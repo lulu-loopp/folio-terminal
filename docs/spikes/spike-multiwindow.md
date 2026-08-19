@@ -251,6 +251,10 @@ let frame = bt_platform::CustomWindowFrame::install(hwnd)?;
 
 同样是纯重构：此时仍然只有一个 `WindowRuntime`。分界线用 Q4 那两张表。
 
+**状态：片 B 落地**（2026-08-19）——`Runtime` 的 195 个字段分成 `App`（38）与 `WindowRuntime`（157），`Runtime` 留作 `{ app, window }` 的薄门面，所以方法签名一个没动，动的只是所有权；片 C 才把 `window` 换成按 `WindowId` 的表。Q4 "其实是 per-app" 那张表点名的六项全部升上去了，并按同一个问题补齐了它写完之后长出来的那些：四个 store 与它们欠的两句话、`shortcuts`、两个 watcher、配色的两笔账、PSReadLine 的两个磁盘事实、命令行的两笔、读一次的系统事实与 trace 开关。**已经诚实是进程级的 static 一律留在原地**（`profile_revision` 背后的表、`THEME` / `CURSOR_STYLE`、`WINDOW_CLASS_BACKGROUND`、探针的 static）——把它们搬进 `App` 只为整齐不会让它们更共享一点，那是片 E 的裁决。
+
+本片挖出一条 spike 没写到的坑：`Runtime: Deref<Target = TabState>`、`TabState: Deref<Target = LeafSession>`，所以**一个搬走的字段如果在这条链下游同名，`self.x` 不报错而是悄悄换一个东西**。全表比对只有 `last_presented_frame` 一处（窗级镜像 vs 那一格自己的），13 处手改。设计记于 `docs/DESIGN.md` §2.4。
+
 **片 C —— 路由与生命周期**（唯一改行为的一片，很小）
 
 `Option<Runtime>` → `HashMap<WindowId, WindowRuntime>`；`window_event` 按 id 查表；`user_event` / `about_to_wait` 遍历；`CloseRequested` 改成"移除这个窗，空了才 `event_loop.exit()`"；`shutdown()` 拆成窗级（关本窗 PTY）和应用级（flush session）。

@@ -163,6 +163,24 @@ target  ← CreateTargetForHwnd(hwnd, topmost = true)
 
 **验收是逐像素的。** 同一台机器、同一块桌面矩形、指针停在窗外、每个状态各拍五帧（用于剔除自己会动的光标），A2 与 main 的 release 版对比：start / dir / 文件列 / 设置 / 缩小 / 还原六个画面，窗口内部**差异像素 0、最大通道差 0**；只有窗口自己那圈两像素 DWM 边框与圆角在变，而它在**同一个构建**的两次运行之间同样在变（main×2 = 906px，A2×2 = 10652px），因为那里合成的是窗口背后的桌面。**白底也照拍**（`BT_BG=#FFFFFF`——预乘 alpha 出错时深色底看不出来、白底一眼看得出）：start / dir / 设置三帧内部同样 0 像素差，白到屏幕上正好是 (255,255,255)。resize 期二十步逐帧对比：两个构建都没有黑带、没有撕裂、没有未画到的带；main 有一帧是 DWM 把上一帧拉伸后的画面，A2 一帧都没有——它呈现的始终是刚好那么大的真帧。
 
+### 2.4 运行时的两层：App 层与 Window 层（多窗块 片 B，2026-08-19，已落地）
+
+**`Runtime` 的 195 个字段按同一个问题分成两个真类型**：这是一件关于**这个程序**的事，还是关于**一扇窗**的事？依据是多窗 spike（`docs/spikes/spike-multiwindow.md` 片 B）的 Q4 两张表——"天生 per-window 的字段"和"其实是 per-app、不升上去就会分叉出 N 份互相不同意的副本的字段"。片 A1 把渲染器分成了 device 层与 window 层（§2.2），这一片对状态做同一件事；两片合起来，"多开一个窗"才在类型上讲得出来。
+
+- **`App`（进程一份，38 个字段）**：四个磁盘文件的 store（`session_store` / `settings_store` / `keybindings_store` / `profiles_store`）与它们各自欠下的那句话（`keybindings_fault` / `profiles_fault`）、`recent`（pin / Recent / 撤销关闭三扇门读的同一个库）、`shortcuts`（这一版的默认表叠上用户的 `keybindings.json`，**一张表**而不是每窗一张）、`profile_programs`（一次文件系统探测）、`theme_mode`、四条 worker 线路（math / files / preview / git，各带 running 与 notice 两个位）、两个 watcher（`git_watch` / `scheme_watch`）与配色的两笔账（`scheme_fault` / `scheme_source`）、PSReadLine 的两个磁盘事实（`psreadline_documents` / `psreadline_installed`）、命令行留下的两笔（`cli_refusals` / `cli_preview`）、读一次就不会变的系统事实（`motion`、`acrylic_available`）、五个 trace 开关与 `startup_started`、`event_proxy`。
+- **`WindowRuntime`（每窗一份，157 个字段）**：surface 与句柄（`renderer`、`window`、`compositor`、`custom_window_frame`，以及 `MathContextMenu` / `FolderPicker` / `ImagePicker` / `ImeSystemCaret` 四座 Win32 桥）、`tabs` / `active_tab` / `next_tab_id`、输入现场（modifier、指针、四个滚轮余量、preedit）、悬停、手势、窗级 UI（float / rail / 各菜单 / 设置 / 搜索 / toast / tooltip / 重命名）、几何（`seat_viewport` / `work_area` / `size_policy` / `lawful_client_size` / `window_min_inner_size`），以及所有按像素字号或按 seat 做 key 的缓存和"上一帧画了什么"的账。
+- **`Runtime` 保留为门面**（`{ app: App, window: WindowRuntime }`），所以本片**没有改动任何一个方法签名**：全文件的方法照旧 `impl Runtime`，动的只是所有权。片 C 才是把 `window` 换成 `HashMap<WindowId, WindowRuntime>`、并让方法学会自己是替哪扇窗做事的那一片。一句 `const _: fn(Runtime) = |Runtime { app: _, window: _ }| ();` 钉住"门面只有两层"——不带 `..` 的穷尽解构，加第三个字段就编译不过，而那正是"这属于哪一层"还有人回答得出的最后一刻。
+
+**三条判定规则，各自带判例：**
+
+1. **worker 是进程的，cache 是它所在那一层的。** 四条 worker 与两个 watcher 升到 `App`：地址写在请求上，第二个窗再来一套线程买到的只是第二种乱序的可能；而它们喂的缓存（`git_trees`、`file_trees`、`peek_cache`、`command_rails`……）留在 tab 或窗上，因为一份缓存是"某块玻璃上现在有什么"的函数。`GitWatch` 的原注释写着"在窗上而不是在 tab 上，因为它跟随的集合只有窗知道"——升上去以后那句话仍然成立，只是集合成了所有窗的并集，而今天只有一个窗，并集就是它自己。
+2. **诚实是进程级的 static 留在原地。** `profiles::profile_revision()` 背后的表、`bt-render` 的 `THEME` / `CURSOR_STYLE`、`bt-platform` 的 `WINDOW_CLASS_BACKGROUND`、PSReadLine 探针的那几个 static，都**没有**为了结构上的整齐被搬进 `App`：它们本来就是进程一份，搬进结构体不会让它们更共享一点，只会多一条取用路径和一次要维护的搬运。哪几个应该变成 `App` 的字段是片 E 的裁决（要 per-window 主题就得给每个窗注册自己的窗口类，那是它自己的工单）。
+3. **窗有几个就该有几份的留在窗上，即使驱动它的是应用级设置。** `dwm_dark_mode`、`translucency_available`、置顶与透明度都是"这扇窗现在穿着什么"：设置改的是所有窗，但**说给 DWM 听的那句话是一扇窗一句**，而 `translucency_available` 干脆是从那一窗自己的 `alpha_report` 上读出来的。
+
+**一处 deref 陷阱值得写下来，因为它不报错。** `Runtime: Deref<Target = TabState>`，而 `TabState: Deref<Target = LeafSession>`。一个字段从 `Runtime` 挪走之后，若这条链下游存在同名字段，`self.x` **不会编译失败**，而是**悄悄换成另一个东西**。全表比对下来只有一处：`last_presented_frame` 既是 `WindowRuntime` 的（窗级镜像）又是 `LeafSession` 的（那一格自己的），两个 `impl Runtime` 块里的 13 处因此是手改的，不是编译器指出来的。**任何后续切分都要先做这张同名表**，否则这一类改动的失败模式是"编译通过、测试通过、画面偶尔是另一格的"。
+
+本片不改任何用户可见行为：全套测试（含 vendor ref 45/45）绿，clippy `-D warnings` 与 `fmt --check` 干净，release 版逐画面复核与一次滚轮 `BT_PERF_TRACE` 与 main 无差别。
+
 ## 3. 内容模型
 
 ### 3.1 内容生命周期事件表（v3.7：单一所有权版）

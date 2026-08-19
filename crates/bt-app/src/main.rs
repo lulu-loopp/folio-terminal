@@ -958,10 +958,10 @@ enum PreviewSurface {
     /// find named below:
     ///
     /// * **It is the window's, not a tab's.** There is one pointer, so there is
-    ///   one glance; its view lives on [`Runtime::peek_pane`] beside the card's
+    ///   one glance; its view lives on [`WindowRuntime::peek_pane`] beside the card's
     ///   own state rather than in a tab's `preview_panes` map.
     /// * **Its buffer may not be in the pool.** A glance at a file nobody opened
-    ///   reads [`Runtime::peek_buffer`], deliberately off the pool so that running
+    ///   reads [`WindowRuntime::peek_buffer`], deliberately off the pool so that running
     ///   the pointer down a list cannot evict the eight buffers you chose (P145).
     /// * **It is not in [`Runtime::preview_surfaces`],** and what that absence
     ///   buys is now smaller than it was. It was written here as "it cannot be
@@ -4048,28 +4048,27 @@ impl PtyWakeSignal {
     }
 }
 
-struct Runtime {
-    renderer: Renderer,
-    tabs: Vec<TabState>,
-    active_tab: usize,
-    next_tab_id: u64,
+/// **What is true of this program, whatever window you are looking at**
+/// (multiwindow slice B, `docs/spikes/spike-multiwindow.md` 片 B).
+///
+/// One question decides membership: *is this a fact about the application, or
+/// about one window?* The stores behind the four files on disk, the four worker
+/// threads and the two watchers, the shell probe's answers, the command line
+/// this process was started with, the accessibility and OS capabilities read
+/// once — none of them acquires a second, differing copy because a second window
+/// opened, and every one of them would if it sat on the window. The spike's Q4
+/// table is the dividing line; this struct is its left column.
+///
+/// It is a **sibling** of [`WindowRuntime`] and never a member of it. A window
+/// holding the session store is the shape that makes "two windows" mean "two
+/// files fighting over one `session.json`", which is exactly the defect slice D
+/// exists to fix; keeping the arrow out of the window is what stops it being
+/// written in the first place.
+struct App {
     event_proxy: EventLoopProxy<AppEvent>,
-    /// The one bit every shell in this window nudges the loop through. See
-    /// [`PtyWakeSignal`].
-    pty_wake: PtyWakeSignal,
     math_worker: MathWorker,
     math_worker_running: bool,
     math_worker_notice_pending: bool,
-    /// The picture of every rendered table on the glass, keyed by the block's own source text,
-    /// beside the type size and the three inks it was laid out with.
-    ///
-    /// **Keyed by the source rather than by the artifact key** because two panes showing the same
-    /// table are showing the same picture, and because the source is the one identity both sides
-    /// of this hand-off can see — `bt-render` reads it off the placement it is already holding.
-    /// The stamp is what makes the entry answerable: a table laid out at 12.5px in a dark palette
-    /// is not the picture to draw after the reader has changed either, and a cached picture with
-    /// no record of what it was cached for could only ever be right by luck.
-    table_paints: HashMap<String, TablePaint>,
     /// **The repositories the kernel has been asked to report changes in**
     /// (R31's D).
     ///
@@ -4104,6 +4103,143 @@ struct Runtime {
     git_worker: git::GitWorker,
     git_worker_running: bool,
     git_worker_notice_pending: bool,
+    /// Whether this Windows knows what a system backdrop is, asked once
+    /// (`bt_platform::system_backdrop_available`).
+    acrylic_available: bool,
+    startup_started: Instant,
+    trace_startup: bool,
+    trace_resize: bool,
+    trace_layout_events: bool,
+    trace_perf: bool,
+    /// Whether this system wants animation at all, read once at start-up.
+    ///
+    /// Once, because it is an accessibility preference rather than a live
+    /// signal: Windows broadcasts `WM_SETTINGCHANGE` when it moves, and until
+    /// this window listens for that, re-reading it every frame would buy a
+    /// system call per frame and no extra correctness.
+    motion: Motion,
+    /// The schemes folder's watch and its debounce (§7.1.6c-4c).
+    scheme_watch: scheme_watch::SchemeWatch,
+    /// The scheme file currently reported broken, so that it is reported once.
+    ///
+    /// **Cleared when the folder reads cleanly again**, which is the whole of
+    /// the ruling's "toast again only after it was valid in between": a file
+    /// somebody is editing goes through a dozen unparseable states on its way to
+    /// a good one, and a card per keystroke-plus-save would be a window shouting
+    /// at somebody who is already looking at the error.
+    scheme_fault: Option<String>,
+    /// `[light, dark]`: the name each row stores and the file it last resolved
+    /// to, or `None` when that row's name resolves to nothing.
+    ///
+    /// **A name and a file are not the same identity**, and a rescan needs both.
+    /// The settings file stores a name; a file that stops parsing is reported by
+    /// file; and once it has stopped parsing the catalogue no longer connects
+    /// the two, because the entry that connected them is gone. This is where the
+    /// connection is kept across that gap — without it there is no way to say
+    /// "the scheme you are wearing is the file that just broke" rather than
+    /// "some file in your folder is broken".
+    ///
+    /// `None` for a row storing `""` is the ordinary case and is right: an
+    /// unnamed row means the default, and the default is bundled.
+    scheme_source: [Option<(String, String)>; 2],
+    /// Which of [`profiles::PROFILES`] this machine can actually start, and with
+    /// which executable — probed once, when the window opens.
+    ///
+    /// Once, and held here, for the reason [`profiles::ProfilePrograms`] gives:
+    /// availability is a filesystem question and the picker asks it of every row
+    /// on every frame it is open. Held on the `Runtime` rather than passed down
+    /// from the event loop because it is the same kind of fact as `settings` —
+    /// something about the world this window was opened into, which every verb
+    /// that starts a shell has to consult and none of them may re-derive.
+    ///
+    /// It is deliberately **not** re-probed when a menu opens. Installing Git
+    /// while a menu is on screen is not a case worth a filesystem call per
+    /// frame, and the failure it would introduce — a row changing under a
+    /// pointer already travelling toward it — is worse than the staleness it
+    /// would fix.
+    profile_programs: profiles::ProfilePrograms,
+    /// This user's Documents folder, asked of Windows once.
+    ///
+    /// Once because it cannot move under a running process, and stored rather
+    /// than re-asked because both the row and the dialog need it and a known
+    /// folder lookup is a COM call.
+    psreadline_documents: Option<PathBuf>,
+    /// Which copy of Folio's module is on disk **right now** — this build's, an
+    /// older Folio build's, or none.
+    ///
+    /// Cached because it is nine file reads and a version-resource walk, and the
+    /// settings dialog asks on every frame it draws; refreshed at the two moments
+    /// it can change — an install and a removal — and once when the probe lands,
+    /// which is the first point at which anything wants to know.
+    ///
+    /// **Three answers since 2026-08-18**, and the middle one is why: a module an
+    /// older Folio wrote is neither "ours" nor "somebody else's", and a `bool`
+    /// made it the second, which is how it became a module this product had
+    /// installed and would not remove.
+    psreadline_installed: psreadline::InstalledCopy,
+    session_store: persist::SessionStore,
+    settings_store: persist::SettingsStore,
+    /// The shortcut table dispatch reads: this build's defaults with the user's
+    /// `keybindings.json` laid over them.
+    ///
+    /// One table and not two, because the settings page edits the same object
+    /// the key handler consults — a chord recorded in the dialog answers on the
+    /// very next press, with no reload between them.
+    shortcuts: shortcuts::Shortcuts,
+    keybindings_store: persist::KeybindingsStore,
+    /// The sentence a damaged `keybindings.json` owes the user, until it has
+    /// been said. Raised on the first frame rather than during construction:
+    /// there is no window to hang a notice on until then, and a notice printed
+    /// into a window that does not exist is a notice nobody reads.
+    keybindings_fault: Option<String>,
+    /// What the command line asked for and this launch could not do, until it has
+    /// been said. Held for [`Self::announce_keybindings_fault`]'s reason exactly:
+    /// the arguments were read before there was a window, and a card needs one.
+    cli_refusals: Vec<cli::CliRefusal>,
+    /// A document named on the command line, until there is a pane to put it in.
+    cli_preview: Option<PathBuf>,
+    profiles_store: persist::ProfilesStore,
+    /// The sentence a damaged or partly refused `profiles.json` owes the user,
+    /// until it has been said — [`Self::keybindings_fault`]'s twin, for its
+    /// reason.
+    profiles_fault: Option<String>,
+    /// The one store that pin, Recent and undo-close all draw from — kept beside
+    /// the tabs rather than inside the session file's mirror so the three doors
+    /// read live state, not the last thing that happened to be flushed.
+    recent: seed::SeedVault,
+    /// Persisted user choice, distinct from the resolved renderer theme. Under `BT_BG` the process
+    /// colors are locked but this mode is still kept across a diagnostic launch.
+    theme_mode: ThemeModeV1,
+}
+
+/// **What is true of one window** (multiwindow slice B).
+///
+/// The surface and its handles, the tabs on it, the one pointer over it and
+/// everything that pointer can be doing, the gestures in flight, the window-level
+/// UI, and the geometry it was solved into. Everything here would be a second,
+/// legitimately different copy in a second window — which is the whole test.
+///
+/// There is still exactly one of these. Slice C is what turns [`Runtime`]'s one
+/// field into a map keyed by `WindowId`; this slice only makes that sentence
+/// something the type system can express.
+struct WindowRuntime {
+    renderer: Renderer,
+    tabs: Vec<TabState>,
+    active_tab: usize,
+    next_tab_id: u64,
+    /// The one bit every shell in this window nudges the loop through. See
+    /// [`PtyWakeSignal`].
+    pty_wake: PtyWakeSignal,
+    /// The picture of every rendered table on the glass, keyed by the block's own source text,
+    /// beside the type size and the three inks it was laid out with.
+    ///
+    /// **Keyed by the source rather than by the artifact key** because two panes showing the same
+    /// table are showing the same picture, and because the source is the one identity both sides
+    /// of this hand-off can see — `bt-render` reads it off the placement it is already holding.
+    /// The stamp is what makes the entry answerable: a table laid out at 12.5px in a dark palette
+    /// is not the picture to draw after the reader has changed either, and a cached picture with
+    /// no record of what it was cached for could only ever be right by luck.
+    table_paints: HashMap<String, TablePaint>,
     /// How wide the "no preview" card's button caption is drawn.
     ///
     /// Measured into the runtime where the picture is built, for the reason
@@ -4191,9 +4327,6 @@ struct Runtime {
     /// so what is remembered is where the hand landed on it. Cleared on release
     /// and whenever the dialog shuts.
     settings_menu_bar_drag: Option<f32>,
-    /// Whether this Windows knows what a system backdrop is, asked once
-    /// (`bt_platform::system_backdrop_available`).
-    acrylic_available: bool,
     /// The last dark/light this window told DWM it was wearing
     /// (`bt_platform::set_window_dark_mode`), or `None` before it has said
     /// anything (§7.1.6c-4f amendment).
@@ -4216,10 +4349,6 @@ struct Runtime {
     /// is the only place in this program that presents a frame.
     compositor: bt_platform::Compositor,
     window: Arc<Window>,
-    startup_started: Instant,
-    trace_startup: bool,
-    trace_resize: bool,
-    trace_layout_events: bool,
     /// The geometry changes the most recent layout commit produced (T230).
     ///
     /// An outbox, replaced whole at each commit rather than appended to, because
@@ -4235,7 +4364,6 @@ struct Runtime {
     /// consumer written later against an interface that does not exist yet is
     /// how the mapping gets invented twice.
     last_layout_events: Vec<seats::LayoutEvent>,
-    trace_perf: bool,
     resize_trace_logged_transaction: u64,
     resize_trace_logged_events: usize,
     background_visible: Option<Duration>,
@@ -4337,13 +4465,6 @@ struct Runtime {
     /// of [`attention_is_consumed`], and the reason a bell that rings while the
     /// user is away in another application is still waiting when they return.
     window_focused: bool,
-    /// Whether this system wants animation at all, read once at start-up.
-    ///
-    /// Once, because it is an accessibility preference rather than a live
-    /// signal: Windows broadcasts `WM_SETTINGCHANGE` when it moves, and until
-    /// this window listens for that, re-reading it every frame would buy a
-    /// system call per frame and no extra correctness.
-    motion: Motion,
     ime_system_caret: bt_platform::ImeSystemCaret,
     pointer_position: Option<PhysicalPosition<f64>>,
     mouse_route: Option<MouseRoute>,
@@ -4469,30 +4590,6 @@ struct Runtime {
     /// for the reason that field is here: there is one pointer, so there is at
     /// most one of these in the window whatever tab it is over.
     preview_hex_hover: Option<PreviewHexHover>,
-    /// The schemes folder's watch and its debounce (§7.1.6c-4c).
-    scheme_watch: scheme_watch::SchemeWatch,
-    /// The scheme file currently reported broken, so that it is reported once.
-    ///
-    /// **Cleared when the folder reads cleanly again**, which is the whole of
-    /// the ruling's "toast again only after it was valid in between": a file
-    /// somebody is editing goes through a dozen unparseable states on its way to
-    /// a good one, and a card per keystroke-plus-save would be a window shouting
-    /// at somebody who is already looking at the error.
-    scheme_fault: Option<String>,
-    /// `[light, dark]`: the name each row stores and the file it last resolved
-    /// to, or `None` when that row's name resolves to nothing.
-    ///
-    /// **A name and a file are not the same identity**, and a rescan needs both.
-    /// The settings file stores a name; a file that stops parsing is reported by
-    /// file; and once it has stopped parsing the catalogue no longer connects
-    /// the two, because the entry that connected them is gone. This is where the
-    /// connection is kept across that gap — without it there is no way to say
-    /// "the scheme you are wearing is the file that just broke" rather than
-    /// "some file in your folder is broken".
-    ///
-    /// `None` for a row storing `""` is the ordinary case and is right: an
-    /// unnamed row means the default, and the default is bundled.
-    scheme_source: [Option<(String, String)>; 2],
     /// A jump's 950 ms row flash, while one is running.
     command_flash: Option<CommandFlash>,
     /// **The window's one in-pane search** (§7.1.5d, S3).
@@ -4543,22 +4640,6 @@ struct Runtime {
     /// the same reasons — and separate from it because the two are different
     /// kinds of surface: one is modal and one is a popup.
     profile_menu: profiles::ProfileMenu,
-    /// Which of [`profiles::PROFILES`] this machine can actually start, and with
-    /// which executable — probed once, when the window opens.
-    ///
-    /// Once, and held here, for the reason [`profiles::ProfilePrograms`] gives:
-    /// availability is a filesystem question and the picker asks it of every row
-    /// on every frame it is open. Held on the `Runtime` rather than passed down
-    /// from the event loop because it is the same kind of fact as `settings` —
-    /// something about the world this window was opened into, which every verb
-    /// that starts a shell has to consult and none of them may re-derive.
-    ///
-    /// It is deliberately **not** re-probed when a menu opens. Installing Git
-    /// while a menu is on screen is not a case worth a filesystem call per
-    /// frame, and the failure it would introduce — a row changing under a
-    /// pointer already travelling toward it — is worse than the staleness it
-    /// would fix.
-    profile_programs: profiles::ProfilePrograms,
     /// The picker's arrow on its way to matching it.
     ///
     /// Beside `profile_menu` rather than inside it because they are two
@@ -4816,25 +4897,6 @@ struct Runtime {
     /// The PSReadLine invitation, when the probe has found a shell that would
     /// benefit (§7.1.6c-3b).
     psreadline_invite: psreadline::Invite,
-    /// This user's Documents folder, asked of Windows once.
-    ///
-    /// Once because it cannot move under a running process, and stored rather
-    /// than re-asked because both the row and the dialog need it and a known
-    /// folder lookup is a COM call.
-    psreadline_documents: Option<PathBuf>,
-    /// Which copy of Folio's module is on disk **right now** — this build's, an
-    /// older Folio build's, or none.
-    ///
-    /// Cached because it is nine file reads and a version-resource walk, and the
-    /// settings dialog asks on every frame it draws; refreshed at the two moments
-    /// it can change — an install and a removal — and once when the probe lands,
-    /// which is the first point at which anything wants to know.
-    ///
-    /// **Three answers since 2026-08-18**, and the middle one is why: a module an
-    /// older Folio wrote is neither "ours" nor "somebody else's", and a `bool`
-    /// made it the second, which is how it became a module this product had
-    /// installed and would not remove.
-    psreadline_installed: psreadline::InstalledCopy,
     /// Whether the size row has been answered since the invitation was refused.
     ///
     /// The one exception in the trigger table, and it is deliberately *not*
@@ -4977,7 +5039,7 @@ struct Runtime {
     float: float::FloatHost,
     /// A pinned float being moved or resized by hand, or `None`.
     ///
-    /// Beside [`Runtime::divider_drag`] rather than folded into it: a divider
+    /// Beside [`WindowRuntime::divider_drag`] rather than folded into it: a divider
     /// drag is one axis of one seam and writes a ratio into the tree, while this
     /// is two axes of a surface that is not in the tree at all
     /// (`M2-tiny-window-priority.md` §3.1 — 浮窗对布局是只读消费者). Sharing a
@@ -5057,36 +5119,6 @@ struct Runtime {
     last_drawn_resizing_card: Option<(f32, f32)>,
     /// The last work area that was successfully observed (tiny-window §4.4).
     work_area: WorkAreaHint,
-    session_store: persist::SessionStore,
-    settings_store: persist::SettingsStore,
-    /// The shortcut table dispatch reads: this build's defaults with the user's
-    /// `keybindings.json` laid over them.
-    ///
-    /// One table and not two, because the settings page edits the same object
-    /// the key handler consults — a chord recorded in the dialog answers on the
-    /// very next press, with no reload between them.
-    shortcuts: shortcuts::Shortcuts,
-    keybindings_store: persist::KeybindingsStore,
-    /// The sentence a damaged `keybindings.json` owes the user, until it has
-    /// been said. Raised on the first frame rather than during construction:
-    /// there is no window to hang a notice on until then, and a notice printed
-    /// into a window that does not exist is a notice nobody reads.
-    keybindings_fault: Option<String>,
-    /// What the command line asked for and this launch could not do, until it has
-    /// been said. Held for [`Self::announce_keybindings_fault`]'s reason exactly:
-    /// the arguments were read before there was a window, and a card needs one.
-    cli_refusals: Vec<cli::CliRefusal>,
-    /// A document named on the command line, until there is a pane to put it in.
-    cli_preview: Option<PathBuf>,
-    profiles_store: persist::ProfilesStore,
-    /// The sentence a damaged or partly refused `profiles.json` owes the user,
-    /// until it has been said — [`Self::keybindings_fault`]'s twin, for its
-    /// reason.
-    profiles_fault: Option<String>,
-    /// The one store that pin, Recent and undo-close all draw from — kept beside
-    /// the tabs rather than inside the session file's mirror so the three doors
-    /// read live state, not the last thing that happened to be flushed.
-    recent: seed::SeedVault,
     /// Tabs from the last session that were **not** pinned, waiting on the
     /// restore prompt's question. Empty once it has been answered.
     ///
@@ -5105,9 +5137,6 @@ struct Runtime {
     /// type into it, it stops being scaffolding and becomes a tab you are using,
     /// so the first keystroke forgets it here and it is never taken away.
     placeholder_tab: Option<TabId>,
-    /// Persisted user choice, distinct from the resolved renderer theme. Under `BT_BG` the process
-    /// colors are locked but this mode is still kept across a diagnostic launch.
-    theme_mode: ThemeModeV1,
     /// The last minimum handed to the frame. On Windows, winit 0.30 re-applies the current inner
     /// size whenever this setter runs; repeating an unchanged minimum can therefore feed the
     /// non-client adjustment back into the client size. The `Option` distinguishes "never applied"
@@ -5133,6 +5162,116 @@ struct Runtime {
     /// what lets the two be told apart without guessing, and without a one-shot flag whose
     /// correctness would depend on winit's delivery order.
     lawful_client_size: Option<PhysicalSize<u32>>,
+}
+
+/// The two layers, while there is still one of each.
+///
+/// A facade rather than a rename: every method in this file goes on answering to
+/// `self`, so the slice moves ownership without moving a single call site into a
+/// new signature. Slice C is where the methods learn which window they are for.
+struct Runtime {
+    app: App,
+    window: WindowRuntime,
+}
+
+/// PIN — **the facade is two layers and nothing else.**
+///
+/// An exhaustive destructuring with no `..`: a field added to `Runtime` rather
+/// than to one of the two layers stops this compiling, which is the only moment
+/// at which "which layer is this?" is still a question somebody is being asked.
+/// Slice C replaces the second binding with a map keyed by `WindowId`; until
+/// then this is what keeps a third home from quietly appearing beside them.
+const _: fn(Runtime) = |Runtime { app: _, window: _ }| ();
+
+#[cfg(test)]
+mod layer_shape_tests {
+    /// This file, read as text — the only witness that can answer "what is *not*
+    /// in that struct".
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The body of a top-level `struct <name> { … }`, which is delimited by the
+    /// one `}` in column zero that follows it.
+    fn struct_body(name: &str) -> &'static str {
+        let head = format!(
+            "
+struct {name} {{
+"
+        );
+        let start = SOURCE
+            .find(&head)
+            .unwrap_or_else(|| panic!("`struct {name}` is declared at the top level"))
+            + head.len();
+        let end = start
+            + SOURCE[start..]
+                .find(
+                    "
+}
+",
+                )
+                .expect("a top-level struct is closed by a `}` in column zero");
+        &SOURCE[start..end]
+    }
+
+    /// PIN (multiwindow slice B) — **the window layer holds nothing the
+    /// application owns.**
+    ///
+    /// The spike's whole reason for the split, said as a test rather than as a
+    /// comment: a `SessionStore` on the window is what makes "two windows" mean
+    /// "two handles fighting over one `session.json`" — the defect slice D
+    /// exists to repair, and one that costs nothing to prevent while there is
+    /// still only one window to put it on.
+    ///
+    /// Red gate: move any one of these fields back and the test names it.
+    #[test]
+    fn the_window_layer_owns_nothing_the_application_owns() {
+        let body = struct_body("WindowRuntime");
+        for owned_by_the_app in [
+            "persist::SessionStore",
+            "persist::SettingsStore",
+            "persist::KeybindingsStore",
+            "persist::ProfilesStore",
+            "seed::SeedVault",
+            "shortcuts::Shortcuts",
+            "profiles::ProfilePrograms",
+            "MathWorker",
+            "files::FilesWorker",
+            "preview::PreviewWorker",
+            "git::GitWorker",
+            "git_watch::GitWatch",
+            "scheme_watch::SchemeWatch",
+        ] {
+            assert!(
+                !body.contains(owned_by_the_app),
+                "`{owned_by_the_app}` is a fact about this program, not about one window"
+            );
+        }
+    }
+
+    /// PIN (multiwindow slice B) — **and the application layer holds nothing a
+    /// second window would legitimately hold a second of.**
+    ///
+    /// The other half of the same line. A surface, a tree of tabs, a frame or a
+    /// pointer bridge on `App` is a field that would have to be un-shared again
+    /// the moment a second window opened.
+    #[test]
+    fn the_application_layer_owns_nothing_one_window_owns() {
+        let body = struct_body("App");
+        for owned_by_a_window in [
+            "Renderer",
+            "Arc<Window>",
+            "bt_platform::Compositor",
+            "bt_platform::CustomWindowFrame",
+            "bt_platform::ImeSystemCaret",
+            "bt_platform::FolderPicker",
+            "bt_platform::MathContextMenu",
+            "Vec<TabState>",
+        ] {
+            assert!(
+                !body.contains(owned_by_a_window),
+                "`{owned_by_a_window}` is a fact about one window"
+            );
+        }
+    }
 }
 
 fn active_item<T>(items: &[T], active: usize) -> &T {
@@ -5489,13 +5628,13 @@ impl Deref for Runtime {
     type Target = TabState;
 
     fn deref(&self) -> &Self::Target {
-        active_item(&self.tabs, self.active_tab)
+        active_item(&self.window.tabs, self.window.active_tab)
     }
 }
 
 impl DerefMut for Runtime {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        active_item_mut(&mut self.tabs, self.active_tab)
+        active_item_mut(&mut self.window.tabs, self.window.active_tab)
     }
 }
 
@@ -7437,7 +7576,7 @@ struct CommandFlash {
 #[derive(Clone, Debug, PartialEq)]
 struct SearchScanCache {
     seat: SeatId,
-    /// [`Runtime::search_revision`] — what was typed and how it was switched.
+    /// [`WindowRuntime::search_revision`] — what was typed and how it was switched.
     revision: u64,
     /// The frozen plane's identity: how many lines, which ones the ends are, and the generation
     /// their text belongs to. Any edit history can undergo moves at least one of the four.
@@ -8752,7 +8891,7 @@ fn peek_cache_key_for_decode(
 /// underline and the status line that spells its target, and the solid underline under a reference
 /// that has been verified as a picture. Which pane wears them is a question about coordinates and
 /// never about which pane holds the keyboard — this function is called for exactly the pane
-/// `Runtime::hover_pane` names, whether or not that is the focused leaf.
+/// `WindowRuntime::hover_pane` names, whether or not that is the focused leaf.
 fn apply_hover_marks(
     frame: &mut ViewportFrame,
     hyperlink_hover: &HyperlinkHover,
@@ -15145,227 +15284,234 @@ impl Runtime {
         let preview_worker = preview::PreviewWorker::spawn(proxy.clone())?;
         let git_worker = git::GitWorker::spawn(proxy.clone())?;
         let mut runtime = Self {
-            renderer,
-            tabs,
-            active_tab,
-            next_tab_id: conpty_sources.len() as u64 + 1,
-            event_proxy: proxy.clone(),
-            pty_wake,
-            git_watch: git_watch::GitWatch::default(),
-            math_worker,
-            math_worker_running: true,
-            math_worker_notice_pending: false,
-            table_paints: HashMap::new(),
-            files_worker,
-            files_worker_running: true,
-            files_worker_notice_pending: false,
-            preview_worker,
-            preview_worker_running: true,
-            preview_worker_notice_pending: false,
-            git_worker,
-            git_worker_running: true,
-            git_worker_notice_pending: false,
-            preview_button_width: 0.0,
-            preview_opened_at: None,
-            pending_frames: LatestFrameSlot::default(),
-            modifiers: ModifiersState::default(),
-            math_context_menu,
-            folder_picker,
-            folder_pick: None,
-            image_picker,
-            image_pick_pending: None,
-            background_picture: None,
-            background_decode: BackgroundDecodeMailbox::default(),
-            settings_slider_drag: None,
-            settings_menu_bar_drag: None,
-            acrylic_available,
-            dwm_dark_mode: None,
-            translucency_available,
-            custom_window_frame,
-            compositor,
-            window,
-            startup_started,
-            trace_startup,
-            trace_resize,
-            trace_layout_events,
-            last_layout_events: Vec::new(),
-            trace_perf,
-            resize_trace_logged_transaction: 0,
-            resize_trace_logged_events: 0,
-            background_visible: None,
-            first_text_visible: None,
-            window_shown: false,
-            first_visible_present_dpi_checked: false,
-            first_text_presented: false,
-            last_presented_frame: None,
-            terminal_content_revision: 0,
-            presented_picture_revision: 0,
-            chrome_present_pending: false,
-            unpainted_pane_output: false,
-            composed_terminal_frames: 0,
-            wheel_events: 0,
-            wheel_routings: 0,
-            wheel_burst: None,
-            last_present_at: None,
-            strip_animation_ticked_at: None,
-            preedit: None,
-            ime_active: false,
-            ime_cursor_throttle: ImeCursorThrottle::default(),
-            rename_caret_line: None,
-            cursor_blink: CursorBlink::new(Instant::now()),
-            motion: read_motion_preference(),
-            // A window is focused when it opens, and `CursorBlink` starts from
-            // the same assumption — the two must agree or the strip and the
-            // caret would disagree about whether anyone is home.
-            window_focused: true,
-            ime_system_caret,
-            pointer_position: None,
-            mouse_route: None,
-            click_tracker: ClickTracker::default(),
-            line_wheel_remainder: 0.0,
-            pixel_wheel_remainder: 0.0,
-            notch_wheel_remainder: 0.0,
-            local_wheel_subpixel_remainder: 0.0,
-            hyperlink_hover: HyperlinkHover::default(),
-            hover_pane: None,
-            underlined_image_reference: None,
-            peek_hover: PeekHover::default(),
-            peek_cache: std::collections::HashMap::new(),
-            peek_thumbnail: None,
-            peek_thumbnail_pending: None,
-            math_hover_anchor: None,
-            math_hover_clear_at: None,
-            pending_math_context_anchor: None,
-            seat_pointer: seats::ChromePointer::default(),
-            tooltip: tooltip::TooltipHost::default(),
-            layout_peek: peek_strip::PeekHost::default(),
-            tooltip_anchors: tooltip::TooltipAnchors::default(),
-            tooltip_drawn_opacity: None,
-            toasts: toast::ToastHost::default(),
-            toast_layouts: Vec::new(),
-            toasts_drawn: Vec::new(),
-            toast_pointer_drawn: toast::ToastPointer::default(),
-            command_rails: BTreeMap::new(),
-            command_rail_hover: None,
-            preview_hex_hover: None,
-            scheme_watch: scheme_watch::SchemeWatch::default(),
-            scheme_fault: None,
-            scheme_source: [None, None],
-            command_flash: None,
-            search: search::SearchState::default(),
-            search_layout: None,
-            search_hover: None,
-            search_scan: None,
-            search_revision: 0,
-            chrome_marks: marks::ChromeMarkRasters::default(),
-            settings: settings::SettingsPanel::default(),
-            profile_undo: None,
-            settings_scroll: 0.0,
-            profile_menu: profiles::ProfileMenu::default(),
-            profile_programs,
-            chevron_turn: ChevronTurn::default(),
-            last_drawn_chevron: None,
-            pane_motion: PaneMotion::default(),
-            // The window opens on a tree that has never been edited, so the
-            // first commit that *does* edit one is the first thing to animate.
-            pane_motion_revision: 0,
-            // A tree nobody has edited is a tree whose shells are in step with
-            // it by construction: the first solve sizes them from it.
-            shells_settled_revision: 0,
-            tab_scroll: 0.0,
-            rail,
-            rail_scroll: 0.0,
-            rail_open: RevealTween::over(RAIL_TRANSITION),
-            rail_text: RevealTween::over(RAIL_TEXT_FADE),
-            // Seeded at the rail's resting fold so the first frame is the state
-            // the window restored into, not a fold arriving out of nowhere.
-            rail_fold: RevealTween::resting(f32::from(u8::from(!rail.collapsed)), RAIL_TRANSITION),
-            rail_chrome: seats::ChromeGroup::default(),
-            last_drawn_rail: None,
-            tab_press: None,
-            pane_press: None,
-            row_press: None,
-            file_peek: None,
-            peek_buffer: None,
-            peek_pane: PreviewPane::default(),
-            peek_picture: None,
-            peek_card_pending: None,
-            drag: None,
-            drop_preview: None,
-            last_drawn_dock_reveal: None,
-            seat_viewport,
-            tab_clicks: TabClicks::default(),
-            files_row_clicks: FilesRowClicks::default(),
-            root_menu: profiles::RootMenu::default(),
-            dirty_gate: restore::DirtyGate::default(),
-            psreadline_invite: psreadline::Invite::default(),
-            psreadline_documents: psreadline::documents_directory(),
-            psreadline_installed: psreadline::InstalledCopy::default(),
-            psreadline_size_changed: false,
-            window_close_requested: false,
-            preview_menu: profiles::PreviewMenu::default(),
-            preview_head_measures: BTreeMap::new(),
-            file_menu: None,
-            git_menu: None,
-            term_menu: None,
-            restarting: None,
-            pane_menu: None,
-            chevrons: ChevronGates::default(),
-            graph_filter_menu: None,
-            float: float::FloatHost::default(),
-            float_drag: None,
-            float_head_press: None,
-            float_hover: None,
-            revealed_foot: None,
-            files_name_widths: BTreeMap::new(),
-            git_pages_shown: BTreeMap::new(),
-            git_graphs_shown: BTreeMap::new(),
-            git_graph_clicks: FilesRowClicks::default(),
-            files_view_widths: BTreeMap::new(),
-            files_notice: None,
-            files_focus: FilesKeyboardFocus::default(),
-            rename: None,
-            rename_blink: CursorBlink::new(Instant::now()),
-            settings_marks: marks::ChromeMarkRasters::default(),
-            divider_drag: None,
-            resizing_card_transition: RevealTween::over(RESIZING_CARD_TRANSITION),
-            resizing_card_split: None,
-            last_drawn_resizing_card: None,
-            work_area: WorkAreaHint::NeverKnown,
-            session_store,
-            settings_store,
-            shortcuts,
-            keybindings_store,
-            keybindings_fault,
-            cli_refusals: std::mem::take(&mut cli_plan.refusals),
-            cli_preview: cli_plan.preview.take(),
-            profiles_store,
-            profiles_fault,
-            recent,
-            pending_restore,
-            // "It opens BEFORE it asks — like a browser, which lands you on
-            // your pages and puts 'restore?' on top of a window that already
-            // works" (mock-up 7435-7439). The window is built by the time this
-            // runs, so the question arrives over something usable.
-            restore_prompt: {
-                let mut prompt = restore::RestorePrompt::default();
-                if has_question {
-                    prompt.open();
-                }
-                prompt
+            app: App {
+                event_proxy: proxy.clone(),
+                git_watch: git_watch::GitWatch::default(),
+                math_worker,
+                math_worker_running: true,
+                math_worker_notice_pending: false,
+                files_worker,
+                files_worker_running: true,
+                files_worker_notice_pending: false,
+                preview_worker,
+                preview_worker_running: true,
+                preview_worker_notice_pending: false,
+                git_worker,
+                git_worker_running: true,
+                git_worker_notice_pending: false,
+                acrylic_available,
+                startup_started,
+                trace_startup,
+                trace_resize,
+                trace_layout_events,
+                trace_perf,
+                motion: read_motion_preference(),
+                scheme_watch: scheme_watch::SchemeWatch::default(),
+                scheme_fault: None,
+                scheme_source: [None, None],
+                profile_programs,
+                psreadline_documents: psreadline::documents_directory(),
+                psreadline_installed: psreadline::InstalledCopy::default(),
+                session_store,
+                settings_store,
+                shortcuts,
+                keybindings_store,
+                keybindings_fault,
+                cli_refusals: std::mem::take(&mut cli_plan.refusals),
+                cli_preview: cli_plan.preview.take(),
+                profiles_store,
+                profiles_fault,
+                recent,
+                theme_mode,
             },
-            placeholder_tab,
-            theme_mode,
-            window_min_inner_size: None,
-            // The opening rectangle is the program's: either the product's own size or one
-            // `restore_window_placement` chose out of the session file. A session restored into a
-            // window too small for its tree therefore folds — the program put it there, and
-            // folding is the honest picture of "this does not fit". The first drag of the frame
-            // hands it to the user and the folds give way to panes (user ruling 2026-08-08).
-            // `None` is `claim_lawful_layout`'s standing claim, written out: the opening rectangle
-            // has been asked for and not yet answered, and the first one to arrive is it.
-            size_policy: SizePolicy::Lawful,
-            lawful_client_size: None,
+            window: WindowRuntime {
+                renderer,
+                tabs,
+                active_tab,
+                next_tab_id: conpty_sources.len() as u64 + 1,
+                pty_wake,
+                table_paints: HashMap::new(),
+                preview_button_width: 0.0,
+                preview_opened_at: None,
+                pending_frames: LatestFrameSlot::default(),
+                modifiers: ModifiersState::default(),
+                math_context_menu,
+                folder_picker,
+                folder_pick: None,
+                image_picker,
+                image_pick_pending: None,
+                background_picture: None,
+                background_decode: BackgroundDecodeMailbox::default(),
+                settings_slider_drag: None,
+                settings_menu_bar_drag: None,
+                dwm_dark_mode: None,
+                translucency_available,
+                custom_window_frame,
+                compositor,
+                window,
+                last_layout_events: Vec::new(),
+                resize_trace_logged_transaction: 0,
+                resize_trace_logged_events: 0,
+                background_visible: None,
+                first_text_visible: None,
+                window_shown: false,
+                first_visible_present_dpi_checked: false,
+                first_text_presented: false,
+                last_presented_frame: None,
+                terminal_content_revision: 0,
+                presented_picture_revision: 0,
+                chrome_present_pending: false,
+                unpainted_pane_output: false,
+                composed_terminal_frames: 0,
+                wheel_events: 0,
+                wheel_routings: 0,
+                wheel_burst: None,
+                last_present_at: None,
+                strip_animation_ticked_at: None,
+                preedit: None,
+                ime_active: false,
+                ime_cursor_throttle: ImeCursorThrottle::default(),
+                rename_caret_line: None,
+                cursor_blink: CursorBlink::new(Instant::now()),
+                // A window is focused when it opens, and `CursorBlink` starts from
+                // the same assumption — the two must agree or the strip and the
+                // caret would disagree about whether anyone is home.
+                window_focused: true,
+                ime_system_caret,
+                pointer_position: None,
+                mouse_route: None,
+                click_tracker: ClickTracker::default(),
+                line_wheel_remainder: 0.0,
+                pixel_wheel_remainder: 0.0,
+                notch_wheel_remainder: 0.0,
+                local_wheel_subpixel_remainder: 0.0,
+                hyperlink_hover: HyperlinkHover::default(),
+                hover_pane: None,
+                underlined_image_reference: None,
+                peek_hover: PeekHover::default(),
+                peek_cache: std::collections::HashMap::new(),
+                peek_thumbnail: None,
+                peek_thumbnail_pending: None,
+                math_hover_anchor: None,
+                math_hover_clear_at: None,
+                pending_math_context_anchor: None,
+                seat_pointer: seats::ChromePointer::default(),
+                tooltip: tooltip::TooltipHost::default(),
+                layout_peek: peek_strip::PeekHost::default(),
+                tooltip_anchors: tooltip::TooltipAnchors::default(),
+                tooltip_drawn_opacity: None,
+                toasts: toast::ToastHost::default(),
+                toast_layouts: Vec::new(),
+                toasts_drawn: Vec::new(),
+                toast_pointer_drawn: toast::ToastPointer::default(),
+                command_rails: BTreeMap::new(),
+                command_rail_hover: None,
+                preview_hex_hover: None,
+                command_flash: None,
+                search: search::SearchState::default(),
+                search_layout: None,
+                search_hover: None,
+                search_scan: None,
+                search_revision: 0,
+                chrome_marks: marks::ChromeMarkRasters::default(),
+                settings: settings::SettingsPanel::default(),
+                profile_undo: None,
+                settings_scroll: 0.0,
+                profile_menu: profiles::ProfileMenu::default(),
+                chevron_turn: ChevronTurn::default(),
+                last_drawn_chevron: None,
+                pane_motion: PaneMotion::default(),
+                // The window opens on a tree that has never been edited, so the
+                // first commit that *does* edit one is the first thing to animate.
+                pane_motion_revision: 0,
+                // A tree nobody has edited is a tree whose shells are in step with
+                // it by construction: the first solve sizes them from it.
+                shells_settled_revision: 0,
+                tab_scroll: 0.0,
+                rail,
+                rail_scroll: 0.0,
+                rail_open: RevealTween::over(RAIL_TRANSITION),
+                rail_text: RevealTween::over(RAIL_TEXT_FADE),
+                // Seeded at the rail's resting fold so the first frame is the state
+                // the window restored into, not a fold arriving out of nowhere.
+                rail_fold: RevealTween::resting(
+                    f32::from(u8::from(!rail.collapsed)),
+                    RAIL_TRANSITION,
+                ),
+                rail_chrome: seats::ChromeGroup::default(),
+                last_drawn_rail: None,
+                tab_press: None,
+                pane_press: None,
+                row_press: None,
+                file_peek: None,
+                peek_buffer: None,
+                peek_pane: PreviewPane::default(),
+                peek_picture: None,
+                peek_card_pending: None,
+                drag: None,
+                drop_preview: None,
+                last_drawn_dock_reveal: None,
+                seat_viewport,
+                tab_clicks: TabClicks::default(),
+                files_row_clicks: FilesRowClicks::default(),
+                root_menu: profiles::RootMenu::default(),
+                dirty_gate: restore::DirtyGate::default(),
+                psreadline_invite: psreadline::Invite::default(),
+                psreadline_size_changed: false,
+                window_close_requested: false,
+                preview_menu: profiles::PreviewMenu::default(),
+                preview_head_measures: BTreeMap::new(),
+                file_menu: None,
+                git_menu: None,
+                term_menu: None,
+                restarting: None,
+                pane_menu: None,
+                chevrons: ChevronGates::default(),
+                graph_filter_menu: None,
+                float: float::FloatHost::default(),
+                float_drag: None,
+                float_head_press: None,
+                float_hover: None,
+                revealed_foot: None,
+                files_name_widths: BTreeMap::new(),
+                git_pages_shown: BTreeMap::new(),
+                git_graphs_shown: BTreeMap::new(),
+                git_graph_clicks: FilesRowClicks::default(),
+                files_view_widths: BTreeMap::new(),
+                files_notice: None,
+                files_focus: FilesKeyboardFocus::default(),
+                rename: None,
+                rename_blink: CursorBlink::new(Instant::now()),
+                settings_marks: marks::ChromeMarkRasters::default(),
+                divider_drag: None,
+                resizing_card_transition: RevealTween::over(RESIZING_CARD_TRANSITION),
+                resizing_card_split: None,
+                last_drawn_resizing_card: None,
+                work_area: WorkAreaHint::NeverKnown,
+                pending_restore,
+                // "It opens BEFORE it asks — like a browser, which lands you on
+                // your pages and puts 'restore?' on top of a window that already
+                // works" (mock-up 7435-7439). The window is built by the time this
+                // runs, so the question arrives over something usable.
+                restore_prompt: {
+                    let mut prompt = restore::RestorePrompt::default();
+                    if has_question {
+                        prompt.open();
+                    }
+                    prompt
+                },
+                placeholder_tab,
+                window_min_inner_size: None,
+                // The opening rectangle is the program's: either the product's own size or one
+                // `restore_window_placement` chose out of the session file. A session restored into a
+                // window too small for its tree therefore folds — the program put it there, and
+                // folding is the honest picture of "this does not fit". The first drag of the frame
+                // hands it to the user and the folds give way to panes (user ruling 2026-08-08).
+                // `None` is `claim_lawful_layout`'s standing claim, written out: the opening rectangle
+                // has been asked for and not yet answered, and the first one to arrive is it.
+                size_policy: SizePolicy::Lawful,
+                lawful_client_size: None,
+            },
         };
         runtime.refresh_work_area();
         // **The window's ground, before the first frame** (§7.1.6c-4b). The
@@ -15380,7 +15526,7 @@ impl Runtime {
         // today. Both are best-effort — neither is a reason to refuse to open —
         // and the acrylic call is skipped outright on a Windows that has no such
         // attribute, which is also what greys its row.
-        if runtime.settings_store.loaded().always_on_top
+        if runtime.app.settings_store.loaded().always_on_top
             && let Err(error) = bt_platform::set_window_topmost(hwnd, true)
         {
             eprintln!("recoverable always-on-top failure: {error}");
@@ -15390,7 +15536,7 @@ impl Runtime {
         // wore a light border for its first frame would have flickered.
         runtime.apply_window_dark_mode()?;
         if acrylic_available
-            && runtime.settings_store.loaded().acrylic
+            && runtime.app.settings_store.loaded().acrylic
             && let Err(error) = bt_platform::set_system_backdrop(hwnd, true)
         {
             eprintln!("recoverable system backdrop failure: {error}");
@@ -15403,14 +15549,14 @@ impl Runtime {
         // a restored pane sits on "Loading …" forever — measured on the real
         // machine, which is also why it is a loop over every tab rather than
         // over the active one.
-        for index in 0..runtime.tabs.len() {
+        for index in 0..runtime.window.tabs.len() {
             runtime.request_revived_previews(index);
         }
         runtime.apply_window_min_inner_size()?;
-        runtime.window.set_title(&runtime.display_title());
+        runtime.window.window.set_title(&runtime.display_title());
         runtime.refresh_chrome();
         if trace_startup {
-            let renderer_phases = runtime.renderer.init_timings();
+            let renderer_phases = runtime.window.renderer.init_timings();
             eprintln!(
                 "BT_STARTUP window={}ms adapter={}ms device={}ms surface={}ms fonts={}ms metrics={}ms render_resources={}ms renderer_total={}ms pty_spawn={}ms probe_input={} conpty_sources={conpty_sources:?} runtime_ready={}ms",
                 window_time.as_millis(),
@@ -15439,10 +15585,10 @@ impl Runtime {
         // normal rectangle set above survives as the placement Windows restores
         // the window to when the user unmaximizes it.
         if restored.is_some_and(|placement| placement.maximized) {
-            runtime.window.set_maximized(true);
+            runtime.window.window.set_maximized(true);
         }
-        runtime.window.set_visible(true);
-        runtime.window_shown = true;
+        runtime.window.window.set_visible(true);
+        runtime.window.window_shown = true;
         // Showing a hidden Win32 window can synchronously settle it onto a different monitor.
         // Query Win32 directly: winit's cached scale can race during initial monitor placement.
         runtime.reconcile_authoritative_dpi("show")?;
@@ -15462,10 +15608,10 @@ impl Runtime {
         // The first of the two moments the schemes folder's watch can be armed
         // at — the other is the instant `Customise scheme…` creates it. Nothing
         // asks whether the folder exists on a schedule; see `scheme_watch`.
-        runtime.scheme_watch.arm(&runtime.event_proxy);
+        runtime.app.scheme_watch.arm(&runtime.app.event_proxy);
         runtime.refresh_scheme_sources();
         let background_visible = startup_started.elapsed();
-        runtime.background_visible = Some(background_visible);
+        runtime.window.background_visible = Some(background_visible);
         if trace_startup {
             eprintln!(
                 "BT_STARTUP background_visible={}ms",
@@ -15496,10 +15642,11 @@ impl Runtime {
     /// tab machinery.
     fn new_tab_with_profile(&mut self, profile: usize) -> Result<()> {
         debug_assert!(profile < profiles::count());
-        let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
-        let wake = self.pty_wake.wake();
-        let id = TabId(self.next_tab_id);
-        self.next_tab_id += 1;
+        let render_physical =
+            presentation_physical_size(self.window.renderer.presentation_geometry());
+        let wake = self.window.pty_wake.wake();
+        let id = TabId(self.window.next_tab_id);
+        self.window.next_tab_id += 1;
         // Both facts are read off the *same* leaf — `self` derefs to the focused
         // session, which is also what `working_directory()` is asked of. A
         // profile taken from one pane and a directory from another would be the
@@ -15524,7 +15671,7 @@ impl Runtime {
         let (tab, _) = create_tab_state(
             id,
             seats,
-            &self.renderer,
+            &self.window.renderer,
             render_physical,
             wake,
             None,
@@ -15534,15 +15681,15 @@ impl Runtime {
             &BTreeMap::new(),
             &PreviewRestore::default(),
             TabSeed::default(),
-            &self.profile_programs,
+            &self.app.profile_programs,
             self.default_profile(),
-            self.size_policy,
-            self.rail,
-            FormulaSwitches::from_settings(self.settings_store.loaded()),
+            self.window.size_policy,
+            self.window.rail,
+            FormulaSwitches::from_settings(self.app.settings_store.loaded()),
         )?;
-        self.tabs.push(tab);
+        self.window.tabs.push(tab);
         self.apply_window_min_inner_size()?;
-        self.activate_tab(self.tabs.len() - 1, true)
+        self.activate_tab(self.window.tabs.len() - 1, true)
     }
 
     /// Scroll the strip until `index` is wholly on screen, and report whether
@@ -15553,26 +15700,31 @@ impl Runtime {
     /// Everything else the strip does about scrolling, it does because the wheel
     /// asked.
     fn reveal_tab(&mut self, index: usize) -> bool {
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let width = self.renderer.presentation_geometry().swapchain_size.0 as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let width = self
+            .window
+            .renderer
+            .presentation_geometry()
+            .swapchain_size
+            .0 as f32;
         let scrolled = seats::tab_scroll_to_reveal(
             width,
             scale,
-            self.tabs.len(),
-            self.active_tab,
-            self.tab_scroll,
+            self.window.tabs.len(),
+            self.window.active_tab,
+            self.window.tab_scroll,
             index,
         );
-        let moved = scrolled != self.tab_scroll;
-        self.tab_scroll = scrolled;
+        let moved = scrolled != self.window.tab_scroll;
+        self.window.tab_scroll = scrolled;
         moved
     }
 
     fn activate_tab(&mut self, index: usize, force: bool) -> Result<()> {
-        if index >= self.tabs.len() || (!force && index == self.active_tab) {
+        if index >= self.window.tabs.len() || (!force && index == self.window.active_tab) {
             return Ok(());
         }
-        self.active_tab = index;
+        self.window.active_tab = index;
         // Looking at a tab is what answers every claim it was making, so the
         // dot goes out here — the unread mark, the bell and the failure all at
         // once, because "the user has now seen this tab" is one event and not
@@ -15580,22 +15732,22 @@ impl Runtime {
         // the strip is rebuilt from this state at the end of this function, and
         // a tab that became active while still counting as unread would flash
         // its own dot on the way in.
-        self.tabs[index].mark_seen();
+        self.window.tabs[index].mark_seen();
         // Ordered after the assignment on purpose: the tab being revealed is the
         // active one, and an active tab is measured with the skirt only an active
         // tab has.
         self.reveal_tab(index);
-        let _ = self.pending_frames.take();
-        self.last_presented_frame = None;
-        self.preedit = None;
-        self.mouse_route = None;
-        self.divider_drag = None;
-        self.seat_pointer = seats::ChromePointer::default();
-        self.hyperlink_hover.clear();
-        self.peek_hover.clear();
-        self.renderer.set_peek_overlay(None);
-        self.hover_pane = None;
-        self.underlined_image_reference = None;
+        let _ = self.window.pending_frames.take();
+        self.window.last_presented_frame = None;
+        self.window.preedit = None;
+        self.window.mouse_route = None;
+        self.window.divider_drag = None;
+        self.window.seat_pointer = seats::ChromePointer::default();
+        self.window.hyperlink_hover.clear();
+        self.window.peek_hover.clear();
+        self.window.renderer.set_peek_overlay(None);
+        self.window.hover_pane = None;
+        self.window.underlined_image_reference = None;
         // **A tab switch closes the capsule and keeps what was typed** (D-8,
         // user ruling 2026-08-16, which is the prototype's behaviour said out
         // loud rather than a change to it).
@@ -15618,13 +15770,14 @@ impl Runtime {
         // the tab on rectangles nobody has ever seen and glide them to the ones
         // the solver has. The revision is adopted rather than reset, so the next
         // structural edit in *this* tab is the next thing that animates.
-        self.pane_motion = PaneMotion::default();
-        self.pane_motion_revision = self.seats.structure_revision();
-        let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
+        self.window.pane_motion = PaneMotion::default();
+        self.window.pane_motion_revision = self.seats.structure_revision();
+        let render_physical =
+            presentation_physical_size(self.window.renderer.presentation_geometry());
         self.resolve_seat_layout(render_physical);
         self.resize_leaves_to_layout(Instant::now(), "resize activated tab to its seat layout")?;
         self.sync_math_layout_key();
-        self.window.set_title(&self.display_title());
+        self.window.window.set_title(&self.display_title());
         self.refresh_chrome();
         self.mark_session_dirty(Instant::now());
         self.publish_frame(FrameTrigger {
@@ -15642,12 +15795,12 @@ impl Runtime {
     /// (see [`absorb_tab_sessions`]) — and the invariant broke on the path that
     /// had no copy.
     fn toggle_pin(&mut self, index: usize) -> Result<()> {
-        if index >= self.tabs.len() {
+        if index >= self.window.tabs.len() {
             return Ok(());
         }
-        self.tabs[index].pinned = !self.tabs[index].pinned;
-        settle_pin_partition(&mut self.tabs, &mut self.active_tab);
-        self.reveal_tab(self.active_tab);
+        self.window.tabs[index].pinned = !self.window.tabs[index].pinned;
+        settle_pin_partition(&mut self.window.tabs, &mut self.window.active_tab);
+        self.reveal_tab(self.window.active_tab);
         self.refresh_chrome();
         self.mark_session_dirty(Instant::now());
         self.present_chrome_change()
@@ -15658,7 +15811,7 @@ impl Runtime {
     /// Index 0 is "the one I just closed", which is the whole of what undo-close
     /// is: not a separate store, just the front of this one.
     fn reopen_recent(&mut self, index: usize) -> Result<()> {
-        let Some(entry) = self.recent.take(index) else {
+        let Some(entry) = self.app.recent.take(index) else {
             return Ok(());
         };
         let pages = entry.previews;
@@ -15672,10 +15825,11 @@ impl Runtime {
             // is T5's, and until then such an entry cannot be written either.
             return Ok(());
         };
-        let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
-        let wake = self.pty_wake.wake();
-        let id = TabId(self.next_tab_id);
-        self.next_tab_id += 1;
+        let render_physical =
+            presentation_physical_size(self.window.renderer.presentation_geometry());
+        let wake = self.window.pty_wake.wake();
+        let id = TabId(self.window.next_tab_id);
+        self.window.next_tab_id += 1;
         let mut seats = seats::Seats::lone_terminal();
         // **The pages come back beside the shell** (裁决 10). Each one lands
         // through the same `add_preview` an open goes through, so the address
@@ -15720,7 +15874,7 @@ impl Runtime {
         let (tab, _) = create_tab_state(
             id,
             seats,
-            &self.renderer,
+            &self.window.renderer,
             render_physical,
             wake,
             None,
@@ -15737,18 +15891,18 @@ impl Runtime {
                 // it back every time.
                 pinned: false,
             },
-            &self.profile_programs,
+            &self.app.profile_programs,
             self.default_profile(),
-            self.size_policy,
-            self.rail,
-            FormulaSwitches::from_settings(self.settings_store.loaded()),
+            self.window.size_policy,
+            self.window.rail,
+            FormulaSwitches::from_settings(self.app.settings_store.loaded()),
         )?;
         // Appended, which keeps the pinned run intact without a re-sort: a new
         // unpinned tab belongs at the end by construction.
-        self.tabs.push(tab);
-        self.request_revived_previews(self.tabs.len() - 1);
+        self.window.tabs.push(tab);
+        self.request_revived_previews(self.window.tabs.len() - 1);
         self.apply_window_min_inner_size()?;
-        self.activate_tab(self.tabs.len() - 1, true)
+        self.activate_tab(self.window.tabs.len() - 1, true)
     }
 
     /// **Ask the worker for everything a revived tab's preview panes are
@@ -15766,7 +15920,7 @@ impl Runtime {
     /// tab before it activates any of them, and the response carries the
     /// [`TabId`] it was asked for.
     fn request_revived_previews(&mut self, index: usize) {
-        let Some(tab) = self.tabs.get(index) else {
+        let Some(tab) = self.window.tabs.get(index) else {
             return;
         };
         let id = tab.id;
@@ -15789,7 +15943,7 @@ impl Runtime {
             })
             .collect();
         for (source, want) in wants {
-            if !self.preview_worker.request(preview::PreviewRequest {
+            if !self.app.preview_worker.request(preview::PreviewRequest {
                 tab: id,
                 source,
                 want,
@@ -15812,7 +15966,7 @@ impl Runtime {
     /// and the Recent list can both still reach them. Nothing a user had open is
     /// ever dropped on the floor by a single click.
     fn answer_restore(&mut self, restore: bool) -> Result<()> {
-        let pending = std::mem::take(&mut self.pending_restore);
+        let pending = std::mem::take(&mut self.window.pending_restore);
         if pending.is_empty() {
             return Ok(());
         }
@@ -15820,7 +15974,7 @@ impl Runtime {
             let now = SystemTime::now();
             for tab in &pending {
                 if let Some(leaf) = first_term_leaf(&tab.root) {
-                    self.recent.record(
+                    self.app.recent.record(
                         seed::Seed::Term {
                             profile_id: leaf.profile_id.clone(),
                             cwd: leaf.cwd.clone(),
@@ -15837,21 +15991,22 @@ impl Runtime {
             self.mark_session_dirty(Instant::now());
             return Ok(());
         }
-        let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
+        let render_physical =
+            presentation_physical_size(self.window.renderer.presentation_geometry());
         // The placeholder existed only because we had no answer; now we do. It
         // goes only if it is untouched — a shell you have already typed into is
         // yours, not scaffolding.
-        let placeholder = self.placeholder_tab.take();
-        let first_revived = self.tabs.len();
+        let placeholder = self.window.placeholder_tab.take();
+        let first_revived = self.window.tabs.len();
         for tab in &pending {
             let (seats, seed, leaves, files, preview) = revive_plan(tab);
-            let wake = self.pty_wake.wake();
-            let id = TabId(self.next_tab_id);
-            self.next_tab_id += 1;
+            let wake = self.window.pty_wake.wake();
+            let id = TabId(self.window.next_tab_id);
+            self.window.next_tab_id += 1;
             let (revived, _) = create_tab_state(
                 id,
                 seats,
-                &self.renderer,
+                &self.window.renderer,
                 render_physical,
                 wake,
                 None,
@@ -15859,20 +16014,24 @@ impl Runtime {
                 &files,
                 &preview,
                 seed,
-                &self.profile_programs,
+                &self.app.profile_programs,
                 self.default_profile(),
-                self.size_policy,
-                self.rail,
-                FormulaSwitches::from_settings(self.settings_store.loaded()),
+                self.window.size_policy,
+                self.window.rail,
+                FormulaSwitches::from_settings(self.app.settings_store.loaded()),
             )?;
-            self.tabs.push(revived);
-            self.request_revived_previews(self.tabs.len() - 1);
+            self.window.tabs.push(revived);
+            self.request_revived_previews(self.window.tabs.len() - 1);
         }
         if let Some(placeholder) = placeholder
-            && self.tabs.len() > 1
-            && let Some(index) = self.tabs.iter().position(|tab| tab.id == placeholder)
+            && self.window.tabs.len() > 1
+            && let Some(index) = self
+                .window
+                .tabs
+                .iter()
+                .position(|tab| tab.id == placeholder)
         {
-            let mut removed = self.tabs.remove(index);
+            let mut removed = self.window.tabs.remove(index);
             // The same leak `close_tab` carried, on the path that retires the
             // launch placeholder once the session file's own tabs are standing.
             // A placeholder holds one shell today and always has; asking for all
@@ -15882,11 +16041,11 @@ impl Runtime {
         }
         self.apply_window_min_inner_size()?;
         let landing = first_revived.saturating_sub(usize::from(placeholder.is_some()));
-        self.activate_tab(landing.min(self.tabs.len() - 1), true)
+        self.activate_tab(landing.min(self.window.tabs.len() - 1), true)
     }
 
     fn close_tab(&mut self, index: usize) -> Result<()> {
-        if index >= self.tabs.len() {
+        if index >= self.window.tabs.len() {
             return Ok(());
         }
         // **Gate ② (P124)** — "the tab owns its buffer pool; the pool dies with
@@ -15901,7 +16060,7 @@ impl Runtime {
         // walks `sessions`, so a shell that had come adrift from the tree would
         // be a ConPTY closed for a pane nobody could see, or one left running.
         debug_assert!(
-            self.tabs[index].sessions_match_terminals(),
+            self.window.tabs[index].sessions_match_terminals(),
             "item 6: a tab closes with its shells still matching its tree"
         );
         // A tab that is going away takes its editor and its press with it. The
@@ -15909,48 +16068,53 @@ impl Runtime {
         // like any other and the seed the vault is about to record reads
         // `manual_name` — "输入到一半关掉,新名字进 Recent" is the same promise
         // §7.1.4 makes about closing the window.
-        if self
-            .rename
-            .as_ref()
-            .is_some_and(|editor| self.tabs.get(index).is_some_and(|tab| tab.id == editor.tab))
-        {
+        if self.window.rename.as_ref().is_some_and(|editor| {
+            self.window
+                .tabs
+                .get(index)
+                .is_some_and(|tab| tab.id == editor.tab)
+        }) {
             self.finish_rename(true)?;
         }
-        if self
-            .tab_press
-            .is_some_and(|press| self.tabs.get(index).is_some_and(|tab| tab.id == press.tab))
-        {
-            self.tab_press = None;
+        if self.window.tab_press.is_some_and(|press| {
+            self.window
+                .tabs
+                .get(index)
+                .is_some_and(|tab| tab.id == press.tab)
+        }) {
+            self.window.tab_press = None;
         }
-        if self.drag.as_ref().is_some_and(|drag| {
-            self.tabs
+        if self.window.drag.as_ref().is_some_and(|drag| {
+            self.window
+                .tabs
                 .get(index)
                 .is_some_and(|tab| drag.tab() == Some(tab.id))
         }) {
-            self.drag = None;
+            self.window.drag = None;
         }
-        match tab_close_action(self.tabs.len(), self.active_tab, index) {
+        match tab_close_action(self.window.tabs.len(), self.window.active_tab, index) {
             TabCloseAction::CloseWindow => {
-                let hwnd = window_hwnd(&self.window)?;
+                let hwnd = window_hwnd(&self.window.window)?;
                 bt_platform::request_window_close(hwnd)
                     .map_err(|error| anyhow!(error))
                     .context("request close after the final tab")?;
             }
             TabCloseAction::Keep { active_tab } => {
-                let was_active = index == self.active_tab;
+                let was_active = index == self.window.active_tab;
                 // The one regular write path into the vault: closing is what
                 // fills Recent (mock-up 3929). It happens before the tab is
                 // taken apart, because the seed is read off the live session.
-                let pages = self.tabs[index].preview_pages();
-                self.recent
-                    .record(self.tabs[index].seed(), pages, SystemTime::now());
-                let mut removed = self.tabs.remove(index);
+                let pages = self.window.tabs[index].preview_pages();
+                self.app
+                    .recent
+                    .record(self.window.tabs[index].seed(), pages, SystemTime::now());
+                let mut removed = self.window.tabs.remove(index);
                 // Every leaf's shell, not the focused one's. Reaching for
                 // `removed.pty` went through the deref and closed exactly one of
                 // them — see [`TabState::shutdown_all_shells`] for the ConPTY a
                 // two-pane tab used to leak on the way out.
                 removed.shutdown_all_shells()?;
-                self.active_tab = active_tab;
+                self.window.active_tab = active_tab;
                 self.apply_window_min_inner_size()?;
                 if was_active {
                     self.activate_tab(active_tab, true)?;
@@ -15979,19 +16143,19 @@ impl Runtime {
     fn resolve_seat_layout(&mut self, render_physical: PhysicalSize<u32>) {
         // Provenance is decided here, at the one place a rectangle becomes a layout, and from the
         // very number the solver is handed (user ruling 2026-08-08).
-        (self.size_policy, self.lawful_client_size) = size_authority_for_rectangle(
-            self.size_policy,
-            self.lawful_client_size,
+        (self.window.size_policy, self.window.lawful_client_size) = size_authority_for_rectangle(
+            self.window.size_policy,
+            self.window.lawful_client_size,
             render_physical,
         );
         let (layout, overflow, terminal_seat, viewport) = solve_seats(
             &self.seats,
-            &self.renderer,
+            &self.window.renderer,
             render_physical,
-            self.size_policy,
-            self.rail,
+            self.window.size_policy,
+            self.window.rail,
         );
-        self.seat_viewport = viewport;
+        self.window.seat_viewport = viewport;
         // T230, and the reason the diff is taken *here*: this is the one place a
         // solved layout becomes the layout, so it is the one place that can tell
         // a real change from a rebuild that landed on the same answer. Every
@@ -16001,7 +16165,7 @@ impl Runtime {
         self.seat_layout = layout;
         self.seat_overflow = overflow;
         self.publish_layout_events(events);
-        self.renderer.set_seat_viewport(terminal_seat);
+        self.window.renderer.set_seat_viewport(terminal_seat);
         self.refresh_preview_for_layout();
         self.refresh_chrome();
     }
@@ -16047,8 +16211,9 @@ impl Runtime {
             .map(|placement| {
                 (
                     placement.id,
-                    self.pane_motion
-                        .transform_of(placement.id, now, self.motion),
+                    self.window
+                        .pane_motion
+                        .transform_of(placement.id, now, self.app.motion),
                 )
             })
             .collect()
@@ -16056,7 +16221,7 @@ impl Runtime {
 
     /// **B22 — bring the resizing cards up to date with the hand.**
     ///
-    /// Derived from [`Runtime::divider_drag`] rather than mirrored into the tween
+    /// Derived from [`WindowRuntime::divider_drag`] rather than mirrored into the tween
     /// at every place a drag starts and ends, and for the reason `refresh_chrome`
     /// already gives about `body.dragging`: a drag ends by four doors — the
     /// button coming up, Esc, losing the mouse capture, and the layout being torn
@@ -16076,25 +16241,29 @@ impl Runtime {
     /// running down around a rectangle that no longer exists, and the honest
     /// picture of that is no card at all.
     fn sync_resizing_cards(&mut self, now: Instant) {
-        let motion = self.motion;
-        if let Some(drag) = self.divider_drag {
-            self.resizing_card_split = Some(drag.split);
-            self.resizing_card_transition.retarget(1.0, now, motion);
+        let motion = self.app.motion;
+        if let Some(drag) = self.window.divider_drag {
+            self.window.resizing_card_split = Some(drag.split);
+            self.window
+                .resizing_card_transition
+                .retarget(1.0, now, motion);
             return;
         }
-        let Some(split) = self.resizing_card_split else {
+        let Some(split) = self.window.resizing_card_split else {
             return;
         };
-        self.resizing_card_transition.retarget(0.0, now, motion);
-        let (inset, moving) = self.resizing_card_transition.sample(now, motion);
+        self.window
+            .resizing_card_transition
+            .retarget(0.0, now, motion);
+        let (inset, moving) = self.window.resizing_card_transition.sample(now, motion);
         let still_there = self
             .seats
             .split_slots(&self.seat_layout)
             .iter()
             .any(|slot| slot.id == split);
         if (!moving && inset <= 0.0) || !still_there {
-            self.resizing_card_split = None;
-            self.resizing_card_transition = RevealTween::over(RESIZING_CARD_TRANSITION);
+            self.window.resizing_card_split = None;
+            self.window.resizing_card_transition = RevealTween::over(RESIZING_CARD_TRANSITION);
         }
     }
 
@@ -16109,8 +16278,11 @@ impl Runtime {
     /// same picture and only one of them is a fact — see
     /// [`seats::resizing_card_inset`] for why a card of zero size is not a card.
     fn resizing_cards_frame(&self, now: Instant) -> Option<seats::ResizingCards> {
-        let split = self.resizing_card_split?;
-        let (inset, _) = self.resizing_card_transition.sample(now, self.motion);
+        let split = self.window.resizing_card_split?;
+        let (inset, _) = self
+            .window
+            .resizing_card_transition
+            .sample(now, self.app.motion);
         (inset > 0.0).then_some(seats::ResizingCards { split, inset })
     }
 
@@ -16124,39 +16296,43 @@ impl Runtime {
     /// milliseconds.
     fn drawn_resizing_card(&self, now: Instant) -> Option<(f32, f32)> {
         let cards = self.resizing_cards_frame(now)?;
-        seats::resizing_card_inset(self.renderer.metrics().scale_factor as f32, cards.inset)
+        seats::resizing_card_inset(
+            self.window.renderer.metrics().scale_factor as f32,
+            cards.inset,
+        )
     }
 
     /// Hand one commit's geometry changes to whoever is listening (T230).
     ///
-    /// See [`Runtime::last_layout_events`] for who that is, and is not, today.
+    /// See [`WindowRuntime::last_layout_events`] for who that is, and is not, today.
     fn publish_layout_events(&mut self, events: Vec<seats::LayoutEvent>) {
-        self.last_layout_events = events;
-        if self.trace_layout_events && !self.last_layout_events.is_empty() {
-            eprintln!("BT_LAYOUT_EVENTS {:?}", self.last_layout_events);
+        self.window.last_layout_events = events;
+        if self.app.trace_layout_events && !self.window.last_layout_events.is_empty() {
+            eprintln!("BT_LAYOUT_EVENTS {:?}", self.window.last_layout_events);
         }
     }
 
     fn seat_metrics(&self) -> SeatMetrics {
-        seats::seat_metrics(self.renderer.metrics().dpi_milli().get())
+        seats::seat_metrics(self.window.renderer.metrics().dpi_milli().get())
     }
 
     /// Rebuild the chrome quads and labels from the current solve. Returns
     /// whether anything visible changed.
     fn refresh_chrome(&mut self) -> bool {
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let (width, _) = self.renderer.presentation_geometry().swapchain_size;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (width, _) = self.window.renderer.presentation_geometry().swapchain_size;
         // **The window's own drag handler is told what the bar is wearing now.**
         // With the rail out, the tabs are not in the title bar at all and almost
         // none of it belongs to the app — asking the horizontal strip's geometry
         // regardless is what left the whole top bar answering `HTCLIENT`, so the
         // window could not be dragged by it (R3).
-        self.custom_window_frame
+        self.window
+            .custom_window_frame
             .set_tab_strip_right_px(seats::title_bar_app_run_right_px(
                 width as f32,
                 scale,
-                self.tabs.len(),
-                self.rail,
+                self.window.tabs.len(),
+                self.window.rail,
             ));
         // The badge's box is a function of the number in it, and only the font
         // knows how wide a number is — so the measuring happens here, where the
@@ -16167,18 +16343,23 @@ impl Runtime {
         // grabs, releases or cancels one already goes through.
         self.sync_resizing_cards(now);
         let palette = bt_render::chrome_palette();
-        let renaming = self.rename.as_ref().map(|editor| editor.tab);
+        let renaming = self.window.rename.as_ref().map(|editor| editor.tab);
         // Only a tab drag lifts a tab out of the strip; a pane in the air leaves
         // the strip exactly as it was.
         let carried = self
+            .window
             .drag
             .as_ref()
             .and_then(|drag| drag.tab_carry().map(|carry| carry.offset));
-        let grabbed = self.drag.as_ref().and_then(|drag| {
+        let grabbed = self.window.drag.as_ref().and_then(|drag| {
             let tab = drag.tab()?;
-            self.tabs.iter().position(|candidate| candidate.id == tab)
+            self.window
+                .tabs
+                .iter()
+                .position(|candidate| candidate.id == tab)
         });
         let tabs = self
+            .window
             .tabs
             .iter()
             .enumerate()
@@ -16188,15 +16369,24 @@ impl Runtime {
                     tab.display_title(),
                     pane_count,
                     tab.tab_mark(),
-                    tab.mark_state(index == self.active_tab, now, self.motion, &palette),
+                    tab.mark_state(
+                        index == self.window.active_tab,
+                        now,
+                        self.app.motion,
+                        &palette,
+                    ),
                     seats::TabTrailer {
                         pinned: tab.pinned,
-                        reveal: tab.pin_reveal.sample(now, self.motion).0,
+                        reveal: tab.pin_reveal.sample(now, self.app.motion).0,
                         files: tab.seats.is_lone_terminal(),
-                        files_lit: tab.files_lit.sample(now, self.motion).0,
+                        files_lit: tab.files_lit.sample(now, self.app.motion).0,
                     },
-                    tab.drawn_offset(now, self.motion, carried.filter(|_| grabbed == Some(index))),
-                    tab.landing.sample(now, self.motion).0,
+                    tab.drawn_offset(
+                        now,
+                        self.app.motion,
+                        carried.filter(|_| grabbed == Some(index)),
+                    ),
+                    tab.landing.sample(now, self.app.motion).0,
                     // The layer under the override, which is exactly what the
                     // editor's placeholder shows: `autoName(s)` is `displayName`
                     // with the manual name taken out (mock-up 2605-2606).
@@ -16219,7 +16409,8 @@ impl Runtime {
                     seats::TabContent {
                         mark_kind,
                         badge_text_width: if pane_count > 1 {
-                            self.renderer
+                            self.window
+                                .renderer
                                 .measure_chrome_text(&pane_count.to_string(), badge_font_px)
                         } else {
                             0.0
@@ -16247,7 +16438,7 @@ impl Runtime {
         // editor has been measured, because the editor is a fact about a real tab
         // and the indices it was measured against are the strip's own; the
         // stand-in is a guest that takes a slot for one gesture and then leaves.
-        let mut active_tab = self.active_tab;
+        let mut active_tab = self.window.active_tab;
         let mut grabbed = grabbed;
         let mut strip_preview = None;
         if let Some((slot, stand_in)) = self.strip_stand_in() {
@@ -16310,11 +16501,11 @@ impl Runtime {
         // measure a string — the same reason `files_name_widths` is a field. The
         // press then lands on the row that was drawn, because it *is* the row
         // that was drawn.
-        self.git_pages_shown = git_pages.clone();
+        self.window.git_pages_shown = git_pages.clone();
         let git_graphs = self.git_graphs(scale);
         // Kept for the hit test, for `git_pages_shown`'s reason exactly.
-        self.git_graphs_shown = git_graphs.clone();
-        self.files_view_widths = files_views
+        self.window.git_graphs_shown = git_graphs.clone();
+        self.window.files_view_widths = files_views
             .iter()
             .map(|(seat, content)| (*seat, content.widths))
             .collect();
@@ -16405,7 +16596,7 @@ impl Runtime {
             .into_iter()
             .filter_map(|seat| Some((seat, self.dress_preview_foot(seat, scale, now)?)))
             .collect();
-        self.preview_button_width = self.renderer.measure_chrome_text(
+        self.window.preview_button_width = self.window.renderer.measure_chrome_text(
             preview_open_label,
             seats::PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX * scale,
         );
@@ -16417,11 +16608,11 @@ impl Runtime {
                     seats::PreviewCardContent {
                         notice,
                         button: preview_open_label,
-                        button_text_px: self.preview_button_width,
+                        button_text_px: self.window.preview_button_width,
                         // The hover already named a seat; now the card it lights
                         // is that seat's, so two "Open in default app" buttons
                         // side by side no longer light together.
-                        button_hovered: self.seat_pointer.hover
+                        button_hovered: self.window.seat_pointer.hover
                             == Some(seats::ChromeTarget::PreviewOpenButton(seat)),
                     },
                 )
@@ -16442,7 +16633,7 @@ impl Runtime {
         // Storing them here, where the picture is built from them, is what makes
         // "the button you can press is the button you can see" true by
         // construction rather than by two functions agreeing.
-        self.files_name_widths = self.measure_files_names(&files_names);
+        self.window.files_name_widths = self.measure_files_names(&files_names);
         // Borrowed off the owned frames above, the same two-step the heads take:
         // the paint looks a placement up in this list rather than being handed
         // one answer for every preview seat.
@@ -16493,27 +16684,27 @@ impl Runtime {
             // the runtime, and the way for a mirror of it to go wrong is for one
             // of those places to be added later and forget.
             seats::ChromePointer {
-                other_drag_in_flight: self.drag.is_some(),
-                ..self.seat_pointer
+                other_drag_in_flight: self.window.drag.is_some(),
+                ..self.window.seat_pointer
             },
             seats::ChromeContent {
                 tabs: &tabs,
                 active_tab,
                 grabbed,
                 strip_preview,
-                tab_scroll: self.tab_scroll,
+                tab_scroll: self.window.tab_scroll,
                 // Sampled on this frame's own `now`, like the chevron beside it:
                 // the two scalars are what the rail *looks like* this instant,
                 // and `seats` holds no clock to work them out for itself.
                 rail: self.sampled_rail(now),
-                rail_scroll: self.rail_scroll,
+                rail_scroll: self.window.rail_scroll,
                 preview_titles: &preview_titles,
                 float_shown: &float_shown,
                 terminal_names: &terminal_names,
                 leaf_marks: &leaf_marks,
                 files_names: &files_names,
-                files_name_widths: &self.files_name_widths,
-                files_root_open: self.root_menu.seat(),
+                files_name_widths: &self.window.files_name_widths,
+                files_root_open: self.window.root_menu.seat(),
                 files_trees: &files_trees,
                 files_views: &files_views,
                 git_pages: &git_pages,
@@ -16523,23 +16714,26 @@ impl Runtime {
                 preview_heads: &preview_heads,
                 preview_cards: &preview_cards,
                 fit_overflow: self.seat_overflow,
-                profile_menu_open: self.profile_menu.is_open(),
-                chevron_turn: self.chevron_turn.sample(now, self.motion).0,
+                profile_menu_open: self.window.profile_menu.is_open(),
+                chevron_turn: self.window.chevron_turn.sample(now, self.app.motion).0,
                 pane_motion: seats::PaneMotionFrame::new(&pane_transforms),
                 resizing_cards,
             },
         );
         let seats::WindowChrome { seats, rail } = chrome;
         dump_chrome_frame(&seats);
-        let icons = self.chrome_marks.resolve(&seats.sprites);
-        let chrome_changed = self.renderer.set_chrome(seats.quads, seats.labels, icons);
+        let icons = self.window.chrome_marks.resolve(&seats.sprites);
+        let chrome_changed = self
+            .window
+            .renderer
+            .set_chrome(seats.quads, seats.labels, icons);
         // The rail floats over the panes, so it is handed on to the overlay
         // stack instead of being drawn in the same run as them — see
         // [`seats::WindowChrome`]. Kept here rather than rebuilt down there
         // because it is a *product* of this build: everything it needs was
         // sampled on this frame's `now`, and asking for it again a few lines
         // later would be asking a second clock.
-        self.rail_chrome = rail;
+        self.window.rail_chrome = rail;
         // From the same geometry, on the same beat: what the strip draws is what
         // can be tipped, and both are decided here or neither is.
         self.rebuild_tooltip_anchors(scale, width as f32, now);
@@ -16577,14 +16771,15 @@ impl Runtime {
         // length of the gesture — the same rule hover, the peek flyout and the
         // terminal's own selection already live by. An empty list is how that is
         // said here: there is nothing to be over.
-        if self.drag.is_none() {
+        if self.window.drag.is_none() {
             // **First, so it wins.** The picker floats over whichever surface
             // opened it, and first-match-wins is this list's whole ordering rule
             // — a row registered after the chevron under it would never be
             // reached. It is the innermost thing on screen, so it is pushed
             // innermost.
             if let Some(layout) = self.profile_menu_layout() {
-                for (row, rect, text) in layout.tips(&self.profile_programs, self.recent.entries())
+                for (row, rect, text) in
+                    layout.tips(&self.app.profile_programs, self.app.recent.entries())
                 {
                     anchors.push(tooltip::TooltipAnchorId::ProfileRow(row), rect, text);
                 }
@@ -16594,6 +16789,7 @@ impl Runtime {
             // where every other cropped caption in this window puts it.
             if let Some(layout) = self.root_menu_layout() {
                 let choices = self
+                    .window
                     .root_menu
                     .seat()
                     .map(|seat| self.root_choices(seat))
@@ -16606,29 +16802,29 @@ impl Runtime {
                 width,
                 scale,
                 &self.tab_trailers(now),
-                self.active_tab,
-                self.tab_scroll,
+                self.window.active_tab,
+                self.window.tab_scroll,
             );
             let rail = self.rail_geometry_now(now);
-            let renaming = self
-                .rename
-                .as_ref()
-                .and_then(|editor| self.tabs.iter().position(|tab| tab.id == editor.tab));
+            let renaming =
+                self.window.rename.as_ref().and_then(|editor| {
+                    self.window.tabs.iter().position(|tab| tab.id == editor.tab)
+                });
             for (id, rect) in tab_surface_tip_boxes(
-                self.rail.layout,
+                self.window.rail.layout,
                 &strip,
                 rail.as_ref(),
                 scale,
-                self.profile_menu.is_open(),
+                self.window.profile_menu.is_open(),
                 renaming,
             ) {
                 anchors.push(id, rect, self.tab_surface_tip_text(id));
             }
-            for (target, rect) in seats::window_chrome_boxes(width, scale, self.rail) {
+            for (target, rect) in seats::window_chrome_boxes(width, scale, self.window.rail) {
                 let text = match target {
                     // The gear, silenced while the dialog it opens is up — the
                     // chevron's rule, for the same reason.
-                    seats::ChromeTarget::Settings if self.settings.is_open() => "",
+                    seats::ChromeTarget::Settings if self.window.settings.is_open() => "",
                     seats::ChromeTarget::Settings => i18n::Text::Settings.text(),
                     // `title="Toggle sidebar"` (mock-up 2270), quoted rather than
                     // reworded: the tip is the mock-up's own text and it names the
@@ -16654,12 +16850,12 @@ impl Runtime {
         // which is this list's innermost-first order read literally: a pane head
         // sits over its own pane and under the popups, and nothing else in the
         // window claims these nineteen pixels.
-        if self.drag.is_none() {
+        if self.window.drag.is_none() {
             // Silenced on the head whose menu is up — the gear's rule and the
             // strip chevron's, for their reason: a tip explaining what a button
             // opens, standing beside the thing it just opened, is a sentence
             // about a fact already on screen.
-            let open_on = self.pane_menu.as_ref().map(|menu| menu.seat);
+            let open_on = self.window.pane_menu.as_ref().map(|menu| menu.seat);
             let seats: Vec<SeatId> = self
                 .seat_layout
                 .rects
@@ -16688,9 +16884,10 @@ impl Runtime {
         // the pane-level anchors and inside the same `drag.is_none()` guard as
         // everything above them, because a page under a drag is a page nobody is
         // pointing at.
-        if self.drag.is_none() {
+        if self.window.drag.is_none() {
             let git_scale = scale;
             let pages: Vec<(SeatId, git_panel::GitPanelContent)> = self
+                .window
                 .git_pages_shown
                 .iter()
                 .map(|(seat, page)| (*seat, page.clone()))
@@ -16705,7 +16902,7 @@ impl Runtime {
                 // painter uses, because a tip is a promise about something on
                 // screen and a hover verb on a resting row is not (see
                 // `git_panel::GIT_ACT_REVEAL`).
-                let revealed_row = match self.seat_pointer.hover {
+                let revealed_row = match self.window.seat_pointer.hover {
                     Some(seats::ChromeTarget::GitRow { seat: on, index })
                     | Some(seats::ChromeTarget::GitAct {
                         seat: on, index, ..
@@ -16768,7 +16965,7 @@ impl Runtime {
         // The commit graph's toolbar (T1). Only the toolbar: the rows below it
         // carry a tooltip of their own and have never registered one, because a
         // list whose every row explains itself is a list that flickers.
-        let graph_seats: Vec<SeatId> = self.git_graphs_shown.keys().copied().collect();
+        let graph_seats: Vec<SeatId> = self.window.git_graphs_shown.keys().copied().collect();
         for seat in graph_seats {
             let Some(rects) = self.graph_toolbar_rects(seat) else {
                 continue;
@@ -16800,9 +16997,9 @@ impl Runtime {
         // at. `retain` below therefore takes the card down the moment the pointer
         // leaves the rail, and the pointer's own 380ms is the delay the ruling
         // asked to reuse rather than a clock of the card's own.
-        if self.drag.is_none()
-            && let Some((seat, index)) = self.command_rail_hover
-            && let Some(cache) = self.command_rails.get(&seat)
+        if self.window.drag.is_none()
+            && let Some((seat, index)) = self.window.command_rail_hover
+            && let Some(cache) = self.window.command_rails.get(&seat)
             && let Some(tick) = cache.rail().ticks.get(index).copied()
             && let Some(host) = cmdrail::peek_host(cache.rail(), index)
             && let Some(leaf) = self.sessions.get(&seat)
@@ -16846,8 +17043,8 @@ impl Runtime {
         // therefore outermost of them, which is right: it is the innermost thing
         // on screen that is not a popup, and nothing else registers a box inside
         // a preview's body.
-        if self.drag.is_none()
-            && let Some(hover) = self.preview_hex_hover.as_ref()
+        if self.window.drag.is_none()
+            && let Some(hover) = self.window.preview_hex_hover.as_ref()
         {
             anchors.push_faced(
                 tooltip::TooltipAnchorId::PreviewHex(hover.surface, hover.offset),
@@ -16860,16 +17057,17 @@ impl Runtime {
         // tip still counting down toward a subject that left has nothing to
         // arrive at. Retiring both here, against the list that was just built, is
         // what keeps the host from owing a frame it could never pay.
-        self.tooltip.retain(|id| anchors.find(id).is_some());
-        self.tooltip_anchors = anchors;
+        self.window.tooltip.retain(|id| anchors.find(id).is_some());
+        self.window.tooltip_anchors = anchors;
         // The peek's subject is a tab rather than an anchor, so it is retired
         // against the same predicate that armed it. Sampled into a slice first:
         // the closure cannot read `self` while the host it is retiring is part
         // of `self`.
-        let eligible: Vec<bool> = (0..self.tabs.len())
+        let eligible: Vec<bool> = (0..self.window.tabs.len())
             .map(|index| self.layout_peek_eligible(index))
             .collect();
-        self.layout_peek
+        self.window
+            .layout_peek
             .retain(|index| eligible.get(index).copied().unwrap_or(false));
     }
 
@@ -16888,6 +17086,7 @@ impl Runtime {
     fn tab_surface_tip_text(&self, id: tooltip::TooltipAnchorId) -> String {
         match id {
             tooltip::TooltipAnchorId::TabPin(index) => self
+                .window
                 .tabs
                 .get(index)
                 .map(|tab| {
@@ -16906,6 +17105,7 @@ impl Runtime {
             // action wearing one glyph in two places.
             tooltip::TooltipAnchorId::TabFiles(_) => float_trigger_tip().to_owned(),
             tooltip::TooltipAnchorId::TabIcon(index) => self
+                .window
                 .tabs
                 .get(index)
                 .map(|tab| {
@@ -16914,6 +17114,7 @@ impl Runtime {
                 })
                 .unwrap_or_default(),
             tooltip::TooltipAnchorId::Tab(index) => self
+                .window
                 .tabs
                 .get(index)
                 .map(TabState::tooltip_text)
@@ -16931,15 +17132,16 @@ impl Runtime {
     /// the moment the fade ends there is one more frame owed, carrying the
     /// opacity from wherever the last wake left it up to a solid 1.
     fn tooltip_owes_frame(&self, now: Instant) -> bool {
-        self.tooltip_drawn_opacity != self.tooltip_opacity(now)
+        self.window.tooltip_drawn_opacity != self.tooltip_opacity(now)
     }
 
     /// The opacity the tip should be painted at this instant, or `None` when
     /// there is no tip.
     fn tooltip_opacity(&self, now: Instant) -> Option<f32> {
-        self.tooltip
+        self.window
+            .tooltip
             .active()
-            .map(|_| self.tooltip.opacity(now, self.motion))
+            .map(|_| self.window.tooltip.opacity(now, self.app.motion))
     }
 
     /// When this window next has tooltip work: the settle deadline, or the next
@@ -16948,13 +17150,14 @@ impl Runtime {
         if self.tooltip_owes_frame(now) {
             return Some(now);
         }
-        self.tooltip
-            .deadline(now, self.motion, STRIP_ANIMATION_FRAME)
+        self.window
+            .tooltip
+            .deadline(now, self.app.motion, STRIP_ANIMATION_FRAME)
     }
 
     /// Note what the pointer is over and repaint if the answer took a tip down.
     fn note_tooltip(&mut self, anchor: Option<tooltip::TooltipAnchorId>) -> Result<()> {
-        if self.tooltip.observe(anchor, Instant::now()) && self.refresh_overlay() {
+        if self.window.tooltip.observe(anchor, Instant::now()) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -16965,7 +17168,8 @@ impl Runtime {
         &self,
         position: PhysicalPosition<f64>,
     ) -> Option<tooltip::TooltipAnchorId> {
-        self.tooltip_anchors
+        self.window
+            .tooltip_anchors
             .at(position.x as f32, position.y as f32)
             .map(|anchor| anchor.id)
     }
@@ -16984,13 +17188,13 @@ impl Runtime {
         title: Option<String>,
         body: impl Into<String>,
     ) -> Result<()> {
-        self.toasts.raise(
+        self.window.toasts.raise(
             kind,
             anchor,
             title,
             body,
             None,
-            self.motion == Motion::Reduced,
+            self.app.motion == Motion::Reduced,
             Instant::now(),
         );
         if self.refresh_overlay() {
@@ -17002,7 +17206,7 @@ impl Runtime {
         // its clock run, because the hold is a *hover* and no hover event had
         // arrived. Asked here, the way `drive_rail_zone` is asked after a float
         // opens: the answer changed without the pointer moving.
-        if let Some(position) = self.pointer_position {
+        if let Some(position) = self.window.pointer_position {
             self.drive_toast_hover(position)?;
         }
         Ok(())
@@ -17016,7 +17220,7 @@ impl Runtime {
     /// a confident sentence over somewhere else. `None` is what sends it to the
     /// window's corner — the fallback, and only that.
     fn toast_anchor_rect(&self, anchor: toast::ToastAnchor) -> Option<[f32; 4]> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         match anchor {
             // The column's page body, whichever page it is showing. A notice
             // about what this column was asked to do does not move to the corner
@@ -17041,27 +17245,28 @@ impl Runtime {
     fn toast_layer(&mut self) -> Vec<marks::OverlayLayer> {
         // Recorded at the end and only on the path that paints, so the debt is
         // against what is *on screen* — [`Self::tooltip_layer`]'s own note.
-        self.toasts_drawn = Vec::new();
-        self.toast_layouts = Vec::new();
-        self.toast_pointer_drawn = toast::ToastPointer::default();
-        if self.toasts.is_empty() {
+        self.window.toasts_drawn = Vec::new();
+        self.window.toast_layouts = Vec::new();
+        self.window.toast_pointer_drawn = toast::ToastPointer::default();
+        if self.window.toasts.is_empty() {
             return Vec::new();
         }
         let now = Instant::now();
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         // The rectangles first, while nothing is borrowed: `place` needs both the
         // anchor resolver (which reads the layout) and the measurer (which holds
         // the renderer), and the two cannot both borrow `self`.
         let anchors: Vec<(toast::ToastAnchor, Option<[f32; 4]>)> = self
+            .window
             .toasts
             .toasts()
             .iter()
             .map(|toast| (toast.anchor(), self.toast_anchor_rect(toast.anchor())))
             .collect();
-        let renderer = &mut self.renderer;
+        let renderer = &mut self.window.renderer;
         let layouts = toast::place(
-            self.toasts.toasts(),
+            self.window.toasts.toasts(),
             |anchor| {
                 anchors
                     .iter()
@@ -17074,10 +17279,10 @@ impl Runtime {
         );
         let pointer = self.toast_pointer(&layouts);
         let palette = bt_render::chrome_palette();
-        let layers = toast::build(&layouts, &self.toasts, pointer, &palette, scale, now);
-        self.toasts_drawn = self.toasts.frame_state(now);
-        self.toast_pointer_drawn = pointer;
-        self.toast_layouts = layouts;
+        let layers = toast::build(&layouts, &self.window.toasts, pointer, &palette, scale, now);
+        self.window.toasts_drawn = self.window.toasts.frame_state(now);
+        self.window.toast_pointer_drawn = pointer;
+        self.window.toast_layouts = layouts;
         layers
     }
 
@@ -17101,13 +17306,13 @@ impl Runtime {
         body: impl Into<String>,
         verb: &str,
     ) -> Result<toast::ToastId> {
-        let id = self.toasts.raise(
+        let id = self.window.toasts.raise(
             kind,
             anchor,
             None,
             body,
             Some(verb.to_owned()),
-            self.motion == Motion::Reduced,
+            self.app.motion == Motion::Reduced,
             Instant::now(),
         );
         if self.refresh_overlay() {
@@ -17119,7 +17324,7 @@ impl Runtime {
     /// Which card, which `×` and which verb the pointer is on, for the reveal
     /// ladder.
     fn toast_pointer(&self, layouts: &[toast::ToastLayout]) -> toast::ToastPointer {
-        let Some(position) = self.pointer_position else {
+        let Some(position) = self.window.pointer_position else {
             return toast::ToastPointer::default();
         };
         match toast::at(layouts, position.x as f32, position.y as f32) {
@@ -17144,7 +17349,7 @@ impl Runtime {
 
     /// Whether the cards on screen differ from the cards last painted.
     fn toasts_owe_frame(&self, now: Instant) -> bool {
-        self.toasts_drawn != self.toasts.frame_state(now)
+        self.window.toasts_drawn != self.window.toasts.frame_state(now)
     }
 
     /// When this window next has notice work: an entrance landing, a life running
@@ -17153,12 +17358,12 @@ impl Runtime {
         if self.toasts_owe_frame(now) {
             return Some(now);
         }
-        self.toasts.deadline(now)
+        self.window.toasts.deadline(now)
     }
 
     /// Move every card's clock on, and pay the frames the movement owes.
     fn advance_toasts(&mut self, now: Instant) -> Result<()> {
-        let moved = self.toasts.advance(now);
+        let moved = self.window.toasts.advance(now);
         if (moved || self.toasts_owe_frame(now)) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -17169,7 +17374,11 @@ impl Runtime {
     /// and the one that lights its `×`. Returns whether the press should stop
     /// here.
     fn drive_toast_hover(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let hit = toast::at(&self.toast_layouts, position.x as f32, position.y as f32);
+        let hit = toast::at(
+            &self.window.toast_layouts,
+            position.x as f32,
+            position.y as f32,
+        );
         let card = hit.map(|hit| match hit {
             toast::ToastHit::Close(id)
             | toast::ToastHit::Card(id)
@@ -17178,8 +17387,9 @@ impl Runtime {
         // Two questions, and both have to be asked: the clock stops for the card
         // under the pointer, and the ladder's rung changes when the pointer
         // crosses into the `×` *without* changing which card it is on.
-        let moved = self.toast_pointer(&self.toast_layouts) != self.toast_pointer_drawn;
-        let held = self.toasts.hover(card, Instant::now());
+        let moved =
+            self.toast_pointer(&self.window.toast_layouts) != self.window.toast_pointer_drawn;
+        let held = self.window.toasts.hover(card, Instant::now());
         if (held || moved) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -17192,7 +17402,11 @@ impl Runtime {
     /// verb on every row; a press that fell through it would stage whatever
     /// happened to be under the card you were reaching for.
     fn press_toast(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let Some(hit) = toast::at(&self.toast_layouts, position.x as f32, position.y as f32) else {
+        let Some(hit) = toast::at(
+            &self.window.toast_layouts,
+            position.x as f32,
+            position.y as f32,
+        ) else {
             return Ok(false);
         };
         // The verb first: pressing it does the thing and sends the card away,
@@ -17200,13 +17414,13 @@ impl Runtime {
         // no longer true.
         if let toast::ToastHit::Action(id) = hit {
             self.take_profile_undo(id)?;
-            if self.toasts.dismiss(id, Instant::now()) && self.refresh_overlay() {
+            if self.window.toasts.dismiss(id, Instant::now()) && self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
             return Ok(true);
         }
         if let toast::ToastHit::Close(id) = hit
-            && self.toasts.dismiss(id, Instant::now())
+            && self.window.toasts.dismiss(id, Instant::now())
             && self.refresh_overlay()
         {
             self.present_chrome_change()?;
@@ -17227,7 +17441,7 @@ impl Runtime {
     /// picture.
     fn command_rail_body(&self, seat: SeatId) -> Option<[f32; 4]> {
         let leaf = self.sessions.get(&seat)?;
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
         cmdrail::host_rect(
             [
@@ -17277,9 +17491,9 @@ impl Runtime {
                 failed: mark.failed(),
             })
             .collect();
-        let current = self.search.current().map(|hit| hit.line);
+        let current = self.window.search.current().map(|hit| hit.line);
         let mut matches: Vec<cmdrail::MatchLine> = Vec::new();
-        for (index, hit) in self.search.hits().iter().enumerate() {
+        for (index, hit) in self.window.search.hits().iter().enumerate() {
             if matches.last().is_some_and(|last| last.line == hit.line) {
                 continue;
             }
@@ -17301,13 +17515,13 @@ impl Runtime {
     /// query has asked nothing, and a rail that greys out to answer nothing is a
     /// rail that has told the reader their history went away.
     fn command_rail_search(&self, seat: SeatId) -> Option<cmdrail::RailSearch> {
-        if !rail_is_searching(self.search.seat(), self.search.query(), seat) {
+        if !rail_is_searching(self.window.search.seat(), self.window.search.query(), seat) {
             return None;
         }
         Some(cmdrail::RailSearch {
-            query: self.search_revision,
-            hits: self.search.revision(),
-            current: self.search.current_index(),
+            query: self.window.search_revision,
+            hits: self.window.search.revision(),
+            current: self.window.search.current_index(),
         })
     }
 
@@ -17315,12 +17529,13 @@ impl Runtime {
     /// [`cmdrail::RailCache::fold_for_mode`].
     fn fold_rails_on_mode_change(&mut self) {
         let modes: Vec<(SeatId, bool)> = self
+            .window
             .command_rails
             .keys()
             .map(|seat| (*seat, self.command_rail_search(*seat).is_some()))
             .collect();
         for (seat, searching) in modes {
-            if let Some(cache) = self.command_rails.get_mut(&seat) {
+            if let Some(cache) = self.window.command_rails.get_mut(&seat) {
                 cache.fold_for_mode(searching);
             }
         }
@@ -17339,8 +17554,8 @@ impl Runtime {
     /// function that produced the text the match was *found* in, so the card
     /// cannot quote a line the scan never saw.
     fn search_hit_line_text(&self, hit: usize) -> Option<String> {
-        let seat = self.search.seat()?;
-        let line = self.search.hits().get(hit)?.line;
+        let seat = self.window.search.seat()?;
+        let line = self.window.search.hits().get(hit)?.line;
         let leaf = self.sessions.get(&seat)?;
         match line {
             bt_viewport::SearchLine::History(id) => {
@@ -17373,9 +17588,9 @@ impl Runtime {
     /// travels — so [`cmdrail::RailCache::picture`] paints those afresh and caches
     /// only the resting one.
     fn command_rail_layers(&mut self) -> Vec<marks::OverlayLayer> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let palette = bt_render::chrome_palette();
-        let motion = self.motion;
+        let motion = self.app.motion;
         let now = Instant::now();
         let flash = self.command_flash_layer(&palette, scale);
         // Before anything is keyed: a rail that is changing mode folds whatever
@@ -17399,12 +17614,14 @@ impl Runtime {
                     // The pointer's, and the one thing about the pointer a rail's
                     // *geometry* is a function of: a fisheye genuinely moves ticks.
                     expanded: self
+                        .window
                         .command_rails
                         .get(&seat)
                         .and_then(|cache| cache.pointer().expanded()),
                     search: self.command_rail_search(seat),
                 };
                 let stale = self
+                    .window
                     .command_rails
                     .get(&seat)
                     .is_none_or(|cache| cache.needs_rebuild(key));
@@ -17420,7 +17637,7 @@ impl Runtime {
         // Pass two, exclusive: store what changed and hand out the pictures.
         let mut layers: Vec<marks::OverlayLayer> = flash.into_iter().collect();
         for (seat, key, fresh) in plans {
-            let cache = self.command_rails.entry(seat).or_default();
+            let cache = self.window.command_rails.entry(seat).or_default();
             if let Some(rail) = fresh {
                 cache.install(key, rail, &palette);
             }
@@ -17446,7 +17663,7 @@ impl Runtime {
         palette: &bt_render::ChromePalette,
         scale: f32,
     ) -> Option<marks::OverlayLayer> {
-        let flash = self.command_flash.as_ref()?;
+        let flash = self.window.command_flash.as_ref()?;
         let alpha = cmdrail::flash_alpha(
             Instant::now().saturating_duration_since(flash.started),
             |x| cubic_bezier(x, EASE),
@@ -17454,7 +17671,7 @@ impl Runtime {
         let body = self.command_rail_body(flash.seat)?;
         let frame = self.pane_frame(flash.seat)?;
         let row = frame_row_of_anchor(frame, &flash.anchor)?;
-        let metrics = self.renderer.metrics();
+        let metrics = self.window.renderer.metrics();
         let top = body[1]
             + metrics.padding_px
             + row.top_subpixels as f32 / bt_viewport::SUBPIXELS_PER_PX as f32;
@@ -17481,7 +17698,8 @@ impl Runtime {
     /// While a flash is running, one frame at the animation's own rate; nothing at
     /// all otherwise.
     fn command_flash_deadline(&self, now: Instant) -> Option<Instant> {
-        self.command_flash
+        self.window
+            .command_flash
             .as_ref()
             .filter(|flash| cmdrail::flash_is_running(now.saturating_duration_since(flash.started)))
             .map(|_| now + STRIP_ANIMATION_FRAME)
@@ -17489,11 +17707,11 @@ impl Runtime {
 
     /// Pay the flash's frames, and let it go when it is over.
     fn advance_command_flash(&mut self, now: Instant) -> Result<()> {
-        let Some(flash) = self.command_flash.as_ref() else {
+        let Some(flash) = self.window.command_flash.as_ref() else {
             return Ok(());
         };
         if !cmdrail::flash_is_running(now.saturating_duration_since(flash.started)) {
-            self.command_flash = None;
+            self.window.command_flash = None;
         }
         if self.refresh_overlay() {
             self.present_chrome_change()?;
@@ -17508,16 +17726,19 @@ impl Runtime {
     /// seat id the solver reuses next. The sweep runs where the overlay is built,
     /// so it is a function of the same solve everything else that frame is.
     fn sweep_command_rails(&mut self) {
-        if self.command_rails.is_empty() {
+        if self.window.command_rails.is_empty() {
             return;
         }
         let live: BTreeSet<SeatId> = self.sessions.keys().copied().collect();
-        self.command_rails.retain(|seat, _| live.contains(seat));
+        self.window
+            .command_rails
+            .retain(|seat, _| live.contains(seat));
         if self
+            .window
             .command_rail_hover
             .is_some_and(|(seat, _)| !live.contains(&seat))
         {
-            self.command_rail_hover = None;
+            self.window.command_rail_hover = None;
         }
     }
 
@@ -17539,10 +17760,10 @@ impl Runtime {
     /// own block under the capsule's box).
     fn drive_search_hover(&mut self, position: Option<PhysicalPosition<f64>>) -> Result<bool> {
         let hover = position
-            .zip(self.search_layout)
+            .zip(self.window.search_layout)
             .and_then(|(at, capsule)| search::hit(&capsule, at.x as f32, at.y as f32));
-        if self.search_hover != hover {
-            self.search_hover = hover;
+        if self.window.search_hover != hover {
+            self.window.search_hover = hover;
             if self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
@@ -17557,7 +17778,7 @@ impl Runtime {
     /// are marks and two-letter labels — `Aa`, `ab`, `.*`, a chevron each way and a cross — which
     /// is exactly the case a tip exists for: an idiom is a guess until something says what it does.
     fn search_tip_anchors(&self, anchors: &mut tooltip::TooltipAnchors) {
-        let Some(capsule) = self.search_layout else {
+        let Some(capsule) = self.window.search_layout else {
             return;
         };
         for element in [
@@ -17587,7 +17808,7 @@ impl Runtime {
         position: Option<PhysicalPosition<f64>>,
     ) -> Result<bool> {
         let now = Instant::now();
-        let motion = self.motion;
+        let motion = self.app.motion;
         let palette = bt_render::chrome_palette();
         // Pass one, shared: the fisheye and the crest, settled together against
         // the ledger — see [`cmdrail::resolve`].
@@ -17595,19 +17816,20 @@ impl Runtime {
         let hover = settled
             .as_ref()
             .and_then(|(seat, _, resolved)| resolved.nearest.map(|index| (*seat, index)));
-        let mut changed = self.command_rail_hover != hover;
-        self.command_rail_hover = hover;
+        let mut changed = self.window.command_rail_hover != hover;
+        self.window.command_rail_hover = hover;
         // Pass two, exclusive. Every rail the pointer is not on cools and folds
         // whatever it had open — the mock-up's `railReset`, which does exactly
         // these two things in this order.
         let cold: Vec<SeatId> = self
+            .window
             .command_rails
             .keys()
             .copied()
             .filter(|seat| hover.map(|(hot, _)| hot) != Some(*seat))
             .collect();
         for seat in cold {
-            let Some(cache) = self.command_rails.get_mut(&seat) else {
+            let Some(cache) = self.window.command_rails.get_mut(&seat) else {
                 continue;
             };
             let ticks = cache.rail().ticks.len();
@@ -17618,7 +17840,7 @@ impl Runtime {
             cache.pointer_mut().aim(ticks, None, false, now, motion);
         }
         if let Some((seat, key, resolved)) = settled {
-            let cache = self.command_rails.entry(seat).or_default();
+            let cache = self.window.command_rails.entry(seat).or_default();
             if cache.needs_rebuild(key) {
                 cache.install(key, resolved.rail, &palette);
             }
@@ -17665,15 +17887,17 @@ impl Runtime {
     ) -> Option<(SeatId, cmdrail::RailKey, cmdrail::Resolved)> {
         let seat = seats::pane_at(&self.seat_layout, position.x, position.y)?;
         let body = self.command_rail_body(seat)?;
-        let cache = self.command_rails.get(&seat)?;
+        let cache = self.window.command_rails.get(&seat)?;
         cmdrail::nearest(
             cache.rail(),
-            self.command_rail_hover.is_some_and(|(hot, _)| hot == seat),
+            self.window
+                .command_rail_hover
+                .is_some_and(|(hot, _)| hot == seat),
             position.x as f32,
             position.y as f32,
         )?;
         let leaf = self.sessions.get(&seat)?;
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let resolved = cmdrail::resolve(
             body,
             &self.command_rail_stack(seat),
@@ -17701,10 +17925,12 @@ impl Runtime {
     fn command_rail_at(&self, position: PhysicalPosition<f64>) -> Option<(SeatId, usize)> {
         let seat = seats::pane_at(&self.seat_layout, position.x, position.y)?;
         self.command_rail_body(seat)?;
-        let cache = self.command_rails.get(&seat)?;
+        let cache = self.window.command_rails.get(&seat)?;
         cmdrail::nearest(
             cache.rail(),
-            self.command_rail_hover.is_some_and(|(hot, _)| hot == seat),
+            self.window
+                .command_rail_hover
+                .is_some_and(|(hot, _)| hot == seat),
             position.x as f32,
             position.y as f32,
         )
@@ -17714,7 +17940,7 @@ impl Runtime {
     /// The glance card's anchor for the tick the crest is on, if a rail is hot.
     /// The colour token under the pointer, as an anchor identity.
     fn preview_hex_anchor(&self) -> Option<tooltip::TooltipAnchorId> {
-        let hover = self.preview_hex_hover.as_ref()?;
+        let hover = self.window.preview_hex_hover.as_ref()?;
         Some(tooltip::TooltipAnchorId::PreviewHex(
             hover.surface,
             hover.offset,
@@ -17722,8 +17948,14 @@ impl Runtime {
     }
 
     fn command_tick_anchor(&self) -> Option<tooltip::TooltipAnchorId> {
-        let (seat, index) = self.command_rail_hover?;
-        let tick = self.command_rails.get(&seat)?.rail().ticks.get(index)?;
+        let (seat, index) = self.window.command_rail_hover?;
+        let tick = self
+            .window
+            .command_rails
+            .get(&seat)?
+            .rail()
+            .ticks
+            .get(index)?;
         Some(tooltip::TooltipAnchorId::CommandTick(seat, tick.target))
     }
 
@@ -17735,8 +17967,9 @@ impl Runtime {
     }
 
     fn command_rails_are_moving(&self, now: Instant) -> bool {
-        let motion = self.motion;
-        self.command_rails
+        let motion = self.app.motion;
+        self.window
+            .command_rails
             .values()
             .any(|cache| cache.pointer().is_animating(now, motion))
     }
@@ -17768,6 +18001,7 @@ impl Runtime {
             return Ok(false);
         };
         let Some(target) = self
+            .window
             .command_rails
             .get(&seat)
             .and_then(|cache| cache.rail().ticks.get(index))
@@ -17799,7 +18033,7 @@ impl Runtime {
     /// output was deleted", and the alternative (scroll somewhere near where it
     /// used to be) is the class of guess this whole block refuses.
     fn jump_to_command_mark(&mut self, seat: SeatId, mark: bt_term::CommandMarkId) -> Result<()> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let Some(leaf) = self.sessions.get_mut(&seat) else {
             return Ok(());
         };
@@ -17822,7 +18056,7 @@ impl Runtime {
                 source: anchor.clone(),
                 local_offset,
             }));
-        self.command_flash = Some(CommandFlash {
+        self.window.command_flash = Some(CommandFlash {
             seat,
             anchor,
             started: Instant::now(),
@@ -17891,11 +18125,12 @@ impl Runtime {
     /// are different widths, so the capsule's own width is a function of what it is saying. It is
     /// four `max`es and one row of additions — cheaper than deciding whether it is stale.
     fn search_capsule(&mut self) -> Option<search::Capsule> {
-        let seat = self.search.seat()?;
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let seat = self.window.search.seat()?;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let (rect, head) = seats::search_capsule_host(&self.seats, &self.seat_layout, seat, scale)?;
-        let counter = self.search.counter();
+        let counter = self.window.search.counter();
         let width = self
+            .window
             .renderer
             .measure_chrome_text(&counter, search::COUNTER_FONT_LOGICAL_PX * scale)
             + 2.0 * search::COUNTER_PADDING_X_LOGICAL_PX * scale;
@@ -17928,10 +18163,15 @@ impl Runtime {
         // Opening on a second pane closes the first, which is what "one search, one pane" means at
         // the point it is enforced: the old pane's highlights have to go before the new pane's
         // arrive, or a window with two panes would end up wearing two sets.
-        if let Some(previous) = self.search.seat().filter(|previous| *previous != seat) {
+        if let Some(previous) = self
+            .window
+            .search
+            .seat()
+            .filter(|previous| *previous != seat)
+        {
             self.clear_search_highlights(previous);
         }
-        self.search.open(seat);
+        self.window.search.open(seat);
         self.refresh_search(true)?;
         self.after_search_change()
     }
@@ -17944,14 +18184,14 @@ impl Runtime {
     /// toggle switched. That is what makes `Ctrl+F` after a tab switch a continuation rather than a
     /// fresh start.
     fn close_search(&mut self) -> Result<bool> {
-        let Some(seat) = self.search.seat() else {
+        let Some(seat) = self.window.search.seat() else {
             return Ok(false);
         };
         self.clear_search_highlights(seat);
-        self.search.close();
-        self.search_layout = None;
-        self.search_hover = None;
-        self.search_scan = None;
+        self.window.search.close();
+        self.window.search_layout = None;
+        self.window.search_hover = None;
+        self.window.search_scan = None;
         self.after_search_change()?;
         Ok(true)
     }
@@ -17972,7 +18212,7 @@ impl Runtime {
     /// being composed, so asking for another one from inside it would be the publish re-entering
     /// itself once per line the shell prints.
     fn after_search_change(&mut self) -> Result<()> {
-        if let Some(seat) = self.search.seat() {
+        if let Some(seat) = self.window.search.seat() {
             self.repaint_pane_change(seat)?;
         } else {
             self.publish_interaction_frame()?;
@@ -18003,8 +18243,8 @@ impl Runtime {
     /// **No debounce anywhere.** A keystroke's result is on the next frame; the thing that makes
     /// that affordable is [`SearchScanCache`]'s split by plane, not a timer.
     fn refresh_search(&mut self, forced: bool) -> Result<()> {
-        let Some(seat) = self.search.seat() else {
-            self.search_scan = None;
+        let Some(seat) = self.window.search.seat() else {
+            self.window.search_scan = None;
             return Ok(());
         };
         // A pane that has gone — closed, torn into another tab, turned into a preview — ends the
@@ -18019,15 +18259,19 @@ impl Runtime {
             self.close_search()?;
             return Ok(());
         }
-        let compiled = match search::engine(self.search.flags(), self.search.query()) {
+        let compiled = match search::engine(self.window.search.flags(), self.window.search.query())
+        {
             Ok(compiled) => Some(compiled),
             // An empty query is the state the capsule opens in, not a fault: no hits, no count, no
             // red. A pattern the engine refused is the red one, and its own message is the tip.
             Err(bt_transcript::search::SearchError::Empty) => None,
             Err(bt_transcript::search::SearchError::Pattern(message)) => {
-                let changed = !self.search.hits().is_empty() || self.search.error().is_none();
-                self.search.install(Vec::new(), Some(message), false, None);
-                self.search_scan = None;
+                let changed =
+                    !self.window.search.hits().is_empty() || self.window.search.error().is_none();
+                self.window
+                    .search
+                    .install(Vec::new(), Some(message), false, None);
+                self.window.search_scan = None;
                 if changed {
                     self.install_search_highlights(seat);
                     self.settle_search_change(forced)?;
@@ -18036,9 +18280,10 @@ impl Runtime {
             }
         };
         let Some(compiled) = compiled else {
-            let changed = !self.search.hits().is_empty() || self.search.error().is_some();
-            self.search.install(Vec::new(), None, false, None);
-            self.search_scan = None;
+            let changed =
+                !self.window.search.hits().is_empty() || self.window.search.error().is_some();
+            self.window.search.install(Vec::new(), None, false, None);
+            self.window.search_scan = None;
             if changed {
                 self.install_search_highlights(seat);
                 self.settle_search_change(forced)?;
@@ -18046,7 +18291,7 @@ impl Runtime {
             return Ok(());
         };
 
-        let revision = self.search_revision;
+        let revision = self.window.search_revision;
         let leaf = self.sessions.get(&seat).expect("the seat was just checked");
         let transcript = leaf.session.transcript();
         let frozen = transcript.frozen();
@@ -18057,6 +18302,7 @@ impl Runtime {
             transcript.source_generation(),
         );
         let reusable = self
+            .window
             .search_scan
             .as_ref()
             .filter(|cache| {
@@ -18076,7 +18322,7 @@ impl Runtime {
             .collect();
         let volatile_hits =
             search::scan_volatile(&compiled, transcript, &live, leaf.session.grid_generation());
-        let unchanged = self.search_scan.as_ref().is_some_and(|cache| {
+        let unchanged = self.window.search_scan.as_ref().is_some_and(|cache| {
             cache.seat == seat
                 && cache.revision == revision
                 && cache.history == history_key
@@ -18094,8 +18340,10 @@ impl Runtime {
             .map(|anchor| anchor.source.clone());
         let mut hits = history_hits.clone();
         hits.extend(volatile_hits.iter().cloned());
-        self.search.install(hits, None, !forced, from.as_ref());
-        self.search_scan = Some(SearchScanCache {
+        self.window
+            .search
+            .install(hits, None, !forced, from.as_ref());
+        self.window.search_scan = Some(SearchScanCache {
             seat,
             revision,
             history: history_key,
@@ -18118,7 +18366,7 @@ impl Runtime {
 
     /// Hand the searched pane's projection the hit set it paints from.
     fn install_search_highlights(&mut self, seat: SeatId) {
-        let highlights = Arc::clone(self.search.highlights());
+        let highlights = Arc::clone(self.window.search.highlights());
         if let Some(leaf) = self.sessions.get_mut(&seat) {
             leaf.projection.set_search_highlights(Some(highlights));
         }
@@ -18126,7 +18374,7 @@ impl Runtime {
 
     /// `Enter` / `F3` / the `▲▼` buttons — walk one match, wrapping at both ends.
     fn step_search(&mut self, forwards: bool) -> Result<()> {
-        if self.search.step(forwards).is_none() {
+        if self.window.search.step(forwards).is_none() {
             return Ok(());
         }
         self.after_current_hit_moved()
@@ -18145,7 +18393,7 @@ impl Runtime {
     /// one frame's worth of staleness at most — and moving the reader to a hit
     /// they did not point at would be worse than the press appearing not to land.
     fn select_search_hit(&mut self, index: usize) -> Result<()> {
-        if self.search.set_current(index).is_none() {
+        if self.window.search.set_current(index).is_none() {
             return Ok(());
         }
         self.after_current_hit_moved()
@@ -18156,7 +18404,7 @@ impl Runtime {
     /// the counter is rebuilt around it.
     fn after_current_hit_moved(&mut self) -> Result<()> {
         self.reveal_current_search_hit()?;
-        if let Some(seat) = self.search.seat() {
+        if let Some(seat) = self.window.search.seat() {
             self.install_search_highlights(seat);
         }
         self.after_search_change()
@@ -18173,13 +18421,13 @@ impl Runtime {
     /// which is the one place this differs from the command rail's jump: a command is the start of
     /// output you read downwards, and a match is a point you read *around*.
     fn reveal_current_search_hit(&mut self) -> Result<()> {
-        let Some(seat) = self.search.seat() else {
+        let Some(seat) = self.window.search.seat() else {
             return Ok(());
         };
-        let Some(anchor) = self.search.current().map(|hit| hit.anchor.clone()) else {
+        let Some(anchor) = self.window.search.current().map(|hit| hit.anchor.clone()) else {
             return Ok(());
         };
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let Some(body) = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
         else {
             return Ok(());
@@ -18216,12 +18464,12 @@ impl Runtime {
     /// than above the shortcut table: a field holding the keyboard is not a modal, so the window's
     /// own chords still work over it, and only *typing* is claimed.
     fn search_field_key(&mut self, event: &KeyEvent) -> Result<bool> {
-        if !self.search.is_focused() {
+        if !self.window.search.is_focused() {
             return Ok(false);
         }
         use text_field::TextMove;
-        let shift = self.modifiers.shift_key();
-        let control = self.modifiers.control_key();
+        let shift = self.window.modifiers.shift_key();
+        let control = self.window.modifiers.control_key();
         let mut edited = false;
         match &event.logical_key {
             // Enter walks the matches; `Shift+Enter` walks them backwards (B70). It is a walk and
@@ -18245,9 +18493,9 @@ impl Runtime {
                 self.step_search(false)?;
                 return Ok(true);
             }
-            Key::Named(NamedKey::Backspace) => edited = self.search.field_mut().backspace(),
-            Key::Named(NamedKey::Delete) => edited = self.search.field_mut().delete(),
-            Key::Named(NamedKey::ArrowLeft) => self.search.field_mut().step(
+            Key::Named(NamedKey::Backspace) => edited = self.window.search.field_mut().backspace(),
+            Key::Named(NamedKey::Delete) => edited = self.window.search.field_mut().delete(),
+            Key::Named(NamedKey::ArrowLeft) => self.window.search.field_mut().step(
                 if control {
                     TextMove::WordLeft
                 } else {
@@ -18255,7 +18503,7 @@ impl Runtime {
                 },
                 shift,
             ),
-            Key::Named(NamedKey::ArrowRight) => self.search.field_mut().step(
+            Key::Named(NamedKey::ArrowRight) => self.window.search.field_mut().step(
                 if control {
                     TextMove::WordRight
                 } else {
@@ -18263,19 +18511,21 @@ impl Runtime {
                 },
                 shift,
             ),
-            Key::Named(NamedKey::Home) => self.search.field_mut().step(TextMove::Home, shift),
-            Key::Named(NamedKey::End) => self.search.field_mut().step(TextMove::End, shift),
+            Key::Named(NamedKey::Home) => {
+                self.window.search.field_mut().step(TextMove::Home, shift)
+            }
+            Key::Named(NamedKey::End) => self.window.search.field_mut().step(TextMove::End, shift),
             Key::Named(NamedKey::Space) => {
-                self.search.field_mut().insert(" ");
+                self.window.search.field_mut().insert(" ");
                 edited = true;
             }
             Key::Character(text) if control => {
                 match text.as_str() {
-                    "a" | "A" => self.search.field_mut().select_all(),
+                    "a" | "A" => self.window.search.field_mut().select_all(),
                     // `Ctrl+F` with the caret already in the box selects what is there (B73), so
                     // the chord means the same thing wherever it is pressed: "put me in the search,
                     // ready to replace the query".
-                    "f" | "F" => self.search.field_mut().select_all(),
+                    "f" | "F" => self.window.search.field_mut().select_all(),
                     _ => {}
                 }
             }
@@ -18291,14 +18541,14 @@ impl Runtime {
             // is no shell listening — exactly as the graph's own six keys and the files column's
             // arrows are out of the table. Putting one of the three families in and not the others
             // would be the audit saying two things.
-            Key::Character(text) if self.modifiers.alt_key() && !control => {
+            Key::Character(text) if self.window.modifiers.alt_key() && !control => {
                 if let Some(flag) = search::toggle_for_letter(text) {
                     self.toggle_search_flag(flag)?;
                 }
                 return Ok(true);
             }
             Key::Character(text) => {
-                self.search.field_mut().insert(text);
+                self.window.search.field_mut().insert(text);
                 edited = true;
             }
             // Everything else is swallowed. A key the field has no use for is still not the
@@ -18306,7 +18556,7 @@ impl Runtime {
             _ => {}
         }
         if edited {
-            self.search_revision = self.search_revision.wrapping_add(1);
+            self.window.search_revision = self.window.search_revision.wrapping_add(1);
             self.refresh_search(true)?;
         }
         if self.refresh_overlay() {
@@ -18317,17 +18567,17 @@ impl Runtime {
 
     /// Flip one toggle and re-ask (`Aa` / `ab` / `.*`).
     fn toggle_search_flag(&mut self, flag: search::SearchFlag) -> Result<()> {
-        self.search.flags_mut().toggle(flag);
-        self.search_revision = self.search_revision.wrapping_add(1);
+        self.window.search.flags_mut().toggle(flag);
+        self.window.search_revision = self.window.search_revision.wrapping_add(1);
         // *"Any press hands the caret back"* (B74) — the capsule is one control, and a toggle you
         // pressed with the mouse leaves you able to keep typing.
-        self.search.focus();
+        self.window.search.focus();
         self.refresh_search(true)
     }
 
     /// A press on the capsule. Returns whether it landed there at all.
     fn press_search(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let Some(capsule) = self.search_layout else {
+        let Some(capsule) = self.window.search_layout else {
             return Ok(false);
         };
         let Some(element) = search::hit(&capsule, position.x as f32, position.y as f32) else {
@@ -18340,15 +18590,15 @@ impl Runtime {
             }
             search::SearchElement::Toggle(flag) => self.toggle_search_flag(flag)?,
             search::SearchElement::Previous => {
-                self.search.focus();
+                self.window.search.focus();
                 self.step_search(false)?;
             }
             search::SearchElement::Next => {
-                self.search.focus();
+                self.window.search.focus();
                 self.step_search(true)?;
             }
             search::SearchElement::Field | search::SearchElement::Body => {
-                self.search.focus();
+                self.window.search.focus();
                 self.after_search_change()?;
             }
         }
@@ -18363,7 +18613,7 @@ impl Runtime {
     /// in — the bug the terminal's own preedit path was fixed for on 2026-08-13, and the shape the
     /// commit graph's field already answers.
     fn search_field_look(&mut self) -> (String, bool, f32) {
-        let field = self.search.field();
+        let field = self.window.search.field();
         let typed = field.text().to_owned();
         let before = field.before_caret().to_owned();
         let preedit = field.preedit().to_owned();
@@ -18371,9 +18621,10 @@ impl Runtime {
             "{before}{preedit}{}",
             &typed[before.len().min(typed.len())..]
         );
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let font = search::FIELD_FONT_LOGICAL_PX * scale;
         let caret_x = self
+            .window
             .renderer
             .measure_chrome_text(&format!("{before}{preedit}"), font);
         if shown.is_empty() {
@@ -18386,17 +18637,17 @@ impl Runtime {
     /// The capsule's own level of the overlay stack, or nothing when it is down.
     fn search_layers(&mut self) -> Vec<marks::OverlayLayer> {
         let Some(capsule) = self.search_capsule() else {
-            self.search_layout = None;
+            self.window.search_layout = None;
             return Vec::new();
         };
-        self.search_layout = Some(capsule);
-        let scale = self.renderer.metrics().scale_factor as f32;
+        self.window.search_layout = Some(capsule);
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let palette = bt_render::chrome_palette();
-        let counter = self.search.counter();
-        let flags = self.search.flags();
-        let broken = self.search.error().is_some();
-        let focused = self.search.is_focused();
-        let hover = self.search_hover;
+        let counter = self.window.search.counter();
+        let flags = self.window.search.flags();
+        let broken = self.window.search.error().is_some();
+        let focused = self.window.search.is_focused();
+        let hover = self.window.search_hover;
         let (text, typed, caret_x) = self.search_field_look();
         vec![search::build(
             &capsule,
@@ -18417,7 +18668,7 @@ impl Runtime {
 
     /// Show a settled tip, and keep paying the fade's frames until it lands.
     fn advance_tooltip_if_due(&mut self, now: Instant) -> Result<()> {
-        let promoted = self.tooltip.activate_if_due(now);
+        let promoted = self.window.tooltip.activate_if_due(now);
         if (promoted || self.tooltip_owes_frame(now)) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -18426,7 +18677,7 @@ impl Runtime {
 
     /// Take the tip down — any press, a lost window, a menu opening (M142, I94).
     fn hide_tooltip(&mut self) -> Result<()> {
-        if self.tooltip.hide() && self.refresh_overlay() {
+        if self.window.tooltip.hide() && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -18439,19 +18690,20 @@ impl Runtime {
     /// the two asking different questions is exactly how a popup survives the
     /// death of its own subject.
     fn layout_peek_eligible(&self, tab: usize) -> bool {
-        let Some(state) = self.tabs.get(tab) else {
+        let Some(state) = self.window.tabs.get(tab) else {
             return false;
         };
         peek_strip::eligible(
             state.seats.pane_count(),
-            tab == self.active_tab,
+            tab == self.window.active_tab,
             // A drag owns the pointer outright — the rule the tip, the hyperlink
             // underline and the terminal's own selection already live by.
-            self.drag.is_some(),
+            self.window.drag.is_some(),
             // The editor IS the answer, exactly as it is for the tip: a
             // schematic laid over the box you are typing a name into covers the
             // box you are typing it into.
-            self.rename
+            self.window
+                .rename
                 .as_ref()
                 .is_some_and(|editor| editor.tab == state.id),
         )
@@ -18474,7 +18726,7 @@ impl Runtime {
 
     /// Track the tab under the pointer (L131, L135).
     fn note_layout_peek(&mut self, tab: Option<usize>) -> Result<()> {
-        if self.layout_peek.observe(tab, Instant::now()) && self.refresh_overlay() {
+        if self.window.layout_peek.observe(tab, Instant::now()) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -18489,10 +18741,10 @@ impl Runtime {
     /// forever, and a `WaitUntil` on an instant already in the past is a loop
     /// that never sleeps.
     fn advance_layout_peek_if_due(&mut self, now: Instant) -> Result<()> {
-        if !self.layout_peek.activate_if_due(now) {
+        if !self.window.layout_peek.activate_if_due(now) {
             return Ok(());
         }
-        self.tooltip.hide();
+        self.window.tooltip.hide();
         if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -18501,7 +18753,7 @@ impl Runtime {
 
     /// Take the peek down — any press, a lost window, a drag starting (L135).
     fn hide_layout_peek(&mut self) -> Result<()> {
-        if self.layout_peek.hide() && self.refresh_overlay() {
+        if self.window.layout_peek.hide() && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -18513,7 +18765,7 @@ impl Runtime {
     /// inside a tab whose peek is up: promotion silenced the tip once, and this
     /// is what stops the next mouse-move from arming it again.
     fn layout_peek_suppresses(&self, anchor: tooltip::TooltipAnchorId) -> bool {
-        peek_strip::suppresses(self.layout_peek.active(), anchor)
+        peek_strip::suppresses(self.window.layout_peek.active(), anchor)
     }
 
     /// The peek's own layer, or nothing when none is showing.
@@ -18522,13 +18774,13 @@ impl Runtime {
     /// the breath — for the tip's reason: a schematic that remembered the frame
     /// it appeared on would keep showing a pane that has since closed.
     fn layout_peek_layer(&mut self) -> Vec<marks::OverlayLayer> {
-        let Some(index) = self.layout_peek.active() else {
+        let Some(index) = self.window.layout_peek.active() else {
             return Vec::new();
         };
         let now = Instant::now();
-        let motion = self.motion;
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let motion = self.app.motion;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         // The peek hangs off the row the pointer is on, and *which* geometry
         // holds that row is the same question `chrome_target_at` already asks
         // before it can say the pointer is on a row at all. Asking it here too
@@ -18538,7 +18790,7 @@ impl Runtime {
         // and a trailer list, and knows nothing about a rail being on screen —
         // so it handed back slot 0's box up in the title bar, and the card was
         // drawn in the window's top-left corner across the rail it belonged to.
-        let (host, side) = match self.rail.layout {
+        let (host, side) = match self.window.rail.layout {
             seats::TabLayoutMode::Vertical => {
                 let Some(rail) = self.rail_geometry_now(now) else {
                     return Vec::new();
@@ -18553,8 +18805,8 @@ impl Runtime {
                     width as f32,
                     scale,
                     &self.tab_trailers(now),
-                    self.active_tab,
-                    self.tab_scroll,
+                    self.window.active_tab,
+                    self.window.tab_scroll,
                 );
                 let Some(host) = geometry.tabs.get(index).map(|slot| slot.body) else {
                     return Vec::new();
@@ -18562,7 +18814,7 @@ impl Runtime {
                 (host, peek_strip::PeekSide::Below)
             }
         };
-        let Some(tab) = self.tabs.get(index) else {
+        let Some(tab) = self.window.tabs.get(index) else {
             return Vec::new();
         };
         // The breath belongs to the strip's clock, and the *elapsed* half of it
@@ -18600,7 +18852,7 @@ impl Runtime {
         // refuses the active one outright — but asked rather than assumed, so
         // the claim a leaf makes here is the same fact the strip computes from
         // the same ledger, arrived at the same way.
-        let tab_is_active = index == self.active_tab;
+        let tab_is_active = index == self.window.active_tab;
         let leaves: Vec<peek_strip::PeekLeaf> = tab
             .seats
             .tree()
@@ -18679,7 +18931,11 @@ impl Runtime {
         let font_px = peek_strip::LIST_FONT_LOGICAL_PX * scale;
         let widths: Vec<f32> = leaves
             .iter()
-            .map(|leaf| self.renderer.measure_chrome_text(&leaf.title, font_px))
+            .map(|leaf| {
+                self.window
+                    .renderer
+                    .measure_chrome_text(&leaf.title, font_px)
+            })
             .collect();
         let Some(layout) = peek_strip::layout(
             &tree,
@@ -18704,10 +18960,10 @@ impl Runtime {
     /// share of the run. The measuring is here, beside the renderer, for exactly
     /// the reason the badge's is — only the font knows how wide a word is.
     fn measure_open_rename(&mut self, tabs: &mut [seats::TabContent], scale: f32, width: f32) {
-        let Some(tab_id) = self.rename.as_ref().map(|editor| editor.tab) else {
+        let Some(tab_id) = self.window.rename.as_ref().map(|editor| editor.tab) else {
             return;
         };
-        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+        let Some(index) = self.window.tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
         let trailers = tabs.iter().map(|tab| tab.trailer).collect::<Vec<_>>();
@@ -18724,16 +18980,16 @@ impl Runtime {
         // not its width, because the caret published to the IME needs the box's
         // top and bottom as well: the candidate list has to stand under the tab,
         // not over the letters.
-        let measured = match self.rail.layout {
+        let measured = match self.window.rail.layout {
             seats::TabLayoutMode::Vertical => {
-                let (_, height) = self.renderer.presentation_geometry().swapchain_size;
+                let (_, height) = self.window.renderer.presentation_geometry().swapchain_size;
                 let pinned = seats::pinned_run_len(&trailers);
                 seats::rail_geometry(
                     height as f32,
                     scale,
                     &trailers,
                     pinned,
-                    self.rail_scroll,
+                    self.window.rail_scroll,
                     self.sampled_rail(Instant::now()),
                 )
                 .and_then(|geometry| {
@@ -18756,8 +19012,8 @@ impl Runtime {
                     width,
                     scale,
                     &trailers,
-                    self.active_tab,
-                    self.tab_scroll,
+                    self.window.active_tab,
+                    self.window.tab_scroll,
                 );
                 geometry.tabs.get(index).and_then(|geometry_tab| {
                     let content = tabs.get(index)?;
@@ -18783,7 +19039,7 @@ impl Runtime {
             content.edit = None;
             // And an editor with no box has no caret to publish: the IME is told
             // so rather than left holding the last rectangle this tab had.
-            self.rename_caret_line = None;
+            self.window.rename_caret_line = None;
             return;
         };
         let box_width = title_box[2] - title_box[0];
@@ -18793,8 +19049,8 @@ impl Runtime {
         // Disjoint fields, split by hand: the editor owns where its window
         // starts and the renderer owns how wide a string is, and this is the one
         // place the two have to meet.
-        let renderer = &mut self.renderer;
-        let Some(editor) = self.rename.as_mut() else {
+        let renderer = &mut self.window.renderer;
+        let Some(editor) = self.window.rename.as_mut() else {
             return;
         };
         let mut measure = |text: &str| {
@@ -18847,7 +19103,7 @@ impl Runtime {
                 .unwrap_or_default(),
             caret_px,
             selection_px,
-            caret_lit: self.rename_blink.visible(),
+            caret_lit: self.window.rename_blink.visible(),
         });
         // **Written here because here is the only place the box exists.** The
         // editor's rectangle is a function of the strip's own solve, which is
@@ -18856,7 +19112,7 @@ impl Runtime {
         // one cannot. So the painter records the line it drew and the IME reads
         // it — one derivation still, taken at the moment it is true.
         let x = (title_box[0] + caret_px).min(title_box[2] - caret_width);
-        self.rename_caret_line = Some([x, title_box[1], x + caret_width, title_box[3]]);
+        self.window.rename_caret_line = Some([x, title_box[1], x + caret_width, title_box[3]]);
     }
 
     /// Where the profile picker hangs right now, or `None` when it is shut.
@@ -18864,19 +19120,19 @@ impl Runtime {
     /// `&mut self` because the menu is content-sized and measuring a string goes
     /// through the renderer's font system, which shapes and caches as it goes.
     fn profile_menu_layout(&mut self) -> Option<profiles::ProfileMenuLayout> {
-        if !self.profile_menu.is_open() {
+        if !self.window.profile_menu.is_open() {
             return None;
         }
         let now = Instant::now();
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         // The button that opened the menu is the button the menu hangs off, and
         // in a vertical layout that button is in the rail. Reading the
         // horizontal strip's `˅` regardless is what put the picker adrift in the
         // middle of the terminal: `tab_strip_geometry` is a pure function of a
         // width and a trailer list, so it goes on answering with a box in the
         // title bar long after the tabs have moved down the side.
-        let (anchor, side) = match self.rail.layout {
+        let (anchor, side) = match self.window.rail.layout {
             seats::TabLayoutMode::Vertical => {
                 let rail = self.rail_geometry_now(now)?;
                 // Q181: a parked rail has no chevron — 28px of it would leave the
@@ -18893,8 +19149,8 @@ impl Runtime {
                     width as f32,
                     scale,
                     &self.tab_trailers(now),
-                    self.active_tab,
-                    self.tab_scroll,
+                    self.window.active_tab,
+                    self.window.tab_scroll,
                 )
                 .new_tab_menu,
                 profiles::MenuSide::Below,
@@ -18903,14 +19159,14 @@ impl Runtime {
         // The menu is content-sized, so laying it out is a measuring job — the
         // same renderer, the same font, the same call `build` makes when it
         // draws the strings this width was computed from.
-        let renderer = &mut self.renderer;
+        let renderer = &mut self.window.renderer;
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
         Some(profiles::layout(
             anchor,
             side,
             (width as f32, height as f32),
             scale,
-            self.recent.entries(),
+            self.app.recent.entries(),
             &mut measure,
         ))
     }
@@ -18921,15 +19177,16 @@ impl Runtime {
     /// box that holds them can be sized, which is why the content is built here,
     /// where the renderer is, and handed to a module that knows only numbers.
     fn restore_layout(&mut self) -> Option<restore::RestoreLayout> {
-        if !self.restore_prompt.is_open() || self.pending_restore.is_empty() {
+        if !self.window.restore_prompt.is_open() || self.window.pending_restore.is_empty() {
             return None;
         }
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
-        let renderer = &mut self.renderer;
+        let renderer = &mut self.window.renderer;
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
         let rows = self
+            .window
             .pending_restore
             .iter()
             .map(|tab| {
@@ -18965,7 +19222,7 @@ impl Runtime {
 
     /// Answer the prompt and put it away.
     fn answer_restore_prompt(&mut self, answer: restore::RestoreAnswer) -> Result<()> {
-        self.restore_prompt.close();
+        self.window.restore_prompt.close();
         self.answer_restore(answer == restore::RestoreAnswer::Restore)?;
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -18985,11 +19242,11 @@ impl Runtime {
     /// exactly as the peek strip's and the restore prompt's do, and the geometry
     /// itself stays a pure function of the numbers handed to it.
     fn settings_layout(&mut self) -> Option<settings::SettingsLayout> {
-        if !self.settings.is_open() {
+        if !self.window.settings.is_open() {
             return None;
         }
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         // Read fresh every time rather than cached: the Sidebar row appears and
         // disappears with the Tab layout combo, the shortcut lines change as the
         // user records, and the height, the hit test and the draw all come off
@@ -19003,28 +19260,28 @@ impl Runtime {
         // on lost its rows. A trigger hung off those four separately is a
         // trigger with a fifth door somebody will add later. Idempotent and an
         // atomic load after the first call — see `psreadline::begin_probe`.
-        if content.probes_psreadline(self.settings.category()) {
+        if content.probes_psreadline(self.window.settings.category()) {
             psreadline::begin_probe();
         }
-        let category = self.settings.category();
-        let menu = self.settings.menu();
-        let scroll = self.settings_scroll;
-        let menu_scroll = self.settings.menu_scroll();
+        let category = self.window.settings.category();
+        let menu = self.window.settings.menu();
+        let scroll = self.window.settings_scroll;
+        let menu_scroll = self.window.settings.menu_scroll();
         // **Every picker's width is measured, not only the open one's**
         // (§7.1.6c-5): a button is as wide as its own longest option now, so the
         // geometry needs the font for every row on the page and not just for the
         // popup. Handed over as a closure for `build`'s own reason — the
         // renderer owns the face, and the geometry stays a pure function of what
         // it is told.
-        let renderer = &mut self.renderer;
+        let renderer = &mut self.window.renderer;
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
         settings::layout_for_menus(
             width as f32,
             height as f32,
             scale,
             menu,
-            self.settings.row_menu(),
-            self.settings.delete_menu(),
+            self.window.settings.row_menu(),
+            self.window.settings.delete_menu(),
             content,
             category,
             scroll,
@@ -19050,13 +19307,13 @@ impl Runtime {
         Vec<settings::SchemeFileLine>,
     ) {
         (
-            settings::visible_rows(self.rail.layout),
-            self.shortcuts.editor_rows(),
+            settings::visible_rows(self.window.rail.layout),
+            self.app.shortcuts.editor_rows(),
             // Derived here rather than held on `Runtime`, for the two lists
             // beside it: the page has to show what is true *this frame*, and a
             // copy kept on the struct is a copy that has to be refreshed by
             // whoever changed the table, in every place they changed it.
-            profiles::page_lines(&self.profile_programs, self.default_profile()),
+            profiles::page_lines(&self.app.profile_programs, self.default_profile()),
             // And the folder, for the third list's own reason: what
             // `Delete scheme…` offers is what is in `%APPDATA%\Folio\schemes\`
             // *now*, and the catalogue is re-read on a reason rather than on a
@@ -19108,7 +19365,7 @@ impl Runtime {
     /// page drawing a row that is no longer there. The index itself is kept in
     /// step by the verbs that move it.
     fn editor_subject(&self) -> Option<settings::EditorSubject> {
-        let editor = self.settings.editor()?;
+        let editor = self.window.settings.editor()?;
         let index = editor.index;
         if index >= profiles::count() {
             return None;
@@ -19189,7 +19446,8 @@ impl Runtime {
     /// Which pages have their Advanced group open, as the settings file says.
     fn advanced_open(&self) -> settings::AdvancedOpen {
         settings::AdvancedOpen::from_keys(
-            self.settings_store
+            self.app
+                .settings_store
                 .loaded()
                 .advanced_open
                 .iter()
@@ -19200,45 +19458,55 @@ impl Runtime {
     /// What every row in the settings dialog currently reads.
     fn settings_values(&self) -> settings::SettingsValues {
         settings::SettingsValues {
-            theme: self.theme_mode,
+            theme: self.app.theme_mode,
             cursor: current_cursor_style(),
-            tab_layout: self.rail.layout,
-            sidebar: self.rail.mode,
-            display_formulas: self.settings_store.loaded().display_formulas,
-            inline_formulas: self.settings_store.loaded().inline_formulas,
-            tables: self.settings_store.loaded().tables,
-            block_max_height: self.settings_store.loaded().block_max_height,
-            git_panel: self.settings_store.loaded().git_panel,
-            split_direction: self.settings_store.loaded().split_direction,
-            language: self.settings_store.loaded().language,
+            tab_layout: self.window.rail.layout,
+            sidebar: self.window.rail.mode,
+            display_formulas: self.app.settings_store.loaded().display_formulas,
+            inline_formulas: self.app.settings_store.loaded().inline_formulas,
+            tables: self.app.settings_store.loaded().tables,
+            block_max_height: self.app.settings_store.loaded().block_max_height,
+            git_panel: self.app.settings_store.loaded().git_panel,
+            split_direction: self.app.settings_store.loaded().split_direction,
+            language: self.app.settings_store.loaded().language,
             default_profile: self.default_profile(),
             terminal_font: settings::family_index(
-                &self.settings_store.loaded().terminal_font_family,
+                &self.app.settings_store.loaded().terminal_font_family,
             ),
-            font_size: settings::font_size_index(self.settings_store.loaded().terminal_font_size),
-            light_scheme: settings::scheme_index(&self.settings_store.loaded().light_scheme, true),
-            dark_scheme: settings::scheme_index(&self.settings_store.loaded().dark_scheme, false),
+            font_size: settings::font_size_index(
+                self.app.settings_store.loaded().terminal_font_size,
+            ),
+            light_scheme: settings::scheme_index(
+                &self.app.settings_store.loaded().light_scheme,
+                true,
+            ),
+            dark_scheme: settings::scheme_index(
+                &self.app.settings_store.loaded().dark_scheme,
+                false,
+            ),
             psreadline: self.psreadline_row_state(),
             psreadline_install_available: psreadline::install_available(
                 psreadline::probe(),
                 self.psreadline_row_state(),
-            ) && self.psreadline_documents.is_some(),
+            ) && self.app.psreadline_documents.is_some(),
             psreadline_remove_available: psreadline::remove_available(self.psreadline_row_state()),
             profile_available: (0..profiles::count())
-                .map(|index| self.profile_programs.is_available(index))
+                .map(|index| self.app.profile_programs.is_available(index))
                 .collect(),
             editor: self.editor_subject(),
-            background_image: !self.settings_store.loaded().background_image.is_empty(),
-            background_fit: settings::image_fit_index(self.settings_store.loaded().background_fit),
-            background_image_opacity: self.settings_store.loaded().background_image_opacity,
-            background_opacity: self.settings_store.loaded().background_opacity,
-            acrylic: self.settings_store.loaded().acrylic,
-            always_on_top: self.settings_store.loaded().always_on_top,
+            background_image: !self.app.settings_store.loaded().background_image.is_empty(),
+            background_fit: settings::image_fit_index(
+                self.app.settings_store.loaded().background_fit,
+            ),
+            background_image_opacity: self.app.settings_store.loaded().background_image_opacity,
+            background_opacity: self.app.settings_store.loaded().background_opacity,
+            acrylic: self.app.settings_store.loaded().acrylic,
+            always_on_top: self.app.settings_store.loaded().always_on_top,
             // Both asked of the machine once, at startup, and remembered — see
-            // `Runtime::acrylic_available` / `translucency_available`. Asking
+            // `App::acrylic_available` / `translucency_available`. Asking
             // DWM per frame would be a syscall inside a hover repaint.
-            acrylic_available: self.acrylic_available,
-            translucency_available: self.translucency_available,
+            acrylic_available: self.app.acrylic_available,
+            translucency_available: self.window.translucency_available,
             scheme_in_force_is_user_file: self.scheme_in_force().is_some(),
         }
     }
@@ -19259,9 +19527,9 @@ impl Runtime {
     fn scheme_in_force(&self) -> Option<(String, String)> {
         let light = bt_render::background_is_light(bt_render::background_rgb());
         let stored = if light {
-            self.settings_store.loaded().light_scheme.clone()
+            self.app.settings_store.loaded().light_scheme.clone()
         } else {
-            self.settings_store.loaded().dark_scheme.clone()
+            self.app.settings_store.loaded().dark_scheme.clone()
         };
         if stored.is_empty() {
             return None;
@@ -19279,7 +19547,7 @@ impl Runtime {
     /// its name on the button, because the setting still names it — see
     /// `bt_persist::DEFAULT_BACKGROUND_IMAGE` on why the path is not validated.
     fn background_image_name(&self) -> String {
-        let stored = &self.settings_store.loaded().background_image;
+        let stored = &self.app.settings_store.loaded().background_image;
         if stored.is_empty() {
             return String::new();
         }
@@ -19299,8 +19567,8 @@ impl Runtime {
     /// array index — and none of these callers is a hot path.
     fn default_profile(&self) -> usize {
         profiles::default_profile(
-            &self.settings_store.loaded().default_profile,
-            &self.profile_programs,
+            &self.app.settings_store.loaded().default_profile,
+            &self.app.profile_programs,
         )
     }
 
@@ -19353,11 +19621,11 @@ impl Runtime {
         // front of something already happening, so nothing may cover it. Every
         // other member of the chain below floats over a window that still works.
         stack.modal = if let Some(layout) = self.dirty_gate_layout() {
-            let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+            let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
             restore::gate_build(
                 &layout,
                 (width as f32, height as f32),
-                self.dirty_gate.hover(),
+                self.window.dirty_gate.hover(),
             )
         } else if let Some(layout) = self.psreadline_invite_layout() {
             // **Under the gate and over the settings dialog.** The gate stands in
@@ -19365,27 +19633,27 @@ impl Runtime {
             // stands in front of a shell that has just started, which outranks a
             // dialog the user opened on purpose — and the dialog is where the
             // same question keeps a row, so nothing is lost by being covered.
-            let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+            let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
             restore::invite_build(
                 &layout,
                 (width as f32, height as f32),
-                self.psreadline_invite.hover(),
+                self.window.psreadline_invite.hover(),
             )
         } else if let Some(layout) = self.settings_layout() {
             // The hover and the readings first, then the renderer: a combo whose
             // value outgrows its 118px button is ellipsised, and only the font
             // knows where the cut falls. Same division, and same hoist, as the
             // profile menu's measured hints below.
-            let hover = self.settings.hover();
+            let hover = self.window.settings.hover();
             // The ring, not the focus: `focus_ring` is `None` while the keyboard
             // arrived at this control by way of somebody's finger.
-            let focus = self.settings.focus_ring();
+            let focus = self.window.settings.focus_ring();
             let values = &self.settings_values();
-            let shortcuts = self.shortcuts.editor_rows();
+            let shortcuts = self.app.shortcuts.editor_rows();
             let profile_lines =
-                profiles::page_lines(&self.profile_programs, self.default_profile());
+                profiles::page_lines(&self.app.profile_programs, self.default_profile());
             let background_image = self.background_image_name();
-            let recording = self.settings.recording_state();
+            let recording = self.window.settings.recording_state();
             let recording =
                 recording.map(|(row, caps, hint)| (row, caps.to_vec(), hint.map(str::to_owned)));
             let recording = recording
@@ -19394,12 +19662,12 @@ impl Runtime {
             // **The caret follows the focus and not the ring**: a field
             // somebody clicked into has the keyboard, whether or not the ring is
             // showing.
-            let focus_for_caret = self.settings.focus();
+            let focus_for_caret = self.window.settings.focus();
             // The fields' own text, and the selection the caret is holding in
             // whichever one has the focus. Hoisted with the recorder's caps and
             // for its reason: they are `String`s owned by the panel, and the
             // renderer is borrowed mutably below them.
-            let editor = self.settings.editor();
+            let editor = self.window.settings.editor();
             let editor_env: Vec<(String, String)> = editor.map_or_else(Vec::new, |editor| {
                 editor
                     .env
@@ -19416,7 +19684,7 @@ impl Runtime {
                 caret: editor_caret,
                 refusal: editor.refusal.map(i18n::Text::text),
             });
-            let renderer = &mut self.renderer;
+            let renderer = &mut self.window.renderer;
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
             settings::build(
                 &layout,
@@ -19434,18 +19702,18 @@ impl Runtime {
             // Above the strip but under no scrim: the prompt floats over a
             // window that already works, which is the whole reason it is
             // allowed to exist (mock-up 2219-2221).
-            restore::build(&layout, self.restore_prompt.hover())
+            restore::build(&layout, self.window.restore_prompt.hover())
         } else if let Some(layout) = self.profile_menu_layout() {
             {
                 let default = self.default_profile();
-                let renderer = &mut self.renderer;
+                let renderer = &mut self.window.renderer;
                 let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
                 profiles::build(
                     &layout,
-                    &self.profile_programs,
+                    &self.app.profile_programs,
                     default,
-                    self.profile_menu.hover(),
-                    self.recent.entries(),
+                    self.window.profile_menu.hover(),
+                    self.app.recent.entries(),
                     SystemTime::now(),
                     &mut measure,
                 )
@@ -19456,44 +19724,51 @@ impl Runtime {
             // state: E61's rule is that one popup is up at a time, and a chain
             // cannot draw both however the flags are set.
             let choices = self
+                .window
                 .root_menu
                 .seat()
                 .map(|seat| self.root_choices(seat))
                 .unwrap_or_default();
             let current = self
+                .window
                 .root_menu
                 .seat()
                 .map(|seat| self.files_state(seat).root)
                 .unwrap_or_default();
-            let hover = self.root_menu.hover();
-            let renderer = &mut self.renderer;
+            let hover = self.window.root_menu.hover();
+            let renderer = &mut self.window.renderer;
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
             profiles::root_menu_build(&layout, &choices, &current, hover, &mut measure)
-        } else if self.graph_filter_menu.is_some()
+        } else if self.window.graph_filter_menu.is_some()
             && let Some(layout) = self.graph_filter_menu_layout()
         {
             // The fifth arm of the same chain, and in it for E61's reason: one
             // popup is up at a time, and a chain cannot draw two however the
             // flags are set.
-            let seat = self.graph_filter_menu.as_ref().map(|menu| menu.seat);
+            let seat = self.window.graph_filter_menu.as_ref().map(|menu| menu.seat);
             let hover = self
+                .window
                 .graph_filter_menu
                 .as_ref()
                 .and_then(|m| m.hover.clone());
             let filter = seat
-                .and_then(|seat| self.tabs[self.active_tab].git_graph_view.get(&seat))
+                .and_then(|seat| {
+                    self.window.tabs[self.window.active_tab]
+                        .git_graph_view
+                        .get(&seat)
+                })
                 .map(|view| view.filter.clone())
                 .unwrap_or_default();
             profiles::git_filter_menu_build(&layout, &filter, hover.as_ref())
-        } else if let Some(seat) = self.preview_menu.seat()
+        } else if let Some(seat) = self.window.preview_menu.seat()
             && let Some(layout) = self.preview_menu_layout()
         {
             // The fourth arm of the same chain, and it is in the chain for E61's
             // reason: one popup is up at a time, and a chain cannot draw two
             // however the flags are set.
             let items = self.preview_menu_items(seat);
-            let hover = self.preview_menu.hover();
-            let renderer = &mut self.renderer;
+            let hover = self.window.preview_menu.hover();
+            let renderer = &mut self.window.renderer;
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
             profiles::preview_menu_build(&layout, &items, hover, &mut measure)
         } else {
@@ -19511,8 +19786,8 @@ impl Runtime {
         stack.drag_ghost = self.drag_ghost_layer();
         let flattened = stack.flattened();
         dump_overlay_frame(&flattened);
-        let layers = self.settings_marks.resolve_overlay(flattened);
-        self.renderer.set_modal_overlay(layers)
+        let layers = self.window.settings_marks.resolve_overlay(flattened);
+        self.window.renderer.set_modal_overlay(layers)
     }
 
     /// The rail's own level of the stack — [`rail_overlay_layer`] with this
@@ -19526,8 +19801,11 @@ impl Runtime {
     /// elements, and CSS multiplies them exactly once each.
     fn rail_overlay_layers(&self) -> Vec<marks::OverlayLayer> {
         rail_overlay_layer(
-            &self.rail_chrome,
-            self.rail_fold.sample(Instant::now(), self.motion).0,
+            &self.window.rail_chrome,
+            self.window
+                .rail_fold
+                .sample(Instant::now(), self.app.motion)
+                .0,
         )
     }
 
@@ -19550,7 +19828,7 @@ impl Runtime {
     /// has just filled it are the same picture, which is what makes the landing
     /// read as the thing you were dragging coming to rest.
     fn strip_stand_in(&self) -> Option<(usize, seats::TabContent)> {
-        let drag = self.drag.as_ref()?;
+        let drag = self.window.drag.as_ref()?;
         let DropLanding::StripExtract { slot } = drag.landing? else {
             return None;
         };
@@ -19573,7 +19851,7 @@ impl Runtime {
         // wrong document.
         let title = self.preview_head_name(seat);
         Some((
-            slot.min(self.tabs.len()),
+            slot.min(self.window.tabs.len()),
             seats::TabContent {
                 title: seats::seat_short_caption(
                     kind,
@@ -19615,12 +19893,13 @@ impl Runtime {
     /// switch re-plans without any of them having to know that a drag is in
     /// flight.
     fn sync_drop_preview(&mut self, now: Instant) {
-        let motion = self.motion;
+        let motion = self.app.motion;
         let Some(inputs) = self.plan_inputs() else {
             self.retire_drop_preview(now, motion);
             return;
         };
         if self
+            .window
             .drop_preview
             .as_ref()
             .is_none_or(|shown| shown.inputs != inputs)
@@ -19637,17 +19916,17 @@ impl Runtime {
             // The fade carries across, so moving between zones does not restart
             // it: the box was already up, and the answer changing is a *snap*
             // (M148), never a second arrival.
-            let reveal = self.drop_preview.as_ref().map_or_else(
+            let reveal = self.window.drop_preview.as_ref().map_or_else(
                 || RevealTween::over(DOCK_PREVIEW_FADE),
                 |shown| shown.reveal,
             );
-            self.drop_preview = Some(DropPreview {
+            self.window.drop_preview = Some(DropPreview {
                 inputs,
                 plan,
                 reveal,
             });
         }
-        if let Some(shown) = self.drop_preview.as_mut() {
+        if let Some(shown) = self.window.drop_preview.as_mut() {
             shown.reveal.retarget(1.0, now, motion);
         }
     }
@@ -19660,20 +19939,20 @@ impl Runtime {
     /// the box is gone the plan goes with it, because a plan nobody is drawing is
     /// an answer to a question nobody is asking.
     fn retire_drop_preview(&mut self, now: Instant, motion: Motion) {
-        let Some(shown) = self.drop_preview.as_mut() else {
+        let Some(shown) = self.window.drop_preview.as_mut() else {
             return;
         };
         shown.reveal.retarget(0.0, now, motion);
         let (reveal, moving) = shown.reveal.sample(now, motion);
         if !moving && reveal <= 0.0 {
-            self.drop_preview = None;
+            self.window.drop_preview = None;
         }
     }
 
     /// What the plan on screen must be a function of, or `None` when there is no
     /// dock to draw.
     fn plan_inputs(&self) -> Option<PlanInputs> {
-        self.plan_inputs_for(self.drag.as_ref()?)
+        self.plan_inputs_for(self.window.drag.as_ref()?)
     }
 
     /// The same question asked of a drag the caller is holding.
@@ -19695,7 +19974,8 @@ impl Runtime {
             // a tab.
             DragSource::Pane(_) | DragSource::Row(_) => None,
             DragSource::Tab(id) => Some(
-                self.tabs
+                self.window
+                    .tabs
                     .iter()
                     .find(|candidate| candidate.id == *id)?
                     .seats
@@ -19708,8 +19988,8 @@ impl Runtime {
             source: drag.source.clone(),
             tree: self.seats.tree().clone(),
             cargo,
-            viewport: self.seat_viewport,
-            scale_ppm: seats::scale_ppm(self.renderer.metrics().dpi_milli().get()),
+            viewport: self.window.seat_viewport,
+            scale_ppm: seats::scale_ppm(self.window.renderer.metrics().dpi_milli().get()),
         })
     }
 
@@ -19793,10 +20073,10 @@ impl Runtime {
     /// this frame, including after a window resize that happened mid-fade.
     fn pane_fade_veils(&self, now: Instant) -> Vec<marks::OverlayLayer> {
         pane_fade_veil_layers(
-            &self.pane_motion,
+            &self.window.pane_motion,
             &self.pane_rects(),
             now,
-            self.motion,
+            self.app.motion,
             bt_render::chrome_palette(),
         )
     }
@@ -19808,10 +20088,10 @@ impl Runtime {
     /// `.tip`'s 60) — this is a drawing *on* the layout, not a surface floating
     /// over the window.
     fn dock_overlay_layers(&self, now: Instant) -> Vec<marks::OverlayLayer> {
-        let Some(shown) = self.drop_preview.as_ref() else {
+        let Some(shown) = self.window.drop_preview.as_ref() else {
             return Vec::new();
         };
-        let reveal = shown.reveal.sample(now, self.motion).0;
+        let reveal = shown.reveal.sample(now, self.app.motion).0;
         if reveal <= 0.0 {
             return Vec::new();
         }
@@ -19828,14 +20108,14 @@ impl Runtime {
             } else {
                 ""
             },
-            self.renderer.metrics().scale_factor as f32,
+            self.window.renderer.metrics().scale_factor as f32,
         );
         let Some(overlay) = overlay else {
             return Vec::new();
         };
         let mut layers = seats::build_dock_overlay(
             &overlay,
-            self.renderer.metrics().scale_factor as f32,
+            self.window.renderer.metrics().scale_factor as f32,
             bt_render::chrome_palette(),
         );
         for layer in &mut layers {
@@ -19851,7 +20131,12 @@ impl Runtime {
     /// invisible layer still costs a text shaping pass and a raster lookup every
     /// frame the pointer moves, and "not drawn" is the same picture either way.
     fn drag_ghost_layer(&mut self) -> Vec<marks::OverlayLayer> {
-        let Some(drag) = self.drag.as_ref().filter(|drag| drag.ghost_is_shown()) else {
+        let Some(drag) = self
+            .window
+            .drag
+            .as_ref()
+            .filter(|drag| drag.ghost_is_shown())
+        else {
             return Vec::new();
         };
         let (pointer, source) = (drag.pointer, drag.source.clone());
@@ -19859,10 +20144,11 @@ impl Runtime {
         let Some((mark, mark_logical, mark_color, text)) = self.drag_label(&source, palette) else {
             return Vec::new();
         };
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         // Only the font knows how wide a line is, so the measuring happens here,
         // beside the renderer, exactly as the tip's and the badge's do.
         let width = self
+            .window
             .renderer
             .measure_chrome_text(&text, bt_render::DRAG_GHOST_FONT_LOGICAL_PX * scale);
         let layout = seats::drag_ghost_layout(
@@ -19892,7 +20178,11 @@ impl Runtime {
     ) -> Option<(marks::ChromeMark, f32, [u8; 3], String)> {
         match source {
             DragSource::Tab(id) => {
-                let tab = self.tabs.iter().find(|candidate| candidate.id == *id)?;
+                let tab = self
+                    .window
+                    .tabs
+                    .iter()
+                    .find(|candidate| candidate.id == *id)?;
                 Some((
                     // The tab's own mark, by the same `identityLeaf` rule the
                     // strip draws it with — a ghost is a picture of the tab it
@@ -19960,20 +20250,21 @@ impl Runtime {
         // frame-debt comparison is against what is *on screen*. Recording the
         // intent instead would let a tip that could not be laid out report itself
         // as drawn, and the debt would be settled by a frame nobody ever saw.
-        self.tooltip_drawn_opacity = None;
+        self.window.tooltip_drawn_opacity = None;
         let now = Instant::now();
         let Some(opacity) = self.tooltip_opacity(now) else {
             return Vec::new();
         };
         let Some(anchor) = self
+            .window
             .tooltip
             .active()
-            .and_then(|id| self.tooltip_anchors.find(id))
+            .and_then(|id| self.window.tooltip_anchors.find(id))
         else {
             return Vec::new();
         };
         let (text, host, face) = (anchor.text.clone(), anchor.rect, anchor.face);
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let font_px = face.font_logical_px() * scale;
         // Only the font knows how wide a line is, so the measuring happens here,
         // beside the renderer, exactly as the badge's and the editor's do — first
@@ -19981,11 +20272,11 @@ impl Runtime {
         // lines that came out. Which face measures is the face that draws: a
         // monospace card measured with the sans metrics is a box its own text
         // overflows.
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let gap = tooltip::TIP_GAP_LOGICAL_PX * scale;
         let max_width = (face.max_width_logical_px() * scale).min(width as f32 - 2.0 * gap);
         let (text, widths) = {
-            let renderer = &mut self.renderer;
+            let renderer = &mut self.window.renderer;
             let line_height = (font_px * face.line_height()).round();
             let mut measure = |run: &str| -> f32 {
                 if face.monospace() {
@@ -20033,7 +20324,7 @@ impl Runtime {
             return Vec::new();
         };
         let palette = bt_render::chrome_palette();
-        self.tooltip_drawn_opacity = Some(opacity);
+        self.window.tooltip_drawn_opacity = Some(opacity);
         tooltip::build(&layout, &palette, scale, opacity, face)
     }
 
@@ -20048,7 +20339,7 @@ impl Runtime {
     /// a restored gesture) opens this menu without a press in the right place.
     fn toggle_profile_menu(&mut self) -> Result<()> {
         self.close_popups_except(Popup::Profile);
-        self.profile_menu.toggle();
+        self.window.profile_menu.toggle();
         self.start_chevron_turn();
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -20078,38 +20369,38 @@ impl Runtime {
                 Popup::Profile => {
                     // P133's rule, owed by every closer and paid by only one of
                     // them until now: the arrow turns back when the list goes.
-                    if self.profile_menu.close() {
+                    if self.window.profile_menu.close() {
                         self.start_chevron_turn();
                     }
                 }
                 Popup::Root => {
-                    self.root_menu.close();
+                    self.window.root_menu.close();
                 }
-                Popup::File => self.file_menu = None,
-                Popup::Pane => self.pane_menu = None,
-                Popup::GraphFilter => self.graph_filter_menu = None,
-                Popup::GitMenu => self.git_menu = None,
-                Popup::TermMenu => self.term_menu = None,
+                Popup::File => self.window.file_menu = None,
+                Popup::Pane => self.window.pane_menu = None,
+                Popup::GraphFilter => self.window.graph_filter_menu = None,
+                Popup::GitMenu => self.window.git_menu = None,
+                Popup::TermMenu => self.window.term_menu = None,
                 Popup::Preview => {
-                    self.preview_menu.close();
+                    self.window.preview_menu.close();
                 }
             }
         }
-        self.chevrons.clear();
+        self.window.chevrons.clear();
     }
 
     /// Put the picker away and repaint if it was up. Every press that is not the
     /// chevron's and not the menu's own goes through here first, exactly as the
     /// mock-up's document-level `click` handler does.
     fn close_profile_menu(&mut self) -> Result<bool> {
-        if !self.profile_menu.close() {
+        if !self.window.profile_menu.close() {
             return Ok(false);
         }
         // The gate goes with it. A grace still running against a menu that has
         // already gone would fire a second close on an empty state — harmless
         // today, and exactly the kind of live clock that stops being harmless
         // when a third chevron is added.
-        self.chevrons.profile.clear();
+        self.window.chevrons.profile.clear();
         self.start_chevron_turn();
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -20126,8 +20417,11 @@ impl Runtime {
     /// turn that has begun is finished by `advance_strip_animation` off the
     /// deadline `strip_animation_deadline` asks for.
     fn start_chevron_turn(&mut self) {
-        self.chevron_turn
-            .retarget(self.profile_menu.is_open(), Instant::now(), self.motion);
+        self.window.chevron_turn.retarget(
+            self.window.profile_menu.is_open(),
+            Instant::now(),
+            self.app.motion,
+        );
     }
 
     /// The gear's verb: open the dialog, or shut the one that is open.
@@ -20137,7 +20431,7 @@ impl Runtime {
     /// button claiming to be reachable through a modal.
     fn toggle_settings_panel(&mut self) -> Result<()> {
         let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
-        self.settings.toggle(self.settings_dialog(
+        self.window.settings.toggle(self.settings_dialog(
             &rows,
             &shortcuts,
             &profile_lines,
@@ -20146,11 +20440,11 @@ impl Runtime {
         // A dialog opens at its top. The distance belongs to the sitting the
         // wheel moved, not to the preference the dialog edits, so it does not
         // outlive the dialog being shut.
-        self.settings_scroll = 0.0;
-        if self.settings.is_open() {
-            self.seat_pointer.hover = None;
+        self.window.settings_scroll = 0.0;
+        if self.window.settings.is_open() {
+            self.window.seat_pointer.hover = None;
             self.apply_pointer_cursor();
-        } else if let Some(position) = self.pointer_position {
+        } else if let Some(position) = self.window.pointer_position {
             self.update_chrome_hover(position)?;
         }
         if self.refresh_chrome() {
@@ -20199,16 +20493,21 @@ impl Runtime {
             self.apply_language(language)?;
         }
         if let Some(family) = settings::terminal_font_requested(target) {
-            let size = self.settings_store.loaded().terminal_font_size;
+            let size = self.app.settings_store.loaded().terminal_font_size;
             self.apply_terminal_font(family.to_owned(), size)?;
         }
         if let Some(size) = settings::font_size_requested(target) {
-            let family = self.settings_store.loaded().terminal_font_family.clone();
+            let family = self
+                .app
+                .settings_store
+                .loaded()
+                .terminal_font_family
+                .clone();
             if self.apply_terminal_font(family, size)? {
                 // S110's one exception to "asked once": the row whose visible
                 // consequence on an unpatched 5.1 *is* the bug the module fixes.
                 // See `psreadline::invite_decision`.
-                self.psreadline_size_changed = true;
+                self.window.psreadline_size_changed = true;
             }
         }
         if let Some(name) = settings::light_scheme_requested(target) {
@@ -20225,10 +20524,10 @@ impl Runtime {
         // layout standing, and Q190's combination rule inside `RailState`
         // decides what that pair actually puts on screen.
         if let Some(layout) = settings::tab_layout_requested(target) {
-            self.set_rail_state(rail_state_for(layout, self.rail.mode))?;
+            self.set_rail_state(rail_state_for(layout, self.window.rail.mode))?;
         }
         if let Some(mode) = settings::sidebar_mode_requested(target) {
-            self.set_rail_state(rail_state_for(self.rail.layout, mode))?;
+            self.set_rail_state(rail_state_for(self.window.rail.layout, mode))?;
         }
         if let Some(id) = settings::default_profile_requested(target) {
             self.apply_default_profile(&id)?;
@@ -20262,10 +20561,10 @@ impl Runtime {
         // 2026-08-18). It used to act on the scheme in force, which left every
         // scheme that was not in force unreachable without selecting it first.
         if target == settings::SettingsTarget::DeleteScheme {
-            self.settings.toggle_delete_menu();
+            self.window.settings.toggle_delete_menu();
         }
         if let settings::SettingsTarget::DeleteSchemeItem(index) = target {
-            self.settings.close_delete_menu();
+            self.window.settings.close_delete_menu();
             self.delete_scheme_file(index)?;
         }
         if target == settings::SettingsTarget::CustomiseScheme {
@@ -20276,7 +20575,7 @@ impl Runtime {
         // disclosure, which is the same sentence with eight rows in it.
         let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
         let content = self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files);
-        self.settings.keep_focus_reachable(content);
+        self.window.settings.keep_focus_reachable(content);
         Ok(())
     }
 
@@ -20289,9 +20588,9 @@ impl Runtime {
     fn toggle_advanced_group(&mut self, category: settings::SettingsCategory) -> Result<()> {
         let mut open = self.advanced_open();
         open.toggle(category);
-        let mut settings = self.settings_store.loaded().clone();
+        let mut settings = self.app.settings_store.loaded().clone();
         settings.advanced_open = open.keys();
-        self.settings_store.store(settings);
+        self.app.settings_store.store(settings);
         // The page got taller or shorter under a scroll that was measured against
         // the other length. Not reset to the top — the reader is looking at the
         // heading they just pressed, and sending them to the top would move it
@@ -20299,7 +20598,8 @@ impl Runtime {
         // the next call and is stated here so the number the runtime holds is not
         // left describing a page that no longer exists.
         if let Some(layout) = self.settings_layout() {
-            self.settings_scroll = self.settings_scroll.clamp(0.0, layout.max_scroll());
+            self.window.settings_scroll =
+                self.window.settings_scroll.clamp(0.0, layout.max_scroll());
         }
         Ok(())
     }
@@ -20377,7 +20677,7 @@ impl Runtime {
             // depends on, so its default is `RailMode`'s and not the settings
             // file's.
             Row::Sidebar => {
-                self.set_rail_state(rail_state_for(self.rail.layout, seats::RailMode::default()))?;
+                self.set_rail_state(rail_state_for(self.window.rail.layout, seats::RailMode::default()))?;
             }
             Row::SplitDirection => {
                 self.apply_split_direction(defaults.split_direction)?;
@@ -20424,14 +20724,14 @@ impl Runtime {
     /// and nowhere else, so "the table changed" and "the disk knows" cannot come
     /// apart.
     fn apply_shortcut_edit(&mut self, target: settings::SettingsTarget) -> Result<()> {
-        let lines = self.shortcuts.editor_rows();
+        let lines = self.app.shortcuts.editor_rows();
         match target {
             settings::SettingsTarget::RestoreRow(index) => {
                 let Some(line) = lines.get(index) else {
                     return Ok(());
                 };
                 for id in &line.ids {
-                    self.shortcuts.restore(id);
+                    self.app.shortcuts.restore(id);
                 }
             }
             // **No confirmation, and that is the ruling** (2026-08-17). This
@@ -20442,13 +20742,13 @@ impl Runtime {
             // the user is looking at while they press it, and the file it
             // rewrites is the one file this product invites them to keep open in
             // an editor.
-            settings::SettingsTarget::RestoreAll => self.shortcuts.restore_all(),
+            settings::SettingsTarget::RestoreAll => self.app.shortcuts.restore_all(),
             _ => return Ok(()),
         }
         self.store_keybindings();
         let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
         let content = self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files);
-        self.settings.keep_focus_reachable(content);
+        self.window.settings.keep_focus_reachable(content);
         Ok(())
     }
 
@@ -20460,6 +20760,7 @@ impl Runtime {
     /// retune a chord nobody touched.
     fn store_keybindings(&mut self) {
         let overrides = self
+            .app
             .shortcuts
             .overrides()
             .into_iter()
@@ -20468,7 +20769,7 @@ impl Runtime {
                 chord: entry.chord,
             })
             .collect();
-        self.keybindings_store.store(overrides);
+        self.app.keybindings_store.store(overrides);
     }
 
     /// Say once, on the window, that `keybindings.json` could not be used.
@@ -20479,7 +20780,7 @@ impl Runtime {
     /// to find out. `Error` rather than `Info` for the same reason §7.1.6d gives
     /// the kind to Git's refusals — something the user asked for did not happen.
     fn announce_keybindings_fault(&mut self) -> Result<()> {
-        let Some(fault) = self.keybindings_fault.take() else {
+        let Some(fault) = self.app.keybindings_fault.take() else {
             return Ok(());
         };
         self.toast(
@@ -20504,10 +20805,10 @@ impl Runtime {
     /// (a folder and a profile); the cap is `toast::Toasts`' own and is the same
     /// cap every other multi-card report in this window lives under.
     fn honour_command_line(&mut self) -> Result<()> {
-        if let Some(path) = self.cli_preview.take() {
+        if let Some(path) = self.app.cli_preview.take() {
             self.open_preview(path)?;
         }
-        for refusal in std::mem::take(&mut self.cli_refusals) {
+        for refusal in std::mem::take(&mut self.app.cli_refusals) {
             self.toast(
                 toast::ToastKind::Error,
                 toast::ToastAnchor::Window,
@@ -20552,13 +20853,14 @@ impl Runtime {
     /// you typed is what is stored, at the keystroke.
     fn settings_field_key(&mut self, event: &KeyEvent) -> Result<bool> {
         use text_field::TextMove;
-        let Some(target) = self.settings.focus() else {
+        let Some(target) = self.window.settings.focus() else {
             return Ok(false);
         };
-        if self.settings.menu().is_some() || self.settings.row_menu().is_some() {
+        if self.window.settings.menu().is_some() || self.window.settings.row_menu().is_some() {
             return Ok(false);
         }
         if self
+            .window
             .settings
             .editor()
             .and_then(|editor| editor.field_of(target))
@@ -20566,17 +20868,17 @@ impl Runtime {
         {
             return Ok(false);
         }
-        let shift = self.modifiers.shift_key();
-        let control = self.modifiers.control_key();
+        let shift = self.window.modifiers.shift_key();
+        let control = self.window.modifiers.control_key();
         let paste = matches!(&event.logical_key, Key::Character(text)
             if control && matches!(text.as_str(), "v" | "V"));
         let pasted = paste.then(|| {
-            window_hwnd(&self.window)
+            window_hwnd(&self.window.window)
                 .ok()
                 .and_then(|hwnd| bt_platform::clipboard_text(hwnd).ok())
                 .unwrap_or_default()
         });
-        let Some(editor) = self.settings.editor_mut() else {
+        let Some(editor) = self.window.settings.editor_mut() else {
             return Ok(false);
         };
         let Some(field) = editor.field_mut(target) else {
@@ -20666,7 +20968,7 @@ impl Runtime {
     /// [`Self::store_profiles`], the one door the file, the programs probe and
     /// the window's measurements move through together.
     fn apply_editor_choice(&mut self, target: settings::SettingsTarget) -> Result<()> {
-        let editor_index = self.settings.editor().map(|editor| editor.index);
+        let editor_index = self.window.settings.editor().map(|editor| editor.index);
         match target {
             settings::SettingsTarget::ProfileEdit(index) => {
                 return self.open_profile_editor(index);
@@ -20686,8 +20988,8 @@ impl Runtime {
                 return self.open_profile_editor(made);
             }
             settings::SettingsTarget::EditorBack => {
-                self.settings.close_editor();
-                self.settings_scroll = 0.0;
+                self.window.settings.close_editor();
+                self.window.settings_scroll = 0.0;
                 return Ok(());
             }
             settings::SettingsTarget::EditorBrowse => {
@@ -20695,12 +20997,13 @@ impl Runtime {
                 return Ok(());
             }
             settings::SettingsTarget::EnvAdd => {
-                if let Some(editor) = self.settings.editor_mut() {
+                if let Some(editor) = self.window.settings.editor_mut() {
                     editor.env.push(Default::default());
                     // The caret goes into the row that just appeared, which is
                     // what somebody who pressed `Add` is about to type in.
                     let index = editor.env.len() - 1;
-                    self.settings
+                    self.window
+                        .settings
                         .press(settings::SettingsTarget::EnvName(index));
                 }
                 // Nothing reaches the table: an empty pair is not a variable, and
@@ -20730,7 +21033,8 @@ impl Runtime {
                 self.store_profiles()?;
                 self.reseed_editor_env(index)?;
                 let adopted = profiles::env(index).len().saturating_sub(1);
-                self.settings
+                self.window
+                    .settings
                     .press(settings::SettingsTarget::EnvValue(adopted));
                 return Ok(());
             }
@@ -20738,7 +21042,7 @@ impl Runtime {
                 let Some(index) = editor_index else {
                     return Ok(());
                 };
-                let Some(editor) = self.settings.editor_mut() else {
+                let Some(editor) = self.window.settings.editor_mut() else {
                     return Ok(());
                 };
                 if row >= editor.env.len() {
@@ -20861,7 +21165,7 @@ impl Runtime {
     /// storage without the table noticing would leave two pictures of one fact.
     fn reseed_editor_env(&mut self, index: usize) -> Result<()> {
         let env = profiles::env(index);
-        if let Some(editor) = self.settings.editor_mut() {
+        if let Some(editor) = self.window.settings.editor_mut() {
             editor.env = env
                 .into_iter()
                 .map(|(name, value)| {
@@ -20889,8 +21193,8 @@ impl Runtime {
         if index >= profiles::count() {
             return Ok(());
         }
-        let program = profiles::program_text(index, self.profile_programs.program(index));
-        self.settings.open_editor(settings::ProfileEditor {
+        let program = profiles::program_text(index, self.app.profile_programs.program(index));
+        self.window.settings.open_editor(settings::ProfileEditor {
             index,
             name: text_field::TextField::holding(&profiles::display_title(index)),
             program: text_field::TextField::holding(&program),
@@ -20909,7 +21213,7 @@ impl Runtime {
                 .collect(),
             refusal: None,
         });
-        self.settings_scroll = 0.0;
+        self.window.settings_scroll = 0.0;
         Ok(())
     }
 
@@ -20919,7 +21223,7 @@ impl Runtime {
     /// [`Self::store_profiles`], which is the single door the file, the programs
     /// probe and the window's own measurements move through.
     fn apply_row_verb(&mut self, index: usize, verb: settings::RowVerb) -> Result<()> {
-        self.settings.close_row_menu();
+        self.window.settings.close_row_menu();
         match verb {
             settings::RowVerb::Duplicate => {
                 if profiles::duplicate(index).is_none() {
@@ -20972,11 +21276,12 @@ impl Runtime {
         // showing is not there any more. Back to the list, which is where a
         // reader who has just deleted something is looking.
         if self
+            .window
             .settings
             .editor()
             .is_some_and(|editor| editor.index == index)
         {
-            self.settings.close_editor();
+            self.window.settings.close_editor();
         }
         self.store_profiles()?;
         let id = self.toast_with_verb(
@@ -20985,20 +21290,20 @@ impl Runtime {
             i18n::profile_deleted(&title, panes),
             i18n::Text::ProfilesUndo.text(),
         )?;
-        self.profile_undo = Some((id, removed, index));
+        self.window.profile_undo = Some((id, removed, index));
         Ok(())
     }
 
     /// The card's verb: put the row back where it was, with its own id.
     ///
     /// A verb pressed on a card that is no longer the one holding the undo does
-    /// nothing — see [`Self::profile_undo`].
+    /// nothing — see [`WindowRuntime::profile_undo`].
     fn take_profile_undo(&mut self, card: toast::ToastId) -> Result<()> {
-        let Some((id, profile, at)) = self.profile_undo.take() else {
+        let Some((id, profile, at)) = self.window.profile_undo.take() else {
             return Ok(());
         };
         if id != card {
-            self.profile_undo = Some((id, profile, at));
+            self.window.profile_undo = Some((id, profile, at));
             return Ok(());
         }
         profiles::reinsert(profile, at);
@@ -21014,16 +21319,18 @@ impl Runtime {
     /// said anything.
     fn browse_for_program(&mut self) {
         let start = self
+            .window
             .settings
             .editor()
             .map(|editor| PathBuf::from(editor.program.text()))
             .and_then(|path| path.parent().map(Path::to_path_buf))
             .filter(|parent| parent.as_os_str().len() > 1);
         match self
+            .window
             .image_picker
             .request(bt_platform::FilePickKind::Program, start.as_deref())
         {
-            Ok(true) => self.image_pick_pending = Some(FilePick::ProfileProgram),
+            Ok(true) => self.window.image_pick_pending = Some(FilePick::ProfileProgram),
             // Already queued or already open: a second press while one is up is
             // one dialog, not two, and whoever asked first keeps the answer.
             Ok(false) => {}
@@ -21033,15 +21340,15 @@ impl Runtime {
 
     /// `Choose a folder…` in the starting-directory picker.
     fn browse_for_start_folder(&mut self) {
-        let Some(index) = self.settings.editor().map(|editor| editor.index) else {
+        let Some(index) = self.window.settings.editor().map(|editor| editor.index) else {
             return;
         };
         let start = match profiles::start_at(index) {
             profiles::StartAt::Fixed(path) => Some(path),
             _ => None,
         };
-        match self.folder_picker.request(start.as_deref()) {
-            Ok(true) => self.folder_pick = Some(FolderPick::ProfileStart(index)),
+        match self.window.folder_picker.request(start.as_deref()) {
+            Ok(true) => self.window.folder_pick = Some(FolderPick::ProfileStart(index)),
             Ok(false) => {}
             Err(error) => eprintln!("recoverable folder chooser failure: {error}"),
         }
@@ -21057,14 +21364,14 @@ impl Runtime {
     /// field keeps what they typed and the row says why it is not the table's
     /// answer yet.
     fn write_editor_field(&mut self, target: settings::SettingsTarget) -> Result<()> {
-        let Some(editor) = self.settings.editor() else {
+        let Some(editor) = self.window.settings.editor() else {
             return Ok(());
         };
         let index = editor.index;
         match target {
             settings::SettingsTarget::Field(settings::SettingsRow::ProfileName) => {
                 let verdict = profiles::rename(index, editor.name.text());
-                if let Some(editor) = self.settings.editor_mut() {
+                if let Some(editor) = self.window.settings.editor_mut() {
                     editor.refusal = match verdict {
                         profiles::NameVerdict::Written => None,
                         profiles::NameVerdict::Blank => Some(i18n::Text::ProfilesNameBlank),
@@ -21108,8 +21415,9 @@ impl Runtime {
     /// `profiles::profile_revision` through `LayoutKey`. Anything that changes
     /// the table calls this and nothing else does.
     fn store_profiles(&mut self) -> Result<()> {
-        self.profile_programs = profiles::ProfilePrograms::probe(&bt_pty::SystemShellEnvironment);
-        self.profiles_store.store(profiles::to_file());
+        self.app.profile_programs =
+            profiles::ProfilePrograms::probe(&bt_pty::SystemShellEnvironment);
+        self.app.profiles_store.store(profiles::to_file());
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
@@ -21123,7 +21431,7 @@ impl Runtime {
     /// this build ships — so a user whose file was refused has no other way to
     /// find out.
     fn announce_profiles_fault(&mut self) -> Result<()> {
-        let Some(fault) = self.profiles_fault.take() else {
+        let Some(fault) = self.app.profiles_fault.take() else {
             return Ok(());
         };
         self.toast(
@@ -21147,25 +21455,25 @@ impl Runtime {
     /// was pressed rather than the one Shift made of it — which is what makes
     /// the caps the panel draws afterwards the caps on the user's own board.
     fn record_settings_key(&mut self, event: &KeyEvent) -> Result<()> {
-        let Some(row) = self.settings.recording_row() else {
+        let Some(row) = self.window.settings.recording_row() else {
             return Ok(());
         };
         let base = event.key_without_modifiers();
-        let input = match shortcuts::classify_recording(&base, self.modifiers) {
+        let input = match shortcuts::classify_recording(&base, self.window.modifiers) {
             shortcuts::RecordedKey::Modifier => settings::RecordInput::Modifier {
-                caps: shortcuts::live_caps(self.modifiers),
+                caps: shortcuts::live_caps(self.window.modifiers),
             },
             shortcuts::RecordedKey::Cancel => settings::RecordInput::Cancel,
             shortcuts::RecordedKey::Unbind => settings::RecordInput::Unbind,
             shortcuts::RecordedKey::Confirm => settings::RecordInput::Confirm,
             shortcuts::RecordedKey::Unusable => settings::RecordInput::Unusable,
             shortcuts::RecordedKey::Chord(chord) => {
-                let lines = self.shortcuts.editor_rows();
+                let lines = self.app.shortcuts.editor_rows();
                 let id = lines
                     .get(row)
                     .and_then(|line| line.ids.first().copied())
                     .unwrap_or_default();
-                let refusal = match self.shortcuts.verdict_for(id, &chord) {
+                let refusal = match self.app.shortcuts.verdict_for(id, &chord) {
                     shortcuts::ChordVerdict::Free => None,
                     refused => Some(refused.hint().into_owned()),
                 };
@@ -21176,20 +21484,20 @@ impl Runtime {
                 }
             }
         };
-        match self.settings.record(input) {
+        match self.window.settings.record(input) {
             settings::RecordVerdict::Moved | settings::RecordVerdict::Ended => {}
             settings::RecordVerdict::Commit(index, chord) => {
-                let lines = self.shortcuts.editor_rows();
+                let lines = self.app.shortcuts.editor_rows();
                 if let Some(line) = lines.get(index)
                     && let Some(id) = line.ids.first()
                 {
-                    self.shortcuts.set(id, chord);
+                    self.app.shortcuts.set(id, chord);
                     self.store_keybindings();
                 }
                 let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
                 let content =
                     self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files);
-                self.settings.keep_focus_reachable(content);
+                self.window.settings.keep_focus_reachable(content);
             }
         }
         if self.refresh_chrome() {
@@ -21212,12 +21520,12 @@ impl Runtime {
         // anywhere, and a thumb that kept following the pointer after the button
         // came up would be a control stuck to the hand.
         if state == ElementState::Released
-            && (self.settings_slider_drag.take().is_some()
-                || self.settings_menu_bar_drag.take().is_some())
+            && (self.window.settings_slider_drag.take().is_some()
+                || self.window.settings_menu_bar_drag.take().is_some())
         {
-            if let Some(position) = self.pointer_position {
+            if let Some(position) = self.window.pointer_position {
                 let hover = settings::hit(layout, &self.settings_values(), position.x, position.y);
-                self.settings.set_hover(Some(hover));
+                self.window.settings.set_hover(Some(hover));
             }
             if self.refresh_chrome() {
                 self.present_chrome_change()?;
@@ -21237,7 +21545,7 @@ impl Runtime {
             && contains_point(bar.grab, position)
         {
             let held = (position.y as f32 - bar.thumb[1]).clamp(0.0, bar.thumb[3] - bar.thumb[1]);
-            self.settings_menu_bar_drag = Some(held);
+            self.window.settings_menu_bar_drag = Some(held);
             self.drag_settings_menu_bar(&bar, position)?;
             return Ok(());
         }
@@ -21246,12 +21554,12 @@ impl Runtime {
         // `:focus-visible`. Stated before the verb below, because closing the
         // dialog drops the focus, and a press that set it afterwards would leave
         // a shut dialog remembering one.
-        self.settings.press(target);
+        self.window.settings.press(target);
         match target {
-            settings::SettingsTarget::Scrim => self.settings.close(),
-            settings::SettingsTarget::Close => self.settings.close(),
+            settings::SettingsTarget::Scrim => self.window.settings.close(),
+            settings::SettingsTarget::Close => self.window.settings.close(),
             settings::SettingsTarget::Combo(row) => {
-                self.settings.toggle_menu(row);
+                self.window.settings.toggle_menu(row);
                 // The list opens showing the answer it already has, whatever
                 // page of it that answer is on — a capped picker whose thirty
                 // faces begin at `Agency FB` would otherwise open nowhere near
@@ -21264,25 +21572,25 @@ impl Runtime {
             // Grabbing the thumb and not moving is a press that asked for the
             // value it already had, which costs nothing.
             settings::SettingsTarget::Slider(row) => {
-                self.settings.close_menu();
+                self.window.settings.close_menu();
                 if let Some(value) = layout.slider_at(row, position.x) {
                     self.apply_slider(row, value)?;
                 }
-                self.settings_slider_drag = Some(row);
+                self.window.settings_slider_drag = Some(row);
             }
             target @ settings::SettingsTarget::Choice(..) => {
-                self.settings.close_menu();
+                self.window.settings.close_menu();
                 self.apply_settings_choice(target)?;
             }
             // Turning a page puts the reader at the top of it. The distance
             // belonged to the page they were on, and carrying it across would
             // open the next one somewhere in its middle.
             settings::SettingsTarget::Nav(category) => {
-                if self.settings.select_category(category) {
-                    self.settings_scroll = 0.0;
+                if self.window.settings.select_category(category) {
+                    self.window.settings_scroll = 0.0;
                 }
             }
-            settings::SettingsTarget::Record(index) => self.settings.begin_recording(index),
+            settings::SettingsTarget::Record(index) => self.window.settings.begin_recording(index),
             target @ (settings::SettingsTarget::RestoreRow(_)
             | settings::SettingsTarget::RestoreAll) => self.apply_shortcut_edit(target)?,
             // Both leave through the same door the keyboard's Enter leaves
@@ -21310,7 +21618,7 @@ impl Runtime {
             // row a button, and the row is a row with buttons on it.
             settings::SettingsTarget::ProfileRow(_) => {}
             settings::SettingsTarget::ProfileMore(index) => {
-                self.settings.toggle_row_menu(index);
+                self.window.settings.toggle_row_menu(index);
             }
             target @ (settings::SettingsTarget::ProfileEdit(_)
             | settings::SettingsTarget::ProfileMoreItem(..)
@@ -21322,7 +21630,7 @@ impl Runtime {
             | settings::SettingsTarget::EnvAdd
             | settings::SettingsTarget::EditorRestore
             | settings::SettingsTarget::EditorDelete) => {
-                self.settings.close_menu();
+                self.window.settings.close_menu();
                 self.apply_settings_choice(target)?;
             }
             // A press into a field puts the caret there and nothing more: the
@@ -21330,14 +21638,14 @@ impl Runtime {
             // on change rather than on commit.
             settings::SettingsTarget::Field(_)
             | settings::SettingsTarget::EnvName(_)
-            | settings::SettingsTarget::EnvValue(_) => self.settings.close_menu(),
+            | settings::SettingsTarget::EnvValue(_) => self.window.settings.close_menu(),
         }
-        if let Some(position) = self.pointer_position {
+        if let Some(position) = self.window.pointer_position {
             let hover = self.settings_layout().map(|layout| {
                 settings::hit(&layout, &self.settings_values(), position.x, position.y)
             });
-            self.settings.set_hover(hover);
-            if !self.settings.is_open() {
+            self.window.settings.set_hover(hover);
+            if !self.window.settings.is_open() {
                 self.update_chrome_hover(position)?;
             }
         }
@@ -21355,16 +21663,21 @@ impl Runtime {
     /// succeeded is a different state with a different answer — no minimum at
     /// all, rather than a guess that could lock the user's window.
     fn refresh_work_area(&mut self) {
-        let Ok(hwnd) = window_hwnd(&self.window) else {
+        let Ok(hwnd) = window_hwnd(&self.window.window) else {
             return;
         };
         let Ok(rect) = bt_platform::get_work_area(hwnd) else {
             return;
         };
-        let scale = self.renderer.metrics().scale_factor.max(f64::MIN_POSITIVE);
+        let scale = self
+            .window
+            .renderer
+            .metrics()
+            .scale_factor
+            .max(f64::MIN_POSITIVE);
         let width = ((rect.right - rect.left).max(0) as f64 / scale).round() as i64;
         let height = ((rect.bottom - rect.top).max(0) as f64 / scale).round() as i64;
-        self.work_area = WorkAreaHint::Known(bt_layout::LogicalSize::px(width, height));
+        self.window.work_area = WorkAreaHint::Known(bt_layout::LogicalSize::px(width, height));
     }
 
     /// Hand the OS the technical floor — one pane, whatever the tabs contain.
@@ -21387,15 +21700,16 @@ impl Runtime {
     /// minimum through `WM_GETMINMAXINFO` instead, which asks for no resize at all.
     fn apply_window_min_inner_size(&mut self) -> Result<()> {
         let metrics = self.seat_metrics();
-        let floor = self.seats.min_inner_size(&metrics, self.work_area);
+        let floor = self.seats.min_inner_size(&metrics, self.window.work_area);
         let minimum = (
             floor.width.floor_px().max(1),
             floor.height.floor_px().max(1),
         );
-        if !window_minimum_changed(&mut self.window_min_inner_size, minimum) {
+        if !window_minimum_changed(&mut self.window.window_min_inner_size, minimum) {
             return Ok(());
         }
-        self.custom_window_frame
+        self.window
+            .custom_window_frame
             .set_min_client_size(Some((minimum.0.max(0) as u32, minimum.1.max(0) as u32)))
             .map_err(|error| anyhow!(error))
             .context("apply the window's minimum client size")
@@ -21405,12 +21719,17 @@ impl Runtime {
     /// restart. Layout *intent* only (L11): no rectangle, no cols/rows, no DPI
     /// of a seat — those are all recomputed by the next `solve`.
     fn session_snapshot(&self) -> SessionV1 {
-        let mut session = self.session_store.loaded().clone();
-        let scale = self.renderer.metrics().scale_factor.max(f64::MIN_POSITIVE);
-        let hwnd = window_hwnd(&self.window).ok();
+        let mut session = self.app.session_store.loaded().clone();
+        let scale = self
+            .window
+            .renderer
+            .metrics()
+            .scale_factor
+            .max(f64::MIN_POSITIVE);
+        let hwnd = window_hwnd(&self.window.window).ok();
         let posture = if hwnd.is_some_and(bt_platform::is_window_minimized) {
             WindowPosture::Minimized
-        } else if self.window.is_maximized() {
+        } else if self.window.window.is_maximized() {
             WindowPosture::Maximized
         } else {
             WindowPosture::Normal
@@ -21433,17 +21752,18 @@ impl Runtime {
             session.window.maximized,
         );
         session.schema_version = SESSION_SCHEMA_VERSION;
-        session.theme = session_theme_mode(self.theme_mode);
+        session.theme = session_theme_mode(self.app.theme_mode);
         session.cursor_style = session_cursor_style(current_cursor_style());
-        session.tab_layout = session_tab_layout(self.rail.layout);
-        session.sidebar_mode = session_sidebar_mode(self.rail.mode);
+        session.tab_layout = session_tab_layout(self.window.rail.layout);
+        session.sidebar_mode = session_sidebar_mode(self.window.rail.mode);
         session.window = WindowStateV1 {
             bounds,
-            dpi: self.renderer.metrics().dpi_milli().get(),
+            dpi: self.window.renderer.metrics().dpi_milli().get(),
             maximized,
             monitor_id: session.window.monitor_id.clone(),
         };
         session.tabs = self
+            .window
             .tabs
             .iter()
             .map(|tab| TabV1 {
@@ -21464,7 +21784,7 @@ impl Runtime {
                 preview: tab.preview_content(),
             })
             .collect();
-        session.active_tab = self.active_tab as u32;
+        session.active_tab = self.window.active_tab as u32;
         // A question that was never answered is not a "no". Tabs still waiting on
         // the restore prompt go back to the file exactly as they came out of it,
         // so closing the window mid-question asks again next time rather than
@@ -21472,29 +21792,30 @@ impl Runtime {
         // 不得丢失"). They are appended unpinned, which is what they were.
         session
             .tabs
-            .extend(self.pending_restore.iter().map(|tab| TabV1 {
+            .extend(self.window.pending_restore.iter().map(|tab| TabV1 {
                 pinned: false,
                 ..tab.clone()
             }));
         // The vault is app state while the window is up and file state the moment
         // it is not; this is the one place the two meet.
-        session.recent = self.recent.to_persisted();
+        session.recent = self.app.recent.to_persisted();
         session
     }
 
     /// Record a meaningful change and start the debounce window (§5.1).
     fn mark_session_dirty(&mut self, now: Instant) {
         let snapshot = self.session_snapshot();
-        self.session_store.record(snapshot, now);
+        self.app.session_store.record(snapshot, now);
     }
 
     /// Commit every theme-dependent surface at one event-loop safe point. Until the resulting frame
     /// presents, DWM retains the previous complete back buffer; the renderer never submits a frame
     /// with only one side of this transaction applied.
     fn apply_theme_mode(&mut self, mode: ThemeModeV1) -> Result<bool> {
-        let mode_changed = self.theme_mode != mode;
-        self.theme_mode = mode;
-        let theme_changed = self.apply_theme(resolve_theme_mode(mode, self.window.theme()))?;
+        let mode_changed = self.app.theme_mode != mode;
+        self.app.theme_mode = mode;
+        let theme_changed =
+            self.apply_theme(resolve_theme_mode(mode, self.window.window.theme()))?;
         if mode_changed {
             self.mark_session_dirty(Instant::now());
             if !theme_changed && self.refresh_overlay() {
@@ -21505,7 +21826,7 @@ impl Runtime {
     }
 
     fn os_theme_changed(&mut self, os_theme: OsTheme) -> Result<bool> {
-        let Some(theme) = resolved_theme_change(self.theme_mode, os_theme) else {
+        let Some(theme) = resolved_theme_change(self.app.theme_mode, os_theme) else {
             return Ok(false);
         };
         self.apply_theme(theme)
@@ -21561,9 +21882,9 @@ impl Runtime {
     /// ([`TabState::focused_profile_title`]) — the shell that is running, not the
     /// one that would be started next.
     fn apply_default_profile(&mut self, id: &str) -> Result<bool> {
-        let mut settings = self.settings_store.loaded().clone();
+        let mut settings = self.app.settings_store.loaded().clone();
         settings.default_profile = id.to_owned();
-        if !self.settings_store.store(settings) {
+        if !self.app.settings_store.store(settings) {
             return Ok(false);
         }
         self.publish_frame(FrameTrigger {
@@ -21585,12 +21906,12 @@ impl Runtime {
     /// from `session.json` precisely so a click in this dialog is on disk before
     /// the user can close the window on it.
     fn apply_display_formulas(&mut self, enabled: bool) -> Result<bool> {
-        let mut settings = self.settings_store.loaded().clone();
+        let mut settings = self.app.settings_store.loaded().clone();
         settings.display_formulas = enabled;
-        if !self.settings_store.store(settings) {
+        if !self.app.settings_store.store(settings) {
             return Ok(false);
         }
-        for tab in &mut self.tabs {
+        for tab in &mut self.window.tabs {
             for (_, leaf) in tab.leaves_mut() {
                 leaf.session.set_display_math_bands(enabled);
             }
@@ -21610,12 +21931,12 @@ impl Runtime {
     /// so turning it off shows the text again and turning it on brings the same blocks back with
     /// nothing re-scanned.
     fn apply_tables(&mut self, enabled: bool) -> Result<bool> {
-        let mut settings = self.settings_store.loaded().clone();
+        let mut settings = self.app.settings_store.loaded().clone();
         settings.tables = enabled;
-        if !self.settings_store.store(settings) {
+        if !self.app.settings_store.store(settings) {
             return Ok(false);
         }
-        for tab in &mut self.tabs {
+        for tab in &mut self.window.tabs {
             for (_, leaf) in tab.leaves_mut() {
                 leaf.session.set_table_bands(enabled);
             }
@@ -21637,12 +21958,12 @@ impl Runtime {
     /// no raster is thrown away, and a block that was scrolled inside itself is
     /// still scrolled to the same place when the cap is lifted.
     fn apply_block_max_height(&mut self, height: u32) -> Result<bool> {
-        let mut settings = self.settings_store.loaded().clone();
+        let mut settings = self.app.settings_store.loaded().clone();
         settings.block_max_height = height;
-        if !self.settings_store.store(settings) {
+        if !self.app.settings_store.store(settings) {
             return Ok(false);
         }
-        for tab in &mut self.tabs {
+        for tab in &mut self.window.tabs {
             for (_, leaf) in tab.leaves_mut() {
                 let mut options = leaf.session.math_layout_options();
                 options.block_max_height_px = block_max_height_px(height);
@@ -21662,7 +21983,7 @@ impl Runtime {
         palette: &bt_render::ChromePalette,
     ) -> (u32, [u8; 3], [u8; 3], [u8; 3]) {
         (
-            self.renderer.metrics().font_size_px.to_bits(),
+            self.window.renderer.metrics().font_size_px.to_bits(),
             palette.preview_grid_line,
             palette.preview_table_head_text,
             palette.files_row_hover,
@@ -21677,9 +21998,9 @@ impl Runtime {
     fn build_table_block(&mut self, source: &str) -> Option<table_block::TableBlock> {
         let lines: Vec<&str> = source.lines().collect();
         let span = bt_detect::table::table_at(&lines)?;
-        let metrics = table_block::metrics(self.renderer.metrics().font_size_px);
+        let metrics = table_block::metrics(self.window.renderer.metrics().font_size_px);
         let palette = bt_render::chrome_palette();
-        let renderer = &mut self.renderer;
+        let renderer = &mut self.window.renderer;
         Some(table_block::build(
             &span,
             metrics,
@@ -21707,19 +22028,21 @@ impl Runtime {
         let palette = bt_render::chrome_palette();
         let stamp = self.table_paint_stamp(&palette);
         let mut changed = false;
-        if self.table_paints.len() != sources.len()
+        if self.window.table_paints.len() != sources.len()
             || sources
                 .iter()
-                .any(|source| !self.table_paints.contains_key(source))
+                .any(|source| !self.window.table_paints.contains_key(source))
         {
-            self.table_paints
+            self.window
+                .table_paints
                 .retain(|source, _| sources.contains(source));
             changed = true;
         }
         let stale: Vec<String> = sources
             .iter()
             .filter(|source| {
-                self.table_paints
+                self.window
+                    .table_paints
                     .get(*source)
                     .is_none_or(|held| held.stamp != stamp)
             })
@@ -21729,7 +22052,7 @@ impl Runtime {
             let Some(block) = self.build_table_block(&source) else {
                 continue;
             };
-            self.table_paints.insert(
+            self.window.table_paints.insert(
                 source,
                 TablePaint {
                     paint: block.paint,
@@ -21740,11 +22063,12 @@ impl Runtime {
         }
         if changed {
             let paints = self
+                .window
                 .table_paints
                 .iter()
                 .map(|(source, held)| (source.clone(), held.paint.clone()))
                 .collect();
-            self.renderer.set_table_blocks(paints);
+            self.window.renderer.set_table_blocks(paints);
         }
     }
 
@@ -21799,12 +22123,12 @@ impl Runtime {
     /// to re-arm, so the alternative to re-scanning is answering with a verdict
     /// the user just revoked.
     fn apply_inline_formulas(&mut self, enabled: bool) -> Result<bool> {
-        let mut settings = self.settings_store.loaded().clone();
+        let mut settings = self.app.settings_store.loaded().clone();
         settings.inline_formulas = enabled;
-        if !self.settings_store.store(settings) {
+        if !self.app.settings_store.store(settings) {
             return Ok(false);
         }
-        for tab in &mut self.tabs {
+        for tab in &mut self.window.tabs {
             for (_, leaf) in tab.leaves_mut() {
                 leaf.session.set_inline_math_bands(enabled);
             }
@@ -21842,9 +22166,9 @@ impl Runtime {
     /// for one. `Runtime::settings_split_axis` reads the store at the moment of
     /// the split, so there is no copy of this value anywhere to keep in step.
     fn apply_split_direction(&mut self, direction: bt_persist::SplitDirectionV1) -> Result<bool> {
-        let mut settings = self.settings_store.loaded().clone();
+        let mut settings = self.app.settings_store.loaded().clone();
         settings.split_direction = direction;
-        Ok(self.settings_store.store(settings))
+        Ok(self.app.settings_store.store(settings))
     }
 
     /// **The window's language, changed while the window is up** (§7.1.6c-3c).
@@ -21866,12 +22190,12 @@ impl Runtime {
     /// even though they resolve to one language, and the file has to record which
     /// question the user answered.
     fn apply_language(&mut self, language: bt_persist::LanguageV1) -> Result<bool> {
-        if self.settings_store.loaded().language == language {
+        if self.app.settings_store.loaded().language == language {
             return Ok(false);
         }
-        let mut settings = self.settings_store.loaded().clone();
+        let mut settings = self.app.settings_store.loaded().clone();
         settings.language = language;
-        if !self.settings_store.store(settings) {
+        if !self.app.settings_store.store(settings) {
             return Ok(false);
         }
         self.adopt_new_language()?;
@@ -21906,7 +22230,7 @@ impl Runtime {
     /// slot per language rather than one slot, so step 3 asks it in the new
     /// language and gets the new language back.
     fn adopt_new_language(&mut self) -> Result<()> {
-        if !i18n::install(resolved_language(self.settings_store.loaded().language)) {
+        if !i18n::install(resolved_language(self.app.settings_store.loaded().language)) {
             return Ok(());
         }
         self.sync_math_layout_key();
@@ -21932,13 +22256,13 @@ impl Runtime {
         // them may have gone stale — and DWM's acrylic plate and border are
         // drawn from that statement, not from anything in this process's frame.
         self.apply_window_dark_mode()?;
-        install_theme_class_background(&self.window)?;
+        install_theme_class_background(&self.window.window)?;
         self.sync_math_layout_key();
         // The one thing a rail's key cannot see. A palette is not a fact about a
         // pane, so [`cmdrail::RailKey`] does not carry one — which means a rail
         // built under the old ink would be handed back unchanged, and a light
         // window would keep a dark window's ticks.
-        for cache in self.command_rails.values_mut() {
+        for cache in self.window.command_rails.values_mut() {
             cache.clear();
         }
         self.refresh_chrome();
@@ -21963,17 +22287,17 @@ impl Runtime {
     /// artefact keyed on a palette is already invalidated by. Nothing here is a
     /// second invalidation list.
     fn apply_scheme(&mut self, light: Option<String>, dark: Option<String>) -> Result<bool> {
-        let mut settings = self.settings_store.loaded().clone();
+        let mut settings = self.app.settings_store.loaded().clone();
         if let Some(light) = light {
             settings.light_scheme = light;
         }
         if let Some(dark) = dark {
             settings.dark_scheme = dark;
         }
-        if &settings == self.settings_store.loaded() {
+        if &settings == self.app.settings_store.loaded() {
             return Ok(false);
         }
-        if !self.settings_store.store(settings) {
+        if !self.app.settings_store.store(settings) {
             return Ok(false);
         }
         // **A row that just changed is coming from a different file**, and what
@@ -21986,7 +22310,7 @@ impl Runtime {
         // Before the early return below, because that return is about the
         // *palette* not having moved and this is about which file answered.
         self.refresh_scheme_sources();
-        if adopt_stored_schemes(self.settings_store.loaded()) == ThemeChange::Unchanged {
+        if adopt_stored_schemes(self.app.settings_store.loaded()) == ThemeChange::Unchanged {
             return Ok(false);
         }
         self.adopt_new_palette()?;
@@ -22003,9 +22327,9 @@ impl Runtime {
     /// which is what keeps "what is stored" and "what is drawn" one reading
     /// rather than four that have to agree.
     fn apply_window_ground(&mut self) -> Result<bool> {
-        let stored = self.settings_store.loaded();
+        let stored = self.app.settings_store.loaded();
         let ground = bt_render::WindowGround {
-            image: self.background_picture.clone(),
+            image: self.window.background_picture.clone(),
             fit: match stored.background_fit {
                 bt_persist::BackgroundFitV1::Stretch => bt_render::BackgroundFit::Stretch,
                 bt_persist::BackgroundFitV1::Fill => bt_render::BackgroundFit::Fill,
@@ -22016,7 +22340,7 @@ impl Runtime {
             // the file says. Not a clamp on the stored value — the file keeps
             // what its owner wrote, and moving the profile to a machine that can
             // honour it restores the window they set up.
-            alpha: if self.translucency_available {
+            alpha: if self.window.translucency_available {
                 f32::from(stored.background_opacity) / 100.0
             } else {
                 1.0
@@ -22056,13 +22380,13 @@ impl Runtime {
     /// drive that is not plugged in today is the ordinary case, and quietly
     /// erasing the setting would mean plugging the drive back in changed nothing.
     fn reload_background_picture(&mut self) -> Result<()> {
-        let stored = self.settings_store.loaded().background_image.clone();
+        let stored = self.app.settings_store.loaded().background_image.clone();
         // Every call withdraws whatever the last one asked for, `None` included:
         // a clear that raced a slow decode must win, and the generation is how
         // it does.
-        let generation = self.background_decode.withdraw();
+        let generation = self.window.background_decode.withdraw();
         if stored.is_empty() {
-            self.background_picture = None;
+            self.window.background_picture = None;
             return Ok(());
         }
         let ceiling = self.background_picture_ceiling();
@@ -22071,8 +22395,8 @@ impl Runtime {
             || stored.clone(),
             |name| name.to_string_lossy().into_owned(),
         );
-        let slot = self.background_decode.slot();
-        let proxy = self.event_proxy.clone();
+        let slot = self.window.background_decode.slot();
+        let proxy = self.app.event_proxy.clone();
         // In the workers' band: a wallpaper is never the reason a frame is late.
         bt_platform::spawn_at_priority(
             "background-picture",
@@ -22115,13 +22439,13 @@ impl Runtime {
     /// physical size, which is the only other fact available and is never zero.
     fn background_picture_ceiling(&self) -> (u32, u32) {
         let mut ceiling = (0_u32, 0_u32);
-        for monitor in self.window.available_monitors() {
+        for monitor in self.window.window.available_monitors() {
             let size = monitor.size();
             ceiling.0 = ceiling.0.max(size.width);
             ceiling.1 = ceiling.1.max(size.height);
         }
         if ceiling.0 == 0 || ceiling.1 == 0 {
-            let inner = self.window.inner_size();
+            let inner = self.window.window.inner_size();
             ceiling = (inner.width.max(1), inner.height.max(1));
         }
         ceiling
@@ -22134,16 +22458,16 @@ impl Runtime {
         // while it was still decoding — is dropped in silence by `take_current`:
         // it answers a row nobody is looking at any more, and a card about it
         // would be a report on a decision that has been superseded.
-        let Some(landed) = self.background_decode.take_current() else {
+        let Some(landed) = self.window.background_decode.take_current() else {
             return Ok(());
         };
         match landed.result {
             Ok(image) => {
-                self.background_picture = Some(image);
+                self.window.background_picture = Some(image);
                 self.apply_window_ground()?;
             }
             Err(refusal) => {
-                self.background_picture = None;
+                self.window.background_picture = None;
                 self.apply_window_ground()?;
                 self.toast(
                     toast::ToastKind::Error,
@@ -22158,12 +22482,12 @@ impl Runtime {
 
     /// The picture behind the window, chosen or cleared.
     fn apply_background_image(&mut self, path: String) -> Result<bool> {
-        let mut settings = self.settings_store.loaded().clone();
+        let mut settings = self.app.settings_store.loaded().clone();
         settings.background_image = path;
-        if &settings == self.settings_store.loaded() {
+        if &settings == self.app.settings_store.loaded() {
             return Ok(false);
         }
-        if !self.settings_store.store(settings) {
+        if !self.app.settings_store.store(settings) {
             return Ok(false);
         }
         self.reload_background_picture()?;
@@ -22173,12 +22497,12 @@ impl Runtime {
 
     /// How the picture meets the window.
     fn apply_image_fit(&mut self, fit: bt_persist::BackgroundFitV1) -> Result<bool> {
-        let mut settings = self.settings_store.loaded().clone();
+        let mut settings = self.app.settings_store.loaded().clone();
         settings.background_fit = fit;
-        if &settings == self.settings_store.loaded() {
+        if &settings == self.app.settings_store.loaded() {
             return Ok(false);
         }
-        if !self.settings_store.store(settings) {
+        if !self.app.settings_store.store(settings) {
             return Ok(false);
         }
         self.apply_window_ground()?;
@@ -22196,16 +22520,16 @@ impl Runtime {
             return Ok(false);
         };
         let value = range.clamp(value);
-        let mut settings = self.settings_store.loaded().clone();
+        let mut settings = self.app.settings_store.loaded().clone();
         match row {
             settings::SettingsRow::ImageOpacity => settings.background_image_opacity = value,
             settings::SettingsRow::BackgroundOpacity => settings.background_opacity = value,
             _ => return Ok(false),
         }
-        if &settings == self.settings_store.loaded() {
+        if &settings == self.app.settings_store.loaded() {
             return Ok(false);
         }
-        if !self.settings_store.store(settings) {
+        if !self.app.settings_store.store(settings) {
             return Ok(false);
         }
         // The ground is re-put whether or not it moved the clear: the picture's
@@ -22236,11 +22560,12 @@ impl Runtime {
     /// Best-effort and silent about the ordinary case: an old Windows refuses
     /// the attribute and keeps the border it had.
     fn apply_window_dark_mode(&mut self) -> Result<()> {
-        let Some(dark) = dwm_dark_mode_owed(self.dwm_dark_mode, bt_render::background_rgb()) else {
+        let Some(dark) = dwm_dark_mode_owed(self.window.dwm_dark_mode, bt_render::background_rgb())
+        else {
             return Ok(());
         };
-        let hwnd = window_hwnd(&self.window)?;
-        self.dwm_dark_mode = Some(dark);
+        let hwnd = window_hwnd(&self.window.window)?;
+        self.window.dwm_dark_mode = Some(dark);
         if let Err(error) = bt_platform::set_window_dark_mode(hwnd, dark) {
             eprintln!("recoverable dark-mode failure: {error}");
         }
@@ -22253,20 +22578,20 @@ impl Runtime {
     /// DWM refuses: a row that remembered On while the window wore nothing would
     /// be a switch whose position is a claim about a thing that did not happen.
     fn apply_acrylic(&mut self, enabled: bool) -> Result<bool> {
-        if !self.acrylic_available {
+        if !self.app.acrylic_available {
             return Ok(false);
         }
-        let hwnd = window_hwnd(&self.window)?;
+        let hwnd = window_hwnd(&self.window.window)?;
         if let Err(error) = bt_platform::set_system_backdrop(hwnd, enabled) {
             eprintln!("recoverable system backdrop failure: {error}");
             return Ok(false);
         }
-        let mut settings = self.settings_store.loaded().clone();
+        let mut settings = self.app.settings_store.loaded().clone();
         settings.acrylic = enabled;
-        if &settings == self.settings_store.loaded() {
+        if &settings == self.app.settings_store.loaded() {
             return Ok(false);
         }
-        Ok(self.settings_store.store(settings))
+        Ok(self.app.settings_store.store(settings))
     }
 
     /// Whether the window stays above other windows.
@@ -22276,17 +22601,17 @@ impl Runtime {
     /// activates: switching the row on while another window has the keyboard
     /// must not steal it.
     fn apply_always_on_top(&mut self, enabled: bool) -> Result<bool> {
-        let hwnd = window_hwnd(&self.window)?;
+        let hwnd = window_hwnd(&self.window.window)?;
         if let Err(error) = bt_platform::set_window_topmost(hwnd, enabled) {
             eprintln!("recoverable always-on-top failure: {error}");
             return Ok(false);
         }
-        let mut settings = self.settings_store.loaded().clone();
+        let mut settings = self.app.settings_store.loaded().clone();
         settings.always_on_top = enabled;
-        if &settings == self.settings_store.loaded() {
+        if &settings == self.app.settings_store.loaded() {
             return Ok(false);
         }
-        Ok(self.settings_store.store(settings))
+        Ok(self.app.settings_store.store(settings))
     }
 
     /// `Choose…` on the Background image row: queue the system's chooser.
@@ -22296,15 +22621,16 @@ impl Runtime {
     /// is not this function's failure — the dialog opens at the system's default
     /// instead, exactly as the folder chooser's own start does.
     fn browse_for_background_image(&mut self) {
-        let stored = self.settings_store.loaded().background_image.clone();
+        let stored = self.app.settings_store.loaded().background_image.clone();
         let start = (!stored.is_empty())
             .then(|| Path::new(&stored).parent().map(Path::to_path_buf))
             .flatten();
         match self
+            .window
             .image_picker
             .request(bt_platform::FilePickKind::Image, start.as_deref())
         {
-            Ok(true) => self.image_pick_pending = Some(FilePick::BackgroundImage),
+            Ok(true) => self.window.image_pick_pending = Some(FilePick::BackgroundImage),
             Ok(false) => {}
             Err(error) => eprintln!("recoverable picture chooser failure: {error}"),
         }
@@ -22312,10 +22638,10 @@ impl Runtime {
 
     /// Collect the picture chooser's answer, once, after its modal has shut.
     fn apply_image_pick_result(&mut self) -> Result<()> {
-        let Some(result) = self.image_picker.take_result() else {
+        let Some(result) = self.window.image_picker.take_result() else {
             return Ok(());
         };
-        let Some(asked) = self.image_pick_pending.take() else {
+        let Some(asked) = self.window.image_pick_pending.take() else {
             return Ok(());
         };
         let path = match result {
@@ -22337,10 +22663,10 @@ impl Runtime {
             // Undo would otherwise land somebody's program on the row that has
             // taken the index.
             FilePick::ProfileProgram => {
-                let Some(index) = self.settings.editor().map(|editor| editor.index) else {
+                let Some(index) = self.window.settings.editor().map(|editor| editor.index) else {
                     return Ok(());
                 };
-                if let Some(editor) = self.settings.editor_mut() {
+                if let Some(editor) = self.window.settings.editor_mut() {
                     editor.program = text_field::TextField::holding(&path.to_string_lossy());
                 }
                 profiles::set_program_path(index, &path);
@@ -22397,7 +22723,7 @@ impl Runtime {
             return self.open_scheme_for_editing(path);
         }
         let light = bt_render::background_is_light(bt_render::background_rgb());
-        let settings = self.settings_store.loaded();
+        let settings = self.app.settings_store.loaded();
         let stored = if light {
             settings.light_scheme.clone()
         } else {
@@ -22428,7 +22754,7 @@ impl Runtime {
         };
         // The folder exists now whether or not it did a moment ago, which is one
         // of the two moments `SchemeWatch` can be armed at.
-        self.scheme_watch.arm(&self.event_proxy);
+        self.app.scheme_watch.arm(&self.app.event_proxy);
         if light {
             self.apply_scheme(Some(name), None)?;
         } else {
@@ -22449,7 +22775,7 @@ impl Runtime {
         // **The dialog goes.** It is the one verb in it whose answer is a
         // document, and a modal standing over the document it just handed you is
         // a modal in the way.
-        self.settings.close();
+        self.window.settings.close();
         let Some(surface) = self.preview_landing_surface() else {
             return Ok(());
         };
@@ -22524,8 +22850,8 @@ impl Runtime {
         // its row, which is the rule this verb has always had, now asked per row
         // instead of assumed about the canvas in force.
         let in_force = [
-            self.settings_store.loaded().light_scheme.clone(),
-            self.settings_store.loaded().dark_scheme.clone(),
+            self.app.settings_store.loaded().light_scheme.clone(),
+            self.app.settings_store.loaded().dark_scheme.clone(),
         ];
         let catalogue = schemes::catalogue();
         let falls: [bool; 2] = [true, false].map(|light| {
@@ -22596,12 +22922,12 @@ impl Runtime {
     /// exactly what has been lost.
     fn refresh_scheme_sources(&mut self) {
         let names = [
-            self.settings_store.loaded().light_scheme.clone(),
-            self.settings_store.loaded().dark_scheme.clone(),
+            self.app.settings_store.loaded().light_scheme.clone(),
+            self.app.settings_store.loaded().dark_scheme.clone(),
         ];
         let catalogue = schemes::catalogue();
         for (index, light) in [true, false].into_iter().enumerate() {
-            self.scheme_source[index] = catalogue
+            self.app.scheme_source[index] = catalogue
                 .file_of(&names[index], light)
                 .map(|file| (names[index].clone(), file.to_owned()));
         }
@@ -22615,7 +22941,7 @@ impl Runtime {
     /// only after a notification, which is what keeps an always-on watch from
     /// being the polling R31 forbids.
     fn advance_scheme_watch(&mut self, now: Instant) -> Result<()> {
-        if !self.scheme_watch.due(now) {
+        if !self.app.scheme_watch.due(now) {
             return Ok(());
         }
         self.reread_schemes()
@@ -22643,15 +22969,15 @@ impl Runtime {
     /// handed to `set_schemes` is derived from the two stored names, so a file
     /// neither of them resolves to cannot move it.
     fn reread_schemes(&mut self) -> Result<()> {
-        let source = self.scheme_source.clone();
+        let source = self.app.scheme_source.clone();
         let after = schemes::rescan();
-        let settings = self.settings_store.loaded().clone();
+        let settings = self.app.settings_store.loaded().clone();
         let verdict = schemes::rescan_verdict(
             &after,
             [&settings.light_scheme, &settings.dark_scheme],
             source,
             bt_render::schemes_in_force(),
-            self.scheme_fault.as_deref(),
+            self.app.scheme_fault.as_deref(),
         );
         if bt_render::set_schemes(verdict.schemes.0, verdict.schemes.1)
             == bt_render::ThemeChange::Changed
@@ -22659,7 +22985,7 @@ impl Runtime {
             self.adopt_new_palette()?;
         }
         self.refresh_scheme_sources();
-        self.scheme_fault = verdict.fault;
+        self.app.scheme_fault = verdict.fault;
         if let Some((file, reason)) = verdict.report {
             self.toast(
                 toast::ToastKind::Error,
@@ -22736,18 +23062,21 @@ impl Runtime {
     /// Returns whether anything changed. No restart card: unlike the Language
     /// row, this one takes effect where the user can see it.
     fn apply_terminal_font(&mut self, family: String, size: u8) -> Result<bool> {
-        let current = self.settings_store.loaded();
+        let current = self.app.settings_store.loaded();
         if current.terminal_font_family == family && current.terminal_font_size == size {
             return Ok(false);
         }
         let mut settings = current.clone();
         settings.terminal_font_family = family;
         settings.terminal_font_size = size;
-        if !self.settings_store.store(settings) {
+        if !self.app.settings_store.store(settings) {
             return Ok(false);
         }
-        let metrics = apply_stored_terminal_font(&mut self.renderer, self.settings_store.loaded())?;
-        for tab in &mut self.tabs {
+        let metrics = apply_stored_terminal_font(
+            &mut self.window.renderer,
+            self.app.settings_store.loaded(),
+        )?;
+        for tab in &mut self.window.tabs {
             for (_, leaf) in tab.leaves_mut() {
                 leaf.session
                     .set_cell_height_subpixels(metrics.cell_height_subpixels());
@@ -22757,9 +23086,10 @@ impl Runtime {
                     .set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
             }
         }
-        let physical = self.window.inner_size();
+        let physical = self.window.window.inner_size();
         if physical.width > 0 && physical.height > 0 {
-            let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
+            let render_physical =
+                presentation_physical_size(self.window.renderer.presentation_geometry());
             self.refresh_work_area();
             self.apply_window_min_inner_size()?;
             self.resolve_seat_layout(render_physical);
@@ -22780,8 +23110,8 @@ impl Runtime {
     fn psreadline_row_state(&self) -> psreadline::RowState {
         psreadline::row_state(
             psreadline::probe(),
-            self.settings_store.loaded().psreadline_invite,
-            self.psreadline_installed,
+            self.app.settings_store.loaded().psreadline_invite,
+            self.app.psreadline_installed,
         )
     }
 
@@ -22789,11 +23119,12 @@ impl Runtime {
     /// it is called and far too expensive on every frame — see the field.
     fn refresh_psreadline_installed(&mut self) -> bool {
         let installed = self
+            .app
             .psreadline_documents
             .as_deref()
             .map_or(psreadline::InstalledCopy::None, psreadline::installed_copy);
-        let changed = self.psreadline_installed != installed;
-        self.psreadline_installed = installed;
+        let changed = self.app.psreadline_installed != installed;
+        self.app.psreadline_installed = installed;
         changed
     }
 
@@ -22804,7 +23135,7 @@ impl Runtime {
     /// carries the operating system's own sentence, because on the machine where
     /// it fires nobody else can see it.
     fn apply_psreadline(&mut self, install: bool) -> Result<bool> {
-        let Some(documents) = self.psreadline_documents.clone() else {
+        let Some(documents) = self.app.psreadline_documents.clone() else {
             return Ok(false);
         };
         if install {
@@ -22861,12 +23192,12 @@ impl Runtime {
     }
 
     fn record_psreadline_invite(&mut self, state: bt_persist::PsReadLineInviteV1) {
-        if self.settings_store.loaded().psreadline_invite == state {
+        if self.app.settings_store.loaded().psreadline_invite == state {
             return;
         }
-        let mut settings = self.settings_store.loaded().clone();
+        let mut settings = self.app.settings_store.loaded().clone();
         settings.psreadline_invite = state;
-        self.settings_store.store(settings);
+        self.app.settings_store.store(settings);
     }
 
     /// Raise the invitation once the probe has answered and the table says it is
@@ -22876,7 +23207,7 @@ impl Runtime {
     /// because raising a modal is a change to the window and the window is this
     /// thread's. The check is three comparisons on the common path.
     fn raise_psreadline_invite_if_due(&mut self) -> Result<()> {
-        if self.psreadline_invite.is_open() || psreadline::probe().is_none() {
+        if self.window.psreadline_invite.is_open() || psreadline::probe().is_none() {
             return Ok(());
         }
         if self.refresh_psreadline_installed() {
@@ -22889,23 +23220,23 @@ impl Runtime {
         // Terminal page's row is where that is offered — an unbidden modal for a
         // patch bump would be this product interrupting a reader over its own
         // release history.
-        if self.psreadline_installed != psreadline::InstalledCopy::None {
+        if self.app.psreadline_installed != psreadline::InstalledCopy::None {
             return Ok(());
         }
         let decision = psreadline::invite_decision(
             psreadline::probe(),
-            self.settings_store.loaded().psreadline_invite,
-            self.psreadline_size_changed,
+            self.app.settings_store.loaded().psreadline_invite,
+            self.window.psreadline_size_changed,
         );
         if decision != psreadline::InviteDecision::Show {
             return Ok(());
         }
         // The second showing is spent whether it is answered or not: a dialog
         // raised by a font-size change has had its one exception.
-        if self.psreadline_size_changed {
-            self.psreadline_size_changed = false;
+        if self.window.psreadline_size_changed {
+            self.window.psreadline_size_changed = false;
         }
-        self.psreadline_invite.open();
+        self.window.psreadline_invite.open();
         if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -22914,10 +23245,10 @@ impl Runtime {
 
     /// The invitation, measured against a real font, or nothing while it is shut.
     fn psreadline_invite_layout(&mut self) -> Option<restore::InviteLayout> {
-        if !self.psreadline_invite.is_open() {
+        if !self.window.psreadline_invite.is_open() {
             return None;
         }
-        let documents = self.psreadline_documents.clone()?;
+        let documents = self.app.psreadline_documents.clone()?;
         let (body, reason) = psreadline::invite_body(
             psreadline::probe(),
             &psreadline::module_directory(&documents),
@@ -22926,11 +23257,11 @@ impl Runtime {
         let title = i18n::Text::PsReadLineInviteTitle.text();
         let decline_text = i18n::Text::PsReadLineNotNow.text();
         let install_text = i18n::Text::PsReadLineInstall.text();
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let room = restore::content_width(width, scale);
-        let renderer = &mut self.renderer;
+        let renderer = &mut self.window.renderer;
         let mut wrap = |text: &str| {
             restore::wrap(text, room, |line| {
                 renderer.measure_chrome_text(line, restore::SUB_FONT_LOGICAL_PX * scale)
@@ -22958,15 +23289,16 @@ impl Runtime {
         match target {
             restore::InviteTarget::Panel => return Ok(()),
             restore::InviteTarget::Decline => {
-                let next =
-                    psreadline::state_after_decline(self.settings_store.loaded().psreadline_invite);
+                let next = psreadline::state_after_decline(
+                    self.app.settings_store.loaded().psreadline_invite,
+                );
                 self.record_psreadline_invite(next);
             }
             restore::InviteTarget::Install => {
                 self.apply_psreadline(true)?;
             }
         }
-        self.psreadline_invite.close();
+        self.window.psreadline_invite.close();
         if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -22974,13 +23306,13 @@ impl Runtime {
     }
 
     fn apply_git_panel(&mut self, enabled: bool) -> Result<bool> {
-        let mut settings = self.settings_store.loaded().clone();
+        let mut settings = self.app.settings_store.loaded().clone();
         settings.git_panel = enabled;
-        if !self.settings_store.store(settings) {
+        if !self.app.settings_store.store(settings) {
             return Ok(false);
         }
         if !enabled {
-            for tab in &mut self.tabs {
+            for tab in &mut self.window.tabs {
                 tab.git_trees.clear();
             }
         }
@@ -23030,8 +23362,8 @@ impl Runtime {
     /// view left behind is a buffer this tab still believes is on screen — which
     /// is precisely what the pool's dirty gates read.
     fn settle_seat_set_change(&mut self) -> Result<()> {
-        self.seat_pointer = seats::ChromePointer::default();
-        self.divider_drag = None;
+        self.window.seat_pointer = seats::ChromePointer::default();
+        self.window.divider_drag = None;
         self.sweep_preview_panes();
         self.apply_window_min_inner_size()?;
         self.commit_seat_geometry()
@@ -23059,7 +23391,7 @@ impl Runtime {
     /// be given up when the window runs out of room.
     ///
     /// (This paragraph used to say there was no `InputOwner::FilesTree` yet.
-    /// There is — [`Runtime::files_focus`] is it, and `files_tree_key` is its
+    /// There is — [`WindowRuntime::files_focus`] is it, and `files_tree_key` is its
     /// rung of §7.1.5's ladder. What stayed true is the sentence around it:
     /// giving a column the *keyboard* is a separate act from opening one, and
     /// opening one from a chord does not perform it.)
@@ -23148,7 +23480,7 @@ impl Runtime {
             return Ok(());
         }
         if closing_this_pane_closes_the_tab(self.seats.pane_count(), kind, self.sessions.len()) {
-            return self.close_tab(self.active_tab);
+            return self.close_tab(self.window.active_tab);
         }
         let metrics = self.seat_metrics();
         if !self.seats.close_seat(&metrics, seat) {
@@ -23208,7 +23540,7 @@ impl Runtime {
         // And then, uniquely to closing: the pointer is standing still over
         // whatever moved *into* the gap, so the hover it lost above is
         // immediately owed again from the new rectangles.
-        if let Some(position) = self.pointer_position {
+        if let Some(position) = self.window.pointer_position {
             self.update_chrome_hover(position)?;
         }
         Ok(())
@@ -23235,7 +23567,7 @@ impl Runtime {
                 // Out of range is ignored, not clamped: Ctrl+Shift+9 in a window
                 // with three tabs means "the ninth", and there is no ninth. A
                 // clamp would silently answer a different question.
-                match goto_tab_index(self.tabs.len(), ordinal) {
+                match goto_tab_index(self.window.tabs.len(), ordinal) {
                     Some(index) => self.activate_tab(index, false),
                     None => Ok(()),
                 }
@@ -23306,7 +23638,7 @@ impl Runtime {
 
     /// Ctrl+Tab / Ctrl+Shift+Tab, wrapping at both ends.
     fn step_tab(&mut self, forward: bool) -> Result<()> {
-        match stepped_tab(self.tabs.len(), self.active_tab, forward) {
+        match stepped_tab(self.window.tabs.len(), self.window.active_tab, forward) {
             Some(index) => self.activate_tab(index, false),
             None => Ok(()),
         }
@@ -23341,7 +23673,7 @@ impl Runtime {
     /// there would cut a tall pane sideways because the wide one next door said
     /// so.
     fn pane_split_axis(&self, seat: SeatId) -> Axis {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
             .map_or(Axis::Row, |body| auto_split_axis(body.width, body.height))
     }
@@ -23408,7 +23740,7 @@ impl Runtime {
         // columns it has, and that answer comes from the solve the split just
         // changed — never invented here (red line L10).
         self.commit_seat_geometry()?;
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let Some(body) = seats::pane_body_viewport(&self.seats, &self.seat_layout, arriving, scale)
         else {
             // The solver placed no rectangle for the seat it just minted, which
@@ -23430,15 +23762,15 @@ impl Runtime {
             .get(&source)
             .map(|leaf| seed.applied(leaf.profile, leaf.session.working_directory()))
             .unwrap_or_default();
-        let wake = self.pty_wake.wake();
-        let formulas = FormulaSwitches::from_settings(self.settings_store.loaded());
+        let wake = self.window.pty_wake.wake();
+        let formulas = FormulaSwitches::from_settings(self.app.settings_store.loaded());
         let leaf = create_leaf_session(
-            &self.renderer,
+            &self.window.renderer,
             body,
             wake,
             None,
             &inherited,
-            &self.profile_programs,
+            &self.app.profile_programs,
             formulas,
         )?;
         self.sessions.insert(arriving, leaf);
@@ -23491,7 +23823,7 @@ impl Runtime {
             self.focused_leaf = seat;
             // The frame slot holds the pane that *was* focused. Leaving it would
             // let the next present assert a stale grid against the new pane.
-            self.last_presented_frame = None;
+            self.window.last_presented_frame = None;
         }
         // **D40's rule, now that there is a second kind of thing to focus.**
         // Pressing a pane is how you say "type here", and a files column is
@@ -23507,7 +23839,9 @@ impl Runtime {
         // list it was in. It reaches here even when the column *already* had the
         // keyboard — the owner does not move, the ring goes out, and the frame is
         // owed for that alone.
-        let files = self.tabs[self.active_tab].files.contains_key(&seat);
+        let files = self.window.tabs[self.window.active_tab]
+            .files
+            .contains_key(&seat);
         if self.set_files_keyboard(files.then_some(seat), FilesFocusArrival::Pointer) {
             self.refresh_chrome();
         }
@@ -23529,7 +23863,7 @@ impl Runtime {
         if surface == PreviewSurface::Peek {
             // The glance is the window's — one pointer, one card — so its view is
             // not in any tab's map. See [`PreviewSurface::Peek`].
-            return Some(&self.peek_pane);
+            return Some(&self.window.peek_pane);
         }
         self.preview_tab(surface)?.preview_panes.get(surface)
     }
@@ -23537,10 +23871,10 @@ impl Runtime {
     /// The same, mutably and vivifying — a surface that exists has a view.
     fn preview_pane_mut(&mut self, surface: PreviewSurface) -> &mut PreviewPane {
         if surface == PreviewSurface::Peek {
-            return &mut self.peek_pane;
+            return &mut self.window.peek_pane;
         }
         let index = self.preview_tab_index(surface);
-        self.tabs[index].preview_panes.entry(surface)
+        self.window.tabs[index].preview_panes.entry(surface)
     }
 
     /// The buffer this surface is on, **mutably**, in its own tab's one pool.
@@ -23554,12 +23888,12 @@ impl Runtime {
         surface: PreviewSurface,
     ) -> Option<&mut preview::PreviewBuffer> {
         let index = self.preview_tab_index(surface);
-        let source = self.tabs[index]
+        let source = self.window.tabs[index]
             .preview_panes
             .get(surface)?
             .buffer
             .clone()?;
-        self.tabs[index].preview_pool.get_mut(&source)
+        self.window.tabs[index].preview_pool.get_mut(&source)
     }
 
     /// The buffer this surface is on, looked up in **its own** tab's one pool.
@@ -23569,9 +23903,10 @@ impl Runtime {
     /// and its own off-pool slot when there is not.
     fn preview_buffer_on(&self, surface: PreviewSurface) -> Option<&preview::PreviewBuffer> {
         if surface == PreviewSurface::Peek {
-            let source = self.peek_pane.buffer.as_ref()?;
+            let source = self.window.peek_pane.buffer.as_ref()?;
             return self.preview_pool.get(source).or_else(|| {
-                self.peek_buffer
+                self.window
+                    .peek_buffer
                     .as_ref()
                     .filter(|buffer| &buffer.source == source)
             });
@@ -23622,8 +23957,8 @@ impl Runtime {
             // pointer is over — there is nowhere else a file row can be.
             PreviewSurface::Seat(_) | PreviewSurface::Peek => Some(self),
             PreviewSurface::Float(id) => {
-                let tab = self.float.live(id)?.preview()?.tab;
-                self.tabs.iter().find(|state| state.id == tab)
+                let tab = self.window.float.live(id)?.preview()?.tab;
+                self.window.tabs.iter().find(|state| state.id == tab)
             }
         }
     }
@@ -23636,13 +23971,19 @@ impl Runtime {
     /// by construction.
     fn preview_tab_index(&self, surface: PreviewSurface) -> usize {
         let PreviewSurface::Float(id) = surface else {
-            return self.active_tab;
+            return self.window.active_tab;
         };
-        self.float
+        self.window
+            .float
             .live(id)
             .and_then(|win| win.preview())
-            .and_then(|preview| self.tabs.iter().position(|state| state.id == preview.tab))
-            .unwrap_or(self.active_tab)
+            .and_then(|preview| {
+                self.window
+                    .tabs
+                    .iter()
+                    .position(|state| state.id == preview.tab)
+            })
+            .unwrap_or(self.window.active_tab)
     }
 
     /// Every preview surface that exists **right now**, in paint order: the tree's
@@ -23665,7 +24006,8 @@ impl Runtime {
         // is still standing. Listing only the active tab's would have every tab
         // switch retire the other tabs' views.
         surfaces.extend(
-            self.float
+            self.window
+                .float
                 .drawn()
                 .filter(|win| win.preview().is_some())
                 .map(|win| PreviewSurface::Float(win.epoch)),
@@ -23689,8 +24031,9 @@ impl Runtime {
         // a seat only ever appears in its own tab's map, so the `alive` list —
         // which carries this tab's seats and every window — leaves the other tabs'
         // seat entries exactly where they are.
-        let active = self.active_tab;
+        let active = self.window.active_tab;
         let dropped: Vec<(usize, PreviewSurface)> = self
+            .window
             .tabs
             .iter()
             .enumerate()
@@ -23705,7 +24048,7 @@ impl Runtime {
                 PreviewSurface::Seat(_) => *index == active && !alive.contains(surface),
                 PreviewSurface::Float(_) => !alive.contains(surface),
                 // Unreachable, and that is the point: the glance's view lives on
-                // the window ([`Runtime::peek_pane`]), so no tab's map can be
+                // the window ([`WindowRuntime::peek_pane`]), so no tab's map can be
                 // holding one for the sweep to find. It is retired by the card
                 // coming down, in `hide_file_peek`.
                 PreviewSurface::Peek => false,
@@ -23715,7 +24058,7 @@ impl Runtime {
             // Filed and cleared where it actually lives — the window's own tab,
             // which is not the one on screen whenever a float outlived a switch.
             self.leave_preview_buffer_in(index, surface);
-            self.tabs[index].preview_panes.remove(surface);
+            self.window.tabs[index].preview_panes.remove(surface);
         }
         // And this tab's head measurements beside them. A seat id is re-minted
         // from a counter, so a width left behind for a pane that has gone comes
@@ -23723,7 +24066,8 @@ impl Runtime {
         // — the same argument `close_pane` makes about a files column's cached
         // root. Only seats have measured heads: a float's head is measured into
         // its own layer every frame and stored nowhere.
-        self.preview_head_measures
+        self.window
+            .preview_head_measures
             .retain(|seat, _| alive.contains(&PreviewSurface::Seat(*seat)));
         if self
             .preview_edit_focus
@@ -23834,9 +24178,10 @@ impl Runtime {
         &self,
         position: PhysicalPosition<f64>,
     ) -> Option<(PreviewSurface, [f32; 4])> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let (x, y) = (position.x as f32, position.y as f32);
-        self.float
+        self.window
+            .float
             .hit_order()
             .filter(|win| win.preview().is_some())
             .map(|win| PreviewSurface::Float(win.epoch))
@@ -23871,7 +24216,8 @@ impl Runtime {
     /// exclusive across the host, so this is at most one window — the same
     /// singleton the files tree's own float focus is.
     fn focused_preview_float(&self) -> Option<float::FloatId> {
-        self.float
+        self.window
+            .float
             .live_windows()
             .find(|win| win.focused && win.preview().is_some())
             .map(|win| win.epoch)
@@ -23925,7 +24271,7 @@ impl Runtime {
         // The one field of the meta line no decoder can answer, asked on the
         // same lane a document's head goes down.
         let tab = self.id;
-        if !self.preview_worker.request(preview::PreviewRequest {
+        if !self.app.preview_worker.request(preview::PreviewRequest {
             tab,
             source: preview::PreviewSource::file(path.clone()),
             want: preview::PreviewWant::Size,
@@ -23946,7 +24292,7 @@ impl Runtime {
         // A picture has landed: the lane is this surface's if this surface is a
         // pane, and untouched if it is a window ([`preview_lane_after_landing`]).
         self.preview_raster = preview_lane_after_landing(self.preview_raster, surface, true);
-        self.renderer.set_preview_image(None);
+        self.window.renderer.set_preview_image(None);
         self.refresh_preview_for_layout();
         self.refresh_chrome();
         self.present_chrome_change()
@@ -24037,7 +24383,7 @@ impl Runtime {
         pane.caret = view.caret;
         pane.scroll = view.scroll;
         if wants_read
-            && !self.preview_worker.request(preview::PreviewRequest {
+            && !self.app.preview_worker.request(preview::PreviewRequest {
                 tab,
                 source,
                 want: preview::PreviewWant::Head,
@@ -24078,7 +24424,7 @@ impl Runtime {
         self.preview_pane_mut(surface).image = None;
         if self.preview_raster == Some(surface) {
             self.preview_raster = None;
-            self.renderer.set_preview_image(None);
+            self.window.renderer.set_preview_image(None);
         }
     }
 
@@ -24110,8 +24456,8 @@ impl Runtime {
         // A surface that has never shown anything has no view to file, and
         // vivifying one here only to empty it would leave a pane behind for the
         // sweep to retire a moment later.
-        if self.tabs[index].preview_panes.get(surface).is_some() {
-            let pane = self.tabs[index].preview_panes.entry(surface);
+        if self.window.tabs[index].preview_panes.get(surface).is_some() {
+            let pane = self.window.tabs[index].preview_panes.entry(surface);
             let left = pane.buffer.take();
             let view = PreviewViewState {
                 caret: pane.caret,
@@ -24133,7 +24479,9 @@ impl Runtime {
             if let Some(source) = left {
                 // The memory is per buffer and the buffer is the tab's, so it is
                 // filed in the same tab the view came out of.
-                self.tabs[index].preview_views.remember(&source, view);
+                self.window.tabs[index]
+                    .preview_views
+                    .remember(&source, view);
             }
         }
         if self.preview_edit_focus == Some(surface) {
@@ -24242,14 +24590,16 @@ impl Runtime {
         let tools = seats::PreviewHeadTools {
             switcher: pool > 1,
             name_width: self
+                .window
                 .renderer
                 .measure_chrome_text(&name, seats::PREVIEW_NAME_FONT_LOGICAL_PX * scale),
             count_width: self
+                .window
                 .renderer
                 .measure_chrome_text(&count, seats::PREVIEW_COUNT_FONT_LOGICAL_PX * scale),
             ..tools
         };
-        self.preview_head_measures.insert(seat, tools);
+        self.window.preview_head_measures.insert(seat, tools);
         Some(PreviewHeadFrame {
             name,
             count,
@@ -24259,7 +24609,7 @@ impl Runtime {
                 others_dirty,
                 flip_to_source,
                 pinned: self.seats.preview_is_pinned(seat),
-                menu_open: self.preview_menu.seat() == Some(seat),
+                menu_open: self.window.preview_menu.seat() == Some(seat),
                 ..seats::PreviewHeadContent::default()
             },
         })
@@ -24271,7 +24621,7 @@ impl Runtime {
         let surface = PreviewSurface::Seat(seat);
         let pool = self.preview_pool.len();
         let buffer = self.preview_buffer_on(surface);
-        let measured = self.preview_head_measures.get(&seat).copied();
+        let measured = self.window.preview_head_measures.get(&seat).copied();
         seats::PreviewHeadTools {
             save: self.preview_is_editable(surface),
             flip: buffer.is_some_and(|buffer| buffer.ftype == preview::PreviewFtype::Markdown),
@@ -24340,7 +24690,7 @@ impl Runtime {
         let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
         let run = seats::pane_foot_geometry(rect, bt_layout::SeatKind::Preview, scale).foot_path;
         let font = seats::FILES_FOOT_FONT_LOGICAL_PX * scale;
-        let renderer = &mut self.renderer;
+        let renderer = &mut self.window.renderer;
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
         Some(seats::dress_foot(
             seats::FootDress {
@@ -24389,7 +24739,7 @@ impl Runtime {
         if !self.reveal_in_explorer(&path) {
             return Ok(());
         }
-        self.revealed_foot = Some((RevealedFoot::Preview(seat), Instant::now()));
+        self.window.revealed_foot = Some((RevealedFoot::Preview(seat), Instant::now()));
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -24491,12 +24841,12 @@ impl Runtime {
         body: [f32; 4],
         delta: MouseScrollDelta,
     ) -> Result<()> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         // **Shift turns the wheel sideways**, which is the convention every
         // horizontal scroller on this desktop already follows and the only one
         // a mouse without a tilt wheel can reach. The notch is the same notch;
         // only the axis it is spent on changes.
-        let sideways = self.modifiers.shift_key();
+        let sideways = self.window.modifiers.shift_key();
         let extent = if sideways {
             body[2] - body[0]
         } else {
@@ -24544,7 +24894,7 @@ impl Runtime {
         let PreviewDocument::Markdown { blocks, layout, .. } = &pane.doc else {
             return Ok(false);
         };
-        let Some(pointer) = self.pointer_position else {
+        let Some(pointer) = self.window.pointer_position else {
             return Ok(false);
         };
         let (x, y) = (pointer.x as f32, pointer.y as f32);
@@ -24603,7 +24953,7 @@ impl Runtime {
     /// is the reading that can answer for all three surfaces.
     fn preview_document_box(&self, surface: PreviewSurface, scale: f32) -> Option<[f32; 4]> {
         if surface == PreviewSurface::Peek {
-            let peek = self.file_peek.as_ref()?;
+            let peek = self.window.file_peek.as_ref()?;
             return peek.body.filter(|_| peek.due.is_none());
         }
         self.preview_surface_body_rect(surface, scale)
@@ -24632,7 +24982,11 @@ impl Runtime {
         position: PhysicalPosition<f64>,
     ) -> Option<(PreviewSurface, [f32; 4])> {
         let at = [position.x as f32, position.y as f32];
-        if let Some(peek) = self.file_peek.as_ref().filter(|peek| peek.due.is_none())
+        if let Some(peek) = self
+            .window
+            .file_peek
+            .as_ref()
+            .filter(|peek| peek.due.is_none())
             && let Some((frame, body)) = peek.frame.zip(peek.body)
             && let Some(body) = file_peek::body_at(frame, body, at)
         {
@@ -24647,7 +25001,7 @@ impl Runtime {
         &self,
         position: PhysicalPosition<f64>,
     ) -> Option<(PreviewSurface, usize, preview::ScrollBar)> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let (surface, body) = self.preview_block_surface_at(position)?;
         let pane = self.preview_pane(surface)?;
         let PreviewDocument::Markdown { blocks, layout, .. } = &pane.doc else {
@@ -24771,7 +25125,7 @@ impl Runtime {
     /// panes in the tree, and they belong at the very bottom of the overlay —
     /// see [`OverlayStack::preview_bars`].
     fn preview_seat_bar_layers(&self) -> Vec<marks::OverlayLayer> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         self.seats
             .preview_seats()
             .into_iter()
@@ -24787,7 +25141,7 @@ impl Runtime {
 
     /// One preview float's bars, on their own layers above that window.
     fn preview_float_bar_layers(&self, id: float::FloatId) -> Vec<marks::OverlayLayer> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let surface = PreviewSurface::Float(id);
         let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             return Vec::new();
@@ -24805,7 +25159,7 @@ impl Runtime {
         &self,
         position: PhysicalPosition<f64>,
     ) -> Option<(PreviewSurface, preview::ScrollBar)> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let at = [position.x as f32, position.y as f32];
         let (surface, body) = self.preview_surface_at(position)?;
         // **The vertical one first**, which decides the one place the two can
@@ -24863,7 +25217,7 @@ impl Runtime {
         let Some(drag) = self.preview_body_drag else {
             return Ok(false);
         };
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         // The gesture's own surface, not the one under the pointer: a hand that
         // has left the pane it took hold in is still holding that pane's thumb.
         let Some(body) = self.preview_surface_body_rect(drag.surface, scale) else {
@@ -24922,7 +25276,7 @@ impl Runtime {
         if leaf.session.terminal_modes().alternate_screen {
             return None;
         }
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
         Some([
             body.x as f32,
@@ -24941,7 +25295,7 @@ impl Runtime {
     fn terminal_scroll_bar(&self, seat: SeatId) -> Option<termscroll::TerminalScrollBar> {
         let body = self.terminal_scroll_body(seat)?;
         let leaf = self.sessions.get(&seat)?;
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         termscroll::bar(
             body,
             leaf.projection.scroll_extent_subpixels(),
@@ -24971,8 +25325,8 @@ impl Runtime {
     /// one thing that must not happen is a gesture that scrolls the pane and
     /// leaves its picture of the scroll invisible.
     fn wake_terminal_thumb(&mut self, seat: SeatId) {
-        let active = self.active_tab;
-        if let Some(leaf) = self.tabs[active].sessions.get_mut(&seat) {
+        let active = self.window.active_tab;
+        if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) {
             leaf.thumb_awake = Instant::now();
         }
     }
@@ -24997,8 +25351,8 @@ impl Runtime {
     /// setter of its own, so the clamp stays in the one place that owns it —
     /// the drag and the wheel end up at the same extent by the same arithmetic.
     fn scroll_seat_to_subpixels(&mut self, seat: SeatId, wanted: i64) -> Result<()> {
-        let active = self.active_tab;
-        let Some(leaf) = self.tabs[active].sessions.get_mut(&seat) else {
+        let active = self.window.active_tab;
+        let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
             return Ok(());
         };
         let current = leaf.projection.scroll_offset_subpixels();
@@ -25097,7 +25451,7 @@ impl Runtime {
     fn terminal_bar_layers(&self) -> Vec<marks::OverlayLayer> {
         let palette = bt_render::chrome_palette();
         let now = Instant::now();
-        let motion = self.motion;
+        let motion = self.app.motion;
         self.sessions
             .iter()
             .filter_map(|(seat, leaf)| {
@@ -25144,7 +25498,7 @@ impl Runtime {
     /// held, hovered, or parked in history — is not going anywhere, and a pane
     /// with no scrollback has nothing on the glass to take off it.
     fn terminal_thumb_deadline(&self, now: Instant) -> Option<Instant> {
-        let motion = self.motion;
+        let motion = self.app.motion;
         self.sessions
             .iter()
             .filter(|(seat, leaf)| {
@@ -25204,7 +25558,7 @@ impl Runtime {
             // card, which carries its own way out to the system.
             preview::LinkAction::Preview(path) => self.open_preview(path),
             preview::LinkAction::Browse(url) => {
-                let result = window_hwnd(&self.window).and_then(|hwnd| {
+                let result = window_hwnd(&self.window.window).and_then(|hwnd| {
                     bt_platform::shell_execute(hwnd, &url)
                         .map_err(|error| anyhow!(error))
                         .context("open a markdown link in the system browser")
@@ -25251,7 +25605,7 @@ impl Runtime {
     /// that colour. Asking whether the pointer is inside the box that was just
     /// computed is the general form of that check, and it costs one comparison.
     fn preview_hex_at(&self, position: PhysicalPosition<f64>) -> Option<PreviewHexHover> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let (surface, body) = self.preview_surface_at(position)?;
         let content = self
             .preview_buffer_on(surface)
@@ -25317,8 +25671,8 @@ impl Runtime {
     /// therefore costs exactly what a pointer crossing a tab strip costs.
     fn note_preview_hex_hover(&mut self, position: Option<PhysicalPosition<f64>>) {
         let over = position.and_then(|position| self.preview_hex_at(position));
-        if over != self.preview_hex_hover {
-            self.preview_hex_hover = over;
+        if over != self.window.preview_hex_hover {
+            self.window.preview_hex_hover = over;
         }
     }
 
@@ -25352,7 +25706,7 @@ impl Runtime {
         let Some(drag) = self.preview_block_drag else {
             return Ok(false);
         };
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         // The gesture's own surface, not the one under the pointer: a hand that
         // has left the pane it took hold in is still holding that pane's thumb.
         // Asked of `preview_document_box` rather than of the tree, because the
@@ -25478,7 +25832,7 @@ impl Runtime {
             return Ok(());
         };
         if self.open_local_path(&path) {
-            self.preview_opened_at = Some(Instant::now());
+            self.window.preview_opened_at = Some(Instant::now());
         }
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -25493,7 +25847,7 @@ impl Runtime {
     /// uses (ruling 6, 2026-08-12: the four mock-up durations collapse to this
     /// one).
     fn preview_open_button_label(&self, now: Instant) -> &'static str {
-        match self.preview_opened_at {
+        match self.window.preview_opened_at {
             Some(at) if now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK => {
                 preview_opened_label()
             }
@@ -25553,7 +25907,7 @@ impl Runtime {
             // (B81). The stance `F3` exists for is "search open, hands back on
             // the terminal", so a flag that meant "the field is focused" would
             // switch the row off in exactly the state it is wanted.
-            search_open: self.search.is_open(),
+            search_open: self.window.search.is_open(),
         }
     }
 
@@ -25590,27 +25944,28 @@ impl Runtime {
     /// blinks in a shell that is not receiving the characters.
     fn keyboard_owner(&self) -> KeyboardOwner {
         KeyboardOwner {
-            rename: self.rename.is_some(),
+            rename: self.window.rename.is_some(),
             // `Menu` and `Dialog`, which own the keyboard outright while they are
             // up (§7.1.5, and the mock-up's "an open menu owns the keyboard" at
             // 6188).
             // The prompt inside a git context menu, which is a popup and would
             // otherwise be swallowed by the rung under this one.
             git_prompt: self
+                .window
                 .git_menu
                 .as_ref()
                 .is_some_and(|menu| menu.prompt.is_some()),
-            menu_or_dialog: self.dirty_gate.is_open()
-                || self.psreadline_invite.is_open()
-                || self.settings.is_open()
-                || self.file_menu.is_some()
-                || self.git_menu.is_some()
-                || self.pane_menu.is_some()
-                || self.profile_menu.is_open()
-                || self.root_menu.seat().is_some()
-                || self.preview_menu.seat().is_some()
-                || self.graph_filter_menu.is_some()
-                || self.term_menu.is_some(),
+            menu_or_dialog: self.window.dirty_gate.is_open()
+                || self.window.psreadline_invite.is_open()
+                || self.window.settings.is_open()
+                || self.window.file_menu.is_some()
+                || self.window.git_menu.is_some()
+                || self.window.pane_menu.is_some()
+                || self.window.profile_menu.is_open()
+                || self.window.root_menu.seat().is_some()
+                || self.window.preview_menu.seat().is_some()
+                || self.window.graph_filter_menu.is_some()
+                || self.window.term_menu.is_some(),
             files_tree: self.files_keyboard_seat().is_some(),
             // The graph's search field, when it is the focused preview's and it
             // holds the keyboard.
@@ -25623,7 +25978,7 @@ impl Runtime {
             // so they are not the shell's either.
             preview: self.preview_keyboard_surface().is_some(),
             // The search capsule, and only while the caret is in it.
-            search: self.search.is_focused(),
+            search: self.window.search.is_focused(),
         }
     }
 
@@ -25645,7 +26000,7 @@ impl Runtime {
         let Some(surface) = self.preview_edit_focus() else {
             return self.preview_browse_key(event);
         };
-        let command = preview_edit::command(&event.logical_key, self.modifiers);
+        let command = preview_edit::command(&event.logical_key, self.window.modifiers);
         // Repeats travel and type; they do not copy, paste or blur. Held Enter is
         // one continuous "again" and a held verb is not — the same line the files
         // tree draws between its travel keys and its verbs.
@@ -25753,8 +26108,8 @@ impl Runtime {
             return Ok(true);
         }
         if let PreviewSurface::Seat(seat) = surface
-            && self.git_graphs_shown.contains_key(&seat)
-            && let Some(key) = graph_key_of(&event.logical_key, self.modifiers)
+            && self.window.git_graphs_shown.contains_key(&seat)
+            && let Some(key) = graph_key_of(&event.logical_key, self.window.modifiers)
             && self.graph_key(seat, key)?
         {
             return Ok(true);
@@ -25776,7 +26131,7 @@ impl Runtime {
             self.set_preview_image_zoom(surface, zoomed)?;
             return Ok(true);
         }
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             // A seat with no body to scroll still owns the key: there is no
             // terminal under it either way.
@@ -25821,14 +26176,14 @@ impl Runtime {
                 // A collapsed range is the caret; an open one is the IME's
                 // target clause and not a caret at all — see
                 // [`preedit_caret_byte`].
-                self.preedit = (!text.is_empty()).then_some(Preedit {
+                self.window.preedit = (!text.is_empty()).then_some(Preedit {
                     text,
                     cursor_byte: preedit_caret_byte(cursor_range),
                 });
                 self.repaint_preview()
             }
             Ime::Commit(text) => {
-                self.preedit = None;
+                self.window.preedit = None;
                 self.insert_into_preview(&text)
             }
             // Reached only for `Preedit`/`Commit`; the window's own bookkeeping
@@ -25848,7 +26203,7 @@ impl Runtime {
     /// told which one is composing.
     fn shell_preedit(&self) -> Option<&Preedit> {
         matches!(ime_owner(self.keyboard_owner()), ImeOwner::Shell)
-            .then_some(self.preedit.as_ref())
+            .then_some(self.window.preedit.as_ref())
             .flatten()
     }
 
@@ -25860,7 +26215,7 @@ impl Runtime {
     /// ([`Self::apply_ime_cursor_area`]) serve whichever surface is composing.
     fn preview_ime_cursor_area(&self) -> Option<ImeCursorArea> {
         let surface = self.preview_edit_focus()?;
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let body = self.preview_surface_body_rect(surface, scale)?;
         let (line, column) = self.preview_caret_position(surface)?;
         let advance = self.preview_pane(surface)?.mono_advance;
@@ -25899,15 +26254,15 @@ impl Runtime {
     /// window the candidate list may not cover, and a rectangle inset by the
     /// caret's own four pixels is four pixels of the field the list would sit on.
     fn field_ime_caret(&mut self, owner: ImeOwner) -> Option<ImeCursorArea> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let line = match owner {
-            ImeOwner::Rename => self.rename_caret_line?,
+            ImeOwner::Rename => self.window.rename_caret_line?,
             ImeOwner::GraphSearch => {
                 let PreviewSurface::Seat(seat) = self.preview_keyboard_surface()? else {
                     return None;
                 };
                 let rects = self.graph_toolbar_rects(seat)?;
-                let toolbar = self.git_graphs_shown.get(&seat)?.toolbar.as_ref()?;
+                let toolbar = self.window.git_graphs_shown.get(&seat)?.toolbar.as_ref()?;
                 git_graph::graph_search_field(rects, toolbar, scale)?.caret
             }
             ImeOwner::GitPrompt => self.git_menu_layout()?.prompt_rects()?.caret_line(scale),
@@ -25940,7 +26295,7 @@ impl Runtime {
     /// [`ImeCursorThrottle`] turns a burst of identical rectangles into nothing
     /// and a burst of moving ones into one call per 60Hz slot.
     fn offer_ime_caret(&mut self, grid: Option<&ViewportFrame>) {
-        if !self.ime_active {
+        if !self.window.ime_active {
             return;
         }
         let owner = ime_owner(self.keyboard_owner());
@@ -25954,15 +26309,15 @@ impl Runtime {
             // would sit over the shell while the letters went into the file.
             ImeCaretSource::TerminalCursor => grid.map(|frame| {
                 window_ime_cursor_area(
-                    self.renderer.seat_viewport(),
-                    self.renderer.ime_cursor_area(frame),
+                    self.window.renderer.seat_viewport(),
+                    self.window.renderer.ime_cursor_area(frame),
                 )
             }),
         };
         let Some(area) = area else {
             return;
         };
-        if let Some(area) = self.ime_cursor_throttle.offer(area, Instant::now()) {
+        if let Some(area) = self.window.ime_cursor_throttle.offer(area, Instant::now()) {
             self.apply_ime_cursor_area(area);
         }
     }
@@ -26068,7 +26423,7 @@ impl Runtime {
 
     /// How many lines this surface's edit surface can show — what a page is.
     fn preview_page_rows(&self, surface: PreviewSurface) -> usize {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             return 1;
         };
@@ -26083,7 +26438,7 @@ impl Runtime {
     /// which is what every text field does and the only behaviour that makes
     /// holding Down look like reading rather than like jumping.
     fn reveal_preview_caret(&mut self, surface: PreviewSurface) {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             return;
         };
@@ -26150,7 +26505,7 @@ impl Runtime {
         else {
             return;
         };
-        if let Err(error) = write_terminal_clipboard_text(&self.window, &text) {
+        if let Err(error) = write_terminal_clipboard_text(&self.window.window, &text) {
             eprintln!("recoverable preview copy failure: {error:#}");
         }
     }
@@ -26161,7 +26516,7 @@ impl Runtime {
     /// pasting it verbatim into a file written with bare newlines is how a
     /// one-line paste turns the next diff into a whole-file rewrite.
     fn paste_into_preview(&mut self) -> Result<()> {
-        let hwnd = window_hwnd(&self.window)?;
+        let hwnd = window_hwnd(&self.window.window)?;
         let text = match bt_platform::clipboard_text(hwnd) {
             Ok(text) => text,
             Err(error) => {
@@ -26285,7 +26640,7 @@ impl Runtime {
     ///
     /// Returns whether the press was the surface's.
     fn press_preview_body(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let Some((surface, body)) = self.preview_edit_body(position) else {
             return Ok(false);
         };
@@ -26302,7 +26657,7 @@ impl Runtime {
         // Shift-click extends from wherever the selection already was, which is
         // the one gesture that makes a long selection possible without a drag
         // that outruns the pane.
-        caret.place(&content, offset, self.modifiers.shift_key());
+        caret.place(&content, offset, self.window.modifiers.shift_key());
         self.preview_pane_mut(surface).caret = caret;
         self.preview_edit_focus = Some(surface);
         self.preview_selecting = Some(surface);
@@ -26386,7 +26741,7 @@ impl Runtime {
         let Some(surface) = self.preview_selecting else {
             return Ok(false);
         };
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             return Ok(false);
         };
@@ -26492,7 +26847,7 @@ impl Runtime {
     /// gesture touched would leave the others believing a geometry that stopped
     /// existing in the same frame.
     fn heal_preview_scroll(&mut self) {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         for surface in self.preview_surfaces() {
             let Some(body) = self.preview_surface_body_rect(surface, scale) else {
                 continue;
@@ -26568,7 +26923,10 @@ impl Runtime {
             return;
         };
         let text_metrics = seats::preview_text_metrics(scale);
-        let advance = self.renderer.preview_mono_advance(text_metrics.font_size);
+        let advance = self
+            .window
+            .renderer
+            .preview_mono_advance(text_metrics.font_size);
         self.preview_pane_mut(surface).mono_advance = advance;
         let doc = match view {
             // The editor's own line model, not [`str::lines`]: a body ending in
@@ -26686,7 +27044,7 @@ impl Runtime {
                     }
                     let columns = markdown_table_columns(rows, metrics, |cell, heading| {
                         let runs = markdown_runs(cell, &palette, heading);
-                        self.renderer.measure_preview_paragraph_width(
+                        self.window.renderer.measure_preview_paragraph_width(
                             &runs,
                             metrics.font_size,
                             metrics.line_height,
@@ -26708,7 +27066,7 @@ impl Runtime {
                     // longest line measured at the prose size would reserve a
                     // scroll extent the fence never uses.
                     width: markdown_fence_width(text, metrics, |runs| {
-                        self.renderer.measure_preview_paragraph_width(
+                        self.window.renderer.measure_preview_paragraph_width(
                             runs,
                             metrics.code_font,
                             metrics.code_line_height,
@@ -26735,7 +27093,7 @@ impl Runtime {
         width: f32,
         metrics: seats::PreviewMarkdownMetrics,
     ) -> Vec<MarkdownBlockLayout> {
-        let renderer = &mut self.renderer;
+        let renderer = &mut self.window.renderer;
         let mut wrapped = |runs: &[bt_render::PreviewRun], width: f32, font: f32, line: f32| {
             renderer.measure_preview_paragraph(runs, width, font, line)
         };
@@ -26975,7 +27333,7 @@ impl Runtime {
             .filter(|surface| matches!(surface, PreviewSurface::Seat(_)))
             .filter_map(|surface| self.build_preview_body(surface))
             .collect();
-        self.renderer.set_preview_bodies(bodies);
+        self.window.renderer.set_preview_bodies(bodies);
     }
 
     /// The body of whatever **one** surface is showing, or nothing when it is
@@ -26986,7 +27344,7 @@ impl Runtime {
     /// size into the frame's cost, which is exactly what the head read exists to
     /// keep out of it.
     fn build_preview_body(&mut self, surface: PreviewSurface) -> Option<bt_render::PreviewBody> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let body = self.preview_surface_body_rect(surface, scale)?;
         self.build_preview_body_in(surface, body)
     }
@@ -27003,7 +27361,7 @@ impl Runtime {
         surface: PreviewSurface,
         body: [f32; 4],
     ) -> Option<bt_render::PreviewBody> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         // A picture's own lane draws the pixels; what is left for this surface
         // is the sentence under them (mock-up 4955).
         if self
@@ -27117,7 +27475,7 @@ impl Runtime {
         // paragraph landed and that answer is only true of the body as it now
         // stands. The hover's rule is drawn from the same boxes, so the line
         // under a link cannot be anywhere but under it.
-        let links = measure_preview_links(&mut self.renderer, &built, &sites);
+        let links = measure_preview_links(&mut self.window.renderer, &built, &sites);
         if let Some((hovered_surface, hovered)) = self.preview_link_hover
             && hovered_surface == surface
             && links.iter().any(|link| link.rect == hovered)
@@ -27174,7 +27532,7 @@ impl Runtime {
         // keyboard is — see [`Self::shell_preedit`] for the other half of that
         // single ownership.
         let preedit = caret
-            .zip(self.preedit.as_ref())
+            .zip(self.window.preedit.as_ref())
             .map(|((row, column), preedit)| PreviewPreedit {
                 row,
                 column,
@@ -27339,7 +27697,7 @@ impl Runtime {
     /// on a guess, and the gesture is better spent on nothing than on that.
     fn preview_image_geometry(&self, surface: PreviewSurface) -> Option<([f32; 4], [u32; 2])> {
         let (width, height) = self.preview_pane(surface)?.image.as_ref()?.native?;
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let body = self.preview_surface_body_rect(surface, scale)?;
         (width > 0 && height > 0).then_some((body, [width, height]))
     }
@@ -27404,7 +27762,7 @@ impl Runtime {
             picture.drawn = None;
         }
         if self.preview_raster == Some(surface) {
-            self.renderer.set_preview_image(None);
+            self.window.renderer.set_preview_image(None);
         }
     }
 
@@ -27462,7 +27820,7 @@ impl Runtime {
             .iter()
             .any(|surface| self.preview_raster == Some(*surface))
         {
-            self.renderer.set_preview_image(None);
+            self.window.renderer.set_preview_image(None);
         }
         for surface in hosts {
             self.refit_preview_picture(surface);
@@ -27482,7 +27840,7 @@ impl Runtime {
     /// its meta line and showed nothing at all, and the request it had left in
     /// flight was then answered to nobody.
     fn refit_preview_picture(&mut self, surface: PreviewSurface) {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         // **U8 — a seat's box travels with its pane's tween**, and carries the
         // crop a FLIP needs; a float's is its window's body, which does not
         // animate, because a window is not a pane and does not fly to a slot.
@@ -27495,8 +27853,9 @@ impl Runtime {
                     &self.seat_layout,
                     seat,
                     scale,
-                    self.pane_motion
-                        .transform_of(seat, Instant::now(), self.motion),
+                    self.window
+                        .pane_motion
+                        .transform_of(seat, Instant::now(), self.app.motion),
                 ) else {
                     self.hide_preview_picture(surface);
                     return;
@@ -27528,7 +27887,7 @@ impl Runtime {
             return;
         };
         let cache_key = normalized_local_image_path_key(&path);
-        let decoded = match self.peek_cache.get(&cache_key) {
+        let decoded = match self.window.peek_cache.get(&cache_key) {
             Some(PeekCacheEntry::Ready {
                 key,
                 rgba,
@@ -27557,13 +27916,14 @@ impl Runtime {
         }
         let Some((content_key, rgba, native_width, native_height)) = decoded else {
             self.hide_preview_picture(surface);
-            if !self.math_worker_running {
+            if !self.app.math_worker_running {
                 if let Some(picture) = self.preview_picture_mut(surface) {
                     picture.failure = Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
                 }
                 return;
             }
             if self
+                .app
                 .math_worker
                 .tasks
                 .send(MathWorkerRequest::PeekImage {
@@ -27572,7 +27932,9 @@ impl Runtime {
                 })
                 .is_ok()
             {
-                self.peek_cache.insert(cache_key, PeekCacheEntry::Pending);
+                self.window
+                    .peek_cache
+                    .insert(cache_key, PeekCacheEntry::Pending);
             } else if let Some(picture) = self.preview_picture_mut(surface) {
                 picture.failure = Some(i18n::Text::PreviewFailedImageWorker.text().to_owned());
             }
@@ -27668,7 +28030,7 @@ impl Runtime {
             });
         match (placement, held) {
             (Some(placement), Some((key, rgba, width_px, height_px))) => {
-                self.renderer.set_preview_image(Some(PreviewImage {
+                self.window.renderer.set_preview_image(Some(PreviewImage {
                     seat: placement.seat,
                     clip: placement.clip,
                     key,
@@ -27681,7 +28043,7 @@ impl Runtime {
                 }));
             }
             (Some(_), None) => {
-                self.renderer.set_preview_image(None);
+                self.window.renderer.set_preview_image(None);
             }
             // A float paints from the rectangle filed just below: its window is
             // an overlay layer a whole pass above the seat lane, so handing this
@@ -27699,12 +28061,13 @@ impl Runtime {
         }
         if self.preview_picture(surface).is_some_and(|picture| {
             picture.pending.as_ref() == Some(&target) || picture.resize_scale_deadline.is_some()
-        }) || !self.math_worker_running
+        }) || !self.app.math_worker_running
         {
             return;
         }
         let task = peek_scale_task(&target, rgba, native_width, native_height);
         if self
+            .app
             .math_worker
             .scale_tasks
             .send(ScaleWorkerRequest::Preview {
@@ -27730,8 +28093,9 @@ impl Runtime {
     /// debounce — it answers every frame, and someone else decides when the
     /// child hears about it.
     fn commit_seat_geometry(&mut self) -> Result<()> {
-        let trace_started = self.trace_perf.then(Instant::now);
-        let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
+        let trace_started = self.app.trace_perf.then(Instant::now);
+        let render_physical =
+            presentation_physical_size(self.window.renderer.presentation_geometry());
         if render_physical.width == 0 || render_physical.height == 0 {
             return Ok(());
         }
@@ -27740,8 +28104,8 @@ impl Runtime {
         // raster was sized to it. tiny-window §3.5 generalises the existing
         // dissolve rule to exactly this case, so the same two lines `resize`
         // already runs run here.
-        self.peek_hover.clear();
-        self.renderer.set_peek_overlay(None);
+        self.window.peek_hover.clear();
+        self.window.renderer.set_peek_overlay(None);
         let now = Instant::now();
         self.defer_preview_resample(now);
         // **U8 — `snapshotPanes()` (mock-up 6557-6562), before the layout moves.**
@@ -27754,8 +28118,9 @@ impl Runtime {
         // Taken here rather than inside the re-solve because this is the last
         // moment `self.seat_layout` still describes what the user can see.
         let before = self
+            .window
             .pane_motion
-            .snapshot(&self.pane_rects(), now, self.motion);
+            .snapshot(&self.pane_rects(), now, self.app.motion);
         self.resolve_seat_layout(render_physical);
         let solved_at = trace_started.map(|_| Instant::now());
         let next_grid =
@@ -27776,10 +28141,12 @@ impl Runtime {
         // window is resized keeps its remaining offset and decays onto the new
         // rectangle. Both draw seams read the transform against the live solve,
         // which is that behaviour with no extra code.
-        if self.pane_motion_revision != self.seats.structure_revision() {
-            self.pane_motion_revision = self.seats.structure_revision();
+        if self.window.pane_motion_revision != self.seats.structure_revision() {
+            self.window.pane_motion_revision = self.seats.structure_revision();
             let after = self.pane_rects();
-            self.pane_motion.begin(&before, &after, now, self.motion);
+            self.window
+                .pane_motion
+                .begin(&before, &after, now, self.app.motion);
             // The chrome `resolve_seat_layout` built a moment ago was built
             // through the *previous* frame's transforms, because the tweens that
             // decide it did not exist yet. Rebuilt here rather than by moving
@@ -27798,7 +28165,7 @@ impl Runtime {
             source: FrameSource::Resize,
         })?;
         let published_at = trace_started.map(|_| Instant::now());
-        let synchronous_present = self.divider_drag.is_none();
+        let synchronous_present = self.window.divider_drag.is_none();
         // Pointer motion must stay ahead of the swapchain. `publish_frame` already requested a
         // redraw and `LatestFrameSlot` keeps the newest geometry, so presenting synchronously here
         // would make every divider event wait on GPU acquire/vsync before Windows can deliver the
@@ -27841,11 +28208,11 @@ impl Runtime {
     /// [`chrome_tick_reuses_picture`].
     fn picture_on_glass(&self) -> PictureOnGlass {
         PictureOnGlass {
-            frame_pending: self.pending_frames.pending_frame().is_some(),
-            has_presented_frame: self.last_presented_frame.is_some(),
+            frame_pending: self.window.pending_frames.pending_frame().is_some(),
+            has_presented_frame: self.window.last_presented_frame.is_some(),
             presentation_hold: self.projection.presentation_hold(),
-            content_revision: self.terminal_content_revision,
-            presented_revision: self.presented_picture_revision,
+            content_revision: self.window.terminal_content_revision,
+            presented_revision: self.window.presented_picture_revision,
         }
     }
 
@@ -27861,8 +28228,8 @@ impl Runtime {
     /// which is what the caller did unconditionally before.
     fn publish_chrome_frame(&mut self, now: Instant) -> Result<()> {
         if chrome_tick_reuses_picture(self.picture_on_glass()) {
-            self.chrome_present_pending = true;
-            self.window.request_redraw();
+            self.window.chrome_present_pending = true;
+            self.window.window.request_redraw();
             return Ok(());
         }
         self.publish_frame(FrameTrigger {
@@ -27878,7 +28245,7 @@ impl Runtime {
         // moment anything can say so. Two `u64`s, in debug only — the cost of
         // the third instance of a bug that has now happened twice.
         debug_assert_eq!(
-            self.shells_settled_revision,
+            self.window.shells_settled_revision,
             self.seats.structure_revision(),
             "a seat arrived or left without `settle_seat_set_change`: the panes \
              are about to be drawn at their new widths while their shells still \
@@ -27901,23 +28268,24 @@ impl Runtime {
         // [`SearchScanCache`]). A frame that changed nothing about the search
         // costs one comparison of a fifty-row scan.
         self.refresh_search(false)?;
-        let active = self.active_tab;
-        let tasks = self.math_worker.tasks.clone();
-        let scale_tasks = self.math_worker.scale_tasks.clone();
+        let active = self.window.active_tab;
+        let tasks = self.app.math_worker.tasks.clone();
+        let scale_tasks = self.app.math_worker.scale_tasks.clone();
         dispatch_tab_decoration_tasks(
-            &mut self.tabs[active],
+            &mut self.window.tabs[active],
             &tasks,
             &scale_tasks,
-            &mut self.math_worker_running,
-            &mut self.math_worker_notice_pending,
+            &mut self.app.math_worker_running,
+            &mut self.app.math_worker_notice_pending,
         );
-        self.composed_terminal_frames = self.composed_terminal_frames.saturating_add(1);
+        self.window.composed_terminal_frames =
+            self.window.composed_terminal_frames.saturating_add(1);
         let mut terminal_frame = {
             // Bound once, to the focused leaf: `session` and `projection` are
             // two fields of one shell, and reaching each through its own deref
             // would be two borrows of the tab rather than one borrow of the
             // leaf.
-            let leaf = self.tabs[active].focused_mut();
+            let leaf = self.window.tabs[active].focused_mut();
             leaf.session.refresh_projection(&mut leaf.projection);
             leaf.session
                 .viewport_frame(&mut leaf.projection)
@@ -27928,8 +28296,8 @@ impl Runtime {
         // previous complete formula frame while a proven primary reprint is between clear and exact
         // source re-anchor. Both release through projection/session facts (re-anchor, explicit user
         // takeover, or hard lifecycle retirement), never a timer.
-        if self.projection.presentation_hold() && self.last_presented_frame.is_some() {
-            if self.trace_perf {
+        if self.projection.presentation_hold() && self.window.last_presented_frame.is_some() {
+            if self.app.trace_perf {
                 eprintln!(
                     "BT_PERF_TRACE hold=presentation source={:?} review={} exact_source={}",
                     trigger.source,
@@ -27941,11 +28309,11 @@ impl Runtime {
         }
         if self.session.schedule_visible_artifacts(&terminal_frame) != 0 {
             dispatch_tab_decoration_tasks(
-                &mut self.tabs[active],
+                &mut self.window.tabs[active],
                 &tasks,
                 &scale_tasks,
-                &mut self.math_worker_running,
-                &mut self.math_worker_notice_pending,
+                &mut self.app.math_worker_running,
+                &mut self.app.math_worker_notice_pending,
             );
         }
         // This frame's own references, scanned once for the whole of this frame's life on screen.
@@ -27966,11 +28334,11 @@ impl Runtime {
         // immediately; only what a hover *reveals* — a tooltip there, a thumbnail here — waits out
         // the 300ms settle. When the pointer is in another pane, that pane wears them and this one
         // is left alone, which `redraw` sees to.
-        if self.hover_pane == Some(self.focused_leaf) {
+        if self.window.hover_pane == Some(self.focused_leaf) {
             let hovered_reference = self.hovered_image_reference();
             apply_hover_marks(
                 &mut terminal_frame,
-                &self.hyperlink_hover,
+                &self.window.hyperlink_hover,
                 hovered_reference.as_ref().map(|(_, reference)| reference),
             );
         }
@@ -27985,15 +28353,15 @@ impl Runtime {
         // came back — and an answer that is gone before the next repaint is a
         // gesture that looks like it did nothing at all. The mock-up's own
         // click-feedback (B24) holds its word for 1300ms for the same reason.
-        if let Some((notice, shown_at)) = self.files_notice.clone() {
+        if let Some((notice, shown_at)) = self.window.files_notice.clone() {
             if Instant::now().saturating_duration_since(shown_at) < FILES_NOTICE_DWELL {
                 terminal_frame.status_text = Some(notice);
             } else {
-                self.files_notice = None;
+                self.window.files_notice = None;
             }
         }
         if terminal_frame.status_text.is_none()
-            && let Some(notice) = take_math_worker_notice(&mut self.math_worker_notice_pending)
+            && let Some(notice) = take_math_worker_notice(&mut self.app.math_worker_notice_pending)
         {
             terminal_frame.status_text = Some(notice.to_owned());
         }
@@ -28004,7 +28372,7 @@ impl Runtime {
         // one it actually read.
         if terminal_frame.status_text.is_none()
             && let Some(notice) =
-                files::take_files_worker_notice(&mut self.files_worker_notice_pending)
+                files::take_files_worker_notice(&mut self.app.files_worker_notice_pending)
         {
             terminal_frame.status_text = Some(notice.to_owned());
         }
@@ -28013,13 +28381,14 @@ impl Runtime {
         // that loses all three threads says all three sentences, one per frame.
         if terminal_frame.status_text.is_none()
             && let Some(notice) =
-                preview::take_preview_worker_notice(&mut self.preview_worker_notice_pending)
+                preview::take_preview_worker_notice(&mut self.app.preview_worker_notice_pending)
         {
             terminal_frame.status_text = Some(notice.to_owned());
         }
         // The fourth, in the same queue and last for the same reason.
         if terminal_frame.status_text.is_none()
-            && let Some(notice) = git::take_git_worker_notice(&mut self.git_worker_notice_pending)
+            && let Some(notice) =
+                git::take_git_worker_notice(&mut self.app.git_worker_notice_pending)
         {
             terminal_frame.status_text = Some(notice.to_owned());
         }
@@ -28028,14 +28397,14 @@ impl Runtime {
         if skip_unchanged
             && pty_drain_says_nothing_new(
                 pty_frame_is_unchanged(
-                    self.pending_frames.pending_frame(),
-                    self.last_presented_frame.as_ref(),
+                    self.window.pending_frames.pending_frame(),
+                    self.window.last_presented_frame.as_ref(),
                     &composed.frame,
                 ),
-                self.unpainted_pane_output,
+                self.window.unpainted_pane_output,
             )
         {
-            if self.trace_perf {
+            if self.app.trace_perf {
                 let digest_started = Instant::now();
                 let digest = frame_content_digest(&composed.frame);
                 let alternate_screen = frame_is_alternate_screen(&composed.frame);
@@ -28061,11 +28430,13 @@ impl Runtime {
         // above this can hold, skip or decide the frame says nothing new; only
         // a frame that actually enters the slot moves the revision the
         // chrome-only path compares against.
-        self.terminal_content_revision = self.terminal_content_revision.saturating_add(1);
-        self.pending_frames
+        self.window.terminal_content_revision =
+            self.window.terminal_content_revision.saturating_add(1);
+        self.window
+            .pending_frames
             .publish(composed.frame, trigger)
             .context("reject non-rectangular frame at publish boundary")?;
-        self.window.request_redraw();
+        self.window.window.request_redraw();
         Ok(true)
     }
 
@@ -28083,29 +28454,29 @@ impl Runtime {
 
     fn disable_math_worker(&mut self) -> bool {
         disable_math_worker_state(
-            &mut self.math_worker_running,
-            &mut self.math_worker_notice_pending,
+            &mut self.app.math_worker_running,
+            &mut self.app.math_worker_notice_pending,
         )
     }
 
     fn disable_files_worker(&mut self) -> bool {
         files::disable_files_worker_state(
-            &mut self.files_worker_running,
-            &mut self.files_worker_notice_pending,
+            &mut self.app.files_worker_running,
+            &mut self.app.files_worker_notice_pending,
         )
     }
 
     fn disable_preview_worker(&mut self) -> bool {
         preview::disable_preview_worker_state(
-            &mut self.preview_worker_running,
-            &mut self.preview_worker_notice_pending,
+            &mut self.app.preview_worker_running,
+            &mut self.app.preview_worker_notice_pending,
         )
     }
 
     fn disable_git_worker(&mut self) -> bool {
         git::disable_git_worker_state(
-            &mut self.git_worker_running,
-            &mut self.git_worker_notice_pending,
+            &mut self.app.git_worker_running,
+            &mut self.app.git_worker_notice_pending,
         )
     }
 
@@ -28124,13 +28495,14 @@ impl Runtime {
         // for what asking `refresh_chrome` alone costs.
         let mut body = false;
         loop {
-            match self.git_worker.responses.try_recv() {
+            match self.app.git_worker.responses.try_recv() {
                 Ok(response) => {
                     let host = response.host;
-                    let Some(index) = self.tabs.iter().position(|tab| tab.id == host.tab()) else {
+                    let Some(index) = self.window.tabs.iter().position(|tab| tab.id == host.tab())
+                    else {
                         continue;
                     };
-                    let tab = &mut self.tabs[index];
+                    let tab = &mut self.window.tabs[index];
                     // **The asker has to still be there.** A column that closed
                     // and a graph that was shut are the same cancellation,
                     // arriving as a dropped answer — and each says so in its own
@@ -28162,6 +28534,7 @@ impl Runtime {
                                 // has moved on is the cancellation arriving as a
                                 // dropped result.
                                 if let Some(peek) = self
+                                    .window
                                     .peek_buffer
                                     .as_mut()
                                     .filter(|peek| peek.source == source)
@@ -28176,7 +28549,7 @@ impl Runtime {
                                             peek.decline(git_panel::fault_sentence(&fault));
                                         }
                                     }
-                                    body |= index == self.active_tab;
+                                    body |= index == self.window.active_tab;
                                 }
                                 continue;
                             };
@@ -28191,7 +28564,7 @@ impl Runtime {
                                 }),
                                 Err(fault) => buffer.decline(git_panel::fault_sentence(&fault)),
                             }
-                            body |= index == self.active_tab;
+                            body |= index == self.window.active_tab;
                             continue;
                         }
                         Err(answer) => answer,
@@ -28247,7 +28620,7 @@ impl Runtime {
                         // `self` was borrowed mutably above; the tab has to be
                         // taken again for the filing below.
                     }
-                    let tab = &mut self.tabs[index];
+                    let tab = &mut self.window.tabs[index];
                     let filed = match &host {
                         git::GitHost::Column(leaf) => tab
                             .git_trees
@@ -28280,7 +28653,7 @@ impl Runtime {
                             state.invalidate();
                         }
                     }
-                    changed |= filed && index == self.active_tab;
+                    changed |= filed && index == self.window.active_tab;
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -28347,9 +28720,9 @@ impl Runtime {
         if root.trim().is_empty() {
             return;
         }
-        let active = self.active_tab;
-        let tab_id = self.tabs[active].id;
-        let cache = self.tabs[active].git_trees.entry(seat).or_default();
+        let active = self.window.active_tab;
+        let tab_id = self.window.tabs[active].id;
+        let cache = self.window.tabs[active].git_trees.entry(seat).or_default();
         cache.retarget(std::path::Path::new(root));
         let questions = cache.pending_questions();
         // Marked before any send, so a second call on the same frame sees
@@ -28358,7 +28731,7 @@ impl Runtime {
             cache.mark_pending(question);
         }
         for question in questions {
-            if !self.git_worker.request(git::GitRequest {
+            if !self.app.git_worker.request(git::GitRequest {
                 host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
                 question,
             }) {
@@ -28377,13 +28750,17 @@ impl Runtime {
     fn apply_preview_results(&mut self) -> Result<()> {
         let mut changed = false;
         loop {
-            match self.preview_worker.responses.try_recv() {
+            match self.app.preview_worker.responses.try_recv() {
                 Ok(response) => {
-                    let Some(index) = self.tabs.iter().position(|tab| tab.id == response.tab)
+                    let Some(index) = self
+                        .window
+                        .tabs
+                        .iter()
+                        .position(|tab| tab.id == response.tab)
                     else {
                         continue;
                     };
-                    let tab = &mut self.tabs[index];
+                    let tab = &mut self.window.tabs[index];
                     match response.answer {
                         preview::PreviewAnswer::Head(outcome) => {
                             let Some(buffer) = tab.preview_pool.get_mut(&response.source) else {
@@ -28395,12 +28772,13 @@ impl Runtime {
                                 // during the read, and that is the cancellation
                                 // §7.1.3 asks for, arriving as a dropped result.
                                 if let Some(peek) = self
+                                    .window
                                     .peek_buffer
                                     .as_mut()
                                     .filter(|peek| peek.source == response.source)
                                 {
                                     peek.accept(outcome);
-                                    changed |= index == self.active_tab;
+                                    changed |= index == self.window.active_tab;
                                 }
                                 continue;
                             };
@@ -28413,7 +28791,7 @@ impl Runtime {
                             // trusted, which is the same discipline the scroll
                             // offset is held to two lines from a body landing.
                             let content = buffer.content.clone();
-                            let tab = &mut self.tabs[index];
+                            let tab = &mut self.window.tabs[index];
                             // **Every surface on this buffer**, and there may be
                             // several: one file open in two panes is one buffer
                             // (§7.1.3) with two carets, and a body arriving under
@@ -28429,7 +28807,7 @@ impl Runtime {
                                     tab.preview_panes.entry(*surface).caret.heal(&content);
                                 }
                             }
-                            changed |= index == self.active_tab && !showing.is_empty();
+                            changed |= index == self.window.active_tab && !showing.is_empty();
                         }
                         // A picture's byte count, for the meta line under it.
                         // Filed against the image state rather than the pool,
@@ -28453,7 +28831,7 @@ impl Runtime {
                                     told = true;
                                 }
                             }
-                            changed |= told && index == self.active_tab;
+                            changed |= told && index == self.window.active_tab;
                         }
                     }
                 }
@@ -28496,9 +28874,9 @@ impl Runtime {
     /// is not missing, it is folded. Deriving the request list anywhere else
     /// would mean a second walk that could disagree with the one on screen.
     fn files_trees(&mut self, now: Instant) -> BTreeMap<SeatId, seats::FilesTreeContent> {
-        let active = self.active_tab;
-        let tab_id = self.tabs[active].id;
-        let motion = self.motion;
+        let active = self.window.active_tab;
+        let tab_id = self.window.tabs[active].id;
+        let motion = self.app.motion;
         // The *ring's* seat, not the keyboard's: `:focus-visible`, so a column
         // that took the keyboard from a press shows its selection without one.
         let ringed = self.files_ring_seat();
@@ -28509,11 +28887,11 @@ impl Runtime {
         // until a Git page has asked something, which is the gate saying "no
         // extra read" in the only way that cannot be forgotten. Nothing here asks
         // git anything; every answer in it was paid for by an open page.
-        let pages = self.tabs[active].git_badge_sources();
+        let pages = self.window.tabs[active].git_badge_sources();
         let badges: BTreeMap<SeatId, git_panel::GitTreeBadges> = walked
             .keys()
             .map(|seat| {
-                let root = self.tabs[active]
+                let root = self.window.tabs[active]
                     .files
                     .get(seat)
                     .map(|state| state.root.clone())
@@ -28529,12 +28907,12 @@ impl Runtime {
         for (seat, (mut content, wanted)) in walked {
             content.focus_ring = Some(seat) == ringed;
             content.badges = badges.get(&seat).cloned().unwrap_or_default();
-            let root = self.tabs[active]
+            let root = self.window.tabs[active]
                 .files
                 .get(&seat)
                 .map(|state| state.root.clone())
                 .unwrap_or_default();
-            let cache = self.tabs[active].file_trees.entry(seat).or_default();
+            let cache = self.window.tabs[active].file_trees.entry(seat).or_default();
             for key in wanted {
                 // Marked before the send so that the next walk — which may
                 // happen on this very frame, from the hit test — sees a question
@@ -28561,7 +28939,7 @@ impl Runtime {
             views.insert(seat, content);
         }
         for ask in asks {
-            if !self.files_worker.request(ask) {
+            if !self.app.files_worker.request(ask) {
                 self.disable_files_worker();
                 break;
             }
@@ -28576,7 +28954,7 @@ impl Runtime {
         // open, never on a timer, and never for a page nobody switched to. A
         // column on its tree costs exactly what it cost before this slice: no
         // process at all.
-        let on_screen: Vec<(SeatId, seats::FilesView, String)> = self.tabs[active]
+        let on_screen: Vec<(SeatId, seats::FilesView, String)> = self.window.tabs[active]
             .files
             .iter()
             .filter(|(seat, _)| views.contains_key(seat))
@@ -28597,8 +28975,8 @@ impl Runtime {
     /// because nothing can reach here: there is no strip to press and the chord
     /// asks the same question first.
     fn set_files_view(&mut self, seat: SeatId, view: seats::FilesView) -> Result<()> {
-        let active = self.active_tab;
-        let Some(state) = self.tabs[active].files.get_mut(&seat) else {
+        let active = self.window.active_tab;
+        let Some(state) = self.window.tabs[active].files.get_mut(&seat) else {
             return Ok(());
         };
         if state.view == view {
@@ -28639,8 +29017,8 @@ impl Runtime {
         let Some(seat) = self.seats.files().into_iter().next() else {
             return Ok(());
         };
-        let active = self.active_tab;
-        let view = self.tabs[active]
+        let active = self.window.active_tab;
+        let view = self.window.tabs[active]
             .files
             .get(&seat)
             .map_or(seats::FilesView::Files, |state| state.view);
@@ -28656,12 +29034,12 @@ impl Runtime {
     /// press is about and carries out the answer, exactly as
     /// [`Self::press_git_act`] carries out `press_outcome`'s.
     fn press_git_row(&mut self, seat: SeatId, index: usize) -> Result<()> {
-        let active = self.active_tab;
+        let active = self.window.active_tab;
         // The rows as they are **on screen**, and the root as the *cache* has
         // it: a document opened against a root the column has since left would
         // be a diff of a file in another repository, and the cache is the one
         // thing that knows which repository this column found.
-        let Some(root) = self.tabs[active]
+        let Some(root) = self.window.tabs[active]
             .git_trees
             .get(&seat)
             .and_then(git::GitCache::root)
@@ -28673,12 +29051,13 @@ impl Runtime {
         // because it is not one: it opens and shuts what is under it, and the
         // answer lives on the column's durable state rather than in a preview.
         if self
+            .window
             .git_pages_shown
             .get(&seat)
             .and_then(|page| page.rows.get(index))
             .is_some_and(git_panel::row_toggles_remotes)
         {
-            let state = self.tabs[active].files.entry(seat).or_default();
+            let state = self.window.tabs[active].files.entry(seat).or_default();
             state.git_remotes_open = !state.git_remotes_open;
             self.mark_session_dirty(Instant::now());
             if self.refresh_chrome() {
@@ -28687,6 +29066,7 @@ impl Runtime {
             return Ok(());
         }
         let Some(open) = self
+            .window
             .git_pages_shown
             .get(&seat)
             .and_then(|page| page.rows.get(index))
@@ -28745,9 +29125,9 @@ impl Runtime {
         let Some(question) = git_document_question(&source, renamed_from) else {
             return Ok(());
         };
-        let active = self.active_tab;
-        let tab_id = self.tabs[active].id;
-        if !self.git_worker.request(git::GitRequest {
+        let active = self.window.active_tab;
+        let tab_id = self.window.tabs[active].id;
+        if !self.app.git_worker.request(git::GitRequest {
             host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
             question,
         }) {
@@ -28762,9 +29142,9 @@ impl Runtime {
     /// the list is the cache's, which is the same split the whole page is built
     /// on: what the repository said, and what this column is looking at.
     fn expand_commit(&mut self, seat: SeatId, hash: &str) -> Result<()> {
-        let active = self.active_tab;
-        let tab_id = self.tabs[active].id;
-        let Some(state) = self.tabs[active].files.get_mut(&seat) else {
+        let active = self.window.active_tab;
+        let tab_id = self.window.tabs[active].id;
+        let Some(state) = self.window.tabs[active].files.get_mut(&seat) else {
             return Ok(());
         };
         let opened = git_panel::toggled_expansion(state.git_expanded.as_deref(), hash);
@@ -28772,9 +29152,9 @@ impl Runtime {
         // Shutting one asks nothing: the answer stays in the cache, so pressing
         // the same commit again draws its files without a second subprocess.
         if let Some(hash) = opened
-            && let Some(cache) = self.tabs[active].git_trees.get_mut(&seat)
+            && let Some(cache) = self.window.tabs[active].git_trees.get_mut(&seat)
             && let Some(question) = cache.begin_commit_files(&hash)
-            && !self.git_worker.request(git::GitRequest {
+            && !self.app.git_worker.request(git::GitRequest {
                 host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
                 question,
             })
@@ -28795,7 +29175,7 @@ impl Runtime {
     /// *before* a question is built, so the confirmation is a door in front of the
     /// verb rather than a message about one that has already run.
     fn press_git_act(&mut self, seat: SeatId, index: usize, act: git_panel::GitAct) -> Result<()> {
-        let Some(page) = self.git_pages_shown.get(&seat) else {
+        let Some(page) = self.window.git_pages_shown.get(&seat) else {
             return Ok(());
         };
         let Some(row) = page.rows.get(index) else {
@@ -28883,15 +29263,15 @@ impl Runtime {
     /// starts exactly where the list currently ends — so the duplicate is
     /// dropped rather than appended twice.
     fn load_more_commits(&mut self, seat: SeatId) -> Result<()> {
-        let active = self.active_tab;
-        let tab_id = self.tabs[active].id;
-        let Some(cache) = self.tabs[active].git_trees.get(&seat) else {
+        let active = self.window.active_tab;
+        let tab_id = self.window.tabs[active].id;
+        let Some(cache) = self.window.tabs[active].git_trees.get(&seat) else {
             return Ok(());
         };
         let Some(question) = cache.more_commits() else {
             return Ok(());
         };
-        if !self.git_worker.request(git::GitRequest {
+        if !self.app.git_worker.request(git::GitRequest {
             host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
             question,
         }) {
@@ -28908,8 +29288,8 @@ impl Runtime {
     /// pressing it twice on one document — which is what the preview pool's own
     /// single-instance contract already means by "the same buffer".
     fn open_git_graph(&mut self, seat: SeatId) -> Result<()> {
-        let active = self.active_tab;
-        let Some(root) = self.tabs[active]
+        let active = self.window.active_tab;
+        let Some(root) = self.window.tabs[active]
             .git_trees
             .get(&seat)
             .and_then(git::GitCache::root)
@@ -28924,7 +29304,7 @@ impl Runtime {
         );
         // The state before the seat, so the first frame after the seat is taken
         // already has a cache to ask its questions from.
-        self.tabs[active]
+        self.window.tabs[active]
             .git_graphs
             .entry(root)
             .or_insert_with_key(|root| git_graph::GraphState::new(root.clone()));
@@ -28941,11 +29321,15 @@ impl Runtime {
     /// plan is derived from the cache rather than remembered, so a slot already
     /// in flight asks for nothing however often this is called.
     fn ask_git_for_graphs(&mut self) {
-        let active = self.active_tab;
-        let tab_id = self.tabs[active].id;
-        let roots: Vec<std::path::PathBuf> = self.tabs[active].git_graphs.keys().cloned().collect();
+        let active = self.window.active_tab;
+        let tab_id = self.window.tabs[active].id;
+        let roots: Vec<std::path::PathBuf> = self.window.tabs[active]
+            .git_graphs
+            .keys()
+            .cloned()
+            .collect();
         for root in roots {
-            let Some(state) = self.tabs[active].git_graphs.get_mut(&root) else {
+            let Some(state) = self.window.tabs[active].git_graphs.get_mut(&root) else {
                 continue;
             };
             let questions = state.cache.pending_questions();
@@ -28953,7 +29337,7 @@ impl Runtime {
                 state.cache.mark_pending(question);
             }
             for question in questions {
-                if !self.git_worker.request(git::GitRequest {
+                if !self.app.git_worker.request(git::GitRequest {
                     host: git::GitHost::Graph {
                         tab: tab_id,
                         root: root.clone(),
@@ -28969,9 +29353,9 @@ impl Runtime {
 
     /// One more page of history for a graph (R23's auto-paging).
     fn extend_graph(&mut self, root: &Path) {
-        let active = self.active_tab;
-        let tab_id = self.tabs[active].id;
-        let Some(state) = self.tabs[active].git_graphs.get(root) else {
+        let active = self.window.active_tab;
+        let tab_id = self.window.tabs[active].id;
+        let Some(state) = self.window.tabs[active].git_graphs.get(root) else {
             return;
         };
         let Some(question) = state.cache.more_commits() else {
@@ -28983,7 +29367,7 @@ impl Runtime {
         // rather than appended. What stops the flood is that the list is one
         // page longer the moment the first answer lands, and `wants_more` then
         // asks about a further page rather than the same one.
-        if !self.git_worker.request(git::GitRequest {
+        if !self.app.git_worker.request(git::GitRequest {
             host: git::GitHost::Graph {
                 tab: tab_id,
                 root: root.to_owned(),
@@ -29000,15 +29384,15 @@ impl Runtime {
     /// reached from a derivation that runs every frame, so "have I asked this
     /// already" has to be answerable by the thing holding the answer.
     fn ask_graph_compare(&mut self, root: &Path, a: &str, b: Option<&str>) {
-        let active = self.active_tab;
-        let tab_id = self.tabs[active].id;
-        let Some(state) = self.tabs[active].git_graphs.get_mut(root) else {
+        let active = self.window.active_tab;
+        let tab_id = self.window.tabs[active].id;
+        let Some(state) = self.window.tabs[active].git_graphs.get_mut(root) else {
             return;
         };
         let Some(question) = state.cache.begin_compare_files(a, b) else {
             return;
         };
-        if !self.git_worker.request(git::GitRequest {
+        if !self.app.git_worker.request(git::GitRequest {
             host: git::GitHost::Graph {
                 tab: tab_id,
                 root: root.to_owned(),
@@ -29029,8 +29413,8 @@ impl Runtime {
     ///
     /// Answers whether anything moved, so the caller can decide about a frame.
     fn step_graph_seeks(&mut self) -> Result<bool> {
-        let active = self.active_tab;
-        let seats: Vec<SeatId> = self.tabs[active]
+        let active = self.window.active_tab;
+        let seats: Vec<SeatId> = self.window.tabs[active]
             .git_graph_view
             .iter()
             .filter(|(_, view)| view.seek.is_some())
@@ -29038,23 +29422,24 @@ impl Runtime {
             .collect();
         let mut moved = false;
         for seat in seats {
-            let Some((root, seek)) = self.tabs[active]
+            let Some((root, seek)) = self.window.tabs[active]
                 .git_graph_view
                 .get(&seat)
                 .and_then(|view| Some((view.root.clone(), view.seek.clone()?)))
             else {
                 continue;
             };
-            let Some(state) = self.tabs[active].git_graphs.get(&root) else {
+            let Some(state) = self.window.tabs[active].git_graphs.get(&root) else {
                 continue;
             };
             match git_graph::graph_seek_step(state, &seek) {
                 git_graph::GraphSeekStep::Arrived(at) => {
                     let row = self
+                        .window
                         .git_graphs_shown
                         .get(&seat)
                         .map(|content| content.commit_row(at));
-                    if let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) {
+                    if let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) {
                         view.seek = None;
                     }
                     if let Some(row) = row {
@@ -29064,7 +29449,7 @@ impl Runtime {
                     moved = true;
                 }
                 git_graph::GraphSeekStep::NeedPage => {
-                    if let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) {
+                    if let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) {
                         view.seek = Some(git_graph::GraphSeek {
                             pages: seek.pages + 1,
                             ..seek
@@ -29074,7 +29459,7 @@ impl Runtime {
                 }
                 git_graph::GraphSeekStep::Waiting => {}
                 git_graph::GraphSeekStep::GaveUp => {
-                    if let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) {
+                    if let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) {
                         view.seek = None;
                     }
                     self.toast(
@@ -29092,7 +29477,7 @@ impl Runtime {
 
     /// Which graph each preview seat is drawing, and how far down it is.
     fn git_graphs(&mut self, scale: f32) -> BTreeMap<SeatId, git_graph::GraphContent> {
-        let active = self.active_tab;
+        let active = self.window.active_tab;
         let showing: Vec<(SeatId, std::path::PathBuf)> = self
             .seats
             .preview_seats()
@@ -29110,7 +29495,7 @@ impl Runtime {
             .collect();
         // A seat that has stopped showing a graph keeps no scroll and no open
         // commit: it is not looking at that list any more.
-        self.tabs[active]
+        self.window.tabs[active]
             .git_graph_view
             .retain(|seat, _| showing.iter().any(|(shown, _)| shown == seat));
         if showing.is_empty() {
@@ -29128,11 +29513,14 @@ impl Runtime {
             // The state may not exist yet on the very first frame after a
             // restore put a graph buffer back on a seat; making it here is the
             // same "vivify and ask" the columns do.
-            self.tabs[active]
+            self.window.tabs[active]
                 .git_graphs
                 .entry(root.clone())
                 .or_insert_with_key(|root| git_graph::GraphState::new(root.clone()));
-            let view = self.tabs[active].git_graph_view.entry(seat).or_default();
+            let view = self.window.tabs[active]
+                .git_graph_view
+                .entry(seat)
+                .or_default();
             if view.root != root {
                 *view = GraphView {
                     root: root.clone(),
@@ -29153,7 +29541,7 @@ impl Runtime {
             let search_focused = view.search_focused;
             let search_at = view.search_at;
             let asked = view.search_asked.clone();
-            let Some(state) = self.tabs[active].git_graphs.get(&root) else {
+            let Some(state) = self.window.tabs[active].git_graphs.get(&root) else {
                 continue;
             };
             let state = state.clone();
@@ -29166,7 +29554,7 @@ impl Runtime {
                 .and_then(|query| state.cache.search(query))
                 .and_then(git::GitSlot::ready)
                 .map(Vec::as_slice);
-            let renderer = &mut self.renderer;
+            let renderer = &mut self.window.renderer;
             let mut measure = |text: &str, size: f32, face: git_panel::MeasureFace| {
                 renderer.measure_chrome_label(
                     text,
@@ -29212,7 +29600,10 @@ impl Runtime {
             if content.wants_more {
                 extend.push(root.clone());
             }
-            let view = self.tabs[active].git_graph_view.entry(seat).or_default();
+            let view = self.window.tabs[active]
+                .git_graph_view
+                .entry(seat)
+                .or_default();
             view.scroll_px = healed;
             view.selected = selected;
             view.lane_hold = git_graph::LaneWidthHold {
@@ -29242,8 +29633,8 @@ impl Runtime {
 
     /// A graph row's body, pressed — one click.
     fn press_graph_row(&mut self, seat: SeatId, index: usize, now: Instant) -> Result<()> {
-        let active = self.active_tab;
-        let Some(root) = self.tabs[active]
+        let active = self.window.active_tab;
+        let Some(root) = self.window.tabs[active]
             .git_graph_view
             .get(&seat)
             .map(|view| view.root.clone())
@@ -29251,6 +29642,7 @@ impl Runtime {
             return Ok(());
         };
         let Some(row) = self
+            .window
             .git_graphs_shown
             .get(&seat)
             .and_then(|page| page.rows.iter().find(|row| row.index() == index))
@@ -29265,7 +29657,7 @@ impl Runtime {
         // over. Without a row open it is not a comparison at all and falls
         // through to the ordinary press, because there is no first end for it to
         // be the second end of.
-        if self.modifiers.control_key() {
+        if self.window.modifiers.control_key() {
             let hash = match &row {
                 git_graph::GraphViewRow::Uncommitted(_) => {
                     Some(git_graph::GRAPH_UNCOMMITTED_HASH.to_owned())
@@ -29307,7 +29699,7 @@ impl Runtime {
         // the keyboard walks from where the pointer last was, which is what makes
         // clicking a row and then pressing `↓` mean the row under it.
         self.select_graph_row(seat, index);
-        let double = self.git_graph_clicks.register(seat, &key, now) == TabClick::Double;
+        let double = self.window.git_graph_clicks.register(seat, &key, now) == TabClick::Double;
         let open = if double {
             git_graph::row_double_open(&row).or_else(|| git_graph::row_open(&row, &root))
         } else {
@@ -29343,8 +29735,8 @@ impl Runtime {
     /// `Ctrl`+click on the row already at the far end means, for the reason every
     /// toggle in this window works that way.
     fn set_graph_compare(&mut self, seat: SeatId, hash: &str) -> bool {
-        let active = self.active_tab;
-        let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) else {
+        let active = self.window.active_tab;
+        let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) else {
             return false;
         };
         let Some(expanded) = view.expanded.clone() else {
@@ -29360,8 +29752,8 @@ impl Runtime {
 
     /// Stop comparing, keeping the open row open.
     fn clear_graph_compare(&mut self, seat: SeatId) -> bool {
-        let active = self.active_tab;
-        self.tabs[active]
+        let active = self.window.active_tab;
+        self.window.tabs[active]
             .git_graph_view
             .get_mut(&seat)
             .is_some_and(|view| view.compare.take().is_some())
@@ -29369,7 +29761,7 @@ impl Runtime {
 
     /// One of the detail block's own parts, pressed (D2/D6/D7).
     fn press_graph_detail(&mut self, seat: SeatId, part: git_graph::GraphDetailPart) -> Result<()> {
-        let Some(detail) = self.git_graphs_shown.get(&seat).and_then(|content| {
+        let Some(detail) = self.window.git_graphs_shown.get(&seat).and_then(|content| {
             content.rows.iter().find_map(|row| match row {
                 git_graph::GraphViewRow::Detail(detail) => Some(detail.clone()),
                 _ => None,
@@ -29412,7 +29804,7 @@ impl Runtime {
     /// waiting for: a copy is invisible, and a verb whose whole effect is
     /// somewhere the reader cannot see has to say that it happened.
     fn copy_from_graph(&mut self, seat: SeatId, text: &str, said: &str) -> Result<()> {
-        let result = window_hwnd(&self.window).and_then(|hwnd| {
+        let result = window_hwnd(&self.window.window).and_then(|hwnd| {
             bt_platform::set_clipboard_text(hwnd, text)
                 .map_err(|error| anyhow!(error))
                 .context("copy a commit's own words to the clipboard")
@@ -29430,8 +29822,8 @@ impl Runtime {
 
     /// Go to a commit, paging until it turns up if it has to (D2).
     fn seek_graph_commit(&mut self, seat: SeatId, hash: String) -> Result<()> {
-        let active = self.active_tab;
-        if let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) {
+        let active = self.window.active_tab;
+        if let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) {
             view.seek = Some(git_graph::GraphSeek { hash, pages: 0 });
         }
         if self.step_graph_seeks()? && self.refresh_chrome() {
@@ -29445,18 +29837,24 @@ impl Runtime {
     /// Written whether or not it moved: the caller is a gesture that *means* this
     /// row, and a press on the row already selected is still that.
     fn select_graph_row(&mut self, seat: SeatId, index: usize) {
-        let active = self.active_tab;
-        let view = self.tabs[active].git_graph_view.entry(seat).or_default();
+        let active = self.window.active_tab;
+        let view = self.window.tabs[active]
+            .git_graph_view
+            .entry(seat)
+            .or_default();
         view.selected = Some(index);
     }
 
     /// Turn one commit's file list over, in the graph (R15) — or the working
     /// tree's (V5).
     fn expand_graph_commit(&mut self, seat: SeatId, root: &Path, hash: &str) -> Result<()> {
-        let active = self.active_tab;
-        let tab_id = self.tabs[active].id;
+        let active = self.window.active_tab;
+        let tab_id = self.window.tabs[active].id;
         let opened = {
-            let view = self.tabs[active].git_graph_view.entry(seat).or_default();
+            let view = self.window.tabs[active]
+                .git_graph_view
+                .entry(seat)
+                .or_default();
             let opened = git_graph::toggled_expansion(view.expanded.as_deref(), hash);
             view.expanded.clone_from(&opened);
             // **A comparison belongs to the row it was started from** (D6/D9), so
@@ -29471,9 +29869,9 @@ impl Runtime {
         // what let the row exist at all under R31's two-condition gate.
         if let Some(hash) = opened
             && hash != git_graph::GRAPH_UNCOMMITTED_HASH
-            && let Some(state) = self.tabs[active].git_graphs.get_mut(root)
+            && let Some(state) = self.window.tabs[active].git_graphs.get_mut(root)
             && let Some(question) = state.cache.begin_commit_files(&hash)
-            && !self.git_worker.request(git::GitRequest {
+            && !self.app.git_worker.request(git::GitRequest {
                 host: git::GitHost::Graph {
                     tab: tab_id,
                     root: root.to_owned(),
@@ -29497,10 +29895,10 @@ impl Runtime {
     /// which for `Esc` with nothing open is the whole point: the float dismissal
     /// and, under that, `vim` are entitled to an `Esc` this page has no use for.
     fn graph_key(&mut self, seat: SeatId, key: git_graph::GraphKey) -> Result<bool> {
-        let Some(content) = self.git_graphs_shown.get(&seat).cloned() else {
+        let Some(content) = self.window.git_graphs_shown.get(&seat).cloned() else {
             return Ok(false);
         };
-        let Some(root) = self.tabs[self.active_tab]
+        let Some(root) = self.window.tabs[self.window.active_tab]
             .git_graph_view
             .get(&seat)
             .map(|view| view.root.clone())
@@ -29576,7 +29974,7 @@ impl Runtime {
                 return Ok(true);
             }
             git_graph::GraphKeyAction::Collapse(row) => {
-                let hash = self.tabs[self.active_tab]
+                let hash = self.window.tabs[self.window.active_tab]
                     .git_graph_view
                     .get(&seat)
                     .and_then(|view| view.expanded.clone());
@@ -29599,8 +29997,8 @@ impl Runtime {
 
     /// Scroll a graph until one of its rows is whole on screen (V14).
     fn reveal_graph_row(&mut self, seat: SeatId, index: usize) {
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(content) = self.git_graphs_shown.get(&seat) else {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let Some(content) = self.window.git_graphs_shown.get(&seat) else {
             return;
         };
         let Some(body) = seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)
@@ -29608,8 +30006,8 @@ impl Runtime {
             return;
         };
         let wanted = git_graph::graph_geometry(body, content, scale).reveal(index);
-        let active = self.active_tab;
-        if let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) {
+        let active = self.window.active_tab;
+        if let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) {
             view.scroll_px = wanted;
         }
     }
@@ -29640,9 +30038,9 @@ impl Runtime {
         let Some(question) = git_document_question(&source, renamed_from) else {
             return Ok(());
         };
-        let active = self.active_tab;
-        let tab_id = self.tabs[active].id;
-        if !self.git_worker.request(git::GitRequest {
+        let active = self.window.active_tab;
+        let tab_id = self.window.tabs[active].id;
+        if !self.app.git_worker.request(git::GitRequest {
             host: git::GitHost::Graph {
                 tab: tab_id,
                 root: root.to_owned(),
@@ -29656,15 +30054,15 @@ impl Runtime {
 
     /// **Stand somewhere else** (R10) — from a branch row.
     fn checkout_from_column(&mut self, seat: SeatId, target: String, detach: bool) -> Result<()> {
-        let active = self.active_tab;
-        let tab_id = self.tabs[active].id;
-        let Some(cache) = self.tabs[active].git_trees.get_mut(&seat) else {
+        let active = self.window.active_tab;
+        let tab_id = self.window.tabs[active].id;
+        let Some(cache) = self.window.tabs[active].git_trees.get_mut(&seat) else {
             return Ok(());
         };
         let Some(question) = cache.begin_checkout(target, detach) else {
             return Ok(());
         };
-        if !self.git_worker.request(git::GitRequest {
+        if !self.app.git_worker.request(git::GitRequest {
             host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
             question,
         }) {
@@ -29687,15 +30085,15 @@ impl Runtime {
     /// a graph drawing the new one is the one disagreement this whole subsystem
     /// was built to prevent.
     fn checkout_in_graph(&mut self, root: &Path, target: String, detach: bool) -> Result<()> {
-        let active = self.active_tab;
-        let tab_id = self.tabs[active].id;
-        let Some(state) = self.tabs[active].git_graphs.get_mut(root) else {
+        let active = self.window.active_tab;
+        let tab_id = self.window.tabs[active].id;
+        let Some(state) = self.window.tabs[active].git_graphs.get_mut(root) else {
             return Ok(());
         };
         let Some(question) = state.cache.begin_checkout(target, detach) else {
             return Ok(());
         };
-        if !self.git_worker.request(git::GitRequest {
+        if !self.app.git_worker.request(git::GitRequest {
             host: git::GitHost::Graph {
                 tab: tab_id,
                 root: root.to_owned(),
@@ -29719,14 +30117,14 @@ impl Runtime {
         body: [f32; 4],
         delta: MouseScrollDelta,
     ) -> Result<()> {
-        let active = self.active_tab;
-        let Some(content) = self.git_graphs_shown.get(&seat) else {
+        let active = self.window.active_tab;
+        let Some(content) = self.window.git_graphs_shown.get(&seat) else {
             return Ok(());
         };
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let extent = (content.total_rows.max(1)) as f32;
         let travel = self.vertical_wheel_travel(delta, extent);
-        let stored = self.tabs[active]
+        let stored = self.window.tabs[active]
             .git_graph_view
             .get(&seat)
             .map_or(0.0, |view| view.scroll_px);
@@ -29734,7 +30132,7 @@ impl Runtime {
         if (wanted - stored).abs() < f32::EPSILON {
             return Ok(());
         }
-        if let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) {
+        if let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) {
             view.scroll_px = wanted;
         }
         if self.refresh_chrome() {
@@ -29750,7 +30148,7 @@ impl Runtime {
     /// in four places is four places to consult it differently, and the symptom
     /// of that here would be a strip you can press but cannot see.
     fn git_panel_on(&self) -> bool {
-        self.settings_store.loaded().git_panel
+        self.app.settings_store.loaded().git_panel
     }
 
     /// Which page each docked Files column is on, and how wide its switch's two
@@ -29768,14 +30166,14 @@ impl Runtime {
         // Two strings, measured once per frame rather than once per column: they
         // are the same two words in every column in the window, and the only
         // thing that could make them differ is the font, which is one font.
-        let widths =
-            seats::FilesView::ALL.map(|view| self.renderer.measure_chrome_text(view.label(), font));
-        let active = self.active_tab;
+        let widths = seats::FilesView::ALL
+            .map(|view| self.window.renderer.measure_chrome_text(view.label(), font));
+        let active = self.window.active_tab;
         self.seats
             .files()
             .into_iter()
             .map(|seat| {
-                let view = self.tabs[active]
+                let view = self.window.tabs[active]
                     .files
                     .get(&seat)
                     .map_or(seats::FilesView::Files, |state| state.view);
@@ -29802,31 +30200,31 @@ impl Runtime {
         if showing.is_empty() {
             return BTreeMap::new();
         }
-        let active = self.active_tab;
+        let active = self.window.active_tab;
         let mut pages = BTreeMap::new();
         for seat in showing {
             // A column that has never had a Git page has no cache yet, and the
             // page it draws for one frame is "reading" — which is true: the ask
             // rides the same walk and will have gone out by the time this frame
             // is on screen.
-            let Some(cache) = self.tabs[active].git_trees.get(&seat).cloned() else {
+            let Some(cache) = self.window.tabs[active].git_trees.get(&seat).cloned() else {
                 pages.insert(seat, git_panel::GitPanelContent::default());
                 continue;
             };
             // Which commit is open is the *column's* (R15), so it is read off
             // the leaf beside the cache rather than out of it — the cache holds
             // the answer, this decides whether it is on screen.
-            let expanded = self.tabs[active]
+            let expanded = self.window.tabs[active]
                 .files
                 .get(&seat)
                 .and_then(|state| state.git_expanded.clone());
             // And so is whether the REMOTES sub-group is unfolded (T9) — the
             // same kind of fact, off the same leaf, and durable like `view`.
-            let remotes_open = self.tabs[active]
+            let remotes_open = self.window.tabs[active]
                 .files
                 .get(&seat)
                 .is_some_and(|state| state.git_remotes_open);
-            let renderer = &mut self.renderer;
+            let renderer = &mut self.window.renderer;
             let mut measure = |text: &str, size: f32, face: git_panel::MeasureFace| {
                 renderer.measure_chrome_label(
                     text,
@@ -29845,7 +30243,7 @@ impl Runtime {
                 scale,
                 &mut measure,
             );
-            content.scroll_px = self.tabs[active]
+            content.scroll_px = self.window.tabs[active]
                 .git_scroll
                 .get(&seat)
                 .copied()
@@ -29862,7 +30260,7 @@ impl Runtime {
             let body = seats::files_pane_geometry(rect, scale, true).body;
             let healed = git_panel::clamp_git_scroll(body, content, content.scroll_px, scale);
             content.scroll_px = healed;
-            self.tabs[active].git_scroll.insert(*seat, healed);
+            self.window.tabs[active].git_scroll.insert(*seat, healed);
         }
         pages
     }
@@ -29897,13 +30295,13 @@ impl Runtime {
     ) {
         let font = seats::FILES_FOOT_FONT_LOGICAL_PX * scale;
         let segmented = self.git_panel_on();
-        let active = self.active_tab;
+        let active = self.window.active_tab;
         for (seat, tree) in trees.iter_mut() {
-            let revealed = self.revealed_foot.is_some_and(|(shown, at)| {
+            let revealed = self.window.revealed_foot.is_some_and(|(shown, at)| {
                 shown == RevealedFoot::Column(*seat)
                     && now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK
             });
-            let root = self.tabs[active].files_state(*seat).root;
+            let root = self.window.tabs[active].files_state(*seat).root;
             tree.foot_revealed = revealed;
             // An unrooted column has no path and nothing to reveal, so its strip
             // is a hairline and nothing else — the mock-up's foot with an empty
@@ -29923,7 +30321,7 @@ impl Runtime {
             } else {
                 root
             };
-            let renderer = &mut self.renderer;
+            let renderer = &mut self.window.renderer;
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
             tree.foot_path = settings::ellipsized_left(&text, room, font, &mut measure);
         }
@@ -29937,8 +30335,8 @@ impl Runtime {
     /// instant *and wrong*. The kept rows stay on screen until the new answer
     /// lands, so a refresh never blinks.
     fn refresh_files_dir(&mut self, seat: SeatId, key: &str) {
-        let active = self.active_tab;
-        let tab = &self.tabs[active];
+        let active = self.window.active_tab;
+        let tab = &self.window.tabs[active];
         let Some(state) = tab.files.get(&seat) else {
             return;
         };
@@ -29947,7 +30345,7 @@ impl Runtime {
             key: key.to_owned(),
             path: files::full_path(&state.root, key),
         };
-        if !self.files_worker.request(request) {
+        if !self.app.files_worker.request(request) {
             self.disable_files_worker();
         }
     }
@@ -29956,17 +30354,18 @@ impl Runtime {
     fn apply_files_results(&mut self) -> Result<()> {
         let mut changed = false;
         loop {
-            match self.files_worker.responses.try_recv() {
+            match self.app.files_worker.responses.try_recv() {
                 Ok(response) => match response.host {
                     // A tab or a column that closed while its read was in flight
                     // has nowhere to put the answer, and that is not a failure —
                     // it is the cancellation, arriving as a dropped result.
                     files::FilesHost::Docked(leaf) => {
-                        let Some(index) = self.tabs.iter().position(|tab| tab.id == leaf.tab)
+                        let Some(index) =
+                            self.window.tabs.iter().position(|tab| tab.id == leaf.tab)
                         else {
                             continue;
                         };
-                        let tab = &mut self.tabs[index];
+                        let tab = &mut self.window.tabs[index];
                         if !tab.files.contains_key(&leaf.seat) {
                             continue;
                         }
@@ -29974,7 +30373,7 @@ impl Runtime {
                             .entry(leaf.seat)
                             .or_default()
                             .accept(&response.key, response.outcome);
-                        changed |= index == self.active_tab;
+                        changed |= index == self.window.active_tab;
                     }
                     // The float's version of the same cancellation: the window is
                     // gone, or it is showing a *different* view than the one that
@@ -29988,6 +30387,7 @@ impl Runtime {
                     // other's contents.
                     files::FilesHost::Float(epoch) => {
                         let Some(files) = self
+                            .window
                             .float
                             .live_mut(epoch)
                             .and_then(float::FloatWin::files_mut)
@@ -30029,14 +30429,14 @@ impl Runtime {
     fn press_files_row(&mut self, seat: SeatId, index: usize) -> Result<()> {
         use crate::files::RowKind;
         let now = Instant::now();
-        let motion = self.motion;
+        let motion = self.app.motion;
         let trees = self.files_trees(now);
         let Some(row) = trees.get(&seat).and_then(|tree| tree.rows.get(index)) else {
-            self.files_row_clicks.interrupt();
+            self.window.files_row_clicks.interrupt();
             return Ok(());
         };
         if !row.is_node() {
-            self.files_row_clicks.interrupt();
+            self.window.files_row_clicks.interrupt();
             return Ok(());
         }
         let key = row.key.clone();
@@ -30047,21 +30447,22 @@ impl Runtime {
         // folds, which is what it looks like, and nothing else.
         let activating = matches!(kind, RowKind::File)
             && self
+                .window
                 .files_row_clicks
                 .register(RowHost::Column(seat), &key, now)
                 == TabClick::Double;
         if !matches!(kind, RowKind::File) {
-            self.files_row_clicks.interrupt();
+            self.window.files_row_clicks.interrupt();
         }
-        let active = self.active_tab;
-        let Some(state) = self.tabs[active].files.get_mut(&seat) else {
+        let active = self.window.active_tab;
+        let Some(state) = self.window.tabs[active].files.get_mut(&seat) else {
             return Ok(());
         };
         let opening = press_files_node(state, &key, kind);
         if matches!(kind, RowKind::Directory { .. }) {
             // The triangle starts turning from wherever it actually is, so a
             // double-click reverses mid-flight instead of snapping.
-            self.tabs[active]
+            self.window.tabs[active]
                 .file_trees
                 .entry(seat)
                 .or_default()
@@ -30093,7 +30494,7 @@ impl Runtime {
     /// the pointer, which is the whole class of bug the hit test's own note is
     /// about.
     fn row_geometry(&mut self, host: RowHost) -> Option<seats::FilesTreeGeometry> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         match host {
             // A Git page is not a tree and has no tree geometry. Everything that
             // needs a row's rectangle asks [`Self::peek_row_rect`], which knows
@@ -30111,7 +30512,7 @@ impl Runtime {
                 let tools = self.float_head_tools(id);
                 let dock_label = self.float_dock_label_width(scale);
                 let now = Instant::now();
-                let win = self.float.drawn().find(|win| win.epoch == id)?;
+                let win = self.window.float.drawn().find(|win| win.epoch == id)?;
                 let files = win.files()?;
                 let rows = files::tree_view(&files.files, &files.cache).rows.len();
                 let scroll = files.cache.scroll_px;
@@ -30145,7 +30546,7 @@ impl Runtime {
                 Some((root, rows))
             }
             RowHost::Float(id) => {
-                let files = self.float.live(id)?.files()?;
+                let files = self.window.float.live(id)?.files()?;
                 let view = files::tree_view(&files.files, &files.cache);
                 Some((files.files.root.clone(), view.rows))
             }
@@ -30184,8 +30585,8 @@ impl Runtime {
     /// is not a node arms nothing, so a press on "Loading …" cannot become a
     /// drag of a sentence.
     fn arm_row_press(&mut self, host: RowHost, index: usize, position: PhysicalPosition<f64>) {
-        self.tab_press = None;
-        self.pane_press = None;
+        self.window.tab_press = None;
+        self.window.pane_press = None;
         let Some((_, rows)) = self.host_rows(host) else {
             return;
         };
@@ -30196,7 +30597,7 @@ impl Runtime {
         let Some(rect) = self.row_geometry(host).map(|tree| tree.row_rect(index)) else {
             return;
         };
-        self.row_press = Some(RowPress {
+        self.window.row_press = Some(RowPress {
             host,
             key,
             rect,
@@ -30259,16 +30660,16 @@ impl Runtime {
             }
             RowPayloadKind::Folder => {
                 let root = payload.path.display().to_string();
-                let active = self.active_tab;
-                self.tabs[active].files.insert(
+                let active = self.window.active_tab;
+                self.window.tabs[active].files.insert(
                     seat,
                     seats::FilesLeafState {
                         root,
                         ..seats::FilesLeafState::default()
                     },
                 );
-                self.tabs[active].file_trees.remove(&seat);
-                self.tabs[active].git_trees.remove(&seat);
+                self.window.tabs[active].file_trees.remove(&seat);
+                self.window.tabs[active].git_trees.remove(&seat);
                 self.mark_session_dirty(Instant::now());
                 if self.refresh_chrome() {
                     self.present_chrome_change()?;
@@ -30301,6 +30702,7 @@ impl Runtime {
     /// debt is for the card, not for the timer.
     fn observe_file_peek(&mut self, host: Option<(RowHost, usize)>, now: Instant) -> bool {
         let at = self
+            .window
             .pointer_position
             .map(|point| [point.x as f32, point.y as f32]);
         // **A card on screen answers before the rows do** (user ruling,
@@ -30348,13 +30750,14 @@ impl Runtime {
             // free to arm its own card, and if nothing is, the grace starts.
             Some(file_peek::Life::Released) | None => {}
         }
-        let Some((host, index)) = host.filter(|_| self.drag.is_none()) else {
+        let Some((host, index)) = host.filter(|_| self.window.drag.is_none()) else {
             return self.release_file_peek(now);
         };
         let Some((key, _, _)) = self.peek_row(host, index) else {
             return self.release_file_peek(now);
         };
         if self
+            .window
             .file_peek
             .as_ref()
             .is_some_and(|peek| peek.host == host && peek.key == key)
@@ -30366,7 +30769,7 @@ impl Runtime {
             return self.keep_file_peek();
         }
         let taken = self.hide_file_peek();
-        self.file_peek = self.armed_file_peek(host, index, now);
+        self.window.file_peek = self.armed_file_peek(host, index, now);
         taken
     }
 
@@ -30438,7 +30841,7 @@ impl Runtime {
         index: usize,
     ) -> Option<(String, String, preview::PreviewSource)> {
         let root = self.git_trees.get(&seat).and_then(git::GitCache::root)?;
-        let row = self.git_pages_shown.get(&seat)?.rows.get(index)?;
+        let row = self.window.git_pages_shown.get(&seat)?.rows.get(index)?;
         let peek = git_panel::row_peek(row, root)?;
         Some((peek.key, peek.name, peek.source))
     }
@@ -30454,10 +30857,10 @@ impl Runtime {
                 Some(self.row_geometry(host)?.row_rect(index))
             }
             RowHost::Git(seat) => {
-                let scale = self.renderer.metrics().scale_factor as f32;
+                let scale = self.window.renderer.metrics().scale_factor as f32;
                 let rect = seats::files_pane_rect(&self.seat_layout, seat)?;
                 let body = seats::files_pane_geometry(rect, scale, true).body;
-                let page = self.git_pages_shown.get(&seat)?;
+                let page = self.window.git_pages_shown.get(&seat)?;
                 Some(git_panel::git_panel_geometry(body, page, scale).row_rect(index))
             }
         }
@@ -30501,10 +30904,11 @@ impl Runtime {
         // ruling's: the grace starts, and the card comes down when it runs out
         // (real-machine capture, 2026-08-14).
         let over = host
-            .filter(|_| self.drag.is_none())
+            .filter(|_| self.window.drag.is_none())
             .and_then(|(host, index)| {
                 let (key, _, _) = self.peek_row(host, index)?;
                 let showing = self
+                    .window
                     .file_peek
                     .as_ref()
                     .is_some_and(|peek| peek.host == host && peek.key == key);
@@ -30512,6 +30916,7 @@ impl Runtime {
             });
         let row = over.as_ref().map(|(host, _, key)| (*host, key.clone()));
         let waiting = self
+            .window
             .file_peek
             .as_ref()
             .and_then(|peek| peek.dwell.as_ref())
@@ -30522,14 +30927,14 @@ impl Runtime {
             // crossing rows never reaches this arm twice on one row.
             file_peek::Dwell::Keep => {}
             file_peek::Dwell::Idle => {
-                if let Some(peek) = self.file_peek.as_mut() {
+                if let Some(peek) = self.window.file_peek.as_mut() {
                     peek.dwell = None;
                 }
             }
             file_peek::Dwell::Start => {
                 let (host, index, _) = over.expect("a start is a start on some row");
                 let next = self.armed_file_peek(host, index, now).map(Box::new);
-                if let Some(peek) = self.file_peek.as_mut() {
+                if let Some(peek) = self.window.file_peek.as_mut() {
                     peek.dwell = next;
                 }
             }
@@ -30550,6 +30955,7 @@ impl Runtime {
     /// never be noticed by a pointer path.
     fn switch_file_peek(&mut self, now: Instant) -> bool {
         let due = self
+            .window
             .file_peek
             .as_ref()
             .and_then(|peek| peek.dwell.as_ref())
@@ -30557,11 +30963,16 @@ impl Runtime {
         if due.is_none_or(|due| due > now) {
             return false;
         }
-        let Some(next) = self.file_peek.as_mut().and_then(|peek| peek.dwell.take()) else {
+        let Some(next) = self
+            .window
+            .file_peek
+            .as_mut()
+            .and_then(|peek| peek.dwell.take())
+        else {
             return false;
         };
         self.hide_file_peek();
-        self.file_peek = Some(*next);
+        self.window.file_peek = Some(*next);
         // Straight onto the glass rather than into another 350ms: the hand has
         // already spent that on the row, and a card that made it spend it twice
         // would be charging for the same wait.
@@ -30574,7 +30985,7 @@ impl Runtime {
     /// An intent that has not matured holds nothing: there is no card yet, and
     /// the rectangle a previous one left behind is not a place to stand.
     fn file_peek_holds(&self, at: [f32; 2]) -> bool {
-        self.file_peek.as_ref().is_some_and(|peek| {
+        self.window.file_peek.as_ref().is_some_and(|peek| {
             peek.due.is_none()
                 && peek
                     .frame
@@ -30588,7 +30999,8 @@ impl Runtime {
     /// actually running — the card is drawn identically either way, so a card
     /// that was never dying costs nothing to save.
     fn keep_file_peek(&mut self) -> bool {
-        self.file_peek
+        self.window
+            .file_peek
             .as_mut()
             .is_some_and(|peek| peek.closing_at.take().is_some())
     }
@@ -30604,9 +31016,14 @@ impl Runtime {
     /// left behind is not a place to stand, and a grace held over an unborn card
     /// would fire it over a row the pointer left long ago.
     fn file_peek_life(&self, at: Option<[f32; 2]>) -> Option<file_peek::Life> {
-        let peek = self.file_peek.as_ref()?;
+        let peek = self.window.file_peek.as_ref()?;
         let frame = peek.frame.filter(|_| peek.due.is_none())?;
-        Some(file_peek::life(peek.rect, frame, at, self.drag.is_some()))
+        Some(file_peek::life(
+            peek.rect,
+            frame,
+            at,
+            self.window.drag.is_some(),
+        ))
     }
 
     /// The pointer is outside a living card's corridor and there is nothing under
@@ -30617,13 +31034,13 @@ impl Runtime {
     /// drawn identically while it runs — and that is the same asymmetry
     /// [`Self::observe_file_peek`] reports for arming an intent.
     fn release_file_peek(&mut self, now: Instant) -> bool {
-        let Some(peek) = self.file_peek.as_ref() else {
+        let Some(peek) = self.window.file_peek.as_ref() else {
             return false;
         };
         if peek.due.is_some() || peek.frame.is_none() {
             return self.hide_file_peek();
         }
-        let peek = self.file_peek.as_mut().expect("just borrowed");
+        let peek = self.window.file_peek.as_mut().expect("just borrowed");
         if peek.closing_at.is_none() {
             peek.closing_at = Some(now + float::FLY_CLOSE);
         }
@@ -30636,6 +31053,7 @@ impl Runtime {
     /// it owes a frame.
     fn expire_file_peek(&mut self, now: Instant) -> bool {
         if self
+            .window
             .file_peek
             .as_ref()
             .and_then(|peek| peek.closing_at)
@@ -30657,7 +31075,7 @@ impl Runtime {
     ///
     /// Returns whether anything changed.
     fn mature_file_peek(&mut self, now: Instant) -> bool {
-        let Some(peek) = self.file_peek.as_ref() else {
+        let Some(peek) = self.window.file_peek.as_ref() else {
             return false;
         };
         if peek.due.is_none_or(|due| due > now) {
@@ -30668,7 +31086,7 @@ impl Runtime {
             RowHost::Git(seat) => Some(seat),
             RowHost::Column(_) | RowHost::Float(_) => None,
         };
-        if let Some(peek) = self.file_peek.as_mut() {
+        if let Some(peek) = self.window.file_peek.as_mut() {
             peek.due = None;
         }
         // The card's surface is pointed at the file here, once, rather than on
@@ -30676,7 +31094,7 @@ impl Runtime {
         // holds the parsed document, and re-aiming it per frame would be a
         // document key that changed per frame and a markdown file re-parsed at
         // sixty hertz.
-        self.peek_pane = PreviewPane {
+        self.window.peek_pane = PreviewPane {
             buffer: Some(source.clone()),
             ..PreviewPane::default()
         };
@@ -30689,10 +31107,10 @@ impl Runtime {
             // 2026-08-14: hovering a restored, never-opened pool entry showed
             // an empty card forever.)
             let wants_read = pooled.wants_head_read();
-            self.peek_buffer = None;
+            self.window.peek_buffer = None;
             if wants_read {
                 let tab = self.id;
-                if !self.preview_worker.request(preview::PreviewRequest {
+                if !self.app.preview_worker.request(preview::PreviewRequest {
                     tab,
                     source,
                     want: preview::PreviewWant::Head,
@@ -30704,7 +31122,7 @@ impl Runtime {
         }
         let buffer = preview::PreviewBuffer::new(source.clone(), name);
         let wants_read = buffer.wants_head_read();
-        self.peek_buffer = Some(buffer);
+        self.window.peek_buffer = Some(buffer);
         // **A composed document waits for git and never for a disk.** A glance
         // over a commit's file is a `GitShow`, and `wants_head_read` answers
         // `false` for it by construction — so without this the card would sit
@@ -30715,7 +31133,7 @@ impl Runtime {
             && let Some(question) = git_document_question(&source, None)
         {
             let tab = self.id;
-            if !self.git_worker.request(git::GitRequest {
+            if !self.app.git_worker.request(git::GitRequest {
                 host: git::GitHost::Column(LeafId { tab, seat }),
                 question,
             }) {
@@ -30725,7 +31143,7 @@ impl Runtime {
         }
         if wants_read {
             let tab = self.id;
-            if !self.preview_worker.request(preview::PreviewRequest {
+            if !self.app.preview_worker.request(preview::PreviewRequest {
                 tab,
                 source,
                 want: preview::PreviewWant::Head,
@@ -30747,15 +31165,16 @@ impl Runtime {
     /// not a timer — because that is the only case that owes a frame.
     fn hide_file_peek(&mut self) -> bool {
         let showing = self
+            .window
             .file_peek
             .as_ref()
             .is_some_and(|peek| peek.due.is_none());
-        self.file_peek = None;
-        self.peek_buffer = None;
+        self.window.file_peek = None;
+        self.window.peek_buffer = None;
         // And the parsed document with it: a card that is down is holding a
         // markdown layout for a file nobody is looking at.
-        self.peek_pane = PreviewPane::default();
-        self.peek_picture = None;
+        self.window.peek_pane = PreviewPane::default();
+        self.window.peek_picture = None;
         // And any hand that was on a block inside it. The card's surface is the
         // one the sweep deliberately never retires ([`Self::sweep_preview_panes`]),
         // because its life is this field's — so this is where that life ends for
@@ -30784,7 +31203,7 @@ impl Runtime {
     /// has to reach it too. Both are the same fact — the glance is a *view* of a
     /// buffer, never a copy of one.
     fn file_peek_subject(&self) -> Option<FilePeekSubject> {
-        let peek = self.file_peek.as_ref()?;
+        let peek = self.window.file_peek.as_ref()?;
         if peek.due.is_some() {
             return None;
         }
@@ -30829,33 +31248,35 @@ impl Runtime {
             height: 0.0,
         };
         let key = normalized_local_image_path_key(path);
-        let (content_key, rgba, native_width, native_height) = match self.peek_cache.get(&key) {
-            Some(PeekCacheEntry::Ready {
-                key,
-                rgba,
-                width_px,
-                height_px,
-            }) => (key.clone(), Arc::clone(rgba), *width_px, *height_px),
-            // A decode in flight, or one that failed: the card shows the ground
-            // and no picture. There is no "loading" word here for the same reason
-            // there is none in the document — see [`file_peek::PeekBody`].
-            Some(PeekCacheEntry::Pending | PeekCacheEntry::Failed) => return empty,
-            None => {
-                if self.math_worker_running
-                    && self
-                        .math_worker
-                        .tasks
-                        .send(MathWorkerRequest::PeekImage {
-                            leaf: self.focused_leaf_id(),
-                            path: path.to_owned(),
-                        })
-                        .is_ok()
-                {
-                    self.peek_cache.insert(key, PeekCacheEntry::Pending);
+        let (content_key, rgba, native_width, native_height) =
+            match self.window.peek_cache.get(&key) {
+                Some(PeekCacheEntry::Ready {
+                    key,
+                    rgba,
+                    width_px,
+                    height_px,
+                }) => (key.clone(), Arc::clone(rgba), *width_px, *height_px),
+                // A decode in flight, or one that failed: the card shows the ground
+                // and no picture. There is no "loading" word here for the same reason
+                // there is none in the document — see [`file_peek::PeekBody`].
+                Some(PeekCacheEntry::Pending | PeekCacheEntry::Failed) => return empty,
+                None => {
+                    if self.app.math_worker_running
+                        && self
+                            .app
+                            .math_worker
+                            .tasks
+                            .send(MathWorkerRequest::PeekImage {
+                                leaf: self.focused_leaf_id(),
+                                path: path.to_owned(),
+                            })
+                            .is_ok()
+                    {
+                        self.window.peek_cache.insert(key, PeekCacheEntry::Pending);
+                    }
+                    return empty;
                 }
-                return empty;
-            }
-        };
+            };
         // The frame the mock-up gives the picture, in whole physical pixels.
         let fit_width = ((file_peek::PEEK_IMAGE_W_LOGICAL_PX * scale).round() as u32).max(1);
         let fit_height = ((file_peek::PEEK_IMAGE_H_LOGICAL_PX * scale).round() as u32).max(1);
@@ -30870,16 +31291,19 @@ impl Runtime {
         };
         let target: PeekThumbnailTarget = (content_key, display_width, display_height);
         if self
+            .window
             .peek_picture
             .as_ref()
             .is_some_and(|picture| picture.matches(&target))
         {
             return fitted;
         }
-        if self.peek_card_pending.as_ref() == Some(&target) || !self.math_worker_running {
+        if self.window.peek_card_pending.as_ref() == Some(&target) || !self.app.math_worker_running
+        {
             return empty;
         }
         if self
+            .app
             .math_worker
             .scale_tasks
             .send(ScaleWorkerRequest::Peek {
@@ -30888,7 +31312,7 @@ impl Runtime {
             })
             .is_ok()
         {
-            self.peek_card_pending = Some(target);
+            self.window.peek_card_pending = Some(target);
         }
         empty
     }
@@ -30929,7 +31353,7 @@ impl Runtime {
         let Some(subject) = self.file_peek_subject() else {
             return Vec::new();
         };
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         // How tall the document really is, kept whole: the card's body is the
         // *capped* height, and the scroll bar's arithmetic needs the uncapped one
         // to know what share of it is showing.
@@ -30959,13 +31383,15 @@ impl Runtime {
             dirty: subject.dirty,
             body: body_kind,
         };
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         // Only the font knows how wide a line is, so the measuring happens here,
         // beside the renderer, exactly as the tip's and the ghost's do.
         let name_width = self
+            .window
             .renderer
             .measure_chrome_text(&content.name, file_peek::PEEK_HEAD_FONT_LOGICAL_PX * scale);
         let ftype_width = self
+            .window
             .renderer
             .measure_chrome_text(&content.ftype, file_peek::PEEK_TYPE_FONT_LOGICAL_PX * scale);
         let layout = file_peek::layout(
@@ -30977,6 +31403,7 @@ impl Runtime {
             scale,
         );
         let picture = self
+            .window
             .peek_picture
             .as_ref()
             .map(|picture| file_peek::PeekPicture {
@@ -30994,7 +31421,7 @@ impl Runtime {
             .unwrap_or_default()
             .to_owned();
         let foot = {
-            let renderer = &mut self.renderer;
+            let renderer = &mut self.window.renderer;
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
             seats::dress_foot(
                 seats::FootDress {
@@ -31019,7 +31446,7 @@ impl Runtime {
         // screen that nothing could touch. How tall the document turned out is
         // no longer filed with them: the hit test asks the card's own pane, the
         // way it asks a seat's.
-        if let Some(peek) = self.file_peek.as_mut() {
+        if let Some(peek) = self.window.file_peek.as_mut() {
             peek.frame = Some(layout.frame);
             peek.body = Some(layout.body);
         }
@@ -31036,9 +31463,9 @@ impl Runtime {
             PreviewSurface::Peek,
             layout.body,
             scale,
-            self.peek_pane.scroll,
+            self.window.peek_pane.scroll,
         );
-        self.peek_pane.scroll = scroll;
+        self.window.peek_pane.scroll = scroll;
         // The same channel a preview float's document rides, for the same
         // reason: the body has to be drawn *above* the card's own face, and
         // the seats' document lane is a whole pass below the overlays.
@@ -31056,10 +31483,12 @@ impl Runtime {
             return vec![layer];
         };
         let state = ScrollThumbState::of(
-            self.file_peek
+            self.window
+                .file_peek
                 .as_ref()
                 .is_some_and(|peek| peek.thumb_grab.is_some()),
-            self.pointer_position
+            self.window
+                .pointer_position
                 .is_some_and(|at| file_peek::contains(bar.grab, [at.x as f32, at.y as f32])),
         );
         vec![layer, scroll_bar_layer(&bar, state, &palette)]
@@ -31090,7 +31519,7 @@ impl Runtime {
         if button != MouseButton::Left {
             return Ok(false);
         }
-        let Some(position) = self.pointer_position else {
+        let Some(position) = self.window.pointer_position else {
             return Ok(false);
         };
         let at = [position.x as f32, position.y as f32];
@@ -31098,6 +31527,7 @@ impl Runtime {
             return Ok(false);
         }
         let frame = self
+            .window
             .file_peek
             .as_ref()
             .and_then(|peek| peek.frame)
@@ -31105,7 +31535,7 @@ impl Runtime {
         match file_peek::press_at(frame, self.file_peek_bar().as_ref(), at) {
             file_peek::Press::Elsewhere => Ok(false),
             file_peek::Press::Thumb(grab) => {
-                if let Some(peek) = self.file_peek.as_mut() {
+                if let Some(peek) = self.window.file_peek.as_mut() {
                     peek.thumb_grab = Some(grab);
                 }
                 // The thumb's ink changes the moment it is taken, so this owes a
@@ -31128,6 +31558,7 @@ impl Runtime {
                     return Ok(true);
                 }
                 let Some((host, source, name)) = self
+                    .window
                     .file_peek
                     .as_ref()
                     .map(|peek| (peek.host, peek.source.clone(), peek.name.clone()))
@@ -31163,7 +31594,12 @@ impl Runtime {
     /// that trusted a stored rectangle would be dragging where the thumb *was*.
     /// Answers whether the pointer was the thumb's, so the caller stops.
     fn drag_file_peek_thumb(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let Some(grab) = self.file_peek.as_ref().and_then(|peek| peek.thumb_grab) else {
+        let Some(grab) = self
+            .window
+            .file_peek
+            .as_ref()
+            .and_then(|peek| peek.thumb_grab)
+        else {
             return Ok(false);
         };
         let Some(bar) = self.file_peek_bar() else {
@@ -31174,10 +31610,10 @@ impl Runtime {
         // place that has to be right about which way this one runs.
         let along = bar.along([position.x as f32, position.y as f32]);
         let wanted = preview::scroll_dragged_to(&bar, along, grab);
-        if (wanted - self.peek_pane.scroll[1]).abs() < f32::EPSILON {
+        if (wanted - self.window.peek_pane.scroll[1]).abs() < f32::EPSILON {
             return Ok(true);
         }
-        self.peek_pane.scroll[1] = wanted;
+        self.window.peek_pane.scroll[1] = wanted;
         if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -31197,6 +31633,7 @@ impl Runtime {
     /// waiting for it.
     fn release_file_peek_thumb(&mut self) -> Result<()> {
         let released = self
+            .window
             .file_peek
             .as_mut()
             .is_some_and(|peek| peek.thumb_grab.take().is_some());
@@ -31214,7 +31651,7 @@ impl Runtime {
     /// it was drawn on is a rectangle the pointer is tested against after the
     /// thing moved.
     fn file_peek_bar(&self) -> Option<preview::ScrollBar> {
-        let peek = self.file_peek.as_ref()?;
+        let peek = self.window.file_peek.as_ref()?;
         let body = peek.body.filter(|_| peek.due.is_none())?;
         // The same door the seat's bar and the float's go through, asked with
         // the one thing the card has to hand in: the box its own layout
@@ -31225,7 +31662,7 @@ impl Runtime {
             PreviewSurface::Peek,
             preview::ScrollAxis::Vertical,
             body,
-            self.renderer.metrics().scale_factor as f32,
+            self.window.renderer.metrics().scale_factor as f32,
         )
     }
 
@@ -31237,11 +31674,11 @@ impl Runtime {
     /// the painter and [`seats::hit_files_root`], so the two cannot disagree
     /// about where the button ends.
     fn measure_files_names(&mut self, names: &BTreeMap<SeatId, String>) -> BTreeMap<SeatId, f32> {
-        let size =
-            bt_render::SEAT_TITLE_FONT_LOGICAL_PX * self.renderer.metrics().scale_factor as f32;
+        let size = bt_render::SEAT_TITLE_FONT_LOGICAL_PX
+            * self.window.renderer.metrics().scale_factor as f32;
         names
             .iter()
-            .map(|(seat, name)| (*seat, self.renderer.measure_chrome_text(name, size)))
+            .map(|(seat, name)| (*seat, self.window.renderer.measure_chrome_text(name, size)))
             .collect()
     }
 
@@ -31255,8 +31692,8 @@ impl Runtime {
     /// times, and it makes the second half free: an anchor that has gone folds
     /// the menu instead of measuring a rectangle that is no longer anywhere.
     fn root_menu_layout(&mut self) -> Option<profiles::RootMenuLayout> {
-        let seat = self.root_menu.seat()?;
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let seat = self.window.root_menu.seat()?;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let names = self.files_names();
         let widths = self.measure_files_names(&names);
         let placement = self.seat_layout.rects.iter().find(|placement| {
@@ -31276,8 +31713,8 @@ impl Runtime {
         if choices.is_empty() {
             return None;
         }
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
-        let renderer = &mut self.renderer;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let renderer = &mut self.window.renderer;
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
         Some(profiles::root_menu_layout(
             anchor,
@@ -31296,7 +31733,7 @@ impl Runtime {
     /// "a terminal is here" is true of all of them, and the whole point of the
     /// list is to name the places you are already standing.
     fn root_choices(&self, seat: SeatId) -> Vec<profiles::RootChoice> {
-        let tab = &self.tabs[self.active_tab];
+        let tab = &self.window.tabs[self.window.active_tab];
         let cwds: Vec<String> = tab
             .seats
             .terminals()
@@ -31325,17 +31762,17 @@ impl Runtime {
     /// moved. Dropping it is what turns the next walk into a fresh set of
     /// questions.
     fn reroot_files_column(&mut self, seat: SeatId, root: &str) -> Result<()> {
-        let active = self.active_tab;
-        let Some(state) = self.tabs[active].files.get_mut(&seat) else {
+        let active = self.window.active_tab;
+        let Some(state) = self.window.tabs[active].files.get_mut(&seat) else {
             return Ok(());
         };
         if !reroot_files_state(state, root) {
             return Ok(());
         }
-        self.tabs[active].file_trees.remove(&seat);
+        self.window.tabs[active].file_trees.remove(&seat);
         // A column pointed somewhere else is a column that may be in another
         // repository — or in none. Everything it knew was about the old root.
-        self.tabs[active].git_trees.remove(&seat);
+        self.window.tabs[active].git_trees.remove(&seat);
         self.mark_session_dirty(Instant::now());
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -31359,10 +31796,12 @@ impl Runtime {
     /// and the reason is written to the log the other recoverable failures use
     /// rather than turned into a banner about COM apartments.
     fn browse_for_root(&mut self, seat: SeatId) {
-        let start = self.tabs[self.active_tab].files_state(seat).root;
+        let start = self.window.tabs[self.window.active_tab]
+            .files_state(seat)
+            .root;
         let start = (!start.is_empty()).then(|| PathBuf::from(start));
-        match self.folder_picker.request(start.as_deref()) {
-            Ok(true) => self.folder_pick = Some(FolderPick::Reroot(seat)),
+        match self.window.folder_picker.request(start.as_deref()) {
+            Ok(true) => self.window.folder_pick = Some(FolderPick::Reroot(seat)),
             // Already queued or already open: a second `Browse…` while one is up
             // is one dialog, not two, and whoever asked first keeps the answer.
             Ok(false) => {}
@@ -31375,13 +31814,13 @@ impl Runtime {
     /// **Two verbs behind one bridge** (2026-08-16). The chooser is a single
     /// posted-message channel to Windows — it has to be, because two nested
     /// modal loops on one thread is not a thing a window survives — so which
-    /// verb asked is remembered on this side, in [`Self::folder_pick`], and
+    /// verb asked is remembered on this side, in [`WindowRuntime::folder_pick`], and
     /// spent here.
     fn apply_folder_pick_result(&mut self) -> Result<()> {
-        let Some(result) = self.folder_picker.take_result() else {
+        let Some(result) = self.window.folder_picker.take_result() else {
             return Ok(());
         };
-        let asked = self.folder_pick.take();
+        let asked = self.window.folder_pick.take();
         let Some((asked, path)) = folder_pick_outcome(asked, result) else {
             return Ok(());
         };
@@ -31429,7 +31868,7 @@ impl Runtime {
         // be left to a press falling through, because every opener stops its own
         // press from travelling.
         self.close_popups_except(Popup::Root);
-        self.root_menu.toggle(seat);
+        self.window.root_menu.toggle(seat);
         // Pressing the head is also how you say "type here", and the column is
         // somewhere you can type — so the button lends the keyboard exactly as
         // the tree below it does, ringless for the same reason: it is a press.
@@ -31441,7 +31880,7 @@ impl Runtime {
     }
 
     fn close_root_menu(&mut self) -> Result<bool> {
-        if !self.root_menu.close() {
+        if !self.window.root_menu.close() {
             return Ok(false);
         }
         if self.refresh_chrome() {
@@ -31470,7 +31909,7 @@ impl Runtime {
             // pane — only the LAST preview pane's close would strand it" (P123),
             // so closing one of two asks nothing at all.
             restore::GateRequest::ClosePane(seat) => {
-                let tab = &self.tabs[self.active_tab];
+                let tab = &self.window.tabs[self.window.active_tab];
                 let previews = tab
                     .seats
                     .tree()
@@ -31489,10 +31928,13 @@ impl Runtime {
                     Vec::new()
                 }
             }
-            restore::GateRequest::CloseTab(index) => {
-                self.tabs.get(*index).map(one_tab).unwrap_or_default()
-            }
-            restore::GateRequest::Shut => self.tabs.iter().flat_map(one_tab).collect(),
+            restore::GateRequest::CloseTab(index) => self
+                .window
+                .tabs
+                .get(*index)
+                .map(one_tab)
+                .unwrap_or_default(),
+            restore::GateRequest::Shut => self.window.tabs.iter().flat_map(one_tab).collect(),
             // A discard names one file, and it is never empty — which matters,
             // because `raise_dirty_gate` treats an empty list as "there is
             // nothing to ask about" and lets the verb through. There is always
@@ -31530,13 +31972,13 @@ impl Runtime {
         // A gate that is already up is the answer to this question: the verb
         // below it is re-run when it is answered, and that re-run must not raise
         // a second one.
-        if self.dirty_gate.is_open() {
+        if self.window.dirty_gate.is_open() {
             return Ok(false);
         }
         if self.gate_dirty_names(&request).is_empty() {
             return Ok(false);
         }
-        self.dirty_gate.open(request);
+        self.window.dirty_gate.open(request);
         if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -31550,7 +31992,7 @@ impl Runtime {
     /// re-run against a pool still holding dirty buffers would put the same
     /// question again forever.
     fn answer_dirty_gate(&mut self, answer: restore::GateAnswer) -> Result<()> {
-        let Some(request) = self.dirty_gate.take() else {
+        let Some(request) = self.window.dirty_gate.take() else {
             return Ok(());
         };
         if self.refresh_overlay() {
@@ -31573,7 +32015,7 @@ impl Runtime {
                 self.close_pane(seat)
             }
             restore::GateRequest::CloseTab(index) => {
-                if let Some(tab) = self.tabs.get_mut(index) {
+                if let Some(tab) = self.window.tabs.get_mut(index) {
                     tab.preview_pool.clear();
                 }
                 self.close_tab(index)
@@ -31590,14 +32032,14 @@ impl Runtime {
                 // history came back empty. The gate raises itself off
                 // `dirty_names`, so dropping the dirty buffers is all it takes
                 // for the re-requested shut not to ask again.
-                for tab in &mut self.tabs {
+                for tab in &mut self.window.tabs {
                     tab.preview_pool.discard_dirty();
                 }
                 // The shut is the one verb this does not own: it is the event
                 // loop's, and it is re-requested rather than performed here so
                 // that everything else `CloseRequested` does still happens in the
                 // order it always did.
-                self.window_close_requested = true;
+                self.window.window_close_requested = true;
                 Ok(())
             }
             // The one request whose confirmed verb is not a re-run of something
@@ -31647,7 +32089,7 @@ impl Runtime {
 
     /// The gate's box this frame, or `None` when nothing is being asked.
     fn dirty_gate_layout(&mut self) -> Option<restore::GateLayout> {
-        let request = self.dirty_gate.request()?.clone();
+        let request = self.window.dirty_gate.request()?.clone();
         let names = self.gate_dirty_names(&request);
         if names.is_empty() {
             return None;
@@ -31655,11 +32097,11 @@ impl Runtime {
         let message = request.message(&names);
         let title = request.title();
         let discard_text = request.answer_text();
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let room = restore::content_width(width, scale);
-        let renderer = &mut self.renderer;
+        let renderer = &mut self.window.renderer;
         let content = restore::GateContent {
             title,
             message_lines: restore::wrap(&message, room, |line| {
@@ -31709,8 +32151,8 @@ impl Runtime {
     /// anchor that has gone folds the menu instead of measuring a rectangle that
     /// is no longer anywhere.
     fn preview_menu_layout(&mut self) -> Option<profiles::PreviewMenuLayout> {
-        let seat = self.preview_menu.seat()?;
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let seat = self.window.preview_menu.seat()?;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
         let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
         let anchor =
@@ -31719,8 +32161,8 @@ impl Runtime {
         if items.is_empty() {
             return None;
         }
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
-        let renderer = &mut self.renderer;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let renderer = &mut self.window.renderer;
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
         Some(profiles::preview_menu_layout(
             anchor,
@@ -31738,7 +32180,7 @@ impl Runtime {
         // does it (E61): mutual exclusion cannot be left to a press falling
         // through, because every opener stops its own press from travelling.
         self.close_popups_except(Popup::Preview);
-        self.preview_menu.toggle(seat);
+        self.window.preview_menu.toggle(seat);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -31752,7 +32194,7 @@ impl Runtime {
     /// state: the chevron's angle is derived from `preview_menu.seat()` on the
     /// next frame, so shutting the menu *is* turning it back.
     fn close_preview_menu(&mut self) -> Result<bool> {
-        if !self.preview_menu.close() {
+        if !self.window.preview_menu.close() {
             return Ok(false);
         }
         if self.refresh_chrome() {
@@ -31804,12 +32246,12 @@ impl Runtime {
     /// fold for is the window changing size under it, which the caller handles
     /// by closing it — a menu is a moment, and a resize ends the moment.
     fn file_menu_layout(&mut self) -> Option<profiles::FileMenuLayout> {
-        let menu = self.file_menu.as_ref()?;
+        let menu = self.window.file_menu.as_ref()?;
         let point = menu.point;
         let open_text = menu.activation.open_text();
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
-        let renderer = &mut self.renderer;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let renderer = &mut self.window.renderer;
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
         Some(profiles::file_menu_layout(
             point,
@@ -31840,7 +32282,7 @@ impl Runtime {
         // E61: the opener closes the others. Not the float — that is a place, not
         // a popup, and this menu is very often *about a row inside it*.
         self.close_popups_except(Popup::File);
-        self.file_menu = Some(FileMenuState {
+        self.window.file_menu = Some(FileMenuState {
             point,
             activation,
             hover: None,
@@ -31862,7 +32304,7 @@ impl Runtime {
     /// raised by a click on the same row cannot come up in two places.
     fn raise_file_menu_on_row(&mut self, seat: SeatId, key: &str) -> Result<()> {
         let now = Instant::now();
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let trees = self.files_trees(now);
         let Some(index) = trees
             .get(&seat)
@@ -31880,7 +32322,9 @@ impl Runtime {
             return Ok(());
         };
         let rect = geometry.row_rect(index);
-        let root = self.tabs[self.active_tab].files_state(seat).root;
+        let root = self.window.tabs[self.window.active_tab]
+            .files_state(seat)
+            .root;
         self.open_file_menu(files_row_activation(&root, key), [rect[0], rect[3]])
     }
 
@@ -31893,7 +32337,7 @@ impl Runtime {
     /// remembering the painted list, on [`Runtime::press_files_row`]'s reasoning.
     fn file_row_under(&mut self, position: PhysicalPosition<f64>) -> Option<RowActivation> {
         if let Some((id, float::FloatPart::Row(index))) = self.float_hit_at(position) {
-            let files = self.float.live(id)?.files()?;
+            let files = self.window.float.live(id)?.files()?;
             let rows = files::tree_view(&files.files, &files.cache).rows;
             let row = rows.get(index)?;
             if !matches!(row.kind, files::RowKind::File) {
@@ -31913,7 +32357,9 @@ impl Runtime {
         }
         let key = row.key.clone();
         Some(files_row_activation(
-            &self.tabs[self.active_tab].files_state(seat).root,
+            &self.window.tabs[self.window.active_tab]
+                .files_state(seat)
+                .root,
             &key,
         ))
     }
@@ -31957,14 +32403,14 @@ impl Runtime {
         let Some(layout) = self.file_menu_layout() else {
             return Vec::new();
         };
-        let Some(menu) = self.file_menu.as_ref() else {
+        let Some(menu) = self.window.file_menu.as_ref() else {
             return Vec::new();
         };
         profiles::file_menu_build(&layout, menu.activation.open_text(), menu.hover)
     }
 
     fn close_file_menu(&mut self) -> Result<bool> {
-        if self.file_menu.take().is_none() {
+        if self.window.file_menu.take().is_none() {
             return Ok(false);
         }
         if self.refresh_chrome() {
@@ -31984,7 +32430,7 @@ impl Runtime {
     /// renderer mutably. The file menu solves the same thing the same way, one
     /// field at a time; this one has six, so they travel together.
     fn git_menu_draw(&self) -> Option<GitMenuDraw> {
-        let menu = self.git_menu.as_ref()?;
+        let menu = self.window.git_menu.as_ref()?;
         Some(GitMenuDraw {
             point: menu.point,
             target: menu.target.clone(),
@@ -32020,9 +32466,9 @@ impl Runtime {
     /// pages, scrolls and is rebuilt by every repository answer.
     fn git_menu_layout(&mut self) -> Option<profiles::GitMenuLayout> {
         let draw = self.git_menu_draw()?;
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
-        let renderer = &mut self.renderer;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let renderer = &mut self.window.renderer;
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
         Some(profiles::git_menu_layout(
             draw.point,
@@ -32045,7 +32491,7 @@ impl Runtime {
     }
 
     fn close_git_menu(&mut self) -> Result<bool> {
-        if self.git_menu.take().is_none() {
+        if self.window.git_menu.take().is_none() {
             return Ok(false);
         }
         if self.refresh_chrome() {
@@ -32065,7 +32511,7 @@ impl Runtime {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Option<(GitOrigin, PathBuf, profiles::GitMenuTarget, Option<usize>)> {
-        let active = self.active_tab;
+        let active = self.window.active_tab;
         match self.chrome_target_at(position)? {
             // A right press on a hover verb is a right press on the row it sits
             // in. The pane head's own menu takes the same position for the same
@@ -32073,12 +32519,12 @@ impl Runtime {
             // else is exactly the edge a hand finds by accident.
             seats::ChromeTarget::GitRow { seat, index }
             | seats::ChromeTarget::GitAct { seat, index, .. } => {
-                let root = self.tabs[active]
+                let root = self.window.tabs[active]
                     .git_trees
                     .get(&seat)
                     .and_then(git::GitCache::root)
                     .map(Path::to_path_buf)?;
-                let row = self.git_pages_shown.get(&seat)?.rows.get(index)?;
+                let row = self.window.git_pages_shown.get(&seat)?.rows.get(index)?;
                 let target = match row {
                     git_panel::GitRow::Change(change) => profiles::GitMenuTarget::Change {
                         path: change.path.clone(),
@@ -32113,12 +32559,16 @@ impl Runtime {
                 Some((GitOrigin::Column(seat), root, target, None))
             }
             seats::ChromeTarget::GitGraphRow { seat, index } => {
-                let root = self.tabs[active].git_graph_view.get(&seat)?.root.clone();
-                let expanded = self.tabs[active]
+                let root = self.window.tabs[active]
+                    .git_graph_view
+                    .get(&seat)?
+                    .root
+                    .clone();
+                let expanded = self.window.tabs[active]
                     .git_graph_view
                     .get(&seat)
                     .and_then(|view| view.expanded.clone());
-                let content = self.git_graphs_shown.get(&seat)?;
+                let content = self.window.git_graphs_shown.get(&seat)?;
                 let row = content.rows.iter().find(|row| row.index() == index)?;
                 let target = match row {
                     git_graph::GraphViewRow::Commit(commit) => {
@@ -32131,7 +32581,7 @@ impl Runtime {
                                 rect,
                                 content.lane_width,
                                 content.columns,
-                                self.renderer.metrics().scale_factor as f32,
+                                self.window.renderer.metrics().scale_factor as f32,
                                 position.x as f32,
                                 position.y as f32,
                             )
@@ -32186,8 +32636,8 @@ impl Runtime {
 
     /// Where one row of a graph is drawn, this frame.
     fn graph_row_rect(&self, seat: SeatId, index: usize) -> Option<[f32; 4]> {
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let content = self.git_graphs_shown.get(&seat)?;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let content = self.window.git_graphs_shown.get(&seat)?;
         let body = seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)?;
         Some(git_graph::graph_geometry(body, content, scale).row_rect(index))
     }
@@ -32207,7 +32657,7 @@ impl Runtime {
         }
         // E61: the opener closes the others.
         self.close_popups_except(Popup::GitMenu);
-        self.git_menu = Some(GitMenuState {
+        self.window.git_menu = Some(GitMenuState {
             point: [position.x as f32, position.y as f32],
             origin,
             root,
@@ -32228,7 +32678,7 @@ impl Runtime {
     /// and its origin, and only what is drawn inside it changes. That is what
     /// makes Esc able to put the field away and leave the verbs standing.
     fn open_git_prompt(&mut self, kind: profiles::GitPromptKind) -> Result<()> {
-        let Some(menu) = self.git_menu.as_mut() else {
+        let Some(menu) = self.window.git_menu.as_mut() else {
             return Ok(());
         };
         let subject = match &menu.target {
@@ -32268,7 +32718,7 @@ impl Runtime {
     /// the field turns on and the field keeps the keyboard. **No card** — see
     /// [`profiles::GitPromptLook::fault`].
     fn commit_git_prompt(&mut self) -> Result<()> {
-        let Some(menu) = self.git_menu.as_ref() else {
+        let Some(menu) = self.window.git_menu.as_ref() else {
             return Ok(());
         };
         let Some(prompt) = menu.prompt.as_ref() else {
@@ -32277,7 +32727,12 @@ impl Runtime {
         let name = prompt.field.text().to_owned();
         let kind = prompt.kind;
         if git::ref_name_fault(&name).is_some() {
-            if let Some(prompt) = self.git_menu.as_mut().and_then(|menu| menu.prompt.as_mut()) {
+            if let Some(prompt) = self
+                .window
+                .git_menu
+                .as_mut()
+                .and_then(|menu| menu.prompt.as_mut())
+            {
                 prompt.asked_empty = true;
             }
             if self.refresh_chrome() {
@@ -32326,7 +32781,7 @@ impl Runtime {
         if let Some(kind) = row.prompt() {
             return self.open_git_prompt(kind);
         }
-        let Some(menu) = self.git_menu.take() else {
+        let Some(menu) = self.window.git_menu.take() else {
             return Ok(());
         };
         if self.refresh_chrome() {
@@ -32549,15 +33004,18 @@ impl Runtime {
         root: &Path,
         hash: &str,
     ) -> Result<()> {
-        let active = self.active_tab;
-        let open = self.tabs[active]
+        let active = self.window.active_tab;
+        let open = self.window.tabs[active]
             .git_graph_view
             .get(&seat)
             .and_then(|view| view.expanded.clone());
         if open.as_deref() != Some(hash) {
             self.expand_graph_commit(seat, root, hash)?;
         }
-        if let Some(view) = self.tabs[self.active_tab].git_graph_view.get_mut(&seat) {
+        if let Some(view) = self.window.tabs[self.window.active_tab]
+            .git_graph_view
+            .get_mut(&seat)
+        {
             view.compare = Some(git_graph::GRAPH_UNCOMMITTED_HASH.to_owned());
         }
         if self.refresh_chrome() {
@@ -32568,19 +33026,21 @@ impl Runtime {
 
     /// Which preview seat is showing this repository's graph, if one is.
     fn graph_seat_for(&self, root: &Path) -> Option<SeatId> {
-        self.tabs[self.active_tab]
+        self.window.tabs[self.window.active_tab]
             .git_graph_view
             .iter()
-            .find(|(seat, view)| view.root == root && self.git_graphs_shown.contains_key(seat))
+            .find(|(seat, view)| {
+                view.root == root && self.window.git_graphs_shown.contains_key(seat)
+            })
             .map(|(seat, _)| *seat)
     }
 
     /// The cache one origin reads from.
     fn git_cache_at(&self, origin: &GitOrigin) -> Option<&git::GitCache> {
-        let active = self.active_tab;
+        let active = self.window.active_tab;
         match origin {
-            GitOrigin::Column(seat) => self.tabs[active].git_trees.get(seat),
-            GitOrigin::Graph(root) => self.tabs[active]
+            GitOrigin::Column(seat) => self.window.tabs[active].git_trees.get(seat),
+            GitOrigin::Graph(root) => self.window.tabs[active]
                 .git_graphs
                 .get(root)
                 .map(|state| &state.cache),
@@ -32589,7 +33049,7 @@ impl Runtime {
 
     /// Which surface a repository answer for this origin comes back to.
     fn git_host_at(&self, origin: &GitOrigin) -> git::GitHost {
-        let tab = self.tabs[self.active_tab].id;
+        let tab = self.window.tabs[self.window.active_tab].id;
         match origin {
             GitOrigin::Column(seat) => git::GitHost::Column(LeafId { tab, seat: *seat }),
             GitOrigin::Graph(root) => git::GitHost::Graph {
@@ -32613,14 +33073,14 @@ impl Runtime {
         verb: git::GitWriteVerb,
         paths: Vec<String>,
     ) -> Result<()> {
-        let active = self.active_tab;
+        let active = self.window.active_tab;
         let host = self.git_host_at(origin);
         let question = match origin {
-            GitOrigin::Column(seat) => self.tabs[active]
+            GitOrigin::Column(seat) => self.window.tabs[active]
                 .git_trees
                 .get_mut(seat)
                 .and_then(|cache| cache.begin_write(verb, paths)),
-            GitOrigin::Graph(root) => self.tabs[active]
+            GitOrigin::Graph(root) => self.window.tabs[active]
                 .git_graphs
                 .get_mut(root)
                 .and_then(|state| state.cache.begin_write(verb, paths)),
@@ -32628,7 +33088,11 @@ impl Runtime {
         let Some(question) = question else {
             return Ok(());
         };
-        if !self.git_worker.request(git::GitRequest { host, question }) {
+        if !self
+            .app
+            .git_worker
+            .request(git::GitRequest { host, question })
+        {
             self.disable_git_worker();
             return Ok(());
         }
@@ -32663,7 +33127,7 @@ impl Runtime {
         text: &str,
         said: &str,
     ) -> Result<()> {
-        let result = window_hwnd(&self.window).and_then(|hwnd| {
+        let result = window_hwnd(&self.window.window).and_then(|hwnd| {
             bt_platform::set_clipboard_text(hwnd, text)
                 .map_err(|error| anyhow!(error))
                 .context("copy a repository's own words to the clipboard")
@@ -32674,7 +33138,7 @@ impl Runtime {
         let anchor = match origin {
             GitOrigin::Column(seat) => toast::ToastAnchor::FilesColumn(*seat),
             GitOrigin::Graph(_) => self.git_toast_anchor(&git::GitHost::Graph {
-                tab: self.tabs[self.active_tab].id,
+                tab: self.window.tabs[self.window.active_tab].id,
                 root: root.to_owned(),
             }),
         };
@@ -32695,11 +33159,11 @@ impl Runtime {
     /// the whole repository when the receipt arrives anyway (see
     /// [`git::GitWriteVerb::moves_refs`]).
     fn git_origin_for_root(&self, root: &Path) -> Option<GitOrigin> {
-        let active = self.active_tab;
-        if self.tabs[active].git_graphs.contains_key(root) {
+        let active = self.window.active_tab;
+        if self.window.tabs[active].git_graphs.contains_key(root) {
             return Some(GitOrigin::Graph(root.to_owned()));
         }
-        self.tabs[active]
+        self.window.tabs[active]
             .git_trees
             .iter()
             .find(|(_, cache)| cache.root() == Some(root))
@@ -32715,9 +33179,10 @@ impl Runtime {
     /// takes every key exactly as the graph's search field does.
     fn git_menu_key(&mut self, event: &KeyEvent) -> Result<()> {
         use text_field::TextMove;
-        let control = self.modifiers.control_key();
-        let shift = self.modifiers.shift_key();
+        let control = self.window.modifiers.control_key();
+        let shift = self.window.modifiers.shift_key();
         if self
+            .window
             .git_menu
             .as_ref()
             .is_some_and(|menu| menu.prompt.is_some())
@@ -32729,7 +33194,7 @@ impl Runtime {
                 // menu.
                 Key::Named(NamedKey::Escape) => {
                     if !event.repeat
-                        && let Some(menu) = self.git_menu.as_mut()
+                        && let Some(menu) = self.window.git_menu.as_mut()
                     {
                         menu.prompt = None;
                         if self.refresh_chrome() {
@@ -32747,6 +33212,7 @@ impl Runtime {
                 _ => {}
             }
             let Some(field) = self
+                .window
                 .git_menu
                 .as_mut()
                 .and_then(|menu| menu.prompt.as_mut())
@@ -32805,7 +33271,7 @@ impl Runtime {
             // "further", and holding Enter is not one continuous "again".
             Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowUp) => {
                 let forwards = matches!(event.logical_key, Key::Named(NamedKey::ArrowDown));
-                if let Some(menu) = self.git_menu.as_mut() {
+                if let Some(menu) = self.window.git_menu.as_mut() {
                     let rows = profiles::git_menu(&menu.target).rows;
                     menu.hover = profiles::git_menu_step(&rows, &menu.target, menu.hover, forwards);
                 }
@@ -32815,7 +33281,7 @@ impl Runtime {
             }
             Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
                 if !event.repeat
-                    && let Some(row) = self.git_menu.as_ref().and_then(|menu| menu.hover)
+                    && let Some(row) = self.window.git_menu.as_ref().and_then(|menu| menu.hover)
                 {
                     self.run_git_menu_row(row)?;
                 }
@@ -32829,7 +33295,12 @@ impl Runtime {
 
     /// A composition, with a git prompt holding the keyboard (v2 ④).
     fn git_prompt_ime(&mut self, event: &Ime) -> Result<()> {
-        let Some(prompt) = self.git_menu.as_mut().and_then(|menu| menu.prompt.as_mut()) else {
+        let Some(prompt) = self
+            .window
+            .git_menu
+            .as_mut()
+            .and_then(|menu| menu.prompt.as_mut())
+        else {
             return Ok(());
         };
         match event {
@@ -32865,7 +33336,7 @@ impl Runtime {
                 .get(&seat)
                 .and_then(|leaf| leaf.session.selection_text())
                 .is_some_and(|text| !text.is_empty()),
-            restart_in_flight: self.restarting == Some(seat),
+            restart_in_flight: self.window.restarting == Some(seat),
             // The same question `Find…` will ask when it runs, asked of the same
             // function: one door, so a greyed row and a declined verb can never
             // disagree about which panes a search can be addressed to.
@@ -32880,7 +33351,7 @@ impl Runtime {
     /// top of the pane-head menu already hanging over it.
     fn open_term_menu_at(&mut self, seat: SeatId, position: PhysicalPosition<f64>) -> Result<()> {
         self.close_popups_except(Popup::TermMenu);
-        self.term_menu = Some(TermMenuState {
+        self.window.term_menu = Some(TermMenuState {
             point: [position.x as f32, position.y as f32],
             seat,
             subject: self.term_menu_subject(seat),
@@ -32899,7 +33370,7 @@ impl Runtime {
     /// needs no owned draw struct — the measure closure can hold the renderer
     /// mutably while the look sits on the stack.
     fn term_menu_layout(&mut self) -> Option<profiles::TermMenuLayout> {
-        let menu = self.term_menu.as_ref()?;
+        let menu = self.window.term_menu.as_ref()?;
         let (point, look) = (
             menu.point,
             profiles::TermMenuLook {
@@ -32907,9 +33378,9 @@ impl Runtime {
                 hover: menu.hover,
             },
         );
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
-        let renderer = &mut self.renderer;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let renderer = &mut self.window.renderer;
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
         Some(profiles::term_menu_layout(
             point,
@@ -32922,10 +33393,15 @@ impl Runtime {
 
     /// The terminal menu's own level of the overlay stack.
     fn term_menu_layer(&mut self) -> Vec<marks::OverlayLayer> {
-        let Some(look) = self.term_menu.as_ref().map(|menu| profiles::TermMenuLook {
-            subject: menu.subject,
-            hover: menu.hover,
-        }) else {
+        let Some(look) = self
+            .window
+            .term_menu
+            .as_ref()
+            .map(|menu| profiles::TermMenuLook {
+                subject: menu.subject,
+                hover: menu.hover,
+            })
+        else {
             return Vec::new();
         };
         let Some(layout) = self.term_menu_layout() else {
@@ -32935,7 +33411,7 @@ impl Runtime {
     }
 
     fn close_term_menu(&mut self) -> Result<bool> {
-        if self.term_menu.take().is_none() {
+        if self.window.term_menu.take().is_none() {
             return Ok(false);
         }
         if self.refresh_chrome() {
@@ -32951,7 +33427,7 @@ impl Runtime {
     /// behind the scrim, and a row that spawns a shell would leave one hanging
     /// over a pane that is being rebuilt underneath it.
     fn run_term_menu_row(&mut self, row: profiles::TermMenuRow) -> Result<()> {
-        let Some(menu) = self.term_menu.take() else {
+        let Some(menu) = self.window.term_menu.take() else {
             return Ok(());
         };
         if self.refresh_chrome() {
@@ -33009,7 +33485,7 @@ impl Runtime {
             // continuous "again".
             Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowUp) => {
                 let forwards = matches!(event.logical_key, Key::Named(NamedKey::ArrowDown));
-                if let Some(menu) = self.term_menu.as_mut() {
+                if let Some(menu) = self.window.term_menu.as_mut() {
                     menu.hover = profiles::term_menu_step(menu.hover, menu.subject, forwards);
                 }
                 if self.refresh_overlay() {
@@ -33018,7 +33494,7 @@ impl Runtime {
             }
             Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
                 if !event.repeat
-                    && let Some(row) = self.term_menu.as_ref().and_then(|menu| menu.hover)
+                    && let Some(row) = self.window.term_menu.as_ref().and_then(|menu| menu.hover)
                 {
                     self.run_term_menu_row(row)?;
                 }
@@ -33130,31 +33606,31 @@ impl Runtime {
     /// and a confirmation that guessed would be a dialog in front of a fact
     /// nobody measured.
     fn restart_shell(&mut self, seat: SeatId) -> Result<()> {
-        if self.restarting.is_some() {
+        if self.window.restarting.is_some() {
             return Ok(());
         }
         let Some(leaf) = self.sessions.get(&seat) else {
             return Ok(());
         };
         let seed = restart_seed(leaf.profile, leaf.session.working_directory());
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let Some(body) = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
         else {
             return Ok(());
         };
-        let wake = self.pty_wake.wake();
-        let formulas = FormulaSwitches::from_settings(self.settings_store.loaded());
-        self.restarting = Some(seat);
+        let wake = self.window.pty_wake.wake();
+        let formulas = FormulaSwitches::from_settings(self.app.settings_store.loaded());
+        self.window.restarting = Some(seat);
         let spawned = create_leaf_session(
-            &self.renderer,
+            &self.window.renderer,
             body,
             wake,
             None,
             &seed,
-            &self.profile_programs,
+            &self.app.profile_programs,
             formulas,
         );
-        self.restarting = None;
+        self.window.restarting = None;
         // The old leaf is dropped **here**, by the insert: `PtySession::drop`
         // takes the child with it, and it takes it only once the replacement is
         // known to exist.
@@ -33164,14 +33640,14 @@ impl Runtime {
         // frame there would let the next present assert a grid belonging to a
         // session that no longer exists.
         if seat == self.focused_leaf {
-            self.last_presented_frame = None;
+            self.window.last_presented_frame = None;
         }
         // The capsule's hits were cut from a transcript that no longer exists,
         // and so was the cache that decides whether to re-cut them: its key is a
         // count and a pair of ids, and an empty transcript's key is the same
         // whichever shell emptied it. Both go.
         self.clear_search_highlights(seat);
-        self.search_scan = None;
+        self.window.search_scan = None;
         self.settle_seat_set_change()?;
         self.refresh_chrome();
         self.repaint_pane_change(seat)
@@ -33183,11 +33659,11 @@ impl Runtime {
     /// twin, and anchored the same way: at the point the pointer was at, which
     /// no re-layout can move or destroy.
     fn pane_menu_layout(&mut self) -> Option<profiles::PaneMenuLayout> {
-        let menu = self.pane_menu.as_ref()?;
+        let menu = self.window.pane_menu.as_ref()?;
         let (point, submenu_open) = (menu.point, menu.submenu_open);
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
-        let renderer = &mut self.renderer;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let renderer = &mut self.window.renderer;
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
         Some(profiles::pane_menu_layout(
             point,
@@ -33212,7 +33688,7 @@ impl Runtime {
         }
         // E61: the opener closes the others.
         self.close_popups_except(Popup::Pane);
-        self.pane_menu = Some(PaneMenuState {
+        self.window.pane_menu = Some(PaneMenuState {
             point,
             seat,
             hover: None,
@@ -33243,18 +33719,19 @@ impl Runtime {
     /// rather than to a button on it.
     fn toggle_pane_menu(&mut self, seat: SeatId) -> Result<()> {
         if self
+            .window
             .pane_menu
             .as_ref()
             .is_some_and(|menu| menu.seat == seat)
         {
-            self.chevrons.clear();
+            self.window.chevrons.clear();
             self.close_pane_menu()?;
             return Ok(());
         }
         let Some(anchor) = self.pane_chevron_box(seat) else {
             return Ok(());
         };
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         self.open_pane_menu(
             seat,
             [
@@ -33272,7 +33749,7 @@ impl Runtime {
     /// window keeps: the rectangle a menu hangs off has to be the rectangle the
     /// button was drawn in, by one derivation and not by two that agree today.
     fn pane_chevron_box(&self, seat: SeatId) -> Option<[f32; 4]> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         seats::pane_chevron_box(&self.seats, &self.seat_layout, seat, scale)
     }
 
@@ -33282,7 +33759,7 @@ impl Runtime {
         let Some(layout) = self.pane_menu_layout() else {
             return Vec::new();
         };
-        let Some(menu) = self.pane_menu.as_ref() else {
+        let Some(menu) = self.window.pane_menu.as_ref() else {
             return Vec::new();
         };
         let (hover, seat) = (menu.hover, menu.seat);
@@ -33291,14 +33768,14 @@ impl Runtime {
         // Bash, and a submenu that ticked PowerShell on it would be telling you
         // about the window rather than about the pane the menu was raised on.
         let current = self.sessions.get(&seat).map(|leaf| leaf.profile);
-        let programs = &self.profile_programs;
-        let renderer = &mut self.renderer;
+        let programs = &self.app.profile_programs;
+        let renderer = &mut self.window.renderer;
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
         profiles::pane_menu_build(&layout, hover, current, programs, &mut measure)
     }
 
     fn close_pane_menu(&mut self) -> Result<bool> {
-        if self.pane_menu.take().is_none() {
+        if self.window.pane_menu.take().is_none() {
             return Ok(false);
         }
         if self.refresh_chrome() {
@@ -33312,7 +33789,7 @@ impl Runtime {
     /// The hold is cleared on both edges: an opening submenu has nothing to
     /// survive yet, and a closing one has nothing left to survive for.
     fn set_pane_submenu(&mut self, open: bool) -> Result<bool> {
-        let Some(menu) = self.pane_menu.as_mut() else {
+        let Some(menu) = self.window.pane_menu.as_mut() else {
             return Ok(false);
         };
         if menu.submenu_open == open {
@@ -33365,7 +33842,7 @@ impl Runtime {
         let submenu = layout.submenu_frame();
         let to = [position.x as f32, position.y as f32];
         let now = Instant::now();
-        let Some(menu) = self.pane_menu.as_mut() else {
+        let Some(menu) = self.window.pane_menu.as_mut() else {
             return Ok(false);
         };
         let hovering_child = matches!(
@@ -33447,7 +33924,7 @@ impl Runtime {
     /// question — "what does this menu owe at some instant" — and a menu cannot
     /// be both waiting to open its child and holding it open against the rows.
     fn advance_pane_menu(&mut self, now: Instant) -> Result<()> {
-        let Some(menu) = self.pane_menu.as_ref() else {
+        let Some(menu) = self.window.pane_menu.as_ref() else {
             return Ok(());
         };
         let Some(due) = menu.submenu_hold_until else {
@@ -33463,7 +33940,7 @@ impl Runtime {
             // remembered, because the rows have not moved but the hold was
             // deliberately keeping the answer stale.
             self.set_pane_submenu(false)?;
-            if let Some(position) = self.pointer_position {
+            if let Some(position) = self.window.pointer_position {
                 self.drive_pane_menu_hover(position)?;
             }
             return Ok(());
@@ -33476,7 +33953,7 @@ impl Runtime {
 
     /// The pane menu's next wake-up, for the loop's set.
     fn pane_menu_deadline(&self) -> Option<Instant> {
-        self.pane_menu.as_ref()?.submenu_hold_until
+        self.window.pane_menu.as_ref()?.submenu_hold_until
     }
 
     /// **Both `⌄` clocks, told where the pointer is** (user ruling, 2026-08-16).
@@ -33497,15 +33974,15 @@ impl Runtime {
         // list for the length of a drag). A menu dropped under a pane being
         // carried across the window would be a menu nobody asked for, standing
         // in the way of the drop.
-        if self.drag.is_some() || self.float_drag.is_some() {
-            self.chevrons.clear();
+        if self.window.drag.is_some() || self.window.float_drag.is_some() {
+            self.window.chevrons.clear();
             return;
         }
-        let profile_open = self.profile_menu.is_open();
-        let pane_open = self.pane_menu.is_some();
+        let profile_open = self.window.profile_menu.is_open();
+        let pane_open = self.window.pane_menu.is_some();
         let target = self.chrome_target_at(position);
         let on_profile_button = matches!(target, Some(seats::ChromeTarget::NewTabMenu));
-        let pane_seat = self.pane_menu.as_ref().map(|menu| menu.seat);
+        let pane_seat = self.window.pane_menu.as_ref().map(|menu| menu.seat);
         // A rest on *any* pane head's chevron arms that head's menu — including
         // a second head's while the first head's menu is up, which is how a hand
         // walks a menu across a split without clicking. The gate is told
@@ -33538,7 +34015,7 @@ impl Runtime {
             (None, true) => (profiles::ChevronPointer::Surface, pane_open),
             (None, false) => (profiles::ChevronPointer::Away, pane_open),
         };
-        self.chevrons.observe(
+        self.window.chevrons.observe(
             (profile_where, profile_open),
             (pane_where, pane_owner_open),
             now,
@@ -33553,11 +34030,11 @@ impl Runtime {
     /// ruling's "两处 ⌄ 语义完全对齐" a property of the code rather than a
     /// coincidence of two implementations.
     fn advance_chevrons(&mut self, now: Instant) -> Result<()> {
-        if let Some(action) = self.chevrons.profile.due(now) {
-            self.chevrons.profile.clear();
+        if let Some(action) = self.window.chevrons.profile.due(now) {
+            self.window.chevrons.profile.clear();
             match action {
                 profiles::ChevronAction::Open => {
-                    if !self.profile_menu.is_open() {
+                    if !self.window.profile_menu.is_open() {
                         self.toggle_profile_menu()?;
                     }
                 }
@@ -33566,14 +34043,14 @@ impl Runtime {
                 }
             }
         }
-        if let Some(action) = self.chevrons.pane.due(now) {
-            self.chevrons.pane.clear();
+        if let Some(action) = self.window.chevrons.pane.due(now) {
+            self.window.chevrons.pane.clear();
             match action {
                 profiles::ChevronAction::Open => {
                     // Which head is under the pointer is asked again here rather
                     // than remembered with the clock: the rest is 250ms long and
                     // a layout can change inside it.
-                    if let Some(position) = self.pointer_position
+                    if let Some(position) = self.window.pointer_position
                         && let Some(seats::ChromeTarget::PaneMenu(seat)) =
                             self.chrome_target_at(position)
                     {
@@ -33597,8 +34074,8 @@ impl Runtime {
     /// for: the rectangle a control can be pressed in has to be the rectangle it
     /// was drawn in, by one derivation and not by two that agree today.
     fn graph_toolbar_rects(&self, seat: SeatId) -> Option<git_graph::GraphToolbarRects> {
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let content = self.git_graphs_shown.get(&seat)?;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let content = self.window.git_graphs_shown.get(&seat)?;
         let body = seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)?;
         let geometry = git_graph::graph_geometry(body, content, scale);
         let toolbar = content.toolbar.as_ref()?;
@@ -33622,12 +34099,12 @@ impl Runtime {
 
     /// Where the filter menu hangs, or nothing when it is not up.
     fn graph_filter_menu_layout(&mut self) -> Option<profiles::GitFilterMenuLayout> {
-        let seat = self.graph_filter_menu.as_ref()?.seat;
+        let seat = self.window.graph_filter_menu.as_ref()?.seat;
         let anchor = self.graph_toolbar_rects(seat)?.filter;
         let rows = profiles::git_filter_rows(&self.graph_filter_branches(seat));
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
-        let renderer = &mut self.renderer;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let renderer = &mut self.window.renderer;
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
         Some(profiles::git_filter_menu_layout(
             anchor,
@@ -33646,15 +34123,15 @@ impl Runtime {
     /// and a menu that borrowed the other one's answer would offer a branch this
     /// graph cannot walk.
     fn graph_filter_branches(&self, seat: SeatId) -> Vec<String> {
-        let active = self.active_tab;
-        let Some(root) = self.tabs[active]
+        let active = self.window.active_tab;
+        let Some(root) = self.window.tabs[active]
             .git_graph_view
             .get(&seat)
             .map(|view| view.root.clone())
         else {
             return Vec::new();
         };
-        self.tabs[active]
+        self.window.tabs[active]
             .git_graphs
             .get(&root)
             .and_then(|state| state.cache.refs().ready())
@@ -33668,7 +34145,7 @@ impl Runtime {
 
     /// Whether this seat's search field holds the keyboard (T4).
     fn graph_search_focused(&self, seat: SeatId) -> bool {
-        self.tabs[self.active_tab]
+        self.window.tabs[self.window.active_tab]
             .git_graph_view
             .get(&seat)
             .is_some_and(|view| view.search_focused)
@@ -33683,9 +34160,9 @@ impl Runtime {
     /// the answer the files column and the read-only preview both already give.
     fn graph_search_key(&mut self, seat: SeatId, event: &KeyEvent) -> Result<bool> {
         use text_field::TextMove;
-        let control = self.modifiers.control_key();
-        let shift = self.modifiers.shift_key();
-        let active = self.active_tab;
+        let control = self.window.modifiers.control_key();
+        let shift = self.window.modifiers.shift_key();
+        let active = self.window.active_tab;
         enum Then {
             /// Nothing but a repaint.
             Draw,
@@ -33696,7 +34173,7 @@ impl Runtime {
             /// Give the keyboard back to the graph and forget the search.
             Clear,
         }
-        let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) else {
+        let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) else {
             return Ok(false);
         };
         let then = match &event.logical_key {
@@ -33783,11 +34260,11 @@ impl Runtime {
 
     /// A composition, with the search field holding the keyboard (T4).
     fn graph_search_ime(&mut self, event: &Ime) -> Result<()> {
-        let active = self.active_tab;
+        let active = self.window.active_tab;
         let Some(PreviewSurface::Seat(seat)) = self.preview_keyboard_surface() else {
             return Ok(());
         };
-        let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) else {
+        let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) else {
             return Ok(());
         };
         match event {
@@ -33811,21 +34288,21 @@ impl Runtime {
     /// hundred thousand lines for it on the way to the two characters it becomes
     /// would be work done for a string the reader never typed.
     fn search_ime(&mut self, event: Ime) -> Result<()> {
-        if !self.search.is_focused() {
+        if !self.window.search.is_focused() {
             return Ok(());
         }
         match event {
             Ime::Preedit(text, _) => {
-                self.search.field_mut().set_preedit(&text);
+                self.window.search.field_mut().set_preedit(&text);
                 if self.refresh_overlay() {
                     self.present_chrome_change()?;
                 }
                 return Ok(());
             }
-            Ime::Commit(text) => self.search.field_mut().insert(&text),
+            Ime::Commit(text) => self.window.search.field_mut().insert(&text),
             Ime::Enabled | Ime::Disabled => return Ok(()),
         }
-        self.search_revision = self.search_revision.wrapping_add(1);
+        self.window.search_revision = self.window.search_revision.wrapping_add(1);
         self.refresh_search(true)?;
         if self.refresh_overlay() {
             self.present_chrome_change()?;
@@ -33835,9 +34312,9 @@ impl Runtime {
 
     /// Put what is in the field to git (T4).
     fn ask_graph_search(&mut self, seat: SeatId) -> Result<()> {
-        let active = self.active_tab;
-        let tab_id = self.tabs[active].id;
-        let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) else {
+        let active = self.window.active_tab;
+        let tab_id = self.window.tabs[active].id;
+        let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) else {
             return Ok(());
         };
         let query = view.search.text().to_owned();
@@ -33848,20 +34325,20 @@ impl Runtime {
         if view.search.is_empty() {
             view.search_asked = None;
             view.search_at = None;
-            if let Some(state) = self.tabs[active].git_graphs.get_mut(&root) {
+            if let Some(state) = self.window.tabs[active].git_graphs.get_mut(&root) {
                 state.cache.clear_search();
             }
             return Ok(());
         }
         view.search_asked = Some(query.clone());
         view.search_at = None;
-        let Some(state) = self.tabs[active].git_graphs.get_mut(&root) else {
+        let Some(state) = self.window.tabs[active].git_graphs.get_mut(&root) else {
             return Ok(());
         };
         let Some(question) = state.cache.begin_search(&query) else {
             return Ok(());
         };
-        if !self.git_worker.request(git::GitRequest {
+        if !self.app.git_worker.request(git::GitRequest {
             host: git::GitHost::Graph { tab: tab_id, root },
             question,
         }) {
@@ -33877,15 +34354,15 @@ impl Runtime {
     /// fifty commits of it, so a match nine hundred rows down is a hash the page
     /// does not contain — which is exactly the case the seek was written for.
     fn step_graph_search(&mut self, seat: SeatId, forwards: bool) -> Result<()> {
-        let active = self.active_tab;
-        let Some(view) = self.tabs[active].git_graph_view.get(&seat) else {
+        let active = self.window.active_tab;
+        let Some(view) = self.window.tabs[active].git_graph_view.get(&seat) else {
             return Ok(());
         };
         let root = view.root.clone();
         let Some(query) = view.search_asked.clone() else {
             return Ok(());
         };
-        let Some(matches) = self.tabs[active]
+        let Some(matches) = self.window.tabs[active]
             .git_graphs
             .get(&root)
             .and_then(|state| state.cache.search(&query))
@@ -33900,7 +34377,7 @@ impl Runtime {
         // The ring is [`git_graph::search_step`]'s — see there for why stepping
         // off the end starts again rather than stopping.
         let Some(at) = git_graph::search_step(
-            self.tabs[active]
+            self.window.tabs[active]
                 .git_graph_view
                 .get(&seat)
                 .and_then(|view| view.search_at),
@@ -33909,7 +34386,7 @@ impl Runtime {
         ) else {
             return Ok(());
         };
-        if let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) {
+        if let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) {
             view.search_at = Some(at);
             view.seek = Some(git_graph::GraphSeek {
                 hash: matches[at].clone(),
@@ -33924,11 +34401,13 @@ impl Runtime {
     /// opener in this window.
     fn toggle_graph_filter_menu(&mut self, seat: SeatId) -> Result<()> {
         let already = self
+            .window
             .graph_filter_menu
             .as_ref()
             .is_some_and(|menu| menu.seat == seat);
         self.close_popups_except(Popup::GraphFilter);
-        self.graph_filter_menu = (!already).then_some(GraphFilterMenuState { seat, hover: None });
+        self.window.graph_filter_menu =
+            (!already).then_some(GraphFilterMenuState { seat, hover: None });
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -33936,7 +34415,7 @@ impl Runtime {
     }
 
     fn close_graph_filter_menu(&mut self) -> Result<bool> {
-        if self.graph_filter_menu.take().is_none() {
+        if self.window.graph_filter_menu.take().is_none() {
             return Ok(false);
         }
         if self.refresh_chrome() {
@@ -33954,11 +34433,11 @@ impl Runtime {
     /// picking two branches means picking one and then the other; a menu that
     /// shut on the first would make the second gesture a second opening.
     fn run_graph_filter_row(&mut self, row: &profiles::GitFilterRow) -> Result<()> {
-        let Some(seat) = self.graph_filter_menu.as_ref().map(|menu| menu.seat) else {
+        let Some(seat) = self.window.graph_filter_menu.as_ref().map(|menu| menu.seat) else {
             return Ok(());
         };
-        let active = self.active_tab;
-        let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) else {
+        let active = self.window.active_tab;
+        let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) else {
             return Ok(());
         };
         match row {
@@ -33972,7 +34451,7 @@ impl Runtime {
         // and asked again — see `GitCache::set_log_refs`. A branch that was not
         // walked has no commits on hand to reveal, so there is nothing here that
         // could have been done by filtering what is already loaded.
-        if let Some(state) = self.tabs[active].git_graphs.get_mut(&root)
+        if let Some(state) = self.window.tabs[active].git_graphs.get_mut(&root)
             && state.cache.set_log_refs(refs)
         {
             state.invalidate();
@@ -33986,13 +34465,13 @@ impl Runtime {
 
     /// The search field takes the keyboard (T4).
     fn focus_graph_search(&mut self, seat: SeatId) -> Result<()> {
-        let active = self.active_tab;
-        if let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) {
+        let active = self.window.active_tab;
+        if let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) {
             view.search_focused = true;
         }
         // A press in the field is a press on a control, so it closes the popups
         // for E61's reason exactly as every other opener does.
-        self.graph_filter_menu = None;
+        self.window.graph_filter_menu = None;
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -34002,8 +34481,8 @@ impl Runtime {
     /// The `×`, or `Esc` in the field: forget the search and give the keyboard
     /// back to the graph (T4).
     fn clear_graph_search(&mut self, seat: SeatId) -> Result<()> {
-        let active = self.active_tab;
-        let Some(view) = self.tabs[active].git_graph_view.get_mut(&seat) else {
+        let active = self.window.active_tab;
+        let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) else {
             return Ok(());
         };
         view.search.clear();
@@ -34011,7 +34490,7 @@ impl Runtime {
         view.search_at = None;
         view.search_focused = false;
         let root = view.root.clone();
-        if let Some(state) = self.tabs[active].git_graphs.get_mut(&root) {
+        if let Some(state) = self.window.tabs[active].git_graphs.get_mut(&root) {
             state.cache.clear_search();
         }
         if self.refresh_chrome() {
@@ -34031,7 +34510,7 @@ impl Runtime {
     /// under the lane walker is not a history it can resume, and a refresh is
     /// exactly the moment that may have happened.
     fn refresh_graph(&mut self, seat: SeatId) -> Result<()> {
-        let Some(root) = self.tabs[self.active_tab]
+        let Some(root) = self.window.tabs[self.window.active_tab]
             .git_graph_view
             .get(&seat)
             .map(|view| view.root.clone())
@@ -34077,13 +34556,13 @@ impl Runtime {
     /// answer, in `sync`, before anything is drawn from them.
     fn reread_git_origin(&mut self, origin: &GitOrigin, ask: Ask) -> bool {
         let host = self.git_host_at(origin);
-        let active = self.active_tab;
+        let active = self.window.active_tab;
         let questions = match origin {
-            GitOrigin::Column(seat) => match self.tabs[active].git_trees.get_mut(seat) {
+            GitOrigin::Column(seat) => match self.window.tabs[active].git_trees.get_mut(seat) {
                 Some(cache) => ask.begin(cache),
                 None => Vec::new(),
             },
-            GitOrigin::Graph(root) => match self.tabs[active].git_graphs.get_mut(root) {
+            GitOrigin::Graph(root) => match self.window.tabs[active].git_graphs.get_mut(root) {
                 Some(state) => {
                     let questions = ask.begin(&mut state.cache);
                     if !questions.is_empty() {
@@ -34098,7 +34577,7 @@ impl Runtime {
             return false;
         }
         for question in questions {
-            if !self.git_worker.request(git::GitRequest {
+            if !self.app.git_worker.request(git::GitRequest {
                 host: host.clone(),
                 question,
             }) {
@@ -34117,12 +34596,16 @@ impl Runtime {
     /// A column that is on its Files page is in this list, with `false`, and that
     /// is the fact the pin is about.
     fn git_surfaces_on_screen(&self) -> Vec<(GitOrigin, PathBuf, bool)> {
-        let active = self.active_tab;
-        let mut surfaces: Vec<(GitOrigin, PathBuf, bool)> = self.tabs[active]
+        let active = self.window.active_tab;
+        let mut surfaces: Vec<(GitOrigin, PathBuf, bool)> = self.window.tabs[active]
             .files
             .iter()
             .filter_map(|(seat, state)| {
-                let root = self.tabs[active].git_trees.get(seat)?.root()?.to_path_buf();
+                let root = self.window.tabs[active]
+                    .git_trees
+                    .get(seat)?
+                    .root()?
+                    .to_path_buf();
                 Some((
                     GitOrigin::Column(*seat),
                     root,
@@ -34130,7 +34613,8 @@ impl Runtime {
                     // frame's own record of which columns put a Git page on the
                     // glass; a seat that is collapsed or not laid out is not a
                     // surface looking at a repository, however its `view` is set.
-                    state.view == seats::FilesView::Git && self.git_pages_shown.contains_key(seat),
+                    state.view == seats::FilesView::Git
+                        && self.window.git_pages_shown.contains_key(seat),
                 ))
             })
             .collect();
@@ -34138,9 +34622,9 @@ impl Runtime {
         // are one surface — and the second would find the first's re-read already
         // owed in any case.
         let mut graphs: Vec<PathBuf> = Vec::new();
-        for (seat, view) in &self.tabs[active].git_graph_view {
-            if !self.git_graphs_shown.contains_key(seat)
-                || !self.tabs[active].git_graphs.contains_key(&view.root)
+        for (seat, view) in &self.window.tabs[active].git_graph_view {
+            if !self.window.git_graphs_shown.contains_key(seat)
+                || !self.window.tabs[active].git_graphs.contains_key(&view.root)
                 || graphs.contains(&view.root)
             {
                 continue;
@@ -34181,8 +34665,8 @@ impl Runtime {
             .filter(|(_, _, showing)| *showing)
             .map(|(_, root, _)| root.clone())
             .collect();
-        self.git_watch.sync(&wanted, &self.event_proxy);
-        let due = self.git_watch.due(now);
+        self.app.git_watch.sync(&wanted, &self.app.event_proxy);
+        let due = self.app.git_watch.due(now);
         if due.is_empty() {
             return Ok(());
         }
@@ -34231,11 +34715,11 @@ impl Runtime {
     /// that raised this and the one that ran it, the pointer has travelled —
     /// down the menu, which is drawn over some *other* pane as often as not.
     fn run_pane_menu_row(&mut self, hit: profiles::PaneMenuHit) -> Result<()> {
-        let Some(menu) = self.pane_menu.take() else {
+        let Some(menu) = self.window.pane_menu.take() else {
             return Ok(());
         };
         let seat = menu.seat;
-        self.chevrons.clear();
+        self.window.chevrons.clear();
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -34314,7 +34798,7 @@ impl Runtime {
         // path that touches the solver — which is how a rectangle nobody asks
         // for goes stale unnoticed.
         split_axis(
-            self.settings_store.loaded().split_direction,
+            self.app.settings_store.loaded().split_direction,
             self.pane_split_axis(seat),
         )
     }
@@ -34342,8 +34826,8 @@ impl Runtime {
             .sessions
             .get(&seat)
             .and_then(|leaf| leaf.session.working_directory().map(Path::to_path_buf));
-        match self.folder_picker.request(start.as_deref()) {
-            Ok(true) => self.folder_pick = Some(FolderPick::SplitInto(seat)),
+        match self.window.folder_picker.request(start.as_deref()) {
+            Ok(true) => self.window.folder_pick = Some(FolderPick::SplitInto(seat)),
             // Already queued or already open: a second request while one is up
             // is one dialog, not two, and whoever asked first keeps the answer.
             Ok(false) => {}
@@ -34368,7 +34852,7 @@ impl Runtime {
     /// here for the same reason it is right for the drag: the gesture was "put
     /// this over there", not "take me there".
     fn move_pane_to_new_tab(&mut self, seat: SeatId) -> Result<()> {
-        let slot = self.tabs.len();
+        let slot = self.window.tabs.len();
         self.extract_pane_into_new_tab(seat, slot)?;
         Ok(())
     }
@@ -34380,7 +34864,7 @@ impl Runtime {
     /// still on screen after the focus has left it is a menu the next Esc will
     /// be spent on.
     fn run_file_menu_row(&mut self, row: profiles::FileMenuRow) -> Result<()> {
-        let Some(menu) = self.file_menu.take() else {
+        let Some(menu) = self.window.file_menu.take() else {
             return Ok(());
         };
         let activation = menu.activation;
@@ -34413,7 +34897,7 @@ impl Runtime {
     /// pasted somewhere this window does not control.
     fn copy_path_to_clipboard(&mut self, path: &Path) -> Result<()> {
         let text = path.to_string_lossy().into_owned();
-        let result = write_terminal_clipboard_text(&self.window, &text);
+        let result = write_terminal_clipboard_text(&self.window.window, &text);
         recoverable_clipboard_write(result, "copy a files row's path");
         Ok(())
     }
@@ -34438,11 +34922,11 @@ impl Runtime {
     /// bracketed-paste mode is told this arrived as one lump — which is what
     /// stops a path from being read as anything but characters.
     fn insert_path_into_terminal(&mut self, path: &Path) -> Result<()> {
-        let active = self.active_tab;
-        let seat = self.tabs[active].focused_leaf;
+        let active = self.window.active_tab;
+        let seat = self.window.tabs[active].focused_leaf;
         let text = inserted_path_text(
             path,
-            input_line_needs_a_space_first(&self.tabs[active].focused().session),
+            input_line_needs_a_space_first(&self.window.tabs[active].focused().session),
         );
 
         // The keyboard goes back to the shell before the characters do. The
@@ -34466,7 +34950,7 @@ impl Runtime {
             session,
             projection,
             ..
-        } = self.tabs[active].focused_mut();
+        } = self.window.tabs[active].focused_mut();
         paste_text(session, projection, &text, |chunk| {
             if let Some(pty) = pty.as_mut() {
                 pty.write(chunk)
@@ -34498,7 +34982,7 @@ impl Runtime {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Option<(float::FloatId, float::FloatPart)> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         // Measured once for the whole sweep: the caption is the same width in
         // every window, and asking the renderer inside the loop would borrow it
         // against the host we are walking.
@@ -34509,10 +34993,10 @@ impl Runtime {
         // are a question about the *content* plane, which is `&self`, and asking
         // it inside a loop that is already holding the host would be two borrows
         // of one window.
-        let ids: Vec<float::FloatId> = self.float.hit_order().map(|win| win.epoch).collect();
+        let ids: Vec<float::FloatId> = self.window.float.hit_order().map(|win| win.epoch).collect();
         for id in ids {
             let tools = self.float_head_tools(id);
-            let Some(win) = self.float.drawn().find(|win| win.epoch == id) else {
+            let Some(win) = self.window.float.drawn().find(|win| win.epoch == id) else {
                 continue;
             };
             let geometry = float::float_geometry(
@@ -34545,8 +35029,8 @@ impl Runtime {
     /// is not on that list.
     fn drive_float_hover(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
         let hit = self.float_hit_at(position);
-        if self.float_hover != hit {
-            self.float_hover = hit;
+        if self.window.float_hover != hit {
+            self.window.float_hover = hit;
             self.apply_pointer_cursor();
             if self.refresh_overlay() {
                 self.present_chrome_change()?;
@@ -34555,8 +35039,8 @@ impl Runtime {
         // The clocks below are the *peek*'s alone, and it is asked for by name:
         // with several windows on screen the frame that decides the grace has to
         // be the transient one's, not whichever float is frontmost.
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(frame) = self.float.peek().map(|win| win.frame) else {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let Some(frame) = self.window.float.peek().map(|win| win.frame) else {
             return Ok(());
         };
         let reach = float::peek_reach(frame, position.x as f32, position.y as f32, scale);
@@ -34573,9 +35057,9 @@ impl Runtime {
             )
         );
         if reach.inside || on_trigger {
-            self.float.hold();
+            self.window.float.hold();
         } else {
-            self.float.release(reach.off_left, Instant::now());
+            self.window.float.release(reach.off_left, Instant::now());
         }
         Ok(())
     }
@@ -34590,13 +35074,13 @@ impl Runtime {
     /// would have refreshed the overlay for a change that happened in a pane, and
     /// the pane would have kept saying "Revealed" until something else moved.
     fn advance_foot_reveal(&mut self, now: Instant) -> Result<()> {
-        let Some((foot, at)) = self.revealed_foot else {
+        let Some((foot, at)) = self.window.revealed_foot else {
             return Ok(());
         };
         if now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK {
             return Ok(());
         }
-        self.revealed_foot = None;
+        self.window.revealed_foot = None;
         let changed = match foot {
             RevealedFoot::Float(_) => self.refresh_overlay(),
             RevealedFoot::Column(_) | RevealedFoot::Preview(_) => self.refresh_chrome(),
@@ -34609,7 +35093,7 @@ impl Runtime {
 
     /// Advance both of the float's clocks and its animation.
     fn advance_float(&mut self, now: Instant) -> Result<()> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let mut changed = false;
         // A *transient* peek whose trigger has gone — the tab closed, the split
         // collapsed, the pane it hung from stopped being a terminal — has nothing
@@ -34618,15 +35102,16 @@ impl Runtime {
         // by ruling (§7.1.2): it was torn off, and the death of the header it came
         // from is not on its list of closers.
         if let Some((id, origin)) = self
+            .window
             .float
             .peek()
             .and_then(|win| Some((win.epoch, win.origin?)))
             && self.trigger_rect(origin).is_none()
         {
-            self.float.dismiss(id, now);
+            self.window.float.dismiss(id, now);
             changed = true;
         }
-        if let Some(trigger) = self.float.take_due(now) {
+        if let Some(trigger) = self.window.float.take_due(now) {
             // The intent matured. The trigger is looked up **again, by identity**
             // (G86): the strip may have been rebuilt during those 180ms, and an
             // intent that had remembered a rectangle would be pointing at one
@@ -34636,13 +35121,13 @@ impl Runtime {
             }
             changed = true;
         }
-        if self.float.grace_expired(now)
-            && let Some(id) = self.float.peek_id()
+        if self.window.float.grace_expired(now)
+            && let Some(id) = self.window.float.peek_id()
         {
             self.dismiss_float(id)?;
             changed = true;
         }
-        if self.float.sweep(now, self.motion, scale) {
+        if self.window.float.sweep(now, self.app.motion, scale) {
             self.forget_dead_float_gestures();
             // A finished exit is where a window stops being drawn, and therefore
             // where it stops being a preview surface.
@@ -34658,9 +35143,10 @@ impl Runtime {
         // A float in the middle of its entrance owes a frame; one standing still
         // owes nothing, which is why the deadline below reports nothing then.
         let animating = self
+            .window
             .float
             .drawn()
-            .any(|win| win.fade(now, self.motion, scale).moving);
+            .any(|win| win.fade(now, self.app.motion, scale).moving);
         if (changed || animating) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -34678,7 +35164,7 @@ impl Runtime {
     /// than to whichever float is in front when it lands.
     fn ask_float_directories(&mut self) {
         let mut asks = Vec::new();
-        for win in self.float.live_windows_mut() {
+        for win in self.window.float.live_windows_mut() {
             let epoch = win.epoch;
             let Some(files) = win.files_mut() else {
                 continue;
@@ -34694,7 +35180,7 @@ impl Runtime {
             }
         }
         for ask in asks {
-            if !self.files_worker.request(ask) {
+            if !self.app.files_worker.request(ask) {
                 self.disable_files_worker();
                 break;
             }
@@ -34718,13 +35204,14 @@ impl Runtime {
         // does and the only thing that makes a buried window reachable — and the
         // raise is a frame debt, so it is paid here rather than left for whatever
         // the branch below happens to repaint.
-        if self.float.raise(id) && self.refresh_overlay() {
+        if self.window.float.raise(id) && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         // Which tenant is in this window, asked once: the three parts below whose
         // verb differs by tenant all read the same answer, and asking three times
         // is three chances for them to disagree about one window.
         let holds_a_buffer = self
+            .window
             .float
             .live(id)
             .is_some_and(|win| win.preview().is_some());
@@ -34747,12 +35234,17 @@ impl Runtime {
                 self.press_float_row(id, index)?;
             }
             float::FloatPart::Head => {
-                let frame = self.float.live(id).map(|win| win.frame).unwrap_or_default();
+                let frame = self
+                    .window
+                    .float
+                    .live(id)
+                    .map(|win| win.frame)
+                    .unwrap_or_default();
                 let grab = [position.x as f32 - frame[0], position.y as f32 - frame[1]];
-                if self.float.is_pinned(id) {
+                if self.window.float.is_pinned(id) {
                     // A window that is already yours is picked up on the press:
                     // there is nothing left to decide.
-                    self.float_drag = Some(FloatDrag {
+                    self.window.float_drag = Some(FloatDrag {
                         win: id,
                         kind: FloatDragKind::Move { grab },
                     });
@@ -34768,12 +35260,12 @@ impl Runtime {
                     // The offset is taken here, at the press, so the promotion
                     // does not move the window under the hand — see
                     // [`FloatHeadPress`].
-                    self.float_head_press = Some(FloatHeadPress::armed(id, position, frame));
+                    self.window.float_head_press = Some(FloatHeadPress::armed(id, position, frame));
                 }
             }
             float::FloatPart::Grip => {
-                if self.float.is_pinned(id) {
-                    self.float_drag = Some(FloatDrag {
+                if self.window.float.is_pinned(id) {
+                    self.window.float_drag = Some(FloatDrag {
                         win: id,
                         kind: FloatDragKind::Resize,
                     });
@@ -34818,8 +35310,8 @@ impl Runtime {
     /// rebuild the list** — a row node swapped between two clicks is how the
     /// double-click that opens a preview goes silently missing.
     fn press_float_row(&mut self, id: float::FloatId, index: usize) -> Result<()> {
-        let motion = self.motion;
-        let Some(win) = self.float.live_mut(id) else {
+        let motion = self.app.motion;
+        let Some(win) = self.window.float.live_mut(id) else {
             return Ok(());
         };
         let epoch = win.epoch;
@@ -34851,7 +35343,7 @@ impl Runtime {
                 path: files::full_path(&root, &key),
                 key: key.clone(),
             };
-            if !self.files_worker.request(request) {
+            if !self.app.files_worker.request(request) {
                 self.disable_files_worker();
             }
         }
@@ -34861,11 +35353,12 @@ impl Runtime {
         // counted, for the reason the column gives.
         let activating = matches!(kind, files::RowKind::File)
             && self
+                .window
                 .files_row_clicks
                 .register(RowHost::Float(id), &key, Instant::now())
                 == TabClick::Double;
         if !matches!(kind, files::RowKind::File) {
-            self.files_row_clicks.interrupt();
+            self.window.files_row_clicks.interrupt();
         }
         if activating && let RowActivation::Preview(path) = files_row_activation(&root, &key) {
             self.open_preview(path)?;
@@ -34885,6 +35378,7 @@ impl Runtime {
     /// click reads as having done nothing.
     fn reveal_float_root(&mut self, id: float::FloatId) -> Result<()> {
         let Some(root) = self
+            .window
             .float
             .live(id)
             .and_then(float::FloatWin::files)
@@ -34900,7 +35394,7 @@ impl Runtime {
         // three strips is one verb, and a bridge that only one of the three
         // goes around is a bridge with a hole in it.
         if self.reveal_in_explorer(Path::new(&root)) {
-            self.revealed_foot = Some((RevealedFoot::Float(id), Instant::now()));
+            self.window.revealed_foot = Some((RevealedFoot::Float(id), Instant::now()));
             if self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
@@ -34931,7 +35425,7 @@ impl Runtime {
             return Ok(());
         };
         if self.reveal_in_explorer(&path) {
-            self.revealed_foot = Some((RevealedFoot::Float(id), Instant::now()));
+            self.window.revealed_foot = Some((RevealedFoot::Float(id), Instant::now()));
             if self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
@@ -34950,7 +35444,9 @@ impl Runtime {
     /// by the same gate that enforces it for a double-clicked row, rather than by
     /// this call site being careful.
     fn reveal_files_root(&mut self, seat: SeatId) -> Result<()> {
-        let root = self.tabs[self.active_tab].files_state(seat).root;
+        let root = self.window.tabs[self.window.active_tab]
+            .files_state(seat)
+            .root;
         if root.is_empty() {
             return Ok(());
         }
@@ -34961,7 +35457,7 @@ impl Runtime {
         if !self.reveal_in_explorer(Path::new(&root)) {
             return Ok(());
         }
-        self.revealed_foot = Some((RevealedFoot::Column(seat), Instant::now()));
+        self.window.revealed_foot = Some((RevealedFoot::Column(seat), Instant::now()));
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -34970,7 +35466,7 @@ impl Runtime {
 
     /// Whether `foot` is still showing its confirmation.
     fn foot_reveal_is_fresh(&self, foot: RevealedFoot, now: Instant) -> bool {
-        self.revealed_foot.is_some_and(|(shown, at)| {
+        self.window.revealed_foot.is_some_and(|(shown, at)| {
             shown == foot && now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK
         })
     }
@@ -34991,28 +35487,28 @@ impl Runtime {
     /// `resize_float_to_content`'s `height: auto` — is switched off by the very
     /// drag step that follows, before any tick can run it.
     fn promote_float_head_press(&mut self, position: PhysicalPosition<f64>) {
-        let scale = self.renderer.metrics().scale_factor;
-        let Some(press) = self.float_head_press.as_mut() else {
+        let scale = self.window.renderer.metrics().scale_factor;
+        let Some(press) = self.window.float_head_press.as_mut() else {
             return;
         };
         let Some(carry) = press.promoted(position, scale) else {
             return;
         };
         let pressed = press.win;
-        self.float_head_press = None;
+        self.window.float_head_press = None;
         // A peek that stopped being live while the button was down — dismissed by
         // Esc, wiped by a viewport change, *or replaced by another trigger's* —
         // has nothing this gesture may promote, and the press dies with it rather
         // than keeping a window it was never aimed at.
-        if self.float.peek_id() != Some(pressed) {
+        if self.window.float.peek_id() != Some(pressed) {
             return;
         }
-        let Some(win) = self.float.promote() else {
+        let Some(win) = self.window.float.promote() else {
             return;
         };
         // The window keeps its identity across the promotion, so the carry that
         // follows is aimed at the very window the press began on.
-        self.float_drag = Some(FloatDrag { win, kind: carry });
+        self.window.float_drag = Some(FloatDrag { win, kind: carry });
         // The hand closes on it the instant it becomes carryable, rather than at
         // the next move: this *is* the move, and a frame of open palm over a
         // window already travelling would be the cursor disagreeing with the
@@ -35023,14 +35519,14 @@ impl Runtime {
     /// Move or resize the float under a dragged pointer. Returns whether it owned
     /// the event.
     fn drive_float_drag(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let Some(drag) = self.float_drag else {
+        let Some(drag) = self.window.float_drag else {
             return Ok(false);
         };
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let viewport = self.float_viewport();
         let pointer = [position.x as f32, position.y as f32];
-        let Some(win) = self.float.live_mut(drag.win) else {
-            self.float_drag = None;
+        let Some(win) = self.window.float.live_mut(drag.win) else {
+            self.window.float_drag = None;
             return Ok(false);
         };
         // The grip's floors are the tenant's — a tree is useless below 200×150, a
@@ -35081,11 +35577,12 @@ impl Runtime {
     /// host: two windows can be following their content at once, and a hand on
     /// one of them ends it for that one alone.
     fn resize_floats_to_content(&mut self) -> bool {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let viewport = self.float_viewport();
         // Read every window's answer first, then write them: the read wants the
         // whole host and each write wants one window of it.
         let grown: Vec<(float::FloatId, [f32; 4])> = self
+            .window
             .float
             .live_windows()
             .filter(|win| win.self_sizing)
@@ -35116,7 +35613,7 @@ impl Runtime {
             return false;
         }
         for (id, frame) in grown {
-            if let Some(win) = self.float.live_mut(id) {
+            if let Some(win) = self.window.float.live_mut(id) {
                 win.frame = frame;
             }
         }
@@ -35134,19 +35631,19 @@ impl Runtime {
     /// and pinned windows can be on screen together, so dissolving the transient
     /// one is no longer a reason to leave the permanent ones un-clamped.
     fn reclamp_float(&mut self) {
-        if self.float.wipe_peek().is_some() {
+        if self.window.float.wipe_peek().is_some() {
             // Every gesture aimed at the window that just went dies with it —
             // including a header press still waiting to become one, which if it
             // outlived its peek would keep whatever opened next.
             self.forget_dead_float_gestures();
             self.sweep_preview_panes();
         }
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let viewport = self.float_viewport();
         // Every live window, whoever is inside it: the preview float inherits
         // P67's translate-home for free because the chassis is shared, and a
         // second re-clamp of its own would be a second answer to one question.
-        for win in self.float.live_windows_mut() {
+        for win in self.window.float.live_windows_mut() {
             win.frame = float::clamp_pinned(win.frame, viewport, scale);
         }
     }
@@ -35159,28 +35656,29 @@ impl Runtime {
     /// window* every time any window closed, which is the bug a list invites and
     /// the reason this is asked by identity.
     fn forget_dead_float_gestures(&mut self) {
-        if let Some(drag) = self.float_drag
-            && self.float.live(drag.win).is_none()
+        if let Some(drag) = self.window.float_drag
+            && self.window.float.live(drag.win).is_none()
         {
-            self.float_drag = None;
+            self.window.float_drag = None;
         }
-        if let Some(press) = self.float_head_press
-            && self.float.peek_id() != Some(press.win)
+        if let Some(press) = self.window.float_head_press
+            && self.window.float.peek_id() != Some(press.win)
         {
-            self.float_head_press = None;
+            self.window.float_head_press = None;
         }
-        if let Some((id, _)) = self.float_hover
-            && self.float.live(id).is_none()
+        if let Some((id, _)) = self.window.float_hover
+            && self.window.float.live(id).is_none()
         {
-            self.float_hover = None;
+            self.window.float_hover = None;
         }
     }
 
     /// The float's next appointment.
     fn float_deadline(&self, now: Instant) -> Option<Instant> {
-        let scale = self.renderer.metrics().scale_factor as f32;
-        self.float
-            .deadline(now, self.motion, scale, STRIP_ANIMATION_FRAME)
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        self.window
+            .float
+            .deadline(now, self.app.motion, scale, STRIP_ANIMATION_FRAME)
     }
 
     /// The tabs whose own triggers opened the floats on screen — `.vtab.shown`'s
@@ -35197,10 +35695,13 @@ impl Runtime {
     /// say "this one is mine".
     fn float_shown_tabs(&self) -> Vec<usize> {
         let mut rows: Vec<usize> = self
+            .window
             .float
             .live_windows()
             .filter_map(|win| match win.origin? {
-                float::FloatTrigger::Tab(id) => self.tabs.iter().position(|tab| tab.id == id),
+                float::FloatTrigger::Tab(id) => {
+                    self.window.tabs.iter().position(|tab| tab.id == id)
+                }
                 float::FloatTrigger::Pane(_) => None,
             })
             .collect();
@@ -35219,6 +35720,7 @@ impl Runtime {
     /// then drawn with is a button standing on the name (D4).
     fn float_head_tools(&self, id: float::FloatId) -> float::FloatHeadTools {
         let is_preview = self
+            .window
             .float
             .drawn()
             .find(|win| win.epoch == id)
@@ -35251,7 +35753,7 @@ impl Runtime {
                 moving: false,
             };
         }
-        win.fade(now, self.motion, scale)
+        win.fade(now, self.app.motion, scale)
     }
 
     /// One float's chassis, laid out where that window stands this frame.
@@ -35263,10 +35765,10 @@ impl Runtime {
         id: float::FloatId,
     ) -> Option<(float::FloatGeometry, float::FloatFade)> {
         let now = Instant::now();
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let tools = self.float_head_tools(id);
         let (mode, frame, fade) = {
-            let win = self.float.drawn().find(|win| win.epoch == id)?;
+            let win = self.window.float.drawn().find(|win| win.epoch == id)?;
             (win.mode, win.frame, self.float_fade_of(win, now, scale))
         };
         let dock_label = self.float_dock_label_width(scale);
@@ -35287,7 +35789,7 @@ impl Runtime {
     /// taking a mutable borrow of the whole window to describe controls it is
     /// never going to look at.
     fn float_body_rect(&self, id: float::FloatId, scale: f32) -> Option<[f32; 4]> {
-        let win = self.float.drawn().find(|win| win.epoch == id)?;
+        let win = self.window.float.drawn().find(|win| win.epoch == id)?;
         let fade = self.float_fade_of(win, Instant::now(), scale);
         Some(
             float::float_geometry(
@@ -35313,7 +35815,7 @@ impl Runtime {
     /// against the bounds the shortfall had drawn.
     fn float_dock_label_width(&mut self, scale: f32) -> f32 {
         let font = float::FLOAT_DOCK_FONT_LOGICAL_PX * scale;
-        self.renderer.measure_chrome_label(
+        self.window.renderer.measure_chrome_label(
             float_dock_label(),
             font,
             bt_render::ChromeLabelWeight::SemiBold,
@@ -35329,10 +35831,10 @@ impl Runtime {
     /// z-order inside the family is [`float::FloatHost::drawn`]'s order, stated
     /// there and merely obeyed here.
     fn float_layer(&mut self, now: Instant) -> Vec<marks::OverlayLayer> {
-        let ids: Vec<float::FloatId> = self.float.drawn().map(|win| win.epoch).collect();
+        let ids: Vec<float::FloatId> = self.window.float.drawn().map(|win| win.epoch).collect();
         let mut layers = Vec::new();
         for id in ids {
-            let Some(window) = self.float_window_layer(id, now) else {
+            let Some(window) = self.float_window(id, now) else {
                 continue;
             };
             // **The window's own scroll bar, on the layer directly above it**
@@ -35365,12 +35867,9 @@ impl Runtime {
     /// three strips, which is P49's difference table made structural: one branch
     /// per tenant, both handing the same [`float::build`] a [`float::FloatChrome`]
     /// and a body.
-    fn float_window_layer(
-        &mut self,
-        id: float::FloatId,
-        now: Instant,
-    ) -> Option<marks::OverlayLayer> {
+    fn float_window(&mut self, id: float::FloatId, now: Instant) -> Option<marks::OverlayLayer> {
         if self
+            .window
             .float
             .drawn()
             .find(|win| win.epoch == id)?
@@ -35389,12 +35888,12 @@ impl Runtime {
         now: Instant,
     ) -> Option<marks::OverlayLayer> {
         let (geometry, fade) = self.float_geometry_of(id)?;
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let motion = self.motion;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let motion = self.app.motion;
         // Everything the drawing needs, taken in one borrow so the measuring
         // below — which wants the renderer — is not fighting the host for `self`.
         let (mode, root, content) = {
-            let win = self.float.drawn().find(|win| win.epoch == id)?;
+            let win = self.window.float.drawn().find(|win| win.epoch == id)?;
             let files = win.files()?;
             let view = files::tree_view(&files.files, &files.cache);
             let turns = view
@@ -35453,6 +35952,7 @@ impl Runtime {
         // window, so a row index that forgot which window it belonged to would
         // light the same row in every float on screen.
         let hover = self
+            .window
             .float_hover
             .filter(|(hovered, _)| *hovered == id)
             .map(|(_, part)| part);
@@ -35497,7 +35997,7 @@ impl Runtime {
             root
         };
         let (name, path) = {
-            let renderer = &mut self.renderer;
+            let renderer = &mut self.window.renderer;
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
             (
                 settings::ellipsized(
@@ -35562,9 +36062,9 @@ impl Runtime {
         now: Instant,
     ) -> Option<marks::OverlayLayer> {
         let (geometry, fade) = self.float_geometry_of(id)?;
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let surface = PreviewSurface::Float(id);
-        let mode = self.float.drawn().find(|win| win.epoch == id)?.mode;
+        let mode = self.window.float.drawn().find(|win| win.epoch == id)?.mode;
         // The head's caption and the foot's path, off whatever this window is
         // showing — a buffer, or a picture that came down the decode lane.
         let md_source = self.preview_md_source(surface);
@@ -35621,7 +36121,7 @@ impl Runtime {
         let head_font = float::FLOAT_HEAD_FONT_LOGICAL_PX * scale;
         let foot_font = float::FLOAT_FOOT_FONT_LOGICAL_PX * scale;
         let (title, foot) = {
-            let renderer = &mut self.renderer;
+            let renderer = &mut self.window.renderer;
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
             (
                 // **Not upper-cased** (P51). The files head shouts its root
@@ -35651,6 +36151,7 @@ impl Runtime {
             )
         };
         let hover = self
+            .window
             .float_hover
             .filter(|(hovered, _)| *hovered == id)
             .map(|(_, part)| part);
@@ -35760,8 +36261,12 @@ impl Runtime {
     /// solved content box precisely so that no chrome could ever be covered; see
     /// the dated annotation there.
     fn float_viewport(&self) -> [f32; 4] {
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
-        float_viewport_rect(width, height, self.renderer.metrics().scale_factor as f32)
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        float_viewport_rect(
+            width,
+            height,
+            self.window.renderer.metrics().scale_factor as f32,
+        )
     }
 
     /// The box a trigger occupies **right now** (G86/E60).
@@ -35775,21 +36280,22 @@ impl Runtime {
     fn trigger_rect(&self, trigger: float::FloatTrigger) -> Option<[f32; 4]> {
         match trigger {
             float::FloatTrigger::Tab(id) => {
-                let index = self.tabs.iter().position(|tab| tab.id == id)?;
-                let scale = self.renderer.metrics().scale_factor as f32;
-                match self.rail.layout {
+                let index = self.window.tabs.iter().position(|tab| tab.id == id)?;
+                let scale = self.window.renderer.metrics().scale_factor as f32;
+                match self.window.rail.layout {
                     seats::TabLayoutMode::Vertical => {
                         let rail = self.rail_geometry_now(Instant::now())?;
                         rail.tabs.get(index).and_then(|row| row.files)
                     }
                     _ => {
-                        let (width, _) = self.renderer.presentation_geometry().swapchain_size;
+                        let (width, _) =
+                            self.window.renderer.presentation_geometry().swapchain_size;
                         seats::tab_strip_geometry(
                             width as f32,
                             scale,
                             &self.tab_trailers(Instant::now()),
-                            self.active_tab,
-                            self.tab_scroll,
+                            self.window.active_tab,
+                            self.window.tab_scroll,
                         )
                         .tabs
                         .get(index)
@@ -35798,10 +36304,10 @@ impl Runtime {
                 }
             }
             float::FloatTrigger::Pane(leaf) => {
-                if self.tabs[self.active_tab].id != leaf.tab {
+                if self.window.tabs[self.window.active_tab].id != leaf.tab {
                     return None;
                 }
-                let scale = self.renderer.metrics().scale_factor as f32;
+                let scale = self.window.renderer.metrics().scale_factor as f32;
                 let placement = self
                     .seat_layout
                     .rects
@@ -35828,12 +36334,14 @@ impl Runtime {
     fn trigger_root(&self, trigger: float::FloatTrigger) -> String {
         let seat = match trigger {
             float::FloatTrigger::Tab(id) => self
+                .window
                 .tabs
                 .iter()
                 .find(|tab| tab.id == id)
                 .filter(|tab| tab.seats.is_lone_terminal())
                 .map(|tab| (tab, tab.seats.terminal())),
             float::FloatTrigger::Pane(leaf) => self
+                .window
                 .tabs
                 .iter()
                 .find(|tab| tab.id == leaf.tab)
@@ -35906,7 +36414,8 @@ impl Runtime {
     /// [`float::cascade_origin`] must not assume the newcomer is going into this
     /// host: a pop-out computes its frame before its window exists.
     fn taken_float_origins(&self) -> Vec<[f32; 2]> {
-        self.float
+        self.window
+            .float
             .live_windows()
             .map(|win| [win.frame[0], win.frame[1]])
             .collect()
@@ -35931,9 +36440,9 @@ impl Runtime {
         // window rather than a menu, so it does not join the menus' mutually
         // exclusive chain — but a menu hanging off a control that is about to be
         // covered is a menu pointing at nothing.
-        self.profile_menu.close();
-        self.root_menu.close();
-        let scale = self.renderer.metrics().scale_factor as f32;
+        self.window.profile_menu.close();
+        self.window.root_menu.close();
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let viewport = self.float_viewport();
         let size = float::float_opening_size(
             files_float_content_height(&state, &cache, viewport, scale),
@@ -35958,7 +36467,7 @@ impl Runtime {
         // about previews, which is why it is here in the shared door.
         let placed = float::cascade_origin(placed, &self.taken_float_origins(), viewport, scale);
         let frame = float::clamp_pinned(placed, viewport, scale);
-        self.float.open(
+        self.window.float.open(
             mode,
             origin,
             float::FloatTenant::Files(float::FloatFiles {
@@ -35984,7 +36493,7 @@ impl Runtime {
         // than waiting for the next pointer move, because the answer changed
         // without the pointer moving — which is the whole reason the rail's zone
         // is a function and not a `:hover`.
-        self.drive_rail_zone(self.pointer_position);
+        self.drive_rail_zone(self.window.pointer_position);
         self.refresh_chrome();
         self.present_chrome_change()
     }
@@ -36008,11 +36517,12 @@ impl Runtime {
     /// are untouched, so nothing has become unclosable.
     fn press_float_trigger(&mut self, trigger: float::FloatTrigger) -> Result<()> {
         if self
+            .window
             .float
             .peek()
             .is_some_and(|win| win.origin == Some(trigger))
         {
-            self.float.promote();
+            self.window.float.promote();
             self.refresh_chrome();
             return self.present_chrome_change();
         }
@@ -36021,7 +36531,7 @@ impl Runtime {
 
     /// Begin one float's exit (§7.1.2's remaining closers, and only those).
     fn dismiss_float(&mut self, id: float::FloatId) -> Result<bool> {
-        if !self.float.dismiss(id, Instant::now()) {
+        if !self.window.float.dismiss(id, Instant::now()) {
             return Ok(false);
         }
         self.forget_dead_float_gestures();
@@ -36036,7 +36546,7 @@ impl Runtime {
         // rather than at the next move that may never come.
         self.apply_pointer_cursor();
         // ...and it may have just ended.
-        self.drive_rail_zone(self.pointer_position);
+        self.drive_rail_zone(self.window.pointer_position);
         self.refresh_chrome();
         self.present_chrome_change()?;
         Ok(true)
@@ -36049,7 +36559,7 @@ impl Runtime {
     /// takes the next. Closing them all would make one keystroke undo an
     /// arbitrary amount of work the user asked for.
     fn dismiss_top_float(&mut self) -> Result<bool> {
-        let Some(id) = self.float.top().map(|win| win.epoch) else {
+        let Some(id) = self.window.float.top().map(|win| win.epoch) else {
             return Ok(false);
         };
         self.dismiss_float(id)
@@ -36062,11 +36572,11 @@ impl Runtime {
     /// never managed) — the column is not being closed and reopened, it is being
     /// moved, and a move that lost half its state would be a different verb.
     fn undock_files_column(&mut self, seat: SeatId) -> Result<()> {
-        let active = self.active_tab;
-        let Some(state) = self.tabs[active].files.get(&seat).cloned() else {
+        let active = self.window.active_tab;
+        let Some(state) = self.window.tabs[active].files.get(&seat).cloned() else {
             return Ok(());
         };
-        let cache = self.tabs[active]
+        let cache = self.window.tabs[active]
             .file_trees
             .get(&seat)
             .cloned()
@@ -36083,7 +36593,7 @@ impl Runtime {
         // top to bottom, found no room on either side, and did the only thing
         // its last resort allows: a window the height of its own strip — the
         // bare bar at the foot of the window the report shows.
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let anchor = seats::full_pane_rect(&self.seat_layout, seat).and_then(|rect| {
             seats::pane_head_geometry(rect, bt_layout::SeatKind::Files, scale).float
         });
@@ -36109,7 +36619,7 @@ impl Runtime {
     /// ⑤ of the 2026-08-12 ruling at its plainest: DOCK is one window's control,
     /// and the others stay exactly where they are.
     fn dock_float(&mut self, id: float::FloatId) -> Result<()> {
-        let Some(win) = self.float.wipe(id) else {
+        let Some(win) = self.window.float.wipe(id) else {
             return Ok(());
         };
         self.forget_dead_float_gestures();
@@ -36127,9 +36637,11 @@ impl Runtime {
         let Some(seat) = self.seats.add_files_pane(&metrics, Some(tenant.width)) else {
             return Ok(());
         };
-        let active = self.active_tab;
-        self.tabs[active].files.insert(seat, tenant.files);
-        self.tabs[active].file_trees.insert(seat, tenant.cache);
+        let active = self.window.active_tab;
+        self.window.tabs[active].files.insert(seat, tenant.files);
+        self.window.tabs[active]
+            .file_trees
+            .insert(seat, tenant.cache);
         // `DOCK` is a button and this is the click on it.
         self.set_files_keyboard(Some(seat), FilesFocusArrival::Pointer);
         // **The hole this used to be** (user report, 2026-08-13). A column
@@ -36165,7 +36677,7 @@ impl Runtime {
     /// structural answer is the one that survives that stopping being true.
     fn pop_out_preview(&mut self, seat: SeatId) -> Result<()> {
         let surface = PreviewSurface::Seat(seat);
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let viewport = self.float_viewport();
         // The button's own box, read while the head it stands in is still on
         // screen: the window hangs off the control that summoned it, which is
@@ -36188,7 +36700,7 @@ impl Runtime {
             float::FloatSizing::preview(),
         );
         // The menu hanging off this head is pointing at a head that is leaving.
-        if self.preview_menu.seat() == Some(seat) {
+        if self.window.preview_menu.seat() == Some(seat) {
             self.close_preview_menu()?;
         }
         let pane = self.preview_panes.remove(surface).unwrap_or_default();
@@ -36215,18 +36727,18 @@ impl Runtime {
                 *self.preview_panes.entry(surface) = pane;
                 return Ok(());
             };
-            let wake = self.pty_wake.wake();
-            let formulas = FormulaSwitches::from_settings(self.settings_store.loaded());
+            let wake = self.window.pty_wake.wake();
+            let formulas = FormulaSwitches::from_settings(self.app.settings_store.loaded());
             // The **default** profile, which is what a stand-in is: it is not
             // inherited from anything, because the pane it replaces was never
             // running a shell to inherit from.
             let session = create_leaf_session(
-                &self.renderer,
+                &self.window.renderer,
                 body,
                 wake,
                 None,
                 &LeafSeed::default(),
-                &self.profile_programs,
+                &self.app.profile_programs,
                 formulas,
             )?;
             let Some(arrived) = self.seats.stand_in_terminal(&metrics, seat) else {
@@ -36243,7 +36755,7 @@ impl Runtime {
         // the raster it is already holding travels with the pane.
         if self.preview_raster == Some(surface) {
             self.preview_raster = None;
-            self.renderer.set_preview_image(None);
+            self.window.renderer.set_preview_image(None);
         }
         let placed = match anchor {
             Some(anchor) => float::float_placement(anchor, size, viewport, scale),
@@ -36259,7 +36771,7 @@ impl Runtime {
         // Origin `None` and no anchor kept: this window was **torn off**, not
         // summoned from a header, so there is no trigger to re-click it from and
         // nothing to re-place it against as content arrives.
-        let id = self.float.open(
+        let id = self.window.float.open(
             float::FloatMode::Pinned,
             None,
             float::FloatTenant::Preview(float::FloatPreview { tab }),
@@ -36293,6 +36805,7 @@ impl Runtime {
     /// amended.
     fn dock_preview_float(&mut self, id: float::FloatId) -> Result<()> {
         let Some(origin) = self
+            .window
             .float
             .live(id)
             .and_then(float::FloatWin::preview)
@@ -36301,7 +36814,7 @@ impl Runtime {
             return Ok(());
         };
         let surface = PreviewSurface::Float(id);
-        let Some(from) = self.tabs.iter().position(|tab| tab.id == origin) else {
+        let Some(from) = self.window.tabs.iter().position(|tab| tab.id == origin) else {
             return Ok(());
         };
         // Where it lands, resolved **before** the window is taken apart: this may
@@ -36312,15 +36825,15 @@ impl Runtime {
         };
         // The view, out of whichever tab's plane was holding it — a float's pane
         // lives with the tab that opened the window, not with the one on screen.
-        let Some(pane) = self.tabs[from].preview_panes.remove(surface) else {
+        let Some(pane) = self.window.tabs[from].preview_panes.remove(surface) else {
             return Ok(());
         };
-        let active = self.active_tab;
+        let active = self.window.active_tab;
         if from != active
             && let Some(path) = pane.buffer.clone()
-            && let Some(incoming) = self.tabs[from].preview_pool.take(&path)
+            && let Some(incoming) = self.window.tabs[from].preview_pool.take(&path)
         {
-            self.tabs[active].preview_pool.merge_buffer(incoming);
+            self.window.tabs[active].preview_pool.merge_buffer(incoming);
         }
         *self.preview_pane_mut(landing) = pane;
         // **The texture lane, taken back** (user report, 2026-08-17).
@@ -36335,13 +36848,16 @@ impl Runtime {
         // way — a lane pointing at a surface with no picture on it would go on
         // showing the last picture that was there.
         let index = self.preview_tab_index(landing);
-        let landed_a_picture = self.tabs[index]
+        let landed_a_picture = self.window.tabs[index]
             .preview_panes
             .get(landing)
             .is_some_and(|pane| pane.image.is_some());
-        self.tabs[index].preview_raster =
-            preview_lane_after_landing(self.tabs[index].preview_raster, landing, landed_a_picture);
-        self.renderer.set_preview_image(None);
+        self.window.tabs[index].preview_raster = preview_lane_after_landing(
+            self.window.tabs[index].preview_raster,
+            landing,
+            landed_a_picture,
+        );
+        self.window.renderer.set_preview_image(None);
         if let PreviewSurface::Seat(seat) = landing {
             // `DOCK` is a button and this is the click on it: the pane you just
             // put down is the one you are looking at.
@@ -36349,7 +36865,7 @@ impl Runtime {
         }
         // Wiped rather than dismissed — a preview float has no exit to play
         // (P49 ③), so an animation frame here would be the one place it did.
-        self.float.wipe(id);
+        self.window.float.wipe(id);
         self.forget_dead_float_gestures();
         self.sweep_preview_panes();
         self.apply_pointer_cursor();
@@ -36367,13 +36883,17 @@ impl Runtime {
     /// keyboard falls back to the shell the instant the column it was lent to
     /// stops being on screen.
     fn files_keyboard_seat(&self) -> Option<SeatId> {
-        files_keyboard_seat_of(self.files_focus.owner, &self.tabs[self.active_tab])
+        files_keyboard_seat_of(
+            self.window.files_focus.owner,
+            &self.window.tabs[self.window.active_tab],
+        )
     }
 
     /// Whether the column holding the keyboard is *showing* that it does —
     /// `.files-tree:focus-visible`, healed through the same read as the owner.
     fn files_ring_seat(&self) -> Option<SeatId> {
-        self.files_focus
+        self.window
+            .files_focus
             .visible
             .then(|| self.files_keyboard_seat())
             .flatten()
@@ -36394,9 +36914,9 @@ impl Runtime {
     /// still and only the ring goes out, which is what a press on the column that
     /// already had the keyboard does.
     fn set_files_keyboard(&mut self, seat: Option<SeatId>, arrival: FilesFocusArrival) -> bool {
-        let tab = self.tabs[self.active_tab].id;
+        let tab = self.window.tabs[self.window.active_tab].id;
         let owner = seat.map(|seat| LeafId { tab, seat });
-        self.files_focus.arrive(owner, arrival)
+        self.window.files_focus.arrive(owner, arrival)
     }
 
     /// Enter, Space or a double click on a file row (K156/D44).
@@ -36413,7 +36933,9 @@ impl Runtime {
     /// on the way past, and a tree that hands the keyboard away every time you
     /// look at something can only be walked once.
     fn activate_files_row(&mut self, seat: SeatId, key: &str) -> Result<()> {
-        let root = self.tabs[self.active_tab].files_state(seat).root;
+        let root = self.window.tabs[self.window.active_tab]
+            .files_state(seat)
+            .root;
         match files_row_activation(&root, key) {
             RowActivation::Preview(path) => self.open_preview(path),
             RowActivation::Nowhere => Ok(()),
@@ -36448,14 +36970,14 @@ impl Runtime {
     /// a row has not: it confirms in place, and a confirmation printed over a
     /// reveal that never happened would be the one thing worse than silence.
     fn open_local_path(&mut self, path: &Path) -> bool {
-        let result = window_hwnd(&self.window).and_then(|hwnd| {
+        let result = window_hwnd(&self.window.window).and_then(|hwnd| {
             bt_platform::open_local_path(hwnd, path)
                 .map_err(|error| anyhow!(error))
                 .context("open an activated files row with its default handler")
         });
         if let Err(error) = result {
             if format!("{error:#}").contains(bt_platform::PROGRAM_REFUSED) {
-                self.files_notice =
+                self.window.files_notice =
                     Some((files_program_refused_notice().to_owned(), Instant::now()));
             }
             eprintln!("recoverable files row open failure: {error:#}");
@@ -36477,7 +36999,7 @@ impl Runtime {
     /// Reported, because a foot confirms in place and a confirmation printed
     /// over a reveal that never happened is the one thing worse than silence.
     fn reveal_in_explorer(&mut self, path: &Path) -> bool {
-        let result = window_hwnd(&self.window).and_then(|hwnd| {
+        let result = window_hwnd(&self.window.window).and_then(|hwnd| {
             bt_platform::reveal_in_explorer(hwnd, path)
                 .map_err(|error| anyhow!(error))
                 .context("show a path in File Explorer")
@@ -36500,7 +37022,7 @@ impl Runtime {
     /// a letter that fell through to the encoder would land in a shell the user
     /// is not looking at.
     fn files_tree_key(&mut self, seat: SeatId, event: &KeyEvent) -> Result<bool> {
-        let Some(command) = files::tree_command(&event.logical_key, self.modifiers) else {
+        let Some(command) = files::tree_command(&event.logical_key, self.window.modifiers) else {
             // Still the tree's key: it owns the keyboard, so nothing here
             // reaches a shell. It simply has nothing to do with this one.
             //
@@ -36518,7 +37040,7 @@ impl Runtime {
         // transition `set_files_keyboard` cannot express. Set before the command
         // is carried out, so the very keypress that moves the selection is the
         // one that lights the ring around it, in the same frame.
-        if self.files_focus.navigated() {
+        if self.window.files_focus.navigated() {
             self.refresh_chrome();
         }
         if event.repeat
@@ -36542,14 +37064,14 @@ impl Runtime {
             return Ok(true);
         }
         let now = Instant::now();
-        let motion = self.motion;
+        let motion = self.app.motion;
         let rows = self
             .files_trees(now)
             .get(&seat)
             .map(|tree| tree.rows.clone())
             .unwrap_or_default();
-        let active = self.active_tab;
-        let Some(state) = self.tabs[active].files.get_mut(&seat) else {
+        let active = self.window.active_tab;
+        let Some(state) = self.window.tabs[active].files.get_mut(&seat) else {
             return Ok(true);
         };
         let action = files::apply_tree_command(state, &rows, command);
@@ -36567,7 +37089,7 @@ impl Runtime {
         match &action {
             files::TreeAction::Opened(key) | files::TreeAction::Closed(key) => {
                 let opened = matches!(action, files::TreeAction::Opened(_));
-                self.tabs[active]
+                self.window.tabs[active]
                     .file_trees
                     .entry(seat)
                     .or_default()
@@ -36616,7 +37138,7 @@ impl Runtime {
     /// keypress scroll the whole list, which is the same list moving under your
     /// eyes for no reason.
     fn reveal_files_row(&mut self, seat: SeatId, key: &str) {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let trees = self.files_tree_contents();
         let Some(tree) = trees.get(&seat) else {
             return;
@@ -36641,7 +37163,7 @@ impl Runtime {
             return;
         };
         let rows = tree.rows.len();
-        let cache = self.tabs[self.active_tab]
+        let cache = self.window.tabs[self.window.active_tab]
             .file_trees
             .entry(seat)
             .or_default();
@@ -36656,14 +37178,14 @@ impl Runtime {
         delta: MouseScrollDelta,
     ) -> Result<()> {
         let travel = self.vertical_wheel_travel(delta, body[3] - body[1]);
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let rows = self
             .files_tree_contents()
             .get(&seat)
             .map(|tree| tree.rows.len())
             .unwrap_or_default();
-        let active = self.active_tab;
-        let cache = self.tabs[active].file_trees.entry(seat).or_default();
+        let active = self.window.active_tab;
+        let cache = self.window.tabs[active].file_trees.entry(seat).or_default();
         // **Both ends, here** (R2 乙案). There is no scrolling backwards past the
         // top and none forwards past the last row, and this side knows both —
         // it has the body the painter will use and the rows that are in it. The
@@ -36696,8 +37218,13 @@ impl Runtime {
         };
         let body = geometry.viewport;
         let travel = self.vertical_wheel_travel(delta, body[3] - body[1]);
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(files) = self.float.live_mut(id).and_then(float::FloatWin::files_mut) else {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let Some(files) = self
+            .window
+            .float
+            .live_mut(id)
+            .and_then(float::FloatWin::files_mut)
+        else {
             return Ok(());
         };
         let rows = files::tree_view(&files.files, &files.cache).rows.len();
@@ -36707,8 +37234,8 @@ impl Runtime {
         }
         files.cache.scroll_px = scrolled;
         // The rows under a still pointer changed, so the hover row did too.
-        if let Some(position) = self.pointer_position {
-            self.float_hover = self.float_hit_at(position);
+        if let Some(position) = self.window.pointer_position {
+            self.window.float_hover = self.float_hit_at(position);
         }
         if self.refresh_overlay() {
             self.present_chrome_change()?;
@@ -36729,12 +37256,12 @@ impl Runtime {
         delta: MouseScrollDelta,
     ) -> Result<()> {
         let travel = self.vertical_wheel_travel(delta, body[3] - body[1]);
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(page) = self.git_pages_shown.get(&seat) else {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let Some(page) = self.window.git_pages_shown.get(&seat) else {
             return Ok(());
         };
-        let active = self.active_tab;
-        let stored = self.tabs[active]
+        let active = self.window.active_tab;
+        let stored = self.window.tabs[active]
             .git_scroll
             .get(&seat)
             .copied()
@@ -36743,7 +37270,7 @@ impl Runtime {
         if scrolled == stored {
             return Ok(());
         }
-        self.tabs[active].git_scroll.insert(seat, scrolled);
+        self.window.tabs[active].git_scroll.insert(seat, scrolled);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -36771,7 +37298,7 @@ impl Runtime {
         scale: f32,
         trees: &mut BTreeMap<SeatId, seats::FilesTreeContent>,
     ) {
-        let active = self.active_tab;
+        let active = self.window.active_tab;
         let segmented = self.git_panel_on();
         for (seat, tree) in trees.iter_mut() {
             let Some(body) = seats::files_body_rect(&self.seat_layout, *seat, scale, segmented)
@@ -36780,7 +37307,7 @@ impl Runtime {
             };
             let healed = seats::clamp_files_scroll(body, tree.rows.len(), tree.scroll_px, scale);
             tree.scroll_px = healed;
-            if let Some(cache) = self.tabs[active].file_trees.get_mut(seat) {
+            if let Some(cache) = self.window.tabs[active].file_trees.get_mut(seat) {
                 cache.scroll_px = healed;
             }
         }
@@ -36788,8 +37315,8 @@ impl Runtime {
 
     /// C35, applied only where a landed directory has proved a selection gone.
     fn heal_files_selections(&mut self) {
-        let active = self.active_tab;
-        let tab = &mut self.tabs[active];
+        let active = self.window.active_tab;
+        let tab = &mut self.window.tabs[active];
         for seat in tab.seats.files() {
             let Some(cache) = tab.file_trees.get(&seat) else {
                 continue;
@@ -36806,11 +37333,11 @@ impl Runtime {
     fn apply_math_results(&mut self) -> Result<()> {
         let mut changed = false;
         loop {
-            match self.math_worker.results.try_recv() {
+            match self.app.math_worker.results.try_recv() {
                 Ok(completion) => {
                     let leaf = completion.leaf;
-                    let target_index = self.tabs.iter().position(|tab| tab.id == leaf.tab);
-                    let target_active = target_index == Some(self.active_tab);
+                    let target_index = self.window.tabs.iter().position(|tab| tab.id == leaf.tab);
+                    let target_active = target_index == Some(self.window.active_tab);
                     // The answer goes back to the shell that asked for it. Since U12 that is a
                     // seat and not merely a tab: routing through the tab's `Deref` handed every
                     // pane's work to whichever pane happened to hold the keyboard when it landed.
@@ -36831,7 +37358,7 @@ impl Runtime {
                                 };
                                 target_index.is_some_and(|index| {
                                     let applied =
-                                        leaf_session_mut(&mut self.tabs, index, leaf.seat)
+                                        leaf_session_mut(&mut self.window.tabs, index, leaf.seat)
                                             .is_some_and(|session| {
                                                 session.complete_worker_result(task, result)
                                             });
@@ -36846,7 +37373,7 @@ impl Runtime {
                                 };
                                 target_index.is_some_and(|index| {
                                     let applied =
-                                        leaf_session_mut(&mut self.tabs, index, leaf.seat)
+                                        leaf_session_mut(&mut self.window.tabs, index, leaf.seat)
                                             .is_some_and(|session| {
                                                 session.complete_live_worker_result(task, result)
                                             });
@@ -36859,19 +37386,21 @@ impl Runtime {
                                 self.remember_decode_for_peek(&task, result.as_ref().ok());
                             }
                             target_index.is_some_and(|index| {
-                                let applied = leaf_session_mut(&mut self.tabs, index, leaf.seat)
-                                    .is_some_and(|session| {
-                                        session.complete_inline_image_result(task, result)
-                                    });
+                                let applied =
+                                    leaf_session_mut(&mut self.window.tabs, index, leaf.seat)
+                                        .is_some_and(|session| {
+                                            session.complete_inline_image_result(task, result)
+                                        });
                                 target_active && applied
                             })
                         }
                         DecorationWorkerCompletion::ScaleInlineImage { scaled } => target_index
                             .is_some_and(|index| {
-                                let applied = leaf_session_mut(&mut self.tabs, index, leaf.seat)
-                                    .is_some_and(|session| {
-                                        session.complete_inline_image_scale(scaled)
-                                    });
+                                let applied =
+                                    leaf_session_mut(&mut self.window.tabs, index, leaf.seat)
+                                        .is_some_and(|session| {
+                                            session.complete_inline_image_scale(scaled)
+                                        });
                                 target_active && applied
                             }),
                         // **Not gated on the asking tab still being the one on
@@ -36909,15 +37438,15 @@ impl Runtime {
                 }
             }
         }
-        let active = self.active_tab;
-        let tasks = self.math_worker.tasks.clone();
-        let scale_tasks = self.math_worker.scale_tasks.clone();
+        let active = self.window.active_tab;
+        let tasks = self.app.math_worker.tasks.clone();
+        let scale_tasks = self.app.math_worker.scale_tasks.clone();
         dispatch_tab_decoration_tasks(
-            &mut self.tabs[active],
+            &mut self.window.tabs[active],
             &tasks,
             &scale_tasks,
-            &mut self.math_worker_running,
-            &mut self.math_worker_notice_pending,
+            &mut self.app.math_worker_running,
+            &mut self.app.math_worker_notice_pending,
         );
         if changed {
             self.publish_frame(FrameTrigger {
@@ -36935,15 +37464,15 @@ impl Runtime {
             .is_some_and(|deadline| now >= deadline)
         {
             self.session.advance_live_stability(now);
-            let active = self.active_tab;
-            let tasks = self.math_worker.tasks.clone();
-            let scale_tasks = self.math_worker.scale_tasks.clone();
+            let active = self.window.active_tab;
+            let tasks = self.app.math_worker.tasks.clone();
+            let scale_tasks = self.app.math_worker.scale_tasks.clone();
             let disabled = dispatch_tab_decoration_tasks(
-                &mut self.tabs[active],
+                &mut self.window.tabs[active],
                 &tasks,
                 &scale_tasks,
-                &mut self.math_worker_running,
-                &mut self.math_worker_notice_pending,
+                &mut self.app.math_worker_running,
+                &mut self.app.math_worker_notice_pending,
             );
             if disabled {
                 self.publish_frame(FrameTrigger {
@@ -36975,7 +37504,7 @@ impl Runtime {
         // wheel bug [`Self::repaint_pane_change`] was written for, and the same
         // repair: run the compositor over the picture already on the glass, which
         // rebuilds every unfocused pane from its own projection.
-        if !published && self.unpainted_pane_output {
+        if !published && self.window.unpainted_pane_output {
             self.represent_on_screen_frame(FrameTrigger {
                 occurred_at: now,
                 source: FrameSource::Expose,
@@ -36984,20 +37513,20 @@ impl Runtime {
         let sync_open = self.session.synchronized_update_deadline().is_some();
         if published || !sync_open {
             self.pending_keyboard_at = None;
-        } else if self.trace_perf {
+        } else if self.app.trace_perf {
             eprintln!("BT_PERF_TRACE defer=synchronized-update");
         }
         Ok(())
     }
 
     fn flush_resize_trace(&mut self) {
-        if !self.trace_resize {
+        if !self.app.trace_resize {
             return;
         }
         let transaction = self.session.resize_trace_transaction();
-        if transaction != self.resize_trace_logged_transaction {
-            self.resize_trace_logged_transaction = transaction;
-            self.resize_trace_logged_events = 0;
+        if transaction != self.window.resize_trace_logged_transaction {
+            self.window.resize_trace_logged_transaction = transaction;
+            self.window.resize_trace_logged_events = 0;
         }
         let trace = self.session.resize_trace();
         let conpty_source = self
@@ -37005,10 +37534,10 @@ impl Runtime {
             .as_ref()
             .map(|pty| pty.conpty_source().to_string())
             .unwrap_or_else(|| "direct-input".to_string());
-        for event in &trace[self.resize_trace_logged_events.min(trace.len())..] {
+        for event in &trace[self.window.resize_trace_logged_events.min(trace.len())..] {
             eprintln!("BT_RESIZE_TRACE conpty_source={conpty_source:?} {event:?}");
         }
-        self.resize_trace_logged_events = trace.len();
+        self.window.resize_trace_logged_events = trace.len();
     }
 
     /// Hang the candidate window off `area`, which is in **window** pixels.
@@ -37025,32 +37554,32 @@ impl Runtime {
     /// Translating here would have applied the seat's origin to a rectangle that
     /// never had one.
     fn apply_ime_cursor_area(&mut self, area: ImeCursorArea) {
-        self.window.set_ime_cursor_area(
+        self.window.window.set_ime_cursor_area(
             PhysicalPosition::new(area.x, area.y),
             PhysicalSize::new(area.width, area.height),
         );
-        if let Err(error) = self.ime_system_caret.update(area.x, area.y) {
+        if let Err(error) = self.window.ime_system_caret.update(area.x, area.y) {
             eprintln!("Chinese IME system-caret update ignored: {error}");
         }
     }
 
     fn flush_ime_cursor_area(&mut self, now: Instant) {
-        if let Some(area) = self.ime_cursor_throttle.flush_due(now) {
+        if let Some(area) = self.window.ime_cursor_throttle.flush_due(now) {
             self.apply_ime_cursor_area(area);
         }
     }
 
     fn drain_pty(&mut self) -> Result<()> {
         // Lowered first: see [`PtyWakeSignal::accept`].
-        self.pty_wake.accept();
+        self.window.pty_wake.accept();
         let mut active_changed = false;
         let mut active_changed_off_focus = false;
         let mut chrome_changed = false;
         let mut moved = false;
         let mut command_ends: Vec<PathBuf> = Vec::new();
-        for (index, tab) in self.tabs.iter_mut().enumerate() {
+        for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             let outcome = drain_tab_pty(tab)?;
-            if index == self.active_tab {
+            if index == self.window.active_tab {
                 active_changed = outcome.arrived;
                 active_changed_off_focus = outcome.arrived_off_focus;
                 // **Only the tab on screen** (R31): a Git page in a tab nobody is
@@ -37066,7 +37595,7 @@ impl Runtime {
         // publish's own gate reads. Only the tab on screen: a pane of a tab
         // nobody is looking at is not painted by any pass, and its backlog is
         // already kept by the ledger the strip's unread dot is drawn from.
-        self.unpainted_pane_output |= active_changed_off_focus;
+        self.window.unpainted_pane_output |= active_changed_off_focus;
         // **A shell that moved is a session that changed.** `cwd` is a field of
         // every terminal leaf in `session.json`, and until now nothing about a
         // shell reporting a new one was a reason to write the file: the value on
@@ -37093,7 +37622,7 @@ impl Runtime {
             self.reread_git_surfaces(Some(&command_ends))?;
         }
         if chrome_changed {
-            self.window.set_title(&self.display_title());
+            self.window.window.set_title(&self.display_title());
             self.refresh_chrome();
             if !active_changed {
                 self.present_chrome_change()?;
@@ -37115,8 +37644,8 @@ impl Runtime {
         let mut active_finished = false;
         let mut active_finished_off_focus = false;
         let mut chrome_changed = false;
-        let active = self.active_tab;
-        for (index, tab) in self.tabs.iter_mut().enumerate() {
+        let active = self.window.active_tab;
+        for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             let focused = tab.focused_leaf;
             // Per leaf: a synchronized update is a property of one screen, and
             // two shells in one tab time out independently.
@@ -37146,9 +37675,9 @@ impl Runtime {
                 }
             }
         }
-        self.unpainted_pane_output |= active_finished_off_focus;
+        self.window.unpainted_pane_output |= active_finished_off_focus;
         if chrome_changed {
-            self.window.set_title(&self.display_title());
+            self.window.window.set_title(&self.display_title());
             self.refresh_chrome();
         }
         if active_finished {
@@ -37158,9 +37687,10 @@ impl Runtime {
     }
 
     fn reset_cursor_blink(&mut self, now: Instant) -> bool {
-        let changed = self.cursor_blink.reset(now);
-        self.renderer
-            .set_cursor_blink_visible(self.cursor_blink.visible());
+        let changed = self.window.cursor_blink.reset(now);
+        self.window
+            .renderer
+            .set_cursor_blink_visible(self.window.cursor_blink.visible());
         changed
     }
 
@@ -37168,18 +37698,19 @@ impl Runtime {
         // The one place window focus changes hands — both `Focused(true)` and
         // `Focused(false)` arrive here — so the strip's copy is recorded here
         // too rather than in a second listener that could fall out of step.
-        self.window_focused = focused;
+        self.window.window_focused = focused;
         // M142: a window that has lost the keyboard has lost the pointer's
         // attention too, and a tip left floating over a background window is a
         // label on something you are no longer looking at.
         if !focused {
-            self.tooltip.hide();
-            self.layout_peek.hide();
+            self.window.tooltip.hide();
+            self.window.layout_peek.hide();
         }
-        self.cursor_blink.set_focused(focused, now);
-        self.renderer.set_window_focused(focused);
-        self.renderer
-            .set_cursor_blink_visible(self.cursor_blink.visible());
+        self.window.cursor_blink.set_focused(focused, now);
+        self.window.renderer.set_window_focused(focused);
+        self.window
+            .renderer
+            .set_cursor_blink_visible(self.window.cursor_blink.visible());
     }
 
     fn advance_cursor_blink_if_due(&mut self, now: Instant) -> Result<()> {
@@ -37191,16 +37722,18 @@ impl Runtime {
         // phase, so the instant a shell has the keyboard back the caret is
         // *there* rather than half a beat away.
         if !self.keyboard_owner_is_a_shell() {
-            self.cursor_blink.reset(now);
-            self.renderer
-                .set_cursor_blink_visible(self.cursor_blink.visible());
+            self.window.cursor_blink.reset(now);
+            self.window
+                .renderer
+                .set_cursor_blink_visible(self.window.cursor_blink.visible());
             return Ok(());
         }
-        if !self.cursor_blink.advance(now) {
+        if !self.window.cursor_blink.advance(now) {
             return Ok(());
         }
-        self.renderer
-            .set_cursor_blink_visible(self.cursor_blink.visible());
+        self.window
+            .renderer
+            .set_cursor_blink_visible(self.window.cursor_blink.visible());
         // The phase it just changed lives in the renderer, not in the frame:
         // this is a present the caret owes, not a picture. Same road as the
         // strip's ring, and for the same reason.
@@ -37229,13 +37762,13 @@ impl Runtime {
         // here is not a tick lost: [`Self::strip_animation_deadline`] is
         // clamped to the same clock, so the loop is woken exactly when the ring
         // is next allowed to move.
-        if !strip_animation_tick_is_due(self.strip_animation_ticked_at, now) {
+        if !strip_animation_tick_is_due(self.window.strip_animation_ticked_at, now) {
             return Ok(());
         }
-        self.strip_animation_ticked_at = Some(now);
-        let active = self.active_tab;
-        let window_is_focused = self.window_focused;
-        for (index, tab) in self.tabs.iter_mut().enumerate() {
+        self.window.strip_animation_ticked_at = Some(now);
+        let active = self.window.active_tab;
+        let window_is_focused = self.window.window_focused;
+        for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             let tab_is_active = index == active;
             // No ledger arithmetic here, and its absence is load-bearing. This
             // pass runs once per turn of the loop and *after* the turn's tab
@@ -37254,16 +37787,16 @@ impl Runtime {
                 }
             }
         }
-        let motion = self.motion;
+        let motion = self.app.motion;
         let palette = bt_render::chrome_palette();
         let hovered = self.hovered_tab();
-        let trigger_hovered = match self.seat_pointer.hover {
+        let trigger_hovered = match self.window.seat_pointer.hover {
             Some(seats::ChromeTarget::TabFiles(index)) => Some(index),
             _ => None,
         };
         let peeking = self.peeking_tab();
         let mut owes_frame = false;
-        for (index, tab) in self.tabs.iter_mut().enumerate() {
+        for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             // A new progress reading starts the arc easing toward it. This runs
             // for every tab, active or not: a background download's ring has to
             // keep reporting, and its tab is exactly the one the user cannot
@@ -37314,9 +37847,9 @@ impl Runtime {
         // was. Comparing the raw fraction instead would owe a frame on every
         // wake-up of the 140ms, including the long tail where the mark does not
         // change at all.
-        let turning = marks::ChromeMark::chevron(self.chevron_turn.sample(now, motion).0);
-        if tab_owes_frame(self.last_drawn_chevron, turning) {
-            self.last_drawn_chevron = Some(turning);
+        let turning = marks::ChromeMark::chevron(self.window.chevron_turn.sample(now, motion).0);
+        if tab_owes_frame(self.window.last_drawn_chevron, turning) {
+            self.window.last_drawn_chevron = Some(turning);
             owes_frame = true;
         }
         // R1/P168 — the rail's own debt, on the chevron's exact terms: what would
@@ -37326,8 +37859,8 @@ impl Runtime {
         // through the long tail of its ease would otherwise owe a frame for the
         // whole of it.
         let drawn_rail = self.drawn_rail(now);
-        if self.last_drawn_rail != Some(drawn_rail) {
-            self.last_drawn_rail = Some(drawn_rail);
+        if self.window.last_drawn_rail != Some(drawn_rail) {
+            self.window.last_drawn_rail = Some(drawn_rail);
             owes_frame = true;
         }
         // The dock box's fade settles its debt on the same terms as the pin's:
@@ -37336,8 +37869,8 @@ impl Runtime {
         // than inside the overlay build because a debt has to be noticed by the
         // thing that decides whether to build at all.
         let faded = self.drawn_dock_reveal(now, motion);
-        if self.last_drawn_dock_reveal != faded {
-            self.last_drawn_dock_reveal = faded;
+        if self.window.last_drawn_dock_reveal != faded {
+            self.window.last_drawn_dock_reveal = faded;
             owes_frame = true;
         }
         // **B22 — the resizing cards' own debt**, on the same terms as the dock
@@ -37347,8 +37880,8 @@ impl Runtime {
         // the one case where nothing else is asking for the frame — the pointer
         // has stopped, the layout has stopped, and only this transition is left.
         let carded = self.drawn_resizing_card(now);
-        if self.last_drawn_resizing_card != carded {
-            self.last_drawn_resizing_card = carded;
+        if self.window.last_drawn_resizing_card != carded {
+            self.window.last_drawn_resizing_card = carded;
             owes_frame = true;
         }
         // **U8 — the panes' own debt, settled as it is asked.**
@@ -37365,8 +37898,11 @@ impl Runtime {
         // [`PaneMotion::settle_frame_debt`]. A window resized mid-flight moves
         // every pane, and the debt is about what is *drawn*.
         let pane_rects = self.pane_rects();
-        let panes_owe = self.pane_motion.settle_frame_debt(&pane_rects, now, motion);
-        self.pane_motion.retire(now, motion);
+        let panes_owe = self
+            .window
+            .pane_motion
+            .settle_frame_debt(&pane_rects, now, motion);
+        self.window.pane_motion.retire(now, motion);
         if !owes_frame && !panes_owe {
             return Ok(());
         }
@@ -37407,14 +37943,15 @@ impl Runtime {
     /// an earlier one would wake the loop to be turned away by the rate gate
     /// and then re-arm the same deadline — a spin dressed as a schedule.
     fn strip_animation_next_tick(&self, now: Instant) -> Instant {
-        self.strip_animation_ticked_at
+        self.window
+            .strip_animation_ticked_at
             .map_or(now, |last| last + STRIP_ANIMATION_FRAME)
             .max(now)
     }
 
     fn strip_animation_deadline(&self, now: Instant) -> Option<Instant> {
-        let motion = self.motion;
-        let tabs_moving = self.tabs.iter().any(|tab| {
+        let motion = self.app.motion;
+        let tabs_moving = self.window.tabs.iter().any(|tab| {
             tab.mark_is_animating(now, motion)
                 || tab.pin_is_animating(now, motion)
                 || tab.flip.sample(now, motion).1
@@ -37424,19 +37961,20 @@ impl Runtime {
         // picker mid-turn and nothing else happening still has to be woken —
         // and, once the arrow lands, must stop being woken. Under reduced
         // motion this is never true: the turn has no frames to ask for.
-        let chevron_turning = self.chevron_turn.sample(now, motion).1;
+        let chevron_turning = self.window.chevron_turn.sample(now, motion).1;
         // The dock box's fade is the one animation in this window that can be
         // running while the pointer is still: a drag that comes to rest over open
         // air still has 100ms of fade to finish, and nothing else would wake the
         // loop to draw it.
         let dock_fading = self
+            .window
             .drop_preview
             .as_ref()
             .is_some_and(|shown| shown.reveal.sample(now, motion).1);
         // B22, and the same argument one line further: the cards keep running
         // down for a hundred milliseconds after the divider is let go, with the
         // pointer already still. Nothing else would wake the loop to draw them.
-        let cards_moving = self.resizing_card_transition.sample(now, motion).1;
+        let cards_moving = self.window.resizing_card_transition.sample(now, motion).1;
         // P168, and the same argument again: a rail that has been left behind by
         // the pointer keeps sliding shut with nothing else in the window moving,
         // and its labels keep fading for 100ms after that. Under reduced motion
@@ -37450,9 +37988,10 @@ impl Runtime {
         // the fold would be a transition nobody ever woke the loop to draw — the
         // panel would sit still until some other event happened to ask for a
         // frame, which is the snap this animation exists to remove.
-        let rail_moving = (self.rail.draws_icon_rail()
-            && (self.rail_open.sample(now, motion).1 || self.rail_text.sample(now, motion).1))
-            || self.rail_fold.sample(now, motion).1;
+        let rail_moving = (self.window.rail.draws_icon_rail()
+            && (self.window.rail_open.sample(now, motion).1
+                || self.window.rail_text.sample(now, motion).1))
+            || self.window.rail_fold.sample(now, motion).1;
         // U8 — the active tab's panes, on the same terms and with the same
         // `None`: a window whose split has settled asks for no wake-ups at all,
         // and under reduced motion there was never a tween to ask for one.
@@ -37465,7 +38004,7 @@ impl Runtime {
         // already still and nothing else in the window moving. Under reduced
         // motion `RevealTween` reports the target with no frames asked for, so
         // this is never true and the window stays genuinely idle.
-        let files_turning = self.tabs[self.active_tab]
+        let files_turning = self.window.tabs[self.window.active_tab]
             .file_trees
             .values()
             .any(|cache| cache.any_turning(now, motion));
@@ -37477,7 +38016,7 @@ impl Runtime {
                 || rail_moving
                 || files_turning)
                 .then(|| now + STRIP_ANIMATION_FRAME),
-            self.pane_motion.deadline(now, motion),
+            self.window.pane_motion.deadline(now, motion),
         ]
         .into_iter()
         .flatten()
@@ -37500,7 +38039,7 @@ impl Runtime {
     /// would be a second opinion about the same instant, and the frame it would
     /// get wrong is the one where they disagree.
     fn drawn_rail(&self, now: Instant) -> (i32, u8) {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let state = self.sampled_rail(now);
         (
             (state.width_logical_px() * scale).round() as i32,
@@ -37511,7 +38050,7 @@ impl Runtime {
     /// The dock box's opacity as the overlay would draw it, quantised to the
     /// 1/255 a layer's alpha resolves to — `None` when there is no box.
     fn drawn_dock_reveal(&self, now: Instant, motion: Motion) -> Option<u8> {
-        self.drop_preview.as_ref().map(|shown| {
+        self.window.drop_preview.as_ref().map(|shown| {
             let (reveal, _) = shown.reveal.sample(now, motion);
             (reveal.clamp(0.0, 1.0) * 255.0).round() as u8
         })
@@ -37523,7 +38062,7 @@ impl Runtime {
     /// instant — sampling per tab would let two tabs in the same frame disagree
     /// about what time it is, and a reveal is a function of time.
     fn tab_trailers(&self, now: Instant) -> Vec<seats::TabTrailer> {
-        let motion = self.motion;
+        let motion = self.app.motion;
         // **F57 asked at the one place both axes read the run.** The strip and
         // the rail are two drawings of `self.tabs` and both are built from here,
         // so a partition broken by any write path — including one written after
@@ -37534,10 +38073,11 @@ impl Runtime {
         // [`settle_pin_partition`] at the write, and a read that quietly sorted
         // would hide the very path that needs finding.
         debug_assert!(
-            seed::pins_are_normalized(&self.tabs, |tab| tab.pinned),
+            seed::pins_are_normalized(&self.window.tabs, |tab| tab.pinned),
             "F57: the pinned run leads the strip"
         );
-        self.tabs
+        self.window
+            .tabs
             .iter()
             .map(|tab| seats::TabTrailer {
                 pinned: tab.pinned,
@@ -37556,7 +38096,7 @@ impl Runtime {
     /// `.tab:hover .pin` is a descendant rule and holds the pin open while the
     /// pointer is anywhere inside.
     fn hovered_tab(&self) -> Option<usize> {
-        match self.seat_pointer.hover {
+        match self.window.seat_pointer.hover {
             // The folder is a control *of* its tab, so hovering it is hovering
             // the tab — the mock-up's `.tab:hover .tab-files` is a descendant
             // rule, and a trigger that stopped counting as its own tab's hover
@@ -37581,16 +38121,16 @@ impl Runtime {
     /// both answer `None` here, and both are right to — see
     /// [`tab_trailing_targets`].
     fn peeking_tab(&self) -> Option<usize> {
-        match self.float.peek().and_then(|win| win.origin)? {
-            float::FloatTrigger::Tab(id) => self.tabs.iter().position(|tab| tab.id == id),
+        match self.window.float.peek().and_then(|win| win.origin)? {
+            float::FloatTrigger::Tab(id) => self.window.tabs.iter().position(|tab| tab.id == id),
             float::FloatTrigger::Pane(_) => None,
         }
     }
 
     fn finish_resize_if_quiescent(&mut self, now: Instant) -> Result<()> {
         let mut active_finished = false;
-        let active = self.active_tab;
-        for (index, tab) in self.tabs.iter_mut().enumerate() {
+        let active = self.window.active_tab;
+        for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             // Per leaf: each shell runs its own ConPTY resize transaction and
             // each PSReadLine holds its own anchor, so quiescence is reached one
             // shell at a time.
@@ -37641,11 +38181,11 @@ impl Runtime {
         observed_at: Instant,
         context: &'static str,
     ) -> Result<()> {
-        let active = self.active_tab;
-        let conpty_grid = self.tabs[active].conpty_grid;
-        let grid = self.tabs[active].grid;
+        let active = self.window.active_tab;
+        let conpty_grid = self.window.tabs[active].conpty_grid;
+        let grid = self.window.tabs[active].grid;
         let Some(reflow) = plan_grid_change(
-            &mut self.tabs[active].pending_pty_resize,
+            &mut self.window.tabs[active].pending_pty_resize,
             next_grid,
             conpty_grid,
             grid,
@@ -37700,15 +38240,15 @@ impl Runtime {
         observed_at: Instant,
         context: &'static str,
     ) -> Result<Option<GridSize>> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         // **The shells are about to be told what the tree looks like**, which
         // makes this the one honest place to record that they know. See
-        // [`Self::shells_settled_revision`]: every other reading of "the seat
+        // [`WindowRuntime::shells_settled_revision`]: every other reading of "the seat
         // set changed" is a reading of intent, and intent is exactly what the
         // two verbs that forgot the ceremony had.
-        self.shells_settled_revision = self.seats.structure_revision();
+        self.window.shells_settled_revision = self.seats.structure_revision();
         let plan = leaf_resize_plan(&self.seats, &self.seat_layout, self.focused_leaf, scale);
-        let active = self.active_tab;
+        let active = self.window.active_tab;
         // The panes without the keyboard, before the focused one: they take the
         // solver's answer unconditionally, so doing them first keeps the focused
         // leaf's coalescer the last word rather than a thing another pane's
@@ -37716,11 +38256,12 @@ impl Runtime {
         for target in plan.iter().copied().filter(|target| !target.focused) {
             let (seat, body) = (target.seat, target.body);
             let next_grid = self
+                .window
                 .renderer
                 .metrics()
                 .grid_for_pixels(body.width, body.height);
             let physical = PhysicalSize::new(body.width, body.height);
-            let Some(leaf) = self.tabs[active].sessions.get_mut(&seat) else {
+            let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
                 continue;
             };
             if next_grid == leaf.grid && next_grid == leaf.conpty_grid {
@@ -37747,6 +38288,7 @@ impl Runtime {
         };
         let body = target.body;
         let next_grid = self
+            .window
             .renderer
             .metrics()
             .grid_for_pixels(body.width, body.height);
@@ -37835,14 +38377,14 @@ impl Runtime {
     fn pane_hit_context(
         &self,
     ) -> Option<(bt_layout::SeatId, PhysicalPosition<f64>, &ViewportFrame)> {
-        let position = self.pointer_position?;
+        let position = self.window.pointer_position?;
         let seat = seats::pane_at(&self.seat_layout, position.x, position.y)?;
         let leaf = self.sessions.get(&seat)?;
         let frame = leaf.last_presented_frame.as_ref()?;
         // The pane's *body*, not its seat: a pane with a head draws its grid
         // below that head, and a pointer measured from the seat's corner would
         // be off by the head's height on every pane that wears one.
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
         if position.x < f64::from(body.x)
             || position.y < f64::from(body.y)
@@ -37869,6 +38411,7 @@ impl Runtime {
     fn pane_frame_hit(&self) -> Option<(SeatId, bt_render::GridHit)> {
         let (seat, position, frame) = self.pane_hit_context()?;
         let hit = self
+            .window
             .renderer
             .metrics()
             .hit_test_frame(frame, position.x, position.y)?;
@@ -37884,7 +38427,7 @@ impl Runtime {
     /// from.
     ///
     /// One lookup, deliberately. The translation used to be a second one — the hit taken from the
-    /// pane under the pointer, the frame taken from `Runtime::last_presented_frame` — and two
+    /// pane under the pointer, the frame taken from `WindowRuntime::last_presented_frame` — and two
     /// lookups can disagree about which pane they mean, or about whether there is a frame at all.
     /// Both happen on one gesture: `focus_pane_at` empties that window-level slot the instant
     /// keyboard focus moves, and the press that moved it is still on its way down the router, so
@@ -37900,7 +38443,7 @@ impl Runtime {
     /// two other things happen in" are different guarantees, and only the first one
     /// survives someone reordering the router.
     ///
-    /// The leaf's own copy, never `Runtime::last_presented_frame`. That window-level mirror is
+    /// The leaf's own copy, never `WindowRuntime::last_presented_frame`. That window-level mirror is
     /// presentation bookkeeping (the projection hold, the unchanged-frame skip) and `focus_pane_at`
     /// empties it the instant keyboard focus moves — while the press that moved it is still on its
     /// way down the router to the very lines that want a frame. `None` means this pane has not
@@ -37925,12 +38468,15 @@ impl Runtime {
     /// below a pane selects to the end of what is there; it does not stop
     /// selecting at the edge and it does not reach into the pane below.
     fn drag_hit_in_pane(&self, seat: SeatId) -> Option<bt_render::GridHit> {
-        let position = self.pointer_position?;
+        let position = self.window.pointer_position?;
         let frame = self.pane_frame(seat)?;
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
         let (x, y) = clamp_into_body(body, position.x, position.y);
-        self.renderer.metrics().clamped_hit_test_frame(frame, x, y)
+        self.window
+            .renderer
+            .metrics()
+            .clamped_hit_test_frame(frame, x, y)
     }
 
     /// Set one pane's selection: the pane the gesture belongs to, named outright.
@@ -37945,13 +38491,14 @@ impl Runtime {
     /// selection — the drag, the double click, the triple click — comes through
     /// here, so it is the one door that rule has to be written on.
     fn set_pane_view_selection(&mut self, seat: SeatId, selection: Option<ViewSelection>) {
-        let active = self.active_tab;
-        self.tabs[active].set_leaf_selection(seat, selection);
+        let active = self.window.active_tab;
+        self.window.tabs[active].set_leaf_selection(seat, selection);
     }
 
     fn forwarded_mouse_hit(&self) -> Option<bt_render::GridHit> {
         let (_, position, frame) = self.pane_hit_context()?;
         let hit = self
+            .window
             .renderer
             .metrics()
             .hit_test_frame(frame, position.x, position.y)?;
@@ -37972,6 +38519,7 @@ impl Runtime {
             return None;
         }
         let hit = self
+            .window
             .renderer
             .metrics()
             .hit_test_frame(frame, position.x, position.y)?;
@@ -37980,7 +38528,9 @@ impl Runtime {
 
     fn math_hit(&self) -> Option<MathHit> {
         let (_, position, frame) = self.pane_hit_context()?;
-        self.renderer.math_hit_test(frame, position.x, position.y)
+        self.window
+            .renderer
+            .math_hit_test(frame, position.x, position.y)
     }
 
     fn hyperlink_hit(&self, hit: bt_render::GridHit) -> Option<HyperlinkHit> {
@@ -37999,6 +38549,7 @@ impl Runtime {
     fn hovered_leaf(&self) -> Option<(SeatId, &LeafSession, bt_render::GridHit)> {
         let (seat, position, frame) = self.pane_hit_context()?;
         let hit = self
+            .window
             .renderer
             .metrics()
             .hit_test_frame(frame, position.x, position.y)?;
@@ -38013,10 +38564,10 @@ impl Runtime {
     /// Both panes owe a repaint, which is how the marks move across with the pointer.
     fn observe_hovered_pane(&mut self) -> Result<Option<SeatId>> {
         let hovered = self.pane_hit_context().map(|(seat, _, _)| seat);
-        if self.hover_pane == hovered {
+        if self.window.hover_pane == hovered {
             return Ok(hovered);
         }
-        self.hover_pane = hovered;
+        self.window.hover_pane = hovered;
         if let Some(seat) = hovered {
             self.rescan_pane_references(seat);
         }
@@ -38030,8 +38581,8 @@ impl Runtime {
     /// pane's own shell what it draws, which is the same question `publish_frame_inner` asks for
     /// the focused pane on every frame.
     fn rescan_pane_references(&mut self, seat: SeatId) {
-        let active = self.active_tab;
-        let Some(leaf) = self.tabs[active].sessions.get_mut(&seat) else {
+        let active = self.window.active_tab;
+        let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
             return;
         };
         let Some(frame) = leaf.last_presented_frame.as_ref() else {
@@ -38058,7 +38609,8 @@ impl Runtime {
         let reference = leaf.frame_image_references.at(hit)?;
         (reference.verified
             || matches!(
-                self.peek_cache
+                self.window
+                    .peek_cache
                     .get(&normalized_local_image_path_key(&reference.path)),
                 Some(PeekCacheEntry::Ready { .. })
             ))
@@ -38106,10 +38658,10 @@ impl Runtime {
     /// the compose step asks the session afresh.
     fn refresh_image_reference_underline(&mut self) -> Result<()> {
         let hovered = self.hovered_image_reference();
-        if hovered == self.underlined_image_reference {
+        if hovered == self.window.underlined_image_reference {
             return Ok(());
         }
-        self.underlined_image_reference = hovered;
+        self.window.underlined_image_reference = hovered;
         self.repaint_hovered_pane()
     }
 
@@ -38123,7 +38675,7 @@ impl Runtime {
     /// the focused pane for a neighbour owes marks to the neighbour and owes their removal to the
     /// pane it left.
     fn repaint_hovered_pane(&mut self) -> Result<()> {
-        self.window.request_redraw();
+        self.window.window.request_redraw();
         self.publish_interaction_frame()
     }
 
@@ -38173,17 +38725,18 @@ impl Runtime {
     /// is already on screen re-enters the slot; a queued newer frame carries the overlay along on
     /// its own redraw.
     fn present_peek_overlay(&mut self, overlay: Option<PeekImageOverlay>) -> Result<()> {
-        if !self.renderer.set_peek_overlay(overlay) {
+        if !self.window.renderer.set_peek_overlay(overlay) {
             return Ok(());
         }
         // Not while a resize present is outstanding: that gate admits only the newly projected
         // grid, and the frame on screen is the previous one. A repaint is already owed to the
         // resize, and it carries the renderer-side overlay state with it.
         if self.pending_resize_present.is_none()
-            && self.pending_frames.pending_frame().is_none()
-            && let Some(frame) = self.last_presented_frame.clone()
+            && self.window.pending_frames.pending_frame().is_none()
+            && let Some(frame) = self.window.last_presented_frame.clone()
         {
-            self.pending_frames
+            self.window
+                .pending_frames
                 .publish(
                     frame,
                     FrameTrigger {
@@ -38193,14 +38746,14 @@ impl Runtime {
                 )
                 .context("re-present the on-screen frame for a peek overlay change")?;
         }
-        self.window.request_redraw();
+        self.window.window.request_redraw();
         Ok(())
     }
 
     /// Drop peek hover state and hide the flyout. Idempotent; used by every dismiss gesture
     /// (pointer off the span, pointer left, wheel, click, any key).
     fn dismiss_peek(&mut self) -> Result<()> {
-        self.peek_hover.clear();
+        self.window.peek_hover.clear();
         self.present_peek_overlay(None)
     }
 
@@ -38212,12 +38765,12 @@ impl Runtime {
             &self.seats,
             &self.seat_layout,
             seat,
-            self.renderer.metrics().scale_factor as f32,
+            self.window.renderer.metrics().scale_factor as f32,
         )
     }
 
     fn activate_peek_if_due(&mut self, now: Instant) -> Result<()> {
-        if let Some(candidate) = self.peek_hover.activate_if_due(now) {
+        if let Some(candidate) = self.window.peek_hover.activate_if_due(now) {
             self.show_or_request_peek(&candidate)?;
         }
         Ok(())
@@ -38230,7 +38783,7 @@ impl Runtime {
     fn show_or_request_peek(&mut self, candidate: &PeekCandidate) -> Result<()> {
         let cache_key = candidate.subject.key.clone();
         let (content_key, native_rgba, native_width_px, native_height_px) =
-            match self.peek_cache.get(&cache_key) {
+            match self.window.peek_cache.get(&cache_key) {
                 Some(PeekCacheEntry::Ready {
                     key,
                     rgba,
@@ -38247,10 +38800,11 @@ impl Runtime {
                     let Some(path) = candidate.subject.path.clone() else {
                         return Ok(());
                     };
-                    if !self.math_worker_running {
+                    if !self.app.math_worker_running {
                         return Ok(());
                     }
                     if self
+                        .app
                         .math_worker
                         .tasks
                         .send(MathWorkerRequest::PeekImage {
@@ -38259,7 +38813,9 @@ impl Runtime {
                         })
                         .is_ok()
                     {
-                        self.peek_cache.insert(cache_key, PeekCacheEntry::Pending);
+                        self.window
+                            .peek_cache
+                            .insert(cache_key, PeekCacheEntry::Pending);
                     }
                     return Ok(());
                 }
@@ -38270,23 +38826,27 @@ impl Runtime {
         let Some(seat) = self.peek_seat_viewport(candidate.seat) else {
             return Ok(());
         };
-        let Some((display_width_px, display_height_px)) =
-            self.renderer
-                .peek_thumbnail_extent(seat, native_width_px, native_height_px)
+        let Some((display_width_px, display_height_px)) = self
+            .window
+            .renderer
+            .peek_thumbnail_extent(seat, native_width_px, native_height_px)
         else {
             return Ok(());
         };
         let target: PeekThumbnailTarget = (content_key, display_width_px, display_height_px);
-        if let Some(thumbnail) = self.peek_thumbnail.as_ref()
+        if let Some(thumbnail) = self.window.peek_thumbnail.as_ref()
             && thumbnail.matches(&target)
         {
             let overlay = thumbnail.overlay(seat, candidate.pointer);
             return self.present_peek_overlay(Some(overlay));
         }
-        if self.peek_thumbnail_pending.as_ref() == Some(&target) || !self.math_worker_running {
+        if self.window.peek_thumbnail_pending.as_ref() == Some(&target)
+            || !self.app.math_worker_running
+        {
             return Ok(());
         }
         if self
+            .app
             .math_worker
             .scale_tasks
             .send(ScaleWorkerRequest::Peek {
@@ -38298,7 +38858,7 @@ impl Runtime {
             })
             .is_ok()
         {
-            self.peek_thumbnail_pending = Some(target);
+            self.window.peek_thumbnail_pending = Some(target);
         }
         Ok(())
     }
@@ -38327,7 +38887,7 @@ impl Runtime {
             return;
         };
         let cache_key = peek_cache_key_for_decode(&task.source, decoded);
-        self.peek_cache.insert(
+        self.window.peek_cache.insert(
             cache_key,
             PeekCacheEntry::Ready {
                 key: decoded.key.clone(),
@@ -38363,7 +38923,7 @@ impl Runtime {
         let preview_matches = !waiting.is_empty();
         match result {
             Ok(decoded) => {
-                self.peek_cache.insert(
+                self.window.peek_cache.insert(
                     cache_key.clone(),
                     PeekCacheEntry::Ready {
                         key: decoded.key,
@@ -38372,14 +38932,15 @@ impl Runtime {
                         height_px: decoded.height_px,
                     },
                 );
-                if let Some(active) = self.peek_hover.active.clone()
+                if let Some(active) = self.window.peek_hover.active.clone()
                     && active.subject.key == cache_key
                 {
                     self.show_or_request_peek(&active)?;
                 }
             }
             Err(error) => {
-                self.peek_cache
+                self.window
+                    .peek_cache
                     .insert(cache_key.clone(), PeekCacheEntry::Failed);
                 for surface in &waiting {
                     if let Some(picture) = self.preview_picture_mut(*surface) {
@@ -38397,7 +38958,7 @@ impl Runtime {
         // ground while the decode was out. Nothing else will move the pointer to
         // rebuild the chrome, so the frame is owed here — and the rebuild is what
         // asks for the resample, which is the next step of the same errand.
-        if self.file_peek.as_ref().is_some_and(|peek| {
+        if self.window.file_peek.as_ref().is_some_and(|peek| {
             peek.source
                 .file_path()
                 .is_some_and(|path| normalized_local_image_path_key(path) == cache_key)
@@ -38426,9 +38987,9 @@ impl Runtime {
         // on the day both want the same picture at the same size the flyout will
         // simply find its slot cold and ask again, which costs one resample of an
         // image already decoded.
-        if self.peek_card_pending.as_ref() == Some(&delivered) {
-            self.peek_card_pending = None;
-            self.peek_picture = Some(PeekThumbnail::from_scaled(scaled));
+        if self.window.peek_card_pending.as_ref() == Some(&delivered) {
+            self.window.peek_card_pending = None;
+            self.window.peek_picture = Some(PeekThumbnail::from_scaled(scaled));
             // The card is chrome, and a picture that lands while it is up owes
             // the frame that shows it.
             if self.refresh_overlay() {
@@ -38436,11 +38997,11 @@ impl Runtime {
             }
             return Ok(());
         }
-        if self.peek_thumbnail_pending.as_ref() == Some(&delivered) {
-            self.peek_thumbnail_pending = None;
+        if self.window.peek_thumbnail_pending.as_ref() == Some(&delivered) {
+            self.window.peek_thumbnail_pending = None;
         }
-        self.peek_thumbnail = Some(PeekThumbnail::from_scaled(scaled));
-        if let Some(active) = self.peek_hover.active.clone() {
+        self.window.peek_thumbnail = Some(PeekThumbnail::from_scaled(scaled));
+        if let Some(active) = self.window.peek_hover.active.clone() {
             self.show_or_request_peek(&active)?;
         }
         Ok(())
@@ -38469,6 +39030,7 @@ impl Runtime {
         // whose window you have since navigated away from is still a picture
         // that asked a question.
         let Some(surface) = self
+            .window
             .tabs
             .iter()
             .find_map(|tab| tab.preview_panes.awaiting_scale(&delivered))
@@ -38487,14 +39049,14 @@ impl Runtime {
     }
 
     fn activate_hyperlink_hover_if_due(&mut self, now: Instant) -> Result<()> {
-        if self.hyperlink_hover.activate_if_due(now) {
+        if self.window.hyperlink_hover.activate_if_due(now) {
             self.repaint_hovered_pane()?;
         }
         Ok(())
     }
 
     fn pointer_left(&mut self) -> Result<()> {
-        self.pointer_position = None;
+        self.window.pointer_position = None;
         // R2: a pointer that has left the window is not in the rail, and the rail
         // has to be told — nothing else will move the pointer again to tell it,
         // so an open panel would simply stay open over the terminal forever.
@@ -38519,20 +39081,20 @@ impl Runtime {
         // The overlay's own hover goes with it: a `×` still lit after the
         // pointer has left the window is a button claiming to be under a
         // pointer that is not there.
-        let settings_hover_cleared = self.settings.set_hover(None);
-        if (self.seat_pointer.hover.take().is_some() || settings_hover_cleared)
+        let settings_hover_cleared = self.window.settings.set_hover(None);
+        if (self.window.seat_pointer.hover.take().is_some() || settings_hover_cleared)
             && self.refresh_chrome()
         {
             self.present_chrome_change()?;
         }
         self.dismiss_peek()?;
-        let hyperlink_changed = self.hyperlink_hover.clear();
-        if self.math_hover_anchor.is_some() {
-            self.math_hover_clear_at = Some(Instant::now() + Duration::from_millis(500));
+        let hyperlink_changed = self.window.hyperlink_hover.clear();
+        if self.window.math_hover_anchor.is_some() {
+            self.window.math_hover_clear_at = Some(Instant::now() + Duration::from_millis(500));
         }
         // Whatever pane the pointer was standing in is standing in none now, and owes the removal
         // of its marks — which, if it was not the focused one, only a redraw can deliver.
-        self.hover_pane = None;
+        self.window.hover_pane = None;
         if hyperlink_changed {
             self.repaint_hovered_pane()?;
         }
@@ -38546,7 +39108,7 @@ impl Runtime {
         match hyperlink_activation(true, true, &hyperlink.uri) {
             HyperlinkActivation::None => {}
             HyperlinkActivation::Open => {
-                let result = window_hwnd(&self.window).and_then(|hwnd| {
+                let result = window_hwnd(&self.window.window).and_then(|hwnd| {
                     bt_platform::shell_execute(hwnd, &hyperlink.uri)
                         .map_err(|error| anyhow!(error))
                         .context("open HTTP hyperlink in the system browser")
@@ -38556,7 +39118,7 @@ impl Runtime {
                 }
             }
             HyperlinkActivation::Blocked => {
-                self.hyperlink_hover.show_blocked(hyperlink);
+                self.window.hyperlink_hover.show_blocked(hyperlink);
                 self.publish_interaction_frame()?;
             }
         }
@@ -38564,7 +39126,7 @@ impl Runtime {
     }
 
     fn activate_local_image_path(&self, path: &std::path::Path) {
-        let result = window_hwnd(&self.window).and_then(|hwnd| {
+        let result = window_hwnd(&self.window.window).and_then(|hwnd| {
             bt_platform::open_local_file(hwnd, path)
                 .map_err(|error| anyhow!(error))
                 .context("open decoded local image in the system viewer")
@@ -38581,15 +39143,17 @@ impl Runtime {
     fn update_math_hover(&mut self, now: Instant) -> Result<Option<MathHit>> {
         let hit = self.math_hit();
         if let Some(hit) = hit.as_ref() {
-            self.math_hover_clear_at = None;
-            if self.math_hover_anchor.as_ref() != Some(&hit.anchor) {
-                self.math_hover_anchor = Some(hit.anchor.clone());
+            self.window.math_hover_clear_at = None;
+            if self.window.math_hover_anchor.as_ref() != Some(&hit.anchor) {
+                self.window.math_hover_anchor = Some(hit.anchor.clone());
                 if self.set_hovered_math(Some(hit.anchor.clone())) {
                     self.repaint_hovered_pane()?;
                 }
             }
-        } else if self.math_hover_anchor.is_some() && self.math_hover_clear_at.is_none() {
-            self.math_hover_clear_at = Some(now + Duration::from_millis(500));
+        } else if self.window.math_hover_anchor.is_some()
+            && self.window.math_hover_clear_at.is_none()
+        {
+            self.window.math_hover_clear_at = Some(now + Duration::from_millis(500));
         }
         Ok(hit)
     }
@@ -38601,13 +39165,13 @@ impl Runtime {
     /// left by crossing straight into another pane's block and no clear ever ran.
     fn set_hovered_math(&mut self, anchor: Option<MathBlockAnchor>) -> bool {
         let hovered = if anchor.is_some() {
-            self.hover_pane
+            self.window.hover_pane
         } else {
             None
         };
-        let active = self.active_tab;
+        let active = self.window.active_tab;
         let mut changed = false;
-        for (seat, leaf) in self.tabs[active].leaves_mut() {
+        for (seat, leaf) in self.window.tabs[active].leaves_mut() {
             let wanted = anchor.as_ref().filter(|_| hovered == Some(*seat));
             changed |= leaf.session.set_math_hover(wanted);
         }
@@ -38616,13 +39180,14 @@ impl Runtime {
 
     fn clear_math_hover_if_due(&mut self, now: Instant) -> Result<()> {
         if self
+            .window
             .math_hover_clear_at
             .is_none_or(|deadline| now < deadline)
         {
             return Ok(());
         }
-        self.math_hover_clear_at = None;
-        self.math_hover_anchor = None;
+        self.window.math_hover_clear_at = None;
+        self.window.math_hover_anchor = None;
         if self.set_hovered_math(None) {
             self.repaint_hovered_pane()?;
         }
@@ -38633,7 +39198,7 @@ impl Runtime {
         let Some(source) = self.session.math_source(anchor) else {
             return;
         };
-        let result = window_hwnd(&self.window).and_then(|hwnd| {
+        let result = window_hwnd(&self.window.window).and_then(|hwnd| {
             bt_platform::set_clipboard_text(hwnd, source)
                 .map_err(|error| anyhow!(error))
                 .context("copy original LaTeX source to clipboard")
@@ -38642,11 +39207,11 @@ impl Runtime {
     }
 
     fn apply_math_context_menu_result(&mut self) {
-        let Some(result) = self.math_context_menu.take_result() else {
+        let Some(result) = self.window.math_context_menu.take_result() else {
             return;
         };
-        let anchor = self.pending_math_context_anchor.take();
-        self.mouse_route = None;
+        let anchor = self.window.pending_math_context_anchor.take();
+        self.window.mouse_route = None;
         match (result, anchor) {
             (Ok(true), Some(anchor)) => self.copy_math_latex(&anchor),
             (Ok(true), None) => {
@@ -38717,14 +39282,15 @@ impl Runtime {
         // Not while a resize present is outstanding: that gate admits only the
         // newly projected grid, and the frame on screen is the previous one.
         if self.pending_resize_present.is_none()
-            && self.pending_frames.pending_frame().is_none()
-            && let Some(frame) = self.last_presented_frame.clone()
+            && self.window.pending_frames.pending_frame().is_none()
+            && let Some(frame) = self.window.last_presented_frame.clone()
         {
-            self.pending_frames
+            self.window
+                .pending_frames
                 .publish(frame, trigger)
                 .context("re-present the on-screen frame for an unfocused pane")?;
         }
-        self.window.request_redraw();
+        self.window.window.request_redraw();
         Ok(())
     }
 
@@ -38736,8 +39302,8 @@ impl Runtime {
     /// keyboard. The two differ for a gesture, which belongs to the pane it began
     /// in for as long as the button is down.
     fn clear_pane_selection(&mut self, seat: SeatId) {
-        let active = self.active_tab;
-        self.tabs[active].clear_leaf_selection(seat);
+        let active = self.window.active_tab;
+        self.window.tabs[active].clear_leaf_selection(seat);
     }
 
     fn return_to_live_for_input(&mut self) -> bool {
@@ -38770,12 +39336,12 @@ impl Runtime {
         // Typing into the stand-in shell is what makes it yours — and a wheel
         // forwarded into a program running there is as much a claim on it as a
         // keystroke. Same sentence as `send_user_input`'s, for the same reason.
-        if self.placeholder_tab == Some(self.tabs[self.active_tab].id) {
-            self.placeholder_tab = None;
+        if self.window.placeholder_tab == Some(self.window.tabs[self.window.active_tab].id) {
+            self.window.placeholder_tab = None;
         }
         self.pending_keyboard_at = Some(Instant::now());
-        let active = self.active_tab;
-        if let Some(pty) = self.tabs[active]
+        let active = self.window.active_tab;
+        if let Some(pty) = self.window.tabs[active]
             .sessions
             .get_mut(&seat)
             .and_then(|leaf| leaf.pty.as_mut())
@@ -38794,8 +39360,8 @@ impl Runtime {
         let view_changed = kind.returns_view_to_live() && self.return_to_live_for_input();
         // Typing into the stand-in shell is what makes it yours. From here on a
         // Restore appends beside it instead of clearing it away underneath you.
-        if self.placeholder_tab == Some(self.tabs[self.active_tab].id) {
-            self.placeholder_tab = None;
+        if self.window.placeholder_tab == Some(self.window.tabs[self.window.active_tab].id) {
+            self.window.placeholder_tab = None;
         }
         self.pending_keyboard_at = Some(Instant::now());
         if let Some(pty) = self.pty.as_mut() {
@@ -38811,9 +39377,9 @@ impl Runtime {
     }
 
     fn copy_selection(&mut self) -> Result<()> {
-        let window = Arc::clone(&self.window);
-        let active = self.active_tab;
-        let leaf = self.tabs[active].focused_mut();
+        let window = Arc::clone(&self.window.window);
+        let active = self.window.active_tab;
+        let leaf = self.window.tabs[active].focused_mut();
         if !copy_selection(&mut leaf.session, &mut leaf.projection, |text| {
             write_terminal_clipboard_text(&window, text)
         }) {
@@ -38828,7 +39394,7 @@ impl Runtime {
     /// selection just made that the hand means, and there is only one pane it was
     /// ever made in.
     fn copy_selection_on_release(&self, seat: SeatId) {
-        let window = Arc::clone(&self.window);
+        let window = Arc::clone(&self.window.window);
         let Some(leaf) = self.sessions.get(&seat) else {
             return;
         };
@@ -38852,6 +39418,7 @@ impl Runtime {
     fn begin_local_selection(&mut self, seat: SeatId, hit: bt_render::GridHit) -> Result<()> {
         self.dismiss_peek()?;
         let count = self
+            .window
             .click_tracker
             .register(hit.row, hit.column, Instant::now());
         let local_image_path = self.local_image_path_hit(hit);
@@ -38859,9 +39426,9 @@ impl Runtime {
             return Ok(());
         };
         let hyperlink = frame.hyperlink_at(hit.row, hit.column);
-        let open_hyperlink_on_release = self.modifiers.control_key() && hyperlink.is_some();
+        let open_hyperlink_on_release = self.window.modifiers.control_key() && hyperlink.is_some();
         let local_image_activation = local_image_activation(
-            self.modifiers.control_key(),
+            self.window.modifiers.control_key(),
             true,
             local_image_path.as_deref(),
         );
@@ -38903,7 +39470,7 @@ impl Runtime {
         // A linear press begins a possible drag but owns no selection yet. Only movement creates
         // one, so click-no-drag cannot briefly feed copy-on-select or leave a zero-width selection.
         self.set_pane_view_selection(seat, initial);
-        self.mouse_route = Some(MouseRoute::Local(Box::new(SelectionDrag {
+        self.window.mouse_route = Some(MouseRoute::Local(Box::new(SelectionDrag {
             mode,
             origin_seat: seat,
             origin_row: hit.row,
@@ -38924,7 +39491,7 @@ impl Runtime {
     /// spoken in, and [`Self::drag_hit_in_pane`] is the one place that translation
     /// is written.
     fn extend_local_selection(&mut self) -> Result<()> {
-        let Some(MouseRoute::Local(drag)) = self.mouse_route.as_ref() else {
+        let Some(MouseRoute::Local(drag)) = self.window.mouse_route.as_ref() else {
             return Ok(());
         };
         // Copied out field by field rather than by cloning the drag whole: this
@@ -38986,7 +39553,7 @@ impl Runtime {
     }
 
     fn pointer_moved(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
-        self.pointer_position = Some(position);
+        self.window.pointer_position = Some(position);
         // **Both `⌄` clocks, before anything returns** (user ruling, 2026-08-16).
         // A chevron's leave grace is running precisely when the pointer is
         // somewhere else, so it has to be told about moves that every branch
@@ -39053,7 +39620,7 @@ impl Runtime {
         // order it is drawn: under the gate, over the dialog.
         if let Some(layout) = self.psreadline_invite_layout() {
             let over = restore::invite_hit(&layout, position.x, position.y);
-            if self.psreadline_invite.set_hover(Some(over)) && self.refresh_overlay() {
+            if self.window.psreadline_invite.set_hover(Some(over)) && self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
             self.note_tooltip(None)?;
@@ -39065,7 +39632,7 @@ impl Runtime {
             // slider's, wherever it has wandered to, and the hover underneath is
             // as old as the gesture. Every slider ever built keeps following the
             // hand off its own track.
-            if let Some(row) = self.settings_slider_drag {
+            if let Some(row) = self.window.settings_slider_drag {
                 if let Some(value) = layout.slider_at(row, position.x) {
                     self.apply_slider(row, value)?;
                 }
@@ -39074,14 +39641,14 @@ impl Runtime {
             // The same sentence for the picker's own bar, and for the same
             // reason: a gesture that began on a thumb keeps following the hand
             // wherever it wanders.
-            if self.settings_menu_bar_drag.is_some()
+            if self.window.settings_menu_bar_drag.is_some()
                 && let Some(bar) = layout.menu_bar()
             {
                 self.drag_settings_menu_bar(&bar, position)?;
                 return Ok(());
             }
             let hover = settings::hit(&layout, &self.settings_values(), position.x, position.y);
-            if self.settings.set_hover(Some(hover)) && self.refresh_overlay() {
+            if self.window.settings.set_hover(Some(hover)) && self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
             return Ok(());
@@ -39089,7 +39656,7 @@ impl Runtime {
         // The gate takes the pointer outright, on its scrim as well as on its box.
         if let Some(layout) = self.dirty_gate_layout() {
             let over = restore::gate_hit(&layout, position.x, position.y);
-            if self.dirty_gate.set_hover(Some(over)) && self.refresh_overlay() {
+            if self.window.dirty_gate.set_hover(Some(over)) && self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
             self.note_tooltip(None)?;
@@ -39102,12 +39669,12 @@ impl Runtime {
         if let Some(layout) = self.restore_layout() {
             let over = restore::hit(&layout, position.x, position.y);
             if over.is_some() {
-                if self.restore_prompt.set_hover(over) && self.refresh_overlay() {
+                if self.window.restore_prompt.set_hover(over) && self.refresh_overlay() {
                     self.present_chrome_change()?;
                 }
                 return Ok(());
             }
-            if self.restore_prompt.set_hover(None) && self.refresh_overlay() {
+            if self.window.restore_prompt.set_hover(None) && self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
         }
@@ -39128,12 +39695,12 @@ impl Runtime {
         if let Some(layout) = self.profile_menu_layout() {
             let over = profiles::hit(
                 &layout,
-                &self.profile_programs,
-                self.recent.entries(),
+                &self.app.profile_programs,
+                self.app.recent.entries(),
                 position.x,
                 position.y,
             );
-            if self.profile_menu.set_hover(over.flatten()) && self.refresh_overlay() {
+            if self.window.profile_menu.set_hover(over.flatten()) && self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
             if over.is_some() {
@@ -39159,7 +39726,7 @@ impl Runtime {
         // The root menu takes the pointer the same way and on the same terms.
         if let Some(layout) = self.root_menu_layout() {
             let over = profiles::root_menu_hit(&layout, position.x, position.y);
-            if self.root_menu.set_hover(over.flatten()) && self.refresh_overlay() {
+            if self.window.root_menu.set_hover(over.flatten()) && self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
             if over.is_some() {
@@ -39175,7 +39742,7 @@ impl Runtime {
         // it: it is the same popup with a different list in it.
         if let Some(layout) = self.preview_menu_layout() {
             let over = profiles::preview_menu_hit(&layout, position.x, position.y);
-            if self.preview_menu.set_hover(over.flatten()) && self.refresh_overlay() {
+            if self.window.preview_menu.set_hover(over.flatten()) && self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
             if over.is_some() {
@@ -39192,7 +39759,7 @@ impl Runtime {
         if let Some(layout) = self.file_menu_layout() {
             let over = profiles::file_menu_hit(&layout, position.x, position.y);
             if let Some(row) = over
-                && let Some(menu) = self.file_menu.as_mut()
+                && let Some(menu) = self.window.file_menu.as_mut()
                 && menu.hover != row
             {
                 menu.hover = row;
@@ -39212,7 +39779,7 @@ impl Runtime {
         if let Some(layout) = self.git_menu_layout() {
             let over = profiles::git_menu_hit(&layout, position.x, position.y);
             if let Some(row) = over
-                && let Some(menu) = self.git_menu.as_mut()
+                && let Some(menu) = self.window.git_menu.as_mut()
                 && menu.hover != row
             {
                 menu.hover = row;
@@ -39234,7 +39801,7 @@ impl Runtime {
         if let Some(layout) = self.term_menu_layout() {
             let over = profiles::term_menu_hit(&layout, position.x, position.y);
             if let Some(row) = over
-                && let Some(menu) = self.term_menu.as_mut()
+                && let Some(menu) = self.window.term_menu.as_mut()
                 && menu.hover != row
             {
                 menu.hover = row;
@@ -39252,7 +39819,7 @@ impl Runtime {
         if let Some(layout) = self.graph_filter_menu_layout() {
             let over = profiles::git_filter_menu_hit(&layout, position.x, position.y);
             if let Some(row) = over.clone()
-                && let Some(menu) = self.graph_filter_menu.as_mut()
+                && let Some(menu) = self.window.graph_filter_menu.as_mut()
                 && menu.hover != row
             {
                 menu.hover = row;
@@ -39306,25 +39873,32 @@ impl Runtime {
         // has already returned above if a resize is in flight, so neither branch
         // below can be reached while one is — "one gesture owns the pointer at a
         // time", and the ordering is what says so.
-        let scale = self.renderer.metrics().scale_factor;
+        let scale = self.window.renderer.metrics().scale_factor;
         if self
+            .window
             .tab_press
             .as_mut()
             .is_some_and(|press| press.travelled(position, scale))
         {
-            let press = self.tab_press.expect("a press that travelled is a press");
+            let press = self
+                .window
+                .tab_press
+                .expect("a press that travelled is a press");
             self.begin_tab_drag(press, position)?;
         } else if self
+            .window
             .pane_press
             .as_mut()
             .is_some_and(|press| press.latch.travelled(position, scale))
         {
             let seat = self
+                .window
                 .pane_press
                 .expect("a press that travelled is a press")
                 .seat;
             self.begin_pane_drag(seat, position)?;
         } else if self
+            .window
             .row_press
             .as_mut()
             .is_some_and(|press| press.latch.travelled(position, scale))
@@ -39333,6 +39907,7 @@ impl Runtime {
             // the same latch, in the same `else if` chain: one press is in the
             // hand at a time, and which one it is was decided at the press.
             let press = self
+                .window
                 .row_press
                 .clone()
                 .expect("a press that travelled is a press");
@@ -39355,16 +39930,17 @@ impl Runtime {
         // way to reach here is with a free hand.
         let trigger = match self.chrome_target_at(position) {
             Some(seats::ChromeTarget::TabFiles(index)) => self
+                .window
                 .tabs
                 .get(index)
                 .map(|tab| float::FloatTrigger::Tab(tab.id)),
             Some(seats::ChromeTarget::PaneFiles(seat)) => Some(float::FloatTrigger::Pane(LeafId {
-                tab: self.tabs[self.active_tab].id,
+                tab: self.window.tabs[self.window.active_tab].id,
                 seat,
             })),
             _ => None,
         };
-        self.float.observe(trigger, Instant::now());
+        self.window.float.observe(trigger, Instant::now());
         self.drive_float_hover(position)?;
         // P146/P150 — the glance's intent, armed by the row under the pointer
         // on **either** host, and disarmed by everything else. Asked here for
@@ -39411,9 +39987,10 @@ impl Runtime {
         // have to be answered in: they share the pane's top-right corner, and on
         // a short pane the rail's own block reaches up under the capsule. A hand
         // on a toggle must not also be lighting a tick behind it.
-        let on_search = self.drive_search_hover(self.mouse_route.is_none().then_some(position))?;
+        let on_search =
+            self.drive_search_hover(self.window.mouse_route.is_none().then_some(position))?;
         let on_command_rail = self.drive_command_rail_hover(
-            (self.mouse_route.is_none() && !on_search).then_some(position),
+            (self.window.mouse_route.is_none() && !on_search).then_some(position),
         )?;
         // The glance card wins over anything the pane underneath it would say,
         // for the reason the rail takes the pointer at all: it is the surface on
@@ -39447,22 +40024,22 @@ impl Runtime {
         let hit = self.frame_hit().filter(|_| !on_command_rail && !on_search);
         let hyperlink = hit
             .filter(|_| {
-                math_hit.is_none() && !matches!(self.mouse_route, Some(MouseRoute::Local(_)))
+                math_hit.is_none() && !matches!(self.window.mouse_route, Some(MouseRoute::Local(_)))
             })
             .and_then(|hit| self.hyperlink_hit(hit));
-        if self.hyperlink_hover.observe(hyperlink, now) {
+        if self.window.hyperlink_hover.observe(hyperlink, now) {
             self.repaint_hovered_pane()?;
         }
         self.refresh_image_reference_underline()?;
         let peek_path = hit
             .filter(|_| {
-                math_hit.is_none() && !matches!(self.mouse_route, Some(MouseRoute::Local(_)))
+                math_hit.is_none() && !matches!(self.window.mouse_route, Some(MouseRoute::Local(_)))
             })
             .and_then(|hit| self.peek_target(hit));
-        if self.peek_hover.observe(peek_path, position, now) {
+        if self.window.peek_hover.observe(peek_path, position, now) {
             self.present_peek_overlay(None)?;
         }
-        if math_hit.is_some() || matches!(self.mouse_route, Some(MouseRoute::MathBlock)) {
+        if math_hit.is_some() || matches!(self.window.mouse_route, Some(MouseRoute::MathBlock)) {
             return Ok(());
         }
         // Above the "is the pointer over a cell" guard, deliberately: a selection
@@ -39470,7 +40047,7 @@ impl Runtime {
         // not the pointer is over a cell of the pane it is currently crossing.
         // Under the old guard a drag that left its pane simply stopped following
         // the hand until it came back.
-        if matches!(self.mouse_route, Some(MouseRoute::Local(_))) {
+        if matches!(self.window.mouse_route, Some(MouseRoute::Local(_))) {
             return self.extend_local_selection();
         }
         if hit.is_none() {
@@ -39493,10 +40070,10 @@ impl Runtime {
             return Ok(());
         };
         let modes = self.leaf_terminal_modes(seat);
-        if self.modifiers.shift_key() || modes.mouse_tracking == MouseTracking::Off {
+        if self.window.modifiers.shift_key() || modes.mouse_tracking == MouseTracking::Off {
             return Ok(());
         }
-        let button = match self.mouse_route {
+        let button = match self.window.mouse_route {
             Some(MouseRoute::Forward(button)) if modes.mouse_tracking != MouseTracking::Click => {
                 button
             }
@@ -39511,7 +40088,7 @@ impl Runtime {
             input::MouseProtocolEvent::Motion,
             hit.row,
             hit.column,
-            self.modifiers,
+            self.window.modifiers,
         );
         self.send_mouse_input_to(seat, &bytes, "forward SGR mouse motion to PTY")
     }
@@ -39524,7 +40101,7 @@ impl Runtime {
     /// L9 is upheld by the edit itself — `DragDivider`'s focus set is exactly
     /// that one split, so nothing rebalances mid-gesture.
     fn drive_divider_drag(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let Some(drag) = self.divider_drag else {
+        let Some(drag) = self.window.divider_drag else {
             return Ok(false);
         };
         let Some(slot) = self
@@ -39533,14 +40110,14 @@ impl Runtime {
             .into_iter()
             .find(|slot| slot.id == drag.split)
         else {
-            self.divider_drag = None;
+            self.window.divider_drag = None;
             return Ok(false);
         };
         let along = match drag.dir {
             Axis::Row => position.x,
             Axis::Col => position.y,
         };
-        let scale_ppm = seats::scale_ppm(self.renderer.metrics().dpi_milli().get());
+        let scale_ppm = seats::scale_ppm(self.window.renderer.metrics().dpi_milli().get());
         let metrics = self.seat_metrics();
         // A refusal, and a clamp that changed nothing, both mean "do not
         // re-solve": §2.4 rules that an infeasible drag has zero side effects
@@ -39595,7 +40172,7 @@ impl Runtime {
             // back the instant the hand let go would be the refusal arriving one
             // frame late. `claim_lawful_layout` is what hands the minima back
             // their force, and it is the program's own door.
-            self.size_policy = SizePolicy::Sovereign;
+            self.window.size_policy = SizePolicy::Sovereign;
             self.commit_seat_geometry()?;
         }
         Ok(true)
@@ -39622,10 +40199,10 @@ impl Runtime {
     /// the ratio restores a value equal to the one already there, `drag_divider`
     /// reports no change, and no re-solve is asked for.
     fn cancel_divider_drag(&mut self) -> Result<bool> {
-        let Some(drag) = self.divider_drag.take() else {
+        let Some(drag) = self.window.divider_drag.take() else {
             return Ok(false);
         };
-        self.seat_pointer.dragging = None;
+        self.window.seat_pointer.dragging = None;
         let usable = self
             .seats
             .split_slots(&self.seat_layout)
@@ -39656,7 +40233,7 @@ impl Runtime {
             self.commit_seat_geometry()?;
         }
         self.apply_pointer_cursor();
-        if let Some(position) = self.pointer_position {
+        if let Some(position) = self.window.pointer_position {
             self.update_chrome_hover(position)?;
         }
         if self.refresh_chrome() {
@@ -39668,8 +40245,8 @@ impl Runtime {
     /// Repaint the chrome when the pointer moves onto or off a divider, a close
     /// affordance or a collapsed bar.
     fn chrome_target_at(&self, position: PhysicalPosition<f64>) -> Option<seats::ChromeTarget> {
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
         let now = Instant::now();
         let (trailers, pinned) = self.rail_list(now);
@@ -39692,7 +40269,7 @@ impl Runtime {
                 scale,
                 &trailers,
                 pinned,
-                self.rail_scroll,
+                self.window.rail_scroll,
                 rail,
                 position.x,
                 position.y,
@@ -39701,8 +40278,8 @@ impl Runtime {
                 width,
                 scale,
                 &trailers,
-                self.active_tab,
-                self.tab_scroll,
+                self.window.active_tab,
+                self.window.tab_scroll,
                 position.x,
                 position.y,
             ),
@@ -39714,7 +40291,7 @@ impl Runtime {
         .or_else(|| {
             seats::hit_files_root(
                 &self.seat_layout,
-                &self.files_name_widths,
+                &self.window.files_name_widths,
                 scale,
                 position.x,
                 position.y,
@@ -39764,7 +40341,7 @@ impl Runtime {
                     seats::hit_preview_card_button(
                         &self.seats,
                         &self.seat_layout,
-                        self.preview_button_width,
+                        self.window.preview_button_width,
                         scale,
                         position.x,
                         position.y,
@@ -39786,7 +40363,7 @@ impl Runtime {
         .or_else(|| {
             seats::hit_git_panel(
                 &self.seat_layout,
-                &self.git_pages_shown,
+                &self.window.git_pages_shown,
                 scale,
                 position.x,
                 position.y,
@@ -39800,7 +40377,7 @@ impl Runtime {
             seats::hit_git_graph(
                 &self.seats,
                 &self.seat_layout,
-                &self.git_graphs_shown,
+                &self.window.git_graphs_shown,
                 scale,
                 position.x,
                 position.y,
@@ -39825,7 +40402,7 @@ impl Runtime {
     /// the master switch is off, which is what makes the strip unpressable
     /// without a second condition anywhere.
     fn files_seg_widths(&self) -> BTreeMap<SeatId, [f32; 2]> {
-        self.files_view_widths.clone()
+        self.window.files_view_widths.clone()
     }
 
     fn update_chrome_hover(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
@@ -39864,11 +40441,11 @@ impl Runtime {
         hover: Option<seats::ChromeTarget>,
         pane: Option<bt_layout::SeatId>,
     ) -> Result<()> {
-        if self.seat_pointer.hover == hover && self.seat_pointer.pane_hover == pane {
+        if self.window.seat_pointer.hover == hover && self.window.seat_pointer.pane_hover == pane {
             return Ok(());
         }
-        self.seat_pointer.hover = hover;
-        self.seat_pointer.pane_hover = pane;
+        self.window.seat_pointer.hover = hover;
+        self.window.seat_pointer.pane_hover = pane;
         self.apply_pointer_cursor();
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -39883,17 +40460,22 @@ impl Runtime {
     /// grip it began on.
     fn apply_pointer_cursor(&mut self) {
         let grasp = float_grasp(
-            self.float_drag.map(|drag| drag.kind),
-            self.float_hover.map(|(_, part)| part),
+            self.window.float_drag.map(|drag| drag.kind),
+            self.window.float_hover.map(|(_, part)| part),
             // The window **under the pointer**, not "is any window pinned": a
             // peek standing over a pinned one would otherwise borrow its grab
             // hand, and a header that is not a handle would advertise itself as
             // one (2026-08-12).
-            self.float_hover
-                .is_some_and(|(id, _)| self.float.is_pinned(id)),
+            self.window
+                .float_hover
+                .is_some_and(|(id, _)| self.window.float.is_pinned(id)),
         );
-        let divider_axis = self.divider_drag.as_ref().map(|drag| drag.dir).or_else(|| {
-            match self.seat_pointer.hover {
+        let divider_axis = self
+            .window
+            .divider_drag
+            .as_ref()
+            .map(|drag| drag.dir)
+            .or_else(|| match self.window.seat_pointer.hover {
                 Some(seats::ChromeTarget::Divider(split)) => self
                     .seats
                     .split_slots(&self.seat_layout)
@@ -39901,14 +40483,13 @@ impl Runtime {
                     .find(|slot| slot.id == split)
                     .map(|slot| slot.dir),
                 _ => None,
-            }
-        });
-        self.window.set_cursor(pointer_cursor(
-            self.drag.is_some(),
+            });
+        self.window.window.set_cursor(pointer_cursor(
+            self.window.drag.is_some(),
             grasp,
             divider_axis,
             self.preview_link_hover.is_some(),
-            self.command_rail_hover.is_some(),
+            self.window.command_rail_hover.is_some(),
             self.image_grasp(),
         ));
     }
@@ -39924,7 +40505,7 @@ impl Runtime {
         if self.preview_image_drag.is_some() {
             return Some(ImageGrasp::Closed);
         }
-        let position = self.pointer_position?;
+        let position = self.window.pointer_position?;
         let (surface, _) = self.preview_surface_at(position)?;
         let (body, image_px) = self.preview_image_geometry(surface)?;
         image_is_pannable(body, image_px, self.preview_image_zoom(surface))
@@ -39936,10 +40517,11 @@ impl Runtime {
     /// flyout does, so `redraw` would otherwise find nothing queued and skip.
     fn present_chrome_change(&mut self) -> Result<()> {
         if self.pending_resize_present.is_none()
-            && self.pending_frames.pending_frame().is_none()
-            && let Some(frame) = self.last_presented_frame.clone()
+            && self.window.pending_frames.pending_frame().is_none()
+            && let Some(frame) = self.window.last_presented_frame.clone()
         {
-            self.pending_frames
+            self.window
+                .pending_frames
                 .publish(
                     frame,
                     FrameTrigger {
@@ -39949,7 +40531,7 @@ impl Runtime {
                 )
                 .context("re-present the on-screen frame for a seat chrome change")?;
         }
-        self.window.request_redraw();
+        self.window.window.request_redraw();
         Ok(())
     }
 
@@ -39961,16 +40543,16 @@ impl Runtime {
     /// for it to owe.
     fn press_tab(&mut self, index: usize, position: PhysicalPosition<f64>) -> Result<()> {
         let now = Instant::now();
-        let tab = self.tabs[index].id;
+        let tab = self.window.tabs[index].id;
         // Deliberately *not* counted here. A click is complete when the button
         // comes back up, which is why `dblclick` is a release-time event;
         // counting the press as well would pair each click with itself and turn
         // the very first one into a double.
         // One button, one press: whichever source the router chose, the others
         // are not being held.
-        self.pane_press = None;
-        self.row_press = None;
-        self.tab_press = Some(if index == self.active_tab {
+        self.window.pane_press = None;
+        self.window.row_press = None;
+        self.window.tab_press = Some(if index == self.window.active_tab {
             TabPress::settled(tab, position, now)
         } else {
             TabPress::armed(tab, position, now)
@@ -39985,7 +40567,7 @@ impl Runtime {
         target: Option<seats::ChromeTarget>,
     ) -> Result<()> {
         let over = match target {
-            Some(seats::ChromeTarget::Tab(index)) => self.tabs.get(index).map(|tab| tab.id),
+            Some(seats::ChromeTarget::Tab(index)) => self.window.tabs.get(index).map(|tab| tab.id),
             _ => None,
         };
         if press.released_over(over) {
@@ -39999,10 +40581,10 @@ impl Runtime {
         let Some(clicked) = over.filter(|tab| *tab == press.tab) else {
             // Down here and up there is not a click on either, and it is not the
             // first half of one either.
-            self.tab_clicks.interrupt();
+            self.window.tab_clicks.interrupt();
             return Ok(());
         };
-        if self.tab_clicks.register(clicked, Instant::now()) == TabClick::Double {
+        if self.window.tab_clicks.register(clicked, Instant::now()) == TabClick::Double {
             self.open_rename(clicked)?;
         }
         Ok(())
@@ -40011,14 +40593,14 @@ impl Runtime {
     /// The strip's live geometry — the slots every drag judgement is made
     /// against.
     fn strip_geometry(&self, now: Instant) -> seats::TabStripGeometry {
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let (width, _) = self.renderer.presentation_geometry().swapchain_size;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (width, _) = self.window.renderer.presentation_geometry().swapchain_size;
         seats::tab_strip_geometry(
             width as f32,
             scale,
             &self.tab_trailers(now),
-            self.active_tab,
-            self.tab_scroll,
+            self.window.active_tab,
+            self.window.tab_scroll,
         )
     }
 
@@ -40036,9 +40618,9 @@ impl Runtime {
     /// the honest behaviour rather than a failure to handle. The horizontal strip
     /// has no such state: it is always drawn, even holding one tab.
     fn tab_run(&self, now: Instant) -> Option<seats::TabRun> {
-        match self.rail.layout {
+        match self.window.rail.layout {
             seats::TabLayoutMode::Horizontal => {
-                let scale = self.renderer.metrics().scale_factor as f32;
+                let scale = self.window.renderer.metrics().scale_factor as f32;
                 Some(seats::strip_run(&self.strip_geometry(now), scale))
             }
             seats::TabLayoutMode::Vertical => {
@@ -40060,13 +40642,13 @@ impl Runtime {
     /// is the difference between a tab that stays where your fingers put it and
     /// one that snaps 6px sideways the instant it comes free.
     fn begin_tab_drag(&mut self, press: TabPress, position: PhysicalPosition<f64>) -> Result<()> {
-        let Some(index) = self.tabs.iter().position(|tab| tab.id == press.tab) else {
+        let Some(index) = self.window.tabs.iter().position(|tab| tab.id == press.tab) else {
             return Ok(());
         };
         // N163's `homeWs`, read before the activation below can change the
         // answer: this is the tab whose layout the user was looking at when the
         // gesture started, and the one they mean when they aim below the strip.
-        let home = self.tabs[self.active_tab].id;
+        let home = self.window.tabs[self.window.active_tab].id;
         self.activate_tab(index, false)?;
         // Re-read the run: activating may have scrolled it to reveal the tab,
         // and a grip measured against the old scroll would be wrong by exactly
@@ -40148,7 +40730,7 @@ impl Runtime {
         // row that is now travelling is not a row the pointer is resting on
         // (P145 — "gone on leave/press/scroll/**drag**").
         self.hide_file_peek();
-        self.drag = Some(Drag {
+        self.window.drag = Some(Drag {
             source,
             carry,
             pointer: position,
@@ -40176,9 +40758,13 @@ impl Runtime {
     /// you are holding cannot be carried out over the caption buttons, off the
     /// window's left edge, or past the rail's head or foot.
     fn track_grabbed(&self, position: PhysicalPosition<f64>) -> Option<f32> {
-        let drag = self.drag.as_ref()?;
+        let drag = self.window.drag.as_ref()?;
         let (tab, carry) = (drag.tab()?, drag.tab_carry()?);
-        let index = self.tabs.iter().position(|candidate| candidate.id == tab)?;
+        let index = self
+            .window
+            .tabs
+            .iter()
+            .position(|candidate| candidate.id == tab)?;
         let run = self.tab_run(Instant::now())?;
         Some(grabbed_offset(
             run.start(index)?,
@@ -40229,7 +40815,7 @@ impl Runtime {
         home: Option<[f32; 4]>,
         position: PhysicalPosition<f64>,
     ) -> Option<DropLanding> {
-        let scale = self.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
         // **P86 — home ground, asked before anything else.** A payload let go
         // over the very rectangle it was picked up from has landed nowhere, in
         // any zone and on any surface. It is K135's sentence for a source that
@@ -40245,7 +40831,7 @@ impl Runtime {
             return self.survey_strip(source, &run, position);
         }
         // K129 — dragging the active tab onto its own layout is meaningless.
-        if *source == DragSource::Tab(self.tabs[self.active_tab].id) {
+        if *source == DragSource::Tab(self.window.tabs[self.window.active_tab].id) {
             return None;
         }
         let aim = seats::aim_at_layout(
@@ -40283,14 +40869,23 @@ impl Runtime {
         match source {
             DragSource::Tab(tab) => {
                 let tab = *tab;
-                let index = self.tabs.iter().position(|candidate| candidate.id == tab)?;
+                let index = self
+                    .window
+                    .tabs
+                    .iter()
+                    .position(|candidate| candidate.id == tab)?;
                 let half = run.half(index)?;
                 let mid = *slot_mids.get(index)?;
                 let offset = self.track_grabbed(position)?;
                 Some(DropLanding::StripReorder {
                     slot: seats::reorder_target(
                         &slot_mids,
-                        &self.tabs.iter().map(|tab| tab.pinned).collect::<Vec<_>>(),
+                        &self
+                            .window
+                            .tabs
+                            .iter()
+                            .map(|tab| tab.pinned)
+                            .collect::<Vec<_>>(),
                         index,
                         mid + offset,
                         half,
@@ -40317,7 +40912,12 @@ impl Runtime {
                     .then(|| DropLanding::StripExtract {
                         slot: strip_insert_slot(
                             seats::insert_index_at(&slot_mids, run.pos(position.x, position.y)),
-                            &self.tabs.iter().map(|tab| tab.pinned).collect::<Vec<_>>(),
+                            &self
+                                .window
+                                .tabs
+                                .iter()
+                                .map(|tab| tab.pinned)
+                                .collect::<Vec<_>>(),
                         ),
                     })
             }
@@ -40384,8 +40984,8 @@ impl Runtime {
     /// the rectangles it competes with cannot disagree about where the layout
     /// begins.
     fn layout_host_rect(&self) -> [f64; 4] {
-        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
-        let dpi_milli = self.renderer.metrics().dpi_milli().get();
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let dpi_milli = self.window.renderer.metrics().dpi_milli().get();
         let scale_ppm = seats::scale_ppm(dpi_milli);
         // The same inset `solve_seats` hands `logical_viewport`, through the same
         // helper: these two are twins, and a rim measured one pixel to the left
@@ -40395,7 +40995,7 @@ impl Runtime {
             width,
             height,
             scale_ppm,
-            seats::rail_inset_device_px(self.rail, scale_ppm),
+            seats::rail_inset_device_px(self.window.rail, scale_ppm),
         )
     }
 
@@ -40411,7 +41011,7 @@ impl Runtime {
     /// the hand is and a hand that has moved has moved whether or not anything is
     /// willing to receive it.
     fn drive_drag(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let Some(mut drag) = self.drag.clone() else {
+        let Some(mut drag) = self.window.drag.clone() else {
             return Ok(false);
         };
         // What is in the hand can go away underneath the gesture — a background
@@ -40419,7 +41019,7 @@ impl Runtime {
         // by a verb this window ran for some other reason. There is then nothing
         // left to drag, and the state must not survive the thing it points at.
         if !self.drag_source_lives(&drag.source) {
-            self.drag = None;
+            self.window.drag = None;
             self.apply_pointer_cursor();
             if self.refresh_chrome() {
                 self.present_chrome_change()?;
@@ -40434,7 +41034,7 @@ impl Runtime {
         {
             drag.carry = DragCarry::Tab(self.settle_strip_reorder(tab, carry, slot, position));
         }
-        self.drag = Some(drag);
+        self.window.drag = Some(drag);
         // The ghost lives in the overlay rather than in the chrome, and it does
         // not need its own repaint call: `refresh_chrome` rebuilds the overlay
         // from the same choke point and answers `true` if *either* changed. On a
@@ -40450,7 +41050,11 @@ impl Runtime {
     /// Whether the thing this drag is carrying is still in the window.
     fn drag_source_lives(&self, source: &DragSource) -> bool {
         match source {
-            DragSource::Tab(tab) => self.tabs.iter().any(|candidate| candidate.id == *tab),
+            DragSource::Tab(tab) => self
+                .window
+                .tabs
+                .iter()
+                .any(|candidate| candidate.id == *tab),
             DragSource::Pane(seat) => self.seats.tree().contains(*seat),
             // A row's payload is a *path*, and a path does not stop existing
             // because the list it was read out of was rebuilt — which is the
@@ -40503,17 +41107,22 @@ impl Runtime {
             return Ok(());
         }
         if carry.offset != 0.0
-            && let Some(index) = self.tabs.iter().position(|candidate| candidate.id == tab)
+            && let Some(index) = self
+                .window
+                .tabs
+                .iter()
+                .position(|candidate| candidate.id == tab)
         {
-            self.tabs[index]
+            self.window.tabs[index]
                 .flip
-                .displace(carry.offset, Instant::now(), self.motion);
+                .displace(carry.offset, Instant::now(), self.app.motion);
             carry.offset = 0.0;
             drag.carry = DragCarry::Tab(carry);
         }
         if carry.home != tab
-            && self.tabs[self.active_tab].id == tab
+            && self.window.tabs[self.window.active_tab].id == tab
             && let Some(home) = self
+                .window
                 .tabs
                 .iter()
                 .position(|candidate| candidate.id == carry.home)
@@ -40537,7 +41146,12 @@ impl Runtime {
         to: usize,
         position: PhysicalPosition<f64>,
     ) -> TabCarry {
-        let Some(index) = self.tabs.iter().position(|candidate| candidate.id == tab) else {
+        let Some(index) = self
+            .window
+            .tabs
+            .iter()
+            .position(|candidate| candidate.id == tab)
+        else {
             return carry;
         };
         let Some(offset) = self.track_grabbed(position) else {
@@ -40566,19 +41180,24 @@ impl Runtime {
     /// somewhere of its own choosing, and inverting it back to a slot it is not
     /// in would tear it out from under the pointer (K117).
     fn move_tab_with_flip(&mut self, from: usize, to: usize, now: Instant, skip: Option<TabId>) {
-        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+        if from == to || from >= self.window.tabs.len() || to >= self.window.tabs.len() {
             return;
         }
-        let motion = self.motion;
-        let active = self.tabs[self.active_tab].id;
+        let motion = self.app.motion;
+        let active = self.window.tabs[self.window.active_tab].id;
         let before = self.slot_starts(now);
-        let was = self.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>();
-        let tab = self.tabs.remove(from);
-        self.tabs.insert(to, tab);
+        let was = self
+            .window
+            .tabs
+            .iter()
+            .map(|tab| tab.id)
+            .collect::<Vec<_>>();
+        let tab = self.window.tabs.remove(from);
+        self.window.tabs.insert(to, tab);
         // Everything keyed on a slot has to be re-derived from identity after the
         // order changes — the active tab most of all, because its index is what
         // the session file records.
-        self.active_tab = self.tab_index(active);
+        self.window.active_tab = self.tab_index(active);
         let after = self.slot_starts(now);
         for (old_index, id) in was.into_iter().enumerate() {
             if skip == Some(id) {
@@ -40591,7 +41210,9 @@ impl Runtime {
             };
             let delta = old_start - new_start;
             if delta != 0.0 {
-                self.tabs[new_index].flip.displace(delta, now, motion);
+                self.window.tabs[new_index]
+                    .flip
+                    .displace(delta, now, motion);
             }
         }
     }
@@ -40635,25 +41256,29 @@ impl Runtime {
     /// keep the press's activation (J108), and neither writes the session,
     /// because a drag that landed nowhere chose nothing to record.
     fn release_drag(&mut self) -> Result<bool> {
-        let Some(drag) = self.drag.take() else {
+        let Some(drag) = self.window.drag.take() else {
             return Ok(false);
         };
         let now = Instant::now();
-        let motion = self.motion;
+        let motion = self.app.motion;
         // A gesture is not a click, and it is not half of one either.
-        self.tab_press = None;
-        self.pane_press = None;
-        self.row_press = None;
-        self.tab_clicks.interrupt();
+        self.window.tab_press = None;
+        self.window.pane_press = None;
+        self.window.row_press = None;
+        self.window.tab_clicks.interrupt();
         match release_verdict(drag.landing) {
             DragRelease::Commit => {
                 if let (Some(tab), Some(carry)) = (drag.tab(), drag.tab_carry())
-                    && let Some(index) = self.tabs.iter().position(|candidate| candidate.id == tab)
+                    && let Some(index) = self
+                        .window
+                        .tabs
+                        .iter()
+                        .position(|candidate| candidate.id == tab)
                 {
                     // K121 as re-ruled: the settle and nothing else. See
                     // [`TabState::settle_into_slot`] for why the wash that used
                     // to be started here belongs to a hand-over alone.
-                    self.tabs[index].settle_into_slot(carry.offset, now, motion);
+                    self.window.tabs[index].settle_into_slot(carry.offset, now, motion);
                     // The strip's order is the file's order, and a reorder is a
                     // choice the user made rather than a state being explored
                     // (§5.1). A drag that moved nothing decided nothing, and the
@@ -40685,7 +41310,7 @@ impl Runtime {
     /// **U7 — let go over the layout** (L136-L140, G81-G83, D43).
     ///
     /// The plan is computed from the drag's own inputs rather than lifted out of
-    /// [`Runtime::drop_preview`], and the two are the same object for a reason
+    /// [`WindowRuntime::drop_preview`], and the two are the same object for a reason
     /// that is not a coincidence: `plan_drop` is pure (T223/D2), so the same
     /// inputs give back the same tree to the bit. Reading the cache would be
     /// asking a *remembered* answer to a question the world may have changed
@@ -40819,24 +41444,25 @@ impl Runtime {
         arrived: &[(SeatId, SeatId)],
         displaced: Option<bt_layout::Seat>,
     ) -> Result<()> {
-        let Some(index) = self.tabs.iter().position(|tab| tab.id == source) else {
+        let Some(index) = self.window.tabs.iter().position(|tab| tab.id == source) else {
             return Ok(());
         };
         // K129 already forbids a tab being dropped on its own layout, and
         // `leave_strip` is what makes a cross-tab drop reachable at all (J107).
         debug_assert_ne!(
-            index, self.active_tab,
+            index, self.window.active_tab,
             "K129: a tab cannot merge into the layout it is already showing"
         );
-        let id = TabId(self.next_tab_id);
-        let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
-        let renderer = &self.renderer;
+        let id = TabId(self.window.next_tab_id);
+        let render_physical =
+            presentation_physical_size(self.window.renderer.presentation_geometry());
+        let renderer = &self.window.renderer;
         // Copied out before the two-tab borrow: the merged layout lands in this
         // same window, so it answers to whoever owns this window's size — and to
         // whatever the window's rail is currently keeping clear.
-        let policy = self.size_policy;
-        let rail = self.rail;
-        let (from, into) = two_tabs_mut(&mut self.tabs, index, self.active_tab);
+        let policy = self.window.size_policy;
+        let rail = self.window.rail;
+        let (from, into) = two_tabs_mut(&mut self.window.tabs, index, self.window.active_tab);
         let ejected =
             absorb_tab_into_layout(from, into, arrived, displaced.as_ref(), id, |seats| {
                 let (layout, overflow, _, _) =
@@ -40844,13 +41470,18 @@ impl Runtime {
                 (layout, overflow)
             });
         debug_assert!(
-            self.tabs[index].sessions.is_empty(),
+            self.window.tabs[index].sessions.is_empty(),
             "T226: the absorbed tab is leaving with shells still filed under it"
         );
         if ejected.is_some() {
-            self.next_tab_id += 1;
+            self.window.next_tab_id += 1;
         }
-        absorb_tab_into_strip(&mut self.tabs, &mut self.active_tab, index, ejected);
+        absorb_tab_into_strip(
+            &mut self.window.tabs,
+            &mut self.window.active_tab,
+            index,
+            ejected,
+        );
         Ok(())
     }
 
@@ -40893,15 +41524,16 @@ impl Runtime {
     /// implementation is exactly how a move quietly becomes a respawn.
     fn extract_pane_into_new_tab(&mut self, seat: SeatId, slot: usize) -> Result<bool> {
         let metrics = self.seat_metrics();
-        let id = TabId(self.next_tab_id);
-        let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
-        let renderer = &self.renderer;
-        let source = self.active_tab;
-        let motion = self.motion;
-        let policy = self.size_policy;
-        let rail = self.rail;
+        let id = TabId(self.window.next_tab_id);
+        let render_physical =
+            presentation_physical_size(self.window.renderer.presentation_geometry());
+        let renderer = &self.window.renderer;
+        let source = self.window.active_tab;
+        let motion = self.app.motion;
+        let policy = self.window.size_policy;
+        let rail = self.window.rail;
         let torn = tear_pane_into_tab(
-            &mut self.tabs[source],
+            &mut self.window.tabs[source],
             &metrics,
             seat,
             id,
@@ -40916,14 +41548,14 @@ impl Runtime {
         let Some(torn) = torn else {
             return Ok(false);
         };
-        self.next_tab_id += 1;
+        self.window.next_tab_id += 1;
         // The survey already clamped this against the same strip (N158); the
         // `min` is the ordinary bound on an insertion index, not a second opinion
         // about the partition.
-        let slot = slot.min(self.tabs.len());
-        self.tabs.insert(slot, torn);
-        if slot <= self.active_tab {
-            self.active_tab += 1;
+        let slot = slot.min(self.window.tabs.len());
+        self.window.tabs.insert(slot, torn);
+        if slot <= self.window.active_tab {
+            self.window.active_tab += 1;
         }
         debug_assert!(
             self.sessions_match_terminals(),
@@ -40950,13 +41582,13 @@ impl Runtime {
     /// tab, and a cancelled drag does not unchoose it. Nothing here has to say so
     /// — the promise was paid the moment the drag began.
     fn cancel_drag(&mut self) -> Result<bool> {
-        let Some(drag) = self.drag.take() else {
+        let Some(drag) = self.window.drag.take() else {
             return Ok(false);
         };
-        self.tab_press = None;
-        self.pane_press = None;
-        self.row_press = None;
-        self.tab_clicks.interrupt();
+        self.window.tab_press = None;
+        self.window.pane_press = None;
+        self.window.row_press = None;
+        self.window.tab_clicks.interrupt();
         self.settle_home(&drag);
         self.finish_drag()
     }
@@ -40974,15 +41606,27 @@ impl Runtime {
         let (Some(tab), Some(carry)) = (drag.tab(), drag.tab_carry()) else {
             return;
         };
-        let Some(index) = self.tabs.iter().position(|candidate| candidate.id == tab) else {
+        let Some(index) = self
+            .window
+            .tabs
+            .iter()
+            .position(|candidate| candidate.id == tab)
+        else {
             return;
         };
         let now = Instant::now();
-        let motion = self.motion;
+        let motion = self.app.motion;
         // Hand the settle the offset first, so the slide home starts where the
         // hand left the tab and the slot change below composes onto it.
-        self.tabs[index].flip.displace(carry.offset, now, motion);
-        let pinned = self.tabs.iter().map(|tab| tab.pinned).collect::<Vec<_>>();
+        self.window.tabs[index]
+            .flip
+            .displace(carry.offset, now, motion);
+        let pinned = self
+            .window
+            .tabs
+            .iter()
+            .map(|tab| tab.pinned)
+            .collect::<Vec<_>>();
         // F57 again, and it has to be re-applied rather than trusted: between the
         // drag starting and it ending, a pinned tab may have been reaped, which
         // shifts every index after it by one.
@@ -41004,7 +41648,7 @@ impl Runtime {
         self.apply_pointer_cursor();
         // Hover was frozen at "nothing" for the whole gesture; the pointer has
         // not moved, but what is under it has.
-        if let Some(position) = self.pointer_position {
+        if let Some(position) = self.window.pointer_position {
             self.update_chrome_hover(position)?;
         }
         // Taking the ghost down is an overlay change, and on the frame a pane
@@ -41018,30 +41662,36 @@ impl Runtime {
 
     /// Where a tab is now, by identity.
     fn tab_index(&self, tab: TabId) -> usize {
-        self.tabs
+        self.window
+            .tabs
             .iter()
             .position(|candidate| candidate.id == tab)
-            .unwrap_or(self.active_tab)
+            .unwrap_or(self.window.active_tab)
     }
 
     /// Open the tab-name editor (J99-J101, mock-up 5854-5870).
     fn open_rename(&mut self, tab: TabId) -> Result<()> {
-        let Some(index) = self.tabs.iter().position(|candidate| candidate.id == tab) else {
+        let Some(index) = self
+            .window
+            .tabs
+            .iter()
+            .position(|candidate| candidate.id == tab)
+        else {
             return Ok(());
         };
         // Mock-up 5858-5859: a tab with no session to name does not open an
         // editor. Every tab in this build has one, so this is the stub J104 asks
         // for — the guard exists and is asked, and T5's files-only tab will be
         // the first thing it turns away.
-        if !self.tabs[index].seed().can_be_named() {
+        if !self.window.tabs[index].seed().can_be_named() {
             return Ok(());
         }
-        self.rename = Some(TabRename::open(
+        self.window.rename = Some(TabRename::open(
             tab,
-            self.tabs[index].manual_name.as_deref(),
+            self.window.tabs[index].manual_name.as_deref(),
         ));
         // A caret that arrives mid-blink arrives invisible half the time.
-        self.rename_blink.reset(Instant::now());
+        self.window.rename_blink.reset(Instant::now());
         self.refresh_chrome();
         self.present_chrome_change()
     }
@@ -41053,19 +41703,20 @@ impl Runtime {
     /// point rather than an oversight: this is called from every blur-shaped
     /// event in the window, and most of the time there is nothing to blur.
     fn finish_rename(&mut self, commit: bool) -> Result<()> {
-        let Some(editor) = self.rename.take() else {
+        let Some(editor) = self.window.rename.take() else {
             return Ok(());
         };
-        if commit && let Some(index) = self.tabs.iter().position(|tab| tab.id == editor.tab) {
+        if commit && let Some(index) = self.window.tabs.iter().position(|tab| tab.id == editor.tab)
+        {
             let name = editor.committed_name();
-            if self.tabs[index].manual_name != name {
-                self.tabs[index].manual_name = name;
+            if self.window.tabs[index].manual_name != name {
+                self.window.tabs[index].manual_name = name;
                 // The seed reads `manual_name` (`TabState::term_leaf`), so the
                 // vault, the session file and the restore prompt all pick the
                 // new name up from here without a second write — and the OS
                 // window title is the active tab's own.
-                if index == self.active_tab {
-                    self.window.set_title(&self.display_title());
+                if index == self.window.active_tab {
+                    self.window.window.set_title(&self.display_title());
                 }
                 self.mark_session_dirty(Instant::now());
             }
@@ -41081,18 +41732,23 @@ impl Runtime {
     /// Route an event-loop tick to the press promise and the rename caret.
     fn advance_tab_press_if_due(&mut self, now: Instant) -> Result<()> {
         let matured = self
+            .window
             .tab_press
             .as_mut()
             .is_some_and(|press| press.matured(now));
         if !matured {
             return Ok(());
         }
-        let tab = self.tab_press.expect("a press that matured is a press").tab;
+        let tab = self
+            .window
+            .tab_press
+            .expect("a press that matured is a press")
+            .tab;
         self.activate_tab(self.tab_index(tab), false)
     }
 
     fn advance_rename_blink_if_due(&mut self, now: Instant) -> Result<()> {
-        if self.rename.is_none() || !self.rename_blink.advance(now) {
+        if self.window.rename.is_none() || !self.window.rename_blink.advance(now) {
             return Ok(());
         }
         if self.refresh_chrome() {
@@ -41113,7 +41769,7 @@ impl Runtime {
                 && let Some(seats::ChromeTarget::Tab(index)) = self.chrome_target_at(position)
             {
                 // Closing a tab with the wheel is not the first half of anything.
-                self.tab_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
                 self.close_tab(index)?;
                 return Ok(true);
             }
@@ -41167,8 +41823,8 @@ impl Runtime {
             if self.release_drag()? {
                 return Ok(true);
             }
-            if self.divider_drag.take().is_some() {
-                self.seat_pointer.dragging = None;
+            if self.window.divider_drag.take().is_some() {
+                self.window.seat_pointer.dragging = None;
                 self.apply_pointer_cursor();
                 if self.refresh_chrome() {
                     self.present_chrome_change()?;
@@ -41182,8 +41838,9 @@ impl Runtime {
             // A pane press that never travelled has nothing to settle: D40 moved
             // the focus on the way down and that is all a press on a head has
             // ever meant. Dropping it is the whole of letting go.
-            let held_pane = self.pane_press.take().is_some() | self.row_press.take().is_some();
-            if let Some(press) = self.tab_press.take() {
+            let held_pane =
+                self.window.pane_press.take().is_some() | self.window.row_press.take().is_some();
+            if let Some(press) = self.window.tab_press.take() {
                 self.release_tab_press(press, target)?;
                 return Ok(true);
             }
@@ -41201,7 +41858,7 @@ impl Runtime {
         }
         // A press that lands on something other than a row leaves no row press
         // behind. The arms below that *are* rows arm their own, after this.
-        self.row_press = None;
+        self.window.row_press = None;
         // D40, above the router and consuming nothing: every press inside a pane
         // moves the layout focus there, whatever else the press goes on to mean.
         // Above the rename guard too — clicking into another pane is a blur, and
@@ -41222,15 +41879,15 @@ impl Runtime {
         // silently commits, which is the kind of edge nobody discovers on
         // purpose. The `×` and the pin stay buttons — they are the two things in
         // the tab that were never the title.
-        if self.rename.is_some() {
-            let editing = self
-                .rename
-                .as_ref()
-                .and_then(|editor| self.tabs.iter().position(|tab| tab.id == editor.tab));
+        if self.window.rename.is_some() {
+            let editing =
+                self.window.rename.as_ref().and_then(|editor| {
+                    self.window.tabs.iter().position(|tab| tab.id == editor.tab)
+                });
             if target == editing.map(seats::ChromeTarget::Tab) {
                 // "编辑器内的按下/双击不触发拖拽或再次进入编辑" (J103): the press
                 // is consumed whole — no promise armed, no click recorded.
-                self.tab_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
                 return Ok(true);
             }
             self.finish_rename(true)?;
@@ -41254,7 +41911,7 @@ impl Runtime {
             // underneath it. Asked of the pane the press actually landed in, so
             // every terminal leaf answers for itself; see [`press_reaches_no_grid`]
             // for the primary-seat version this replaced and what it cost.
-            self.tab_clicks.interrupt();
+            self.window.tab_clicks.interrupt();
             // The body's own bar answers first of all: it is the outermost piece
             // of furniture the pane has, drawn over the document, over every
             // block in it and over every link in those — and a press on it was
@@ -41347,12 +42004,12 @@ impl Runtime {
                         DividerGrip::Ratio(origin)
                     }
                 };
-                self.divider_drag = Some(DividerDrag {
+                self.window.divider_drag = Some(DividerDrag {
                     split,
                     dir: slot.dir,
                     grip,
                 });
-                self.seat_pointer.dragging = Some(split);
+                self.window.seat_pointer.dragging = Some(split);
                 self.apply_pointer_cursor();
                 if self.refresh_chrome() {
                     self.present_chrome_change()?;
@@ -41400,8 +42057,8 @@ impl Runtime {
             // is exactly the mock-up's shape (`pointerdown` → `startDrag`, with
             // the ordinary click handler left to run, 5835-5840).
             seats::ChromeTarget::PaneHeader(seat) => {
-                self.tab_press = None;
-                self.pane_press = Some(PanePress {
+                self.window.tab_press = None;
+                self.window.pane_press = Some(PanePress {
                     seat,
                     latch: DragLatch::new(position),
                 });
@@ -41410,7 +42067,7 @@ impl Runtime {
             // session to clear, which is the whole of what `closeFilesPane =
             // closePane` means (mock-up 3579).
             seats::ChromeTarget::PaneClose(seat) => {
-                self.tab_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
                 self.close_pane(seat)?;
             }
             // H77: a click on the folder **tears off** a pinned window. The
@@ -41419,15 +42076,15 @@ impl Runtime {
             // is one gesture with two meanings, and the mock-up returns out of
             // `pointerdown` on this button for exactly that reason (5870).
             seats::ChromeTarget::PaneFiles(seat) => {
-                self.tab_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
                 let leaf = LeafId {
-                    tab: self.tabs[self.active_tab].id,
+                    tab: self.window.tabs[self.window.active_tab].id,
                     seat,
                 };
                 self.press_float_trigger(float::FloatTrigger::Pane(leaf))?;
             }
             seats::ChromeTarget::PaneFloat(seat) => {
-                self.tab_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
                 self.undock_files_column(seat)?;
             }
             // The `⌄` (user rulings, 2026-08-15 and 2026-08-16). Its own arm
@@ -41442,11 +42099,11 @@ impl Runtime {
             // would be a press that did nothing. The strip's `⌄` has always
             // toggled; this now does too, through the same policy.
             seats::ChromeTarget::PaneMenu(seat) => {
-                self.tab_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
                 self.toggle_pane_menu(seat)?;
             }
             seats::ChromeTarget::FilesRow { seat, index } => {
-                self.tab_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
                 // P81, in the mock-up's own order: the row is armed as a drag
                 // source *and* pressed. Arming first, because `press_files_row`
                 // can unfold a directory and rebuild the list under the very
@@ -41459,15 +42116,15 @@ impl Runtime {
             // `.pin` do: a chain of clicks on a button is a chain of button
             // presses, not the beginning of a rename somewhere else.
             seats::ChromeTarget::FilesFoot(seat) => {
-                self.tab_clicks.interrupt();
-                self.files_row_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
                 self.reveal_files_root(seat)?;
             }
             // The switch. A press on the half you are already on does nothing,
             // which falls out of `set_files_view` rather than being checked here.
             seats::ChromeTarget::FilesSeg { seat, view } => {
-                self.tab_clicks.interrupt();
-                self.files_row_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
                 self.set_files_view(seat, view)?;
             }
             // A Git row's body, which is a verb as of G-3: a changed file opens
@@ -41476,21 +42133,21 @@ impl Runtime {
             // `.files-foot`'s reason — this is a press on a control, not the
             // beginning of a gesture somewhere else.
             seats::ChromeTarget::GitRow { seat, index } => {
-                self.tab_clicks.interrupt();
-                self.files_row_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
                 self.press_git_row(seat, index)?;
             }
             seats::ChromeTarget::GitGraphRow { seat, index } => {
-                self.tab_clicks.interrupt();
-                self.files_row_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
                 self.press_graph_row(seat, index, Instant::now())?;
             }
             // The toolbar's four controls (T1). A click chain is broken for
             // `.files-foot`'s reason: a chain of clicks on a button is a chain of
             // button presses and never the beginning of a gesture elsewhere.
             seats::ChromeTarget::GitGraphTool { seat, tool } => {
-                self.tab_clicks.interrupt();
-                self.files_row_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
                 self.press_graph_tool(seat, tool)?;
             }
             // A part of the open row's detail block (v2 ②). It breaks a click
@@ -41498,22 +42155,22 @@ impl Runtime {
             // a chain of button presses — and it never reaches `press_graph_row`,
             // because a press on a control is not a press on the list.
             seats::ChromeTarget::GitGraphDetail { seat, part, .. } => {
-                self.tab_clicks.interrupt();
-                self.files_row_clicks.interrupt();
-                self.git_graph_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                self.window.git_graph_clicks.interrupt();
                 self.press_graph_detail(seat, part)?;
             }
             seats::ChromeTarget::GitAct { seat, index, act } => {
-                self.tab_clicks.interrupt();
-                self.files_row_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
                 self.press_git_act(seat, index, act)?;
             }
             // The one way out of a file this window cannot show. It breaks a
             // click chain for `.files-foot`'s reason: a chain of clicks on a
             // button is a chain of button presses.
             seats::ChromeTarget::PreviewOpenButton(_) => {
-                self.tab_clicks.interrupt();
-                self.files_row_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
                 self.open_preview_externally()?;
             }
             // The three tools. Each breaks a click chain for `.files-foot`'s
@@ -41523,28 +42180,28 @@ impl Runtime {
             // as it does on `.pane-files`, and here that is expressed by simply
             // not arming.
             seats::ChromeTarget::PreviewSave(_) => {
-                self.tab_clicks.interrupt();
-                self.files_row_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
                 self.save_preview()?;
             }
             seats::ChromeTarget::PreviewFlip(_) => {
-                self.tab_clicks.interrupt();
-                self.files_row_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
                 self.flip_preview_source()?;
             }
             seats::ChromeTarget::PreviewPin(seat) => {
-                self.tab_clicks.interrupt();
-                self.files_row_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
                 self.toggle_preview_pin(seat)?;
             }
             seats::ChromeTarget::PreviewPopOut(seat) => {
-                self.tab_clicks.interrupt();
-                self.files_row_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
                 self.pop_out_preview(seat)?;
             }
             seats::ChromeTarget::PreviewFoot(seat) => {
-                self.tab_clicks.interrupt();
-                self.files_row_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
                 self.reveal_preview_file(seat)?;
             }
             // The name is a button **and** part of the drag handle, which is
@@ -41553,23 +42210,23 @@ impl Runtime {
             // not arming would make the one pane in the window whose head cannot
             // be grabbed by its name.
             seats::ChromeTarget::PreviewName(seat) => {
-                self.tab_clicks.interrupt();
-                self.files_row_clicks.interrupt();
-                self.pane_press = Some(PanePress {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                self.window.pane_press = Some(PanePress {
                     seat,
                     latch: DragLatch::new(position),
                 });
                 self.toggle_preview_menu(seat)?;
             }
             seats::ChromeTarget::FilesRoot(seat) => {
-                self.tab_clicks.interrupt();
-                self.files_row_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
                 // The head is still armed as a drag handle underneath — B17: the
                 // press means "maybe I am about to move this pane", and the
                 // click that never travels means "change this folder". Arming
                 // costs the click nothing, and not arming would make the one
                 // pane in the window whose head cannot be grabbed by its name.
-                self.pane_press = Some(PanePress {
+                self.window.pane_press = Some(PanePress {
                     seat,
                     latch: DragLatch::new(position),
                 });
@@ -41580,13 +42237,13 @@ impl Runtime {
             // records a click, so neither can be half of a rename — and both
             // break a chain that was already running.
             seats::ChromeTarget::TabClose(index) => {
-                self.tab_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
                 self.close_tab(index)?;
             }
             // F61 — the pin stands in the `×`'s slot, so unpinning is exactly
             // where you already are.
             seats::ChromeTarget::TabPin(index) => {
-                self.tab_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
                 self.toggle_pin(index)?;
             }
             // H77: the click tears the peek off into a pinned window. **H78 is
@@ -41597,25 +42254,27 @@ impl Runtime {
             // clicks on a button is a chain of button presses, and rename lives
             // on the tab body alone.
             seats::ChromeTarget::TabFiles(index) => {
-                self.tab_clicks.interrupt();
-                let Some(id) = self.tabs.get(index).map(|tab| tab.id) else {
+                self.window.tab_clicks.interrupt();
+                let Some(id) = self.window.tabs.get(index).map(|tab| tab.id) else {
                     return Ok(false);
                 };
                 self.press_float_trigger(float::FloatTrigger::Tab(id))?;
             }
             seats::ChromeTarget::NewTab => {
-                self.tab_clicks.interrupt();
+                self.window.tab_clicks.interrupt();
                 self.new_tab()?;
             }
             seats::ChromeTarget::NewTabMenu => self.toggle_profile_menu()?,
             seats::ChromeTarget::Settings => self.toggle_settings_panel()?,
             seats::ChromeTarget::PanelToggle => self.toggle_rail_collapsed()?,
-            seats::ChromeTarget::Minimize => self.window.set_minimized(true),
+            seats::ChromeTarget::Minimize => self.window.window.set_minimized(true),
             seats::ChromeTarget::Maximize => {
-                self.window.set_maximized(!self.window.is_maximized());
+                self.window
+                    .window
+                    .set_maximized(!self.window.window.is_maximized());
             }
             seats::ChromeTarget::CloseWindow => {
-                let hwnd = window_hwnd(&self.window)?;
+                let hwnd = window_hwnd(&self.window.window)?;
                 bt_platform::request_window_close(hwnd)
                     .map_err(|error| anyhow!(error))
                     .context("request self-drawn caption close")?;
@@ -41652,22 +42311,25 @@ impl Runtime {
             // router returns early for every surface above that arm: a click on
             // the tab strip has to hand the caret back too, and it never reaches
             // the level the capsule is answered at.
-            if self.search.is_focused()
+            if self.window.search.is_focused()
                 && !self
+                    .window
                     .search_layout
-                    .zip(self.pointer_position)
+                    .zip(self.window.pointer_position)
                     .is_some_and(|(capsule, at)| {
                         search::hit(&capsule, at.x as f32, at.y as f32).is_some()
                     })
             {
-                self.search.blur();
+                self.window.search.blur();
                 self.after_search_change()?;
             }
         }
         // The gate first, and it is the strictest modal in the window: every
         // press is swallowed, including the ones that land on its own scrim,
         // because the action it is standing in front of is already under way.
-        if let (Some(layout), Some(position)) = (self.dirty_gate_layout(), self.pointer_position) {
+        if let (Some(layout), Some(position)) =
+            (self.dirty_gate_layout(), self.window.pointer_position)
+        {
             if state == ElementState::Pressed && button == MouseButton::Left {
                 let target = restore::gate_hit(&layout, position.x, position.y);
                 if let Some(answer) = restore::gate_answer(target) {
@@ -41679,9 +42341,10 @@ impl Runtime {
         // The invitation, in the order it is drawn. Every press is swallowed,
         // its own scrim included, and a press on a disabled Install lands on
         // `Panel` and answers nothing.
-        if let (Some(layout), Some(position)) =
-            (self.psreadline_invite_layout(), self.pointer_position)
-        {
+        if let (Some(layout), Some(position)) = (
+            self.psreadline_invite_layout(),
+            self.window.pointer_position,
+        ) {
             if state == ElementState::Pressed && button == MouseButton::Left {
                 let target = restore::invite_hit(&layout, position.x, position.y);
                 self.answer_psreadline_invite(target)?;
@@ -41704,7 +42367,7 @@ impl Runtime {
         // it, the caption run included; what changed is that a surface drawn
         // above the scrim is now hit-tested above it too, which is the two
         // saying one thing rather than two.
-        if let Some(position) = self.pointer_position
+        if let Some(position) = self.window.pointer_position
             && state == ElementState::Pressed
             && self.press_toast(position)?
         {
@@ -41713,13 +42376,16 @@ impl Runtime {
         // A modal means MODAL. Ahead of the chrome router, so the caption run —
         // the gear included — is behind the scrim like everything else, and no
         // press reaches a divider, a seat, the terminal's selection or a peek.
-        if let (Some(layout), Some(position)) = (self.settings_layout(), self.pointer_position) {
+        if let (Some(layout), Some(position)) =
+            (self.settings_layout(), self.window.pointer_position)
+        {
             return self.settings_mouse_input(&layout, state, button, position);
         }
         // The prompt takes the press only where it is drawn — it is a prompt over
         // a working app, not a gate in front of one, so a press anywhere else is
         // still the press it always was and reaches the terminal underneath.
-        if let (Some(position), Some(layout)) = (self.pointer_position, self.restore_layout())
+        if let (Some(position), Some(layout)) =
+            (self.window.pointer_position, self.restore_layout())
             && let Some(target) = restore::hit(&layout, position.x, position.y)
         {
             if state == ElementState::Pressed
@@ -41734,7 +42400,9 @@ impl Runtime {
         // same three rules — a row runs it, a press outside puts it away and
         // then goes on being the press it was, which is how a second right press
         // moves it from one row to another.
-        if let (Some(layout), Some(position)) = (self.git_menu_layout(), self.pointer_position) {
+        if let (Some(layout), Some(position)) =
+            (self.git_menu_layout(), self.window.pointer_position)
+        {
             match profiles::git_menu_hit(&layout, position.x, position.y) {
                 Some(row) => {
                     if state == ElementState::Pressed
@@ -41756,7 +42424,9 @@ impl Runtime {
         // rules — a row runs it, its padding swallows, and a press outside puts
         // it away and then goes on being the press it was, which is how a second
         // right press moves it from one pane to another.
-        if let (Some(layout), Some(position)) = (self.term_menu_layout(), self.pointer_position) {
+        if let (Some(layout), Some(position)) =
+            (self.term_menu_layout(), self.window.pointer_position)
+        {
             match profiles::term_menu_hit(&layout, position.x, position.y) {
                 Some(row) => {
                     if state == ElementState::Pressed
@@ -41778,7 +42448,9 @@ impl Runtime {
         // reason `refresh_overlay` gives: it is drawn over the floating window
         // because it is very often *about a row inside it*, and a press has to
         // reach whatever is drawn on top.
-        if let (Some(layout), Some(position)) = (self.file_menu_layout(), self.pointer_position) {
+        if let (Some(layout), Some(position)) =
+            (self.file_menu_layout(), self.window.pointer_position)
+        {
             match profiles::file_menu_hit(&layout, position.x, position.y) {
                 Some(row) => {
                     if state == ElementState::Pressed
@@ -41810,7 +42482,9 @@ impl Runtime {
         // **Except the `⌄` itself**, which is not "outside": a press there is the
         // toggle's close, and letting this arm consume it would shut the menu
         // and then let `press_pane_head` open it again on the same press.
-        if let (Some(layout), Some(position)) = (self.pane_menu_layout(), self.pointer_position) {
+        if let (Some(layout), Some(position)) =
+            (self.pane_menu_layout(), self.window.pointer_position)
+        {
             match profiles::pane_menu_hit(&layout, position.x, position.y) {
                 Some(hit) => {
                     if state == ElementState::Pressed && button == MouseButton::Left {
@@ -41819,6 +42493,7 @@ impl Runtime {
                         // job through the same door.
                         if matches!(hit, profiles::PaneMenuHit::Row(row) if row.has_submenu()) {
                             let open = self
+                                .window
                                 .pane_menu
                                 .as_ref()
                                 .is_some_and(|menu| menu.submenu_open);
@@ -41836,7 +42511,7 @@ impl Runtime {
                             Some(seats::ChromeTarget::PaneMenu(_))
                         )
                     {
-                        self.chevrons.clear();
+                        self.window.chevrons.clear();
                         self.close_pane_menu()?;
                     }
                 }
@@ -41846,9 +42521,10 @@ impl Runtime {
         // a row does *not* put it away. It is a list of settings and picking two
         // branches means picking one and then the other — see
         // `run_graph_filter_row`.
-        if let (Some(layout), Some(position)) =
-            (self.graph_filter_menu_layout(), self.pointer_position)
-        {
+        if let (Some(layout), Some(position)) = (
+            self.graph_filter_menu_layout(),
+            self.window.pointer_position,
+        ) {
             match profiles::git_filter_menu_hit(&layout, position.x, position.y) {
                 Some(row) => {
                     if state == ElementState::Pressed
@@ -41881,7 +42557,7 @@ impl Runtime {
         // because the float is drawn over the columns.
         if state == ElementState::Pressed
             && button == MouseButton::Right
-            && let Some(position) = self.pointer_position
+            && let Some(position) = self.window.pointer_position
             && let Some(activation) = self.file_row_under(position)
         {
             self.open_file_menu(activation, [position.x as f32, position.y as f32])?;
@@ -41900,7 +42576,7 @@ impl Runtime {
         // the kind of edge a hand finds by accident.
         if state == ElementState::Pressed
             && button == MouseButton::Right
-            && let Some(position) = self.pointer_position
+            && let Some(position) = self.window.pointer_position
             && let Some(
                 seats::ChromeTarget::PaneHeader(seat)
                 | seats::ChromeTarget::PaneClose(seat)
@@ -41922,7 +42598,7 @@ impl Runtime {
         // *not* consumed, so it goes on meaning what it meant before.
         if state == ElementState::Pressed
             && button == MouseButton::Right
-            && let Some(position) = self.pointer_position
+            && let Some(position) = self.window.pointer_position
             && self.open_git_menu_at(position)?
         {
             return Ok(());
@@ -41935,12 +42611,12 @@ impl Runtime {
         //
         // Ahead of the arming below rather than after it, so the press that arms
         // one is not the event that throws it away.
-        self.float_head_press = None;
+        self.window.float_head_press = None;
         // A release ends whatever the float was doing, wherever it lands: a
         // gesture that began on the header can finish anywhere, and a window that
         // kept following the pointer after the button came up would be a window
         // stuck to the hand.
-        if state == ElementState::Released && self.float_drag.take().is_some() {
+        if state == ElementState::Released && self.window.float_drag.take().is_some() {
             // The hand opens onto whatever the release actually left it over,
             // which has to be *asked* rather than assumed: a drag owns the
             // pointer, so the hover underneath is as old as the gesture, and a
@@ -41948,7 +42624,7 @@ impl Runtime {
             // part the pull began on is exactly the part no longer under the
             // hand. Without this the resize arrow would outlive the resize,
             // until some later move happened to correct it.
-            if let Some(position) = self.pointer_position {
+            if let Some(position) = self.window.pointer_position {
                 self.drive_float_hover(position)?;
             }
             self.apply_pointer_cursor();
@@ -41962,7 +42638,7 @@ impl Runtime {
         // press it always was.
         if state == ElementState::Pressed
             && button == MouseButton::Left
-            && let Some(position) = self.pointer_position
+            && let Some(position) = self.window.pointer_position
             && self.press_float(position)?
         {
             return Ok(());
@@ -41971,12 +42647,13 @@ impl Runtime {
         // starts that profile's tab; a press on the menu's own padding is the
         // menu's and does nothing; a press anywhere else puts it away and then
         // goes on to be the press it always was.
-        if let (Some(layout), Some(position)) = (self.profile_menu_layout(), self.pointer_position)
+        if let (Some(layout), Some(position)) =
+            (self.profile_menu_layout(), self.window.pointer_position)
         {
             match profiles::hit(
                 &layout,
-                &self.profile_programs,
-                self.recent.entries(),
+                &self.app.profile_programs,
+                self.app.recent.entries(),
                 position.x,
                 position.y,
             ) {
@@ -42019,8 +42696,11 @@ impl Runtime {
             }
         }
         // The root menu, on exactly the terms the picker above takes its press.
-        if let (Some(layout), Some(position)) = (self.root_menu_layout(), self.pointer_position) {
+        if let (Some(layout), Some(position)) =
+            (self.root_menu_layout(), self.window.pointer_position)
+        {
             let choices = self
+                .window
                 .root_menu
                 .seat()
                 .map(|seat| self.root_choices(seat))
@@ -42028,7 +42708,7 @@ impl Runtime {
             match profiles::root_menu_hit(&layout, position.x, position.y) {
                 Some(row) => {
                     if state == ElementState::Pressed && button == MouseButton::Left {
-                        let seat = self.root_menu.seat();
+                        let seat = self.window.root_menu.seat();
                         self.close_root_menu()?;
                         match (seat, row) {
                             (Some(seat), Some(profiles::RootMenuRow::Choice(index))) => {
@@ -42065,9 +42745,9 @@ impl Runtime {
         // their press. Its "except the button that opened it" is the name, which
         // toggles for itself (P136) and would otherwise be shut here and
         // re-opened one line later.
-        if let Some(seat) = self.preview_menu.seat()
+        if let Some(seat) = self.window.preview_menu.seat()
             && let (Some(layout), Some(position)) =
-                (self.preview_menu_layout(), self.pointer_position)
+                (self.preview_menu_layout(), self.window.pointer_position)
         {
             match profiles::preview_menu_hit(&layout, position.x, position.y) {
                 Some(row) => {
@@ -42093,7 +42773,7 @@ impl Runtime {
                 }
             }
         }
-        if let Some(position) = self.pointer_position
+        if let Some(position) = self.window.pointer_position
             && self.chrome_mouse_input(state, button, position)?
         {
             return Ok(());
@@ -42112,7 +42792,7 @@ impl Runtime {
         // nothing.
         if state == ElementState::Pressed
             && button == MouseButton::Left
-            && let Some(position) = self.pointer_position
+            && let Some(position) = self.window.pointer_position
             && self.press_search(position)?
         {
             return Ok(());
@@ -42134,15 +42814,15 @@ impl Runtime {
         // would have an edge nobody finds on purpose.
         if state == ElementState::Pressed
             && button == MouseButton::Left
-            && let Some(position) = self.pointer_position
+            && let Some(position) = self.window.pointer_position
             && self.press_command_rail(position)?
         {
             return Ok(());
         }
         if state == ElementState::Released
-            && matches!(self.mouse_route, Some(MouseRoute::MathBlock))
+            && matches!(self.window.mouse_route, Some(MouseRoute::MathBlock))
         {
-            self.mouse_route = None;
+            self.window.mouse_route = None;
             return Ok(());
         }
         if state == ElementState::Pressed
@@ -42152,7 +42832,7 @@ impl Runtime {
             // Formula pixels are one indivisible presentation object in this slice. Swallowing the
             // complete press/release pair intentionally prevents half-source selections and keeps
             // both local selection and application mouse reporting from seeing synthetic cells.
-            self.mouse_route = Some(MouseRoute::MathBlock);
+            self.window.mouse_route = Some(MouseRoute::MathBlock);
             match (button, math_hit.target) {
                 (MouseButton::Left, MathHitTarget::ToggleSource) => {
                     if self.session.toggle_math_source(&math_hit.anchor) {
@@ -42163,9 +42843,9 @@ impl Runtime {
                 (MouseButton::Left, MathHitTarget::CopyLatex) => {
                     self.copy_math_latex(&math_hit.anchor);
                 }
-                (MouseButton::Right, _) => match self.math_context_menu.request() {
+                (MouseButton::Right, _) => match self.window.math_context_menu.request() {
                     Ok(true) => {
-                        self.pending_math_context_anchor = Some(math_hit.anchor.clone());
+                        self.window.pending_math_context_anchor = Some(math_hit.anchor.clone());
                     }
                     Ok(false) => {}
                     Err(error) => {
@@ -42188,7 +42868,7 @@ impl Runtime {
         // pointer to be over a cell; under the guard below, a release outside the
         // pane left the route latched and the next move went on selecting.
         if state == ElementState::Released
-            && let Some(MouseRoute::Local(drag)) = self.mouse_route.as_ref().cloned()
+            && let Some(MouseRoute::Local(drag)) = self.window.mouse_route.as_ref().cloned()
         {
             return self.finish_local_selection(*drag);
         }
@@ -42208,12 +42888,12 @@ impl Runtime {
         // to keep it away from itself.
         if state == ElementState::Pressed
             && button == MouseButton::Right
-            && let Some(position) = self.pointer_position
+            && let Some(position) = self.window.pointer_position
             && let Some(modes) = self
                 .sessions
                 .get(&hit_seat)
                 .map(|leaf| leaf.session.terminal_modes())
-            && right_press_raises_terminal_menu(modes, self.modifiers)
+            && right_press_raises_terminal_menu(modes, self.window.modifiers)
         {
             return self.open_term_menu_at(hit_seat, position);
         }
@@ -42233,12 +42913,12 @@ impl Runtime {
         // a press one row from the underline could claim it.
         let target = self.pressed_cell_target(hit);
         if let Some(bytes) = route_forwarded_mouse_button(
-            &mut self.mouse_route,
+            &mut self.window.mouse_route,
             state,
             protocol_button,
             forwarded_hit,
             modes,
-            self.modifiers,
+            self.window.modifiers,
             target,
         ) {
             return self.send_user_input(
@@ -42301,8 +42981,9 @@ impl Runtime {
             } else {
                 (false, None, None)
             };
-        let copy_on_select = should_copy_on_select_release(self.mouse_route.as_ref(), single_click);
-        self.mouse_route = None;
+        let copy_on_select =
+            should_copy_on_select_release(self.window.mouse_route.as_ref(), single_click);
+        self.window.mouse_route = None;
         if single_click {
             self.clear_pane_selection(seat);
             self.publish_interaction_frame()?;
@@ -42339,20 +43020,20 @@ impl Runtime {
     /// Reading it only on the icon path is precisely how the fold would go back to
     /// snapping.
     fn sampled_rail(&self, now: Instant) -> seats::RailState {
-        let fold = Some(self.rail_fold.sample(now, self.motion).0);
-        if !self.rail.draws_icon_rail() {
+        let fold = Some(self.window.rail_fold.sample(now, self.app.motion).0);
+        if !self.window.rail.draws_icon_rail() {
             return seats::RailState {
                 open: 1.0,
                 text_opacity: 1.0,
                 fold,
-                ..self.rail
+                ..self.window.rail
             };
         }
         seats::RailState {
-            open: self.rail_open.sample(now, self.motion).0,
-            text_opacity: self.rail_text.sample(now, self.motion).0,
+            open: self.window.rail_open.sample(now, self.app.motion).0,
+            text_opacity: self.window.rail_text.sample(now, self.app.motion).0,
             fold,
-            ..self.rail
+            ..self.window.rail
         }
     }
 
@@ -42372,15 +43053,15 @@ impl Runtime {
     /// collapsed one. That is [`seats::rail_geometry`]'s own answer passed
     /// through rather than a second reading of the same question.
     fn rail_geometry_now(&self, now: Instant) -> Option<seats::RailGeometry> {
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let (_, height) = self.renderer.presentation_geometry().swapchain_size;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (_, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (trailers, pinned) = self.rail_list(now);
         seats::rail_geometry(
             height as f32,
             scale,
             &trailers,
             pinned,
-            self.rail_scroll,
+            self.window.rail_scroll,
             self.sampled_rail(now),
         )
     }
@@ -42401,14 +43082,14 @@ impl Runtime {
     /// against the animating width would re-decide the question against a
     /// different boundary on every frame of the answer it just gave.
     fn drive_rail_zone(&mut self, position: Option<PhysicalPosition<f64>>) {
-        if !self.rail.draws_icon_rail() {
+        if !self.window.rail.draws_icon_rail() {
             return;
         }
-        let scale = self.renderer.metrics().scale_factor;
-        let aiming_open = self.rail_open.to > 0.5;
+        let scale = self.window.renderer.metrics().scale_factor;
+        let aiming_open = self.window.rail_open.to > 0.5;
         let target = seats::RailState {
             open: f32::from(u8::from(aiming_open)),
-            ..self.rail
+            ..self.window.rail
         };
         let width = f64::from(target.width_logical_px()) * scale;
         // The rail begins at the title bar's lower edge, so a pointer up in the
@@ -42422,7 +43103,7 @@ impl Runtime {
             position,
             width,
             top,
-            self.float.peek().and_then(|win| win.origin),
+            self.window.float.peek().and_then(|win| win.origin),
         ));
     }
 
@@ -42435,17 +43116,18 @@ impl Runtime {
     /// target and asks for no frames at all.
     fn aim_rail_at(&mut self, open: bool) {
         let target = f32::from(u8::from(open));
-        if self.rail_open.to == target {
+        if self.window.rail_open.to == target {
             return;
         }
         let now = Instant::now();
-        let motion = self.motion;
-        self.rail_open.retarget(target, now, motion);
+        let motion = self.app.motion;
+        self.window.rail_open.retarget(target, now, motion);
         if open {
-            self.rail_text
+            self.window
+                .rail_text
                 .retarget_after(target, now, motion, RAIL_TEXT_FADE_OPEN_DELAY);
         } else {
-            self.rail_text.retarget(target, now, motion);
+            self.window.rail_text.retarget(target, now, motion);
         }
     }
 
@@ -42471,8 +43153,8 @@ impl Runtime {
     /// `state.railCollapsed` does on reload.
     fn toggle_rail_collapsed(&mut self) -> Result<()> {
         self.set_rail_state(seats::RailState {
-            collapsed: !self.rail.collapsed,
-            ..self.rail
+            collapsed: !self.window.rail.collapsed,
+            ..self.window.rail
         })
     }
 
@@ -42481,7 +43163,7 @@ impl Runtime {
     /// move the rail without the panes, the window minimum, the hover and the
     /// session file following it.
     fn set_rail_state(&mut self, state: seats::RailState) -> Result<()> {
-        let moved = (self.rail.layout, self.rail.mode) != (state.layout, state.mode);
+        let moved = (self.window.rail.layout, self.window.rail.mode) != (state.layout, state.mode);
         // P168 — the fold travels rather than cutting. `.window.rail-collapsed`
         // sets `.rail`'s width to zero and `.rail` carries `width .18s ease`, so
         // the panel is seen to leave instead of blinking out.
@@ -42497,19 +43179,19 @@ impl Runtime {
         // `RevealTween`: under `Motion::Reduced` the value snaps to its target
         // and asks for no frames, so the fold is instant and the panel-toggle
         // stays as immediate as it was before it could animate.
-        if self.rail.collapsed != state.collapsed {
-            self.rail_fold.retarget(
+        if self.window.rail.collapsed != state.collapsed {
+            self.window.rail_fold.retarget(
                 f32::from(u8::from(!state.collapsed)),
                 Instant::now(),
-                self.motion,
+                self.app.motion,
             );
         }
-        self.rail = state;
+        self.window.rail = state;
         eprintln!(
             "BT_RAIL layout={:?} mode={:?} inset={}px",
-            self.rail.layout,
-            self.rail.mode,
-            self.rail.terminal_inset_logical_px()
+            self.window.rail.layout,
+            self.window.rail.mode,
+            self.window.rail.terminal_inset_logical_px()
         );
         // An icon rail is born parked, whatever the last one was doing, and its
         // words are away with it. A pointer already standing inside it opens it
@@ -42523,9 +43205,9 @@ impl Runtime {
         // looking at is gone. "Born parked" is about a rail that has just become
         // an icon rail; a fold does not make a new one.
         if moved {
-            self.rail_open = RevealTween::over(RAIL_TRANSITION);
-            self.rail_text = RevealTween::over(RAIL_TEXT_FADE);
-            self.rail_scroll = 0.0;
+            self.window.rail_open = RevealTween::over(RAIL_TRANSITION);
+            self.window.rail_text = RevealTween::over(RAIL_TEXT_FADE);
+            self.window.rail_scroll = 0.0;
         }
         // The inset changed, so every pane's rectangle did. This is the same
         // path a window resize takes, and it has to be taken here: the rail's
@@ -42533,8 +43215,8 @@ impl Runtime {
         // opening never does (Q179).
         self.commit_seat_geometry()?;
         self.apply_window_min_inner_size()?;
-        if let Some(position) = self.pointer_position {
-            self.seat_pointer.hover = self.chrome_target_at(position);
+        if let Some(position) = self.window.pointer_position {
+            self.window.seat_pointer.hover = self.chrome_target_at(position);
         }
         // Both halves are layout intent, so they persist exactly as the theme
         // and the cursor shape do — a window that opened with the tabs across
@@ -42563,15 +43245,15 @@ impl Runtime {
         };
         let travel = self.vertical_wheel_travel(delta, geometry.viewport[1] - geometry.viewport[0]);
         // Wheel-up reveals what lies above, which is a smaller offset.
-        let scrolled = (self.rail_scroll - travel).clamp(0.0, geometry.max_scroll);
-        if scrolled == self.rail_scroll {
+        let scrolled = (self.window.rail_scroll - travel).clamp(0.0, geometry.max_scroll);
+        if scrolled == self.window.rail_scroll {
             return Ok(());
         }
-        self.rail_scroll = scrolled;
+        self.window.rail_scroll = scrolled;
         // The list moved under a stationary pointer, so what it is over changed
         // without the pointer having done anything.
-        if let Some(position) = self.pointer_position {
-            self.seat_pointer.hover = self.chrome_target_at(position);
+        if let Some(position) = self.window.pointer_position {
+            self.window.seat_pointer.hover = self.chrome_target_at(position);
         }
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -42614,10 +43296,10 @@ impl Runtime {
         bar: &preview::ScrollBar,
         position: PhysicalPosition<f64>,
     ) -> Result<()> {
-        let held = self.settings_menu_bar_drag.unwrap_or_default();
+        let held = self.window.settings_menu_bar_drag.unwrap_or_default();
         let along = bar.along([position.x as f32, position.y as f32]);
         let scrolled = preview::scroll_dragged_to(bar, along, held);
-        if !self.settings.scroll_menu(scrolled) {
+        if !self.window.settings.scroll_menu(scrolled) {
             return Ok(());
         }
         if self.refresh_chrome() {
@@ -42645,8 +43327,8 @@ impl Runtime {
         let Some(layout) = self.settings_layout() else {
             return;
         };
-        let scrolled = layout.menu_scroll_to_show(index, self.settings.menu_scroll());
-        self.settings.scroll_menu(scrolled);
+        let scrolled = layout.menu_scroll_to_show(index, self.window.settings.menu_scroll());
+        self.window.settings.scroll_menu(scrolled);
     }
 
     /// A wheel notch anywhere over the settings modal.
@@ -42668,17 +43350,17 @@ impl Runtime {
         // over its own box. The menu is the innermost box, so it is asked first,
         // which is `hit`'s own smallest-target-first ruling read for the wheel.
         if let Some(body) = layout.menu_body()
-            && let Some(position) = self.pointer_position
+            && let Some(position) = self.window.pointer_position
             && contains_point(body, position)
         {
             let travel = self.vertical_wheel_travel(delta, body[3] - body[1]);
             let scrolled =
-                (self.settings.menu_scroll() - travel).clamp(0.0, layout.menu_max_scroll());
-            if !self.settings.scroll_menu(scrolled) {
+                (self.window.settings.menu_scroll() - travel).clamp(0.0, layout.menu_max_scroll());
+            if !self.window.settings.scroll_menu(scrolled) {
                 return Ok(());
             }
             let moved = self.settings_layout();
-            self.settings.set_hover(moved.map(|layout| {
+            self.window.settings.set_hover(moved.map(|layout| {
                 settings::hit(&layout, &self.settings_values(), position.x, position.y)
             }));
             if self.refresh_chrome() {
@@ -42688,16 +43370,16 @@ impl Runtime {
         }
         let content = layout.content_box();
         let travel = self.vertical_wheel_travel(delta, content[3] - content[1]);
-        let scrolled = (self.settings_scroll - travel).clamp(0.0, layout.max_scroll());
-        if scrolled == self.settings_scroll {
+        let scrolled = (self.window.settings_scroll - travel).clamp(0.0, layout.max_scroll());
+        if scrolled == self.window.settings_scroll {
             return Ok(());
         }
-        self.settings_scroll = scrolled;
+        self.window.settings_scroll = scrolled;
         // The stack moved under a stationary pointer, so what it is over changed
         // without the pointer having done anything.
-        if let Some(position) = self.pointer_position {
+        if let Some(position) = self.window.pointer_position {
             let moved = self.settings_layout();
-            self.settings.set_hover(moved.map(|layout| {
+            self.window.settings.set_hover(moved.map(|layout| {
                 settings::hit(&layout, &self.settings_values(), position.x, position.y)
             }));
         }
@@ -42715,14 +43397,19 @@ impl Runtime {
 
     /// A wheel notch over the tab strip, turned into horizontal motion (A7/A8).
     fn scroll_tab_strip(&mut self, delta: MouseScrollDelta) -> Result<()> {
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let width = self.renderer.presentation_geometry().swapchain_size.0 as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let width = self
+            .window
+            .renderer
+            .presentation_geometry()
+            .swapchain_size
+            .0 as f32;
         let geometry = seats::tab_strip_geometry(
             width,
             scale,
             &self.tab_trailers(Instant::now()),
-            self.active_tab,
-            self.tab_scroll,
+            self.window.active_tab,
+            self.window.tab_scroll,
         );
         let travel = match delta {
             MouseScrollDelta::LineDelta(x, y) => {
@@ -42753,15 +43440,15 @@ impl Runtime {
             }
         };
         // Wheel-up reveals what lies to the left, which is a smaller offset.
-        let scrolled = (self.tab_scroll - travel).clamp(0.0, geometry.max_scroll);
-        if scrolled == self.tab_scroll {
+        let scrolled = (self.window.tab_scroll - travel).clamp(0.0, geometry.max_scroll);
+        if scrolled == self.window.tab_scroll {
             return Ok(());
         }
-        self.tab_scroll = scrolled;
+        self.window.tab_scroll = scrolled;
         // The strip moved under a stationary pointer, so what it is over changed
         // without the pointer having done anything.
-        if let Some(position) = self.pointer_position {
-            self.seat_pointer.hover = self.chrome_target_at(position);
+        if let Some(position) = self.window.pointer_position {
+            self.window.seat_pointer.hover = self.chrome_target_at(position);
         }
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -42772,16 +43459,16 @@ impl Runtime {
     /// Take one notch from the platform. See [`WheelBurst`] for why this is not
     /// [`Self::mouse_wheel`].
     fn queue_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
-        self.wheel_events = self.wheel_events.saturating_add(1);
-        match self.wheel_burst {
+        self.window.wheel_events = self.window.wheel_events.saturating_add(1);
+        match self.window.wheel_burst {
             Some(burst) => match burst.plus(delta) {
-                Some(merged) => self.wheel_burst = Some(merged),
+                Some(merged) => self.window.wheel_burst = Some(merged),
                 None => {
                     self.flush_wheel()?;
-                    self.wheel_burst = Some(WheelBurst::of(delta));
+                    self.window.wheel_burst = Some(WheelBurst::of(delta));
                 }
             },
-            None => self.wheel_burst = Some(WheelBurst::of(delta)),
+            None => self.window.wheel_burst = Some(WheelBurst::of(delta)),
         }
         Ok(())
     }
@@ -42793,10 +43480,10 @@ impl Runtime {
     /// `about_to_wait`. Free — one `Option` read — for the overwhelming majority
     /// of turns, in which nobody touched the wheel.
     fn flush_wheel(&mut self) -> Result<()> {
-        let Some(burst) = self.wheel_burst.take() else {
+        let Some(burst) = self.window.wheel_burst.take() else {
             return Ok(());
         };
-        self.wheel_routings = self.wheel_routings.saturating_add(1);
+        self.window.wheel_routings = self.window.wheel_routings.saturating_add(1);
         self.mouse_wheel(burst.delta())
     }
 
@@ -42811,9 +43498,9 @@ impl Runtime {
         // travel, the axis and the clamp are one implementation and not two: a
         // card that scrolled by a different number of pixels per notch than the
         // pane it mirrors would be lying about being the same document.
-        if let Some(position) = self.pointer_position
+        if let Some(position) = self.window.pointer_position
             && self.file_peek_holds([position.x as f32, position.y as f32])
-            && let Some(body) = self.file_peek.as_ref().and_then(|peek| peek.body)
+            && let Some(body) = self.window.file_peek.as_ref().and_then(|peek| peek.body)
         {
             return self.scroll_preview_body(PreviewSurface::Peek, body, delta);
         }
@@ -42838,8 +43525,13 @@ impl Runtime {
         // through it would scroll the list underneath by a notch aimed at
         // something standing over that list. It is swallowed rather than passed
         // on, which is the same answer a press on the card's body gets.
-        if let Some(position) = self.pointer_position
-            && toast::at(&self.toast_layouts, position.x as f32, position.y as f32).is_some()
+        if let Some(position) = self.window.pointer_position
+            && toast::at(
+                &self.window.toast_layouts,
+                position.x as f32,
+                position.y as f32,
+            )
+            .is_some()
         {
             return Ok(());
         }
@@ -42852,9 +43544,10 @@ impl Runtime {
         // its head or foot is spent, not passed to whatever is behind. A buffer
         // float is not answered here — its body is a preview surface and the
         // preview branch below already finds it by that name.
-        if let Some(position) = self.pointer_position
+        if let Some(position) = self.window.pointer_position
             && let Some((id, part)) = self.float_hit_at(position)
             && self
+                .window
                 .float
                 .drawn()
                 .any(|win| win.epoch == id && win.files().is_some())
@@ -42873,15 +43566,19 @@ impl Runtime {
         // R1: the same notch, over whichever axis the tab list is on. A rail is
         // `overflow-y: auto` where the strip is `overflow-x: auto`, and both are
         // "a wheel over a scroller scrolls it".
-        if let Some(position) = self.pointer_position {
-            if self.rail.layout == seats::TabLayoutMode::Vertical {
+        if let Some(position) = self.window.pointer_position {
+            if self.window.rail.layout == seats::TabLayoutMode::Vertical {
                 if self.rail_contains(position) {
                     return self.scroll_rail(delta);
                 }
             } else if seats::tab_strip_contains(
-                self.renderer.presentation_geometry().swapchain_size.0 as f32,
-                self.renderer.metrics().scale_factor as f32,
-                self.tabs.len(),
+                self.window
+                    .renderer
+                    .presentation_geometry()
+                    .swapchain_size
+                    .0 as f32,
+                self.window.renderer.metrics().scale_factor as f32,
+                self.window.tabs.len(),
                 position.x,
                 position.y,
             ) {
@@ -42893,10 +43590,10 @@ impl Runtime {
         // just answered. It is asked before the pane router below because that
         // router's answer for a files column is "nobody's", and until this slice
         // gave the column rows that was the truth.
-        if let Some(position) = self.pointer_position
+        if let Some(position) = self.window.pointer_position
             && let Some((seat, body)) = seats::files_body_at(
                 &self.seat_layout,
-                self.renderer.metrics().scale_factor as f32,
+                self.window.renderer.metrics().scale_factor as f32,
                 self.git_panel_on(),
                 position.x,
                 position.y,
@@ -42905,7 +43602,7 @@ impl Runtime {
             // `.git-view { overflow-y: auto }` — the second page is a scroller
             // too, and it is the *same* body: which of the two answers a notch
             // depends only on which page the column is on.
-            if self.git_pages_shown.contains_key(&seat) {
+            if self.window.git_pages_shown.contains_key(&seat) {
                 return self.scroll_git_panel(seat, body, delta);
             }
             return self.scroll_files_tree(seat, body, delta);
@@ -42914,10 +43611,10 @@ impl Runtime {
         // Asked before the preview body's own branch because that branch's guard
         // — "the buffer has content" — is false for a graph by construction:
         // there is no text in it to have been read.
-        if let Some(position) = self.pointer_position
+        if let Some(position) = self.window.pointer_position
             && let Some((surface, body)) = self.preview_surface_at(position)
             && let PreviewSurface::Seat(seat) = surface
-            && self.git_graphs_shown.contains_key(&seat)
+            && self.window.git_graphs_shown.contains_key(&seat)
         {
             return self.scroll_git_graph(seat, body, delta);
         }
@@ -42931,7 +43628,7 @@ impl Runtime {
         // very top of this method and went down the document's door — which is
         // half of what keeps the glance at `Fit`; the other half is
         // [`surface_takes_image_zoom`], which would decline anyway.
-        if let Some(position) = self.pointer_position
+        if let Some(position) = self.window.pointer_position
             && let Some((surface, _)) = self.preview_surface_at(position)
             && let Some((body, image_px)) = self.preview_image_geometry(surface)
         {
@@ -42950,7 +43647,7 @@ impl Runtime {
         // sentence again. Asked here, beside the tree's, because it is the same
         // kind of answer: a pane whose body is a scroller, which the router
         // below has no vocabulary for.
-        if let Some(position) = self.pointer_position
+        if let Some(position) = self.window.pointer_position
             && let Some((surface, body)) = self.preview_surface_at(position)
             && self
                 .preview_buffer_on(surface)
@@ -42968,7 +43665,7 @@ impl Runtime {
         // desktop does, and it is the only reading that lets you read a build
         // log in one pane while typing in the other — which is the reason to
         // have two panes at all.
-        let target_seat = match self.pointer_position {
+        let target_seat = match self.window.pointer_position {
             Some(position) => match seats::pane_at(&self.seat_layout, position.x, position.y) {
                 Some(seat) if self.sessions.contains_key(&seat) => seat,
                 // Over a pane that is not a terminal: nobody's notch.
@@ -43023,19 +43720,19 @@ impl Runtime {
             // trackpads feel identical over blocks and text. The commit is tentative: nothing is
             // taken from the local accumulator until the block actually scrolls, because a
             // non-scrollable block falls through to the ordinary routes with the event intact.
-            let mut tentative = self.local_wheel_subpixel_remainder + event_subpixels;
+            let mut tentative = self.window.local_wheel_subpixel_remainder + event_subpixels;
             let take_px = drain_whole_units(&mut tentative, bt_viewport::SUBPIXELS_PER_PX as f64);
             let delta_px = i32::try_from(-take_px).unwrap_or(0);
             if delta_px == 0 {
-                self.local_wheel_subpixel_remainder = tentative;
+                self.window.local_wheel_subpixel_remainder = tentative;
                 return Ok(());
             }
-            let horizontal = if self.modifiers.shift_key() {
+            let horizontal = if self.window.modifiers.shift_key() {
                 delta_px
             } else {
                 0
             };
-            let vertical = if self.modifiers.shift_key() {
+            let vertical = if self.window.modifiers.shift_key() {
                 0
             } else {
                 delta_px
@@ -43044,8 +43741,8 @@ impl Runtime {
             // pans has to be that pane's too — asking the focused session to
             // scroll another pane's block would find no such block, or worse,
             // one that happens to share an anchor.
-            let active = self.active_tab;
-            if self.tabs[active]
+            let active = self.window.active_tab;
+            if self.window.tabs[active]
                 .sessions
                 .get_mut(&target_seat)
                 .is_some_and(|leaf| {
@@ -43053,13 +43750,13 @@ impl Runtime {
                         .scroll_math_block(&math_hit.anchor, horizontal, vertical)
                 })
             {
-                self.local_wheel_subpixel_remainder = tentative;
+                self.window.local_wheel_subpixel_remainder = tentative;
                 return self.publish_interaction_frame();
             }
         }
         let modes = self.leaf_terminal_modes(target_seat);
         let target_is_scrolled = self.leaf(target_seat).projection.is_scrolled();
-        match wheel_route(self.modifiers.shift_key(), modes, target_is_scrolled) {
+        match wheel_route(self.window.modifiers.shift_key(), modes, target_is_scrolled) {
             WheelRoute::MouseReport => {
                 // Mouse-protocol wheel reports are per-notch, never per-system-scroll-line: the
                 // application applies its own lines-per-event step, so multiplying by the Windows
@@ -43086,7 +43783,7 @@ impl Runtime {
                     input::MouseProtocolEvent::Press,
                     hit.row,
                     hit.column,
-                    self.modifiers,
+                    self.window.modifiers,
                 );
                 self.send_mouse_input_to(
                     target_seat,
@@ -43133,13 +43830,13 @@ impl Runtime {
                         bt_platform::WheelScrollAmount::Lines(lines) => lines as f64,
                         bt_platform::WheelScrollAmount::Page => self.leaf_wheel_rows(seat),
                     };
-                self.line_wheel_remainder += f64::from(y) * multiplier;
-                drain_whole_units(&mut self.line_wheel_remainder, 1.0) as i32
+                self.window.line_wheel_remainder += f64::from(y) * multiplier;
+                drain_whole_units(&mut self.window.line_wheel_remainder, 1.0) as i32
             }
             MouseScrollDelta::PixelDelta(position) => {
-                self.pixel_wheel_remainder += position.y;
-                let cell_px = self.renderer.metrics().cell_height_px as f64;
-                drain_whole_units(&mut self.pixel_wheel_remainder, cell_px) as i32
+                self.window.pixel_wheel_remainder += position.y;
+                let cell_px = self.window.renderer.metrics().cell_height_px as f64;
+                drain_whole_units(&mut self.window.pixel_wheel_remainder, cell_px) as i32
             }
         }
     }
@@ -43150,13 +43847,13 @@ impl Runtime {
     fn take_forward_wheel_notches(&mut self, delta: MouseScrollDelta) -> i32 {
         match delta {
             MouseScrollDelta::LineDelta(_, y) => {
-                self.notch_wheel_remainder += f64::from(y);
-                drain_whole_units(&mut self.notch_wheel_remainder, 1.0) as i32
+                self.window.notch_wheel_remainder += f64::from(y);
+                drain_whole_units(&mut self.window.notch_wheel_remainder, 1.0) as i32
             }
             MouseScrollDelta::PixelDelta(position) => {
-                self.pixel_wheel_remainder += position.y;
-                let cell_px = self.renderer.metrics().cell_height_px as f64;
-                drain_whole_units(&mut self.pixel_wheel_remainder, cell_px) as i32
+                self.window.pixel_wheel_remainder += position.y;
+                let cell_px = self.window.renderer.metrics().cell_height_px as f64;
+                drain_whole_units(&mut self.window.pixel_wheel_remainder, cell_px) as i32
             }
         }
     }
@@ -43176,13 +43873,13 @@ impl Runtime {
         seat: bt_layout::SeatId,
         event_subpixels: f64,
     ) -> Result<()> {
-        self.local_wheel_subpixel_remainder += event_subpixels;
-        let take = drain_whole_units(&mut self.local_wheel_subpixel_remainder, 1.0);
+        self.window.local_wheel_subpixel_remainder += event_subpixels;
+        let take = drain_whole_units(&mut self.window.local_wheel_subpixel_remainder, 1.0);
         if take == 0 {
             return Ok(());
         }
-        let active = self.active_tab;
-        let Some(leaf) = self.tabs[active].sessions.get_mut(&seat) else {
+        let active = self.window.active_tab;
+        let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
             return Ok(());
         };
         leaf.projection.scroll_by_subpixels(take);
@@ -43243,7 +43940,7 @@ impl Runtime {
         // which is `Cancel` — the answer that changes nothing — and Esc answers
         // the same way, because dismissing a question about losing work can only
         // ever mean "not that". Every other key is swallowed.
-        if self.dirty_gate.is_open() {
+        if self.window.dirty_gate.is_open() {
             if !event.repeat {
                 match &event.logical_key {
                     Key::Named(NamedKey::Enter) => {
@@ -43264,7 +43961,7 @@ impl Runtime {
         // writes files, and a dialog that appeared while somebody was typing
         // must not be able to install a module with the return key they were
         // already reaching for.
-        if self.psreadline_invite.is_open() {
+        if self.window.psreadline_invite.is_open() {
             if !event.repeat && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
                 self.answer_psreadline_invite(restore::InviteTarget::Decline)?;
             }
@@ -43290,7 +43987,7 @@ impl Runtime {
             // half of it would be a recorder that cannot record the one binding
             // it exists to change. Every key press reaches
             // `record_settings_key` while a capture is open, and Esc gets out.
-            if self.settings.recording_row().is_some() {
+            if self.window.settings.recording_row().is_some() {
                 if event.repeat {
                     return Ok(());
                 }
@@ -43308,18 +44005,21 @@ impl Runtime {
             {
                 return Ok(());
             }
-            let key = settings_key_of(&event.logical_key, self.modifiers, event.repeat);
-            let before = self.settings.category();
+            let key = settings_key_of(&event.logical_key, self.window.modifiers, event.repeat);
+            let before = self.window.settings.category();
             let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
             let content = self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files);
-            let verdict = self.settings.key(key, content, &self.settings_values());
+            let verdict = self
+                .window
+                .settings
+                .key(key, content, &self.settings_values());
             // Turning a page puts the reader at its top — the wheel's distance
             // belonged to the page they left. Read off the panel rather than
             // reported by the verdict, because the arrows turn pages as they
             // walk and a verdict that had to say so would be a second place the
             // rule is written.
-            if self.settings.category() != before {
-                self.settings_scroll = 0.0;
+            if self.window.settings.category() != before {
+                self.window.settings_scroll = 0.0;
             }
             match verdict {
                 settings::SettingsKeyVerdict::Inert => return Ok(()),
@@ -43337,7 +44037,7 @@ impl Runtime {
                     self.apply_slider(row, value)?;
                 }
                 settings::SettingsKeyVerdict::Closed => {
-                    if let Some(position) = self.pointer_position {
+                    if let Some(position) = self.window.pointer_position {
                         self.update_chrome_hover(position)?;
                     }
                 }
@@ -43347,19 +44047,21 @@ impl Runtime {
             // ring drawn outside the box that clips it is a ring nobody sees.
             // Asked of a fresh layout, since the row that now has the focus may
             // be one this frame's scroll had cut off.
-            if let (Some(focus), Some(layout)) = (self.settings.focus(), self.settings_layout()) {
-                let scrolled = layout.scroll_to_show(focus, self.settings_scroll);
-                if scrolled != self.settings_scroll {
-                    self.settings_scroll = scrolled;
+            if let (Some(focus), Some(layout)) =
+                (self.window.settings.focus(), self.settings_layout())
+            {
+                let scrolled = layout.scroll_to_show(focus, self.window.settings_scroll);
+                if scrolled != self.window.settings_scroll {
+                    self.window.settings_scroll = scrolled;
                     // The stack moved under a stationary pointer, which is the
                     // wheel's own rule (`scroll_settings`) reached by the other
                     // door: the row now under the cursor is not the row that was.
-                    if let Some(position) = self.pointer_position
+                    if let Some(position) = self.window.pointer_position
                         && let Some(moved) = self.settings_layout()
                     {
                         let hover =
                             settings::hit(&moved, &self.settings_values(), position.x, position.y);
-                        self.settings.set_hover(Some(hover));
+                        self.window.settings.set_hover(Some(hover));
                     }
                 }
             }
@@ -43369,7 +44071,7 @@ impl Runtime {
             // into a body that shows eight, or the keyboard would be moving a
             // selection nobody can see. Minimal movement again, so a highlight
             // already in view does not shift the list under it.
-            if let Some(settings::SettingsTarget::Choice(_, index)) = self.settings.focus() {
+            if let Some(settings::SettingsTarget::Choice(_, index)) = self.window.settings.focus() {
                 self.show_settings_choice_at(index);
             }
             if self.refresh_chrome() {
@@ -43385,10 +44087,10 @@ impl Runtime {
         // here rather than falling through to §7.1.5's PTY pass-through, which
         // is exactly what that layering says: Esc reaches the child only when
         // the owner is the terminal.
-        if self.rename.is_some() {
-            let mut editor = self.rename.take().expect("the editor is open");
-            let verdict = rename_key(&mut editor, &event.logical_key, self.modifiers);
-            self.rename = Some(editor);
+        if self.window.rename.is_some() {
+            let mut editor = self.window.rename.take().expect("the editor is open");
+            let verdict = rename_key(&mut editor, &event.logical_key, self.window.modifiers);
+            self.window.rename = Some(editor);
             match verdict {
                 RenameVerdict::Commit => self.finish_rename(true)?,
                 RenameVerdict::Cancel => self.finish_rename(false)?,
@@ -43396,7 +44098,7 @@ impl Runtime {
                     // Typing reveals the caret, exactly as it does in the
                     // terminal — a caret that blinks out from under the letter
                     // you just typed reads as a dropped keystroke.
-                    self.rename_blink.reset(now);
+                    self.window.rename_blink.reset(now);
                     self.refresh_chrome();
                     self.present_chrome_change()?;
                 }
@@ -43407,7 +44109,7 @@ impl Runtime {
         // (v2 ④), and above it because it is the one popup here that can hold a
         // text field: the branch prompt takes every key, and a rung below the
         // file menu's would never see them.
-        if self.git_menu.is_some() {
+        if self.window.git_menu.is_some() {
             self.git_menu_key(event)?;
             return Ok(());
         }
@@ -43416,7 +44118,7 @@ impl Runtime {
         // ladder is ordered by: the thing underneath it is a *terminal*, and
         // every key that escapes this branch is a key typed into a shell whose
         // view is behind a menu.
-        if self.term_menu.is_some() {
+        if self.window.term_menu.is_some() {
             self.term_menu_key(event)?;
             return Ok(());
         }
@@ -43430,7 +44132,7 @@ impl Runtime {
         // borrowing the keyboard rather than holding it. The other two are
         // pointer surfaces with an Esc, and they are audited as such (they are
         // recorded in the block's own audit as still owing this).
-        if self.file_menu.is_some() {
+        if self.window.file_menu.is_some() {
             match &event.logical_key {
                 Key::Named(NamedKey::Escape) => {
                     if !event.repeat {
@@ -43443,7 +44145,7 @@ impl Runtime {
                 // continuous "again".
                 Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowUp) => {
                     let forwards = matches!(event.logical_key, Key::Named(NamedKey::ArrowDown));
-                    if let Some(menu) = self.file_menu.as_mut() {
+                    if let Some(menu) = self.window.file_menu.as_mut() {
                         menu.hover = Some(profiles::FileMenuRow::step(menu.hover, forwards));
                     }
                     if self.refresh_overlay() {
@@ -43452,7 +44154,8 @@ impl Runtime {
                 }
                 Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
                     if !event.repeat
-                        && let Some(row) = self.file_menu.as_ref().and_then(|menu| menu.hover)
+                        && let Some(row) =
+                            self.window.file_menu.as_ref().and_then(|menu| menu.hover)
                     {
                         self.run_file_menu_row(row)?;
                     }
@@ -43469,7 +44172,7 @@ impl Runtime {
         // aim the picker's compass and open and shut the child, and Esc unwinds
         // one layer at a time rather than dismissing the whole menu from inside
         // the submenu.
-        if self.pane_menu.is_some() {
+        if self.window.pane_menu.is_some() {
             match &event.logical_key {
                 Key::Named(NamedKey::Escape) => {
                     if !event.repeat {
@@ -43477,7 +44180,7 @@ impl Runtime {
                         // single popup. A submenu is a surface you opened, and a
                         // key that closed both would make the child unclosable
                         // without also losing the parent.
-                        self.chevrons.clear();
+                        self.window.chevrons.clear();
                         if !self.set_pane_submenu(false)? {
                             self.close_pane_menu()?;
                         }
@@ -43489,7 +44192,7 @@ impl Runtime {
                 // which is where `←` and `→` aim the picker's compass.
                 Key::Named(NamedKey::ArrowRight)
                     if matches!(
-                        self.pane_menu.as_ref().and_then(|menu| menu.hover),
+                        self.window.pane_menu.as_ref().and_then(|menu| menu.hover),
                         Some(profiles::PaneMenuHover::Row(row)) if row.has_submenu()
                     ) =>
                 {
@@ -43497,7 +44200,7 @@ impl Runtime {
                 }
                 Key::Named(NamedKey::ArrowLeft)
                     if matches!(
-                        self.pane_menu.as_ref().and_then(|menu| menu.hover),
+                        self.window.pane_menu.as_ref().and_then(|menu| menu.hover),
                         Some(profiles::PaneMenuHover::Submenu(_))
                     ) =>
                 {
@@ -43513,7 +44216,7 @@ impl Runtime {
                         Key::Named(NamedKey::ArrowLeft) => profiles::MenuStep::Left,
                         _ => profiles::MenuStep::Right,
                     };
-                    if let Some(menu) = self.pane_menu.as_mut()
+                    if let Some(menu) = self.window.pane_menu.as_mut()
                         && let Some(moved) =
                             profiles::PaneMenuHover::step(menu.hover, step, profiles::count())
                     {
@@ -43525,7 +44228,8 @@ impl Runtime {
                 }
                 Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
                     if !event.repeat
-                        && let Some(hover) = self.pane_menu.as_ref().and_then(|menu| menu.hover)
+                        && let Some(hover) =
+                            self.window.pane_menu.as_ref().and_then(|menu| menu.hover)
                     {
                         match hover {
                             // The heading opens its child rather than running,
@@ -43566,7 +44270,7 @@ impl Runtime {
             // undone by a clock: a gate left armed would re-open under a pointer
             // that has not moved, which is the version of a hover menu that
             // cannot be dismissed at all.
-            self.chevrons.clear();
+            self.window.chevrons.clear();
             return Ok(());
         }
         // **The float's rung of §7.1.5's ladder**: 进行中的拖拽/divider → Menu →
@@ -43608,7 +44312,9 @@ impl Runtime {
         // A non-empty winit Preedit is the composition authority. Editing/navigation keys are
         // intentionally left to the IME here even if it also exposes a physical named key; no PTY
         // byte may escape this branch and regress M0-beta's composition isolation.
-        if self.preedit.is_some() && input::is_ime_owned_key(&event.logical_key, self.modifiers) {
+        if self.window.preedit.is_some()
+            && input::is_ime_owned_key(&event.logical_key, self.window.modifiers)
+        {
             return Ok(());
         }
         // The terminal's copy and paste, **unless the quick edit has the
@@ -43621,7 +44327,7 @@ impl Runtime {
         if !editing
             && input::should_copy_selection(
                 &event.logical_key,
-                self.modifiers,
+                self.window.modifiers,
                 self.session.view_selection().is_some(),
             )
         {
@@ -43630,7 +44336,7 @@ impl Runtime {
             }
             return Ok(());
         }
-        if !editing && input::is_paste_shortcut(&event.logical_key, self.modifiers) {
+        if !editing && input::is_paste_shortcut(&event.logical_key, self.window.modifiers) {
             if !event.repeat {
                 self.paste_from_clipboard()?;
             }
@@ -43656,10 +44362,10 @@ impl Runtime {
         // `keybindings.json` laid over them. Dispatch reads one table and the
         // settings page edits that same table, which is what keeps a chord a
         // user just recorded from taking a restart to arrive.
-        if let Some(action) = self.shortcuts.lookup(
+        if let Some(action) = self.app.shortcuts.lookup(
             &event.logical_key,
             &event.key_without_modifiers(),
-            self.modifiers,
+            self.window.modifiers,
             self.shortcut_focus(),
         ) {
             if !event.repeat {
@@ -43672,7 +44378,7 @@ impl Runtime {
         // `lastSession` (§7.1.4), so Esc must dismiss the *prompt* without
         // deciding for the user. It sits above the PTY encoder so neither key
         // reaches the child while the question is up.
-        if self.restore_prompt.is_open() && !self.pending_restore.is_empty() {
+        if self.window.restore_prompt.is_open() && !self.window.pending_restore.is_empty() {
             match &event.logical_key {
                 Key::Named(NamedKey::Enter) => {
                     if !event.repeat {
@@ -43680,9 +44386,9 @@ impl Runtime {
                     }
                     return Ok(());
                 }
-                Key::Named(NamedKey::Escape) if self.restore_prompt.consumes_escape() => {
+                Key::Named(NamedKey::Escape) if self.window.restore_prompt.consumes_escape() => {
                     if !event.repeat {
-                        self.restore_prompt.close();
+                        self.window.restore_prompt.close();
                         if self.refresh_chrome() {
                             self.present_chrome_change()?;
                         }
@@ -43695,18 +44401,20 @@ impl Runtime {
         if !self.session.terminal_modes().alternate_screen {
             let page = self.grid.rows.get() as i32;
             match &event.logical_key {
-                Key::Named(NamedKey::PageUp) if self.modifiers == ModifiersState::SHIFT => {
+                Key::Named(NamedKey::PageUp) if self.window.modifiers == ModifiersState::SHIFT => {
                     return self.scroll_view(page);
                 }
-                Key::Named(NamedKey::PageDown) if self.modifiers == ModifiersState::SHIFT => {
+                Key::Named(NamedKey::PageDown)
+                    if self.window.modifiers == ModifiersState::SHIFT =>
+                {
                     return self.scroll_view(-page);
                 }
-                Key::Named(NamedKey::Home) if self.modifiers == ModifiersState::CONTROL => {
+                Key::Named(NamedKey::Home) if self.window.modifiers == ModifiersState::CONTROL => {
                     self.projection.scroll_to_top();
                     self.woke_terminal_thumb(self.focused_leaf)?;
                     return self.publish_interaction_frame();
                 }
-                Key::Named(NamedKey::End) if self.modifiers == ModifiersState::CONTROL => {
+                Key::Named(NamedKey::End) if self.window.modifiers == ModifiersState::CONTROL => {
                     self.projection.scroll_to_bottom();
                     self.woke_terminal_thumb(self.focused_leaf)?;
                     return self.publish_interaction_frame();
@@ -43714,7 +44422,7 @@ impl Runtime {
                 _ => {}
             }
         } else if matches!(&event.logical_key, Key::Named(NamedKey::End))
-            && self.modifiers == ModifiersState::CONTROL
+            && self.window.modifiers == ModifiersState::CONTROL
             && self.projection.is_scrolled()
         {
             // The application's own jump-to-bottom binding: also return the projection-local
@@ -43739,13 +44447,13 @@ impl Runtime {
         // which is a keystroke you only find out about later.
         //
         // Esc has already been answered above, where it puts the picker away.
-        if self.profile_menu.is_open() {
+        if self.window.profile_menu.is_open() {
             return Ok(());
         }
         // And the preview's switcher, on the identical terms (P137: "`#pv-menu`
         // 打开时吞掉所有字符键"). A keystroke aimed at a menu you can see must not
         // reach a shell you cannot — the same sentence, one popup along.
-        if self.preview_menu.seat().is_some() {
+        if self.window.preview_menu.seat().is_some() {
             return Ok(());
         }
         // **`InputOwner::FilesTree`** (§7.1.5, D47) — the last layer above the
@@ -43786,9 +44494,11 @@ impl Runtime {
             return Ok(());
         }
         let application_cursor_mode = self.session.application_cursor_mode();
-        let Some(bytes) =
-            input::keyboard_bytes(&event.logical_key, self.modifiers, application_cursor_mode)
-        else {
+        let Some(bytes) = input::keyboard_bytes(
+            &event.logical_key,
+            self.window.modifiers,
+            application_cursor_mode,
+        ) else {
             return Ok(());
         };
         self.send_user_input(
@@ -43817,8 +44527,8 @@ impl Runtime {
     /// terminal menu, which is raised by a right press, and a right press does
     /// not move the focus.
     fn paste_from_clipboard_into(&mut self, seat: SeatId) -> Result<()> {
-        let window = Arc::clone(&self.window);
-        let active = self.active_tab;
+        let window = Arc::clone(&self.window.window);
+        let active = self.window.active_tab;
         // Destructured rather than reached through three derefs: the paste needs
         // the shell's screen, its projection and its pipe held at once, and they
         // are three fields of one leaf.
@@ -43827,7 +44537,7 @@ impl Runtime {
             session,
             projection,
             ..
-        }) = self.tabs[active].sessions.get_mut(&seat)
+        }) = self.window.tabs[active].sessions.get_mut(&seat)
         else {
             return Ok(());
         };
@@ -43907,10 +44617,10 @@ impl Runtime {
                 // `self.preedit` is touched.
                 ImeOwner::Rename => {
                     if let Ime::Commit(text) = &event {
-                        let mut editor = self.rename.take().expect("the editor is open");
+                        let mut editor = self.window.rename.take().expect("the editor is open");
                         editor.insert(text);
-                        self.rename = Some(editor);
-                        self.rename_blink.reset(Instant::now());
+                        self.window.rename = Some(editor);
+                        self.window.rename_blink.reset(Instant::now());
                         self.refresh_chrome();
                         self.present_chrome_change()?;
                     }
@@ -43956,8 +44666,8 @@ impl Runtime {
         }
         match event {
             Ime::Enabled => {
-                self.ime_active = true;
-                self.ime_cursor_throttle.reset();
+                self.window.ime_active = true;
+                self.window.ime_cursor_throttle.reset();
                 self.publish_frame(FrameTrigger {
                     occurred_at: Instant::now(),
                     source: FrameSource::Expose,
@@ -43968,7 +44678,7 @@ impl Runtime {
                 // target clause and not a caret at all — see
                 // [`preedit_caret_byte`]. Target-clause styling is still
                 // outside scope; the caret simply stops standing on it.
-                self.preedit = (!text.is_empty()).then_some(Preedit {
+                self.window.preedit = (!text.is_empty()).then_some(Preedit {
                     text,
                     cursor_byte: preedit_caret_byte(cursor_range),
                 });
@@ -43978,7 +44688,7 @@ impl Runtime {
                 })
             }
             Ime::Commit(text) => {
-                self.preedit = None;
+                self.window.preedit = None;
                 self.return_to_live_for_input();
                 self.pending_keyboard_at = Some(Instant::now());
                 // IMM32 also emits this commit when focus/layout changes mid-composition. M0-beta
@@ -43994,11 +44704,11 @@ impl Runtime {
             }
             Ime::Disabled => {
                 let drawn_in_the_preview =
-                    self.preedit.is_some() && self.preview_edit_focus().is_some();
-                self.preedit = None;
-                self.ime_active = false;
-                self.ime_cursor_throttle.reset();
-                self.ime_system_caret.destroy();
+                    self.window.preedit.is_some() && self.preview_edit_focus().is_some();
+                self.window.preedit = None;
+                self.window.ime_active = false;
+                self.window.ime_cursor_throttle.reset();
+                self.window.ime_system_caret.destroy();
                 // A composition taken away must stop being *drawn* where it was
                 // drawn. The grid is repainted by the frame below, but the
                 // preview paints from the same field on its own pass and would
@@ -44029,21 +44739,22 @@ impl Runtime {
         // resampled if the new pane asks for another box, on the next settled hover. The frame
         // this handler publishes below is the repaint that drops it, so nothing is queued here:
         // the frame on screen belongs to the old grid and the resize gate would refuse it.
-        self.peek_hover.clear();
-        self.renderer.set_peek_overlay(None);
+        self.window.peek_hover.clear();
+        self.window.renderer.set_peek_overlay(None);
         // The Resized payload is already in physical pixels. Synchronize presentation before any
         // DPI reconciliation can publish a frame, then reconcile once more against inner_size().
-        self.renderer
+        self.window
+            .renderer
             .resize(physical.width, physical.height)
             .context("synchronize renderer swapchain with resized physical client")?;
         self.reconcile_authoritative_dpi("resized")?;
-        let requested_physical = self.window.inner_size();
+        let requested_physical = self.window.window.inner_size();
         if requested_physical.width == 0 || requested_physical.height == 0 {
             return Ok(());
         }
-        let presentation = self.renderer.presentation_geometry();
+        let presentation = self.window.renderer.presentation_geometry();
         trace_surface_size_clamp(
-            self.trace_resize,
+            self.app.trace_resize,
             "BT_RESIZE_TRACE",
             requested_physical,
             presentation,
@@ -44104,7 +44815,7 @@ impl Runtime {
         self.claim_lawful_layout();
         self.defer_preview_resample(Instant::now());
         self.reconcile_authoritative_dpi("scale-factor-changed")?;
-        self.resize(self.window.inner_size())
+        self.resize(self.window.window.inner_size())
     }
 
     /// The *program* is about to change the rectangle, so the layout it produces is held to the
@@ -44114,19 +44825,21 @@ impl Runtime {
     /// request has been made and the OS has not yet answered it, and predicting the answer is
     /// exactly the guess this mechanism exists to avoid.
     fn claim_lawful_layout(&mut self) {
-        self.size_policy = SizePolicy::Lawful;
-        self.lawful_client_size = None;
+        self.window.size_policy = SizePolicy::Lawful;
+        self.window.lawful_client_size = None;
     }
 
     fn reconcile_authoritative_dpi(&mut self, stage: &'static str) -> Result<bool> {
-        let physical = self.window.inner_size();
+        let physical = self.window.window.inner_size();
         if physical.width > 0 && physical.height > 0 {
-            self.renderer
+            self.window
+                .renderer
                 .resize(physical.width, physical.height)
                 .context("reconcile swapchain with physical client size")?;
-            ensure_swapchain_matches_inner(&self.renderer, physical)?;
+            ensure_swapchain_matches_inner(&self.window.renderer, physical)?;
         }
-        let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
+        let render_physical =
+            presentation_physical_size(self.window.renderer.presentation_geometry());
         // Touching the surface is what obliges a solve, not changing the DPI:
         // every seat rectangle is a function of the surface, so the answer that
         // was true of the old one is not yet true of this one. The equal-scale
@@ -44139,16 +44852,16 @@ impl Runtime {
         if physical.width > 0 && physical.height > 0 {
             self.resolve_seat_layout(render_physical);
         }
-        let snapshot = dpi_snapshot(&self.window)?;
+        let snapshot = dpi_snapshot(&self.window.window)?;
         log_dpi_snapshot(
             stage,
             snapshot,
-            Some(self.renderer.metrics().scale_factor),
-            self.renderer.presentation_geometry(),
+            Some(self.window.renderer.metrics().scale_factor),
+            self.window.renderer.presentation_geometry(),
             physical,
         );
         if scale_factors_match(
-            self.renderer.metrics().scale_factor,
+            self.window.renderer.metrics().scale_factor,
             snapshot.authoritative_scale,
         ) {
             return Ok(false);
@@ -44183,26 +44896,27 @@ impl Runtime {
         // which. The session keeps same-source old pixels only while the
         // replacement is pending.
         let width_cells = nonzero_u32(self.grid.columns.get());
-        let dpi_milli = self.renderer.metrics().dpi_milli();
+        let dpi_milli = self.window.renderer.metrics().dpi_milli();
         // The window's own count, not a constant. It was `1` for as long as
         // nothing could change the face; the Terminal font row can, and a frozen
         // revision here would leave every typeset band rastered for the previous
         // cell — correct glyphs at the wrong size, from a cache whose key did not
         // include the thing that moved.
-        let font_rev = self.renderer.font_revision();
+        let font_rev = self.window.renderer.font_revision();
         self.session
             .set_layout_key(window_layout_key(width_cells, dpi_milli, font_rev));
     }
 
     fn apply_scale_factor(&mut self, scale_factor: f64) -> Result<()> {
         let metrics = self
+            .window
             .renderer
             .update_scale_factor(scale_factor)
             .context("remeasure terminal font at new DPI")?;
         ensure_metrics_match_authoritative_scale(metrics.scale_factor, scale_factor)?;
         // Every shell in every tab: a DPI change is a fact about the display, so
         // no screen anywhere in the window is exempt from it.
-        for tab in &mut self.tabs {
+        for tab in &mut self.window.tabs {
             for (_, leaf) in tab.leaves_mut() {
                 leaf.session
                     .set_cell_height_subpixels(metrics.cell_height_subpixels());
@@ -44226,9 +44940,9 @@ impl Runtime {
         // Which panes of the *active* tab died: those are the ones that can be
         // closed as panes, because `close_pane` re-solves the tab the user is
         // looking at.
-        let active = self.active_tab;
+        let active = self.window.active_tab;
         let mut exited_panes = Vec::new();
-        for (seat, leaf) in self.tabs[active].leaves_mut() {
+        for (seat, leaf) in self.window.tabs[active].leaves_mut() {
             let Some(pty) = leaf.pty.as_mut() else {
                 continue;
             };
@@ -44238,14 +44952,14 @@ impl Runtime {
         }
         // Never close the last one here: an empty tab is not a state, and
         // `close_pane` routes that case to `close_tab` on its own.
-        if self.tabs[active].sessions.len() > exited_panes.len() {
+        if self.window.tabs[active].sessions.len() > exited_panes.len() {
             for seat in exited_panes {
                 self.close_pane(seat)?;
             }
         }
 
         let mut exited = Vec::new();
-        for (index, tab) in self.tabs.iter_mut().enumerate() {
+        for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             // A tab has ended when every shell it holds has ended. A tab in
             // probe mode holds no PTY at all and never ends this way.
             let mut any_live = false;
@@ -44265,7 +44979,7 @@ impl Runtime {
         }
         for index in exited.into_iter().rev() {
             self.close_tab(index)?;
-            if self.tabs.len() == 1 && index == 0 {
+            if self.window.tabs.len() == 1 && index == 0 {
                 break;
             }
         }
@@ -44280,8 +44994,8 @@ impl Runtime {
     /// drawn through the transform this instant, and a second copy of this
     /// arithmetic would be a second answer.
     fn pane_draws(&mut self, now: Instant) -> Vec<PaneDraw> {
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let motion = self.motion;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let motion = self.app.motion;
         let bodies: Vec<PaneDraw> = self
             .seats
             .terminals()
@@ -44298,7 +45012,7 @@ impl Runtime {
                 let (viewport, clip) = animated_pane_viewports(
                     body,
                     pane,
-                    self.pane_motion.transform_of(seat, now, motion),
+                    self.window.pane_motion.transform_of(seat, now, motion),
                 );
                 Some(PaneDraw {
                     seat,
@@ -44321,10 +45035,13 @@ impl Runtime {
                 &self.seat_layout,
                 preview_seat,
                 scale,
-                self.pane_motion.transform_of(preview_seat, now, motion),
+                self.window
+                    .pane_motion
+                    .transform_of(preview_seat, now, motion),
             )
         {
-            self.renderer
+            self.window
+                .renderer
                 .place_preview_image(placement.seat, placement.clip);
         }
         bodies
@@ -44340,7 +45057,7 @@ impl Runtime {
     /// `Commit` (`wgpu-hal-30.0.0/src/dx12/mod.rs:1619` — the `Visual` arm,
     /// beside the `VisualFromWndHandle` arm where wgpu owns the composition
     /// device and does commit). Whoever owns the DirectComposition device owns
-    /// the commit, and here that is [`Runtime::compositor`]. A present without
+    /// the commit, and here that is [`WindowRuntime::compositor`]. A present without
     /// its commit is not a dropped frame — it is a screen that never changes
     /// again while every trace in the program reports frames presenting
     /// normally.
@@ -44386,8 +45103,8 @@ impl Runtime {
     /// this instant. See [`chrome_tick_reuses_picture`] for why that is a
     /// complete account of what an animation tick can have moved.
     fn present_retained_picture(&mut self) -> Result<()> {
-        self.chrome_present_pending = false;
-        if self.last_presented_frame.is_none() {
+        self.window.chrome_present_pending = false;
+        if self.window.last_presented_frame.is_none() {
             return Ok(());
         }
         let focused_leaf = self.focused_leaf;
@@ -44399,8 +45116,8 @@ impl Runtime {
         // have moved since it was presented — a theme switch re-presents without re-projecting.
         // So the pictures are re-checked here for the same reason the tweens are re-sampled.
         let table_sources = Self::table_sources(
-            self.last_presented_frame.iter().chain(
-                self.tabs[self.active_tab]
+            self.window.last_presented_frame.iter().chain(
+                self.window.tabs[self.window.active_tab]
                     .sessions
                     .values()
                     .filter_map(|leaf| leaf.last_presented_frame.as_ref()),
@@ -44408,6 +45125,7 @@ impl Runtime {
         );
         self.refresh_table_paints(&table_sources);
         let frame = self
+            .window
             .last_presented_frame
             .as_ref()
             .expect("the picture was there one statement ago and nothing here removes it");
@@ -44416,14 +45134,14 @@ impl Runtime {
             .find(|pane| pane.seat == focused_leaf)
             .copied()
             .unwrap_or_else(|| {
-                let viewport = self.renderer.seat_viewport();
+                let viewport = self.window.renderer.seat_viewport();
                 PaneDraw {
                     seat: focused_leaf,
                     viewport,
                     clip: viewport,
                 }
             });
-        let active = self.active_tab;
+        let active = self.window.active_tab;
         let mut seat_frames = Vec::with_capacity(bodies.len());
         seat_frames.push(bt_render::SeatFrame {
             seat: focused_body.viewport,
@@ -44441,7 +45159,7 @@ impl Runtime {
             if pane.seat == focused_leaf {
                 continue;
             }
-            let Some(leaf) = self.tabs[active].sessions.get(&pane.seat) else {
+            let Some(leaf) = self.window.tabs[active].sessions.get(&pane.seat) else {
                 continue;
             };
             let Some(projected) = leaf.last_presented_frame.as_ref() else {
@@ -44459,8 +45177,8 @@ impl Runtime {
             source: FrameSource::Expose,
         };
         match Self::present_seats_and_commit(
-            &mut self.renderer,
-            &self.compositor,
+            &mut self.window.renderer,
+            &self.window.compositor,
             &seat_frames,
             trigger,
         )
@@ -44471,25 +45189,25 @@ impl Runtime {
             // owed, so the debt is simply re-filed — there is no frame to put
             // back in the slot, which is the whole point of this path.
             PresentOutcome::Skipped | PresentOutcome::Reconfigure => {
-                self.chrome_present_pending = true;
-                self.window.request_redraw();
+                self.window.chrome_present_pending = true;
+                self.window.window.request_redraw();
                 Ok(())
             }
         }
     }
 
     fn redraw(&mut self) -> Result<()> {
-        let Some((frame, trigger)) = self.pending_frames.take() else {
+        let Some((frame, trigger)) = self.window.pending_frames.take() else {
             // Nothing composed. If an animation owes the glass a present of
             // what is already there, this is where that debt is paid.
-            if self.chrome_present_pending {
+            if self.window.chrome_present_pending {
                 return self.present_retained_picture();
             }
             return Ok(());
         };
         // A composed frame supersedes any chrome-only debt: it is about to be
         // presented, chrome and all.
-        self.chrome_present_pending = false;
+        self.window.chrome_present_pending = false;
         if let Some(expected) = self.pending_resize_present {
             ensure!(
                 frame_matches_grid(&frame, expected),
@@ -44526,20 +45244,20 @@ impl Runtime {
         // frames of the same animation composited together.
         let now = Instant::now();
         let bodies = self.pane_draws(now);
-        let active = self.active_tab;
+        let active = self.window.active_tab;
         // The pointer's marks belong to the pane the pointer is in, focused or not, so an
         // unfocused pane that is being hovered is projected *and then decorated* — the same two
         // steps `publish_frame_inner` takes for the focused one. Resolved before the loop because
         // it is a question about the whole window and the loop holds a leaf.
         let hovered_reference = self.hovered_image_reference();
-        let hover_pane = self.hover_pane.filter(|seat| *seat != focused_leaf);
+        let hover_pane = self.window.hover_pane.filter(|seat| *seat != focused_leaf);
         let mut unfocused_frames: Vec<(PaneDraw, ViewportFrame)> = Vec::new();
         for pane in &bodies {
             if pane.seat == focused_leaf {
                 continue;
             }
-            let hyperlink_hover = &self.hyperlink_hover;
-            let Some(leaf) = self.tabs[active].sessions.get_mut(&pane.seat) else {
+            let hyperlink_hover = &self.window.hyperlink_hover;
+            let Some(leaf) = self.window.tabs[active].sessions.get_mut(&pane.seat) else {
                 continue;
             };
             leaf.session.refresh_projection(&mut leaf.projection);
@@ -44564,7 +45282,7 @@ impl Runtime {
             .find(|pane| pane.seat == focused_leaf)
             .copied()
             .unwrap_or_else(|| {
-                let viewport = self.renderer.seat_viewport();
+                let viewport = self.window.renderer.seat_viewport();
                 PaneDraw {
                     seat: focused_leaf,
                     viewport,
@@ -44596,8 +45314,8 @@ impl Runtime {
             });
         }
         match Self::present_seats_and_commit(
-            &mut self.renderer,
-            &self.compositor,
+            &mut self.window.renderer,
+            &self.window.compositor,
             &seat_frames,
             trigger,
         )
@@ -44607,14 +45325,14 @@ impl Runtime {
                 // The glass now holds the newest picture anyone composed. This
                 // is the equality [`chrome_tick_reuses_picture`] reads as its
                 // licence to answer the next animation tick from the screen.
-                self.presented_picture_revision = self.terminal_content_revision;
+                self.window.presented_picture_revision = self.window.terminal_content_revision;
                 // And every pane that could be drawn was just projected afresh
                 // and put on the glass with it, so nothing is owed. See
-                // [`Self::unpainted_pane_output`] for why this is one bit
+                // [`WindowRuntime::unpainted_pane_output`] for why this is one bit
                 // squared here rather than a debt kept per pane.
-                self.unpainted_pane_output = false;
-                if self.window_shown && !self.first_visible_present_dpi_checked {
-                    self.first_visible_present_dpi_checked = true;
+                self.window.unpainted_pane_output = false;
+                if self.window.window_shown && !self.window.first_visible_present_dpi_checked {
+                    self.window.first_visible_present_dpi_checked = true;
                     self.reconcile_authoritative_dpi("first-present")?;
                 }
                 let latency = receipt.latency();
@@ -44628,10 +45346,11 @@ impl Runtime {
                 // notches routed.
                 let presented_at = Instant::now();
                 let since_previous = self
+                    .window
                     .last_present_at
                     .map_or(Duration::ZERO, |previous| presented_at - previous);
-                self.last_present_at = Some(presented_at);
-                if self.trace_perf
+                self.window.last_present_at = Some(presented_at);
+                if self.app.trace_perf
                     && let Ok(latency) = latency
                 {
                     eprintln!(
@@ -44640,13 +45359,13 @@ impl Runtime {
                         latency.event_to_present_call.as_micros(),
                         latency.event_to_submit.as_micros(),
                         since_previous.as_micros(),
-                        self.composed_terminal_frames,
-                        self.pending_frames.overwrites(),
-                        self.wheel_events,
-                        self.wheel_routings,
+                        self.window.composed_terminal_frames,
+                        self.window.pending_frames.overwrites(),
+                        self.window.wheel_events,
+                        self.window.wheel_routings,
                     );
                 }
-                if self.trace_startup
+                if self.app.trace_startup
                     && matches!(trigger.source, FrameSource::Resize)
                     && let Ok(latency) = latency
                 {
@@ -44657,11 +45376,11 @@ impl Runtime {
                         frame.grid_rows
                     );
                 }
-                if has_text && !self.first_text_presented {
-                    self.first_text_presented = true;
-                    if self.trace_startup {
-                        let text_visible = self.startup_started.elapsed();
-                        self.first_text_visible = Some(text_visible);
+                if has_text && !self.window.first_text_presented {
+                    self.window.first_text_presented = true;
+                    if self.app.trace_startup {
+                        let text_visible = self.app.startup_started.elapsed();
+                        self.window.first_text_visible = Some(text_visible);
                         eprintln!(
                             "BT_STARTUP first_text_present={}ms",
                             text_visible.as_millis()
@@ -44670,7 +45389,7 @@ impl Runtime {
                 }
                 // Each pane keeps the frame it just drew, so a pointer question
                 // asked over it can be answered by its own cells. The focused
-                // leaf's copy is `Runtime::last_presented_frame` as well, which
+                // leaf's copy is `WindowRuntime::last_presented_frame` as well, which
                 // is what the presentation-hold and scroll contracts read.
                 //
                 // And each pane's ledger is squared here, in the same breath and
@@ -44680,32 +45399,33 @@ impl Runtime {
                 // three panes on screen are three panes the user can read, and a
                 // tab that lit up for a sibling of the pane holding the keyboard
                 // was the bug this pass was written to end.
-                let active = self.active_tab;
+                let active = self.window.active_tab;
                 for (pane, projected) in unfocused_frames {
-                    if let Some(leaf) = self.tabs[active].sessions.get_mut(&pane.seat) {
+                    if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&pane.seat) {
                         leaf.last_presented_frame = Some(projected);
                         mark_leaf_painted(leaf);
                     }
                 }
-                if let Some(leaf) = self.tabs[active].sessions.get_mut(&focused_leaf) {
+                if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&focused_leaf) {
                     leaf.last_presented_frame = Some(frame.clone());
                     mark_leaf_painted(leaf);
                 }
-                self.last_presented_frame = Some(frame);
+                self.window.last_presented_frame = Some(frame);
                 // The pane under the pointer just drew new cells, so the list its pointer verbs
                 // read is re-derived from them. Only that pane: a reference scan answers a
                 // question nobody is asking of the panes the pointer is not in, and the resting
                 // dotted affordance they do wear was painted by the session itself.
-                if let Some(seat) = self.hover_pane.filter(|seat| *seat != focused_leaf) {
+                if let Some(seat) = self.window.hover_pane.filter(|seat| *seat != focused_leaf) {
                     self.rescan_pane_references(seat);
                 }
                 self.pending_resize_present = None;
             }
             PresentOutcome::Skipped | PresentOutcome::Reconfigure => {
-                self.pending_frames
+                self.window
+                    .pending_frames
                     .publish(frame, trigger)
                     .context("reject non-rectangular frame during redraw retry")?;
-                self.window.request_redraw();
+                self.window.window.request_redraw();
             }
         }
         Ok(())
@@ -44721,9 +45441,9 @@ impl Runtime {
         // signal that this run reached here at all, so it must be removed
         // before anything below is allowed to fail.
         self.mark_session_dirty(Instant::now());
-        self.session_store.close();
-        self.ime_system_caret.destroy();
-        for tab in &mut self.tabs {
+        self.app.session_store.close();
+        self.window.ime_system_caret.destroy();
+        for tab in &mut self.window.tabs {
             for (_, leaf) in tab.leaves_mut() {
                 if let Some(pty) = leaf.pty.as_mut() {
                     pty.shutdown().context("shut down child process")?;
@@ -44916,7 +45636,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         let Some(runtime) = self.runtime.as_mut() else {
             return;
         };
-        if runtime.window.id() != window_id {
+        if runtime.window.window.id() != window_id {
             return;
         }
         // **A burst of notches is spent before anything that is not a notch.**
@@ -44952,7 +45672,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             WindowEvent::KeyboardInput { event, .. } => runtime.keyboard_input(&event),
             WindowEvent::Ime(event) => runtime.ime_input(event),
             WindowEvent::ModifiersChanged(modifiers) => {
-                runtime.modifiers = modifiers.state();
+                runtime.window.modifiers = modifiers.state();
                 Ok(())
             }
             WindowEvent::CursorMoved { position, .. } => runtime.pointer_moved(position),
@@ -44984,18 +45704,18 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 let cancelled = runtime
                     .cancel_drag()
                     .and_then(|tab| runtime.cancel_divider_drag().map(|split| tab || split));
-                runtime.tab_press = None;
-                runtime.pane_press = None;
-                runtime.row_press = None;
+                runtime.window.tab_press = None;
+                runtime.window.pane_press = None;
+                runtime.window.row_press = None;
                 // P149's `window blur`: a glance is about where the pointer is,
                 // and a window that is not listening has no pointer.
                 runtime.hide_file_peek();
-                runtime.tab_clicks.interrupt();
+                runtime.window.tab_clicks.interrupt();
                 // Do not cancel or synthesize anything: IMM32 may synchronously deliver a partial
                 // Commit during this transition, and the product decision is to accept it.
-                runtime.ime_active = false;
-                runtime.ime_cursor_throttle.reset();
-                runtime.ime_system_caret.destroy();
+                runtime.window.ime_active = false;
+                runtime.window.ime_cursor_throttle.reset();
+                runtime.window.ime_system_caret.destroy();
                 runtime.set_cursor_focus(false, Instant::now());
                 committed.and(cancelled.map(|_| ())).and_then(|()| {
                     runtime.publish_frame(FrameTrigger {
@@ -45020,7 +45740,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // would not spend a `git status` on it. No debounce beyond that —
                 // there is no observed flap to debounce, and a timer put in
                 // against one would be exactly the machine this rule is about.
-                let regained = !runtime.window_focused;
+                let regained = !runtime.window.window_focused;
                 runtime.set_cursor_focus(true, Instant::now());
                 let reread = if regained {
                     runtime.reread_git_surfaces(None)
@@ -45045,7 +45765,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // through the one door it always went through instead of a second one
         // opened for the gate.
         if let Some(runtime) = self.runtime.as_mut()
-            && std::mem::take(&mut runtime.window_close_requested)
+            && std::mem::take(&mut runtime.window.window_close_requested)
         {
             let shut = runtime.shutdown();
             self.runtime = None;
@@ -45127,7 +45847,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             self.fail(event_loop, error);
             return;
         }
-        runtime.session_store.flush_if_due(now);
+        runtime.app.session_store.flush_if_due(now);
         // **The one rule, in the one place it can be kept.** Whichever rung holds
         // the keyboard publishes its caret here, at the tail of every pass —
         // which is what "every frame the caret can move" means without anybody
@@ -45248,12 +45968,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             }
         };
         let startup_deadline =
-            startup_poll_delay(runtime.first_text_presented).map(|delay| now + delay);
+            startup_poll_delay(runtime.window.first_text_presented).map(|delay| now + delay);
         // Every leaf, not every tab's focused leaf: an unfocused pane runs its own resize
         // transaction and owes its own PSReadLine repair, so its quiescence is its own deadline to
         // wake for. Reading this through the tab's deref asked only the pane holding the keyboard,
         // and the panes beside it had to wait for some unrelated event to carry them over the line.
         let resize_finish_deadline = runtime
+            .window
             .tabs
             .iter()
             .flat_map(|tab| tab.leaves())
@@ -45268,6 +45989,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // own timeout could only fire if something else happened to wake the
         // window first.
         let synchronized_update_deadline = runtime
+            .window
             .tabs
             .iter()
             .flat_map(|tab| tab.leaves())
@@ -45276,22 +45998,27 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         let live_stability_deadline = runtime.session.live_stability_deadline();
         let wake_deadline = earliest_deadline([
             startup_deadline,
-            runtime.ime_cursor_throttle.deadline(),
+            runtime.window.ime_cursor_throttle.deadline(),
             // Only while a shell holds the keyboard: a frozen caret owes no
             // wake-up at all (ruling 2026-08-13).
             runtime
                 .keyboard_owner_is_a_shell()
-                .then(|| runtime.cursor_blink.deadline())
+                .then(|| runtime.window.cursor_blink.deadline())
                 .flatten(),
             // The press's own 180ms, and only while it still owes one — a press
             // that has been paid or has slipped reports nothing, so a held
             // button costs no wake-ups at all.
-            runtime.tab_press.as_ref().and_then(TabPress::wake_deadline),
+            runtime
+                .window
+                .tab_press
+                .as_ref()
+                .and_then(TabPress::wake_deadline),
             // The rename caret blinks only while there is a rename.
             runtime
+                .window
                 .rename
                 .is_some()
-                .then(|| runtime.rename_blink.deadline())
+                .then(|| runtime.window.rename_blink.deadline())
                 .flatten(),
             runtime.strip_animation_deadline(now),
             pty_resize_deadline,
@@ -45321,20 +46048,25 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // The peek's 350ms while one is settling, and nothing afterwards:
             // it has no fade, so a schematic on screen is finished and asks for
             // no frames at all.
-            runtime.layout_peek.deadline(),
+            runtime.window.layout_peek.deadline(),
             // The glance's 350ms while one is settling, and — since it became a
             // card a hand can walk into (2026-08-14) — the grace that takes it
             // down again once the pointer has left its corridor. A card standing
             // still under a pointer that is inside it has neither clock running
             // and asks for no wake-ups at all, which is the same silence it kept
             // when it could not be touched.
-            runtime.file_peek.as_ref().and_then(|peek| peek.due),
-            runtime.file_peek.as_ref().and_then(|peek| peek.closing_at),
+            runtime.window.file_peek.as_ref().and_then(|peek| peek.due),
+            runtime
+                .window
+                .file_peek
+                .as_ref()
+                .and_then(|peek| peek.closing_at),
             // And the dwell's own 350ms, which is the one clock in this window
             // that has to fire under a pointer that is not moving at all — a
             // hand resting on another row sends no events, so without this wake
             // "停留即换" would only ever happen on the next thing to twitch.
             runtime
+                .window
                 .file_peek
                 .as_ref()
                 .and_then(|peek| peek.dwell.as_ref())
@@ -45347,6 +46079,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // due to turn back into a path. One entry for both feet, because
             // there is one clock.
             runtime
+                .window
                 .revealed_foot
                 .map(|(_, at)| at + FOOT_REVEAL_FEEDBACK),
             // The preview's "Saved", on the same clock and owing the same single
@@ -45354,23 +46087,23 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             runtime.preview_notice_deadline(),
             // The two chevrons' 250/150, and nothing at all while the pointer is
             // not on one and no menu one opened is up (2026-08-16).
-            runtime.chevrons.deadline(),
+            runtime.window.chevrons.deadline(),
             // And the pane menu's own clock: the heading's rest while the
             // submenu is shut, the safety triangle's cap while it is open.
             runtime.pane_menu_deadline(),
-            runtime.hyperlink_hover.show_at,
-            runtime.peek_hover.show_at,
-            runtime.math_hover_clear_at,
+            runtime.window.hyperlink_hover.show_at,
+            runtime.window.peek_hover.show_at,
+            runtime.window.math_hover_clear_at,
             runtime.preview_resample_deadline(),
-            runtime.session_store.deadline(),
+            runtime.app.session_store.deadline(),
             // The schemes folder's own debounce, on the same terms: absent for
             // every window whose folder nobody is editing.
-            runtime.scheme_watch.deadline(),
+            runtime.app.scheme_watch.deadline(),
             // The debounce a change notification started (R31's D). Absent —
             // and therefore costing nothing — for every window that is not
             // currently holding unanswered news about a repository, which is
             // every window most of the time.
-            runtime.git_watch.deadline(),
+            runtime.app.git_watch.deadline(),
         ]);
         event_loop
             .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
@@ -46854,7 +47587,7 @@ fn pty_frame_is_unchanged(
 /// pane: the frame [`Runtime::publish_frame_inner`] composed is the focused
 /// leaf's, and the frame it was compared against is the focused leaf's.
 /// `unpainted_pane_output` is the rest of the window — see
-/// [`Runtime::unpainted_pane_output`] for what it costs to leave it out.
+/// [`WindowRuntime::unpainted_pane_output`] for what it costs to leave it out.
 ///
 /// A drain may be dropped only when both halves are quiet. A sibling pane that
 /// has spoken makes the window's content new however still the focused pane is,
@@ -46897,9 +47630,9 @@ struct PictureOnGlass {
     /// displacement, an off-band DPI reprint. Composing during a hold produces
     /// a frame that [`Runtime::publish_frame_inner`] throws away.
     presentation_hold: bool,
-    /// [`Runtime::terminal_content_revision`].
+    /// [`WindowRuntime::terminal_content_revision`].
     content_revision: u64,
-    /// [`Runtime::presented_picture_revision`].
+    /// [`WindowRuntime::presented_picture_revision`].
     presented_revision: u64,
 }
 
@@ -53022,10 +53755,10 @@ mod tests {
         /// projection and the decoration pass that an animation tick used to
         /// pay for sixty times a second.
         viewport_frames: usize,
-        /// [`Runtime::terminal_content_revision`], on the same bump: a frame
+        /// [`WindowRuntime::terminal_content_revision`], on the same bump: a frame
         /// that actually entered the slot.
         content_revision: u64,
-        /// [`Runtime::presented_picture_revision`], on the same bump: a frame
+        /// [`WindowRuntime::presented_picture_revision`], on the same bump: a frame
         /// that actually reached the glass.
         presented_revision: u64,
     }
@@ -53377,13 +54110,13 @@ mod tests {
         sibling: DualPlaneSession,
         sibling_projection: ViewportProjection,
         pending: LatestFrameSlot,
-        /// `Runtime::last_presented_frame` — the focused leaf's copy, and what
+        /// `WindowRuntime::last_presented_frame` — the focused leaf's copy, and what
         /// the unchanged-frame gate compares against.
         focused_on_glass: Option<ViewportFrame>,
         /// `LeafSession::last_presented_frame` for the pane beside it: what the
         /// user can actually read in that half of the window.
         sibling_on_glass: Option<ViewportFrame>,
-        /// [`Runtime::unpainted_pane_output`].
+        /// [`WindowRuntime::unpainted_pane_output`].
         unpainted_pane_output: bool,
         presents: usize,
         /// Every projection this window paid for, both panes counted — the P0
