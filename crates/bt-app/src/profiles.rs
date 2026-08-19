@@ -1,4 +1,4 @@
-//! The profile picker â the menu the tab strip's `Ë` opens.
+//! The profile picker — the menu the tab strip's `˅` opens.
 //!
 //! Spec authority is `design/ui-mockup.html`: the `.profile-menu` / `.profile-item`
 //! block (lines 1006-1030) for the surface and its rows, and `openProfileMenu`
@@ -7,7 +7,7 @@
 //!
 //! Those two line numbers were written as 976-1002 and 7296 and had drifted about
 //! thirty lines as the mock-up grew above them. They are re-anchored here, and the
-//! individual constants below carry their own â a reference that names a *number*
+//! individual constants below carry their own — a reference that names a *number*
 //! rots silently, so the ones that matter are stated beside the value they
 //! justify where a wrong line is caught by the value not matching.
 //!
@@ -15,19 +15,19 @@
 //!
 //! * **It is a popup, not a modal.** There is no scrim, so unlike [`crate::settings`]
 //!   its [`hit`] returns `None` for a point that is not on the menu, and a press
-//!   there closes the menu and then goes on about its business â which is exactly
+//!   there closes the menu and then goes on about its business — which is exactly
 //!   what the mock-up's `document.addEventListener("click", closeProfileMenu)`
 //!   does.
 //! * **It floats, so it blends.** Its lift, its hairline and its face are the
 //!   same three planes every floating surface in this product is made of, built
-//!   through the same [`crate::settings::push_float_window`] â a popup drawn out
+//!   through the same [`crate::settings::push_float_window`] — a popup drawn out
 //!   of opaque chrome quads would have to know what is under it, and nothing is
 //!   under a popup but whatever the terminal happens to be showing.
 //! * **It shows two lists, so a row is not a number.** Under the profiles sits
 //!   `Recently opened` (mock-up 7424-7433), and its rows index the seed vault
 //!   rather than [`PROFILES`]. Both [`hit`] and the hover therefore speak in
 //!   [`MenuRow`], because the one thing a bare index cannot say is which list it
-//!   came from â and the answer it gets wrong is silent.
+//!   came from — and the answer it gets wrong is silent.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -56,21 +56,21 @@ use crate::{
     settings::push_float_window,
 };
 
-// ââ `.profile-menu` ââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// ── `.profile-menu` ────────────────────────────────────────────────────────
 /// `min-width: 180px`. It is the only width the menu has: every row is one mark
 /// and one short name, so nothing here ever asks for more than the minimum.
 const MENU_MIN_WIDTH_LOGICAL_PX: f32 = 180.0;
-/// `border-radius: 8px` â a popup menu's own round, the same one the theme
+/// `border-radius: 8px` — a popup menu's own round, the same one the theme
 /// picker's menu wears, and deliberately not the 10px a floating *window* gets.
 const MENU_RADIUS_LOGICAL_PX: f32 = 8.0;
 const MENU_PADDING_LOGICAL_PX: f32 = 4.0;
-/// `menu.style.top = a.bottom + 4` â the gap between the button and its menu.
+/// `menu.style.top = a.bottom + 4` — the gap between the button and its menu.
 pub const MENU_OFFSET_LOGICAL_PX: f32 = 4.0;
-/// `Math.min(a.left, win.width - mw - 8)` â the menu never touches the window's
+/// `Math.min(a.left, win.width - mw - 8)` — the menu never touches the window's
 /// right edge, however near the edge the button that opened it sits.
 const MENU_EDGE_MARGIN_LOGICAL_PX: f32 = 8.0;
 
-// ââ `.profile-item` ââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// ── `.profile-item` ────────────────────────────────────────────────────────
 /// `padding: 7px 10px` around a 13px line box, which measures 15.5px in the
 /// mock-up's own renderer: 7 + 15.5 + 7.
 const ITEM_HEIGHT_LOGICAL_PX: f32 = 29.5;
@@ -79,18 +79,18 @@ const ITEM_PADDING_X_LOGICAL_PX: f32 = 10.0;
 /// `.profile-item { gap: 10px }`.
 const ITEM_GAP_LOGICAL_PX: f32 = 10.0;
 const ITEM_FONT_LOGICAL_PX: f32 = 13.0;
-/// `.profile-item .ticon { width: 14px }` â the column. The mark inside it is
+/// `.profile-item .ticon { width: 14px }` — the column. The mark inside it is
 /// the strip's own 15px `.pmark`, centred, exactly as the flex box centres it.
 const ITEM_ICON_COLUMN_LOGICAL_PX: f32 = 14.0;
 const ITEM_MARK_LOGICAL_PX: f32 = 15.0;
-/// The box a `Ã` gets in that same column â **ten, not fifteen** (user ruling,
+/// The box a `×` gets in that same column — **ten, not fifteen** (user ruling,
 /// 2026-08-16), and a deliberate deviation from the mock-up.
 ///
 /// `#i-close`'s artwork runs edge to edge of its own `viewBox`: it is a bare
 /// cross with no margin, drawn that way because every other place it appears is
 /// a *button* whose padding supplies the air. A menu row has no button around
 /// it, so struck at the column's full fifteen the cross came out visibly heavier
-/// than the folder and the copy glyph beside it â two marks whose artwork is a
+/// than the folder and the copy glyph beside it — two marks whose artwork is a
 /// shape inside a box with its own breathing room. Ten in a fifteen-pixel column
 /// gives it the same optical weight as its neighbours, which is what "the same
 /// size" actually means for glyphs that are not drawn to the same margins.
@@ -126,18 +126,18 @@ fn hint_text() -> &'static str {
 /// The same slot, because it is the same sentence in the same place: one short
 /// annotation about the profile rather than about the pointer. `default` and
 /// `not installed` are the two things a row can have to add, and no row has both
-/// â the default profile is [`ProgramSource::DefaultShell`], which always
+/// — the default profile is [`ProgramSource::DefaultShell`], which always
 /// resolves.
 ///
 /// The words are chosen against the alternative of showing nothing. A greyed row
 /// with no caption asks the user to work out *why* it is grey, and the two
-/// available guesses â "not on this machine" and "Folio is broken" â
+/// available guesses — "not on this machine" and "Folio is broken" —
 /// are not equally actionable.
 fn unavailable_hint_text() -> &'static str {
     crate::i18n::Text::ProfileHintUnavailable.text()
 }
 
-/// **The `Ë` menu's second section: one row, and what it is for** (H113,
+/// **The `˅` menu's second section: one row, and what it is for** (H113,
 /// mock-up 7417-7423).
 ///
 /// Every row above it makes a **tab**; this one adds a **pane** to the tab you
@@ -156,9 +156,9 @@ fn files_pane_hint_text() -> &'static str {
     crate::i18n::Text::ProfileFilesPaneHint.text()
 }
 
-// ââ the greyed row âââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// ── the greyed row ─────────────────────────────────────────────────────────
 /// `.ticon-wrap.dead .ticon { opacity: .35; filter: grayscale(1) }` (mock-up
-/// line 314) â the mock-up's own register for a mark that names something not
+/// line 314) — the mock-up's own register for a mark that names something not
 /// running, borrowed here for a mark that names something not installed.
 ///
 /// Both fields, and neither alone: grayscale without the fade leaves a mark at
@@ -170,19 +170,19 @@ fn files_pane_hint_text() -> &'static str {
 /// shells".
 const UNAVAILABLE_MARK_OPACITY: f32 = 0.35;
 
-// ââ `.menu-sep` (mock-up line 1025) âââââââââââââââââââââââââââââââââââââââââ
+// ── `.menu-sep` (mock-up line 1025) ─────────────────────────────────────────
 /// `height: 1px`, taken to whole device pixels and never below one.
 ///
 /// Rounded rather than left fractional, which is where the floating window's own
 /// border differs: a border is four edges around a rounded box that the coverage
 /// pass is already antialiasing, while this is a single horizontal line, and a
-/// horizontal line 1.25px tall is drawn as two rows of partial ink â a blurred
+/// horizontal line 1.25px tall is drawn as two rows of partial ink — a blurred
 /// grey band instead of a rule. The `max` keeps it from rounding away entirely
 /// at the scales where the ink is thinnest.
 const SEPARATOR_THICKNESS_LOGICAL_PX: f32 = 1.0;
 /// `margin: 5px 0`.
 const SEPARATOR_MARGIN_Y_LOGICAL_PX: f32 = 5.0;
-/// `background: var(--border-soft)` â `rgba(255,255,255,.06)` on dark,
+/// `background: var(--border-soft)` — `rgba(255,255,255,.06)` on dark,
 /// `rgba(0,0,0,.055)` on light (mock-up lines 20 and 50).
 ///
 /// The ink is the one `ChromePalette::menu_border` already carries (both tokens
@@ -190,7 +190,7 @@ const SEPARATOR_MARGIN_Y_LOGICAL_PX: f32 = 5.0;
 /// the palette, so the pair is stated here and chosen **off the ink the palette
 /// handed us** rather than off [`bt_render::current_theme`]. That is not a
 /// detour: the palette is picked by background luma and the theme by the user's
-/// setting, and under a `BT_BG` override those two answers differ â asking the
+/// setting, and under a `BT_BG` override those two answers differ — asking the
 /// palette keeps the hairline in the same theme as the surface under it.
 ///
 /// Its proper home is a pre-composited `--border-soft` over `--menu` in
@@ -199,16 +199,16 @@ const SEPARATOR_ALPHA_ON_DARK: f32 = 0.06;
 /// The light theme's half of [`SEPARATOR_ALPHA_ON_DARK`].
 const SEPARATOR_ALPHA_ON_LIGHT: f32 = 0.055;
 
-// ââ `.menu-label` (mock-up lines 1026-1029) âââââââââââââââââââââââââââââââââ
+// ── `.menu-label` (mock-up lines 1026-1029) ─────────────────────────────────
 const SECTION_LABEL_FONT_LOGICAL_PX: f32 = 10.5;
 /// The 10.5px line box, measured in the mock-up's own renderer (Inter at
-/// `line-height: normal`) â 12.5px, the same ladder its 11px group label climbs
+/// `line-height: normal`) — 12.5px, the same ladder its 11px group label climbs
 /// at 13px and its 13px row at 15.5px.
 const SECTION_LABEL_LINE_LOGICAL_PX: f32 = 12.5;
-/// `letter-spacing: .05em` at `font-weight: 600` â the settings dialog's
+/// `letter-spacing: .05em` at `font-weight: 600` — the settings dialog's
 /// `.group-label` craft, which is the same heading in a different surface.
 const SECTION_LABEL_TRACKING_EM: f32 = 0.05;
-/// `padding: 3px 10px 5px` â top, both sides, bottom.
+/// `padding: 3px 10px 5px` — top, both sides, bottom.
 const SECTION_LABEL_PADDING_TOP_LOGICAL_PX: f32 = 3.0;
 const SECTION_LABEL_PADDING_X_LOGICAL_PX: f32 = 10.0;
 const SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX: f32 = 5.0;
@@ -222,14 +222,14 @@ fn recent_section_label() -> &'static str {
     crate::i18n::Text::ProfileRecentSection.text()
 }
 
-// ââ `.recent-item` (mock-up lines 1030-1031) âââââââââââââââââââââââââââââââ
+// ── `.recent-item` (mock-up lines 1030-1031) ───────────────────────────────
 /// `max-width: 260px`.
 ///
 /// It is a real clamp on the row's box and it cannot bind today: the menu is
 /// [`MENU_MIN_WIDTH_LOGICAL_PX`] wide and nothing here measures text, so every
 /// row is already 170px of content. In the mock-up the menu is content-sized
 /// (`min-width: 180px` over `white-space: nowrap` rows) and this is what stops
-/// one long path from stretching the popup across the window â the day this
+/// one long path from stretching the popup across the window — the day this
 /// module can measure a string, that growth and the ellipsis at mock-up 1031
 /// arrive together, and the clamp is already where it belongs.
 const RECENT_ITEM_MAX_WIDTH_LOGICAL_PX: f32 = 260.0;
@@ -241,16 +241,16 @@ const RECENT_ITEM_MAX_WIDTH_LOGICAL_PX: f32 = 260.0;
 /// `state.defaultProfile` is a number into it.
 ///
 /// Four fixed entries rather than a discovery pass over the machine (user ruling
-/// 2026-08-10, Q1). The alternative â Windows Terminal's dynamic profiles, where
-/// a profile exists only if its shell is installed â answers a different
+/// 2026-08-10, Q1). The alternative — Windows Terminal's dynamic profiles, where
+/// a profile exists only if its shell is installed — answers a different
 /// question than the one this list is asked: the list is the *product's* offer,
 /// and which of them this machine can honour is a fact about the machine.
 /// Discovery is not skipped, it is **separated**: [`ProfilePrograms`] probes for
 /// each one's executable and a profile it cannot find is drawn greyed rather
 /// than dropped. That is the honest form of "you do not have this", and it is
-/// the one a hidden row cannot say â a row that is missing looks exactly like a
+/// the one a hidden row cannot say — a row that is missing looks exactly like a
 /// row that was never designed.
-/// **Owned data since Â§7.1.6c-6, and that is the whole of slice 5a's
+/// **Owned data since §7.1.6c-6, and that is the whole of slice 5a's
 /// foundation.** It was five `Copy` structs of `&'static` fields in a `const`
 /// array, which is exactly the right shape for a table nobody can change and
 /// exactly the wrong one for a table that has a settings page. What replaces it
@@ -262,42 +262,42 @@ const RECENT_ITEM_MAX_WIDTH_LOGICAL_PX: f32 = 260.0;
 /// where [`Self::compared_title`] comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Profile {
-    /// The name a seed keeps this profile by â `docs/DESIGN.md` Â§7.1.4 requires a
-    /// "**ç¨³å® profile_id**ï¼ä¸æ¯æ é¢ãä¸æ¯å±ç¤ºå¯¹è±¡ï¼".
+    /// The name a seed keeps this profile by — `docs/DESIGN.md` §7.1.4 requires a
+    /// "**稳定 profile_id**（不是标题、不是展示对象）".
     ///
     /// It is deliberately not [`Self::title`]: a title is a display object, and
     /// display objects get renamed, localised and reworded. A seed keyed on one
     /// would stop matching its own profile the day the strip's wording changed,
     /// and the tab would come back as somebody else. It is not the executable
-    /// path either â that is what the shell *is*, not which profile chose it, and
+    /// path either — that is what the shell *is*, not which profile chose it, and
     /// two profiles can legitimately launch the same binary.
     ///
     /// **Ruling 2026-08-10 (Q3), and it overturns a written spec.**
-    /// `docs/M2-persistence-schema-v1.md` Â§3.3 says the v1 transitional value is
-    /// "å¯å¨è¯¥ pane æ¶å®éä½¿ç¨ç shell å¯æ§è¡è·¯å¾" â a normalized executable path
-    /// â while this build has always written `"pwsh"`, so both spellings exist on
+    /// `docs/M2-persistence-schema-v1.md` §3.3 says the v1 transitional value is
+    /// "启动该 pane 时实际使用的 shell 可执行路径" — a normalized executable path
+    /// — while this build has always written `"pwsh"`, so both spellings exist on
     /// real disks. The slug wins: a path is not stable (`pwsh.exe` moves between
     /// `%ProgramFiles%` and the Store alias without the user changing anything,
     /// and `BT_SHELL` moves it anywhere), and it is not an identity (two profiles
-    /// may legitimately run one binary â which is precisely what the pwsh profile
+    /// may legitimately run one binary — which is precisely what the pwsh profile
     /// and a future "pwsh with different arguments" profile would do). The paths
     /// already on disk are therefore *historical values to be migrated*, which is
     /// `migrate_session_v5_to_v6`'s whole job.
     pub id: String,
     /// The **shipped** title, kept for byte-comparison and never drawn.
     ///
-    /// This is the string the integration scripts announce â `folio.ps1` sends
+    /// This is the string the integration scripts announce — `folio.ps1` sends
     /// `$PSVersionTable.PSEdition`, which is `PowerShell` or `Windows
-    /// PowerShell` whatever the row is called in this window â and it is what a
+    /// PowerShell` whatever the row is called in this window — and it is what a
     /// pane head compares an OSC 0/2 announcement against before deciding the
     /// shell is merely echoing its launcher.
     ///
-    /// **It is not a setting, it is a protocol constant** (plan Â§1.4). It does
+    /// **It is not a setting, it is a protocol constant** (plan §1.4). It does
     /// not appear on any surface and cannot be edited. A profile of the user's
     /// own has none: no script this build ships will ever announce a name this
     /// build did not choose, so there is no second string to compare.
     ///
-    /// The comparison set is `{compared_title} âª {display_title}` â see
+    /// The comparison set is `{compared_title} ∪ {display_title}` — see
     /// [`announces_this_profile`]. Both, because after a rename neither the
     /// script's word nor the user's own may leak onto a head as a program title.
     pub compared_title: Option<String>,
@@ -309,22 +309,22 @@ pub struct Profile {
     ///
     /// Not translated: `PowerShell 7`, `WSL`, `Git Bash` and `Command Prompt`
     /// are product names, and a Chinese window spells them the same way an
-    /// English one does (Â§G S103) â which is why the shipped defaults live in
+    /// English one does (§G S103) — which is why the shipped defaults live in
     /// this table and not in `i18n.rs`, pinned there by
     /// `no_profile_title_has_been_pulled_into_the_language_table`.
     pub display_title: String,
     /// A profile's icon is its mark, not a letter that happens to be in its
-    /// prompt â the mock-up says so in as many words at `const mark`.
+    /// prompt — the mock-up says so in as many words at `const mark`.
     ///
     /// The five shipped marks are not this product's to repaint (S98/S31: the
     /// blue is Microsoft's and the orange is Ubuntu's), and a profile duplicated
-    /// from a built-in inherits the mark it really is â a copy of PowerShell is
+    /// from a built-in inherits the mark it really is — a copy of PowerShell is
     /// a PowerShell, and the mark is telling the truth. The eight struck colours
     /// a profile drawn from nothing wears are the editor's, one slice on.
     pub mark: ChromeMark,
     /// How this profile's program is found on the machine it is running on.
     pub program: ProgramSource,
-    /// The arguments the profile always passes, ahead of nothing else â there is
+    /// The arguments the profile always passes, ahead of nothing else — there is
     /// no user-supplied argument list yet (that is the profile editor's, K86).
     ///
     /// `-NoLogo` lives here now, and that is the point of the field. It used to
@@ -336,8 +336,8 @@ pub struct Profile {
     /// What this profile sets in its sessions' environment, over what the
     /// terminal sets for itself.
     ///
-    /// **Three layers, and this one is written last** (plan Â§1.7, landed in
-    /// Â§7.1.6c-6c): the environment this window inherited, then the terminal's
+    /// **Three layers, and this one is written last** (plan §1.7, landed in
+    /// §7.1.6c-6c): the environment this window inherited, then the terminal's
     /// own declarations (`TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `COLORTERM`,
     /// `TERM`, the `FORCE_HYPERLINK` declaration, `PROMPT` for `cmd`,
     /// `BT_SHELL_INTEGRATION` for a bash), then these. A row here therefore
@@ -345,11 +345,11 @@ pub struct Profile {
     /// oversight: a profile's environment is the most specific sentence anybody
     /// says about its sessions, and `hyperlink_declaration`'s own rule already
     /// is that whoever set the variable has answered the question. `BT_SHELL`
-    /// surviving as a debugging back door (Q4) says the same thing â this
+    /// surviving as a debugging back door (Q4) says the same thing — this
     /// machine belongs to the person using it.
     ///
     /// **An empty value takes the variable away from this profile's sessions**
-    /// â measured on the real machine rather than assumed, because it is the
+    /// — measured on the real machine rather than assumed, because it is the
     /// operating system's answer and not this terminal's: an environment block
     /// entry whose value is empty removes the name instead of binding it to the
     /// empty string, so a child of a profile carrying `FOO=` has no `FOO` at
@@ -364,17 +364,17 @@ pub struct Profile {
     /// The mock-up has no such field: it has one `HOME` constant (line 2632) that
     /// every profile shares, because every one of its profiles is a fiction that
     /// never starts a process. A real one has to say *whose* home, and the answer
-    /// is not the same kind of thing for all four â see [`StartingDir`].
+    /// is not the same kind of thing for all four — see [`StartingDir`].
     ///
     /// **Not editable, and that is not this slice's boundary but the field's own
-    /// nature** (plan Â§1.6, met again one slice on). Which channel a launcher
-    /// listens on is a fact about the program â `wsl.exe` takes `--cd ~` and a
-    /// Windows shell takes a working directory â and a reader who picked the
-    /// wrong one would get a WSL tab standing in `/mnt/c/Users/â¦`, which is a
+    /// nature** (plan §1.6, met again one slice on). Which channel a launcher
+    /// listens on is a fact about the program — `wsl.exe` takes `--cd ~` and a
+    /// Windows shell takes a working directory — and a reader who picked the
+    /// wrong one would get a WSL tab standing in `/mnt/c/Users/…`, which is a
     /// real directory and not the one that shell opens in. What the editor
     /// offers instead is [`Self::start_at`], which is a different question.
     pub starting_dir: StartingDir,
-    /// Which of three answers a new leaf takes when it is asked where to open â
+    /// Which of three answers a new leaf takes when it is asked where to open —
     /// **the editor's question**, and the three items the mock-up's `Starting
     /// directory` combo carries.
     ///
@@ -390,21 +390,21 @@ pub struct Profile {
     /// leaf in this window has always done, so a table nobody has edited spawns
     /// byte for byte what it spawned before this field existed.
     pub start_at: StartAt,
-    /// Which spelling of a path this profile's shell speaks â see
+    /// Which spelling of a path this profile's shell speaks — see
     /// [`PathNamespace`]. What makes a directory inherited from another pane
     /// either translatable or honestly refused.
     pub paths: PathNamespace,
     /// What this profile's title has to name before it is unambiguous here.
     pub qualifier: Qualifier,
-    /// Which shell-integration script this profile is served by, if any â
+    /// Which shell-integration script this profile is served by, if any —
     /// derived from the program, or named outright. See [`IntegrationChoice`],
     /// and [`served_by`] for the resolved answer every other module wants.
     pub integration: IntegrationChoice,
     /// Kept out of the pickers.
     ///
-    /// A built-in cannot be deleted â a row that is missing looks exactly like a
+    /// A built-in cannot be deleted — a row that is missing looks exactly like a
     /// row that was never designed, which is the sentence this module already
-    /// writes about a shell the machine does not have â so hiding is the whole
+    /// writes about a shell the machine does not have — so hiding is the whole
     /// of what "I do not want to see this" can mean here. A hidden profile is
     /// still a profile: a seat already on disk restarts through its own
     /// `profile_id` and is untouched by this.
@@ -415,7 +415,7 @@ pub struct Profile {
     /// a profile is [`ProfilePrograms`]'s answer and stays there: it is a fact
     /// about a filesystem probed once, not a field of the table, and a copy of
     /// it on the row would be a second place for the same question to be
-    /// answered â with the copy going stale exactly when a program is installed
+    /// answered — with the copy going stale exactly when a program is installed
     /// while the window is open.
     pub origin: Origin,
 }
@@ -436,11 +436,11 @@ pub enum Origin {
 ///
 /// Two shapes, because "home" is not one fact here. Three of these profiles run
 /// as Windows processes and take their starting directory the way every Windows
-/// process does â as a working directory handed to `CreateProcess`. WSL's shell
+/// process does — as a working directory handed to `CreateProcess`. WSL's shell
 /// does not: `wsl.exe` is a *launcher*, its working directory is a Windows path
 /// that the distribution sees through `/mnt`, and the Linux home it should open
 /// in has no Windows spelling at all. Handing `C:\Users\Weiyi` to a WSL tab lands
-/// it in `/mnt/c/Users/Weiyi` â a real directory, and not the one a shell opens
+/// it in `/mnt/c/Users/Weiyi` — a real directory, and not the one a shell opens
 /// in when you start it yourself.
 ///
 /// So the enum carries the *form* the answer takes rather than a path. That is
@@ -448,7 +448,7 @@ pub enum Origin {
 /// profile states how it is told where to start, and the spawn reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StartingDir {
-    /// `%USERPROFILE%` â the Windows home, handed over as a working directory.
+    /// `%USERPROFILE%` — the Windows home, handed over as a working directory.
     ///
     /// The variable rather than a composed `C:\Users\<name>`: a roaming or
     /// redirected profile lives elsewhere and the variable is the only thing that
@@ -464,26 +464,26 @@ pub enum StartingDir {
     /// answers `/mnt/d`.
     ///
     /// Passed *instead of* a working directory and never beside one, because
-    /// `--cd` overrides the inherited directory anyway â and because the
+    /// `--cd` overrides the inherited directory anyway — and because the
     /// directory this profile is given is written in its own namespace
     /// ([`PathNamespace::Wsl`]), which is not a string `CreateProcess` could be
     /// handed. That is the same fact stated twice: the launcher is the only
     /// thing in the chain that speaks both.
     LauncherFlag {
         flag: String,
-        /// What the flag is given when nothing has been inherited â the shell's
+        /// What the flag is given when nothing has been inherited — the shell's
         /// own `$HOME`, which has no Windows spelling to hand over instead.
         home: String,
     },
 }
 
-/// Where a new leaf of a profile opens â the three answers the editor offers,
+/// Where a new leaf of a profile opens — the three answers the editor offers,
 /// and the one question about a starting directory that is the reader's.
 ///
 /// [`StartingDir`] above is the *form* an answer takes when a profile has to
 /// name its own home; this is what happens **before** that question is reached.
 /// The mock-up's combo writes the three `The current pane's folder`, `Home` and
-/// `Choose a folderâ¦`, and the first is selected on a profile nobody has
+/// `Choose a folder…`, and the first is selected on a profile nobody has
 /// touched.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StartAt {
@@ -494,7 +494,7 @@ pub enum StartAt {
     /// **Today's behaviour and the shipped value**, which is what makes this
     /// field free: a table nobody has edited answers exactly what it answered
     /// before the field existed. [`cwd_for_spawn`] is the "can this profile
-    /// spell it" half and it is unchanged â a pair of namespaces that cannot
+    /// spell it" half and it is unchanged — a pair of namespaces that cannot
     /// cross still falls through to the profile's own home rather than to a
     /// guess.
     Inherit,
@@ -505,7 +505,7 @@ pub enum StartAt {
     /// one *refuses* an inheritance that exists, which is what somebody who
     /// keeps one profile pinned to a home directory is asking for.
     Home,
-    /// This place, always â a folder chosen through the system's own picker.
+    /// This place, always — a folder chosen through the system's own picker.
     ///
     /// Held in the namespace the picker speaks, which is Windows', and
     /// translated into the profile's at spawn through [`translate_cwd`] rather
@@ -525,7 +525,7 @@ pub enum StartAt {
 /// program that either is on this machine or is not.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProgramSource {
-    /// `bt_pty::resolve_powershell_seven`'s answer â `BT_SHELL` first (ruling
+    /// `bt_pty::resolve_powershell_seven`'s answer — `BT_SHELL` first (ruling
     /// 2026-08-10, Q4: the override is **kept**, as a development back door, and
     /// it covers this profile alone rather than becoming another profile's worth
     /// of configuration), then a `pwsh.exe` probe.
@@ -537,7 +537,7 @@ pub enum ProgramSource {
     /// without PowerShell 7 makes *this* row greyed and truthful instead of
     /// startable and wrong: a user with both installed picks between them, and a
     /// `PowerShell` row that quietly started 5.1 would be the picker lying about
-    /// which of the two it ran â on exactly the machines where the difference is
+    /// which of the two it ran — on exactly the machines where the difference is
     /// visible.
     PowerShellSeven,
     /// The first of these that is a real file, in order.
@@ -556,7 +556,7 @@ pub enum ProgramSource {
 /// One place to look for a profile's executable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProgramCandidate {
-    /// `%VARIABLE%\tail` â an environment variable and a path under it.
+    /// `%VARIABLE%\tail` — an environment variable and a path under it.
     ///
     /// Never a bare relative path: "wherever this process happens to be
     /// standing" is not a place a shell lives.
@@ -568,7 +568,7 @@ pub enum ProgramCandidate {
     /// is not a guess: it reads the install the user is *already using*. A
     /// well-known-paths list can only ever enumerate the installers' defaults,
     /// and the one thing a person who changed the install directory has
-    /// certainly done is put the tool on their `PATH` â so the tool itself is
+    /// certainly done is put the tool on their `PATH` — so the tool itself is
     /// the most reliable landmark its siblings have.
     ///
     /// Concretely, for Git for Windows: `git.exe` lives at `<root>\cmd\git.exe`
@@ -580,13 +580,13 @@ pub enum ProgramCandidate {
 }
 
 /// Which shell-integration script a profile is served by, and **how it gets
-/// there** â the two answers are not the same, and the difference is what the
+/// there** — the two answers are not the same, and the difference is what the
 /// honest-capability matrix is made of.
 ///
-/// **[`Self::None`] arrived with Â§7.1.6c-6 and does not undo that reasoning.**
+/// **[`Self::None`] arrived with §7.1.6c-6 and does not undo that reasoning.**
 /// The variant was refused while every profile in the table was one this build
 /// shipped, and each of those five has a way in; what differs is how far it
-/// reaches, and the variants say so â a distinction a blanket `None` would have
+/// reaches, and the variants say so — a distinction a blanket `None` would have
 /// flattened, by spelling "we found no door" and "the door is only wide enough
 /// for one marker" the same way. A profile of the user's own running an
 /// arbitrary executable is the case that reopens it, and it reopens it honestly
@@ -597,14 +597,14 @@ pub enum ProgramCandidate {
 /// never emits OSC 133 keeps the cursor/WRAPLINE heuristics, and one that never
 /// emits OSC 7 leaves the relative path undetected rather than guessing a
 /// directory. Both are the existing, already-implemented conventions
-/// (`docs/shell-integration.md` Â§34-35 and Â§111-115) â this table confirms they
+/// (`docs/shell-integration.md` §34-35 and §111-115) — this table confirms they
 /// hold for the new shells rather than inventing a second set for them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Integration {
     /// `folio.ps1`, dot-sourced by the user into `$PROFILE`.
     ///
     /// **Opt-in and manual**: this product never injects it
-    /// (`docs/shell-integration.md` Â§83-96), because PowerShell's own startup
+    /// (`docs/shell-integration.md` §83-96), because PowerShell's own startup
     /// file is a single well-known path the user already owns and edits, and a
     /// terminal that rewrote `$PROFILE` behind them would be editing their
     /// shell. There is no argument to hand `pwsh` that would source a second
@@ -617,9 +617,9 @@ pub enum Integration {
     /// interactive shell, so the integration can be installed for a session
     /// without touching anything on disk that belongs to the user. What that
     /// argument costs is the startup chain it replaces, which the script itself
-    /// puts back â see `scripts/shell-integration/folio.bash`.
+    /// puts back — see `scripts/shell-integration/folio.bash`.
     BashInitFile,
-    /// No script at all â the whole integration is the `PROMPT` variable
+    /// No script at all — the whole integration is the `PROMPT` variable
     /// `cmd.exe` prints its prompt from, and what fits in there is **one**
     /// marker: `OSC 7`.
     ///
@@ -636,7 +636,7 @@ pub enum Integration {
     /// opened:
     ///
     /// * `133;A` alone turns `shell_integration_is_authoritative` on, and that
-    ///   flag's job is to **retire the cursor-line heuristic** â the rule that
+    ///   flag's job is to **retire the cursor-line heuristic** — the rule that
     ///   the line under the cursor is probably still being typed and must not be
     ///   decorated yet. Its replacement is the semantic input region, which only
     ///   `B` and `C` can build. A shell that sends `A` and stops has therefore
@@ -649,10 +649,10 @@ pub enum Integration {
     ///   printing, and every resize commit owes an `InvokePrompt` chord to a
     ///   shell with no such binding.
     ///
-    /// A third cost is `M2-restart-shell-contract.md` Â§1.6's: it defines idle as
-    /// "å·²è§ OSC 133 A/Bãåå¨æç¤ºç¬¦", so a `cmd` pane sending A/B would be
+    /// A third cost is `M2-restart-shell-contract.md` §1.6's: it defines idle as
+    /// "已见 OSC 133 A/B、停在提示符", so a `cmd` pane sending A/B would be
     /// classified **idle** and a future `Restart shell` would skip its
-    /// confirmation â precisely where we cannot know whether it is busy.
+    /// confirmation — precisely where we cannot know whether it is busy.
     ///
     /// All three are strictly worse than sending nothing, and sending nothing is
     /// a documented, tested position rather than a gap: a screen that never emits
@@ -660,9 +660,9 @@ pub enum Integration {
     /// (`docs/shell-integration.md`, "Authority and fallback"). So `cmd` stays
     /// there, whole, and spends its one available slot on the marker that has no
     /// bracket to leave dangling. Pinned at
-    /// `bt_term::â¦::a_prompt_that_can_never_send_c_must_not_send_a_or_b_either`.
+    /// `bt_term::…::a_prompt_that_can_never_send_c_must_not_send_a_or_b_either`.
     CmdPrompt,
-    /// No door at all â nothing is dot-sourced, no argument is added and no
+    /// No door at all — nothing is dot-sourced, no argument is added and no
     /// `PROMPT` is written.
     ///
     /// **The degradation needs no invention**: a screen that never sees OSC 133
@@ -675,12 +675,12 @@ pub enum Integration {
 }
 
 /// Which door serves a profile's sessions, **as the editor's picker holds it**
-/// (plan Â§1.6, Â§3.3) â derived from the program, or named outright.
+/// (plan §1.6, §3.3) — derived from the program, or named outright.
 ///
 /// Two states rather than one more [`Integration`] variant, because they answer
 /// different questions and only one of them survives an edit to the `Program`
-/// field: `Auto` is a *rule* â whatever this row runs, serve it the way that
-/// family is served â while a named answer is a decision that outlives the
+/// field: `Auto` is a *rule* — whatever this row runs, serve it the way that
+/// family is served — while a named answer is a decision that outlives the
 /// program it was made about. A row that stored the derived value would forget
 /// which of the two it was the moment somebody pointed it somewhere else, and
 /// the next `Program` edit would either silently keep a door that no longer fits
@@ -692,17 +692,17 @@ pub enum Integration {
 /// `auto_derives_the_door_every_shipped_profile_has_always_had`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IntegrationChoice {
-    /// Read the program's own file name â [`derive_integration`].
+    /// Read the program's own file name — [`derive_integration`].
     Auto,
     /// This door, whatever the program becomes.
     Named(Integration),
 }
 
-/// Which door a program's file name asks for (plan Â§1.6).
+/// Which door a program's file name asks for (plan §1.6).
 ///
 /// **The file name and not a probe.** What serves a shell is decided by which
 /// family it belongs to, and the name is the only thing about a program this
-/// dialog can read without starting it â `--init-file` handed to something that
+/// dialog can read without starting it — `--init-file` handed to something that
 /// is not a bash is a filename it will try to open, and there is no way to ask
 /// first that does not involve running it.
 ///
@@ -717,12 +717,12 @@ pub enum IntegrationChoice {
 #[must_use]
 pub fn derive_integration(program: &ProgramSource) -> Integration {
     let leaf = match program {
-        // Not a file name at all â it is `BT_SHELL`, then a `pwsh` probe, and
+        // Not a file name at all — it is `BT_SHELL`, then a `pwsh` probe, and
         // every path it can resolve to is a PowerShell 7.
         ProgramSource::PowerShellSeven => return Integration::PowerShellOptIn,
         ProgramSource::Path(path) => path.file_name().map(std::ffi::OsStr::to_string_lossy),
-        // Every candidate of one shipped row names one program family â the four
-        // Git Bash places are four `bash.exe`s â so the first is the family, and
+        // Every candidate of one shipped row names one program family — the four
+        // Git Bash places are four `bash.exe`s — so the first is the family, and
         // a row whose candidates disagreed would be a row that could not say what
         // it starts either.
         ProgramSource::FirstOf(candidates) => candidates
@@ -750,7 +750,7 @@ pub fn derive_integration(program: &ProgramSource) -> Integration {
     }
 }
 
-/// One row's door, resolved â the answer every caller outside the editor wants.
+/// One row's door, resolved — the answer every caller outside the editor wants.
 #[must_use]
 pub fn served_by(profile: &Profile) -> Integration {
     match profile.integration {
@@ -777,8 +777,8 @@ pub const WINDOWS_POWERSHELL_ID: &str = "winps";
 /// the file.
 ///
 /// A function and no longer a `const`, because the rows own their strings now
-/// (Â§7.1.6c-6). The cost is five allocations at each call and the call sites are
-/// startup, a restore and a test â the alternative, a second `&'static` struct
+/// (§7.1.6c-6). The cost is five allocations at each call and the call sites are
+/// startup, a restore and a test — the alternative, a second `&'static` struct
 /// standing beside the owned one, would have made every row of this table exist
 /// twice and put the next person who edits one in front of two places to edit.
 #[must_use]
@@ -794,21 +794,21 @@ pub fn shipped() -> Vec<Profile> {
             //
             // **Both rows carry their version** (user ruling 2026-08-11, reversing
             // the bare name this row shipped with). The two were named "PowerShell"
-            // and "Windows PowerShell", which is what each product is *called* â and
+            // and "Windows PowerShell", which is what each product is *called* — and
             // in a tab strip, a tooltip and a picker standing one line apart, it left
             // the user unable to tell which row was 7 and which was 5.1. A name whose
             // job is to distinguish two things has to distinguish them.
             //
             // `7` and not `7.5`: the version is the product line's, which is what the
             // family has been called since it stopped being 6. `5.1` is the whole
-            // number because 5.1 is where Windows PowerShell stopped â a fixed value,
+            // number because 5.1 is where Windows PowerShell stopped — a fixed value,
             // not a reading. A `pwsh` 8 would be a new line and a new word here.
             //
             // **`scripts/shell-integration/folio.ps1` carries both of these
             // strings and must be changed with them, character for character.** The
             // script titles its session with the edition it is running, and
             // `pane_head_title` drops a program title that merely repeats its own
-            // profile's â a shell agreeing with its launcher has announced nothing.
+            // profile's — a shell agreeing with its launcher has announced nothing.
             // That test is string equality, so a rename on one side alone puts the
             // family name back in front of every pane head in the tab. Pinned by
             // `the_integration_script_names_the_profiles_own_titles`.
@@ -843,7 +843,7 @@ pub fn shipped() -> Vec<Profile> {
             mark: ChromeMark::ProfilePowerShell,
             // Not `PowerShellSeven`, and not a bare name either: this is the one
             // shell that is *part of Windows*, so it is named where Windows keeps
-            // it. That is what lets [`fallback_profile()`] be this row â the probe
+            // it. That is what lets [`fallback_profile()`] be this row — the probe
             // finds it on every Windows there is, so the floor under every other
             // profile is never itself greyed.
             program: ProgramSource::FirstOf(vec![ProgramCandidate::Under {
@@ -865,21 +865,21 @@ pub fn shipped() -> Vec<Profile> {
         },
         Profile {
             id: "wsl".to_owned(),
-            // The mock-up writes `WSL Â· Ubuntu`; this is the half of it that is a
+            // The mock-up writes `WSL · Ubuntu`; this is the half of it that is a
             // constant, and [`Qualifier::WslDistribution`] is the half that is a
             // claim about this machine.
             //
-            // The name after the `Â·` is a **discovery claim**: `wsl.exe` with no
+            // The name after the `·` is a **discovery claim**: `wsl.exe` with no
             // arguments starts whatever the user's *default* distribution is, which
             // on one machine is Ubuntu and on the next is Debian or Alpine, so
             // printing "Ubuntu" over a command that will start Debian would be
-            // chrome saying something it did not check. It is now checked â
+            // chrome saying something it did not check. It is now checked —
             // `crate::wsl` asks `wsl.exe --list --verbose` which one carries the
-            // `*` â and appended only when there is more than one installed and the
+            // `*` — and appended only when there is more than one installed and the
             // bare title would therefore be an unanswered question.
             //
             // The constant stays the short form, which is also the mock-up's own
-            // rule at line 4013 that a session's name drops everything from the `Â·`
+            // rule at line 4013 that a session's name drops everything from the `·`
             // on: a tab falling back to its profile's name is called `WSL`.
             compared_title: Some("WSL".to_owned()),
             display_title: "WSL".to_owned(),
@@ -907,14 +907,14 @@ pub fn shipped() -> Vec<Profile> {
             compared_title: Some("Git Bash".to_owned()),
             display_title: "Git Bash".to_owned(),
             mark: ChromeMark::ProfileGit,
-            // Git for Windows lands in more places than a list can enumerate â the
+            // Git for Windows lands in more places than a list can enumerate — the
             // same shape of problem `find_pwsh` already solves for PowerShell 7,
             // and the same answer: probe rather than assume.
             //
             // `git.exe` on `PATH` is tried **first**, and it is the only candidate
             // that generalises. The three paths under it are the system-wide, the
             // 32-bit and the per-user installers' *defaults*, which between them
-            // still miss everyone who chose their own install directory â a case
+            // still miss everyone who chose their own install directory — a case
             // this project met on the very first machine it was tested on, where
             // Git sits on another drive entirely. Somebody who moved the install has
             // certainly put `git` on their path, so the tool is the landmark its own
@@ -944,11 +944,11 @@ pub fn shipped() -> Vec<Profile> {
             args: vec!["--login".to_owned(), "-i".to_owned()],
             env: Vec::new(),
             // Git for Windows' MSYS layer maps `$HOME` onto `%USERPROFILE%` by
-            // default, so the Windows home *is* this shell's home â one directory
+            // default, so the Windows home *is* this shell's home — one directory
             // under two spellings, unlike WSL's two directories.
             starting_dir: StartingDir::WindowsHome,
             // **Windows, not MSYS.** Git Bash prints `/d/Developer` and its process
-            // is standing in `D:\Developer` â one directory, two spellings, and the
+            // is standing in `D:\Developer` — one directory, two spellings, and the
             // Win32 one is the true one: it is what `CreateProcess` was handed, what
             // Explorer opens, and what every other pane in this window speaks. The
             // MSYS spelling is a third namespace that only this shell understands,
@@ -990,11 +990,11 @@ pub fn shipped() -> Vec<Profile> {
 ///
 /// **One table, and it lives here rather than on `Runtime`.** Every consumer of
 /// a profile is already a free function in this module taking a `usize`
-/// ([`title`], [`spawn_place`], [`revived_cwd`], [`index_of_id`]â¦) and two of
+/// ([`title`], [`spawn_place`], [`revived_cwd`], [`index_of_id`]…) and two of
 /// them are in other modules entirely (`restore.rs`, `shell_integration.rs`).
 /// Threading a borrowed table through all of that would have made the table an
 /// argument of forty signatures to serve one owner; [`crate::i18n::install`] set
-/// the precedent for the shape used instead â read the file, install once,
+/// the precedent for the shape used instead — read the file, install once,
 /// before anything that measures a string exists.
 ///
 /// Unlike the language, it can move afterwards: a reorder and a duplicate both
@@ -1012,7 +1012,7 @@ impl ProfileTable {
         &self.profiles
     }
 
-    /// How many rows there are â a runtime fact now, and the reason the two
+    /// How many rows there are — a runtime fact now, and the reason the two
     /// `[T; count()]` arrays this module used to hold became `Vec`s.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -1033,7 +1033,7 @@ impl ProfileTable {
 
     /// The rows a picker offers, as table indices.
     ///
-    /// Hidden rows are absent â that is the whole of what hiding means â and the
+    /// Hidden rows are absent — that is the whole of what hiding means — and the
     /// indices are the **table's**, not the picker's own row numbers. A menu row
     /// that carried its own ordinal would name a different profile the moment
     /// something above it was hidden, and the answer it got wrong would be
@@ -1052,9 +1052,9 @@ impl ProfileTable {
 /// testable: `cargo test` runs this crate's cases in parallel in one process, so
 /// a case that reordered the *process's* table for a microsecond would race
 /// every other case that asks how many profiles there are. The tests below build
-/// their own [`Registry`] and move that. It is `crate::i18n`'s ruling verbatim â
+/// their own [`Registry`] and move that. It is `crate::i18n`'s ruling verbatim —
 /// "these build their own `Current` rather than moving the process's, and that
-/// is a decision and not a shortcut" â met again one table over.
+/// is a decision and not a shortcut" — met again one table over.
 struct Registry {
     /// `Arc` rather than a guard handed to callers: a draw pass reads a title, a
     /// mark and a command line from three places inside one frame, and a lock
@@ -1062,7 +1062,7 @@ struct Registry {
     /// call into this module. A refcount bump per read is much the cheaper half.
     table: RwLock<Arc<ProfileTable>>,
     /// [`crate::i18n::lang_revision`]'s twin, feeding `LayoutKey` for the
-    /// identical reason. A profile's name is a **width**: the `Ë` menu's rows,
+    /// identical reason. A profile's name is a **width**: the `˅` menu's rows,
     /// the pane submenu's, the settings combo's column and every tab that falls
     /// back to its profile's name are measured and cached, so a reorder or a
     /// duplicate that did not advance this would be a window drawing yesterday's
@@ -1144,7 +1144,7 @@ impl Registry {
             id,
             // No script this build ships will ever announce a name this build
             // did not choose, so a copy has no second word to be compared
-            // against â see `announcement_set`.
+            // against — see `announcement_set`.
             compared_title: None,
             display_title,
             // **A copy carries no machine qualifier**, which is what `compose`
@@ -1152,8 +1152,8 @@ impl Registry {
             // WSL has pinned whatever distribution it meant in its own
             // arguments, and appending the machine's *default* distribution to
             // it would be a title naming the wrong one. Said here as well as
-            // there because the two are one row read twice â before the file is
-            // written and after it is read back â and a row that renamed itself
+            // there because the two are one row read twice — before the file is
+            // written and after it is read back — and a row that renamed itself
             // across a restart would be the table disagreeing with itself.
             qualifier: Qualifier::None,
             origin: Origin::User,
@@ -1169,7 +1169,7 @@ impl Registry {
     /// Every editor field's body: read the table, change one row, put it back.
     ///
     /// **One door for all of them**, because every field in this dialog writes
-    /// the instant it is changed (Â§7.1.6c-4a: no dirty gate, nothing to save) and
+    /// the instant it is changed (§7.1.6c-4a: no dirty gate, nothing to save) and
     /// a second spelling of "clone, mutate, publish" is a second place for the
     /// revision to be forgotten. `change` answers whether it changed anything, so
     /// that a field re-writing the value it already held does not tick a
@@ -1225,7 +1225,7 @@ impl Registry {
         })
     }
 
-    /// [`set_hidden`]'s body â the two guards over this table's own floor rather
+    /// [`set_hidden`]'s body — the two guards over this table's own floor rather
     /// than over the process's, which is what lets a test hide a row without
     /// moving the window's answer to "which profile is the floor".
     fn set_hidden(&self, index: usize, hidden: bool, default: usize) -> bool {
@@ -1248,8 +1248,8 @@ impl Registry {
     /// [`delete`]'s body.
     fn delete(&self, index: usize) -> Option<Profile> {
         let mut profiles = self.table().profiles.clone();
-        // A built-in cannot be deleted â a row that is missing looks exactly
-        // like a row that was never designed â and the floor cannot be, whatever
+        // A built-in cannot be deleted — a row that is missing looks exactly
+        // like a row that was never designed — and the floor cannot be, whatever
         // its origin, because a floor with a hole in it is not a floor.
         if profiles.get(index)?.origin != Origin::User {
             return None;
@@ -1259,7 +1259,7 @@ impl Registry {
         Some(removed)
     }
 
-    /// [`reinsert`]'s body â the Undo toast's other half.
+    /// [`reinsert`]'s body — the Undo toast's other half.
     fn reinsert(&self, profile: Profile, at: usize) -> usize {
         let mut profiles = self.table().profiles.clone();
         let at = at.min(profiles.len());
@@ -1307,7 +1307,7 @@ impl Registry {
             // "another one of these", and its copy really is a PowerShell, so
             // the mark is telling the truth (5a's own ruling). `New profile`
             // takes the default only as a *template* for what to run, and the
-            // first thing anybody does with it is point it somewhere else â at
+            // first thing anybody does with it is point it somewhere else — at
             // which moment a Microsoft blue would be a brand on a program that
             // is not theirs.
             mark: ChromeMark::ProfileGeneric {
@@ -1344,14 +1344,14 @@ impl Registry {
     }
 }
 
-/// The process's own registry â the table this window reads.
+/// The process's own registry — the table this window reads.
 static REGISTRY: OnceLock<Registry> = OnceLock::new();
 
 fn registry() -> &'static Registry {
     REGISTRY.get_or_init(Registry::shipped)
 }
 
-/// The table as it stands. Cheap â a refcount bump.
+/// The table as it stands. Cheap — a refcount bump.
 #[must_use]
 pub fn table() -> Arc<ProfileTable> {
     registry().table()
@@ -1387,7 +1387,7 @@ pub enum ProfileFault {
 ///
 /// The rules, each with a red gate of its own:
 ///
-/// * **The array is the order.** There is no `order` key â two places saying the
+/// * **The array is the order.** There is no `order` key — two places saying the
 ///   same thing drift.
 /// * **A built-in entry writes only its differences.** `{ "id": "pwsh" }` is the
 ///   shipped profile, unchanged, in that position.
@@ -1398,7 +1398,7 @@ pub enum ProfileFault {
 ///   named.** The rest of the file still lands.
 /// * **No file at all is the shipped five in shipped order**, byte for byte what
 ///   this window did before this slice existed. Nothing is written until
-///   something is changed â a feature does not announce itself by putting an
+///   something is changed — a feature does not announce itself by putting an
 ///   empty document in everybody's `%APPDATA%`.
 pub fn install(file: &ProfilesV1) -> Vec<ProfileFault> {
     registry().install(file)
@@ -1443,8 +1443,8 @@ fn compose(seed: Option<&Profile>, entry: &ProfileEntryV1) -> Option<Profile> {
             // second string for an announcement to be compared against.
             compared_title: None,
             display_title: entry.id.clone(),
-            // The neutral chassis in its neutral grey â the mock-up's own
-            // `#p-shell` is `#p-cmd`'s shape in another fill â because a row
+            // The neutral chassis in its neutral grey — the mock-up's own
+            // `#p-shell` is `#p-cmd`'s shape in another fill — because a row
             // that has not said what it is must not borrow somebody's brand to
             // say it. The eight struck colours are the editor's.
             mark: ChromeMark::ProfileCmd,
@@ -1492,7 +1492,7 @@ fn compose(seed: Option<&Profile>, entry: &ProfileEntryV1) -> Option<Profile> {
     }
     // The five identity colours are not this product's to repaint (S98/S31), so
     // a `mark` key is read for a profile of the user's own and ignored on a
-    // built-in â the file cannot say what the dialog will not offer.
+    // built-in — the file cannot say what the dialog will not offer.
     if profile.origin == Origin::User
         && let Some(mark) = &entry.mark
         && let Some(named) = mark_from_file(mark)
@@ -1504,20 +1504,20 @@ fn compose(seed: Option<&Profile>, entry: &ProfileEntryV1) -> Option<Profile> {
     {
         profile.integration = named;
     }
-    // **Derived for every row, built-in included** (Â§7.1.6c-6c). It used to be
+    // **Derived for every row, built-in included** (§7.1.6c-6c). It used to be
     // derived for a profile of the reader's own and stated for the five, which
     // was two rules for one fact and left a built-in repointed at another
     // program still translating directories in the namespace of the one it no
-    // longer runs. The derivation reproduces all five shipped answers â
-    // `the_namespace_every_shipped_profile_states_is_the_one_it_derives` â so
+    // longer runs. The derivation reproduces all five shipped answers —
+    // `the_namespace_every_shipped_profile_states_is_the_one_it_derives` — so
     // what this replaces is a copy and not a decision.
     profile.paths = derived_paths(&profile);
     profile.hidden = entry.hidden;
     Some(profile)
 }
 
-/// Which spelling of a path a profile's shell speaks â **derived, never stated**
-/// (plan Â§1.6).
+/// Which spelling of a path a profile's shell speaks — **derived, never stated**
+/// (plan §1.6).
 ///
 /// It is a property of the program and not a taste: choose it wrong and a
 /// directory inherited from another pane is silently translated into
@@ -1630,15 +1630,15 @@ fn start_at_to_file(start_at: &StartAt) -> StartAtV1 {
 ///
 /// A plain name and not the sprite's Rust spelling: `profiles.json` is read by
 /// people, and `ProfileUbuntu` is this build's private word for it. `shell` is
-/// the neutral chassis â the one `cmd` wears and the one a profile of the user's
-/// own gets â named for what it is rather than for the profile it came from.
-/// The neutral chassis's wire word, in both directions â `#p-shell`, the
+/// the neutral chassis — the one `cmd` wears and the one a profile of the user's
+/// own gets — named for what it is rather than for the profile it came from.
+/// The neutral chassis's wire word, in both directions — `#p-shell`, the
 /// drawing `#p-pwsh` and `#p-cmd` already are twice over.
 ///
 /// One value and not an enum with one variant, because a second chassis would
 /// be a second *drawing* and there is not one: the mock-up struck one shape for
 /// "a shell of your own" and the eight colours are what tell two of them apart.
-/// The key is in the file anyway (plan Â§1.2's own worked example writes it) so
+/// The key is in the file anyway (plan §1.2's own worked example writes it) so
 /// that a second one, if it is ever drawn, arrives as a value rather than as a
 /// schema version.
 const GENERIC_CHASSIS: &str = "shell";
@@ -1704,7 +1704,7 @@ fn integration_to_file(integration: IntegrationChoice) -> &'static str {
     }
 }
 
-/// The table as `profiles.json` would write it â **differences only**.
+/// The table as `profiles.json` would write it — **differences only**.
 ///
 /// A built-in equal to the shipped one in every respect is one key, its id, and
 /// that is what lets a later build retune it for everybody who never touched it.
@@ -1757,10 +1757,10 @@ fn entry_for(profile: &Profile, seed: Option<&Profile>) -> ProfileEntryV1 {
 
 /// Move one row one place, and say whether anything moved.
 ///
-/// Buttons and not a drag (plan Â§2.5): this dialog's keyboard model is a Tab
+/// Buttons and not a drag (plan §2.5): this dialog's keyboard model is a Tab
 /// order over targets and a drag has no keyboard equivalent; the list is five to
-/// ten rows, where a drag's only advantage â moving item thirty to position two
-/// â does not arise; and this window's chrome is already dense with drag targets,
+/// ten rows, where a drag's only advantage — moving item thirty to position two
+/// — does not arise; and this window's chrome is already dense with drag targets,
 /// so a third grammar of dragging inside a modal floating over them is a gesture
 /// collision.
 pub fn move_profile(index: usize, down: bool) -> bool {
@@ -1779,11 +1779,11 @@ pub fn duplicate(index: usize) -> Option<usize> {
 }
 
 /// Make a profile of the reader's own from the default as a template, and
-/// answer where it landed â the foot's `+ New profile` (plan Â§2.1).
+/// answer where it landed — the foot's `+ New profile` (plan §2.1).
 ///
 /// Not a blank one: a profile with no program is a row that cannot start, and
 /// this block's default state is meant to be foolproof. Not a menu of templates
-/// either â every row's `Duplicate` already is that, and one verb behind two
+/// either — every row's `Duplicate` already is that, and one verb behind two
 /// doors is the thing this house keeps deleting.
 pub fn create(template: usize) -> Option<usize> {
     registry().create(template)
@@ -1795,7 +1795,7 @@ pub fn create(template: usize) -> Option<usize> {
 /// Deterministic and not random, for `fresh_id`'s opposite reason: an id only
 /// has to be *unlikely* to collide, while two rows in the same list wearing the
 /// same colour is the exact failure a colour is there to prevent. Walking round
-/// after eight is honest â a ninth profile has to share with somebody, and
+/// after eight is honest — a ninth profile has to share with somebody, and
 /// sharing with the oldest is the least surprising choice.
 fn unworn_colour(profiles: &[Profile]) -> MarkColour {
     let worn = |candidate: MarkColour| {
@@ -1819,8 +1819,8 @@ fn unworn_colour(profiles: &[Profile]) -> MarkColour {
 pub enum NameVerdict {
     /// The table has it.
     Written,
-    /// Nothing, or nothing but spaces. A row has to be nameable â it is what a
-    /// tab, a picker and this list all draw â and an empty one would be a blank
+    /// Nothing, or nothing but spaces. A row has to be nameable — it is what a
+    /// tab, a picker and this list all draw — and an empty one would be a blank
     /// line in three surfaces.
     Blank,
     /// Another row already draws exactly this. **Refused rather than allowed**,
@@ -1828,19 +1828,19 @@ pub enum NameVerdict {
     /// mark and its name, and two rows called `PowerShell 7` standing one line
     /// apart in a picker is precisely the failure that made the two PowerShells
     /// carry their versions (user ruling 2026-08-11). The refusal is exact and
-    /// not fuzzy â `powershell 7` and `PowerShell  7` are different names and
-    /// the reader may mean either â because a rule a person cannot predict is
+    /// not fuzzy — `powershell 7` and `PowerShell  7` are different names and
+    /// the reader may mean either — because a rule a person cannot predict is
     /// worse than no rule.
     Taken,
 }
 
-/// Rename one row â the editor's `Name` field, which writes
+/// Rename one row — the editor's `Name` field, which writes
 /// [`Profile::display_title`] and never the string an announcement is compared
-/// against (Â§G S103, plan Â§1.4).
+/// against (§G S103, plan §1.4).
 ///
 /// A built-in is renamed too (user ruling 2026-08-17, Q2 = b): "give PowerShell 7
 /// a `-NoProfile`" is the commonest thing anybody does to this table, and forcing
-/// a duplicate for it would make two rows called PowerShell â while the
+/// a duplicate for it would make two rows called PowerShell — while the
 /// uniqueness of a row is half of this product's identity model. Its shipped
 /// [`Profile::compared_title`] is untouched and invisible, so `folio.ps1`'s
 /// announcement is still recognised as an echo after the rename.
@@ -1848,8 +1848,8 @@ pub fn rename(index: usize, title: &str) -> NameVerdict {
     registry().rename(index, title)
 }
 
-/// Point one row at a program on this machine â the editor's `Program` field and
-/// its `Browseâ¦`.
+/// Point one row at a program on this machine — the editor's `Program` field and
+/// its `Browse…`.
 ///
 /// A typed or browsed path is always a [`ProgramSource::Path`], including on a
 /// built-in: the shipped resolutions are *orders of search* (`BT_SHELL`, then a
@@ -1865,7 +1865,7 @@ pub fn set_program_path(index: usize, path: &Path) -> bool {
         profile.program = program;
         // A program is what decides which spelling of a path this profile's
         // shell speaks, and the namespace is derived and never stated (plan
-        // Â§1.6) â so it is re-derived here rather than left describing the
+        // §1.6) — so it is re-derived here rather than left describing the
         // program that used to be in this row.
         profile.paths = derived_paths(profile);
         true
@@ -1883,7 +1883,7 @@ pub fn set_start_at(index: usize, start_at: StartAt) -> bool {
     })
 }
 
-/// Repaint one row's mark â **a profile of the reader's own only**.
+/// Repaint one row's mark — **a profile of the reader's own only**.
 ///
 /// The five shipped colours are not this product's to repaint (S98/S31: the blue
 /// is Microsoft's and the orange is Ubuntu's), which is the same ruling that
@@ -1908,7 +1908,7 @@ pub fn set_args(index: usize, args: Vec<String>) -> bool {
 /// What this row sets in its sessions' environment, over what the terminal sets
 /// for itself.
 ///
-/// **Read at spawn, last** (plan Â§1.7) â see [`Profile::env`] for the three
+/// **Read at spawn, last** (plan §1.7) — see [`Profile::env`] for the three
 /// layers and for why a row here beats the terminal's own declaration.
 pub fn set_env(index: usize, env: Vec<(String, String)>) -> bool {
     registry().edit(index, |profile| {
@@ -1920,11 +1920,11 @@ pub fn set_env(index: usize, env: Vec<(String, String)>) -> bool {
     })
 }
 
-/// Keep one row out of the pickers, or put it back â the `â¯` menu's `Hide` and
+/// Keep one row out of the pickers, or put it back — the `⋯` menu's `Hide` and
 /// `Show`.
 ///
 /// Two rows refuse to be hidden and the refusals are guards rather than
-/// politeness (plan Â§2.4, R5): the **default** cannot be hidden because hiding it
+/// politeness (plan §2.4, R5): the **default** cannot be hidden because hiding it
 /// leaves no new tab to open, and the **fallback floor** cannot, because every
 /// degradation in this product lands on it and a floor that can be taken away is
 /// a chain with a hole in the bottom. `default` is passed in rather than read,
@@ -1935,12 +1935,12 @@ pub fn set_hidden(index: usize, hidden: bool, default: usize) -> bool {
 }
 
 /// Take one row out of the table and hand it back whole, so an Undo can put it
-/// back â the `â¯` menu's `Delete` and the editor's foot verb.
+/// back — the `⋯` menu's `Delete` and the editor's foot verb.
 ///
-/// **Immediate, with an undo, and no confirmation** (plan Â§2.3, ruling 3): this
+/// **Immediate, with an undo, and no confirmation** (plan §2.3, ruling 3): this
 /// dialog has no dirty gate to route a question through and every choice in it is
 /// written the instant it is made, so what deletion is owed is not a second
-/// question but a way back â which is the register `Ctrl+Shift+T` already struck
+/// question but a way back — which is the register `Ctrl+Shift+T` already struck
 /// in this product, where a confirmation would be the first modal over a modal.
 ///
 /// The whole row comes back rather than a recipe for rebuilding it, because the
@@ -1954,13 +1954,13 @@ pub fn delete(index: usize) -> Option<Profile> {
 /// Put a deleted row back where it was, and answer where that turned out to be.
 ///
 /// Clamped to the end rather than refused, because the list may have moved under
-/// the toast â a reorder, or a second deletion â and a row that came back at the
+/// the toast — a reorder, or a second deletion — and a row that came back at the
 /// end is a row that came back.
 pub fn reinsert(profile: Profile, at: usize) -> usize {
     registry().reinsert(profile, at)
 }
 
-/// Put one built-in back to the table this build ships â the editor's foot verb
+/// Put one built-in back to the table this build ships — the editor's foot verb
 /// on a built-in (`Restore all defaults`).
 ///
 /// Its position and its hidden flag are not defaults: both are decisions about
@@ -1993,7 +1993,7 @@ pub fn integration_name(integration: Integration) -> crate::i18n::Text {
     }
 }
 
-/// `Auto (Bash init file)` â that picker's **button** while the row is on the
+/// `Auto (Bash init file)` — that picker's **button** while the row is on the
 /// rule, interned so the caption can ride a `Copy` snapshot of the page.
 ///
 /// `None` when the row has named a door: the button then says the word on the
@@ -2010,7 +2010,7 @@ pub fn integration_auto_label(index: usize) -> Option<&'static str> {
     })
 }
 
-/// A path the dialog has to draw, interned â the fixed starting folder, which is
+/// A path the dialog has to draw, interned — the fixed starting folder, which is
 /// this profile's value and therefore what its picker's button says.
 ///
 /// Through the same table [`title`] uses, and for its reason: `SettingsValues`
@@ -2022,7 +2022,7 @@ pub fn intern_path(path: &Path) -> &'static str {
     intern(&path.to_string_lossy())
 }
 
-/// Whether one row is a profile of the reader's own â which is what decides
+/// Whether one row is a profile of the reader's own — which is what decides
 /// whether it can be deleted, whether its colour is theirs, and which of the two
 /// verbs its editor's foot carries.
 #[must_use]
@@ -2060,7 +2060,7 @@ pub fn hidden(index: usize) -> bool {
     with_table(|table| table.get(index).is_some_and(|profile| profile.hidden))
 }
 
-/// The program this row names, spelled out in full â what the editor's `Program`
+/// The program this row names, spelled out in full — what the editor's `Program`
 /// field holds.
 ///
 /// The *resolution* rather than a probe: a built-in nobody has edited says what
@@ -2081,8 +2081,8 @@ pub fn program_text(index: usize, resolved: Option<&OsStr>) -> String {
     )
 }
 
-/// Split an argument line the way Windows splits a command line â **spaces
-/// separate, double quotes group** (plan Â§3.3).
+/// Split an argument line the way Windows splits a command line — **spaces
+/// separate, double quotes group** (plan §3.3).
 ///
 /// The rule is short on purpose and it is stated in the row's own sentence,
 /// because an argument box whose quoting rule cannot be said in one line is a box
@@ -2090,7 +2090,7 @@ pub fn program_text(index: usize, resolved: Option<&OsStr>) -> String {
 /// group in which whitespace is ordinary and a second `"` closes it; a `""`
 /// inside a group is one literal quote, which is `CommandLineToArgvW`'s own rule
 /// for the case and the only one a person can discover by trying it. Backslash
-/// escaping â `\"` â is deliberately **not** honoured: a Windows path is full of
+/// escaping — `\"` — is deliberately **not** honoured: a Windows path is full of
 /// backslashes, and a rule that made `C:\bin\` change the meaning of the next
 /// character would break the commonest argument there is.
 #[must_use]
@@ -2149,7 +2149,7 @@ pub fn join_arguments(words: &[String]) -> String {
         .join(" ")
 }
 
-/// `PowerShell 7 copy`, then `PowerShell 7 copy 2` â the naming the scheme
+/// `PowerShell 7 copy`, then `PowerShell 7 copy 2` — the naming the scheme
 /// customiser struck a slice earlier, verbatim: **a copy of a copy numbers
 /// itself from the original's name**, so duplicating `X copy` gives `X copy 2`
 /// and never `X copy copy`.
@@ -2180,16 +2180,16 @@ fn copy_title(source: &str, profiles: &[Profile]) -> String {
 }
 
 /// A stable id for a profile of the user's own: **the name it was made with,
-/// slugged, plus four hex digits** â `claude-7f3a`, `powershell-7-copy-91b2`.
+/// slugged, plus four hex digits** — `claude-7f3a`, `powershell-7-copy-91b2`.
 ///
 /// Not the slug alone, because renaming is the commonest edit there is and an
 /// identity that moved with the name would strand every seed on disk naming it.
 /// Not a bare uuid either: the whole point of a file of its own is that a person
-/// can read it, and `a3f1c8e0-â¦` is a line nobody can read. Computed once at
+/// can read it, and `a3f1c8e0-…` is a line nobody can read. Computed once at
 /// creation and never recomputed.
 ///
-/// The five shipped slugs are reserved words; a collision â with them, or with
-/// an id already in the table â retries with another suffix.
+/// The five shipped slugs are reserved words; a collision — with them, or with
+/// an id already in the table — retries with another suffix.
 fn fresh_id(display_title: &str, profiles: &[Profile]) -> String {
     let mut stem = String::new();
     for character in display_title.chars() {
@@ -2285,14 +2285,14 @@ pub fn paths(index: usize) -> PathNamespace {
     })
 }
 
-/// Which integration script serves one row â **resolved**, which is what every
+/// Which integration script serves one row — **resolved**, which is what every
 /// caller outside the editor's own picker is asking.
 #[must_use]
 pub fn integration(index: usize) -> Integration {
     with_table(|table| table.get(index).map_or(Integration::None, served_by))
 }
 
-/// One whole row, cloned â **what the spawn path is handed** (Â§7.1.6c-6c).
+/// One whole row, cloned — **what the spawn path is handed** (§7.1.6c-6c).
 ///
 /// `shell_command` used to take an index and ask this module four separate
 /// questions about it; it takes the row itself now, which makes it a pure
@@ -2313,7 +2313,7 @@ pub fn integration_choice(index: usize) -> IntegrationChoice {
     })
 }
 
-/// Which door serves this row's sessions â the `Shell integration` picker.
+/// Which door serves this row's sessions — the `Shell integration` picker.
 ///
 /// The namespace comes with it, because it has to: `paths` is derived from the
 /// program *and* the door (only `wsl.exe` behind a bash init file crosses into
@@ -2345,15 +2345,15 @@ pub fn args(index: usize) -> Vec<String> {
 /// One row of the Settings dialog's **Profiles** page, ready to be laid out.
 ///
 /// Built here and not in `settings.rs` for the reason every other derived answer
-/// in this house is built once: the `Ë` menu, the pane submenu, the default
+/// in this house is built once: the `˅` menu, the pane submenu, the default
 /// picker and this page are four surfaces asking the same three questions about
-/// a profile â what is it called, can this machine start it, and what does it
-/// actually give you â and four spellings of that is four chances for two of
+/// a profile — what is it called, can this machine start it, and what does it
+/// actually give you — and four spellings of that is four chances for two of
 /// them to disagree in front of the same reader.
 ///
 /// It rides into the dialog through `SettingsContent`, exactly as the shortcut
-/// page's lines do, which is what keeps [`ProfilePrograms`] â a fact about a
-/// filesystem â out of a struct that is otherwise a snapshot of settings.
+/// page's lines do, which is what keeps [`ProfilePrograms`] — a fact about a
+/// filesystem — out of a struct that is otherwise a snapshot of settings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileLine {
     /// Which row of the table this is. **The table's index and not the page's**:
@@ -2361,33 +2361,33 @@ pub struct ProfileLine {
     /// would come apart the day it did not.
     pub index: usize,
     pub mark: ChromeMark,
-    /// What the row is called, qualifier and all â [`title`].
+    /// What the row is called, qualifier and all — [`title`].
     pub title: &'static str,
-    /// The line under the name: what this profile runs, or â on a machine that
-    /// does not have it â why it cannot.
+    /// The line under the name: what this profile runs, or — on a machine that
+    /// does not have it — why it cannot.
     pub command: String,
     /// The honest capability sentence (J85), or `None` for a row that cannot
     /// run at all.
     ///
     /// **An unavailable row drops this line rather than greying it.** A shell
     /// that is not on this machine has no capabilities to report, and the one
-    /// sentence the row has room for is the reason it cannot start â which is
+    /// sentence the row has room for is the reason it cannot start — which is
     /// `.row.unavailable`'s existing rule applied to a row that happened to have
     /// two lines.
     pub capability: Option<&'static str>,
     /// Whether the `default` badge is on this row. **It reports and is not a
     /// control**: the default is changed on the General page and nowhere else,
-    /// because one field with two writers is the thing Â§7.1.6c-4a just avoided.
+    /// because one field with two writers is the thing §7.1.6c-4a just avoided.
     pub is_default: bool,
     /// Whether this is the floor every degradation in the product lands on.
     ///
     /// A fact about the table and not about this profile, exactly as
     /// [`Self::is_default`] is a fact about `settings.json` resolved against
-    /// this machine â and it is here for that field's reason: the row menu greys
+    /// this machine — and it is here for that field's reason: the row menu greys
     /// `Hide` on both, and a menu that asked the table itself would be a second
     /// reader of a rule [`set_hidden`] already enforces.
     pub is_fallback: bool,
-    /// Whether the `â¯` offers `Delete` at all. A built-in is hidden, never
+    /// Whether the `⋯` offers `Delete` at all. A built-in is hidden, never
     /// deleted, and its menu is simply shorter.
     pub deletable: bool,
     pub hidden: bool,
@@ -2430,14 +2430,14 @@ pub fn page_lines(programs: &ProfilePrograms, default: usize) -> Vec<ProfileLine
     })
 }
 
-/// `pwsh.exe -NoLogo`, `wsl.exe --cd ~`, `cmd.exe` â what this row starts, in
+/// `pwsh.exe -NoLogo`, `wsl.exe --cd ~`, `cmd.exe` — what this row starts, in
 /// the words the mock-up wrote under each of its names.
 ///
 /// **The leaf and not the path.** The full path is `C:\Program
 /// Files\PowerShell\7\pwsh.exe` and the row has about fifty-eight characters;
 /// the executable's own name is the half that identifies it, and the half a
 /// reader would recognise. The place arguments are appended because for the one
-/// profile that has them they are the whole of where it opens â `wsl.exe` alone
+/// profile that has them they are the whole of where it opens — `wsl.exe` alone
 /// says nothing about `~`.
 fn command_line(profile: &Profile, resolved: Option<&OsStr>) -> String {
     let program = resolved
@@ -2460,7 +2460,7 @@ fn command_line(profile: &Profile, resolved: Option<&OsStr>) -> String {
 /// the shell.
 ///
 /// The authority is `docs/shell-integration.md`'s "What each profile actually
-/// gets", and this page does not build a second matrix â it draws one row of
+/// gets", and this page does not build a second matrix — it draws one row of
 /// that one. Which is why the derivation is over [`Integration`] and
 /// [`PathNamespace`] rather than over the profile's id: a duplicate of WSL is
 /// not `wsl`, and it gets WSL's sentence because it gets WSL's door.
@@ -2471,10 +2471,10 @@ fn command_line(profile: &Profile, resolved: Option<&OsStr>) -> String {
 /// already spoken. Said this way each sentence is true in every state and never
 /// needs a probe to stay true.
 ///
-/// **Hyperlinks are the third dimension** (Â§7.1.6c-6c, J85 closed). Every
+/// **Hyperlinks are the third dimension** (§7.1.6c-6c, J85 closed). Every
 /// sentence above names them, and four of them would be claiming something this
-/// profile has switched off: `FORCE_HYPERLINK=0` in its own environment, or â
-/// on a PowerShell â a `TERM_PROGRAM` override, because `folio.ps1` declares
+/// profile has switched off: `FORCE_HYPERLINK=0` in its own environment, or —
+/// on a PowerShell — a `TERM_PROGRAM` override, because `folio.ps1` declares
 /// links only for a session whose `TERM_PROGRAM` it recognises as this
 /// terminal's. So the answer is asked of the one place that knows it
 /// ([`crate::shell_integration::declares_hyperlinks`]) and each sentence has a
@@ -2543,28 +2543,28 @@ pub fn capability_in_editor(index: usize) -> crate::i18n::Text {
     })
 }
 
-/// Every spelling of one profile's name that a shell announcing it would use â
+/// Every spelling of one profile's name that a shell announcing it would use —
 /// **the set a pane head compares an OSC 0/2 title against**.
 ///
 /// A shell that merely says its launcher's name has announced nothing, and the
 /// head must not promote it to a program title. Which name, though, is now two
-/// questions and not one (plan Â§1.4, and the first thing slice 5a had to land):
+/// questions and not one (plan §1.4, and the first thing slice 5a had to land):
 ///
-/// * the **shipped** title, because that is what the integration scripts send â
+/// * the **shipped** title, because that is what the integration scripts send —
 ///   `folio.ps1` writes `PowerShell 7` or `Windows PowerShell 5.1` however the
 ///   row has since been renamed. Drop this and the family name reappears in
 ///   front of every pane head the day somebody renames a row;
-/// * the **display** title, because a user who renames a row to `ä¸å·` is owed
+/// * the **display** title, because a user who renames a row to `七号` is owed
 ///   the same silence when their own shell echoes it back;
 /// * the **qualified** form, because that is the third spelling this window
-///   itself shows, and `WSL Â· Ubuntu` is what a tab reads.
+///   itself shows, and `WSL · Ubuntu` is what a tab reads.
 ///
 /// A profile of the user's own contributes no shipped string: no script this
 /// build ships will ever announce a name this build did not choose, so there is
 /// no second word to compare.
 ///
 /// `&'static str` throughout, so the set can be handed to a pure function and
-/// held for the length of a frame â the two composed spellings are interned by
+/// held for the length of a frame — the two composed spellings are interned by
 /// [`title`]'s own table.
 #[must_use]
 pub fn announcement_set(index: usize) -> Vec<&'static str> {
@@ -2582,7 +2582,7 @@ pub fn announcement_set(index: usize) -> Vec<&'static str> {
     })
 }
 
-/// [`announcement_set`]'s rule, without the interning and without the table â
+/// [`announcement_set`]'s rule, without the interning and without the table —
 /// so the rule can be read, and tested, on one profile.
 fn announcement_names(profile: &Profile, qualified: &str) -> Vec<String> {
     let mut names = vec![qualified.to_owned()];
@@ -2606,12 +2606,12 @@ fn announcement_names(profile: &Profile, qualified: &str) -> Vec<String> {
 /// It used to be called `DEFAULT_PROFILE` and it used to be both things at once:
 /// the floor a broken `profile_id` lands on, *and* the profile the `+` starts.
 /// P3 makes the second one a setting, and the two have to come apart before that
-/// setting exists â a name that means "what the user picked" and "what we do when
+/// setting exists — a name that means "what the user picked" and "what we do when
 /// nothing was picked" is a name that will be read as the wrong one of the two by
 /// whoever touches it next.
 ///
 /// What it must satisfy is one property: it names a program that is **part of
-/// Windows**, so it always starts â which is what makes it safe to be the end of
+/// Windows**, so it always starts — which is what makes it safe to be the end of
 /// every fallback chain (see [`the_fallback_profile_can_always_be_started`]).
 /// The *user's* default carries no such guarantee (they can uninstall Git after
 /// choosing Git Bash), which is precisely why [`default_profile`] resolves
@@ -2621,7 +2621,7 @@ fn announcement_names(profile: &Profile, qualified: &str) -> Vec<String> {
 /// follows the property rather than changing it. The floor used to be the
 /// PowerShell row because that row's resolution order *ended* at
 /// `powershell.exe`; now that PowerShell 7 has been given a row that answers
-/// honestly â greyed on a machine without it â the row that cannot fail is the
+/// honestly — greyed on a machine without it — the row that cannot fail is the
 /// one that names Windows PowerShell directly. Pointing the floor at a profile
 /// that can be greyed would be a fallback chain with a hole at the bottom.
 ///
@@ -2630,7 +2630,7 @@ fn announcement_names(profile: &Profile, qualified: &str) -> Vec<String> {
 /// that ends up running 5.1 now says *Windows PowerShell* on its tab instead of
 /// wearing the name of the shell it failed to be.
 ///
-/// **A lookup and no longer the literal `1`** (Â§7.1.6c-6). It was an ordinal
+/// **A lookup and no longer the literal `1`** (§7.1.6c-6). It was an ordinal
 /// into a `const` array, which was exact for as long as nothing could reorder
 /// that array; a table the user can reorder turns the same literal into "whoever
 /// happens to be second", and a floor that can be walked out from under is a
@@ -2647,14 +2647,14 @@ pub fn fallback_profile() -> usize {
 /// against a borrowed table for one reason: a case that moved the *window's*
 /// table to ask what happens when a profile disappears would race every other
 /// case in this crate. The file can now change under a running window
-/// (Â§7.1.6c-6d), so "what a name resolves to after the table moved" is a
+/// (§7.1.6c-6d), so "what a name resolves to after the table moved" is a
 /// question with red gates on it, and a question that cannot be asked of a
 /// private table cannot have one.
 fn fallback_profile_in(table: &ProfileTable) -> usize {
     table.position_of_id(WINDOWS_POWERSHELL_ID).unwrap_or(0)
 }
 
-/// Which profile the `+`, `Ctrl+Shift+N` and the opening window start from â
+/// Which profile the `+`, `Ctrl+Shift+N` and the opening window start from —
 /// `state.defaultProfile` (mock-up 3217), resolved for this machine.
 ///
 /// `stored` is `settings.json`'s `default_profile`, an id and not an index
@@ -2663,8 +2663,8 @@ fn fallback_profile_in(table: &ProfileTable) -> usize {
 /// readings of "the default" is how three of them end up meaning something
 /// slightly different:
 ///
-/// * an id naming no profile in this build â including the empty id a user who
-///   has never opened the setting has â is [`fallback_profile()`], which is
+/// * an id naming no profile in this build — including the empty id a user who
+///   has never opened the setting has — is [`fallback_profile()`], which is
 ///   [`index_of_id`]'s rule and not a second one;
 /// * an id naming a profile this machine cannot start is **also**
 ///   [`fallback_profile()`], and this is the part `index_of_id` cannot do because
@@ -2674,21 +2674,21 @@ fn fallback_profile_in(table: &ProfileTable) -> usize {
 ///
 /// The stored id is *not* rewritten when it degrades. Uninstalling Git must not
 /// quietly consume the answer "Git Bash", or reinstalling it would leave the
-/// user's own choice erased with nothing to say so â the degradation lives for
+/// user's own choice erased with nothing to say so — the degradation lives for
 /// exactly as long as its cause.
 #[must_use]
 pub fn default_profile(stored: &str, programs: &ProfilePrograms) -> usize {
     with_table(|table| default_profile_in(table, stored, |index| programs.is_available(index)))
 }
 
-/// The same three inputs over a table handed in â see [`fallback_profile_in`].
+/// The same three inputs over a table handed in — see [`fallback_profile_in`].
 ///
 /// **This is also the whole of what an external deletion owes the default
-/// profile** (Â§7.1.6c-6d): a hand edit that takes the row away leaves
+/// profile** (§7.1.6c-6d): a hand edit that takes the row away leaves
 /// `settings.json` naming an id nothing holds, which is the first of the three
 /// cases above and was already answered before the file could move. There is no
 /// second rule for a row deleted on disk, and the stored id is left alone there
-/// too â putting the entry back puts the default back.
+/// too — putting the entry back puts the default back.
 fn default_profile_in(
     table: &ProfileTable,
     stored: &str,
@@ -2703,15 +2703,15 @@ fn default_profile_in(
 /// Which profile a seed's `profile_id` names, or [`fallback_profile()`] when the
 /// file names one this build does not have.
 ///
-/// Falling back rather than refusing is the schema's own rule â `Â§5.4` éå¶éçº§,
-/// "æªç¥ profileâé»è®¤": a profile that was removed (or that a newer build wrote)
+/// Falling back rather than refusing is the schema's own rule — `§5.4` 逐叶降级,
+/// "未知 profile→默认": a profile that was removed (or that a newer build wrote)
 /// must cost you that tab's *shell choice*, never the tab. The place you were
 /// standing is the part worth keeping, and it survives this.
 ///
 /// It falls to the *fallback* and deliberately not to the user's configured
 /// default, which is the one place those two answers visibly differ. The setting
-/// says what it is for in the dialog's own words â "What opens on a new tab, and
-/// when Folio starts" â and a leaf coming back off disk is neither. A
+/// says what it is for in the dialog's own words — "What opens on a new tab, and
+/// when Folio starts" — and a leaf coming back off disk is neither. A
 /// user who set their default to `cmd` and restores a session written by a build
 /// that spelled a profile differently is owed the pane back, not every such pane
 /// silently converted to their current preference; and the conversion would be
@@ -2722,14 +2722,14 @@ pub fn index_of_id(id: &str) -> usize {
     with_table(|table| index_of_id_in(table, id))
 }
 
-/// The same rule over a table handed in â see [`fallback_profile_in`].
+/// The same rule over a table handed in — see [`fallback_profile_in`].
 ///
 /// **A seat that is already running reaches for this when the file moves under
-/// it** (Â§7.1.6c-6d). A pane holds the *index* of the profile it was born from,
+/// it** (§7.1.6c-6d). A pane holds the *index* of the profile it was born from,
 /// and an index is a position in a table somebody may now be reordering in an
 /// editor; asking by id across the change is what keeps a running pane wearing
 /// its own mark instead of whichever row slid into its slot. When the profile is
-/// gone the rule above applies unchanged â the seat costs its shell choice,
+/// gone the rule above applies unchanged — the seat costs its shell choice,
 /// never the seat.
 fn index_of_id_in(table: &ProfileTable, id: &str) -> usize {
     table
@@ -2742,8 +2742,8 @@ fn index_of_id_in(table: &ProfileTable, id: &str) -> usize {
 /// The question [`index_of_id`] answers *away*: it folds "this profile" and "no
 /// such profile, have the default" into one number, which is right for every
 /// caller that needs a profile and wrong for the one caller that needs to know a
-/// substitution happened. `M2-restart-shell-contract.md` Â§3 requires that
-/// substitution to be visible â "ç»ä¸éé»æ¿æ¢" â and a function that answers
+/// substitution happened. `M2-restart-shell-contract.md` §3 requires that
+/// substitution to be visible — "绝不静默替换" — and a function that answers
 /// `fallback_profile()` for a saved `"pwsh"` and a saved `"fish"` alike cannot tell
 /// anyone which of the two it was looking at.
 #[must_use]
@@ -2751,20 +2751,20 @@ pub fn has_id(id: &str) -> bool {
     with_table(|table| table.position_of_id(id).is_some())
 }
 
-/// What a greyed row says when the pointer rests on it â the *why* behind the
+/// What a greyed row says when the pointer rests on it — the *why* behind the
 /// grey, which the row itself has no room for.
 ///
 /// The mock-up has no tooltip here to quote: its four profiles are always
 /// startable, so it never had a greyed row to explain (user ruling: where the
 /// mock-up is silent, rule and report). Its own convention decides the shape
-/// anyway â a `title` on a menu row is the fact the row could not fit (7426/7430
+/// anyway — a `title` on a menu row is the fact the row could not fit (7426/7430
 /// put the full path on a Recent row captioned with only its leaf), so this is
 /// the fact `not installed` could not fit.
 ///
 /// The wording names **the profile and the machine**, in that order, and it is
 /// chosen against two alternatives that read as bug reports. "Not found" alone
 /// invites "where did you look?"; "Folio could not find Git Bash" makes
-/// the terminal the subject of a sentence whose subject is the machine. `â not
+/// the terminal the subject of a sentence whose subject is the machine. `— not
 /// found on this machine` says the search happened, that it was for a real thing,
 /// and that the answer is about this computer rather than about the product.
 #[must_use]
@@ -2777,8 +2777,8 @@ pub fn unavailable_tip(profile: usize) -> String {
 ///
 /// A profile's [`Profile::title`] is a constant, and for three of the four that
 /// is the whole truth: `Command Prompt` names one program. `WSL` names a
-/// *launcher*, and which shell it launches is a fact about this machine â the
-/// mock-up writes `WSL Â· Ubuntu` (line 2598) and P1 shipped the bare `WSL`
+/// *launcher*, and which shell it launches is a fact about this machine — the
+/// mock-up writes `WSL · Ubuntu` (line 2598) and P1 shipped the bare `WSL`
 /// precisely because printing "Ubuntu" over a command that would start Debian is
 /// chrome saying something it did not check. This field is where the checking
 /// gets attached.
@@ -2787,7 +2787,7 @@ pub fn unavailable_tip(profile: usize) -> String {
 /// exactly one profile has each. The two would come apart the moment the profile
 /// editor (K86) lets somebody make a second WSL profile pinned to a *named*
 /// distribution: that profile's paths are still WSL's, and its title is already
-/// complete â qualifying it with the machine's *default* distribution would be a
+/// complete — qualifying it with the machine's *default* distribution would be a
 /// title that names the wrong one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Qualifier {
@@ -2798,7 +2798,7 @@ pub enum Qualifier {
     WslDistribution,
 }
 
-/// The title this machine spells `profile` by â the constant, plus whatever
+/// The title this machine spells `profile` by — the constant, plus whatever
 /// [`Qualifier`] it earns here.
 ///
 /// Composed once and kept for the life of the process, which is what lets every
@@ -2848,7 +2848,7 @@ pub fn title(profile: usize) -> &'static str {
 /// `crate::settings::intern_scheme_name`'s recipe, one module over and for the
 /// same reason: the leak is **per name, not per call and not per rebuild**, so
 /// the memory this can consume is bounded by how many different names the user's
-/// table has held in one session â a handful, for the case it exists for, which
+/// table has held in one session — a handful, for the case it exists for, which
 /// is a row being renamed or duplicated. Freeing one would mean proving that no
 /// picker, no measurement and no hit test still holds it, which is exactly the
 /// proof `&'static str` exists to not have to write.
@@ -2866,19 +2866,19 @@ fn intern(text: &str) -> &'static str {
     leaked
 }
 
-/// [`title`]'s rule, without the cache â `Profile.title`, then the qualifier
+/// [`title`]'s rule, without the cache — `Profile.title`, then the qualifier
 /// this machine earned, joined the way the mock-up joins them.
 ///
-/// ` Â· ` with spaces around it, which is the mock-up's own spelling and is also
+/// ` · ` with spaces around it, which is the mock-up's own spelling and is also
 /// what makes the mock-up's *other* rule expressible: a session's name is
-/// everything before `" Â·"` (line 4013), so a tab that falls back to its
-/// profile's name is called `WSL` and not `WSL Â· Ubuntu-24.04`. That rule needs
-/// no code here â the short form **is** the constant, and the only place the
+/// everything before `" ·"` (line 4013), so a tab that falls back to its
+/// profile's name is called `WSL` and not `WSL · Ubuntu-24.04`. That rule needs
+/// no code here — the short form **is** the constant, and the only place the
 /// qualifier is added is the place a long name fits.
 fn compose_title(profile: &Profile, qualifier: Option<&str>) -> String {
     match (profile.qualifier, qualifier) {
         (Qualifier::WslDistribution, Some(distribution)) => {
-            format!("{} Â· {distribution}", profile.display_title)
+            format!("{} · {distribution}", profile.display_title)
         }
         _ => profile.display_title.clone(),
     }
@@ -2899,25 +2899,25 @@ fn compose_title(profile: &Profile, qualifier: Option<&str>) -> String {
 /// the pane opens in a place nobody chose while looking as though it worked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathNamespace {
-    /// `D:\Developer` â a Win32 path, drive-rooted.
+    /// `D:\Developer` — a Win32 path, drive-rooted.
     Windows,
-    /// `/mnt/d/Developer`, `/home/weiyi` â the distribution's own filesystem.
+    /// `/mnt/d/Developer`, `/home/weiyi` — the distribution's own filesystem.
     Wsl,
 }
 
-/// `C:\Users\Weiyi` â `/mnt/c/Users/Weiyi`, or `None` when this path names
+/// `C:\Users\Weiyi` → `/mnt/c/Users/Weiyi`, or `None` when this path names
 /// nothing a WSL shell can stand in.
 ///
 /// The drive map is WSL's own and it is a documented, stable mount rule rather
 /// than a convention we are inventing: every fixed drive appears under `/mnt/`
 /// at its lower-cased letter. Verified against the launcher itself on this
-/// machine â `wsl.exe --cd 'D:\Developer' -- pwd` answers `/mnt/d/Developer`,
+/// machine — `wsl.exe --cd 'D:\Developer' -- pwd` answers `/mnt/d/Developer`,
 /// which is the same answer this function gives.
 ///
 /// `None` for everything that is not drive-rooted, and each refusal is a real
 /// case rather than defensive noise:
 ///
-/// * a UNC share (`\\server\share`, and the `\\wsl.localhost\â¦` spelling
+/// * a UNC share (`\\server\share`, and the `\\wsl.localhost\…` spelling
 ///   `wslpath -w` produces) is not mounted under `/mnt` at all;
 /// * a relative or drive-relative path (`src`, `C:src`) does not name a place
 ///   without knowing where somebody was standing, and that somebody is not this
@@ -2927,8 +2927,8 @@ pub enum PathNamespace {
 ///   see.
 ///
 /// The parse goes through [`std::path::Component`] rather than through the
-/// string, so the shapes Windows actually has â including the verbatim
-/// `\\?\C:\â¦` spelling of a drive â are classified by the platform's own parser
+/// string, so the shapes Windows actually has — including the verbatim
+/// `\\?\C:\…` spelling of a drive — are classified by the platform's own parser
 /// instead of by a prefix test that would read `\\?\C:\x` as a UNC share.
 #[must_use]
 pub fn windows_to_wsl(path: &Path) -> Option<PathBuf> {
@@ -2953,14 +2953,14 @@ pub fn windows_to_wsl(path: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(translated))
 }
 
-/// `/mnt/c/Users/Weiyi` â `C:\Users\Weiyi`, or `None` when Windows has no name
+/// `/mnt/c/Users/Weiyi` → `C:\Users\Weiyi`, or `None` when Windows has no name
 /// for this place.
 ///
 /// The inverse is **not total**, and that asymmetry is the whole reason a
 /// translation can fail. `/home/weiyi` is a directory inside the distribution's
 /// own root filesystem; the only Windows spelling of it is the
 /// `\\wsl.localhost\<distro>\home\weiyi` share, which is a network path to a
-/// service rather than a directory â it needs the distribution running, it is
+/// service rather than a directory — it needs the distribution running, it is
 /// not what `cd` in that shell means, and it is precisely the authority a
 /// `file://` report is obliged to reject as remote. So the honest answer is that
 /// there is no answer, and the caller falls back to the target profile's own
@@ -2988,7 +2988,7 @@ pub fn wsl_to_windows(path: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(translated))
 }
 
-/// Where `cwd` â a directory written in `from`'s namespace â is, said in `to`'s,
+/// Where `cwd` — a directory written in `from`'s namespace — is, said in `to`'s,
 /// or `None` when `to` has no name for it.
 #[must_use]
 pub fn translate_cwd(from: PathNamespace, to: PathNamespace, cwd: &Path) -> Option<PathBuf> {
@@ -3001,7 +3001,7 @@ pub fn translate_cwd(from: PathNamespace, to: PathNamespace, cwd: &Path) -> Opti
 }
 
 /// The directory a new leaf of `target` opens in when it is born beside a leaf
-/// of `source` that is standing in `cwd` â P4's replacement for "only from its
+/// of `source` that is standing in `cwd` — P4's replacement for "only from its
 /// own profile".
 ///
 /// P3 answered this by refusing every crossing pair, which was the conservative
@@ -3009,11 +3009,11 @@ pub fn translate_cwd(from: PathNamespace, to: PathNamespace, cwd: &Path) -> Opti
 /// written in two namespaces, and carrying one across unconverted names nothing.
 /// The test it enforced was *"is this the same profile"*; the test now is **"can
 /// the target say where you are standing"**, which is the question that was
-/// always being asked. Every pair that can, inherits â a PowerShell in
+/// always being asked. Every pair that can, inherits — a PowerShell in
 /// `D:\Developer` opens a WSL tab in `/mnt/d/Developer`, and a WSL shell in
-/// `/mnt/d/Developer` opens a PowerShell in `D:\Developer` â and the pairs that
+/// `/mnt/d/Developer` opens a PowerShell in `D:\Developer` — and the pairs that
 /// cannot fall through to the target profile's own starting directory rather
-/// than to a guess (`docs/shell-integration.md` Â§34-35).
+/// than to a guess (`docs/shell-integration.md` §34-35).
 #[must_use]
 pub fn cwd_for_spawn(source: usize, target: usize, cwd: Option<&Path>) -> Option<PathBuf> {
     translate_cwd(paths(source), paths(target), cwd?)
@@ -3021,13 +3021,13 @@ pub fn cwd_for_spawn(source: usize, target: usize, cwd: Option<&Path>) -> Option
 
 /// Where a leaf is to be started, in the two forms a spawn can actually say it.
 ///
-/// Both at once rather than an either/or, because they are not alternatives â
+/// Both at once rather than an either/or, because they are not alternatives —
 /// they are the two channels a process launch has, and a profile uses whichever
 /// one its program listens on.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SpawnPlace {
     /// Handed over as the child's working directory. `None` when this machine
-    /// cannot name the place â the shell then starts where a process started by
+    /// cannot name the place — the shell then starts where a process started by
     /// this one starts, which is what every leaf did before there was a starting
     /// directory at all: an unchanged answer rather than a guessed one.
     pub working_directory: Option<PathBuf>,
@@ -3036,7 +3036,7 @@ pub struct SpawnPlace {
 }
 
 /// A directory a leaf of `profile` was saved standing in, if it is still a
-/// directory â the existence check that guards every revival, asked in the
+/// directory — the existence check that guards every revival, asked in the
 /// namespace the path is written in.
 ///
 /// `is_dir()` is a Win32 question, and asking it of `/mnt/d/Developer` answers
@@ -3044,7 +3044,7 @@ pub struct SpawnPlace {
 /// `/mnt` exists as far as Windows is concerned, so an unguarded check would
 /// drop the directory of every WSL pane it ever restored, silently, and every
 /// revived WSL tab would come back at `~`. The check is therefore asked only
-/// where it can be answered, and a WSL directory is taken at its word â if it
+/// where it can be answered, and a WSL directory is taken at its word — if it
 /// has since been deleted, `wsl.exe --cd` reports that itself, in the pane,
 /// which is an honest answer this side could not have produced anyway.
 #[must_use]
@@ -3055,15 +3055,15 @@ pub fn revived_cwd(profile: usize, cwd: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Where a leaf of `profile` opens, and how its launcher is told â the
+/// Where a leaf of `profile` opens, and how its launcher is told — the
 /// resolution of [`Profile::starting_dir`] and an inherited directory against
 /// this machine.
 ///
 /// `inherited` is what [`cwd_for_spawn`] handed back, **already in this
 /// profile's own namespace**; this function only decides which channel it
 /// travels on. Both inputs meet here rather than at the call site because the
-/// channel is a property of the profile and the P3-era split â cwd through one
-/// path, the profile's home through another â is what let a WSL leaf's inherited
+/// channel is a property of the profile and the P3-era split — cwd through one
+/// path, the profile's home through another — is what let a WSL leaf's inherited
 /// directory be handed to `CreateProcess` as if it were a Windows path.
 ///
 /// Read at spawn rather than probed once like [`ProfilePrograms`], and the
@@ -3115,7 +3115,7 @@ pub fn spawn_place(
     place_for(&start_at, &starting_dir, namespace, inherited, environment)
 }
 
-/// [`spawn_place`]'s pure half â the three answers resolved against one
+/// [`spawn_place`]'s pure half — the three answers resolved against one
 /// machine, with no table under it.
 ///
 /// Split off for [`merge`]'s reason one function over: the rule is worth pinning
@@ -3135,7 +3135,7 @@ fn place_for(
     // untranslatable inheritance already did.
     let place = match start_at.clone() {
         StartAt::Inherit => inherited,
-        // Not "inherit with nothing to inherit" â this one *refuses* a folder
+        // Not "inherit with nothing to inherit" — this one *refuses* a folder
         // that was there, which is the whole of what the reader asked for.
         StartAt::Home => None,
         // Written in the picker's namespace and crossed into the profile's here,
@@ -3162,8 +3162,8 @@ fn place_for(
 
 /// The first directory of `PATH` holding `file_name`, joined.
 ///
-/// `std::env::split_paths` only parses an already-fetched `PATH` string â it
-/// touches neither the real environment nor the real filesystem â so this stays
+/// `std::env::split_paths` only parses an already-fetched `PATH` string — it
+/// touches neither the real environment nor the real filesystem — so this stays
 /// a pure function of whatever `environment` reports, which is what lets a test
 /// hand it an imaginary machine.
 fn search_path(environment: &dyn ShellEnvironment, file_name: &str) -> Option<PathBuf> {
@@ -3175,8 +3175,8 @@ fn search_path(environment: &dyn ShellEnvironment, file_name: &str) -> Option<Pa
 
 /// The installs `git.exe` is looked for in when it is not on `PATH`.
 ///
-/// The same three the Git Bash profile falls back to â the system-wide, the
-/// 32-bit and the per-user installers' defaults â pointed at `cmd\git.exe`
+/// The same three the Git Bash profile falls back to — the system-wide, the
+/// 32-bit and the per-user installers' defaults — pointed at `cmd\git.exe`
 /// instead of `bin\bash.exe`, because they are two files of one install.
 fn git_fallbacks() -> [ProgramCandidate; 3] {
     [
@@ -3199,7 +3199,7 @@ fn git_fallbacks() -> [ProgramCandidate; 3] {
 ///
 /// **`PATH` first, and it is more than a shortcut.** The Git block asks `git`
 /// questions whose answers sit three inches from a pane where the user types
-/// `git status` themselves â so the binary that answers must be *the one they
+/// `git status` themselves — so the binary that answers must be *the one they
 /// are already using*, not merely one that exists. `PATH` names that binary; the
 /// three fallbacks under it only catch a machine where Git was installed but
 /// never put on the path, and a Git found that way is still the only one there
@@ -3226,7 +3226,7 @@ pub fn find_git(environment: &dyn ShellEnvironment) -> Option<PathBuf> {
 ///
 /// Once, and that is the whole reason this is a value rather than a function.
 /// Availability is a filesystem question, the picker asks it of every row it
-/// draws, and the picker is redrawn on every frame it is open â a probe called
+/// draws, and the picker is redrawn on every frame it is open — a probe called
 /// from the paint would put four `is_file` calls on the pointer's path at
 /// whatever rate the screen refreshes. It is also a question whose answer must
 /// not change *while the menu is open*: a row that greys out between the frame
@@ -3281,7 +3281,7 @@ impl ProfilePrograms {
     }
 
     /// Where one candidate says to look, or `None` when the machine cannot even
-    /// name the place â an environment variable that is unset, or an anchor that
+    /// name the place — an environment variable that is unset, or an anchor that
     /// is nowhere on `PATH`.
     ///
     /// Naming a place is not finding a file there; the caller still probes.
@@ -3296,7 +3296,7 @@ impl ProfilePrograms {
             ProgramCandidate::BesideOnPath { anchor, tail } => {
                 let found = search_path(environment, anchor)?;
                 // The anchor's install root is some ancestor of wherever PATH
-                // found it â `<root>\cmd\git.exe` in a plain shell, but
+                // found it — `<root>\cmd\git.exe` in a plain shell, but
                 // `<root>\mingw64\bin\git.exe` when PATH was set up by Git Bash
                 // itself. Walking every ancestor and asking which one truly
                 // carries the tail answers both spellings; a fixed two-step
@@ -3324,7 +3324,7 @@ impl ProfilePrograms {
     }
 }
 
-/// Which row of the menu, and **what kind of row** â the two lists the picker
+/// Which row of the menu, and **what kind of row** — the two lists the picker
 /// shows are indexed separately and a bare number cannot say which one it is
 /// counting.
 ///
@@ -3332,7 +3332,7 @@ impl ProfilePrograms {
 /// and nothing else, so a row index *was* a profile index and the two could be
 /// the same integer; the moment a Recent section sits under the profiles, that
 /// same integer names two different things, and the failure it produces is not
-/// a panic but a silent one â clicking `~/repo Â· 3m ago` launching a plain
+/// a panic but a silent one — clicking `~/repo · 3m ago` launching a plain
 /// PowerShell in the wrong place, which looks like the menu working.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuRow {
@@ -3368,14 +3368,14 @@ impl ProfileMenu {
     }
 
     /// The chevron: open when shut, shut when open. A control that opens
-    /// something must also put it away â the mock-up learned that one the hard
+    /// something must also put it away — the mock-up learned that one the hard
     /// way, and its comment says so.
     pub fn toggle(&mut self) {
         self.open = !self.open;
         self.hover = None;
     }
 
-    /// Shut it, and report whether there was anything to shut â which is what
+    /// Shut it, and report whether there was anything to shut — which is what
     /// tells Esc and a press elsewhere whether they consumed anything.
     pub fn close(&mut self) -> bool {
         let was_open = self.open;
@@ -3409,7 +3409,7 @@ pub struct ProfileMenuLayout {
     /// Which table row each of [`Self::items`] draws.
     ///
     /// The two are not the same number once anything is hidden, and the answer a
-    /// bare ordinal would get wrong here is silent â the wrong shell would
+    /// bare ordinal would get wrong here is silent — the wrong shell would
     /// simply start. So the mapping is laid down once, at layout, and the draw
     /// and the hit test both read it rather than each recomputing which rows are
     /// on offer.
@@ -3418,7 +3418,7 @@ pub struct ProfileMenuLayout {
     ///
     /// Unconditional where the Recent separator is optional, and the asymmetry
     /// is the mock-up's: a Recent heading over an empty list is a promise the
-    /// menu cannot keep, while `Files pane` is always available â every tab can
+    /// menu cannot keep, while `Files pane` is always available — every tab can
     /// be given a files column.
     files_separator: [f32; 4],
     /// The `Files pane` row itself.
@@ -3440,8 +3440,8 @@ impl ProfileMenuLayout {
     ///
     /// [`hit`] answers the same question and more, and cannot be used for it: it
     /// needs the machine's profile list and the seed vault, because a *row* has
-    /// to know whether it can be chosen. The `â`'s leave grace asks something
-    /// much smaller â "is the pointer still on the pair" â and asking it through
+    /// to know whether it can be chosen. The `⌄`'s leave grace asks something
+    /// much smaller — "is the pointer still on the pair" — and asking it through
     /// the bigger question would make the grace depend on which shells are
     /// installed.
     #[must_use]
@@ -3455,13 +3455,13 @@ impl ProfileMenuLayout {
     /// The mock-up puts a `title` on a menu row exactly when the row is showing
     /// less than it knows: 7426 and 7430 caption a Recent row with the last
     /// segment of a path and hang the whole path off it. This is that rule, plus
-    /// the one row the mock-up never had â a profile this machine cannot start,
+    /// the one row the mock-up never had — a profile this machine cannot start,
     /// captioned `not installed`, which is a state without its reason.
     ///
     /// It is one iterator rather than a tooltip block beside the draw, because
     /// the rectangles are the *laid-out* ones: a tip registered against a box
     /// computed a second way is a tip that appears where the row is not. An
-    /// available profile row yields nothing â its caption already is everything
+    /// available profile row yields nothing — its caption already is everything
     /// the row knows, and a tip that restates the label under the pointer is the
     /// noise `hideTip` exists to prevent.
     pub fn tips<'a>(
@@ -3496,8 +3496,8 @@ impl ProfileMenuLayout {
 
 /// What the menu shows of a vault: its first [`RECENT_CAPACITY`] entries.
 ///
-/// The cap is the vault's own (`docs/DESIGN.md` Â§7.1.4, mock-up 4106) and not a
-/// second policy invented here â but it is applied here too, because a menu is
+/// The cap is the vault's own (`docs/DESIGN.md` §7.1.4, mock-up 4106) and not a
+/// second policy invented here — but it is applied here too, because a menu is
 /// a surface with a window edge under it and "however many the caller passed"
 /// is not a height. Both [`layout`] and [`build`] read the slice through this,
 /// so the rectangles and the rows drawn into them cannot disagree.
@@ -3513,7 +3513,7 @@ fn menu_rows(recent: &[RecentEntry]) -> &[RecentEntry] {
 /// real boxes and a menu below either one has the whole page to fall into.
 ///
 /// This window is not a page. Below-and-left of a *rail* button is the rail's
-/// own column â 46px of it while the rail is parked â so the menu would be laid
+/// own column — 46px of it while the rail is parked — so the menu would be laid
 /// down the sidebar it was opened from. A vertical strip keeps its free space to
 /// the side, which is the same reason [`crate::peek_strip::PeekSide`] exists and
 /// the same answer.
@@ -3525,7 +3525,7 @@ pub enum MenuSide {
     Beside,
 }
 
-/// The menu hung off `anchor` â the `Ë`'s own box, in physical pixels â inside
+/// The menu hung off `anchor` — the `˅`'s own box, in physical pixels — inside
 /// a surface this big, showing `recent` under the profiles.
 ///
 /// No clock is read here and none is passed: how long ago a seed was closed is
@@ -3570,7 +3570,7 @@ pub fn layout(
     let files_block = separator_block + item_height;
 
     // **`min-width`, at last read as a minimum.** The mock-up's menu is
-    // content-sized â `min-width: 180px` over `white-space: nowrap` rows â and
+    // content-sized — `min-width: 180px` over `white-space: nowrap` rows — and
     // this took that declaration for a fixed width, which was survivable only
     // while every row fitted inside it. `Windows PowerShell` does not: with its
     // `default` annotation beside it the pair wants about 200px, and a fixed
@@ -3579,7 +3579,7 @@ pub fn layout(
     //
     // The annotation slot always reserves the **widest** annotation a row could
     // carry rather than the one it happens to carry today, so that changing the
-    // default profile â or unplugging the drive Git lives on â cannot make the
+    // default profile — or unplugging the drive Git lives on — cannot make the
     // menu change width under the pointer.
     let annotation = measure(hint_text(), px(HINT_FONT_LOGICAL_PX))
         .max(measure(unavailable_hint_text(), px(HINT_FONT_LOGICAL_PX)));
@@ -3599,7 +3599,7 @@ pub fn layout(
     // Not an oversight: a profile's title is this module's own (a constant, or a
     // constant plus a qualifier this machine answered), so its length is a fact
     // the product is responsible for and must make room for. A Recent row's name
-    // is a *directory* â arbitrary length, chosen by nobody here â and letting
+    // is a *directory* — arbitrary length, chosen by nobody here — and letting
     // one stretch the popup across the window is exactly what mock-up 1030's
     // `max-width: 260px` exists to prevent. Recent rows therefore go on being
     // clamped into whatever width the profile rows established, which is the
@@ -3630,15 +3630,15 @@ pub fn layout(
     let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
     let (left, top) = match side {
         // `menu.style.top = a.bottom + 4; menu.style.left = Math.min(a.left,
-        // win.width - mw - 8)` â the mock-up's own two lines.
+        // win.width - mw - 8)` — the mock-up's own two lines.
         MenuSide::Below => (
             anchor[0].min(surface_width - width - edge).max(0.0).round(),
             (anchor[3] + px(MENU_OFFSET_LOGICAL_PX)).round(),
         ),
-        // The same four pixels turned through a right angle. The rail's `Ë`
+        // The same four pixels turned through a right angle. The rail's `˅`
         // stands beside its `+` when the panel is open and collapses to nothing
         // when it is parked (Q181), so the box handed in here is the chevron's
-        // in one state and the `+`'s in the other â and "clear of its right
+        // in one state and the `+`'s in the other — and "clear of its right
         // edge, level with its top" is the one placement that reads the same for
         // both, because the two share that edge and that top by construction.
         MenuSide::Beside => (
@@ -3686,7 +3686,7 @@ pub fn layout(
         cursor += separator_block;
         let section_label = [content_left, cursor, content_right, cursor + section_block];
         cursor += section_block;
-        // `.recent-item { max-width: 260px }` â see the constant: a clamp that
+        // `.recent-item { max-width: 260px }` — see the constant: a clamp that
         // cannot bind while the menu keeps its min-width, and the right place
         // for it the day the menu is content-sized.
         let recent_right = content_right.min(content_left + px(RECENT_ITEM_MAX_WIDTH_LOGICAL_PX));
@@ -3720,7 +3720,7 @@ pub fn layout(
 /// a press outside it belongs to whatever is there and merely closes the menu on
 /// its way past.
 ///
-/// The separator and the heading are body, not rows â they are the two things in
+/// The separator and the heading are body, not rows — they are the two things in
 /// the menu that name nothing you can open.
 ///
 /// **A row this machine cannot start is body too**, and that is the whole
@@ -3767,7 +3767,7 @@ pub fn hit(
 /// Whether the shell a Recent row would revive can be started on this machine.
 ///
 /// Asked of Recent rows and not only of profile rows, because the row above and
-/// the row below are the same offer: `~/repo Â· 3m ago` under a Git mark is
+/// the row below are the same offer: `~/repo · 3m ago` under a Git mark is
 /// "start Git Bash here", and if the profile row that says `Git Bash` is greyed
 /// then this one has to be too. Greying one and not the other would put, in one
 /// menu, both answers to the same question.
@@ -3788,7 +3788,7 @@ fn contains(rect: [f32; 4], x: f32, y: f32) -> bool {
 ///
 /// One layer and not more: a popup with nothing of its own inside it has nothing
 /// to cover but the window, and the window is not the overlay's to draw. The
-/// stack exists so a surface can cover another surface the overlay drew â see
+/// stack exists so a surface can cover another surface the overlay drew — see
 /// [`crate::settings::build`], where the picker is a second layer over the dialog
 /// it hangs off.
 #[must_use]
@@ -3806,7 +3806,7 @@ pub fn build(
     let px = |value: f32| value * scale;
     let alpha = |value: u8| f32::from(value) / 255.0;
     // `.default-hint { margin-left: auto }` is a flex item, so in the mock-up it
-    // takes its own width out of the row before the name gets any â and the name
+    // takes its own width out of the row before the name gets any — and the name
     // is what shrinks (line 1031 puts `text-overflow: ellipsis` on the name span
     // and not on the hint). Measuring it is how that becomes true here: the row
     // is 180px, `Command Prompt` and `default` do not both fit in it, and until
@@ -3847,7 +3847,7 @@ pub fn build(
                 name: title(index),
                 // `margin-left: auto` puts the hint hard against the row's
                 // trailing padding, and it names a fact about the profile rather
-                // than the row's state â so it does not answer to hover.
+                // than the row's state — so it does not answer to hover.
                 //
                 // The two annotations are exclusive by construction rather than
                 // by an `if/else` that could one day pick wrong: `default` is
@@ -3870,7 +3870,7 @@ pub fn build(
         );
     }
 
-    // ââ the second section: `Files pane` âââââââââââââââââââââââââââââââââââ
+    // ── the second section: `Files pane` ───────────────────────────────────
     quads.push(OverlayQuad {
         rect: layout.files_separator,
         color: palette.menu_border,
@@ -3944,11 +3944,11 @@ pub fn build(
 
 /// One `.profile-item`, whichever list it belongs to.
 ///
-/// The two lists are the same row â mock-up 7426/7430 is `class="profile-item
+/// The two lists are the same row — mock-up 7426/7430 is `class="profile-item
 /// recent-item"`, and `.recent-item` adds a width and nothing else. So they are
 /// drawn by one function rather than two that look alike, because the way two
 /// menu rows drift apart is that somebody fixes the ink on one of them.
-/// `.menu-label` / `.rm-label` â a heading over a list, in the one form both
+/// `.menu-label` / `.rm-label` — a heading over a list, in the one form both
 /// popups wear it.
 fn section_label(text: &str, band: [f32; 4], scale: f32, palette: ChromePalette) -> ChromeLabel {
     let px = |value: f32| value * scale;
@@ -3964,7 +3964,7 @@ fn section_label(text: &str, band: [f32; 4], scale: f32, palette: ChromePalette)
             band[3] - px(SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX),
         ],
         font_size_px: px(SECTION_LABEL_FONT_LOGICAL_PX),
-        // `--ink3` over `--menu` â the same ink the row hints wear, because it
+        // `--ink3` over `--menu` — the same ink the row hints wear, because it
         // is the same declaration on the same surface.
         color: palette.menu_item_hint_text,
         align_right: false,
@@ -3981,7 +3981,7 @@ struct Row<'a> {
     /// The glyph in the row's icon column, or **nothing at all**.
     ///
     /// `None` since the graph's branch filter (T2, v2 (3)): an unticked checkbox
-    /// is an empty box and this window draws an empty box as empty space â a
+    /// is an empty box and this window draws an empty box as empty space — a
     /// hollow square would be a second container idiom beside the ring the radio
     /// rows already use, and at a menu row's fourteen pixels a square and a
     /// circle differing only in their corners is a distinction nobody reads. The
@@ -4001,12 +4001,12 @@ struct Row<'a> {
     ///
     /// One caller: the preview switcher's dirty dot, which is `--accent` because
     /// it is the same dot the header wears (mock-up 580-582). Everything else
-    /// leaves it alone and gets `--ink3` â a hint that *reports* rather than
+    /// leaves it alone and gets `--ink3` — a hint that *reports* rather than
     /// *warns*, which is why the ink is a parameter and not a rule.
     hint_ink: Option<[u8; 3]>,
     hovered: bool,
     /// Whether this row can do what it says. A row that cannot is drawn and not
-    /// offered â see [`hit`], which is where "not offered" is actually enforced.
+    /// offered — see [`hit`], which is where "not offered" is actually enforced.
     available: bool,
 }
 
@@ -4029,8 +4029,8 @@ fn push_row(
         ));
     }
     // The 15px mark centred on its own 14px column, which is what a flex box
-    // does with a child one pixel wider than the box it is in â or the 10px box
-    // a `Ã` gets instead, centred in exactly the same column so that a row with
+    // does with a child one pixel wider than the box it is in — or the 10px box
+    // a `×` gets instead, centred in exactly the same column so that a row with
     // a cross and a row with a folder still line their names up. See
     // [`ITEM_MARK_CLOSE_LOGICAL_PX`].
     let column_left = item[0] + px(ITEM_PADDING_X_LOGICAL_PX);
@@ -4063,8 +4063,8 @@ fn push_row(
         // The name's box ends at the row's trailing padding, and the row's own
         // right edge is where `.recent-item`'s `max-width` already landed. A
         // `ChromeLabel` clips per glyph and per pixel, so a name too long for
-        // that box is cropped exactly as CSS `overflow: hidden` crops it â
-        // mock-up 1031 asks for `text-overflow: ellipsis` instead, and the `â¦`
+        // that box is cropped exactly as CSS `overflow: hidden` crops it —
+        // mock-up 1031 asks for `text-overflow: ellipsis` instead, and the `…`
         // needs a measured string this module is not given.
         rect: [
             column_right + px(ITEM_GAP_LOGICAL_PX),
@@ -4074,8 +4074,8 @@ fn push_row(
         ],
         font_size_px: px(ITEM_FONT_LOGICAL_PX),
         // Three inks and one order of precedence. An unavailable row drops to
-        // the hint's own `--ink3` â the menu's quietest ink, and already the one
-        // this surface uses for text that reports rather than offers â and it
+        // the hint's own `--ink3` — the menu's quietest ink, and already the one
+        // this surface uses for text that reports rather than offers — and it
         // wins over hover because an unavailable row is never hovered anyway
         // (see [`hit`]); stating it first means the two cannot disagree if that
         // ever stops being true.
@@ -4104,7 +4104,7 @@ fn push_row(
             ],
             font_size_px: px(HINT_FONT_LOGICAL_PX),
             // `--ink3` over `--menu`. It used to be `dialog_muted_text`,
-            // which is the same ink over `--win` â the settings dialog's
+            // which is the same ink over `--win` — the settings dialog's
             // surface, not this one. Identical in the light theme, six levels
             // adrift in the dark.
             color: row.hint_ink.unwrap_or(palette.menu_item_hint_text),
@@ -4120,7 +4120,7 @@ fn push_row(
 
 /// `--border-soft`'s alpha for the theme whose `--border` is drawn in `ink`.
 ///
-/// White is the dark theme's hairline and black is the light theme's â the
+/// White is the dark theme's hairline and black is the light theme's — the
 /// palette's own convention, documented at `ChromePalette::menu_border`.
 fn separator_alpha(ink: [u8; 3]) -> f32 {
     if ink == [0xff, 0xff, 0xff] {
@@ -4130,7 +4130,7 @@ fn separator_alpha(ink: [u8; 3]) -> f32 {
     }
 }
 
-/// The mark a recent row wears â mock-up 7427/7431.
+/// The mark a recent row wears — mock-up 7427/7431.
 ///
 /// A terminal seed wears **its own profile's** mark rather than a generic one:
 /// the row is offering to reopen that shell, and the picker's rows one section
@@ -4143,7 +4143,7 @@ fn recent_mark(seed: &Seed) -> ChromeMark {
     }
 }
 
-/// What a recent row calls itself â mock-up 7431: `r.seed.name || cwdLeaf(r.seed)`.
+/// What a recent row calls itself — mock-up 7431: `r.seed.name || cwdLeaf(r.seed)`.
 ///
 /// Your own name for the tab wins, and the folder it stood in answers when you
 /// never gave it one. An empty manual name is not a name: `||` in the mock-up
@@ -4168,20 +4168,20 @@ fn recent_label(seed: &Seed) -> &str {
 ///
 /// **Duplicated** from `main.rs`'s `cwd_leaf`, deliberately and temporarily: that
 /// one is the tab-title layer's, it takes a `&Path`, and `main.rs` is a binary
-/// crate root that nothing can import from. The two must stay the same rule â
+/// crate root that nothing can import from. The two must stay the same rule —
 /// a Recent row that names a folder differently from the tab it reopens is the
-/// same place under two names â so the day either moves, both move together.
+/// same place under two names — so the day either moves, both move together.
 pub(crate) fn cwd_leaf(path: &str) -> &str {
     let trimmed = path.trim_end_matches(['\\', '/']);
     let leaf = trimmed.rsplit(['\\', '/']).next().unwrap_or(trimmed);
     if leaf.is_empty() { trimmed } else { leaf }
 }
 
-// ââ `.root-menu` â where a files column is pointed (E53-E61) âââââââââââââââ
+// ── `.root-menu` — where a files column is pointed (E53-E61) ───────────────
 //
 // **Why it lives in this file.** It is not a profile picker and it says so in
-// its own names; what it *is* is the same popup â the same float window, the
-// same 29.5px row, the same mark column, gap, ink and hover fill â hung off a
+// its own names; what it *is* is the same popup — the same float window, the
+// same 29.5px row, the same mark column, gap, ink and hover fill — hung off a
 // different button. `push_row`'s own comment gives the reason two lists that
 // look alike are drawn by one function: "the way two menu rows drift apart is
 // that somebody fixes the ink on one of them". A second module would mean a
@@ -4249,7 +4249,7 @@ pub fn root_choices(root: &str, home: Option<&str>, cwds: &[String]) -> Vec<Root
     }
     // The parent of the root, which the mock-up computes by trimming trailing
     // separators and then one segment. `Path::parent` is that, done by a
-    // component walk that knows what a drive prefix is â so `C:\` has no parent
+    // component walk that knows what a drive prefix is — so `C:\` has no parent
     // rather than an empty string, and a root already at the top of its drive
     // simply does not offer the row.
     if let Some(parent) = Path::new(root.trim_end_matches(['\\', '/']))
@@ -4267,7 +4267,7 @@ pub fn root_choices(root: &str, home: Option<&str>, cwds: &[String]) -> Vec<Root
 pub enum RootMenuRow {
     /// An index into the [`root_choices`] the menu was laid out from.
     Choice(usize),
-    /// `Browseâ¦` â the escape hatch to any folder at all (E55).
+    /// `Browse…` — the escape hatch to any folder at all (E55).
     ///
     /// Its own variant rather than a last index, because it is the one row whose
     /// meaning is not "go to this named place": the list above it is a set of
@@ -4326,7 +4326,7 @@ pub struct RootMenuLayout {
     frame: [f32; 4],
     label: [f32; 4],
     items: Vec<[f32; 4]>,
-    /// The hairline above `Browseâ¦` â unconditional, because the row below it is
+    /// The hairline above `Browse…` — unconditional, because the row below it is
     /// unconditional too. The profile menu's is an `Option` only because the
     /// Recent section it introduces can be empty.
     browse_separator: [f32; 4],
@@ -4350,7 +4350,7 @@ impl RootMenuLayout {
 
 /// The root menu hung under the head's root button.
 ///
-/// `top = anchor.bottom + 4`, `left = clamp(anchor.left)` â mock-up 5169-5175,
+/// `top = anchor.bottom + 4`, `left = clamp(anchor.left)` — mock-up 5169-5175,
 /// which is the same two lines [`layout`] uses for [`MenuSide::Below`], because
 /// it is the same gesture: a button on a horizontal surface with the window
 /// below it.
@@ -4374,7 +4374,7 @@ pub fn root_menu_layout(
         + SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX)
     .round();
 
-    // The widest note any row could carry, reserved for every row â the same
+    // The widest note any row could carry, reserved for every row — the same
     // rule the profile menu's annotation follows and for the same reason: a
     // menu that changed width because a shell moved would move under the
     // pointer.
@@ -4383,8 +4383,8 @@ pub fn root_menu_layout(
         .map(|note| measure(note.text(), px(HINT_FONT_LOGICAL_PX)))
         .fold(0.0, f32::max);
     let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
-    // Every row's name is a *directory* â arbitrary length, chosen by nobody
-    // here â so the widest one does not get to stretch the popup across the
+    // Every row's name is a *directory* — arbitrary length, chosen by nobody
+    // here — so the widest one does not get to stretch the popup across the
     // window. It is the same clamp `RECENT_ITEM_MAX_WIDTH_LOGICAL_PX` puts on
     // the Recent rows, applied to the whole menu because here every row is one.
     let content = choices
@@ -4397,7 +4397,7 @@ pub fn root_menu_layout(
                 + note
         })
         .fold(0.0, f32::max);
-    // `Browseâ¦` is measured with the rest rather than assumed to fit: it is a
+    // `Browse…` is measured with the rest rather than assumed to fit: it is a
     // translated string one day, and a row that overflowed the box it was not
     // counted into would be clipped by the very menu it belongs to.
     let content = content.max(
@@ -4472,7 +4472,7 @@ pub fn root_menu_hit(layout: &RootMenuLayout, x: f64, y: f64) -> Option<Option<R
 }
 
 /// The last segment of a path, or the whole of it when there is no segment to
-/// take â a drive root is `C:\` and its "name" is itself.
+/// take — a drive root is `C:\` and its "name" is itself.
 fn cwd_leaf_or_path(path: &str) -> String {
     crate::cwd_leaf(Path::new(path)).unwrap_or_else(|| path.to_owned())
 }
@@ -4544,7 +4544,7 @@ pub fn root_menu_build(
         );
     }
 
-    // ââ the escape hatch (E55) ââââââââââââââââââââââââââââââââââââââââââââââ
+    // ── the escape hatch (E55) ──────────────────────────────────────────────
     quads.push(OverlayQuad {
         rect: layout.browse_separator,
         color: palette.menu_border,
@@ -4583,7 +4583,7 @@ pub fn root_menu_build(
     }]
 }
 
-/// `.rm-label` â the heading over the list (mock-up 5138).
+/// `.rm-label` — the heading over the list (mock-up 5138).
 fn root_section_label() -> &'static str {
     crate::i18n::Text::RootSection.text()
 }
@@ -4606,19 +4606,19 @@ fn browse_text() -> &'static str {
 /// names. Sharing the number made the root menu 10px narrower than drawn.
 const ROOT_MENU_MIN_WIDTH_LOGICAL_PX: f32 = 190.0;
 
-// ââ the file row's context menu (K143/K145) âââââââââââââââââââââââââââââââââ
+// ── the file row's context menu (K143/K145) ─────────────────────────────────
 
 /// One row of the menu a file row raises under the pointer.
 ///
 /// Exactly three verbs, and the list is closed rather than a `Vec`: `DESIGN.md`
-/// Â§7.1.3 names them â "Open preview / Copy path / Insert path into terminal" â
-/// and the mock-up's fourth (`Save asâ¦`, mock-up 8088) is conditional on a
+/// §7.1.3 names them — "Open preview / Copy path / Insert path into terminal" —
+/// and the mock-up's fourth (`Save as…`, mock-up 8088) is conditional on a
 /// *terminal artefact* and is raised from the inline-image path, not from a row
 /// of the tree. A menu whose length cannot vary is also a menu whose keyboard
 /// walk cannot go looking for a row that is not there.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileMenuRow {
-    /// Hand the row to whatever opens it â the same verb its double click has,
+    /// Hand the row to whatever opens it — the same verb its double click has,
     /// which is why the caller supplies the wording (see [`file_menu_layout`]).
     Open,
     CopyPath,
@@ -4635,7 +4635,7 @@ impl FileMenuRow {
     /// Clamped, not cyclic, because the tree this menu was raised from clamps
     /// too (D45): one window should not hold two different ideas of what the
     /// bottom of a list does. From nowhere, a step in either direction lands on
-    /// the end it came from â pressing Up on a fresh menu offers the last row,
+    /// the end it came from — pressing Up on a fresh menu offers the last row,
     /// which is the convention every platform menu keeps.
     #[must_use]
     pub fn step(current: Option<Self>, forwards: bool) -> Self {
@@ -4673,12 +4673,12 @@ pub struct FileMenuLayout {
     scale: f32,
     frame: [f32; 4],
     items: [[f32; 4]; 3],
-    /// The rule under `Open` â mock-up 8089, which separates *what this row is*
+    /// The rule under `Open` — mock-up 8089, which separates *what this row is*
     /// from *what its path is*.
     separator: [f32; 4],
 }
 
-/// `Insert path into terminal` â the widest of the three, and the reason the
+/// `Insert path into terminal` — the widest of the three, and the reason the
 /// menu is measured rather than given a fixed width.
 pub fn insert_path_text() -> &'static str {
     crate::i18n::Text::FileMenuInsertPath.text()
@@ -4692,7 +4692,7 @@ pub fn copy_path_text() -> &'static str {
 /// **A point, not a widget.** Every other popup in this window hangs off a
 /// button and must therefore re-find that button after a re-render (E59/E60).
 /// This one is raised at the pointer, so the anchor is a coordinate that no
-/// re-layout can move or destroy â which is also why it does not need the live
+/// re-layout can move or destroy — which is also why it does not need the live
 /// re-measure the root menu pays for on every frame.
 ///
 /// `open_text` is the caller's because only the caller knows where the row
@@ -4823,7 +4823,7 @@ pub fn file_menu_build(
                 hovered: hover == Some(*row),
                 // All three verbs act on a path this process enumerated. There
                 // is no machine on which one of them is a promise that cannot be
-                // kept â the refusals these verbs *can* meet (a program the tree
+                // kept — the refusals these verbs *can* meet (a program the tree
                 // will not run, a shell that has gone) happen after the press
                 // and are spoken then, which is the same answer the double
                 // click gives.
@@ -4851,12 +4851,12 @@ pub fn file_menu_build(
     }]
 }
 
-// ââ the git context menus (v2 â£) ââââââââââââââââââââââââââââââââââââââââââââ
+// ── the git context menus (v2 ④) ────────────────────────────────────────────
 //
 // **One menu machine, and what it offers is decided by what was pressed.**
 // There are six things in this product a right press can land on that have a
-// repository verb attached â a commit, a local branch, a remote-tracking
-// branch, a tag, a changed file, and the working tree's own row â and they live
+// repository verb attached — a commit, a local branch, a remote-tracking
+// branch, a tag, a changed file, and the working tree's own row — and they live
 // in two different surfaces (the Git panel's column and the graph document). A
 // menu per surface would be two lists of the same verbs drifting apart; a menu
 // per row type would be six. So there is one [`GitMenuTarget`], one list of
@@ -4865,7 +4865,7 @@ pub fn file_menu_build(
 // **The boundary is the ruling, and it is a boundary of verbs.** Read and
 // navigate freely; write only what one command undoes. Nothing here merges,
 // rebases, resets, cherry-picks, reverts, pushes, pulls, fetches, or reaches for
-// `-D` or `--force` â see [`crate::git::GIT_NEVER_WORDS`], which is that
+// `-D` or `--force` — see [`crate::git::GIT_NEVER_WORDS`], which is that
 // sentence written as a test over every command this window can build.
 //
 // **The rule under the rule**: every menu that has both is split by one
@@ -4876,19 +4876,19 @@ pub fn file_menu_build(
 
 /// What a right press landed on.
 ///
-/// Self-contained â every variant carries the words its menu needs â for
+/// Self-contained — every variant carries the words its menu needs — for
 /// [`crate::git_panel::GitRow`]'s own reason: a target that indexed into a list
 /// the runtime also has to hold is a target that can disagree with it about
 /// which row the menu is about, and the gap between raising a menu and pressing
 /// one of its rows is exactly where a repository re-read lands.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GitMenuTarget {
-    /// A commit row â the graph's, or the panel's own COMMITS list.
+    /// A commit row — the graph's, or the panel's own COMMITS list.
     Commit {
         /// The whole forty characters: what a `git branch <name> <at>` is given,
         /// and what goes on the clipboard.
         hash: String,
-        /// git's abbreviation â what the card says out loud.
+        /// git's abbreviation — what the card says out loud.
         short: String,
         subject: String,
         /// Whether the surface this row is on has D6's compare mode at all.
@@ -4905,7 +4905,7 @@ pub enum GitMenuTarget {
         /// silent.
         compare_ready: bool,
     },
-    /// A local branch â a panel BRANCHES row, or a filled pill in the graph.
+    /// A local branch — a panel BRANCHES row, or a filled pill in the graph.
     LocalBranch {
         name: String,
         /// Whether `HEAD` is on it. It decides two rows' availability and
@@ -4913,7 +4913,7 @@ pub enum GitMenuTarget {
         /// will not delete the branch you are standing on.
         current: bool,
     },
-    /// A remote-tracking branch â a REMOTES row, or a hollow pill.
+    /// A remote-tracking branch — a REMOTES row, or a hollow pill.
     ///
     /// `name` is git's own spelling with the remote on the front
     /// (`origin/main`), because that is what `--track` is handed.
@@ -4924,10 +4924,10 @@ pub enum GitMenuTarget {
     Change {
         path: String,
         group: crate::git::GitGroup,
-        /// Whether git has ever seen this file â the difference between a
+        /// Whether git has ever seen this file — the difference between a
         /// discard that restores and one that deletes.
         untracked: bool,
-        /// Where a rename came from, when this row is one â what the diff
+        /// Where a rename came from, when this row is one — what the diff
         /// `Open diff` asks for needs in order to *be* a rename (see
         /// [`crate::git::GitQuestion::Diff::renamed_from`]).
         renamed_from: Option<String>,
@@ -4951,17 +4951,17 @@ pub enum GitMenuTarget {
 /// variants for that would be two code paths to keep in step.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GitMenuRow {
-    /// `git checkout` â a branch by name, a commit or a tag detached.
+    /// `git checkout` — a branch by name, a commit or a tag detached.
     Checkout,
     /// The prompt that ends in `git branch <name> <hash>`.
     CreateBranchHere,
-    /// The prompt that ends in `git tag <name> <hash>` â lightweight.
+    /// The prompt that ends in `git tag <name> <hash>` — lightweight.
     CreateTagHere,
     /// The prompt that ends in `git branch -m <old> <new>`.
     RenameBranch,
-    /// `git branch -d` â behind the gate, and never `-D`.
+    /// `git branch -d` — behind the gate, and never `-D`.
     DeleteBranch,
-    /// `git tag -d` â behind the gate.
+    /// `git tag -d` — behind the gate.
     DeleteTag,
     /// `git checkout -b <local> --track <remote>` (M10), or a plain checkout
     /// when the local already exists.
@@ -4970,7 +4970,7 @@ pub enum GitMenuRow {
     Stage,
     /// `git restore --staged`.
     Unstage,
-    /// `git restore --worktree`, or `git clean -f` â behind the gate.
+    /// `git restore --worktree`, or `git clean -f` — behind the gate.
     Discard,
     /// Put this file's diff on the preview seat, exactly as pressing the row
     /// does.
@@ -4983,7 +4983,7 @@ pub enum GitMenuRow {
     CopyName,
     /// Enter D6's compare mode with this row as the far end.
     CompareWithSelected,
-    /// D6 with `b: None` â this commit against what is on disk.
+    /// D6 with `b: None` — this commit against what is on disk.
     CompareWithWorkingTree,
 }
 
@@ -5088,8 +5088,8 @@ impl GitMenuRow {
     /// Whether this row *writes* to the repository, which is what the separator
     /// divides on.
     ///
-    /// A property of the row rather than a position in a list, so the rule â
-    /// verbs above the rule, readings below it â is stated once and every menu
+    /// A property of the row rather than a position in a list, so the rule —
+    /// verbs above the rule, readings below it — is stated once and every menu
     /// obeys it by construction. `Open diff` and the two compares are readings:
     /// they put a document on a seat and leave the repository exactly as they
     /// found it.
@@ -5112,8 +5112,8 @@ impl GitMenuRow {
 
     /// Which prompt this row opens, when it opens one.
     ///
-    /// The three rows whose name ends in `â¦` and no others, which is the
-    /// platform convention the file menu's `Browseâ¦` already keeps: the ellipsis
+    /// The three rows whose name ends in `…` and no others, which is the
+    /// platform convention the file menu's `Browse…` already keeps: the ellipsis
     /// is a promise that pressing this asks you again before anything happens.
     #[must_use]
     pub fn prompt(self) -> Option<GitPromptKind> {
@@ -5127,7 +5127,7 @@ impl GitMenuRow {
 
     /// The mark in the row's 14-pixel column.
     ///
-    /// **`Renameâ¦` has none, and that is a choice rather than an oversight.**
+    /// **`Rename…` has none, and that is a choice rather than an oversight.**
     /// The house's mark set is cut from geometry and has no pencil in it; the
     /// nearest thing to one would be a mark that means something else, and a
     /// wrong picture is read faster than a missing one. The row's own name, with
@@ -5162,7 +5162,7 @@ pub enum GitPromptKind {
 }
 
 impl GitPromptKind {
-    /// The line over the field â **what is being named, and where.**
+    /// The line over the field — **what is being named, and where.**
     ///
     /// It is here rather than at the call site because it is part of the menu's
     /// copy, and copy that lived at the call site would be copy that could differ
@@ -5200,7 +5200,7 @@ pub struct GitMenu {
 
 /// What this target's menu holds.
 ///
-/// **Empty means "do not open"**, and exactly one target can answer that way â
+/// **Empty means "do not open"**, and exactly one target can answer that way —
 /// see [`GitMenuTarget::Uncommitted`].
 #[must_use]
 pub fn git_menu(target: &GitMenuTarget) -> GitMenu {
@@ -5284,7 +5284,7 @@ pub fn git_menu(target: &GitMenuTarget) -> GitMenu {
 /// are drawn rather than hidden: a menu whose rows move depending on where
 /// `HEAD` is would be a menu you cannot learn the shape of. `Checkout` is
 /// pointless there (you are already on it) and `Delete` is impossible (git
-/// refuses to delete a checked-out branch), so both are shown greyed â the same
+/// refuses to delete a checked-out branch), so both are shown greyed — the same
 /// answer the profile picker gives a shell that is not installed.
 #[must_use]
 pub fn git_menu_row_available(row: GitMenuRow, target: &GitMenuTarget) -> bool {
@@ -5341,7 +5341,7 @@ pub struct GitPromptLook<'a> {
     /// [`GitPromptKind::caption`]'s answer, built by the caller because the
     /// subject is the caller's.
     pub caption: &'a str,
-    /// What is in the field, composition included â the whole line as drawn.
+    /// What is in the field, composition included — the whole line as drawn.
     pub text: &'a str,
     /// The part before the caret, which is what the caret's own x is measured
     /// from.
@@ -5384,7 +5384,7 @@ pub struct GitMenuItem {
 pub struct GitPromptRects {
     pub caption: [f32; 4],
     pub field: [f32; 4],
-    /// `None` when the name as typed is fine â the menu is one line shorter, and
+    /// `None` when the name as typed is fine — the menu is one line shorter, and
     /// grows by that line the moment it is not.
     pub hint: Option<[f32; 4]>,
     /// Where the caret stands, measured from the text's own left edge.
@@ -5401,7 +5401,7 @@ impl GitPromptRects {
         [left, self.field[1], right.max(left), self.field[3]]
     }
 
-    /// **The caret's line box** â its x from [`Self::caret_x`], its top and bottom
+    /// **The caret's line box** — its x from [`Self::caret_x`], its top and bottom
     /// the field's own.
     ///
     /// One derivation with two readers, exactly as `search::Capsule::caret_line`
@@ -5431,7 +5431,7 @@ pub struct GitMenuLayout {
 impl GitMenuLayout {
     /// The prompt's rectangles, when this menu has become one.
     ///
-    /// Read by the window so the IME can be told where the name is being typed â
+    /// Read by the window so the IME can be told where the name is being typed —
     /// the only thing outside this module that needs a box from inside the menu,
     /// and it needs the one the painter used.
     #[must_use]
@@ -5442,10 +5442,10 @@ impl GitMenuLayout {
 
 /// `.root-menu`'s floor, which is this menu's too: every row here is a verb and
 /// a noun, and the widest of them (`Compare with working tree`) is measured
-/// anyway â the floor only stops the two-row menus from looking like tooltips.
+/// anyway — the floor only stops the two-row menus from looking like tooltips.
 const GIT_MENU_MIN_WIDTH_LOGICAL_PX: f32 = 190.0;
 /// The prompt's own floor. Wider than the rows', because a field you type a name
-/// into that is exactly as wide as the word `Renameâ¦` is a field you cannot see
+/// into that is exactly as wide as the word `Rename…` is a field you cannot see
 /// what you typed in.
 const GIT_PROMPT_MIN_WIDTH_LOGICAL_PX: f32 = 230.0;
 const GIT_PROMPT_FIELD_HEIGHT_LOGICAL_PX: f32 = 26.0;
@@ -5461,7 +5461,7 @@ const GIT_PROMPT_CARET_INSET_LOGICAL_PX: f32 = 5.0;
 
 /// Lay the menu out under the point it was raised at.
 ///
-/// **A point, not a widget** â [`file_menu_layout`]'s ruling, and doubly true
+/// **A point, not a widget** — [`file_menu_layout`]'s ruling, and doubly true
 /// here: the row this menu is about can be scrolled away, paged past or replaced
 /// by a repository re-read while the menu is up, and a menu that re-found its
 /// anchor every frame would follow it off the screen. Both axes are clamped into
@@ -5651,7 +5651,7 @@ pub fn git_menu_build(layout: &GitMenuLayout, look: &GitMenuLook<'_>) -> Vec<Ove
             tabular_numerals: false,
             clip: Some(rects.caption),
         });
-        // The field's own ground is the row hover's fill â the quietest raised
+        // The field's own ground is the row hover's fill — the quietest raised
         // surface this menu has, and therefore the one that reads as "a box you
         // type into" without inventing a colour the palette does not hold.
         quads.extend(rounded_overlay_fill(
@@ -5671,7 +5671,7 @@ pub fn git_menu_build(layout: &GitMenuLayout, look: &GitMenuLook<'_>) -> Vec<Ove
             rect: text_rect,
             font_size_px: px(GIT_PROMPT_FONT_LOGICAL_PX),
             // The placeholder is the field saying what it is for; typed text is
-            // the reader's. Two inks, for the search field's own reason â one
+            // the reader's. Two inks, for the search field's own reason — one
             // ink and an empty field would read as a name nobody can delete.
             color: if typed {
                 palette.menu_item_text
@@ -5747,7 +5747,7 @@ pub fn git_menu_build(layout: &GitMenuLayout, look: &GitMenuLook<'_>) -> Vec<Ove
     }]
 }
 
-// ââ the terminal's own context menu (`#term-menu`, ticket #62) ââââââââââââââ
+// ── the terminal's own context menu (`#term-menu`, ticket #62) ──────────────
 //
 // The oldest menu in the mock-up and the last one to be built, which is why the
 // two menus above it read like siblings of something that was not there: the
@@ -5755,9 +5755,9 @@ pub fn git_menu_build(layout: &GitMenuLayout, look: &GitMenuLook<'_>) -> Vec<Ove
 // rules" for anchoring at a point, and until this slice there was no terminal
 // menu to have any.
 //
-// **The row list is `docs/DESIGN.md` Â§7.1.6, literally** â ãCopyãPasteã
-// Select allãââãClear screenãClear scrollbackâ¦ãRestart shellâ¦ã â with the
-// one addition Â§7.1.5d's S3 landing note booked against this ticket: `Findâ¦`,
+// **The row list is `docs/DESIGN.md` §7.1.6, literally** — 「Copy、Paste、
+// Select all、──、Clear screen、Clear scrollback…、Restart shell…」 — with the
+// one addition §7.1.5d's S3 landing note booked against this ticket: `Find…`,
 // after `Select all` and above the rule, because it belongs with the three verbs
 // that read the pane rather than with the two that destroy something in it.
 //
@@ -5772,11 +5772,11 @@ pub fn git_menu_build(layout: &GitMenuLayout, look: &GitMenuLook<'_>) -> Vec<Ove
 /// One row of the terminal's context menu.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TermMenuRow {
-    /// The selection onto the clipboard â **through copy-on-select's own door**,
+    /// The selection onto the clipboard — **through copy-on-select's own door**,
     /// so the menu and the drag put the same bytes there and leave the selection
     /// standing.
     Copy,
-    /// The clipboard into the shell â the keyboard's paste, byte for byte:
+    /// The clipboard into the shell — the keyboard's paste, byte for byte:
     /// bracketed when the shell asked for bracketing, chunked onto the one
     /// synchronous writer, view back at the bottom.
     Paste,
@@ -5784,24 +5784,24 @@ pub enum TermMenuRow {
     /// staged rows that have scrolled out but are not finalized, and the live
     /// grid.
     SelectAll,
-    /// Â§7.1.5d's capsule, on this pane â `Runtime::open_search`.
+    /// §7.1.5d's capsule, on this pane — `Runtime::open_search`.
     ///
     /// The row S3 shipped without: the engine, the capsule, the rail's merge and
     /// the keys all landed, and the *discoverable* door did not, because this
     /// menu did not exist to hang it on. `Ctrl+F` was the only way in.
     Find,
-    /// **ED2 and the cursor home, executed here** â nothing is written to the
+    /// **ED2 and the cursor home, executed here** — nothing is written to the
     /// PTY, the transcript and staging are not touched, and the rows that leave
     /// the viewport scroll out into history the ordinary way, so they can still
-    /// be scrolled back to and searched (Â§7.1.6).
+    /// be scrolled back to and searched (§7.1.6).
     ClearScreen,
-    /// **The whole of Â§3.1's ED3 deletion** â history, staging, blocks, indexes,
-    /// caches, anchor degradation, tombstones â which is what makes it the one
+    /// **The whole of §3.1's ED3 deletion** — history, staging, blocks, indexes,
+    /// caches, anchor degradation, tombstones — which is what makes it the one
     /// row on this menu behind a confirmation.
     ClearScrollback,
     /// The shell is killed and a new one takes its place in the same seat, on
     /// the same profile, in the last folder it reported
-    /// (`docs/M2-restart-shell-contract.md` Â§1).
+    /// (`docs/M2-restart-shell-contract.md` §1).
     RestartShell,
 }
 
@@ -5834,7 +5834,7 @@ pub fn term_menu_restart_text() -> &'static str {
     crate::i18n::Text::TermMenuShellAgain.text()
 }
 
-/// The menu, in Â§7.1.6's order.
+/// The menu, in §7.1.6's order.
 ///
 /// A `const` list rather than a function that builds one, because there is
 /// nothing to decide: every terminal pane offers these seven verbs in this order,
@@ -5872,18 +5872,18 @@ pub struct TermMenuSubject {
     pub has_selection: bool,
     /// Whether this seat is between shells.
     ///
-    /// `Restart shellâ¦` is greyed rather than hidden while one is under way, for
+    /// `Restart shell…` is greyed rather than hidden while one is under way, for
     /// [`git_menu_row_available`]'s reason: a menu whose rows move is a menu you
     /// cannot learn the shape of, and "the verb you just pressed is still
     /// happening" is a thing worth saying rather than a row worth removing.
     pub restart_in_flight: bool,
     /// Whether the capsule can open on this pane at all.
     ///
-    /// **False exactly on the alternate screen** (Â§7.1.5d, D-5/R3): Â§3.2 keeps
+    /// **False exactly on the alternate screen** (§7.1.5d, D-5/R3): §3.2 keeps
     /// that screen's anchors in an isolated namespace, so there is nothing there
     /// for a search to address and `Runtime::open_search` declines outright. A
-    /// `Findâ¦` offered over `vim` would be a row that opens nothing, which is
-    /// worse than a greyed one â the reader would be entitled to think the
+    /// `Find…` offered over `vim` would be a row that opens nothing, which is
+    /// worse than a greyed one — the reader would be entitled to think the
     /// search had failed rather than that it does not go there.
     ///
     /// It is a field rather than a second reading of `has_selection`'s source
@@ -5898,8 +5898,8 @@ impl Default for TermMenuSubject {
     ///
     /// Written out rather than derived, because two of these three facts are
     /// good news and `bool::default()` is `false`: a derived default would say
-    /// "this pane cannot be searched", which is the alternate screen â the rare
-    /// case â and every caller that reached for `..Default::default()` would
+    /// "this pane cannot be searched", which is the alternate screen — the rare
+    /// case — and every caller that reached for `..Default::default()` would
     /// silently be describing `vim`.
     fn default() -> Self {
         Self {
@@ -5915,7 +5915,7 @@ impl Default for TermMenuSubject {
 /// **`Paste` is not on this list, and that is a decision** (ticket #62, item 4):
 /// the row would be greyed on an empty clipboard *if asking were cheap*, and on
 /// this platform it is not. `bt_platform::clipboard_text` is the only wrapper
-/// there is and it opens the clipboard, reads the whole payload and closes it â
+/// there is and it opens the clipboard, reads the whole payload and closes it —
 /// a transaction that contends with every other application on the machine, run
 /// on every menu raise, to grey one row. `IsClipboardFormatAvailable` is the
 /// cheap question and nothing wraps it, so the honest answer is the ticket's own
@@ -5929,7 +5929,7 @@ impl Default for TermMenuSubject {
 pub fn term_menu_row_available(row: TermMenuRow, subject: TermMenuSubject) -> bool {
     match row {
         TermMenuRow::Copy => subject.has_selection,
-        // Not "there is nothing to find" â an empty transcript is searchable and
+        // Not "there is nothing to find" — an empty transcript is searchable and
         // answers `0/0`, which is a real answer. This is the one place a search
         // cannot be *addressed*.
         TermMenuRow::Find => subject.can_search,
@@ -5938,7 +5938,7 @@ pub fn term_menu_row_available(row: TermMenuRow, subject: TermMenuSubject) -> bo
     }
 }
 
-/// The row a keyboard step lands on, **skipping the ones that answer nothing** â
+/// The row a keyboard step lands on, **skipping the ones that answer nothing** —
 /// [`git_menu_step`]'s rule and [`FileMenuRow::step`]'s clamp, on this list.
 #[must_use]
 pub fn term_menu_step(
@@ -5972,9 +5972,9 @@ impl TermMenuRow {
     /// What the row says.
     ///
     /// **Three ellipses and no more**, which is the platform convention the git
-    /// menu's three prompts already keep: `Clear scrollbackâ¦` asks again before
-    /// it deletes anything, `Restart shellâ¦` is the mock-up's own honest
-    /// renaming of what `Refresh` used to do, and `Findâ¦` opens a field rather
+    /// menu's three prompts already keep: `Clear scrollback…` asks again before
+    /// it deletes anything, `Restart shell…` is the mock-up's own honest
+    /// renaming of what `Refresh` used to do, and `Find…` opens a field rather
     /// than doing something. `Clear screen` has none because it does its whole
     /// job the moment it is pressed and takes nothing away.
     #[must_use]
@@ -5992,7 +5992,7 @@ impl TermMenuRow {
 
     /// The mark in the row's 14-pixel column.
     ///
-    /// **`Findâ¦` has none**, and it is the git menu's `Renameâ¦` decision made a
+    /// **`Find…` has none**, and it is the git menu's `Rename…` decision made a
     /// second time for the same reason: the house's mark set is cut from the
     /// mock-up's own sheet, that sheet has no magnifier in it, and the nearest
     /// thing to one would be a mark that means something else. A wrong picture is
@@ -6031,7 +6031,7 @@ pub struct TermMenuLayout {
 ///
 /// Its own type rather than [`GitMenuItem`] with a different row in it, because
 /// the two lists hold different enums and a shared item would have to be generic
-/// over them â a type parameter bought for three fields that are copied out at
+/// over them — a type parameter bought for three fields that are copied out at
 /// the one call site each.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TermMenuItem {
@@ -6041,12 +6041,12 @@ pub struct TermMenuItem {
 }
 
 /// `.term-menu`'s own `min-width: 172px` (mock-up 659), which is narrower than
-/// the two menus above it declare â this list's longest row is two words.
+/// the two menus above it declare — this list's longest row is two words.
 const TERM_MENU_MIN_WIDTH_LOGICAL_PX: f32 = 172.0;
 
 /// Lay the menu out under the point it was raised at.
 ///
-/// **A point, not a pane** â [`git_menu_layout`]'s ruling, and it matters here
+/// **A point, not a pane** — [`git_menu_layout`]'s ruling, and it matters here
 /// for a reason of its own: the pane under this menu is a *running shell*, so its
 /// rectangle can be re-solved by a split, a divider drag or a window resize while
 /// the menu stands, and a menu that re-found its pane every frame would walk
@@ -6127,7 +6127,7 @@ pub fn term_menu_layout(
 /// What a point is over, with the same three answers every other menu gives: a
 /// row, the menu's own padding, or nothing at all.
 ///
-/// A row that cannot do what it says is **not** offered â the pointer falls
+/// A row that cannot do what it says is **not** offered — the pointer falls
 /// through it onto the menu's body, so it neither lights nor answers a press.
 #[must_use]
 pub fn term_menu_hit(layout: &TermMenuLayout, x: f64, y: f64) -> Option<Option<TermMenuRow>> {
@@ -6196,24 +6196,24 @@ pub fn term_menu_build(layout: &TermMenuLayout, look: &TermMenuLook) -> Vec<Over
     }]
 }
 
-// ââ the `â` open policy, shared by every chevron in the house âââââââââââââââ
+// ── the `⌄` open policy, shared by every chevron in the house ───────────────
 //
-// **User ruling, 2026-08-16.** There are two `â` in this window â the tab
-// strip's, beside the `+`, and now the pane head's â and until this ruling they
+// **User ruling, 2026-08-16.** There are two `⌄` in this window — the tab
+// strip's, beside the `+`, and now the pane head's — and until this ruling they
 // opened by two different rules: the strip's on a click, the head's not at all
-// (its slot held a `â` that split without asking). The ruling makes them one
+// (its slot held a `⊞` that split without asking). The ruling makes them one
 // control with one grammar: **rest on it for 250ms, or click it, and the menu
 // comes; take the pointer off both the button and the menu and it goes after a
 // short grace.**
 //
-// The ruling's own argument for the hover half is discoverability: "ç¨æ·æ­¤åä»
-// æ²¡åç° pane å¤´å³é®æèå". A verb reachable only by right click is a verb most
-// people never learn exists, and the answer is not a fifth button â it is that
+// The ruling's own argument for the hover half is discoverability: "用户此前从
+// 没发现 pane 头右键有菜单". A verb reachable only by right click is a verb most
+// people never learn exists, and the answer is not a fifth button — it is that
 // the one glyph in this product that already *means* "there is a list behind
 // me" should behave the way a list behind a glyph behaves everywhere else.
 //
-// And the ruling is equally firm about the boundary: `â` is the **only** hover-
-// opening surface. Everything else keeps the house's division of labour â hover
+// And the ruling is equally firm about the boundary: `⌄` is the **only** hover-
+// opening surface. Everything else keeps the house's division of labour — hover
 // is for looking (a tip, a peek), click is for doing, right click is for
 // options. A window where any button might open a panel under a resting hand is
 // a window you cannot rest your hand in.
@@ -6224,24 +6224,24 @@ pub fn term_menu_build(layout: &TermMenuLayout, look: &TermMenuLook) -> Vec<Over
 // once; and the test that matters is the one that drives both gates through the
 // same steps and gets the same answers.
 
-/// How long a pointer has to rest on a `â` before the menu behind it opens.
+/// How long a pointer has to rest on a `⌄` before the menu behind it opens.
 ///
 /// 250ms is the ruling's own number and it is chosen against the two failures at
 /// either end. Shorter, and a pointer merely *crossing* the button on its way to
-/// the `+` beside it drops a menu in its path â the classic hover-menu bug,
+/// the `+` beside it drops a menu in its path — the classic hover-menu bug,
 /// which is why the mock-up's own menus were click-only to begin with. Longer,
 /// and the gesture stops reading as "rest here" and starts reading as "wait
 /// here", which is a different and worse instruction.
 pub const CHEVRON_HOVER_OPEN: Duration = Duration::from_millis(250);
 
-/// How long a menu a `â` opened stays up once the pointer has left **both** it
+/// How long a menu a `⌄` opened stays up once the pointer has left **both** it
 /// and the button.
 ///
 /// The grace exists because the button and its menu are two rectangles with a
 /// four-pixel gap between them ([`MENU_OFFSET_LOGICAL_PX`]), and a hand
 /// travelling from one to the other crosses that gap. Without a grace the menu
 /// would close in the gap it was drawn across, every time, and the ruling's
-/// "é¢æ¿åå¾æ å¯è§ä¸ºä¸ä½" would be false in exactly the pixels where it matters.
+/// "面板和图标可视为一体" would be false in exactly the pixels where it matters.
 ///
 /// 150ms rather than the 250 above, and deliberately asymmetric: opening is a
 /// commitment the user is making and deserves deliberation, while closing is
@@ -6249,7 +6249,7 @@ pub const CHEVRON_HOVER_OPEN: Duration = Duration::from_millis(250);
 /// the hand has gone reads as a menu that is stuck.
 pub const CHEVRON_LEAVE_GRACE: Duration = Duration::from_millis(150);
 
-/// Where the pointer stands, as far as one `â` and the menu it opens are
+/// Where the pointer stands, as far as one `⌄` and the menu it opens are
 /// concerned.
 ///
 /// Three answers and not two, because the middle one is the whole of what makes
@@ -6258,26 +6258,26 @@ pub const CHEVRON_LEAVE_GRACE: Duration = Duration::from_millis(150);
 /// exists to paper over rather than to hide.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChevronPointer {
-    /// On the `â` itself.
+    /// On the `⌄` itself.
     Button,
-    /// On the menu the `â` opened â its rows, its padding, its submenu.
+    /// On the menu the `⌄` opened — its rows, its padding, its submenu.
     Surface,
     /// On neither.
     Away,
 }
 
-/// What a `â`'s clock says is owed.
+/// What a `⌄`'s clock says is owed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChevronAction {
     Open,
     Close,
 }
 
-/// One `â`'s two clocks: how long the pointer has rested on it, and how long it
+/// One `⌄`'s two clocks: how long the pointer has rested on it, and how long it
 /// has been gone from both surfaces.
 ///
 /// Two `Option<Instant>` rather than one enum, because the two are genuinely
-/// exclusive by construction â [`Self::observe`] never leaves both set â and
+/// exclusive by construction — [`Self::observe`] never leaves both set — and
 /// writing them as an enum would put the proof of that in a `match` arm instead
 /// of in the one function that assigns them.
 ///
@@ -6320,8 +6320,8 @@ impl ChevronGate {
 
     /// What the gate owes at `now`, if anything.
     ///
-    /// Reading it does not spend it â the caller clears the gate by acting on
-    /// the answer, through [`Self::clear`] â because "what is due" and "do it"
+    /// Reading it does not spend it — the caller clears the gate by acting on
+    /// the answer, through [`Self::clear`] — because "what is due" and "do it"
     /// are two questions and the second one can fail.
     #[must_use]
     pub fn due(&self, now: Instant) -> Option<ChevronAction> {
@@ -6353,7 +6353,7 @@ impl ChevronGate {
         }
     }
 
-    /// Stop both clocks â what a caller does once it has acted on [`Self::due`],
+    /// Stop both clocks — what a caller does once it has acted on [`Self::due`],
     /// and what every other door onto these menus (a click, Esc, another popup
     /// opening) does on its way through.
     pub fn clear(&mut self) {
@@ -6362,46 +6362,46 @@ impl ChevronGate {
     }
 }
 
-// ââ the pane head's own menu (user rulings, 2026-08-15 and 2026-08-16) ââââââ
+// ── the pane head's own menu (user rulings, 2026-08-15 and 2026-08-16) ──────
 //
 // The mouse had no way to reach a split. The chords have had three since the
-// fleet shipped â Ctrl+Shift+D and Alt+Shift+-/= â but a hand on the mouse had
+// fleet shipped — Ctrl+Shift+D and Alt+Shift+-/= — but a hand on the mouse had
 // to open a new tab, drag its body across the window and drop it on an edge:
 // three gestures for one verb, and the only one of the three that is obvious is
 // the one that makes a tab you did not want.
 //
-// The 2026-08-15 ruling answered that with two doors onto one machine: a `â` in
+// The 2026-08-15 ruling answered that with two doors onto one machine: a `⊞` in
 // the head that took the pane's longer side and asked nothing, and a right-click
 // menu that named both axes outright. The 2026-08-16 ruling folds the first into
-// the second. The `â` is now a `â` â the house's one glyph for "there is a list
-// behind me" â and the list it opens is this one, which has grown from three
+// the second. The `⊞` is now a `⌄` — the house's one glyph for "there is a list
+// behind me" — and the list it opens is this one, which has grown from three
 // flat verbs into the whole of what a hand can ask of a pane: which way, with
 // what, from where, and where to.
 //
 // It is still `#file-menu`'s skin and `push_row`'s rows, for the reason the
-// switcher's note gives â a menu that looked like its neighbours but was drawn
+// switcher's note gives — a menu that looked like its neighbours but was drawn
 // by different code would be a second popup wearing the first one's clothes.
 // Two things here are genuinely new to the house and are built rather than
 // borrowed: the **picker**, which is a drawing you press rather than a row you
 // read, and the **submenu**, which brings the safety triangle (queue item #53)
 // with it.
 
-// ââ the picker (Snap Layouts' idiom, this house's geometry) ââââââââââââââââ
+// ── the picker (Snap Layouts' idiom, this house's geometry) ────────────────
 //
 // Windows' own Snap Layouts is the reference and the reason: a hand that knows
 // where it wants the new pane should be able to *point at* that place, not read
 // four sentences and pick the one whose adverb matches. The ruling says so in as
-// many words â "æ¹åéæ©ä¼åç»å¾ä¸ç»å­".
+// many words — "方向选择优先给图不给字".
 //
 // Drawn from quads rather than struck as a mark, and that is the one decision
 // here worth arguing. A mark is a raster keyed on a glyph and a box; this is
 // five rectangles whose *relationship* is the whole meaning, one of which lights
 // up under the pointer. As a mark it would be five marks (or one mark per
 // state, which is twenty), each cached separately, and the gap between the pane
-// and its zones â the thing that makes them read as "beside" rather than "part
-// of" â would be a fact about a bitmap instead of a number in this file.
+// and its zones — the thing that makes them read as "beside" rather than "part
+// of" — would be a fact about a bitmap instead of a number in this file.
 
-/// The little pane at the middle of the diagram: 48 Ã 34.
+/// The little pane at the middle of the diagram: 48 × 34.
 ///
 /// A landscape rectangle rather than a square, because it stands for a terminal
 /// pane and terminal panes are wide. A square would make the up/down zones the
@@ -6409,7 +6409,7 @@ impl ChevronGate {
 /// diagram exists to draw.
 const PICKER_PANE_WIDTH_LOGICAL_PX: f32 = 48.0;
 const PICKER_PANE_HEIGHT_LOGICAL_PX: f32 = 34.0;
-/// The pane's own round â `.pane`'s 6px read down for a drawing a third its
+/// The pane's own round — `.pane`'s 6px read down for a drawing a third its
 /// size, on the same ladder every small rounded box in this window climbs.
 const PICKER_PANE_RADIUS_LOGICAL_PX: f32 = 4.0;
 /// How thick a drop zone's slab is.
@@ -6418,7 +6418,7 @@ const PICKER_ZONE_THICKNESS_LOGICAL_PX: f32 = 10.0;
 /// *place the new pane would go* rather than as a border on the old one.
 const PICKER_ZONE_GAP_LOGICAL_PX: f32 = 3.0;
 const PICKER_ZONE_RADIUS_LOGICAL_PX: f32 = 3.0;
-/// The hairline the pane and the four slabs are outlined in â one logical pixel,
+/// The hairline the pane and the four slabs are outlined in — one logical pixel,
 /// the same weight `#file-menu`'s own edge wears.
 const PICKER_EDGE_LOGICAL_PX: f32 = 1.0;
 /// `--accent` at 15% is the wash a zone takes under the pointer.
@@ -6446,7 +6446,7 @@ pub fn picker_caption_text() -> &'static str {
 /// The whole height of the picker's block: the air, the diagram, the caption.
 ///
 /// **Derived rather than declared.** The ruling asks for "one row, ~92px tall",
-/// and 92 is what these terms sum to â but writing `92.0` here and laying the
+/// and 92 is what these terms sum to — but writing `92.0` here and laying the
 /// parts out inside it would make the number the specification and the parts an
 /// arrangement that happens to fit, which is the shape in which a later change
 /// to the slab thickness silently leaves a gap at the bottom.
@@ -6475,7 +6475,7 @@ fn picker_diagram_height_logical_px() -> f32 {
 /// **Named by where the arriving pane lands**, which is how every terminal names
 /// a split: "right" puts a shell on the right, and the rule it draws is
 /// vertical. Nobody says the second half out loud, and the picker does not have
-/// to â a hand pointing at the slab on the right is not reading an adverb.
+/// to — a hand pointing at the slab on the right is not reading an adverb.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SplitZone {
     Right,
@@ -6488,7 +6488,7 @@ impl SplitZone {
     /// The four in the order the keyboard's compass and the tests walk them.
     pub const ALL: [Self; 4] = [Self::Right, Self::Down, Self::Left, Self::Up];
 
-    /// Which axis this zone cuts along â `Row` for side by side, `Col` for
+    /// Which axis this zone cuts along — `Row` for side by side, `Col` for
     /// stacked.
     #[must_use]
     pub fn axis(self) -> Axis {
@@ -6503,7 +6503,7 @@ impl SplitZone {
     /// The whole of what `Left` and `Up` are: the same two axes the menu has
     /// always offered, with the new leaf inserted on the other side of the one it
     /// came out of. `bt-layout`'s `Edit::SplitSeat` has carried a `leading` flag
-    /// since the tree existed and `Seats::split_terminal` has always taken it â
+    /// since the tree existed and `Seats::split_terminal` has always taken it —
     /// no layout work was owed here, only a caller that stops passing `false`.
     #[must_use]
     pub fn leading(self) -> bool {
@@ -6511,22 +6511,22 @@ impl SplitZone {
     }
 }
 
-// ââ the rows âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// ── the rows ───────────────────────────────────────────────────────────────
 
-/// The verbs a pane head's `â` offers.
+/// The verbs a pane head's `⌄` offers.
 ///
 /// Closed rather than a `Vec`, for [`FileMenuRow`]'s reason: a menu whose length
 /// cannot vary is also a menu whose keyboard walk cannot go looking for a row
 /// that is not there.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PaneMenuRow {
-    /// **Door 4 of five** (Â§7.1.6bâ² â£): enter focus mode, or leave it.
+    /// **Door 4 of five** (§7.1.6b′ ④): enter focus mode, or leave it.
     ///
     /// First, and separated from everything under it, because it is the one row
     /// here that is about the *window's* shape rather than about this pane. It
     /// reads out the verb it will perform, so one row is both directions.
     FocusMode,
-    /// The Snap-Layouts picker â a drawing, not a row of text, and the only
+    /// The Snap-Layouts picker — a drawing, not a row of text, and the only
     /// entry here that carries its own four answers.
     Picker,
     /// The submenu heading: split against a profile you name.
@@ -6538,12 +6538,12 @@ pub enum PaneMenuRow {
     Duplicate,
     /// The pane leaves this tab and becomes a tab of its own.
     MoveToNewTab,
-    /// The same verb the `Ã` in the head has.
+    /// The same verb the `×` in the head has.
     ClosePane,
 }
 
 impl PaneMenuRow {
-    /// Every entry, top to bottom â the order they are laid out in and the order
+    /// Every entry, top to bottom — the order they are laid out in and the order
     /// a keyboard walks them.
     pub const ALL: [Self; 7] = [
         Self::FocusMode,
@@ -6555,7 +6555,7 @@ impl PaneMenuRow {
         Self::ClosePane,
     ];
 
-    /// The five that are rows of text with a mark, in order â [`Self::ALL`]
+    /// The five that are rows of text with a mark, in order — [`Self::ALL`]
     /// without the picker.
     pub const TEXT_ROWS: [Self; 6] = [
         Self::FocusMode,
@@ -6575,12 +6575,12 @@ impl PaneMenuRow {
             // "one thing, filling the frame", which is the glyph's sentence
             // whichever direction the row is about to go.
             Self::FocusMode => Some(ChromeMark::WindowMaximize),
-            // The `â` the pane head just gave up, in the one place it still
+            // The `⊞` the pane head just gave up, in the one place it still
             // means what it always meant: "another one of these, beside this".
             Self::SplitWith => Some(ChromeMark::Split),
             Self::NewInFolder => Some(ChromeMark::Folder),
             Self::Duplicate => Some(ChromeMark::Copy),
-            // `#i-float`'s own sentence is "opens outside this frame" â and a
+            // `#i-float`'s own sentence is "opens outside this frame" — and a
             // pane leaving for a tab of its own is exactly that. It is the same
             // glyph the files head wears for undocking, which is the same idea
             // aimed at a different container.
@@ -6593,7 +6593,7 @@ impl PaneMenuRow {
     ///
     /// `focus_on` is the window's own focus-mode bit, and only one row reads it:
     /// door 4 states the verb it will perform, so the same line is the way in and
-    /// the way out (Â§7.1.6bâ² â£). Every other row ignores it.
+    /// the way out (§7.1.6b′ ④). Every other row ignores it.
     fn text(self, focus_on: bool) -> &'static str {
         match self {
             Self::Picker => picker_caption_text(),
@@ -6613,7 +6613,7 @@ impl PaneMenuRow {
     }
 }
 
-/// **Door 4 of five** (Â§7.1.6bâ² â£) â and the row reads out the verb it will
+/// **Door 4 of five** (§7.1.6b′ ④) — and the row reads out the verb it will
 /// perform, so the same line is the way in and the way out.
 ///
 /// Discoverability is the whole reason this door exists: a double-click on a
@@ -6628,8 +6628,8 @@ pub fn focus_mode_text(on: bool) -> &'static str {
     }
 }
 
-/// The submenu heading. The `â¸` is drawn rather than written: see
-/// [`pane_menu_build`], which strikes the house's `â` turned a quarter into the
+/// The submenu heading. The `▸` is drawn rather than written: see
+/// [`pane_menu_build`], which strikes the house's `⌄` turned a quarter into the
 /// row's trailing edge.
 #[must_use]
 pub fn split_with_text() -> &'static str {
@@ -6649,7 +6649,7 @@ pub fn duplicate_pane_text() -> &'static str {
 pub fn move_to_new_tab_text() -> &'static str {
     crate::i18n::Text::PaneMenuMoveToNewTab.text()
 }
-/// The `Ã`'s verb, spelled â a menu row has room for the word the button does
+/// The `×`'s verb, spelled — a menu row has room for the word the button does
 /// not, and `Close pane` is the mock-up's own `title` for that button (4672).
 #[must_use]
 pub fn close_pane_text() -> &'static str {
@@ -6664,14 +6664,14 @@ pub fn current_profile_hint_text() -> &'static str {
     crate::i18n::Text::ProfileHintCurrent.text()
 }
 
-// ââ what the pointer and the keyboard are on âââââââââââââââââââââââââââââââ
+// ── what the pointer and the keyboard are on ───────────────────────────────
 
 /// What a point in one of the menu's two surfaces is over.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PaneMenuHit {
     /// One of the picker's four zones.
     Zone(SplitZone),
-    /// A row of the menu proper. Never [`PaneMenuRow::Picker`] â a point inside
+    /// A row of the menu proper. Never [`PaneMenuRow::Picker`] — a point inside
     /// the picker's block is a zone or it is nothing.
     Row(PaneMenuRow),
     /// A row of the open submenu, by its index into [`PROFILES`].
@@ -6681,7 +6681,7 @@ pub enum PaneMenuHit {
     Surface,
 }
 
-/// What is lit â the pointer's hover and the keyboard's cursor, which are one
+/// What is lit — the pointer's hover and the keyboard's cursor, which are one
 /// thing in a menu.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PaneMenuHover {
@@ -6707,16 +6707,16 @@ impl PaneMenuHover {
     /// Where an arrow key moves the highlight, or `None` when it moves nothing.
     ///
     /// **The picker is a compass inside a list**, and that is the whole of the
-    /// subtlety here. Four zones lie in four directions, so `ââââ` must aim at
-    /// them; but the picker is also the first entry of a vertical list, so `â`
+    /// subtlety here. Four zones lie in four directions, so `←→↑↓` must aim at
+    /// them; but the picker is also the first entry of a vertical list, so `↓`
     /// must eventually leave it. The rule that satisfies both: an arrow that
     /// names a zone lights that zone, and an arrow that names the zone **already
-    /// lit** walks out of the picker in that direction. So `â â` from the picker
+    /// lit** walks out of the picker in that direction. So `↓ ↓` from the picker
     /// is "aim down, then leave downward", which is what a hand that wanted the
-    /// row below would do anyway, and `â` from the row below comes back in
-    /// landing on `Down` â the zone nearest the row it came from.
+    /// row below would do anyway, and `↑` from the row below comes back in
+    /// landing on `Down` — the zone nearest the row it came from.
     ///
-    /// `â` and `â` on a row are deliberately absent: they are the submenu's open
+    /// `→` and `←` on a row are deliberately absent: they are the submenu's open
     /// and close, which are verbs with side effects (a menu appears, a clock
     /// starts) rather than movements of a highlight, and they are the window's to
     /// run. See `Runtime::step_pane_menu`.
@@ -6740,8 +6740,8 @@ impl PaneMenuHover {
                     return Some(Self::Zone(aimed));
                 }
                 // Already aimed that way: walk out of the picker, in the
-                // direction that was aimed. Both ways lead somewhere now â door
-                // 4 stands above the picker (Â§7.1.6bâ² â£), where the walk used to
+                // direction that was aimed. Both ways lead somewhere now — door
+                // 4 stands above the picker (§7.1.6b′ ④), where the walk used to
                 // clamp.
                 match step {
                     MenuStep::Down => Some(Self::Row(PaneMenuRow::SplitWith)),
@@ -6756,8 +6756,8 @@ impl PaneMenuHover {
                     .expect("a hovered row is one of TEXT_ROWS");
                 match step {
                     // The picker stands between door 4 and the rest, so the row
-                    // under door 4 on screen is a *zone* â entered at the one
-                    // nearest the row being left, exactly as `â` enters it at
+                    // under door 4 on screen is a *zone* — entered at the one
+                    // nearest the row being left, exactly as `↑` enters it at
                     // `Down` from below.
                     MenuStep::Down if row == PaneMenuRow::FocusMode => {
                         Some(Self::Zone(SplitZone::Up))
@@ -6787,14 +6787,14 @@ impl PaneMenuHover {
     }
 }
 
-// ââ the safety triangle (queue item #53, closed here) ââââââââââââââââââââââ
+// ── the safety triangle (queue item #53, closed here) ──────────────────────
 
 /// Whether a pointer that has left a submenu's heading is **still on its way to
 /// the submenu**, and must therefore not be stolen by the row it is crossing.
 ///
 /// **The failure this closes.** A submenu hangs to the side of the row that owns
 /// it, so a hand travelling from that row to the submenu's first entry moves
-/// diagonally â and every row between the heading and the submenu's top edge
+/// diagonally — and every row between the heading and the submenu's top edge
 /// passes under the pointer on the way. A menu that hands the highlight to
 /// whatever is under the pointer therefore closes the submenu the moment the
 /// hand starts moving toward it, which is the version of this feature every
@@ -6807,7 +6807,7 @@ impl PaneMenuHover {
 /// that lands inside it is a move toward the submenu, and the submenu holds; a
 /// move that lands outside it is a move at something else, and the row under the
 /// pointer takes over at once. It is Amazon's mega-menu trick, and it is the
-/// only one that needs no timer to be *correct* â the timer above it (300ms) is
+/// only one that needs no timer to be *correct* — the timer above it (300ms) is
 /// a cap on how long a hand may dawdle inside the triangle, not the mechanism.
 ///
 /// The near edge is chosen by which side of the pointer the submenu is on, so
@@ -6825,7 +6825,7 @@ pub fn safe_triangle_holds(from: [f32; 2], to: [f32; 2], submenu: [f32; 4]) -> b
     // The near vertical edge: the submenu's left when it stands to the right of
     // the hand, its right when it stands to the left. A pointer already between
     // the two edges is inside the submenu's own column, where the hit test has
-    // already answered â the left edge is as good an answer as any.
+    // already answered — the left edge is as good an answer as any.
     let near_x = if from[0] <= submenu[0] {
         submenu[0]
     } else {
@@ -6840,8 +6840,8 @@ pub fn safe_triangle_holds(from: [f32; 2], to: [f32; 2], submenu: [f32; 4]) -> b
     let d1 = cross(a, b, to);
     let d2 = cross(b, c, to);
     let d3 = cross(c, a, to);
-    // Inside, or on an edge. A degenerate triangle â the pointer standing
-    // exactly on the near edge's line â has every cross product zero, which this
+    // Inside, or on an edge. A degenerate triangle — the pointer standing
+    // exactly on the near edge's line — has every cross product zero, which this
     // reads as "inside", and that is the right answer: a hand on the edge of the
     // submenu is not a hand that has left for somewhere else.
     let negative = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
@@ -6853,14 +6853,14 @@ pub fn safe_triangle_holds(from: [f32; 2], to: [f32; 2], submenu: [f32; 4]) -> b
 /// is crossing.
 ///
 /// The triangle is the mechanism and this is only its cap, but the cap is owed:
-/// a hand that stops *inside* the triangle â over some other row, thinking â
+/// a hand that stops *inside* the triangle — over some other row, thinking —
 /// sends no further events, so without a clock the submenu would stay up under a
 /// pointer that has plainly stopped travelling. 300ms is long enough to cross
 /// three rows at any speed a hand actually moves and short enough that a stopped
 /// hand does not notice waiting.
 pub const SUBMENU_SAFE_HOLD: Duration = Duration::from_millis(300);
 
-// ââ the geometry âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// ── the geometry ───────────────────────────────────────────────────────────
 
 /// Every rectangle the pane menu draws and hit-tests.
 #[derive(Clone, Debug, PartialEq)]
@@ -6874,7 +6874,7 @@ pub struct PaneMenuLayout {
     picker_pane: [f32; 4],
     /// The four slabs as they are **drawn**, in [`SplitZone::ALL`] order.
     zones: [[f32; 4]; 4],
-    /// The four slabs as they are **pressed** â each grown across its gap toward
+    /// The four slabs as they are **pressed** — each grown across its gap toward
     /// the pane, so the three logical pixels of air between a slab and the pane
     /// are not a dead band in a control that is already only ten wide. Disjoint
     /// by construction: the gap belongs to exactly one slab.
@@ -6884,7 +6884,7 @@ pub struct PaneMenuLayout {
     /// The rule above `Close pane`, which separates the four verbs that *make* a
     /// pane or move one from the one that ends it.
     separator: [f32; 4],
-    /// The rule under door 4 (Â§7.1.6bâ² â£), which separates the one row about the
+    /// The rule under door 4 (§7.1.6b′ ④), which separates the one row about the
     /// *window's* shape from the five about this pane.
     ///
     /// Its own field beside [`Self::separator`] rather than the two being an
@@ -6897,13 +6897,13 @@ pub struct PaneMenuLayout {
     submenu: Option<PaneSubmenuLayout>,
 }
 
-/// The `Split with` submenu's own boxes â the house's first.
+/// The `Split with` submenu's own boxes — the house's first.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaneSubmenuLayout {
     frame: [f32; 4],
     /// One row per **offered** profile, top to bottom.
     items: Vec<[f32; 4]>,
-    /// Which table row each of [`Self::items`] draws â `ProfileMenuLayout`'s
+    /// Which table row each of [`Self::items`] draws — `ProfileMenuLayout`'s
     /// mapping, for its reason.
     profiles: Vec<usize>,
 }
@@ -6938,7 +6938,7 @@ impl PaneMenuLayout {
         self.zones[index]
     }
 
-    /// The submenu's border box, when one is up â the triangle's base, and the
+    /// The submenu's border box, when one is up — the triangle's base, and the
     /// second rectangle a press has to miss.
     #[must_use]
     pub fn submenu_frame(&self) -> Option<[f32; 4]> {
@@ -6958,15 +6958,15 @@ impl PaneMenuLayout {
     }
 }
 
-/// The pane menu, hung under the point the head's `â` was pressed at.
+/// The pane menu, hung under the point the head's `⌄` was pressed at.
 ///
 /// [`file_menu_layout`]'s twin, down to the both-axis clamp: a pane head can be
 /// the bottom head of a tall stack, and an unclamped drop would put every verb
 /// under the window's own edge.
 ///
 /// `submenu_open` rather than a second function, because the submenu's placement
-/// is a fact about *this* menu's frame â it hangs off one of these rows and
-/// flips to the other side when this frame is already near the window's edge â
+/// is a fact about *this* menu's frame — it hangs off one of these rows and
+/// flips to the other side when this frame is already near the window's edge —
 /// and a second entry point would be a second opinion about where the parent is.
 #[must_use]
 pub fn pane_menu_layout(
@@ -6986,14 +6986,14 @@ pub fn pane_menu_layout(
     let separator_block = 2.0 * separator_margin + separator_thickness;
 
     let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
-    // The submenu's `â¸` claims the same slot the profile picker's `default` hint
+    // The submenu's `▸` claims the same slot the profile picker's `default` hint
     // claims, and it is reserved on every row rather than on the one that wears
-    // it â a menu whose width depended on which rows had submenus would change
+    // it — a menu whose width depended on which rows had submenus would change
     // width the day a second row grew one.
     let indicator = px(SUBMENU_INDICATOR_LOGICAL_PX) + px(ITEM_GAP_LOGICAL_PX);
     // **Measured against every caption a row can wear, not the one it is wearing
     // now.** Door 4 reads out its own verb, so its line changes when the bit
-    // turns â and a menu sized to the shorter word would grow under the pointer
+    // turns — and a menu sized to the shorter word would grow under the pointer
     // the moment somebody used it. Taking the wider of the two here means the
     // menu is the same width in both directions, which is what lets
     // `pane_menu_build` choose the word without consulting this.
@@ -7083,7 +7083,7 @@ pub fn pane_menu_layout(
     let pane_left = diagram_left + slab + gap;
     let pane_top = diagram_top + slab + gap;
     // On whole physical pixels: the diagram is all edges, and an edge on a
-    // subpixel is a resampled edge â the crisp hairline the drawing is made of,
+    // subpixel is a resampled edge — the crisp hairline the drawing is made of,
     // blurred across two rows of pixels.
     let pane_left = pane_left.round();
     let pane_top = pane_top.round();
@@ -7169,7 +7169,7 @@ pub fn pane_menu_layout(
 /// Where the `Split with` submenu hangs.
 ///
 /// **To the right of the parent, level with the heading's own top padding, and
-/// flipped to the left when the window's right edge is too close** â the two
+/// flipped to the left when the window's right edge is too close** — the two
 /// rules every submenu in every product follows, and the second is not optional:
 /// a menu opened on a pane head near the right edge is a menu whose child has
 /// nowhere to go on that side, and a child clamped instead of flipped would sit
@@ -7208,7 +7208,7 @@ fn pane_submenu_layout(
     let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
     // Overlapping the parent's edge by its own border and padding, so the two
     // surfaces read as one object with a fold in it rather than as two windows
-    // with a seam â and, more practically, so the corridor the safety triangle
+    // with a seam — and, more practically, so the corridor the safety triangle
     // has to cover is as short as it can be.
     let overlap = border + padding;
     let right_of = parent[2] - overlap;
@@ -7267,7 +7267,15 @@ pub fn pane_menu_hit(layout: &PaneMenuLayout, x: f64, y: f64) -> Option<PaneMenu
             return Some(PaneMenuHit::Zone(*zone));
         }
     }
-    for (row, rect) in PaneMenuRow::TEXT_ROWS.iter().zip(layout.items[1..].iter()) {
+    // Walked over `ALL` beside its own boxes, stepping over the picker — the
+    // painter's own walk, and one list for the same reason. `items[1..]` was
+    // true only while the picker was the first entry; door 4 now stands above
+    // it (§7.1.6b′ ④), and a hit test that assumed where the drawing sits would
+    // answer every press with the name of the row below it.
+    for (row, rect) in PaneMenuRow::ALL.iter().zip(layout.items.iter()) {
+        if *row == PaneMenuRow::Picker {
+            continue;
+        }
         if contains(*rect, x, y) {
             return Some(PaneMenuHit::Row(*row));
         }
@@ -7275,15 +7283,15 @@ pub fn pane_menu_hit(layout: &PaneMenuLayout, x: f64, y: f64) -> Option<PaneMenu
     Some(PaneMenuHit::Surface)
 }
 
-// ââ the drawing ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// ── the drawing ────────────────────────────────────────────────────────────
 
-/// The trailing `â¸`, at the file tree's own disclosure size.
+/// The trailing `▸`, at the file tree's own disclosure size.
 const SUBMENU_INDICATOR_LOGICAL_PX: f32 = 9.0;
 
 /// The pane menu and its submenu as overlay layers.
 ///
 /// `current_profile` is the profile the pane is running, which the submenu marks
-/// â `None` for a pane whose profile this build cannot name, which is the same
+/// — `None` for a pane whose profile this build cannot name, which is the same
 /// silence the profile picker keeps about a machine's missing shells.
 #[must_use]
 pub fn pane_menu_build(
@@ -7340,7 +7348,7 @@ pub fn pane_menu_build(
                 hovered: hover == Some(PaneMenuHover::Row(*row)),
                 // A split the solver has no room for is refused *by the solver*,
                 // after the press, exactly as the chord's is; a pane can always
-                // be closed; and the chooser `New terminal in folderâ¦` opens is
+                // be closed; and the chooser `New terminal in folder…` opens is
                 // Windows', which this window does not get to promise about in
                 // advance. Nothing here is a promise this build knows it cannot
                 // keep.
@@ -7353,11 +7361,11 @@ pub fn pane_menu_build(
             &mut sprites,
         );
         if *row == PaneMenuRow::SplitWith {
-            // The `â¸`, which is `#i-tri` **at rest**: the file tree's disclosure
+            // The `▸`, which is `#i-tri` **at rest**: the file tree's disclosure
             // triangle points right until something opens it, and pointing right
             // is the whole of what a submenu indicator says. No new glyph, no new
             // angle, and no fifth close-enough triangle in a build that already
-            // has one â see `ChromeMark::TreeDisclosure`, whose own note argues
+            // has one — see `ChromeMark::TreeDisclosure`, whose own note argues
             // that three marks differing by where a line falls are three marks
             // nobody can tell apart at fourteen pixels.
             let size = px(SUBMENU_INDICATOR_LOGICAL_PX).round().max(1.0);
@@ -7420,8 +7428,8 @@ fn push_picker(
     let px = |value: f32| value * scale;
     let edge = (PICKER_EDGE_LOGICAL_PX * scale).round().max(1.0);
     let alpha = |value: u8| f32::from(value) / 255.0;
-    // A bordered box is two fills â the whole box in the border's colour, the
-    // face laid one border in with one border less radius â which is exactly
+    // A bordered box is two fills — the whole box in the border's colour, the
+    // face laid one border in with one border less radius — which is exactly
     // what a browser leaves for `border: 1px solid`. See `rounded_overlay_fill`.
     let outlined = |rect: [f32; 4],
                     radius: f32,
@@ -7562,13 +7570,13 @@ fn push_submenu(
     }]
 }
 
-// ââ the commit graph's branch filter (T2/T3, v2 â¢) ââââââââââââââââââââââââââ
+// ── the commit graph's branch filter (T2/T3, v2 ③) ──────────────────────────
 //
 // The fifth popup in this module and the first one with *state on its rows*: a
 // radio, a list of checkboxes and two more checkboxes under a divider. It is
 // `#file-menu`'s skin and `push_row`'s rows for the reason every menu here gives
-// â a popup that looked like its neighbours but was drawn by different code
-// would be a second popup wearing the first one's clothes â and the only thing
+// — a popup that looked like its neighbours but was drawn by different code
+// would be a second popup wearing the first one's clothes — and the only thing
 // it adds to the family is that a row's mark now says whether the row is *on*.
 //
 // **Cloned rather than generalised, and the ruling is the one `#pane-menu` made
@@ -7577,8 +7585,8 @@ fn push_submenu(
 // generic "menu of rows" that all five went through would have to take all four
 // of those as parameters, which is the same code with the layout inverted and
 // one more indirection between a row and the rectangle it is drawn in. What is
-// actually shared is what should be â `push_row`, `push_float_window`, the
-// spacing constants â and that is shared here too.
+// actually shared is what should be — `push_row`, `push_float_window`, the
+// spacing constants — and that is shared here too.
 
 /// One row of the branch filter.
 ///
@@ -7653,7 +7661,7 @@ pub fn git_filter_rows(branches: &[String]) -> Vec<GitFilterRow> {
 /// **Anchored to the button and not to the pointer**, unlike `#file-menu`: it is
 /// opened by pressing a control, so it hangs from that control's own bottom-left
 /// exactly as the profile picker hangs from its chevron. The caller re-finds the
-/// button's rectangle every frame for E59/E60's reason â a re-layout can move it,
+/// button's rectangle every frame for E59/E60's reason — a re-layout can move it,
 /// and a menu pinned to where it *was* is a menu floating over nothing.
 #[must_use]
 pub fn git_filter_menu_layout(
@@ -7688,7 +7696,7 @@ pub fn git_filter_menu_layout(
         (2.0 * (border + padding) + rows.len() as f32 * item_height + separator_block).round();
 
     // Both axes clamped, on `#file-menu`'s reasoning: the button this hangs from
-    // is on a preview seat's own toolbar, which can be anywhere in the window â
+    // is on a preview seat's own toolbar, which can be anywhere in the window —
     // including the bottom of a short pane, where an unclamped drop would put
     // every branch under the window's edge.
     let (surface_width, surface_height) = surface;
@@ -7776,7 +7784,7 @@ pub fn git_filter_row_on(row: &GitFilterRow, filter: &crate::git_graph::GraphFil
 ///
 /// **A radio is a dot and a checkbox is a tick**, which is the distinction the
 /// Git page's own branch list already draws (G35): a filled circle is a *state*
-/// â this is the one â and it is only ever used where exactly one of the rows
+/// — this is the one — and it is only ever used where exactly one of the rows
 /// can be it. The branch rows and the two flags are checkboxes, several of which
 /// can be on at once, so they get the tick this window already uses for "done"
 /// and nothing at all when they are off.
@@ -7795,7 +7803,7 @@ fn git_filter_mark(row: &GitFilterRow, on: bool) -> Option<ChromeMark> {
     }
 }
 
-/// The radio's own round, in the raster's own pixels â half of a mark slot, so
+/// The radio's own round, in the raster's own pixels — half of a mark slot, so
 /// the pill it asks for is a circle rather than a lozenge.
 const GIT_FILTER_RADIO_RADIUS_PX: u32 = 8;
 
@@ -7865,24 +7873,24 @@ pub fn git_filter_menu_build(
     }]
 }
 
-// ââ the preview pane's buffer switcher (`#pv-menu`, mock-up 5085-5138) âââââââ
+// ── the preview pane's buffer switcher (`#pv-menu`, mock-up 5085-5138) ───────
 //
-// "Every live buffer, dirty dots and all â **the dropdown IS the honest
-// inventory of hidden state**" (P130, `DESIGN.md` Â§7.1.3). It wears `.term-menu`'s
+// "Every live buffer, dirty dots and all — **the dropdown IS the honest
+// inventory of hidden state**" (P130, `DESIGN.md` §7.1.3). It wears `.term-menu`'s
 // skin like `#file-menu` does, and it is built out of the same `push_row` every
 // other menu in this module is: the block's own instruction was to reuse the
 // context-menu family rather than mint a second popup, and a menu that looked
 // like its neighbours but was drawn by different code would be a second popup
 // wearing the first one's clothes.
 
-/// The dot a dirty buffer wears in the switcher â `.pvm-dot` (mock-up 581).
+/// The dot a dirty buffer wears in the switcher — `.pvm-dot` (mock-up 581).
 pub const PREVIEW_MENU_DIRTY_DOT: &str = "\u{25cf}";
 
 /// One row of the switcher: a live buffer in the tab's pool.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreviewMenuItem {
     pub name: String,
-    /// Unsaved edits â the dot on the right of the row.
+    /// Unsaved edits — the dot on the right of the row.
     pub dirty: bool,
     /// Whether this is the buffer the pane is showing (`.tm-item.cur`).
     pub current: bool,
@@ -7907,7 +7915,7 @@ impl PreviewMenu {
     }
 
     /// The name button: open here, or shut if this very pane already has it open
-    /// (P136 â "åä¸ä¸ª `data-leaf` åç¹ â æ¶").
+    /// (P136 — "同一个 `data-leaf` 再点 → 收").
     pub fn toggle(&mut self, seat: bt_layout::SeatId) {
         self.open = (self.open != Some(seat)).then_some(seat);
         self.hover = None;
@@ -7942,7 +7950,7 @@ pub struct PreviewMenuLayout {
 
 /// The switcher hung under the head's file name.
 ///
-/// `top = anchor.bottom + 4`, `left = clamp(anchor.left, 6, width - menu - 8)` â
+/// `top = anchor.bottom + 4`, `left = clamp(anchor.left, 6, width - menu - 8)` —
 /// mock-up 5109-5113, which is [`root_menu_layout`]'s pair of lines because it is
 /// the same gesture with a different list under it.
 #[must_use]
@@ -7974,7 +7982,7 @@ pub fn preview_menu_layout(
         })
         .fold(0.0_f32, f32::max);
     // A file name is arbitrary and chosen by nobody here, so the widest one does
-    // not get to stretch the popup across the window â the clamp the root menu
+    // not get to stretch the popup across the window — the clamp the root menu
     // puts on its directory names, for the identical reason.
     let width = (chrome + content)
         .clamp(
@@ -8070,7 +8078,7 @@ pub fn preview_menu_build(
                 name: &item.name,
                 // Reserved on every row and inked on the dirty ones. Drawn as an
                 // empty string rather than omitted so the name's box ends in the
-                // same place down the whole list â see the reservation in
+                // same place down the whole list — see the reservation in
                 // [`preview_menu_layout`].
                 hint: Some((
                     if item.dirty {
@@ -8103,7 +8111,7 @@ pub fn preview_menu_build(
     }]
 }
 
-/// `.term-menu { min-width: 172px }` (mock-up 638), which `#file-menu` wears â
+/// `.term-menu { min-width: 172px }` (mock-up 638), which `#file-menu` wears —
 /// the mock-up gives the two the same skin and says so at K145.
 ///
 /// Narrower than either of the other two menus, and rightly: its rows are three
@@ -8118,8 +8126,8 @@ mod tests {
     /// against.
     ///
     /// A call per case rather than a static: the rows own their strings now
-    /// (Â§7.1.6c-6), so there is no array to borrow. What the cases mean by it is
-    /// unchanged â **the table this build ships**, which is exactly what they
+    /// (§7.1.6c-6), so there is no array to borrow. What the cases mean by it is
+    /// unchanged — **the table this build ships**, which is exactly what they
     /// were pinning before the user could reorder anything.
     fn shipped_five() -> Vec<Profile> {
         shipped()
@@ -8137,8 +8145,8 @@ mod tests {
         layer
     }
 
-    /// The `Ë`'s box in a 960x600 window at 1x, taken from the strip's own
-    /// geometry rather than restated here â one ordinary unpinned tab.
+    /// The `˅`'s box in a 960x600 window at 1x, taken from the strip's own
+    /// geometry rather than restated here — one ordinary unpinned tab.
     fn anchor(scale: f32) -> [f32; 4] {
         let strip = [crate::seats::TabTrailer {
             pinned: false,
@@ -8164,7 +8172,7 @@ mod tests {
         text.chars().count() as f32 * font_px * 0.6
     }
 
-    // ââ P130-P137: the preview's filename switcher ââââââââââââââââââââââââââ
+    // ── P130-P137: the preview's filename switcher ──────────────────────────
 
     fn pool(names: &[(&str, bool, bool)]) -> Vec<PreviewMenuItem> {
         names
@@ -8177,17 +8185,17 @@ mod tests {
             .collect()
     }
 
-    /// PIN (P130-P133) â **the switcher is the honest inventory of hidden
+    /// PIN (P130-P133) — **the switcher is the honest inventory of hidden
     /// state**: every live buffer, in the pool's order, each with its own dirty
     /// dot, and the current one marked.
     ///
     /// MUTATIONS:
-    /// â  list only the clean buffers â the dirty rows vanish and the dropdown
+    /// ① list only the clean buffers — the dirty rows vanish and the dropdown
     ///    stops being the one place unsaved work is visible;
-    /// â¡ draw the dot only where it is dirty *and* size the row to it â the
+    /// ② draw the dot only where it is dirty *and* size the row to it — the
     ///    layout's width changes with the dirty bit and the menu moves under the
     ///    pointer when a buffer is edited;
-    /// â¢ ink the dot from `menu_item_hint_text` â it stops being the header's own
+    /// ③ ink the dot from `menu_item_hint_text` — it stops being the header's own
     ///    dot and starts looking like a note.
     #[test]
     fn the_switcher_lists_every_buffer_with_its_own_dot() {
@@ -8236,7 +8244,7 @@ mod tests {
         assert_eq!(clean_layout.frame, layout.frame);
 
         // Every row answers for its own rectangle, and the box answers for the
-        // rest of itself â a press on the menu's padding is the menu's.
+        // rest of itself — a press on the menu's padding is the menu's.
         for (index, item) in layout.items.iter().enumerate() {
             let (x, y) = ((item[0] + item[2]) / 2.0, (item[1] + item[3]) / 2.0);
             assert_eq!(
@@ -8255,12 +8263,12 @@ mod tests {
         assert_eq!(preview_menu_hit(&layout, 1.0, 1.0), None);
     }
 
-    /// PIN (P133/P136) â **one close path, and the button that opened it
+    /// PIN (P133/P136) — **one close path, and the button that opened it
     /// collapses it.**
     ///
     /// The chevron's angle is derived from this state on the next frame, so there
     /// is nothing to un-flip: shutting the menu *is* turning it back. That is the
-    /// mock-up's own note â "the root menu's lesson, applied on day one this
+    /// mock-up's own note — "the root menu's lesson, applied on day one this
     /// time".
     ///
     /// Mutation: make `toggle` always open, and a second press on the name leaves
@@ -8286,9 +8294,9 @@ mod tests {
         assert!(!menu.set_hover(Some(0)));
     }
 
-    // ââ E53-E61: the root menu âââââââââââââââââââââââââââââââââââââââââââââ
+    // ── E53-E61: the root menu ─────────────────────────────────────────────
 
-    /// PIN â E54. The list runs from the most permanent address to the most
+    /// PIN — E54. The list runs from the most permanent address to the most
     /// local, says why each place is on it, and names each place once.
     #[test]
     fn the_root_menu_offers_home_then_the_shells_then_one_level_up() {
@@ -8323,7 +8331,7 @@ mod tests {
         assert_eq!(choices[1].note, RootNote::Parent);
     }
 
-    /// PIN â a home directory a shell happens to be standing in is offered once,
+    /// PIN — a home directory a shell happens to be standing in is offered once,
     /// and called home.
     #[test]
     fn one_folder_is_one_row_however_many_reasons_it_has_to_be_there() {
@@ -8336,7 +8344,7 @@ mod tests {
         assert_eq!(choices[0].note, RootNote::Home);
     }
 
-    /// PIN â the top of a drive has no parent, and an unrooted column has no
+    /// PIN — the top of a drive has no parent, and an unrooted column has no
     /// list of its own to be at the top of.
     #[test]
     fn a_root_at_the_top_of_its_drive_offers_no_step_up() {
@@ -8370,7 +8378,7 @@ mod tests {
         assert!(clamped.frame[2] <= 960.0 - MENU_EDGE_MARGIN_LOGICAL_PX);
     }
 
-    /// PIN â the rows are what answer, the body is the menu's own, and outside is
+    /// PIN — the rows are what answer, the body is the menu's own, and outside is
     /// nobody's. The same three answers the picker gives, because a press
     /// outside a popup has to reach what it was aimed at.
     #[test]
@@ -8414,11 +8422,11 @@ mod tests {
         assert_eq!(first.2, r"C:\Users\dev", "the tip says the whole path");
     }
 
-    /// PIN â `Browseâ¦` is the last row, it is below a rule, and it is reachable
+    /// PIN — `Browse…` is the last row, it is below a rule, and it is reachable
     /// (E55).
     ///
     /// The red gate this replaces: for one whole block the menu could only offer
-    /// paths the application already knew â HOME, a shell's cwd, the parent â
+    /// paths the application already knew — HOME, a shell's cwd, the parent —
     /// so a folder that was none of those three was not reachable from the
     /// window at all. Asserting the row's *position* as well as its existence is
     /// what stops it from being quietly re-ordered into the list of places,
@@ -8440,7 +8448,7 @@ mod tests {
         );
         assert!(
             layout.browse[1] >= layout.browse_separator[3],
-            "and `Browseâ¦` sits under the rule"
+            "and `Browse…` sits under the rule"
         );
         assert!(
             layout.browse[3] <= layout.frame[3],
@@ -8457,7 +8465,7 @@ mod tests {
         assert_eq!(
             root_menu_hit(&layout, f64::from(x), f64::from(y)),
             Some(None),
-            "the rule is body â pressing a hairline commits nothing"
+            "the rule is body — pressing a hairline commits nothing"
         );
 
         let layer = one_layer(root_menu_build(
@@ -8473,7 +8481,7 @@ mod tests {
         );
     }
 
-    /// PIN â the folder the column is already rooted at is the one drawn open.
+    /// PIN — the folder the column is already rooted at is the one drawn open.
     /// That mark is the menu's "you are here", and getting it from the *current
     /// root* rather than from the hover is what keeps it from following the
     /// pointer around.
@@ -8499,7 +8507,7 @@ mod tests {
                 .sprites
                 .iter()
                 .filter(|sprite| sprite.mark == ChromeMark::FolderOpen)
-                // Only among the *choices*. `Browseâ¦` wears the open folder
+                // Only among the *choices*. `Browse…` wears the open folder
                 // unconditionally (it means "go and look", not "you are here"),
                 // so counting the whole menu would let a choice row lose its
                 // mark without the count noticing.
@@ -8519,7 +8527,7 @@ mod tests {
         );
     }
 
-    /// PIN â E57. The button toggles, and opening one column's menu is closing
+    /// PIN — E57. The button toggles, and opening one column's menu is closing
     /// every other column's.
     #[test]
     fn the_root_menu_belongs_to_one_column_at_a_time_and_its_button_shuts_it() {
@@ -8548,10 +8556,10 @@ mod tests {
     /// What the PowerShell 7 row is called, read from the table rather than
     /// written down.
     ///
-    /// The rows below are about *drawing* â this row's name is inked here, greyed
-    /// there, tipped with what its caption left out â and none of them is about
+    /// The rows below are about *drawing* — this row's name is inked here, greyed
+    /// there, tipped with what its caption left out — and none of them is about
     /// what the name happens to be. Spelling it out made every one of them a
-    /// second, accidental copy of `display_title(â¦)`, so the 7 / 5.1 rename came
+    /// second, accidental copy of `display_title(…)`, so the 7 / 5.1 rename came
     /// back as six failures in tests that had no opinion about it.
     fn powershell_seven() -> String {
         display_title(index_of_id("pwsh"))
@@ -8562,7 +8570,7 @@ mod tests {
     /// The whole reason [`ProfilePrograms::probe`] takes a trait rather than
     /// reading `std::env` is here. "Git Bash is greyed out" is a claim about a
     /// machine, and a test that asked the *host* would pass on the build server
-    /// and fail on a developer's laptop for identical code â the two would even
+    /// and fail on a developer's laptop for identical code — the two would even
     /// disagree about which assertion was the bug.
     #[derive(Default)]
     struct FakeMachine {
@@ -8592,7 +8600,7 @@ mod tests {
                 .with_file(r"C:\Program Files\Git\bin\bash.exe")
         }
 
-        /// Windows with nothing installed on top of it â which still has Windows
+        /// Windows with nothing installed on top of it — which still has Windows
         /// PowerShell, because that one ships *inside* the OS.
         ///
         /// A fixture without it would be a machine that does not exist, and it
@@ -8615,14 +8623,14 @@ mod tests {
         }
     }
 
-    /// The four profiles all startable â the machine most of these tests are
+    /// The four profiles all startable — the machine most of these tests are
     /// about the *menu* on rather than about availability.
     fn equipped() -> ProfilePrograms {
         ProfilePrograms::probe(&FakeMachine::fully_equipped())
     }
 
     /// A bare Windows box: Windows PowerShell and nothing else this product can
-    /// start â not even PowerShell 7, which is an install rather than part of
+    /// start — not even PowerShell 7, which is an install rather than part of
     /// the OS.
     fn bare() -> ProfilePrograms {
         ProfilePrograms::probe(&FakeMachine::bare_windows())
@@ -8671,7 +8679,7 @@ mod tests {
         separator_block(scale) + (ITEM_HEIGHT_LOGICAL_PX * scale).round()
     }
 
-    /// `.menu-sep` â 1px between two 5px margins.
+    /// `.menu-sep` — 1px between two 5px margins.
     fn separator_block(scale: f32) -> f32 {
         2.0 * (SEPARATOR_MARGIN_Y_LOGICAL_PX * scale).round()
             + (SEPARATOR_THICKNESS_LOGICAL_PX * scale).round().max(1.0)
@@ -8687,7 +8695,7 @@ mod tests {
         separator + heading + (ITEM_HEIGHT_LOGICAL_PX * scale).round() * rows as f32
     }
 
-    /// PIN â the menu hangs 4px under the button that opened it, at the button's
+    /// PIN — the menu hangs 4px under the button that opened it, at the button's
     /// own left edge, and it is the mock-up's 180px wide.
     #[test]
     fn the_menu_hangs_under_its_button_at_the_mockup_s_own_width() {
@@ -8748,17 +8756,17 @@ mod tests {
         }
     }
 
-    /// PIN â beside the rail's button, not under it, and the bug that asked.
+    /// PIN — beside the rail's button, not under it, and the bug that asked.
     ///
     /// A real window in rail mode opened the picker adrift in the middle of the
     /// terminal, because the anchor was still read out of the *horizontal*
-    /// strip's geometry â a pure function of a width and a trailer list, which
+    /// strip's geometry — a pure function of a width and a trailer list, which
     /// goes on answering with a box in the title bar long after the tabs have
     /// moved down the side.
     ///
     /// With the rail's own box, "under and left" is still wrong: that is the
     /// rail's own column, 46px of it while parked. Beside, then, and level with
-    /// the button's top â and, because Q181 collapses the `Ë` while the rail is
+    /// the button's top — and, because Q181 collapses the `˅` while the rail is
     /// parked so the `+` is the anchor there instead, the placement is written
     /// so those two boxes give the same answer. They share a right edge and a
     /// top by construction, so the menu does not jump when the panel slides open
@@ -8766,7 +8774,7 @@ mod tests {
     #[test]
     fn beside_the_rail_the_menu_clears_its_button_rather_than_hanging_down_it() {
         let scale = 1.0;
-        // A 220px rail's `+` row, and the `Ë` that stands at its right end:
+        // A 220px rail's `+` row, and the `˅` that stands at its right end:
         // `new_tab` is 173 wide, a 2px gap, then a 28px chevron (Q181).
         let plus = [8.0_f32, 400.0, 181.0, 430.0];
         let chevron = [183.0_f32, 400.0, 211.0, 430.0];
@@ -8816,9 +8824,9 @@ mod tests {
         assert_eq!(strip.frame[1], (chevron[3] + 4.0 * scale).round());
     }
 
-    /// PIN â a menu beside a button near the window's foot is pushed back up
-    /// rather than hanging out of it. The `Below` placement never needed this â
-    /// it only ever hangs off the title bar â which is why the clamp arrived
+    /// PIN — a menu beside a button near the window's foot is pushed back up
+    /// rather than hanging out of it. The `Below` placement never needed this —
+    /// it only ever hangs off the title bar — which is why the clamp arrived
     /// with the rail.
     #[test]
     fn a_menu_beside_a_low_button_stays_inside_the_window() {
@@ -8840,7 +8848,7 @@ mod tests {
         assert!(low.frame[1] >= 0.0, "{:?}", low.frame);
     }
 
-    /// PIN â the mock-up's own four, in the mock-up's own order, each with a
+    /// PIN — the mock-up's own four, in the mock-up's own order, each with a
     /// stable slug, its own mark and a real program to start.
     ///
     /// The order is load-bearing rather than tidy: `state.defaultProfile` is an
@@ -8851,7 +8859,7 @@ mod tests {
     /// This test replaces one that asserted `count() == 1` and was right
     /// to: a list of rows that all started PowerShell would have been rows that
     /// cannot do what they say. What makes the list honest now is the rest of
-    /// this file â a program per profile, and a greyed row where the machine
+    /// this file — a program per profile, and a greyed row where the machine
     /// has none.
     ///
     /// The two PowerShells sit adjacent and in that order (user ruling
@@ -8865,12 +8873,12 @@ mod tests {
         assert_eq!(listed, ["pwsh", "winps", "wsl", "gitbash", "cmd"]);
         assert_eq!(display_title(fallback_profile()), "Windows PowerShell 5.1");
 
-        // **Mark Ã title, and not the mark alone.** This used to require every
+        // **Mark × title, and not the mark alone.** This used to require every
         // mark to be distinct, and the two PowerShells retire that: they are one
         // family and there is one PowerShell symbol in the mock-up, so drawing a
         // second glyph would assert a visual distinction the family does not
-        // have. What has to stay unique is what `docs/UI-UX.md` Â§126-137 says
-        // identity *is* â "å¾æ  Ã ç®å½", the icon and the text together â and in
+        // have. What has to stay unique is what `docs/UI-UX.md` §126-137 says
+        // identity *is* — "图标 × 目录", the icon and the text together — and in
         // this list the text is the title. Two rows with the same mark are fine;
         // two rows a reader cannot tell apart are not.
         for (index, left) in shipped_five().iter().enumerate() {
@@ -8907,13 +8915,13 @@ mod tests {
         }
     }
 
-    /// PIN â **the arguments are the profile's, not the spawn path's.**
+    /// PIN — **the arguments are the profile's, not the spawn path's.**
     ///
     /// `-NoLogo` used to be welded into `PtyCommand::interactive_shell` as "the
     /// one argument", which was true only while every shell this terminal could
     /// start was a PowerShell. It is a PowerShell flag: `cmd.exe` reads it as
     /// the name of a batch file to run and `bash` as a file to open, so passing
-    /// it to the other three would produce three shells that start wrong â the
+    /// it to the other three would produce three shells that start wrong — the
     /// exact failure that cannot be seen from a screenshot of the menu.
     #[test]
     fn only_the_powershell_profile_asks_for_nologo() {
@@ -8937,20 +8945,20 @@ mod tests {
         );
     }
 
-    /// PIN â the two PowerShells are two rows, two programs, and two answers.
+    /// PIN — the two PowerShells are two rows, two programs, and two answers.
     ///
     /// User ruling 2026-08-11, and it reverses this module's earlier reading. One
     /// row called `PowerShell` whose resolution order ended at `powershell.exe`
     /// was defensible while it was the *only* PowerShell row: which end of the
     /// chain a machine landed on was a fact about the machine. It stops being
     /// defensible on a machine that has both installed, which is the common case
-    /// â the row silently starts one of two visibly different products, and the
+    /// — the row silently starts one of two visibly different products, and the
     /// user has no way to ask for the other.
     ///
     /// Red gate, and each half catches a different way of half-doing it:
     ///
     /// * leave `pwsh` resolving through the old chain and a machine without
-    ///   PowerShell 7 gets a row labelled `PowerShell` that starts 5.1 â the
+    ///   PowerShell 7 gets a row labelled `PowerShell` that starts 5.1 — the
     ///   original lie, now with a second row beside it making the lie visible;
     /// * point `fallback_profile()` at `pwsh` and the floor under every other
     ///   profile becomes a row that is allowed to be greyed.
@@ -8975,7 +8983,7 @@ mod tests {
             );
         }
 
-        // On a machine with both, each row starts its own binary â which is the
+        // On a machine with both, each row starts its own binary — which is the
         // whole of what splitting them buys.
         let both = ProfilePrograms::probe(&FakeMachine::fully_equipped());
         assert_eq!(
@@ -9016,7 +9024,7 @@ mod tests {
         );
     }
 
-    /// PIN â the integration script titles a session with its own profile's name,
+    /// PIN — the integration script titles a session with its own profile's name,
     /// character for character.
     ///
     /// The two files are one decision wearing two syntaxes.
@@ -9025,7 +9033,7 @@ mod tests {
     /// equal to the profile's own, because a shell that agrees with its launcher
     /// has announced nothing. That test is string equality and nothing weaker, so
     /// the moment one side is renamed alone every pane head in a PowerShell tab
-    /// goes back to reading `PowerShell Â· D:\â¦` â the exact defect the suppression
+    /// goes back to reading `PowerShell · D:\…` — the exact defect the suppression
     /// was written for, re-entered through the back door of a half-done rename.
     ///
     /// This reads the bytes that ship rather than a copy of them, which is the
@@ -9038,7 +9046,7 @@ mod tests {
     #[test]
     fn the_integration_script_names_the_profiles_own_titles() {
         let script = crate::shell_integration::script_source_ps1();
-        // The assignment as the script writes it â the two arms of the one
+        // The assignment as the script writes it — the two arms of the one
         // conditional that decides what a PowerShell calls itself. `Core` is 7 and
         // everything else is the 5.1 that ships with Windows.
         for (id, edition) in [("pwsh", "Core"), ("winps", "Desktop")] {
@@ -9063,7 +9071,7 @@ mod tests {
         );
     }
 
-    /// PIN â the fallback profile is the one profile that cannot be unavailable.
+    /// PIN — the fallback profile is the one profile that cannot be unavailable.
     ///
     /// Everything else leans on it: `index_of_id` falls back to it for an id this
     /// build does not have, `default_profile` falls back to it for a *setting*
@@ -9084,18 +9092,18 @@ mod tests {
                 shipped_five()[fallback_profile()].program,
                 ProgramSource::PowerShellSeven
             ),
-            "and never the row that is allowed to answer `no` â a fallback chain              whose bottom can be greyed has a hole in it"
+            "and never the row that is allowed to answer `no` — a fallback chain              whose bottom can be greyed has a hole in it"
         );
         // Even on a machine with nothing else on it.
         assert!(bare().is_available(fallback_profile()));
         assert!(equipped().is_available(fallback_profile()));
     }
 
-    /// PIN â `default` is a caption on the *chosen* row, not on the first one.
+    /// PIN — `default` is a caption on the *chosen* row, not on the first one.
     ///
     /// Red gate: the hint used to be `index == DEFAULT_PROFILE`, a constant, so
     /// every reading of the menu said PowerShell however the setting was set. The
-    /// second half â exactly one row wears it â is what keeps a fix that ORs a
+    /// second half — exactly one row wears it — is what keeps a fix that ORs a
     /// new condition onto the old one from passing.
     #[test]
     fn the_default_caption_follows_the_setting_and_lands_on_exactly_one_row() {
@@ -9140,13 +9148,13 @@ mod tests {
         }
     }
 
-    /// PIN â a row's annotation takes its width out of the row before the name
+    /// PIN — a row's annotation takes its width out of the row before the name
     /// gets any, so the two are never drawn on top of each other.
     ///
     /// **Found on the real machine** (2026-08-11), the frame after "Command
     /// Prompt" became the default: the menu is 180px, `Command Prompt` alone very
     /// nearly fills it, and `default` was right-aligned into a span the name's
-    /// own box also ran to the end of â so the window printed `Command Promptdefault`,
+    /// own box also ran to the end of — so the window printed `Command Promptdefault`,
     /// two labels in one place. It was latent before this ticket and reachable
     /// only through `not installed` on a long-named profile; making the default
     /// configurable put it on the common path.
@@ -9209,13 +9217,13 @@ mod tests {
         }
     }
 
-    /// PIN â a row says what its caption could not fit, and only then.
+    /// PIN — a row says what its caption could not fit, and only then.
     ///
     /// Two rules in one list because they are one rule: the mock-up hangs a
     /// `title` on a menu row exactly when the row is showing less than it knows
     /// (7426/7430 caption a Recent row with a path's last segment and tip the
-    /// whole path). A greyed profile row is the case the mock-up never had â it
-    /// is captioned `not installed`, which is a state without its reason â and an
+    /// whole path). A greyed profile row is the case the mock-up never had — it
+    /// is captioned `not installed`, which is a state without its reason — and an
     /// *available* profile row is showing everything it knows, so it says nothing
     /// rather than restating the label under the pointer.
     #[test]
@@ -9237,7 +9245,7 @@ mod tests {
             .filter_map(|(row, _, text)| match row {
                 MenuRow::Profile(index) => Some((*index, text.clone())),
                 // The files row's caption says everything it knows, so it is
-                // never tipped â the same rule an available profile row follows.
+                // never tipped — the same rule an available profile row follows.
                 MenuRow::Recent(_) | MenuRow::FilesPane => None,
             })
             .collect();
@@ -9248,26 +9256,26 @@ mod tests {
                 // 5.1 row beside it is part of Windows and says nothing.
                 (
                     index_of_id("pwsh"),
-                    format!("{} â not found on this machine", powershell_seven())
+                    format!("{} — not found on this machine", powershell_seven())
                 ),
                 (
                     index_of_id("wsl"),
-                    "WSL â not found on this machine".to_owned()
+                    "WSL — not found on this machine".to_owned()
                 ),
                 (
                     index_of_id("gitbash"),
-                    "Git Bash â not found on this machine".to_owned()
+                    "Git Bash — not found on this machine".to_owned()
                 ),
                 (
                     index_of_id("cmd"),
-                    "Command Prompt â not found on this machine".to_owned()
+                    "Command Prompt — not found on this machine".to_owned()
                 ),
             ],
             "every greyed row says why, in its own name, and the startable one \
              says nothing"
         );
 
-        // The rectangles are the laid-out rows themselves â a tip registered
+        // The rectangles are the laid-out rows themselves — a tip registered
         // against a box computed a second way is a tip that appears where the
         // row is not.
         for (row, rect, _) in &bare_tips {
@@ -9279,7 +9287,7 @@ mod tests {
             assert_eq!(*rect, expected);
         }
 
-        // And on a machine with all four, no profile row has anything to add â
+        // And on a machine with all four, no profile row has anything to add —
         // but the Recent row still carries the path its caption cropped.
         let equipped_tips: Vec<_> = layout.tips(&equipped(), &vault).collect();
         assert_eq!(
@@ -9297,7 +9305,7 @@ mod tests {
         );
     }
 
-    /// PIN â the setting decides, the machine vetoes, and neither is the other.
+    /// PIN — the setting decides, the machine vetoes, and neither is the other.
     ///
     /// Red gate for the whole of P3's data half. Four inputs and four different
     /// answers, and the two failure modes this exists to stop are opposites: a
@@ -9326,7 +9334,7 @@ mod tests {
         assert_eq!(
             default_profile("gitbash", &bare()),
             fallback_profile(),
-            "chosen, installed once, uninstalled since â the window still opens"
+            "chosen, installed once, uninstalled since — the window still opens"
         );
         // And the resolved answer is always startable, which is the property
         // `create_leaf_session`'s `expect` is standing on.
@@ -9340,11 +9348,11 @@ mod tests {
         }
     }
 
-    /// PIN â every profile can say where it starts, and WSL says it differently.
+    /// PIN — every profile can say where it starts, and WSL says it differently.
     ///
     /// The trap is a `starting_dir` that resolves to a Windows path for all four:
     /// it would compile, it would look right in the table, and a WSL tab would
-    /// open in `/mnt/c/Users/â¦` â a real directory, silently not the one the same
+    /// open in `/mnt/c/Users/…` — a real directory, silently not the one the same
     /// shell opens in when started any other way.
     #[test]
     fn a_profile_states_its_starting_place_in_the_form_its_launcher_can_take() {
@@ -9385,14 +9393,14 @@ mod tests {
         );
     }
 
-    /// PIN â an inherited directory travels on the channel its own profile
+    /// PIN — an inherited directory travels on the channel its own profile
     /// listens on, and never on the other one.
     ///
     /// Red gate, and it is the failure P4 would otherwise ship: hand a WSL leaf
     /// its inherited `/mnt/d/Developer` as a *working directory* and it reaches
     /// `CreateProcess` as a Windows path, where `bt-pty`'s own "does this
     /// directory exist" check rejects it and silently substitutes this process's
-    /// folder â so the WSL tab opens in `/mnt/c/WINDOWS/system32` while the menu
+    /// folder — so the WSL tab opens in `/mnt/c/WINDOWS/system32` while the menu
     /// row said it would open where you were standing. Nothing about that is
     /// visible: it is a real directory, and the shell starts.
     #[test]
@@ -9424,12 +9432,12 @@ mod tests {
         );
     }
 
-    /// PIN â the drive map, in both directions, including every shape that has
+    /// PIN — the drive map, in both directions, including every shape that has
     /// no answer.
     ///
     /// Red gate: a `to_string_lossy().replace('\\', "/")` translation passes the
     /// happy row and takes `\\server\share\src` to `/mnt/\/server/share/src`,
-    /// `src` to `src`, and `/mnt/cdrom` to `C:` â three paths that name nothing,
+    /// `src` to `src`, and `/mnt/cdrom` to `C:` — three paths that name nothing,
     /// handed to a shell as the place it should open in. Every `None` row here
     /// is a path that a string-level translation would have accepted.
     #[test]
@@ -9452,7 +9460,7 @@ mod tests {
             assert_eq!(
                 windows_to_wsl(Path::new(windows)).as_deref(),
                 Some(Path::new(wsl)),
-                "{windows} â WSL"
+                "{windows} → WSL"
             );
         }
         // Not symmetric as a pair of tables: the lower-cased drive and the
@@ -9467,12 +9475,12 @@ mod tests {
             assert_eq!(
                 wsl_to_windows(Path::new(wsl)).as_deref(),
                 Some(Path::new(windows)),
-                "{wsl} â Windows"
+                "{wsl} → Windows"
             );
         }
         for unnameable in [
             // The UNC shapes, including the one `wslpath -w` answers for a Linux
-            // home â a share, not a mount.
+            // home — a share, not a mount.
             r"\\server\share\src",
             r"\\wsl.localhost\Ubuntu-24.04\home\weiyi",
             r"\\?\UNC\server\share",
@@ -9489,7 +9497,7 @@ mod tests {
             );
         }
         // The verbatim spelling of a drive is still a drive, and only the
-        // platform's own parser knows that â a `\\` prefix test reads it as a
+        // platform's own parser knows that — a `\\` prefix test reads it as a
         // share.
         assert_eq!(
             windows_to_wsl(Path::new(r"\\?\C:\src")).as_deref(),
@@ -9498,7 +9506,7 @@ mod tests {
         for unnameable in [
             // The distribution's own root filesystem. Windows can only reach it
             // through the `\\wsl.localhost` share, which is a service and not a
-            // directory â the ruling is that this has no answer.
+            // directory — the ruling is that this has no answer.
             "/home/weiyi",
             "/",
             "/usr/local/bin",
@@ -9517,16 +9525,16 @@ mod tests {
         }
     }
 
-    /// PIN â every pair of profiles, and what a new tab inherits across it.
+    /// PIN — every pair of profiles, and what a new tab inherits across it.
     ///
     /// This is P3's `a_new_tab_inherits_a_folder_only_from_its_own_profile`
-    /// grown up: that test asserted `Some âº from == to`, and it would now fail,
+    /// grown up: that test asserted `Some ⟺ from == to`, and it would now fail,
     /// which is the point. The rule it enforced was a stand-in for this one.
     ///
     /// Red gate: translating only on the diagonal (P3's rule) leaves a WSL tab
     /// opened from a PowerShell standing in `D:\Developer` at `~`, and the
-    /// mock-up's own promise â "a new shell opens where the one you are looking
-    /// at is standing" â quietly not kept for three quarters of the table.
+    /// mock-up's own promise — "a new shell opens where the one you are looking
+    /// at is standing" — quietly not kept for three quarters of the table.
     #[test]
     fn a_new_tab_inherits_a_folder_whenever_the_shell_it_starts_can_name_it() {
         let windows = Path::new(r"D:\Developer\BetterTerminal");
@@ -9560,19 +9568,19 @@ mod tests {
                     );
                 }
                 // A shell that has never said where it is hands on nothing to
-                // say, whichever pair it is â the OSC 7 rule, unchanged.
+                // say, whichever pair it is — the OSC 7 rule, unchanged.
                 assert_eq!(cwd_for_spawn(source, target, None), None);
             }
         }
     }
 
-    /// PIN â a saved directory is checked for existence only where the check
+    /// PIN — a saved directory is checked for existence only where the check
     /// can be answered.
     ///
     /// Red gate, and it is the silent kind: `is_dir()` is a Win32 question and
     /// `/mnt/d/Developer` answers **no** to it on the very machine where that
     /// directory is fine. An unguarded check therefore drops the directory of
-    /// every WSL pane it restores â every revived WSL tab comes back at `~`,
+    /// every WSL pane it restores — every revived WSL tab comes back at `~`,
     /// nothing is logged, and the session file that has the right answer in it
     /// is overwritten with the wrong one on the next save.
     #[test]
@@ -9602,11 +9610,11 @@ mod tests {
         }
     }
 
-    /// PIN â the qualifier is appended to the constant, and only to the profile
+    /// PIN — the qualifier is appended to the constant, and only to the profile
     /// whose title is incomplete without it.
     ///
-    /// Red gate: qualifying every profile gives `PowerShell Â· Ubuntu-24.04`, and
-    /// qualifying none leaves the `Ë` menu on a three-distribution machine
+    /// Red gate: qualifying every profile gives `PowerShell · Ubuntu-24.04`, and
+    /// qualifying none leaves the `˅` menu on a three-distribution machine
     /// unable to say which of them `WSL` opens.
     #[test]
     fn only_the_profile_that_names_a_launcher_wears_the_machine_s_answer() {
@@ -9620,11 +9628,11 @@ mod tests {
             let qualified = compose_title(profile, Some("Ubuntu-24.04"));
             match profile.qualifier {
                 Qualifier::WslDistribution => {
-                    assert_eq!(qualified, "WSL Â· Ubuntu-24.04");
+                    assert_eq!(qualified, "WSL · Ubuntu-24.04");
                     // The mock-up's own rule (line 4013): a session's name is
-                    // everything before `" Â·"`, and it is the constant.
+                    // everything before `" ·"`, and it is the constant.
                     assert_eq!(
-                        qualified.split(" Â·").next(),
+                        qualified.split(" ·").next(),
                         Some(profile.display_title.as_str())
                     );
                 }
@@ -9637,10 +9645,10 @@ mod tests {
         }
     }
 
-    /// PIN â a profile is available exactly when its program is on the machine,
+    /// PIN — a profile is available exactly when its program is on the machine,
     /// and a machine that has none of them still has PowerShell.
     ///
-    /// Red gate: probing only `%ProgramFiles%` for Git â which is where it lands
+    /// Red gate: probing only `%ProgramFiles%` for Git — which is where it lands
     /// from the ordinary installer and nowhere else. A per-user install
     /// (`%LocalAppData%\Programs\Git`) is the default for anybody without
     /// administrator rights, so "Git Bash is greyed on a machine that has Git
@@ -9700,20 +9708,20 @@ mod tests {
         );
     }
 
-    /// PIN â **Git installed anywhere at all is found, through `git.exe` on
+    /// PIN — **Git installed anywhere at all is found, through `git.exe` on
     /// `PATH`.**
     ///
     /// Red gate, and it is not hypothetical: this ticket's own first real-machine
     /// check ran on a box with Git at `D:\App\Tool\Git`, which is under none of
     /// the three installers' default roots. A well-known-paths list can only
-    /// enumerate defaults, so on that machine â and on everyone else's who chose
-    /// their own directory â the row would have been greyed `not installed` over
+    /// enumerate defaults, so on that machine — and on everyone else's who chose
+    /// their own directory — the row would have been greyed `not installed` over
     /// a working Git Bash. That is not honest degradation, it is a wrong answer
     /// delivered in the tone of an honest one, which is worse than no row at all.
     ///
     /// The anchor is climbed two levels because Git for Windows puts the tool at
-    /// `<root>\cmd\git.exe` and the shell at `<root>\bin\bash.exe` â siblings
-    /// under one root, not nested â so joining onto `git.exe`'s own directory
+    /// `<root>\cmd\git.exe` and the shell at `<root>\bin\bash.exe` — siblings
+    /// under one root, not nested — so joining onto `git.exe`'s own directory
     /// would look in `<root>\cmd\bin` and find nothing.
     #[test]
     fn git_installed_outside_the_well_known_roots_is_found_through_the_tool_on_path() {
@@ -9773,12 +9781,12 @@ mod tests {
         );
     }
 
-    /// PIN â **a greyed row is drawn and is not offered**, and both halves are
+    /// PIN — **a greyed row is drawn and is not offered**, and both halves are
     /// answered by [`hit`] so they cannot disagree.
     ///
     /// Red gate, and it is the difference between this and hiding the row. A
-    /// missing row and a greyed row look nothing alike to a user â one says "you
-    /// do not have this", the other says "we never thought of this" â but they
+    /// missing row and a greyed row look nothing alike to a user — one says "you
+    /// do not have this", the other says "we never thought of this" — but they
     /// look identical to a test that only counts what the menu can launch. So
     /// what is asserted here is that the row is *still on screen*, still named,
     /// still carrying its own artwork, and still costs the same 29.5px of menu:
@@ -9833,7 +9841,7 @@ mod tests {
             .labels
             .iter()
             .find(|label| label.text == "Git Bash")
-            .expect("the row is still named â a hidden row would say nothing at all");
+            .expect("the row is still named — a hidden row would say nothing at all");
         assert_eq!(
             name.color, palette.menu_item_hint_text,
             "and named in the menu's quietest ink"
@@ -9861,14 +9869,14 @@ mod tests {
         // is per row, and the row that always works still looks like it works.
         //
         // Its sprite is taken by *row index* rather than by mark, because the
-        // two PowerShells share a mark on purpose â a search would find whichever
+        // two PowerShells share a mark on purpose — a search would find whichever
         // came first and could not tell the greyed 7 row from the startable 5.1
         // one, which is exactly the pair this test has to distinguish.
         let winps = layer.sprites[fallback_profile()];
         assert_eq!(winps.mark, ChromeMark::ProfilePowerShell);
         assert_eq!(winps.opacity, 1.0);
         assert!(!winps.grayscale);
-        // â¦while PowerShell 7, one row above it, is greyed on this machine.
+        // …while PowerShell 7, one row above it, is greyed on this machine.
         let pwsh = layer.sprites[index_of_id("pwsh")];
         assert_eq!(pwsh.mark, ChromeMark::ProfilePowerShell);
         assert_eq!(pwsh.opacity, UNAVAILABLE_MARK_OPACITY);
@@ -9879,11 +9887,11 @@ mod tests {
         );
     }
 
-    /// PIN â a Recent row is greyed by the same rule its profile row is.
+    /// PIN — a Recent row is greyed by the same rule its profile row is.
     ///
     /// Red gate: greying the profile list and not the Recent list would put both
-    /// answers to one question in a single menu â `Git Bash` greyed at the top,
-    /// and three rows below it a live `~/repo Â· 3m ago` under the same Git mark,
+    /// answers to one question in a single menu — `Git Bash` greyed at the top,
+    /// and three rows below it a live `~/repo · 3m ago` under the same Git mark,
     /// offering to start the shell the row above just said you do not have.
     #[test]
     fn a_recent_row_whose_shell_is_missing_is_greyed_with_its_profile() {
@@ -9965,7 +9973,7 @@ mod tests {
         );
     }
 
-    /// PIN â a popup is not a modal: a point off the menu belongs to nobody
+    /// PIN — a popup is not a modal: a point off the menu belongs to nobody
     /// here, and a point on the menu's own body is not a row.
     ///
     /// Red gate: returning `Some(None)` for everything (the modal shape) would
@@ -10019,14 +10027,14 @@ mod tests {
         assert_eq!(hit(&layout, &equipped(), NO_RECENT, 400.0, 500.0), None);
     }
 
-    /// PIN â the menu is pushed off the window's right edge by no more than the
+    /// PIN — the menu is pushed off the window's right edge by no more than the
     /// mock-up's own 8px margin, however near that edge the button sits.
     ///
     /// The window is sized from the menu rather than written down, because the
     /// menu is content-sized and this pin is about **placement**: a button jammed
     /// against the right edge, and a popup that comes back inside for it. A fixed
     /// number here quietly turns into a second, different claim the moment a
-    /// profile is renamed longer than it â which is how the 7 / 5.1 rename found
+    /// profile is renamed longer than it — which is how the 7 / 5.1 rename found
     /// it, the old 300px window no longer being wide enough to hold the list at
     /// all. That case has its own answer (`max(0.0)`: a menu with nowhere to fit
     /// hangs off the right, never off the left) and it is not this one.
@@ -10043,7 +10051,7 @@ mod tests {
         );
         let menu_width = roomy.frame[2] - roomy.frame[0];
         let surface = menu_width + 40.0;
-        // The button in the top-right corner, which is where the `â` actually is.
+        // The button in the top-right corner, which is where the `⌄` actually is.
         let anchor = [surface - 34.0, 9.0, surface - 6.0, 37.0];
         let layout = layout(
             anchor,
@@ -10066,7 +10074,7 @@ mod tests {
         assert!(frame[0] >= 0.0);
     }
 
-    /// PIN â hover is a fact about an open menu. A stale row cannot stay lit
+    /// PIN — hover is a fact about an open menu. A stale row cannot stay lit
     /// under a menu that is no longer there.
     #[test]
     fn hover_belongs_to_an_open_menu_only() {
@@ -10090,7 +10098,7 @@ mod tests {
         assert!(!menu.close(), "closing a shut menu consumes nothing");
     }
 
-    /// PIN â the hovered row wears `--ink` on `--hover`, and the resting one
+    /// PIN — the hovered row wears `--ink` on `--hover`, and the resting one
     /// `--ink2` on nothing; the row also carries its profile's own mark.
     #[test]
     fn a_hovered_row_lights_up_and_every_row_wears_its_profile_s_mark() {
@@ -10157,11 +10165,11 @@ mod tests {
         );
     }
 
-    /// PIN â I89/I90/I93/I95: every measured value of `.profile-menu` and
+    /// PIN — I89/I90/I93/I95: every measured value of `.profile-menu` and
     /// `.profile-item` (mock-up lines 1006-1031), nailed to the stylesheet.
     ///
     /// The surface, its rows and its ink are checked elsewhere in this module;
-    /// what this pins is the ruler â the numbers a redesign would have to change
+    /// what this pins is the ruler — the numbers a redesign would have to change
     /// deliberately rather than drift past.
     #[test]
     fn the_menu_measures_what_the_stylesheet_says_it_measures() {
@@ -10245,10 +10253,10 @@ mod tests {
         }
     }
 
-    /// PIN â I93: the `default` hint is `--ink3` over `--menu`, and the mark
+    /// PIN — I93: the `default` hint is `--ink3` over `--menu`, and the mark
     /// column is the mock-up's 14px with its 15px mark centred on it.
     ///
-    /// Red gate: the hint used to wear `dialog_muted_text` â the same ink
+    /// Red gate: the hint used to wear `dialog_muted_text` — the same ink
     /// composited over `--win`, the settings dialog's surface. The two agree in
     /// the light theme and part by six levels in the dark, which is exactly the
     /// kind of error that survives a light-theme review.
@@ -10290,7 +10298,7 @@ mod tests {
             layout.items[0][2] - ITEM_PADDING_X_LOGICAL_PX * scale,
             "and that padding is the row's own 10px"
         );
-        // The 15px mark, centred on its 14px column â what a flex box does with
+        // The 15px mark, centred on its 14px column — what a flex box does with
         // a child one pixel wider than its box.
         let mark = sprites
             .iter()
@@ -10315,11 +10323,11 @@ mod tests {
         assert_eq!(title.font_size_px, ITEM_FONT_LOGICAL_PX * scale);
     }
 
-    /// PIN â I92, mock-up 7424: `state.recent.length ? â¦ : ""`. An empty vault
+    /// PIN — I92, mock-up 7424: `state.recent.length ? … : ""`. An empty vault
     /// adds no rule, no heading and no rows, and leaves the menu at exactly the
     /// height it had before Recent existed.
     ///
-    /// Red gate: a section that draws itself unconditionally â a hairline and a
+    /// Red gate: a section that draws itself unconditionally — a hairline and a
     /// heading reading "RECENTLY OPENED" over nothing at all, which is chrome
     /// making a promise the menu cannot keep.
     #[test]
@@ -10339,7 +10347,7 @@ mod tests {
                 (2.0 * (border + MENU_PADDING_LOGICAL_PX * scale)
                     + (ITEM_HEIGHT_LOGICAL_PX * scale).round() * count() as f32
                     // The `Files pane` section is unconditional, so it is here
-                    // even with an empty vault â that asymmetry is the point of
+                    // even with an empty vault — that asymmetry is the point of
                     // this pin, not an exception to it.
                     + files_block(scale))
                 .round(),
@@ -10374,7 +10382,7 @@ mod tests {
         }
     }
 
-    /// PIN â the Recent section is `.menu-sep` (1px between two 5px margins),
+    /// PIN — the Recent section is `.menu-sep` (1px between two 5px margins),
     /// `.menu-label` (3 + the 10.5px line box + 5) and one 29.5px row per seed,
     /// in that order, inside the menu's own padding.
     #[test]
@@ -10455,12 +10463,12 @@ mod tests {
         }
     }
 
-    /// PIN â a press on a recent row is that recent row, by the vault's own
+    /// PIN — a press on a recent row is that recent row, by the vault's own
     /// index, and never a profile.
     ///
     /// Red gate: the menu's rows used to be one untagged `usize` indexed
     /// straight into [`shipped_five()`]. With a Recent section under them that number
-    /// names two different things, and the bug it produces is silent â clicking
+    /// names two different things, and the bug it produces is silent — clicking
     /// the third recent seed launches a bare PowerShell in the wrong folder and
     /// looks, from the outside, exactly like the menu working.
     #[test]
@@ -10500,7 +10508,7 @@ mod tests {
         );
 
         // The rule and the heading name nothing you can open, so they are the
-        // menu's body â a press there does nothing rather than something.
+        // menu's body — a press there does nothing rather than something.
         let rule = layout.separator.expect("separated");
         let band = layout.section_label.expect("titled");
         for rect in [rule, band] {
@@ -10509,8 +10517,8 @@ mod tests {
         }
     }
 
-    /// PIN â the menu shows at most the eight seeds the vault itself keeps
-    /// (`docs/DESIGN.md` Â§7.1.4, mock-up 4106), whatever it is handed.
+    /// PIN — the menu shows at most the eight seeds the vault itself keeps
+    /// (`docs/DESIGN.md` §7.1.4, mock-up 4106), whatever it is handed.
     ///
     /// Red gate: a menu whose height is "however many the caller passed" is a
     /// popup that grows off the bottom of the window, and every row past the
@@ -10566,7 +10574,7 @@ mod tests {
         );
     }
 
-    /// PIN â `.menu-label` is the settings dialog's group-heading craft on the
+    /// PIN — `.menu-label` is the settings dialog's group-heading craft on the
     /// menu's own surface: 10.5px, `600`, `.05em` tracked, `--ink3` over
     /// `--menu`, and drawn uppercase because `text-transform` has no renderer
     /// here.
@@ -10610,7 +10618,7 @@ mod tests {
         assert_eq!(
             heading.rect[0],
             band[0] + SECTION_LABEL_PADDING_X_LOGICAL_PX * scale,
-            "`padding: â¦ 10px â¦`"
+            "`padding: … 10px …`"
         );
         assert_eq!(
             heading.rect[1],
@@ -10640,7 +10648,7 @@ mod tests {
         );
     }
 
-    /// PIN â mock-up 7431: a recent row is called by your own name for it, and
+    /// PIN — mock-up 7431: a recent row is called by your own name for it, and
     /// by the folder it stood in when you never gave it one. The leaf rule is
     /// drive-root aware, so `C:\` is `C:` rather than the empty caption a naive
     /// split leaves behind a trailing separator.
@@ -10691,7 +10699,7 @@ mod tests {
         }
     }
 
-    /// PIN â mock-up 7427/7431: a terminal seed wears its own profile's mark,
+    /// PIN — mock-up 7427/7431: a terminal seed wears its own profile's mark,
     /// a files locus wears `#i-folder`, and both are `--accent`. The ago label
     /// rides in the `.default-hint` slot the `default` hint already owns.
     #[test]
@@ -10735,7 +10743,7 @@ mod tests {
         assert_eq!(shell.mark, mark(fallback_profile()));
         assert_eq!(shell.color, palette.accent);
         // An id this build does not have costs the row its shell choice, never
-        // its mark â `index_of_id` falls back rather than refusing.
+        // its mark — `index_of_id` falls back rather than refusing.
         assert_eq!(
             recent_mark(&Seed::Term {
                 profile_id: "a-shell-from-a-newer-build".to_owned(),
@@ -10764,9 +10772,9 @@ mod tests {
         );
     }
 
-    /// PIN â hovering a recent row lights that row and only that row.
+    /// PIN — hovering a recent row lights that row and only that row.
     ///
-    /// Red gate: the untagged index again, this time in ink â `Some(0)` used to
+    /// Red gate: the untagged index again, this time in ink — `Some(0)` used to
     /// mean "the first row", so pointing at the first recent seed lit the
     /// PowerShell row at the top of the menu.
     #[test]
@@ -10817,9 +10825,9 @@ mod tests {
         );
     }
 
-    // ââ K143-K145: the file row's context menu âââââââââââââââââââââââââââââ
+    // ── K143-K145: the file row's context menu ─────────────────────────────
 
-    /// PIN â the menu is the three verbs `DESIGN.md` Â§7.1.3 names, in that
+    /// PIN — the menu is the three verbs `DESIGN.md` §7.1.3 names, in that
     /// order, with the rule between the row that *opens the file* and the two
     /// that *do something with its path*.
     ///
@@ -10858,13 +10866,13 @@ mod tests {
                 .map(|sprite| sprite.mark)
                 .collect::<Vec<_>>(),
             vec![ChromeMark::File, ChromeMark::Copy, ChromeMark::Paste],
-            "each verb wears its own glyph â the copy and the paste are not one mark twice"
+            "each verb wears its own glyph — the copy and the paste are not one mark twice"
         );
     }
 
-    // ââ the `â` open policy (user ruling, 2026-08-16) âââââââââââââââââââââââ
+    // ── the `⌄` open policy (user ruling, 2026-08-16) ───────────────────────
 
-    /// PIN â **a rest of 250ms opens a `â`, and 249 does not.**
+    /// PIN — **a rest of 250ms opens a `⌄`, and 249 does not.**
     ///
     /// The whole of the ruling's first half, stated as a boundary rather than as
     /// "after a while": a hover menu whose threshold drifts is a hover menu that
@@ -10910,12 +10918,12 @@ mod tests {
         );
     }
 
-    /// PIN â **leaving both the button and the menu closes it after the grace,
+    /// PIN — **leaving both the button and the menu closes it after the grace,
     /// and being on the menu is not leaving.**
     ///
     /// The middle state is the point. The button and its menu are two rectangles
     /// with `MENU_OFFSET_LOGICAL_PX` of window between them, so a hand travelling
-    /// from one to the other is briefly on neither â which the grace covers â and
+    /// from one to the other is briefly on neither — which the grace covers — and
     /// then on the menu, which must stop the grace outright rather than merely
     /// re-arm it.
     ///
@@ -10945,7 +10953,7 @@ mod tests {
         assert_eq!(crossing.due(start + Duration::from_secs(10)), None);
 
         // And a pointer on the button of a menu that is already up owes nothing
-        // in either direction â the click is what toggles it from there.
+        // in either direction — the click is what toggles it from there.
         let mut home = ChevronGate::default();
         home.observe(ChevronPointer::Button, true, start);
         assert_eq!(home.due(start + Duration::from_secs(10)), None);
@@ -10957,11 +10965,11 @@ mod tests {
         assert_eq!(idle.deadline(), None);
     }
 
-    /// PIN (the ruling's own point) â **both chevrons are one policy**: the same
+    /// PIN (the ruling's own point) — **both chevrons are one policy**: the same
     /// type, the same two constants, and the same answers to the same steps.
     ///
-    /// The ruling is "å tab é£è¾¹è¯­ä¹å¯¹é½", and the failure it guards against is
-    /// not a wrong number â it is two implementations that agree today. Driving
+    /// The ruling is "和 tab 那边语义对齐", and the failure it guards against is
+    /// not a wrong number — it is two implementations that agree today. Driving
     /// two independently-constructed gates through one script and demanding
     /// identical answers is the strongest statement this level can make; the
     /// window's own half (that both buttons actually *go through* a gate) is
@@ -10994,7 +11002,7 @@ mod tests {
         );
     }
 
-    // ââ the pane head's own menu ââââââââââââââââââââââââââââââââââââââââââââ
+    // ── the pane head's own menu ────────────────────────────────────────────
 
     fn pane_menu(submenu_open: bool) -> PaneMenuLayout {
         pane_menu_layout(
@@ -11011,7 +11019,7 @@ mod tests {
     ///
     /// The order is the ruling's own, and it is an order of *commitment*: point
     /// at a direction, name a profile, name a folder, repeat this pane, move this
-    /// pane, end this pane. The separator's position is the claim about reading â
+    /// pane, end this pane. The separator's position is the claim about reading —
     /// five verbs that make or move a pane, then one that ends one, because a
     /// destructive verb flush against constructive ones is a verb the hand finds
     /// by overshooting.
@@ -11047,11 +11055,16 @@ mod tests {
             .iter()
             .map(|label| label.text.as_str())
             .collect();
+        // **Paint order, which is not the order on screen**: `push_picker` runs
+        // before the row loop, so the diagram's caption is written first however
+        // high door 4 stands above it. The geometry below is where the *visual*
+        // order is claimed, and it is claimed there because that is where it is
+        // decided.
         assert_eq!(
             names,
             vec![
-                focus_mode_text(false),
                 picker_caption_text(),
+                focus_mode_text(false),
                 split_with_text(),
                 new_in_folder_text(),
                 duplicate_pane_text(),
@@ -11085,13 +11098,13 @@ mod tests {
         );
     }
 
-    /// PIN â **the picker is a pane with four zones around it, and the four are
+    /// PIN — **the picker is a pane with four zones around it, and the four are
     /// disjoint and reach the pane's own edges.**
     ///
     /// The reach is the claim that matters. A slab is ten logical pixels thick
     /// with three of air between it and the pane, and a hit test that answered
     /// only the drawn slab would leave a three-pixel dead band around a control
-    /// that is already the smallest thing in the menu â so each slab's press area
+    /// that is already the smallest thing in the menu — so each slab's press area
     /// crosses its own gap, and no two of them can claim the same point.
     ///
     /// Red gate: hit-test the drawn rectangles and the gap answers `Surface`,
@@ -11151,7 +11164,7 @@ mod tests {
         );
     }
 
-    /// PIN â **`Left` and `Up` are the same two axes with the arriving pane
+    /// PIN — **`Left` and `Up` are the same two axes with the arriving pane
     /// first**, which is `Edit::SplitSeat`'s own `leading` flag.
     ///
     /// Stated here rather than only in the window, because it is the whole of
@@ -11173,25 +11186,44 @@ mod tests {
         assert!(SplitZone::Up.leading());
     }
 
-    /// PIN â **the picker is a compass inside a list**: arrows aim the zones,
+    /// PIN — **the picker is a compass inside a list**: arrows aim the zones,
     /// and the list is left by aiming twice in the same direction.
     ///
     /// Both halves are load-bearing. Without the compass the four zones are
     /// unreachable from the keyboard, and the ruling's whole point is that a
     /// direction should be *pointed at*. Without the walk-out the picker is a
-    /// trap: `â` would aim for ever and the five verbs below would be
+    /// trap: `↓` would aim for ever and the five verbs below would be
     /// unreachable.
     ///
-    /// Red gate: leave the picker on the first `â` and the `Down` zone can never
+    /// Red gate: leave the picker on the first `↓` and the `Down` zone can never
     /// be aimed at; never leave it and the rest of the menu is keyboard-dead.
     #[test]
     fn the_pane_menus_keyboard_walk_aims_the_picker_and_then_leaves_it() {
         use PaneMenuHover as H;
         let rows = count();
         // The list is entered at whichever end the key names.
+        // Door 4 is the first entry now (§7.1.6b′ ④), so `↓` into an unlit menu
+        // lands on it rather than on the picker's first zone.
         assert_eq!(
             H::step(None, MenuStep::Down, rows),
-            Some(H::Zone(SplitZone::Right))
+            Some(H::Row(PaneMenuRow::FocusMode))
+        );
+        // And it is the top: `↑` from it clamps, exactly as every other walk in
+        // this window clamps at its ends.
+        assert_eq!(
+            H::step(Some(H::Row(PaneMenuRow::FocusMode)), MenuStep::Up, rows),
+            None
+        );
+        // `↓` from it enters the picker at the zone nearest the row being left,
+        // which is the mirror of the `↑` that leaves the picker for it.
+        assert_eq!(
+            H::step(Some(H::Row(PaneMenuRow::FocusMode)), MenuStep::Down, rows),
+            Some(H::Zone(SplitZone::Up))
+        );
+        assert_eq!(
+            H::step(Some(H::Zone(SplitZone::Up)), MenuStep::Up, rows),
+            Some(H::Row(PaneMenuRow::FocusMode)),
+            "the picker is no longer the top of the list, so aiming up twice leaves it upward"
         );
         assert_eq!(
             H::step(None, MenuStep::Up, rows),
@@ -11223,16 +11255,13 @@ mod tests {
             H::step(Some(H::Zone(SplitZone::Left)), MenuStep::Left, rows),
             None
         );
-        // Aiming twice in the same direction walks out â downward only, because
-        // the picker is the first entry and the top of a list clamps.
+        // Aiming twice in the same direction walks out — **both ways now**
+        // (§7.1.6b′ ④): the picker used to be the first entry, so `↑` from `Up`
+        // was the top of the list and clamped; door 4 stands there instead, and
+        // the clamp has moved up with it (asserted above).
         assert_eq!(
             H::step(Some(H::Zone(SplitZone::Down)), MenuStep::Down, rows),
             Some(H::Row(PaneMenuRow::SplitWith))
-        );
-        assert_eq!(
-            H::step(Some(H::Zone(SplitZone::Up)), MenuStep::Up, rows),
-            None,
-            "and the top of the list clamps, as every walk in this window does"
         );
         // Back in from below, landing on the zone nearest the row it came from.
         assert_eq!(
@@ -11259,11 +11288,11 @@ mod tests {
         );
     }
 
-    /// PIN â a press on each entry is answered as that entry, the menu's own
+    /// PIN — a press on each entry is answered as that entry, the menu's own
     /// padding swallows, and a point outside is nobody's.
     ///
     /// Red gate: hit-test the frame before the rows and every press anywhere in
-    /// the menu becomes `Surface` â a menu that lights up and does nothing.
+    /// the menu becomes `Surface` — a menu that lights up and does nothing.
     #[test]
     fn the_pane_menu_answers_a_press_on_each_of_its_verbs() {
         let layout = pane_menu(false);
@@ -11295,7 +11324,7 @@ mod tests {
         );
     }
 
-    /// PIN â the pane menu clamps on both axes, [`file_menu_layout`]'s rule.
+    /// PIN — the pane menu clamps on both axes, [`file_menu_layout`]'s rule.
     ///
     /// A pane head can be the bottom head of a tall stack and the right-hand
     /// head of a wide one, so both edges are reachable. An unclamped drop puts
@@ -11319,7 +11348,7 @@ mod tests {
         }
     }
 
-    /// PIN â the picker's block is the sum of what it draws, and it lands on the
+    /// PIN — the picker's block is the sum of what it draws, and it lands on the
     /// ruling's ~92px.
     ///
     /// The point of asserting the *derivation* rather than the number is that the
@@ -11347,7 +11376,7 @@ mod tests {
         assert_eq!(picker_diagram_width_logical_px(), 74.0);
     }
 
-    /// PIN â **a hovered zone is washed in the accent and outlined in it**, and
+    /// PIN — **a hovered zone is washed in the accent and outlined in it**, and
     /// nothing else in the diagram moves.
     ///
     /// The wash is what says "the new pane lands here"; the outline is what says
@@ -11407,13 +11436,13 @@ mod tests {
         );
     }
 
-    // ââ the submenu and the safety triangle (queue item #53) ââââââââââââââââ
+    // ── the submenu and the safety triangle (queue item #53) ────────────────
 
-    /// PIN â **the submenu is the profile list, hung beside its heading, and the
+    /// PIN — **the submenu is the profile list, hung beside its heading, and the
     /// pane's own profile is marked.**
     ///
-    /// It is the *same* list the tab strip's `â` offers, because the ruling asks
-    /// for "profiles äºçº§èå" and a second list would be a second answer to
+    /// It is the *same* list the tab strip's `⌄` offers, because the ruling asks
+    /// for "profiles 二级菜单" and a second list would be a second answer to
     /// "which shells does this product offer". A profile this machine cannot
     /// start is greyed rather than dropped, on `hit`'s own precedent.
     #[test]
@@ -11481,7 +11510,7 @@ mod tests {
         }
     }
 
-    /// PIN â a machine with no Git Bash greys that row rather than hiding it,
+    /// PIN — a machine with no Git Bash greys that row rather than hiding it,
     /// and the mark greys with the word.
     #[test]
     fn a_submenu_row_this_machine_cannot_start_is_drawn_and_not_offered() {
@@ -11495,7 +11524,7 @@ mod tests {
                 .filter(|l| l.text != current_profile_hint_text())
                 .count(),
             count(),
-            "no row is dropped â a missing row looks like a row nobody designed"
+            "no row is dropped — a missing row looks like a row nobody designed"
         );
         assert!(
             child.sprites.iter().any(|sprite| sprite.grayscale),
@@ -11503,7 +11532,7 @@ mod tests {
         );
     }
 
-    /// PIN (**queue item #53, closed**) â the safety triangle holds a pointer
+    /// PIN (**queue item #53, closed**) — the safety triangle holds a pointer
     /// travelling toward the submenu and releases one going anywhere else.
     ///
     /// The three claims are the whole rule:
@@ -11519,7 +11548,7 @@ mod tests {
     ///
     /// Red gate: take the apex from the *current* position instead of the last
     /// one and the triangle is a point that contains nothing, so every diagonal
-    /// steals the highlight â which is the behaviour this closes.
+    /// steals the highlight — which is the behaviour this closes.
     #[test]
     fn the_safe_triangle_holds_a_pointer_aimed_at_the_submenu_and_releases_one_that_is_not() {
         // A submenu standing to the right, its near edge from y=100 to y=200.
@@ -11555,9 +11584,9 @@ mod tests {
         assert_eq!(SUBMENU_SAFE_HOLD, Duration::from_millis(300));
     }
 
-    // ââ the `Ã` in a menu row (user ruling, 2026-08-16) âââââââââââââââââââââ
+    // ── the `×` in a menu row (user ruling, 2026-08-16) ─────────────────────
 
-    /// PIN â **every `Ã` in a menu row is struck in a 10px box, and every other
+    /// PIN — **every `×` in a menu row is struck in a 10px box, and every other
     /// mark keeps its 15**, in whichever menu it appears.
     ///
     /// A deliberate deviation from the mock-up, whose `#i-close` runs edge to
@@ -11566,7 +11595,7 @@ mod tests {
     /// drawn inside a box with margins of their own.
     ///
     /// Red gate: apply the rule to `TabClose` alone and a menu that reaches for
-    /// `PaneClose` â the same drawing under another name â gets the heavy cross
+    /// `PaneClose` — the same drawing under another name — gets the heavy cross
     /// back with nothing to say so.
     #[test]
     fn a_menu_rows_close_glyph_is_struck_ten_wide_and_every_other_mark_fifteen() {
@@ -11593,7 +11622,7 @@ mod tests {
             );
         }
 
-        // And it is true of the drawing, not merely of the table: the `Ã` in the
+        // And it is true of the drawing, not merely of the table: the `×` in the
         // pane menu measures ten and stays centred in the same column the
         // fifteen-pixel marks are centred in.
         let layout = pane_menu(false);
@@ -11614,12 +11643,12 @@ mod tests {
             .sprites
             .iter()
             .find(|sprite| sprite.mark == ChromeMark::Folder)
-            .expect("`New terminal in folderâ¦` wears a folder");
+            .expect("`New terminal in folder…` wears a folder");
         assert_eq!(cross.rect[2] - cross.rect[0], 10.0);
         assert_eq!(folder.rect[2] - folder.rect[0], 15.0);
         // Within half a pixel of each other, which is as centred as two boxes of
-        // different parity can be: both are snapped to whole device pixels â a
-        // mark on a subpixel is a resampled mark â and 10 and 15 cannot both
+        // different parity can be: both are snapped to whole device pixels — a
+        // mark on a subpixel is a resampled mark — and 10 and 15 cannot both
         // land symmetrically on the same column. Half a pixel is the rounding,
         // not a drift.
         let centre = |rect: [f32; 4]| (rect[0] + rect[2]) / 2.0;
@@ -11631,9 +11660,9 @@ mod tests {
         );
     }
 
-    // ââ the commit graph's branch filter (T2/T3, v2 â¢) âââââââââââââââââââââ
+    // ── the commit graph's branch filter (T2/T3, v2 ③) ─────────────────────
 
-    /// T2 â the menu is a radio, the repository's own branches, a divider and two
+    /// T2 — the menu is a radio, the repository's own branches, a divider and two
     /// checkboxes, in that order; and a press on each of them is answered as that
     /// row.
     #[test]
@@ -11686,7 +11715,7 @@ mod tests {
             ),
             None
         );
-        // The divider stands between the branches and the two flags â where the
+        // The divider stands between the branches and the two flags — where the
         // menu stops being about *which history* and starts being about *which
         // names*.
         let last_branch = layout.items[rows.len() - 3];
@@ -11695,7 +11724,7 @@ mod tests {
         assert!(layout.separator[3] <= first_flag[1]);
     }
 
-    /// T2 â a row's mark says whether it is on, and the radio and the checkboxes
+    /// T2 — a row's mark says whether it is on, and the radio and the checkboxes
     /// say it with two different idioms.
     #[test]
     fn the_filter_menus_marks_say_which_rows_are_on() {
@@ -11720,7 +11749,7 @@ mod tests {
             Some(ChromeMark::ControlPillRing { .. })
         ));
         // A tick for a checkbox that is on, and **nothing at all** for one that
-        // is off â an empty box drawn as empty space.
+        // is off — an empty box drawn as empty space.
         assert_eq!(
             git_filter_mark(&GitFilterRow::Tags, true),
             Some(ChromeMark::Check)
@@ -11739,7 +11768,7 @@ mod tests {
         );
     }
 
-    /// PIN â the caller names the first row, so the menu cannot promise a
+    /// PIN — the caller names the first row, so the menu cannot promise a
     /// preview for a file that is going to the system's own handler.
     #[test]
     fn the_first_row_says_where_this_particular_file_is_going() {
@@ -11759,12 +11788,12 @@ mod tests {
         }
     }
 
-    /// PIN â a menu raised in the bottom-right corner is pulled whole back
+    /// PIN — a menu raised in the bottom-right corner is pulled whole back
     /// inside the window, on **both** axes.
     ///
     /// The red gate: the root menu clamps only horizontally, because a button on
-    /// the top strip cannot be near the bottom. A file row can be â it is the
-    /// last row of a tall column â and an unclamped drop puts all three verbs
+    /// the top strip cannot be near the bottom. A file row can be — it is the
+    /// last row of a tall column — and an unclamped drop puts all three verbs
     /// under the window's edge, where the menu is visible and unusable.
     #[test]
     fn a_menu_raised_in_the_corner_is_pulled_back_inside_on_both_axes() {
@@ -11790,7 +11819,7 @@ mod tests {
         );
     }
 
-    /// PIN â rows answer, the body swallows, outside is nobody's; and the rule
+    /// PIN — rows answer, the body swallows, outside is nobody's; and the rule
     /// is body, so a press on a hairline commits no verb.
     #[test]
     fn the_file_menu_answers_a_press_on_each_of_its_three_rows() {
@@ -11823,7 +11852,7 @@ mod tests {
         );
     }
 
-    /// PIN â the keyboard walk stops at both ends instead of wrapping round,
+    /// PIN — the keyboard walk stops at both ends instead of wrapping round,
     /// which is the law the tree beside it already keeps (D45).
     #[test]
     fn the_file_menus_keyboard_walk_clamps_at_both_ends() {
@@ -11849,7 +11878,7 @@ mod tests {
         );
     }
 
-    // ââ v2 â£: the git context menus ââââââââââââââââââââââââââââââââââââââââ
+    // ── v2 ④: the git context menus ────────────────────────────────────────
 
     fn commit_target(can_compare: bool, compare_ready: bool) -> GitMenuTarget {
         GitMenuTarget::Commit {
@@ -11870,12 +11899,12 @@ mod tests {
         }
     }
 
-    /// PIN (v2 â£) â **each target offers the verbs its ruling allows, in order,
+    /// PIN (v2 ④) — **each target offers the verbs its ruling allows, in order,
     /// and nothing else.**
     ///
     /// This is the whole menu specification as a table. The two things it is
     /// pointed at are the two ways a context menu goes wrong: a verb that
-    /// appears where it cannot work (a `Renameâ¦` on a tag), and a verb that
+    /// appears where it cannot work (a `Rename…` on a tag), and a verb that
     /// quietly appears where the ruling says it may not (anything at all on a
     /// remote beyond the two rows M10 allows).
     ///
@@ -11928,7 +11957,7 @@ mod tests {
                 })
                 .rows,
                 vec![R::Checkout, R::RenameBranch, R::DeleteBranch, R::CopyName],
-                "the list does not move when HEAD does â only what is offered changes"
+                "the list does not move when HEAD does — only what is offered changes"
             );
         }
         assert_eq!(
@@ -11984,11 +12013,11 @@ mod tests {
         );
     }
 
-    /// PIN (v2 â£) â **one rule falls between the verbs and the readings**, in
+    /// PIN (v2 ④) — **one rule falls between the verbs and the readings**, in
     /// every menu that has both, and it is derived rather than placed.
     ///
-    /// MUTATION: put `Copy hash` above `Add tag hereâ¦` in the commit's list and
-    /// the separator lands in the middle of the writes, which this catches â the
+    /// MUTATION: put `Copy hash` above `Add tag here…` in the commit's list and
+    /// the separator lands in the middle of the writes, which this catches — the
     /// order and the rule are one fact.
     #[test]
     fn the_git_menus_rule_falls_where_the_writing_stops() {
@@ -12029,7 +12058,7 @@ mod tests {
         );
     }
 
-    /// PIN (v2 â£) â **the branch you are standing on offers neither a checkout
+    /// PIN (v2 ④) — **the branch you are standing on offers neither a checkout
     /// nor a delete**, and both are drawn rather than hidden.
     ///
     /// Drawn, because a menu whose rows move depending on where `HEAD` is is a
@@ -12085,7 +12114,7 @@ mod tests {
         );
     }
 
-    /// PIN (v2 â£) â a press lands on the row it looks like, the body swallows,
+    /// PIN (v2 ④) — a press lands on the row it looks like, the body swallows,
     /// **and a row that cannot do what it says answers nothing at all.**
     #[test]
     fn the_git_menu_answers_a_press_on_each_row_that_can_act() {
@@ -12141,7 +12170,7 @@ mod tests {
         );
     }
 
-    /// PIN (v2 â£) â a git menu raised in the corner is pulled whole back inside
+    /// PIN (v2 ④) — a git menu raised in the corner is pulled whole back inside
     /// the window, on both axes, and the row that would have fallen off still
     /// answers.
     ///
@@ -12173,12 +12202,12 @@ mod tests {
         );
     }
 
-    /// PIN (v2 â£) â **the menu becomes the prompt**: the rows go, a captioned
+    /// PIN (v2 ④) — **the menu becomes the prompt**: the rows go, a captioned
     /// field stands in their place, and a name git would refuse grows a red line
     /// under it rather than a card somewhere else.
     ///
     /// MUTATION: keep the rows under the field and the menu answers presses on
-    /// verbs while a name is being typed â which is a popup with two keyboards.
+    /// verbs while a name is being typed — which is a popup with two keyboards.
     #[test]
     fn a_git_prompt_replaces_the_rows_and_grows_a_line_when_the_name_is_wrong() {
         let target = commit_target(true, true);
@@ -12260,7 +12289,7 @@ mod tests {
         );
     }
 
-    /// PIN (v2 â£) â the three rows that end in `â¦` are the three that ask again,
+    /// PIN (v2 ④) — the three rows that end in `…` are the three that ask again,
     /// and no others.
     ///
     /// The ellipsis is a promise the platform's convention already makes; this
@@ -12307,19 +12336,19 @@ mod tests {
             assert!(!kind.placeholder().is_empty());
         }
     }
-    // ââ ticket #62: the terminal's own context menu âââââââââââââââââââââââââ
+    // ── ticket #62: the terminal's own context menu ─────────────────────────
 
-    /// PIN (ticket #62) â **the row list is `docs/DESIGN.md` Â§7.1.6 plus S3's
-    /// `Findâ¦`, in that order, with the rule in the one place it belongs.**
+    /// PIN (ticket #62) — **the row list is `docs/DESIGN.md` §7.1.6 plus S3's
+    /// `Find…`, in that order, with the rule in the one place it belongs.**
     ///
     /// The order is asserted as a whole list rather than as a set of neighbour
     /// pairs, because the ruling is a sentence and not a collection of
-    /// constraints: ãCopyãPasteãSelect allãââãClear screenãClear
-    /// scrollbackâ¦ãRestart shellâ¦ã, with `Findâ¦` booked in after `Select all`
-    /// by Â§7.1.5d's landing note. A list this test agreed with only pairwise
-    /// would let `Findâ¦` slide below the rule and stay green.
+    /// constraints: 「Copy、Paste、Select all、──、Clear screen、Clear
+    /// scrollback…、Restart shell…」, with `Find…` booked in after `Select all`
+    /// by §7.1.5d's landing note. A list this test agreed with only pairwise
+    /// would let `Find…` slide below the rule and stay green.
     ///
-    /// MUTATION: move `Findâ¦` past the separator and the second assertion names
+    /// MUTATION: move `Find…` past the separator and the second assertion names
     /// the row that is now standing among the destroyers.
     #[test]
     fn the_terminal_menus_rows_are_the_designs_order_with_find_above_the_rule() {
@@ -12360,16 +12389,16 @@ mod tests {
         assert_eq!(R::Paste.text(), "Paste");
         assert_eq!(R::SelectAll.text(), "Select all");
         assert_eq!(R::ClearScreen.text(), "Clear screen");
-        // `Findâ¦` is the one row with no mark, and it is a decision rather than
-        // an omission â see `TermMenuRow::mark`.
+        // `Find…` is the one row with no mark, and it is a decision rather than
+        // an omission — see `TermMenuRow::mark`.
         for row in TERM_MENU_ROWS {
             assert_eq!(row.mark().is_none(), row == R::Find, "{row:?}");
         }
     }
 
-    /// PIN (ticket #62, item 4) â **three rows can be greyed and no others**:
-    /// `Copy` without a selection, `Findâ¦` on the alternate screen, and `Restart
-    /// shellâ¦` while a restart is in flight.
+    /// PIN (ticket #62, item 4) — **three rows can be greyed and no others**:
+    /// `Copy` without a selection, `Find…` on the alternate screen, and `Restart
+    /// shell…` while a restart is in flight.
     ///
     /// `Paste` is asserted *available on an empty clipboard* rather than left
     /// unmentioned, because "always enabled" is the decision this slice made and
@@ -12403,8 +12432,8 @@ mod tests {
         assert!(term_menu_row_available(R::Copy, selected));
         assert!(term_menu_row_available(R::RestartShell, idle));
         assert!(!term_menu_row_available(R::RestartShell, restarting));
-        // `Findâ¦` is greyed on the one screen a search cannot be addressed to,
-        // and offered on every other pane â including an empty one, whose honest
+        // `Find…` is greyed on the one screen a search cannot be addressed to,
+        // and offered on every other pane — including an empty one, whose honest
         // answer is `0/0` rather than "no".
         assert!(term_menu_row_available(R::Find, idle));
         assert!(!term_menu_row_available(R::Find, on_alt_screen));
@@ -12424,13 +12453,13 @@ mod tests {
         }
     }
 
-    /// PIN (ticket #62, item 5) â **the keyboard walk steps over the rows that
+    /// PIN (ticket #62, item 5) — **the keyboard walk steps over the rows that
     /// answer nothing, and clamps at both ends.**
     ///
     /// Clamped rather than cyclic, which is [`FileMenuRow::step`]'s ruling and
     /// the tree's: one window must not hold two ideas of what the bottom of a
     /// list does. From nowhere, a step forwards offers the first *available* row
-    /// â which on a pane with no selection is `Paste`, not the greyed `Copy` the
+    /// — which on a pane with no selection is `Paste`, not the greyed `Copy` the
     /// list starts with.
     ///
     /// MUTATION: walk `TERM_MENU_ROWS` instead of the filtered list and the walk
@@ -12469,7 +12498,7 @@ mod tests {
         );
     }
 
-    /// PIN (ticket #62) â **a menu raised in the corner is pulled back inside on
+    /// PIN (ticket #62) — **a menu raised in the corner is pulled back inside on
     /// both axes, and its last row is still pressable.**
     ///
     /// The git menu's own test, on this list, and the second half is the half
@@ -12500,7 +12529,7 @@ mod tests {
         );
     }
 
-    /// PIN (ticket #62) â **the rule stands between the fourth row and the
+    /// PIN (ticket #62) — **the rule stands between the fourth row and the
     /// fifth, and a greyed row is drawn but not offered.**
     ///
     /// The two facts are one test because they are the same claim about the
@@ -12563,7 +12592,7 @@ mod tests {
         );
     }
 
-    // ââ the table, the file and the page (Â§7.1.6c-6) âââââââââââââââââââââââ
+    // ── the table, the file and the page (§7.1.6c-6) ───────────────────────
     //
     // Every case below moves **its own** `Registry` rather than the process's,
     // which is `crate::i18n`'s ruling verbatim: `cargo test` runs this crate in
@@ -12591,12 +12620,12 @@ mod tests {
         profiles.iter().map(|profile| profile.id.as_str()).collect()
     }
 
-    /// PIN â **a machine with no `profiles.json` is this window before this
+    /// PIN — **a machine with no `profiles.json` is this window before this
     /// slice existed, row for row and byte for byte.**
     ///
     /// The first red gate of the whole slice, and the one everything else is
     /// allowed to build on: the table is data now, the file is optional, and the
-    /// ordinary machine â which has no such file and never will â must not be
+    /// ordinary machine — which has no such file and never will — must not be
     /// able to tell. Nothing is written until something is changed, either: a
     /// feature does not announce itself by putting an empty document in
     /// everybody's `%APPDATA%` (`schemes.rs`'s own judgment).
@@ -12615,7 +12644,7 @@ mod tests {
         );
     }
 
-    /// PIN â **the array is the order, and a built-in writes only what differs.**
+    /// PIN — **the array is the order, and a built-in writes only what differs.**
     ///
     /// There is deliberately no `order` key: two places saying the same thing
     /// drift, and a JSON list already reads as an order to anybody editing it by
@@ -12664,7 +12693,7 @@ mod tests {
         }
     }
 
-    /// PIN â **a built-in this build ships and the file never mentions arrives
+    /// PIN — **a built-in this build ships and the file never mentions arrives
     /// at the end, visible.**
     ///
     /// The only honest answer to "the upgrade brought a sixth profile": it
@@ -12679,7 +12708,7 @@ mod tests {
         assert!(built[2..].iter().all(|profile| !profile.hidden));
     }
 
-    /// PIN â **an entry that is neither a built-in nor a startable profile is
+    /// PIN — **an entry that is neither a built-in nor a startable profile is
     /// dropped, named once, and takes nothing else with it.**
     ///
     /// `schemes`' register applied to a table: skip it, say which one, never
@@ -12705,7 +12734,7 @@ mod tests {
         );
     }
 
-    /// PIN â **the first entry to claim an id keeps it.**
+    /// PIN — **the first entry to claim an id keeps it.**
     ///
     /// A stable id has to name one thing: the seeds already on disk pointing at
     /// it were written when only the first existed, so the first is the one they
@@ -12739,7 +12768,7 @@ mod tests {
         );
     }
 
-    /// PIN â **a hidden built-in leaves the pickers and stays a profile.**
+    /// PIN — **a hidden built-in leaves the pickers and stays a profile.**
     ///
     /// Hiding is the whole of what "I do not want to see this" can mean for a
     /// row that cannot be deleted, and it must not reach the seat that is
@@ -12762,7 +12791,7 @@ mod tests {
                 .map(|index| table.profiles()[index].id.as_str())
                 .collect::<Vec<_>>(),
             ["pwsh", "winps", "wsl", "gitbash"],
-            "the `Ë` menu, the `+` and the picker are all one list, and `cmd` is \
+            "the `˅` menu, the `+` and the picker are all one list, and `cmd` is \
              not on it"
         );
         assert_eq!(
@@ -12772,7 +12801,7 @@ mod tests {
         );
     }
 
-    // ââ the file changing under a running window (Â§7.1.6c-6d) âââââââââââââââ
+    // ── the file changing under a running window (§7.1.6c-6d) ───────────────
     //
     // The watcher's own arithmetic is `dir_news`'s and the read is
     // `ProfilesStore::reread`'s; what is claimed here is what the *table* does
@@ -12788,7 +12817,7 @@ mod tests {
         }
     }
 
-    /// PIN â **a row deleted in an editor leaves every list, and the default it
+    /// PIN — **a row deleted in an editor leaves every list, and the default it
     /// was falls back to the built-in floor without the stored name being
     /// touched.**
     ///
@@ -12796,7 +12825,7 @@ mod tests {
     /// order and an entry that is not in it is not in the table, and the
     /// default goes to the floor because `default_profile` has answered "an id
     /// nothing holds" that way since the day the setting existed. No rule was
-    /// invented for a deletion made on disk â a deletion made on disk is simply
+    /// invented for a deletion made on disk — a deletion made on disk is simply
     /// a file that no longer names it.
     ///
     /// And no card: `Undo` is the verb of a deletion *this window* performed,
@@ -12840,12 +12869,12 @@ mod tests {
         );
     }
 
-    /// PIN â **a table that moves under a running pane does not move the pane.**
+    /// PIN — **a table that moves under a running pane does not move the pane.**
     ///
     /// A profile is a birth certificate and not a contract: a session already
     /// running keeps the program and the environment it was started with,
     /// because they are in a process this window cannot re-argue with. What it
-    /// *can* lose is its own name for itself â the pane holds an index, and an
+    /// *can* lose is its own name for itself — the pane holds an index, and an
     /// index into a table somebody is reordering in an editor is a pointer at
     /// whichever row slid into that slot. Asking by id across the change is the
     /// whole of the repair, and it is `index_of_id`'s existing rule rather than
@@ -12867,7 +12896,7 @@ mod tests {
             .expect("the pane was born from the reader's own row");
         let born_from = before.get(seat).expect("a seat stands on a row").id.clone();
 
-        // The same three rows, in another order â one drag in an editor.
+        // The same three rows, in another order — one drag in an editor.
         registry.install(&file(vec![
             mine("claude-7f3a"),
             named("pwsh"),
@@ -12898,7 +12927,7 @@ mod tests {
         );
     }
 
-    /// PIN â **a document that lands twice is the same table twice**, which is
+    /// PIN — **a document that lands twice is the same table twice**, which is
     /// what lets the watcher answer this window's own writes by comparing rather
     /// than by remembering who wrote them.
     ///
@@ -12918,9 +12947,9 @@ mod tests {
         assert_eq!(registry.revision(), revision);
     }
 
-    // ââ the editor (Â§7.1.6c-6b) ââââââââââââââââââââââââââââââââââââââââââââââ
+    // ── the editor (§7.1.6c-6b) ──────────────────────────────────────────────
 
-    /// PIN â **an edit reaches the file and the file reaches the table back**,
+    /// PIN — **an edit reaches the file and the file reaches the table back**,
     /// which is the whole contract of a dialog with no Save button.
     ///
     /// Red gate: write the field into the table and not into the entry, and the
@@ -12948,7 +12977,7 @@ mod tests {
         assert_eq!(read[0].id, "pwsh", "a rename is not a change of identity");
     }
 
-    /// PIN â **a name another row already draws is refused, and nothing moves.**
+    /// PIN — **a name another row already draws is refused, and nothing moves.**
     ///
     /// A row is told apart by its mark and its name, and two rows called
     /// `PowerShell 7` one line apart in a picker is the failure that made the two
@@ -12973,7 +13002,7 @@ mod tests {
         );
     }
 
-    /// PIN â **the five identity colours are not this product's to repaint, and
+    /// PIN — **the five identity colours are not this product's to repaint, and
     /// a profile of the reader's own is theirs** (S98/S31, user ruling
     /// 2026-08-17 Q5).
     ///
@@ -12999,7 +13028,7 @@ mod tests {
         );
 
         // And a copy of WSL carries no machine qualifier, before the file is
-        // written or after it is read back â one row read twice, and a row that
+        // written or after it is read back — one row read twice, and a row that
         // renamed itself across a restart would be the table disagreeing with
         // itself.
         let wsl = registry.table().position_of_id("wsl").unwrap();
@@ -13031,7 +13060,7 @@ mod tests {
         );
     }
 
-    /// PIN â **a deleted profile comes back with its own id, in its own place.**
+    /// PIN — **a deleted profile comes back with its own id, in its own place.**
     ///
     /// The id is the whole of what must survive: every seed on disk naming this
     /// profile points at that string, and a row rebuilt with a fresh suffix would
@@ -13056,11 +13085,11 @@ mod tests {
         assert_eq!(registry.table().get(copy), Some(&held));
     }
 
-    /// PIN â **the default and the floor cannot be hidden** (plan Â§2.4, R5).
+    /// PIN — **the default and the floor cannot be hidden** (plan §2.4, R5).
     ///
     /// Both are guards rather than politeness: hiding the default leaves no new
     /// tab to open, and hiding the floor puts a hole in the bottom of every
-    /// degradation chain in the product â which is exactly why the floor moved
+    /// degradation chain in the product — which is exactly why the floor moved
     /// off `pwsh` in the first place.
     #[test]
     fn hiding_the_default_and_hiding_the_floor_are_both_refused() {
@@ -13088,7 +13117,7 @@ mod tests {
         assert!(registry.set_hidden(cmd, false, 0));
     }
 
-    /// PIN â **`Restore all defaults` puts every field back and leaves the two
+    /// PIN — **`Restore all defaults` puts every field back and leaves the two
     /// that are not this profile's**: where it sits in the list, and whether it
     /// is hidden.
     ///
@@ -13137,13 +13166,13 @@ mod tests {
         );
     }
 
-    /// PIN â **an argument line survives being split and joined**, because the
+    /// PIN — **an argument line survives being split and joined**, because the
     /// field is written from the table on every visit and a joiner that quoted
     /// differently from the splitter would rewrite somebody's arguments the
     /// second time they opened the page.
     ///
     /// The rule is the row's own sentence: spaces separate, double quotes group,
-    /// `""` inside a group is one literal quote â and a backslash is a
+    /// `""` inside a group is one literal quote — and a backslash is a
     /// backslash, because a Windows path is full of them.
     #[test]
     fn an_argument_line_survives_being_split_and_joined() {
@@ -13169,7 +13198,7 @@ mod tests {
         );
     }
 
-    /// PIN â **`Inherit` is what this window did before the field existed**, and
+    /// PIN — **`Inherit` is what this window did before the field existed**, and
     /// the other two answers are the two things it could not say.
     #[test]
     fn the_three_starting_answers_are_inherit_home_and_one_fixed_place() {
@@ -13223,7 +13252,7 @@ mod tests {
         assert_eq!(place.arguments, ["--cd", "/mnt/d/Developer"]);
 
         // A pair that cannot cross falls to the profile's own home rather than
-        // to a guess â `cwd_for_spawn`'s rule, not a second one.
+        // to a guess — `cwd_for_spawn`'s rule, not a second one.
         let place = place_for(
             &StartAt::Fixed(PathBuf::from(r"\\server\share")),
             &StartingDir::LauncherFlag {
@@ -13237,11 +13266,11 @@ mod tests {
         assert_eq!(place.arguments, ["--cd", "~"]);
     }
 
-    /// PIN â **a new profile wears the chassis and a duplicate wears the brand.**
+    /// PIN — **a new profile wears the chassis and a duplicate wears the brand.**
     ///
     /// The two verbs say different things: `Duplicate` says "another one of
     /// these" and its copy really is a PowerShell, while `New profile` takes the
-    /// default only as a template for what to run â and the first thing anybody
+    /// default only as a template for what to run — and the first thing anybody
     /// does with it is point it somewhere else, at which moment a Microsoft blue
     /// would be a brand on a program that is not theirs.
     #[test]
@@ -13274,7 +13303,7 @@ mod tests {
         );
     }
 
-    /// PIN â **the environment table round-trips through the file**, which is
+    /// PIN — **the environment table round-trips through the file**, which is
     /// the whole of what 5b owes it: the slot is written and read back, and
     /// nothing puts it into a session yet (that is 5c).
     #[test]
@@ -13303,7 +13332,7 @@ mod tests {
         );
     }
 
-    /// PIN â **pointing a row at a program re-derives what it can spell**, so a
+    /// PIN — **pointing a row at a program re-derives what it can spell**, so a
     /// profile whose shell became `wsl.exe` stops being told its directories in
     /// Win32.
     #[test]
@@ -13326,7 +13355,7 @@ mod tests {
         );
     }
 
-    /// PIN â **what the table writes, the table reads back.**
+    /// PIN — **what the table writes, the table reads back.**
     ///
     /// The round trip is where "only differences are written" is proved to be a
     /// *representation* rather than a lossy summary: reorder, hide, rename and
@@ -13365,12 +13394,12 @@ mod tests {
         );
     }
 
-    /// PIN â **a press that moves nothing advances nothing.**
+    /// PIN — **a press that moves nothing advances nothing.**
     ///
     /// `profile_rev` throws away every measured string in the window, so a
-    /// revision that ticked when the first row's `â` was pressed would be a
+    /// revision that ticked when the first row's `↑` was pressed would be a
     /// window re-measuring itself for a press that did nothing. The dark button
-    /// is still drawn, and still a focus stop â it just has no effect to have.
+    /// is still drawn, and still a focus stop — it just has no effect to have.
     #[test]
     fn moving_a_row_advances_the_revision_and_moving_the_first_row_up_does_not() {
         let registry = Registry::shipped();
@@ -13399,7 +13428,7 @@ mod tests {
         assert_eq!(ids(registry.table().profiles()), ids(&shipped()));
     }
 
-    /// PIN â **a copy lands under its original, carries its mark, and takes an
+    /// PIN — **a copy lands under its original, carries its mark, and takes an
     /// id no built-in holds.**
     ///
     /// The five shipped slugs are reserved words: a user profile that took one
@@ -13436,7 +13465,7 @@ mod tests {
         assert_eq!(registry.revision(), 1);
     }
 
-    /// PIN â **a copy of a copy numbers itself from the original's name.**
+    /// PIN — **a copy of a copy numbers itself from the original's name.**
     ///
     /// The scheme customiser struck this a slice earlier and it is the same
     /// sentence here: `X copy`, `X copy 2`, and never `X copy copy`.
@@ -13463,7 +13492,7 @@ mod tests {
         );
     }
 
-    /// PIN â **a renamed built-in still drops the word its script announces.**
+    /// PIN — **a renamed built-in still drops the word its script announces.**
     ///
     /// R7, the thing this slice had to land before any rename was possible.
     /// `folio.ps1` sends `$PSVersionTable.PSEdition`, which is the shipped title
@@ -13475,17 +13504,17 @@ mod tests {
         let (built, _) = merge(
             shipped(),
             &file(vec![ProfileEntryV1 {
-                display_title: Some("ä¸å·".to_owned()),
+                display_title: Some("七号".to_owned()),
                 ..named("pwsh")
             }]),
         );
         let renamed = &built[0];
-        let names = announcement_names(renamed, "ä¸å·");
+        let names = announcement_names(renamed, "七号");
         assert!(
             names.iter().any(|name| name == "PowerShell 7"),
             "the shipped word survives the rename invisibly: {names:?}"
         );
-        assert!(names.iter().any(|name| name == "ä¸å·"));
+        assert!(names.iter().any(|name| name == "七号"));
 
         let copy = Profile {
             compared_title: None,
@@ -13500,7 +13529,7 @@ mod tests {
         );
     }
 
-    /// PIN â **every capability sentence agrees with
+    /// PIN — **every capability sentence agrees with
     /// `docs/shell-integration.md`'s own matrix, row by row.**
     ///
     /// J85: this page draws a row of that table rather than building a second
@@ -13576,7 +13605,7 @@ mod tests {
                 "{id}: the sentence and the matrix disagree about hyperlinks"
             );
         }
-        // **And the row this slice added** (Â§7.1.6c-6c): a profile of the
+        // **And the row this slice added** (§7.1.6c-6c): a profile of the
         // reader's own, served by no door, which is the case `Integration::None`
         // exists for.
         let cells = row_for("**a profile of the reader's own**, no door");
@@ -13601,8 +13630,8 @@ mod tests {
         );
     }
 
-    /// PIN â **a profile that switched its links off stops claiming them**
-    /// (Â§7.1.6c-6c, J85 closed).
+    /// PIN — **a profile that switched its links off stops claiming them**
+    /// (§7.1.6c-6c, J85 closed).
     ///
     /// The sentence is derived from three things and not one: the door, the
     /// namespace, and the two environment rows that can silence a link. Red
@@ -13656,11 +13685,11 @@ mod tests {
         }
     }
 
-    /// PIN â **the namespace every shipped profile states is the one it
-    /// derives** (Â§7.1.6c-6c).
+    /// PIN — **the namespace every shipped profile states is the one it
+    /// derives** (§7.1.6c-6c).
     ///
     /// It used to be derived for a profile of the reader's own and stated for
-    /// the five, which is two rules for one fact â and left a built-in repointed
+    /// the five, which is two rules for one fact — and left a built-in repointed
     /// at another program still translating directories in the namespace of the
     /// one it no longer runs. Deriving it everywhere is only safe because the
     /// derivation agrees with all five, which is what this proves.
@@ -13676,7 +13705,7 @@ mod tests {
         }
     }
 
-    /// PIN â **the door survives the round trip, rule and answer alike.**
+    /// PIN — **the door survives the round trip, rule and answer alike.**
     ///
     /// `auto` is a fifth word on the wire and not an absent key, because absence
     /// already means two other things here: on a built-in it is "whatever this
@@ -13722,7 +13751,7 @@ mod tests {
         );
     }
 
-    /// PIN â **a shell this machine does not have says why, and says nothing
+    /// PIN — **a shell this machine does not have says why, and says nothing
     /// else.**
     ///
     /// `.row.unavailable`'s existing rule met by a row that happened to have two
@@ -13759,7 +13788,7 @@ mod tests {
         );
     }
 
-    /// PIN â the line under a name is the program's own leaf and the words
+    /// PIN — the line under a name is the program's own leaf and the words
     /// handed to it, including the launcher's place flag.
     ///
     /// The full path is sixty characters and the row has about fifty-eight; the

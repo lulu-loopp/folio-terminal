@@ -10582,6 +10582,20 @@ mod tests {
         dialog_around(page_height(rows) + DISCLOSURE_HEIGHT)
     }
 
+    /// The derived cap **under the 600 ceiling** — the height the dialog is
+    /// actually built at.
+    ///
+    /// Its own helper since §7.1.6b′ put a ninth everyday row on `Appearance`
+    /// and the derivation crossed 600 for the first time. Until then the two
+    /// were the same number and the ceiling was documentation; now the ceiling
+    /// is what answers, which is the case [`DIALOG_MAX_HEIGHT_LOGICAL_PX`]'s own
+    /// doc was written for — *"a page that one day grows past 600 must scroll
+    /// rather than swallow the window"*. Keeping the raw derivation beside this
+    /// is what lets the pin below state both halves.
+    fn capped_dialog_height() -> f32 {
+        everyday_cap_height().min(DIALOG_MAX_HEIGHT_LOGICAL_PX)
+    }
+
     /// **Where a dialog that tall lands in a window that tall** — 40% of the
     /// slack above it, and never nearer the caption than the mock-up's 54.
     fn optical_top(surface_height: f32, dialog_height: f32) -> f32 {
@@ -10610,7 +10624,7 @@ mod tests {
             .filter(|row| row.category() == SettingsCategory::Appearance)
             .count();
         dialog_around(page_height_disclosed(on_page))
-            .min(everyday_cap_height())
+            .min(capped_dialog_height())
             .round()
     }
 
@@ -12078,10 +12092,22 @@ mod tests {
             .iter()
             .position(|row| *row == SettingsRow::Sidebar)
             .expect("a vertical tab layout grows the Sidebar row");
+        // **The run, not the neighbour** (§7.1.6b′ ①, 2026-08-19). It read
+        // `railed[at - 1] == TabLayout` until focus mode's own row landed
+        // between the two, which the mock-up puts there deliberately: those
+        // three rows answer one question between them — what shape is this
+        // window — so the group is the adjacency the 2026-08-18 ruling was
+        // asking for. What that ruling actually refuses is still refused here,
+        // and it is what this now asserts: the conditional row may not be two
+        // headings away or behind a disclosure from the row that switches it on.
         assert_eq!(
-            railed[at - 1],
-            SettingsRow::TabLayout,
-            "and it stands directly under the row that conditions it"
+            &railed[at.saturating_sub(2)..=at],
+            &[
+                SettingsRow::TabLayout,
+                SettingsRow::FocusMode,
+                SettingsRow::Sidebar
+            ],
+            "and it stands in the run the row that conditions it opens"
         );
         assert!(
             !SettingsRow::PsReadLine.advanced(),
@@ -12973,13 +12999,33 @@ mod tests {
     /// the two things the cap deliberately leaves to scroll.
     #[test]
     fn a_stack_that_fits_reports_nowhere_to_scroll() {
-        let rows = visible_rows(TabLayoutMode::Vertical);
+        // **The page the app opens on**, which is the horizontal one. It read
+        // `Vertical` until §7.1.6b′ added focus mode's row: under the rail the
+        // Appearance page now holds nine everyday rows and is 32px past the 600
+        // ceiling, so it is no longer an example of a stack that fits — it is
+        // the example of one that does not, and it is pinned as that below.
+        let rows = visible_rows(TabLayoutMode::Horizontal);
         let placed = scrolled_with(&rows, AdvancedOpen::default(), 0.0);
         assert_eq!(
             placed.max_scroll(),
             0.0,
             "the everyday Appearance page fits a {}px dialog with room to spare",
             DIALOG_MAX_HEIGHT_LOGICAL_PX
+        );
+        // **And the one that no longer fits says so by exactly its overflow.**
+        // `DIALOG_MAX_HEIGHT_LOGICAL_PX`'s own doc rules this case — *"a page
+        // that one day grows past 600 must scroll rather than swallow the
+        // window"* — so the honest statement is not that everyday pages never
+        // scroll, it is that the dialog stays a dialog and the surplus goes
+        // under the fold.
+        let railed = visible_rows(TabLayoutMode::Vertical);
+        let overflowing = scrolled_with(&railed, AdvancedOpen::default(), 0.0);
+        assert_eq!(
+            overflowing.max_scroll().round(),
+            (everyday_cap_height() - DIALOG_MAX_HEIGHT_LOGICAL_PX)
+                .max(0.0)
+                .round(),
+            "the Appearance page under the rail scrolls by what it stands over the ceiling"
         );
         let shoved = scrolled_with(&rows, AdvancedOpen::default(), 4_000.0);
         assert_eq!(
@@ -14167,10 +14213,16 @@ mod tests {
             let placed = shaped(category, AdvancedOpen::default(), None);
             assert_eq!(
                 height(placed.frame),
-                everyday_cap_height().round(),
+                capped_dialog_height().round(),
                 "{category:?}: a {}px window still gets a dialog and not a surface",
                 SURFACE.1
             );
+            // Every one of them, still — `shaped` builds the page the app opens
+            // on, with the tabs across the top, and there `Appearance` holds
+            // eight everyday rows and fits. The ninth is `Sidebar`, which only
+            // exists under the vertical rail, and it is that page the cap is
+            // derived from and that page which now overflows: see
+            // `a_stack_that_fits_reports_nowhere_to_scroll`.
             assert_eq!(
                 placed.max_scroll(),
                 0.0,
@@ -14240,11 +14292,23 @@ mod tests {
             "the sweep and the hand derivation are one number: `Appearance` \
              under the vertical rail, its Advanced folded"
         );
+        // **And since §7.1.6b′ it is over the ceiling, so the ceiling answers.**
+        // This pin read `everyday_cap_height() < 600` while the derivation was
+        // the smaller of the two; focus mode's row on `Appearance` took it past
+        // 600, which is the case `DIALOG_MAX_HEIGHT_LOGICAL_PX`'s own doc rules
+        // on — the page scrolls, the dialog stays a dialog. Both halves are
+        // stated, because a build that let the dialog follow the derivation past
+        // 600 would fail the second, and a build that stopped deriving at all
+        // would fail the first.
         assert!(
-            everyday_cap_height() < DIALOG_MAX_HEIGHT_LOGICAL_PX,
-            "and it is under the 600 ceiling, which is why the ceiling is not \
-             what answers today: {}",
+            everyday_cap_height() > DIALOG_MAX_HEIGHT_LOGICAL_PX,
+            "the tallest everyday page has outgrown the ceiling: {}",
             everyday_cap_height()
+        );
+        assert_eq!(
+            capped_dialog_height(),
+            DIALOG_MAX_HEIGHT_LOGICAL_PX,
+            "so the dialog opens at the ceiling and that page scrolls, rather than the window being swallowed"
         );
 
         let rows = flat_rows();
@@ -14282,7 +14346,7 @@ mod tests {
                     .expect("this window hosts the dialog");
                     assert_eq!(
                         height(placed.frame),
-                        everyday_cap_height().round(),
+                        capped_dialog_height().round(),
                         "{tab_layout:?}: neither list nor an opened group nor \
                          the rail's own row may move the frame — {} profiles, \
                          group open {}",
@@ -16359,8 +16423,8 @@ mod tests {
         assert_eq!(&page[start..start + ground.len()], &ground);
         assert_eq!(
             page[start - 1],
-            SettingsRow::TabLayout,
-            "the ground opens the Advanced group, and the everyday row above it              is the last of the seven the ruling kept on top. It used to follow              `Dark scheme` directly; §7.1.6c-5 moved the two font rows up into              that gap and the whole ground down under the disclosure"
+            SettingsRow::FocusMode,
+            "the ground opens the Advanced group, and the everyday row above it              is the last of the ones the ruling kept on top. It used to follow              `Dark scheme` directly; §7.1.6c-5 moved the two font rows up into              that gap and the whole ground down under the disclosure, and              §7.1.6b′ then added focus mode's own row to the end of that run"
         );
         assert!(
             ground.iter().all(|row| row.advanced()),
@@ -16384,6 +16448,10 @@ mod tests {
                 SettingsRow::FontSize,
                 SettingsRow::Cursor,
                 SettingsRow::TabLayout,
+                // Unconditional, unlike the row it stands beside: focus mode
+                // works from either tab layout (§7.1.6b′), so it is on the page
+                // whichever one is in force.
+                SettingsRow::FocusMode,
                 SettingsRow::BackgroundImage,
                 SettingsRow::ImageFit,
                 SettingsRow::ImageOpacity,
@@ -16412,6 +16480,7 @@ mod tests {
                 SettingsRow::FontSize,
                 SettingsRow::Cursor,
                 SettingsRow::TabLayout,
+                SettingsRow::FocusMode,
                 SettingsRow::Sidebar,
                 SettingsRow::BackgroundImage,
                 SettingsRow::ImageFit,
