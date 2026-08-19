@@ -17678,8 +17678,13 @@ mod tests {
                 // that day, so the pin is back to reading every word from the
                 // enum and the mock-up's rail and this build's rail can no
                 // longer drift apart on any of the six.
-                SettingsCategory::Profiles.nav_label(),
+                // The mock-up reordered the rail on 2026-08-19 (Appearance
+                // before Profiles — the rail runs from seeing to doing); the
+                // enum itself is reordered by the settings-redesign-impl slice,
+                // and until it lands this list states the mock-up's order
+                // explicitly.
                 SettingsCategory::Appearance.nav_label(),
+                SettingsCategory::Profiles.nav_label(),
                 SettingsCategory::Terminal.nav_label(),
                 SettingsCategory::RenderedBlocks.nav_label(),
                 SettingsCategory::Shortcuts.nav_label(),

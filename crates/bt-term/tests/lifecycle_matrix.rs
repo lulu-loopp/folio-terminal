@@ -668,24 +668,218 @@ fn recalled_input_keeps_its_prompt_head_and_never_welds_to_the_banner_after_wide
     assert_eq!(rows[1], format!("{PROMPT}{REPAINTED}"));
 }
 
+/// The heap, counted per thread, underneath every test in this file.
+///
+/// `resize_drag_200_frames_stays_within_the_sparse_and_full_budget` used to spend its budget in
+/// milliseconds, and could not. `cargo test -p bt-term` runs this file's 42 tests across 24 cores;
+/// the sparse drag arm asks the allocator for ~630 KiB per frame; the heap and scheduler
+/// contention that follows moved a summed 200-frame wall clock between 64 ms and 129 ms with not
+/// one line of this crate changing, so the pin was red in 8 of 20 suite runs on an *idle* machine
+/// and green in 20 of 20 when run alone. What did not move is how much those 200 frames ask for:
+/// the same bytes in the same number of allocations in every run measured — alone, inside the
+/// suite, and against a saturating 19-job `cargo build`. That is where the budget is spent now.
+/// The distributions are in `docs/M1.8-resize-visual-stability.md`.
+///
+/// Thread-local on purpose: the other 41 tests of this binary are running on their own threads
+/// while the drag runs, and must not land in its total.
+struct DragHeapCounter;
+
+thread_local! {
+    static DRAG_HEAP_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static DRAG_HEAP_ALLOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[expect(
+    unsafe_code,
+    reason = "a global allocator has no safe form. Every method here forwards to \
+              `std::alloc::System` with its arguments unchanged and adds nothing but two \
+              thread-local counter bumps, so the safety contract is exactly System's."
+)]
+unsafe impl std::alloc::GlobalAlloc for DragHeapCounter {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        charge(layout.size() as u64);
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        charge(layout.size() as u64);
+        unsafe { std::alloc::System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
+        // A grow is charged for the growth only; a shrink returns memory and is charged nothing.
+        // Forwarding to System's own `realloc` matters for more than speed: routing it through
+        // `alloc` + copy + `dealloc` instead would change what every `Vec` in this binary does.
+        charge(new_size.saturating_sub(layout.size()) as u64);
+        unsafe { std::alloc::System.realloc(ptr, layout, new_size) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+}
+
+fn charge(bytes: u64) {
+    DRAG_HEAP_BYTES.with(|counter| counter.set(counter.get().wrapping_add(bytes)));
+    DRAG_HEAP_ALLOCATIONS.with(|counter| counter.set(counter.get().wrapping_add(1)));
+}
+
+#[global_allocator]
+static DRAG_HEAP_COUNTER: DragHeapCounter = DragHeapCounter;
+
+/// The frames in one measured drag. A real divider drag delivers a width change per pointer event
+/// and never waits for the child between two of them, which is what this reproduces.
+const DRAG_FRAMES: usize = 200;
+
+/// One screen being dragged: even frames narrow it to `narrow`, odd frames widen it back to
+/// `wide`, and each frame's wall time and heap draw are kept.
+struct DragArm {
+    session: DualPlaneSession,
+    rows: NonZeroU32,
+    narrow: u32,
+    wide: u32,
+    frame_nanos: Vec<u64>,
+    heap_bytes: u64,
+    heap_allocations: u64,
+}
+
+impl DragArm {
+    fn new(session: DualPlaneSession, rows: NonZeroU32, narrow: u32, wide: u32) -> Self {
+        Self {
+            session,
+            rows,
+            narrow,
+            wide,
+            // Reserved before the first frame: a `push` that grew mid-drag would charge the drag
+            // for this test's own bookkeeping.
+            frame_nanos: Vec::with_capacity(DRAG_FRAMES),
+            heap_bytes: 0,
+            heap_allocations: 0,
+        }
+    }
+
+    fn frame(&mut self, frame: usize) {
+        let columns = if frame.is_multiple_of(2) {
+            self.narrow
+        } else {
+            self.wide
+        };
+        let bytes_before = DRAG_HEAP_BYTES.with(std::cell::Cell::get);
+        let allocations_before = DRAG_HEAP_ALLOCATIONS.with(std::cell::Cell::get);
+        let started = Instant::now();
+        self.session.resize(nz32(columns), self.rows).unwrap();
+        std::hint::black_box(self.session.transcript().staging_len());
+        let elapsed = started.elapsed();
+        self.heap_bytes += DRAG_HEAP_BYTES.with(std::cell::Cell::get) - bytes_before;
+        self.heap_allocations +=
+            DRAG_HEAP_ALLOCATIONS.with(std::cell::Cell::get) - allocations_before;
+        self.frame_nanos.push(elapsed.as_nanos() as u64);
+    }
+
+    /// The median of the 100 shrink frames.
+    ///
+    /// The median and not the sum, because a sum of 200 samples collects every preemption the OS
+    /// hands out over the whole drag and reports it as if the code had done the work. The shrink
+    /// half alone and not all 200, because the two halves are two different workloads — a sparse
+    /// shrink reflows and reconciles, the widen back is nearly free at ~40 us — so a median over
+    /// the mixture sits on the seam between the modes and wanders between them.
+    fn median_shrink_nanos(&self) -> u64 {
+        let mut shrinks = self
+            .frame_nanos
+            .iter()
+            .step_by(2)
+            .copied()
+            .collect::<Vec<_>>();
+        shrinks.sort_unstable();
+        shrinks[shrinks.len() / 2]
+    }
+
+    fn report(&self, name: &str) {
+        let mut sorted = self.frame_nanos.clone();
+        sorted.sort_unstable();
+        eprintln!(
+            "BT_RESIZE_BENCH {name} frames={DRAG_FRAMES} sum_us={} shrink_p50_ns={} \
+             frame_p50_ns={} frame_p90_ns={} frame_max_ns={} heap_bytes={} heap_allocations={}",
+            self.frame_nanos.iter().sum::<u64>() / 1_000,
+            self.median_shrink_nanos(),
+            sorted[sorted.len() / 2],
+            sorted[sorted.len() * 9 / 10],
+            sorted[sorted.len() - 1],
+            self.heap_bytes,
+            self.heap_allocations,
+        );
+    }
+}
+
+/// How many times dearer a sparse shrink frame is than the full shrink frame that ran microseconds
+/// after it, at the median of the 100 pairs.
+///
+/// Paired, and not two medians divided: the arms are interleaved frame by frame precisely so that
+/// each of these 100 samples is two measurements taken within microseconds of each other, under
+/// whatever the machine happened to be doing right then. Measured as two separate blocks seconds
+/// apart the same ratio ranged 3.62-7.74, because the sparse arm draws 3.4x the heap of the full
+/// one and therefore pays more for a burst of allocator contention that arrives during only one of
+/// the two blocks. Paired it ranges 2.62-3.90 over the same three load conditions, while the
+/// absolute median it is built from still moves by 1.9x.
+fn median_paired_shrink_shape(sparse: &DragArm, full: &DragArm) -> f64 {
+    let mut shapes = (0..DRAG_FRAMES)
+        .step_by(2)
+        .map(|frame| sparse.frame_nanos[frame] as f64 / full.frame_nanos[frame] as f64)
+        .collect::<Vec<_>>();
+    shapes.sort_by(f64::total_cmp);
+    shapes[shapes.len() / 2]
+}
+
+/// A resize drag is 200 width changes with no PTY round trip in between, on the two screens whose
+/// resize paths differ: `sparse` has a blank tail below the cursor and takes the grow-down branch
+/// added in `6133230`, `full` is a screen with no blank tail and keeps the older history/staging
+/// path. The pin exists because that commit put new work on every sparse drag frame — a blank-tail
+/// scan and a second `reconcile_resize_transaction_to_viewport` — and because the same commit
+/// removed per-frame work from the drag path that must not come back: a `Vec<Row<Cell>>` clone of
+/// vendor history on every frame, a whole-screen `String` rebuilt to re-anchor semantic input
+/// regions that were not there, and a staging retain over rows nothing had staged.
+///
+/// It is spent in three currencies, in order of how much they can be trusted.
+///
+/// **Heap volume** is exact. The 200 frames ask the allocator for the same bytes in the same
+/// number of allocations on every run, under every load, so this arm is the one that actually
+/// pins the algorithm: every regression named above is a regression in how much this path
+/// allocates, and none of them can hide inside a 12% band.
+///
+/// **Shape** is each sparse shrink frame against the full shrink frame that ran microseconds
+/// after it. A clock cancels out of a ratio, and pairing the samples cancels the load as well.
+///
+/// **Ceiling** is the only absolute number left, and it is not a budget — it is the line past
+/// which no machine plausibly running this suite could still be called slow rather than broken.
+/// It sits 3x above the worst median this machine produced while 19 `rustc` processes fought it.
+///
+/// The distributions this is derived from, and what each arm was proved to catch, are in
+/// `docs/M1.8-resize-visual-stability.md`.
 #[test]
 fn resize_drag_200_frames_stays_within_the_sparse_and_full_budget() {
-    const FRAMES: usize = 200;
-    const SPARSE_BUDGET: Duration = Duration::from_millis(75);
-    const FULL_BUDGET: Duration = Duration::from_millis(50);
-    const TOTAL_BUDGET: Duration = Duration::from_millis(120);
+    // Measured 2026-08-19 over 90 runs in four load conditions, identical in every one of them:
+    // sparse 128_942_382 B / 107_432 allocations, full 38_212_398 B / 34_129 allocations. Held to
+    // a per-frame figure with ~12% of slack, which is room for the same algorithm to be written
+    // differently and not room for a screenful of rows to be cloned once a frame.
+    const SPARSE_FRAME_HEAP_BYTES: u64 = 720 * 1024;
+    const SPARSE_FRAME_HEAP_ALLOCATIONS: u64 = 600;
+    const FULL_FRAME_HEAP_BYTES: u64 = 216 * 1024;
+    const FULL_FRAME_HEAP_ALLOCATIONS: u64 = 192;
+    // See `median_paired_shrink_shape` for why this is a paired median rather than a quotient of
+    // two medians. Observed 2.62-3.90 over 28 runs on an idle machine, inside the 42-test suite,
+    // and against a saturating cold workspace build; 6 leaves half again as much room as the worst
+    // of those and, against a typical 3.5, still reports a sparse shrink frame that has grown by
+    // 70%. Measured sensitivity: a 1.9x slowdown on the sparse branch alone is red 3 of 3.
+    const SHRINK_SHAPE: f64 = 6.0;
+    // Worst medians seen under a saturating 19-job build: sparse 1006 us, full 211 us.
+    const SPARSE_SHRINK_CEILING: Duration = Duration::from_millis(3);
+    const FULL_SHRINK_CEILING: Duration = Duration::from_millis(1);
 
     let mut sparse = DualPlaneSession::new(nz32(104), nz32(26));
     sparse
         .feed(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvw\r\nBTP> ")
         .unwrap();
-    let sparse_started = Instant::now();
-    for frame in 0..FRAMES {
-        let columns = if frame % 2 == 0 { 46 } else { 104 };
-        sparse.resize(nz32(columns), nz32(26)).unwrap();
-        std::hint::black_box(sparse.transcript().staging_len());
-    }
-    let sparse_elapsed = sparse_started.elapsed();
+    let mut sparse = DragArm::new(sparse, nz32(26), 46, 104);
 
     let mut full = DualPlaneSession::new(nz32(80), nz32(24));
     let full_input = (0..24)
@@ -693,32 +887,55 @@ fn resize_drag_200_frames_stays_within_the_sparse_and_full_budget() {
         .collect::<Vec<_>>()
         .join("\r\n");
     full.feed(full_input.as_bytes()).unwrap();
-    let full_started = Instant::now();
-    for frame in 0..FRAMES {
-        let columns = if frame % 2 == 0 { 20 } else { 80 };
-        full.resize(nz32(columns), nz32(24)).unwrap();
-        std::hint::black_box(full.transcript().staging_len());
-    }
-    let full_elapsed = full_started.elapsed();
+    let mut full = DragArm::new(full, nz32(24), 20, 80);
 
-    eprintln!(
-        "BT_RESIZE_BENCH frames={FRAMES} sparse_us={} full_us={} total_us={}",
-        sparse_elapsed.as_micros(),
-        full_elapsed.as_micros(),
-        (sparse_elapsed + full_elapsed).as_micros(),
+    for frame in 0..DRAG_FRAMES {
+        sparse.frame(frame);
+        full.frame(frame);
+    }
+
+    sparse.report("sparse");
+    full.report("full");
+
+    let frames = DRAG_FRAMES as u64;
+    assert!(
+        sparse.heap_bytes <= SPARSE_FRAME_HEAP_BYTES * frames,
+        "sparse drag asked for {} B per frame, budget {SPARSE_FRAME_HEAP_BYTES} B",
+        sparse.heap_bytes / frames,
     );
     assert!(
-        sparse_elapsed <= SPARSE_BUDGET,
-        "sparse 200-frame resize exceeded {SPARSE_BUDGET:?}: {sparse_elapsed:?}"
+        sparse.heap_allocations <= SPARSE_FRAME_HEAP_ALLOCATIONS * frames,
+        "sparse drag made {} allocations per frame, budget {SPARSE_FRAME_HEAP_ALLOCATIONS}",
+        sparse.heap_allocations / frames,
     );
     assert!(
-        full_elapsed <= FULL_BUDGET,
-        "full 200-frame resize exceeded {FULL_BUDGET:?}: {full_elapsed:?}"
+        full.heap_bytes <= FULL_FRAME_HEAP_BYTES * frames,
+        "full drag asked for {} B per frame, budget {FULL_FRAME_HEAP_BYTES} B",
+        full.heap_bytes / frames,
     );
     assert!(
-        sparse_elapsed + full_elapsed <= TOTAL_BUDGET,
-        "combined 400-arm-frame resize exceeded {TOTAL_BUDGET:?}: {:?}",
-        sparse_elapsed + full_elapsed
+        full.heap_allocations <= FULL_FRAME_HEAP_ALLOCATIONS * frames,
+        "full drag made {} allocations per frame, budget {FULL_FRAME_HEAP_ALLOCATIONS}",
+        full.heap_allocations / frames,
+    );
+
+    let shape = median_paired_shrink_shape(&sparse, &full);
+    eprintln!("BT_RESIZE_BENCH shape shrink_paired_p50={shape:.2}");
+    assert!(
+        shape <= SHRINK_SHAPE,
+        "the sparse shrink frame is {shape:.2}x the full shrink frame beside it, budget \
+         {SHRINK_SHAPE}x",
+    );
+
+    let sparse_shrink = Duration::from_nanos(sparse.median_shrink_nanos());
+    let full_shrink = Duration::from_nanos(full.median_shrink_nanos());
+    assert!(
+        sparse_shrink <= SPARSE_SHRINK_CEILING,
+        "the median sparse shrink frame is {sparse_shrink:?}, ceiling {SPARSE_SHRINK_CEILING:?}",
+    );
+    assert!(
+        full_shrink <= FULL_SHRINK_CEILING,
+        "the median full shrink frame is {full_shrink:?}, ceiling {FULL_SHRINK_CEILING:?}",
     );
 }
 

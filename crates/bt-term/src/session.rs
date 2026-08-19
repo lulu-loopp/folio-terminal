@@ -12033,21 +12033,36 @@ mod tests {
         session.feed(&repaint).unwrap();
         assert_eq!(session.live_decorations.len(), 1);
 
-        let baseline_started = Instant::now();
+        // The two sides are interleaved and each cycle is its own sample, rather than one block of
+        // 16 timed against another block of 16 seconds later. A quotient of two blocks is only a
+        // ratio of the code if the machine treated both blocks alike, and inside `cargo test` it
+        // does not: this assertion was red in 2 of 20 suite runs on an idle machine while it was
+        // green every time it ran alone (2026-08-19). Paired, a burst of scheduler or allocator
+        // contention lands on both halves of the same sample and cancels out of the quotient; the
+        // median of the 16 then discards the cycles that were preempted outright. Same reasoning,
+        // and the measured distributions, as `docs/M1.8-resize-visual-stability.md`.
+        let mut ratios = Vec::with_capacity(CYCLES);
+        let mut baseline = Duration::ZERO;
+        let mut measured = Duration::ZERO;
         for _ in 0..CYCLES {
+            let baseline_started = Instant::now();
             adapter.feed(&repaint);
             adapter.take_damage();
-        }
-        let baseline = baseline_started.elapsed();
+            let baseline_cycle = baseline_started.elapsed();
 
-        let measured_started = Instant::now();
-        for _ in 0..CYCLES {
+            let measured_started = Instant::now();
             session.feed(&repaint).unwrap();
+            let measured_cycle = measured_started.elapsed();
+
+            baseline += baseline_cycle;
+            measured += measured_cycle;
+            ratios.push(measured_cycle.as_secs_f64() / baseline_cycle.as_secs_f64());
         }
-        let measured = measured_started.elapsed();
-        let ratio = measured.as_secs_f64() / baseline.as_secs_f64();
+        ratios.sort_by(f64::total_cmp);
+        let ratio = ratios[ratios.len() / 2];
         eprintln!(
-            "G1_WIDE_DAMAGE columns={COLUMNS} rows={ROWS} cycles={CYCLES} baseline={baseline:?} fingerprint={measured:?} ratio={ratio:.2}"
+            "G1_WIDE_DAMAGE columns={COLUMNS} rows={ROWS} cycles={CYCLES} baseline={baseline:?} fingerprint={measured:?} ratio={ratio:.2} worst={:.2}",
+            ratios[ratios.len() - 1]
         );
         assert_eq!(
             session.live_decorations.len(),
@@ -12057,7 +12072,8 @@ mod tests {
         // Both sides parse and write 1.28M terminal cells. The fixed side additionally streams each
         // cell once into an allocation-free fingerprint. A 2.25x ceiling allows 12.5% host/timer
         // variance over the equal-cost parse+hash model, yet still rejects the measured 6.2x clone
-        // regression.
+        // regression. The ceiling is unchanged from when this was two blocks; what changed is that
+        // the number under it is now a property of the code rather than of the machine.
         assert!(
             ratio <= 2.25,
             "wide full-screen content invalidation took {ratio:.2}x parser/damage baseline ({measured:?} vs {baseline:?})"
