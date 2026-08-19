@@ -11567,8 +11567,8 @@ impl DropLanding {
             // be suppressed here — a refusal is a plan with no rectangles, and
             // `dock_overlay_layers` already prints "" for one.
             (Self::SeatCentre { .. }, DragSource::Row(payload)) => match payload.kind {
-                RowPayloadKind::File => "Open in this preview",
-                RowPayloadKind::Folder => "Root this tree here",
+                RowPayloadKind::File => i18n::Text::DragOpenInPreview.text(),
+                RowPayloadKind::Folder => i18n::Text::DragRootTreeHere.text(),
             },
             _ => "",
         }
@@ -13366,7 +13366,9 @@ fn folder_pick_outcome(
 /// telling you the shape of the thing rather than what it is for. `and more`
 /// because the sixth entry closes the pane, and a tip that promised only
 /// splitting would be a tip that hid the destructive verb behind it.
-const PANE_CHEVRON_TIP: &str = "Split and more";
+fn pane_chevron_tip() -> &'static str {
+    i18n::Text::PaneChevronTip.text()
+}
 
 /// **Which verb the system folder chooser was opened for.**
 ///
@@ -16870,7 +16872,7 @@ impl Runtime {
                 anchors.push(
                     tooltip::TooltipAnchorId::PaneChevron(seat),
                     rect,
-                    PANE_CHEVRON_TIP,
+                    pane_chevron_tip(),
                 );
             }
             // The search capsule's own controls, pushed after the heads and
@@ -18628,7 +18630,7 @@ impl Runtime {
             .renderer
             .measure_chrome_text(&format!("{before}{preedit}"), font);
         if shown.is_empty() {
-            (search::FIELD_PLACEHOLDER.to_owned(), false, caret_x)
+            (search::field_placeholder().to_owned(), false, caret_x)
         } else {
             (shown, true, caret_x)
         }
@@ -28614,7 +28616,7 @@ impl Runtime {
                         self.toast(
                             toast::ToastKind::Error,
                             anchor,
-                            Some(git_panel::GIT_TOAST_TITLE.to_owned()),
+                            Some(git_panel::git_toast_title().to_owned()),
                             words,
                         )?;
                         // `self` was borrowed mutably above; the tab has to be
@@ -31426,7 +31428,7 @@ impl Runtime {
             seats::dress_foot(
                 seats::FootDress {
                     run: file_peek::foot_run(&layout, scale),
-                    lead: file_peek::PEEK_FOOT_TEXT,
+                    lead: file_peek::peek_foot_text(),
                     flash: None,
                     notice: &notice,
                     // A sentence reads forwards, so it is cut from the back —
@@ -32109,7 +32111,7 @@ impl Runtime {
             }),
             discard_text,
             cancel_text_width: renderer.measure_chrome_text(
-                restore::GATE_CANCEL_TEXT,
+                restore::gate_cancel_text(),
                 restore::BUTTON_FONT_LOGICAL_PX * scale,
             ),
             discard_text_width: renderer
@@ -48631,7 +48633,7 @@ mod tests {
         // And who is named as speaking, which is the other half of the words:
         // the sentence is git's, so the title has to say so rather than let a
         // paragraph of `fatal:` look like something this window decided.
-        assert_eq!(git_panel::GIT_TOAST_TITLE, "Git");
+        assert_eq!(git_panel::git_toast_title(), "Git");
     }
 
     // ── dragging a peek's header keeps it (user ruling 2026-08-12) ──────────

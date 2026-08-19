@@ -4942,50 +4942,101 @@ pub enum GitMenuRow {
     CompareWithWorkingTree,
 }
 
-pub const GIT_MENU_CHECKOUT_TEXT: &str = "Checkout";
-pub const GIT_MENU_CREATE_BRANCH_TEXT: &str = "Create branch here…";
-pub const GIT_MENU_CREATE_TAG_TEXT: &str = "Add tag here…";
-pub const GIT_MENU_RENAME_BRANCH_TEXT: &str = "Rename…";
-pub const GIT_MENU_DELETE_BRANCH_TEXT: &str = "Delete";
-pub const GIT_MENU_DELETE_TAG_TEXT: &str = "Delete tag";
-pub const GIT_MENU_CHECKOUT_TRACKING_TEXT: &str = "Checkout as local branch";
-pub const GIT_MENU_STAGE_TEXT: &str = "Stage";
-pub const GIT_MENU_UNSTAGE_TEXT: &str = "Unstage";
-pub const GIT_MENU_DISCARD_TEXT: &str = "Discard";
-pub const GIT_MENU_OPEN_DIFF_TEXT: &str = "Open diff";
-pub const GIT_MENU_REVEAL_TEXT: &str = "Reveal in Explorer";
+#[must_use]
+pub fn git_menu_checkout_text() -> &'static str {
+    crate::i18n::Text::GitMenuCheckout.text()
+}
+#[must_use]
+pub fn git_menu_create_branch_text() -> &'static str {
+    crate::i18n::Text::GitMenuCreateBranch.text()
+}
+#[must_use]
+pub fn git_menu_create_tag_text() -> &'static str {
+    crate::i18n::Text::GitMenuCreateTag.text()
+}
+#[must_use]
+pub fn git_menu_rename_branch_text() -> &'static str {
+    crate::i18n::Text::GitMenuRename.text()
+}
+#[must_use]
+pub fn git_menu_delete_branch_text() -> &'static str {
+    crate::i18n::Text::GateDelete.text()
+}
+#[must_use]
+pub fn git_menu_delete_tag_text() -> &'static str {
+    crate::i18n::Text::GitMenuDeleteTag.text()
+}
+#[must_use]
+pub fn git_menu_checkout_tracking_text() -> &'static str {
+    crate::i18n::Text::GitMenuCheckoutTracking.text()
+}
+#[must_use]
+pub fn git_menu_stage_text() -> &'static str {
+    crate::i18n::Text::GitActStage.text()
+}
+#[must_use]
+pub fn git_menu_unstage_text() -> &'static str {
+    crate::i18n::Text::GitActUnstage.text()
+}
+#[must_use]
+pub fn git_menu_discard_text() -> &'static str {
+    crate::i18n::Text::GateDiscard.text()
+}
+#[must_use]
+pub fn git_menu_open_diff_text() -> &'static str {
+    crate::i18n::Text::GitMenuOpenDiff.text()
+}
+#[must_use]
+pub fn git_menu_reveal_text() -> &'static str {
+    crate::i18n::Text::GitMenuReveal.text()
+}
 pub fn git_menu_copy_path_text() -> &'static str {
     crate::i18n::Text::FileMenuCopyPath.text()
 }
-pub const GIT_MENU_COPY_HASH_TEXT: &str = "Copy hash";
-pub const GIT_MENU_COPY_SUBJECT_TEXT: &str = "Copy subject";
-pub const GIT_MENU_COPY_NAME_TEXT: &str = "Copy name";
-pub const GIT_MENU_COMPARE_SELECTED_TEXT: &str = "Compare with selected";
-pub const GIT_MENU_COMPARE_WORKING_TEXT: &str = "Compare with working tree";
+#[must_use]
+pub fn git_menu_copy_hash_text() -> &'static str {
+    crate::i18n::Text::GitMenuCopyHash.text()
+}
+#[must_use]
+pub fn git_menu_copy_subject_text() -> &'static str {
+    crate::i18n::Text::GitMenuCopySubject.text()
+}
+#[must_use]
+pub fn git_menu_copy_name_text() -> &'static str {
+    crate::i18n::Text::GitMenuCopyName.text()
+}
+#[must_use]
+pub fn git_menu_compare_selected_text() -> &'static str {
+    crate::i18n::Text::GitMenuCompareSelected.text()
+}
+#[must_use]
+pub fn git_menu_compare_working_text() -> &'static str {
+    crate::i18n::Text::GitMenuCompareWorking.text()
+}
 
 impl GitMenuRow {
     /// What the row says.
     #[must_use]
     pub fn text(self) -> &'static str {
         match self {
-            Self::Checkout => GIT_MENU_CHECKOUT_TEXT,
-            Self::CreateBranchHere => GIT_MENU_CREATE_BRANCH_TEXT,
-            Self::CreateTagHere => GIT_MENU_CREATE_TAG_TEXT,
-            Self::RenameBranch => GIT_MENU_RENAME_BRANCH_TEXT,
-            Self::DeleteBranch => GIT_MENU_DELETE_BRANCH_TEXT,
-            Self::DeleteTag => GIT_MENU_DELETE_TAG_TEXT,
-            Self::CheckoutTracking => GIT_MENU_CHECKOUT_TRACKING_TEXT,
-            Self::Stage => GIT_MENU_STAGE_TEXT,
-            Self::Unstage => GIT_MENU_UNSTAGE_TEXT,
-            Self::Discard => GIT_MENU_DISCARD_TEXT,
-            Self::OpenDiff => GIT_MENU_OPEN_DIFF_TEXT,
-            Self::RevealInExplorer => GIT_MENU_REVEAL_TEXT,
+            Self::Checkout => git_menu_checkout_text(),
+            Self::CreateBranchHere => git_menu_create_branch_text(),
+            Self::CreateTagHere => git_menu_create_tag_text(),
+            Self::RenameBranch => git_menu_rename_branch_text(),
+            Self::DeleteBranch => git_menu_delete_branch_text(),
+            Self::DeleteTag => git_menu_delete_tag_text(),
+            Self::CheckoutTracking => git_menu_checkout_tracking_text(),
+            Self::Stage => git_menu_stage_text(),
+            Self::Unstage => git_menu_unstage_text(),
+            Self::Discard => git_menu_discard_text(),
+            Self::OpenDiff => git_menu_open_diff_text(),
+            Self::RevealInExplorer => git_menu_reveal_text(),
             Self::CopyPath => git_menu_copy_path_text(),
-            Self::CopyHash => GIT_MENU_COPY_HASH_TEXT,
-            Self::CopySubject => GIT_MENU_COPY_SUBJECT_TEXT,
-            Self::CopyName => GIT_MENU_COPY_NAME_TEXT,
-            Self::CompareWithSelected => GIT_MENU_COMPARE_SELECTED_TEXT,
-            Self::CompareWithWorkingTree => GIT_MENU_COMPARE_WORKING_TEXT,
+            Self::CopyHash => git_menu_copy_hash_text(),
+            Self::CopySubject => git_menu_copy_subject_text(),
+            Self::CopyName => git_menu_copy_name_text(),
+            Self::CompareWithSelected => git_menu_compare_selected_text(),
+            Self::CompareWithWorkingTree => git_menu_compare_working_text(),
         }
     }
 
@@ -5074,9 +5125,9 @@ impl GitPromptKind {
     #[must_use]
     pub fn caption(self, subject: &str) -> String {
         match self {
-            Self::CreateBranch => format!("New branch at {subject}"),
-            Self::CreateTag => format!("New tag at {subject}"),
-            Self::RenameBranch => format!("Rename {subject}"),
+            Self::CreateBranch => crate::i18n::git_prompt_new_branch(subject),
+            Self::CreateTag => crate::i18n::git_prompt_new_tag(subject),
+            Self::RenameBranch => crate::i18n::git_prompt_rename(subject),
         }
     }
 
@@ -5084,10 +5135,11 @@ impl GitPromptKind {
     #[must_use]
     pub fn placeholder(self) -> &'static str {
         match self {
-            Self::CreateBranch => "Branch name",
-            Self::CreateTag => "Tag name",
-            Self::RenameBranch => "New name",
+            Self::CreateBranch => crate::i18n::Text::GitPromptBranchName,
+            Self::CreateTag => crate::i18n::Text::GitPromptTagName,
+            Self::RenameBranch => crate::i18n::Text::GitPromptNewName,
         }
+        .text()
     }
 }
 
@@ -5708,13 +5760,34 @@ pub enum TermMenuRow {
     RestartShell,
 }
 
-pub const TERM_MENU_COPY_TEXT: &str = "Copy";
-pub const TERM_MENU_PASTE_TEXT: &str = "Paste";
-pub const TERM_MENU_SELECT_ALL_TEXT: &str = "Select all";
-pub const TERM_MENU_FIND_TEXT: &str = "Find…";
-pub const TERM_MENU_CLEAR_SCREEN_TEXT: &str = "Clear screen";
-pub const TERM_MENU_CLEAR_SCROLLBACK_TEXT: &str = "Clear scrollback…";
-pub const TERM_MENU_RESTART_TEXT: &str = "Restart shell…";
+#[must_use]
+pub fn term_menu_copy_text() -> &'static str {
+    crate::i18n::Text::TermMenuCopy.text()
+}
+#[must_use]
+pub fn term_menu_paste_text() -> &'static str {
+    crate::i18n::Text::TermMenuPaste.text()
+}
+#[must_use]
+pub fn term_menu_select_all_text() -> &'static str {
+    crate::i18n::Text::TermMenuSelectAll.text()
+}
+#[must_use]
+pub fn term_menu_find_text() -> &'static str {
+    crate::i18n::Text::TermMenuFind.text()
+}
+#[must_use]
+pub fn term_menu_clear_screen_text() -> &'static str {
+    crate::i18n::Text::TermMenuClearScreen.text()
+}
+#[must_use]
+pub fn term_menu_clear_scrollback_text() -> &'static str {
+    crate::i18n::Text::TermMenuClearScrollback.text()
+}
+#[must_use]
+pub fn term_menu_restart_text() -> &'static str {
+    crate::i18n::Text::TermMenuShellAgain.text()
+}
 
 /// The menu, in §7.1.6's order.
 ///
@@ -5862,13 +5935,13 @@ impl TermMenuRow {
     #[must_use]
     pub fn text(self) -> &'static str {
         match self {
-            Self::Copy => TERM_MENU_COPY_TEXT,
-            Self::Paste => TERM_MENU_PASTE_TEXT,
-            Self::SelectAll => TERM_MENU_SELECT_ALL_TEXT,
-            Self::Find => TERM_MENU_FIND_TEXT,
-            Self::ClearScreen => TERM_MENU_CLEAR_SCREEN_TEXT,
-            Self::ClearScrollback => TERM_MENU_CLEAR_SCROLLBACK_TEXT,
-            Self::RestartShell => TERM_MENU_RESTART_TEXT,
+            Self::Copy => term_menu_copy_text(),
+            Self::Paste => term_menu_paste_text(),
+            Self::SelectAll => term_menu_select_all_text(),
+            Self::Find => term_menu_find_text(),
+            Self::ClearScreen => term_menu_clear_screen_text(),
+            Self::ClearScrollback => term_menu_clear_scrollback_text(),
+            Self::RestartShell => term_menu_restart_text(),
         }
     }
 
@@ -6320,7 +6393,10 @@ const PICKER_PADDING_BOTTOM_LOGICAL_PX: f32 = 5.0;
 /// not for a different one: this pipeline has no `text-transform`, a chrome
 /// label draws the string it is given, and a lower-case constant that nothing
 /// upper-cases would be a lie about what appears on screen.
-pub const PICKER_CAPTION_TEXT: &str = "SPLIT";
+#[must_use]
+pub fn picker_caption_text() -> &'static str {
+    crate::i18n::Text::PaneMenuSplitCaption.text()
+}
 
 /// The whole height of the picker's block: the air, the diagram, the caption.
 ///
@@ -6458,12 +6534,12 @@ impl PaneMenuRow {
 
     fn text(self) -> &'static str {
         match self {
-            Self::Picker => PICKER_CAPTION_TEXT,
-            Self::SplitWith => SPLIT_WITH_TEXT,
-            Self::NewInFolder => NEW_IN_FOLDER_TEXT,
-            Self::Duplicate => DUPLICATE_PANE_TEXT,
-            Self::MoveToNewTab => MOVE_TO_NEW_TAB_TEXT,
-            Self::ClosePane => CLOSE_PANE_TEXT,
+            Self::Picker => picker_caption_text(),
+            Self::SplitWith => split_with_text(),
+            Self::NewInFolder => new_in_folder_text(),
+            Self::Duplicate => duplicate_pane_text(),
+            Self::MoveToNewTab => move_to_new_tab_text(),
+            Self::ClosePane => close_pane_text(),
         }
     }
 
@@ -6477,15 +6553,30 @@ impl PaneMenuRow {
 /// The submenu heading. The `▸` is drawn rather than written: see
 /// [`pane_menu_build`], which strikes the house's `⌄` turned a quarter into the
 /// row's trailing edge.
-pub const SPLIT_WITH_TEXT: &str = "Split with";
+#[must_use]
+pub fn split_with_text() -> &'static str {
+    crate::i18n::Text::PaneMenuSplitWith.text()
+}
 /// The ellipsis is load-bearing: it is this window's promise that a row asks
 /// before it acts, and this row opens a system dialog you can cancel.
-pub const NEW_IN_FOLDER_TEXT: &str = "New terminal in folder…";
-pub const DUPLICATE_PANE_TEXT: &str = "Duplicate pane";
-pub const MOVE_TO_NEW_TAB_TEXT: &str = "Move pane to new tab";
+#[must_use]
+pub fn new_in_folder_text() -> &'static str {
+    crate::i18n::Text::PaneMenuNewInFolder.text()
+}
+#[must_use]
+pub fn duplicate_pane_text() -> &'static str {
+    crate::i18n::Text::PaneMenuDuplicate.text()
+}
+#[must_use]
+pub fn move_to_new_tab_text() -> &'static str {
+    crate::i18n::Text::PaneMenuMoveToNewTab.text()
+}
 /// The `×`'s verb, spelled — a menu row has room for the word the button does
 /// not, and `Close pane` is the mock-up's own `title` for that button (4672).
-pub const CLOSE_PANE_TEXT: &str = "Close pane";
+#[must_use]
+pub fn close_pane_text() -> &'static str {
+    crate::i18n::Text::ClosePane.text()
+}
 /// What the submenu writes beside the profile this pane is already running.
 ///
 /// The `.default-hint` slot, on the profile picker's own precedent: the mark
@@ -7245,7 +7336,7 @@ fn push_picker(
         );
     }
     labels.push(ChromeLabel {
-        text: PICKER_CAPTION_TEXT.to_owned(),
+        text: picker_caption_text().to_owned(),
         rect: layout.caption,
         font_size_px: px(SECTION_LABEL_FONT_LOGICAL_PX),
         color: palette.menu_item_hint_text,
@@ -7366,8 +7457,14 @@ pub enum GitFilterRow {
 }
 
 /// The two words under the divider.
-pub const GIT_FILTER_REMOTES_TEXT: &str = "Show remote branches";
-pub const GIT_FILTER_TAGS_TEXT: &str = "Show tags";
+#[must_use]
+pub fn git_filter_remotes_text() -> &'static str {
+    crate::i18n::Text::GitFilterShowRemotes.text()
+}
+#[must_use]
+pub fn git_filter_tags_text() -> &'static str {
+    crate::i18n::Text::GitFilterShowTags.text()
+}
 
 /// Every rectangle the filter menu draws and hit-tests.
 #[derive(Clone, Debug, PartialEq)]
@@ -7515,10 +7612,10 @@ pub fn git_filter_menu_hit(
 #[must_use]
 pub fn git_filter_text(row: &GitFilterRow) -> &str {
     match row {
-        GitFilterRow::All => crate::git_graph::GRAPH_FILTER_ALL,
+        GitFilterRow::All => crate::git_graph::graph_filter_all(),
         GitFilterRow::Branch(name) => name,
-        GitFilterRow::Remotes => GIT_FILTER_REMOTES_TEXT,
-        GitFilterRow::Tags => GIT_FILTER_TAGS_TEXT,
+        GitFilterRow::Remotes => git_filter_remotes_text(),
+        GitFilterRow::Tags => git_filter_tags_text(),
     }
 }
 
@@ -10809,12 +10906,12 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                PICKER_CAPTION_TEXT,
-                SPLIT_WITH_TEXT,
-                NEW_IN_FOLDER_TEXT,
-                DUPLICATE_PANE_TEXT,
-                MOVE_TO_NEW_TAB_TEXT,
-                CLOSE_PANE_TEXT,
+                picker_caption_text(),
+                split_with_text(),
+                new_in_folder_text(),
+                duplicate_pane_text(),
+                move_to_new_tab_text(),
+                close_pane_text(),
             ],
             "the caption under the diagram, then five rows, and no heading over them"
         );
@@ -11395,7 +11492,7 @@ mod tests {
         assert_eq!(git_filter_text(&GitFilterRow::All), "All branches");
         assert_eq!(
             git_filter_text(&GitFilterRow::Remotes),
-            GIT_FILTER_REMOTES_TEXT
+            git_filter_remotes_text()
         );
 
         let anchor = [300.0, 40.0, 420.0, 62.0];

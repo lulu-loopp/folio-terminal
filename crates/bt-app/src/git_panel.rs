@@ -42,6 +42,7 @@ use std::path::Path;
 use crate::git::{
     GitCache, GitCommitFile, GitFault, GitGroup, GitSlot, GitStatusEntry, GitWriteVerb, StatusCode,
 };
+use crate::i18n::Text;
 use crate::marks::{ChromeMark, ChromeSprite};
 use crate::preview::PreviewSource;
 
@@ -204,14 +205,20 @@ pub const GIT_PENDING_FADE: f32 = 0.45;
 /// same thing in words that sound like a missing feature: a reader who sees it
 /// wonders what they did wrong, when the answer is only ever "there is no
 /// repository here".
-pub const GIT_NOT_A_REPOSITORY: &str = "Not a git repository";
+#[must_use]
+pub fn git_not_a_repository() -> &'static str {
+    Text::GitNotARepository.text()
+}
 
 /// What the page says while it is finding out.
 ///
 /// Its own sentence rather than an empty list, for [`crate::files`]'s reason: a
 /// list with nothing in it and a list that has not been read yet look identical,
 /// and only one of them means the repository is clean.
-pub const GIT_READING: &str = "Reading the repository…";
+#[must_use]
+pub fn git_reading() -> &'static str {
+    Text::GitReading.text()
+}
 
 /// Who is speaking, on a notice raised by a refused verb (toast ruling,
 /// 2026-08-16).
@@ -221,19 +228,28 @@ pub const GIT_READING: &str = "Reading the repository…";
 /// What the title is *for* is provenance: the card can be standing over a column
 /// or in the corner of the window, and "Git" is what tells you the paragraph
 /// under it came from a program and not from us.
-pub const GIT_TOAST_TITLE: &str = "Git";
+#[must_use]
+pub fn git_toast_title() -> &'static str {
+    Text::GitToastTitle.text()
+}
 
-/// A repository with no commits yet (R7).
-///
-/// It *has* a branch name — `git status` prints one — but nothing points at it,
-/// so every count on the page would be zero for a reason that is not "clean".
-pub const GIT_UNBORN: &str = "no commits yet";
+// A repository with no commits yet (R7) is `Text::GitUnborn`, and it has no
+// reader in this file: it *has* a branch name — `git status` prints one — but
+// nothing points at it, so the masthead says the name and the clause together
+// and `crate::i18n::git_unborn_masthead` is the one place that sentence is
+// composed.
 
 /// `HEAD` is on a commit rather than a branch.
-pub const GIT_DETACHED: &str = "detached HEAD";
+#[must_use]
+pub fn git_detached() -> &'static str {
+    Text::GitDetached.text()
+}
 
 /// The row that asks for the next page of history (R16).
-pub const GIT_LOAD_MORE: &str = "Load more";
+#[must_use]
+pub fn git_load_more() -> &'static str {
+    Text::GitLoadMore.text()
+}
 
 /// An expansion with nothing under it (R15).
 ///
@@ -241,16 +257,20 @@ pub const GIT_LOAD_MORE: &str = "Load more";
 /// parent, and a merge has two, so git answers with nothing rather than choosing
 /// one. Saying "no files" flatly would be a claim about the commit; saying it
 /// this way is a claim about the question that was asked, which is the true one.
-pub const GIT_COMMIT_NO_FILES: &str = "No files against the first parent";
+#[must_use]
+pub fn git_commit_no_files() -> &'static str {
+    Text::GitCommitNoFiles.text()
+}
 
 /// What the three groups are called.
 #[must_use]
 pub fn group_heading(group: GitGroup) -> &'static str {
     match group {
-        GitGroup::Staged => "STAGED",
-        GitGroup::Changes => "CHANGES",
-        GitGroup::Untracked => "UNTRACKED",
+        GitGroup::Staged => Text::GitGroupStaged,
+        GitGroup::Changes => Text::GitGroupChanges,
+        GitGroup::Untracked => Text::GitGroupUntracked,
     }
+    .text()
 }
 
 /// The heading's tooltip — mock-up 4950-4952, with the third written to match.
@@ -264,10 +284,11 @@ pub fn group_heading(group: GitGroup) -> &'static str {
 #[must_use]
 pub fn group_tooltip(group: GitGroup) -> &'static str {
     match group {
-        GitGroup::Staged => "Packed for the next commit — 'git commit' ships exactly these",
-        GitGroup::Changes => "Edited but not packed yet",
-        GitGroup::Untracked => "Not in the repository yet — git is not watching these",
+        GitGroup::Staged => Text::GitGroupStagedTip,
+        GitGroup::Changes => Text::GitGroupChangesTip,
+        GitGroup::Untracked => Text::GitGroupUntrackedTip,
     }
+    .text()
 }
 
 /// The history's own heading. A section, but not a status group — nothing about
@@ -279,36 +300,55 @@ pub const GIT_BRANCH_DOT_LOGICAL_PX: f32 = 7.0;
 /// `.gbdot { border: 1.5px solid var(--ink3) }` — the ring's own weight.
 pub const GIT_BRANCH_DOT_EDGE_LOGICAL_PX: f32 = 1.5;
 
-pub const GIT_BRANCHES_HEADING: &str = "BRANCHES";
+#[must_use]
+pub fn git_branches_heading() -> &'static str {
+    Text::GitBranchesHeading.text()
+}
 /// The teaching sentence over the list, in the voice its three siblings use.
 ///
 /// It says what a press does, because the row itself cannot: unlike a change
 /// row, a branch row has no hover button to point at, and a list of names with
 /// no visible verb is a list nobody tries.
-pub const GIT_BRANCHES_TOOLTIP: &str =
-    "Local branches, current one first — click one to check it out";
+#[must_use]
+pub fn git_branches_tooltip() -> &'static str {
+    Text::GitBranchesTip.text()
+}
 
 /// The sub-group under BRANCHES (T9, v2 ③).
-pub const GIT_REMOTES_HEADING: &str = "REMOTES";
+#[must_use]
+pub fn git_remotes_heading() -> &'static str {
+    Text::GitRemotesHeading.text()
+}
 /// The disclosure triangle in front of it — the files tree's own ten pixels.
 pub const GIT_REMOTES_MARK_LOGICAL_PX: f32 = 10.0;
 /// And the gap between it and the word.
 pub const GIT_REMOTES_MARK_GAP_LOGICAL_PX: f32 = 4.0;
 /// What the row says when it is shut, and when it is open.
-pub const GIT_REMOTES_TOOLTIP_SHUT: &str = "Branches on remotes — click to show them";
-pub const GIT_REMOTES_TOOLTIP_OPEN: &str = "Branches on remotes — click to fold them away";
+#[must_use]
+pub fn git_remotes_tooltip_shut() -> &'static str {
+    Text::GitRemotesTipShut.text()
+}
+#[must_use]
+pub fn git_remotes_tooltip_open() -> &'static str {
+    Text::GitRemotesTipOpen.text()
+}
 
-pub const GIT_COMMITS_HEADING: &str = "COMMITS";
+#[must_use]
+pub fn git_commits_heading() -> &'static str {
+    Text::GitCommitsHeading.text()
+}
 /// Mock-up 4952, cut to what this slice draws: the merge curve is here, the
 /// lanes are G-4's.
-pub const GIT_COMMITS_TOOLTIP: &str = "Recent history, newest first — the curve marks a merge, where a branch's history joins this line";
-/// What both refresh buttons say — the panel masthead's and the graph toolbar's
-/// (T5).
-///
-/// Written once because it is one verb on one repository, seen from the two
-/// surfaces that show it. Two spellings of it would be two things to learn, and
-/// the one that got edited would be whichever surface the editor had open.
-pub const GIT_REFRESH_TOOLTIP: &str = "Read the repository again";
+#[must_use]
+pub fn git_commits_tooltip() -> &'static str {
+    Text::GitCommitsTip.text()
+}
+// What both refresh buttons say — the panel masthead's and the graph toolbar's
+// (T5) — is `Text::GitRefreshTip`, read by [`GitAct::tooltip`] here and by
+// `crate::git_graph::GraphTool::tooltip` there. One entry because it is one
+// verb on one repository seen from the two surfaces that show it: two spellings
+// would be two things to learn, and the one that got edited would be whichever
+// surface the editor had open.
 
 // ── the verbs ──────────────────────────────────────────────────────────────
 
@@ -364,20 +404,21 @@ impl GitAct {
     #[must_use]
     pub fn tooltip(self, untracked: bool) -> &'static str {
         match self {
-            Self::Stage => "Stage",
-            Self::Unstage => "Unstage",
+            Self::Stage => Text::GitActStage,
+            Self::Unstage => Text::GitActUnstage,
             // The two discards are one word to the user and two commands to git,
             // and the tooltip is where that difference has to be said: one puts a
             // file back, the other deletes it, and a person is entitled to know
             // which before the gate asks them to confirm it.
-            Self::Discard if untracked => "Delete this file",
-            Self::Discard => "Discard changes",
-            Self::StageAll => "Stage all",
-            Self::UnstageAll => "Unstage all",
-            Self::LoadMore => "Load fifty more commits",
-            Self::OpenGraph => "Open the full commit graph",
-            Self::Refresh => GIT_REFRESH_TOOLTIP,
+            Self::Discard if untracked => Text::GitActDeleteFile,
+            Self::Discard => Text::GitActDiscardChanges,
+            Self::StageAll => Text::GitActStageAll,
+            Self::UnstageAll => Text::GitActUnstageAll,
+            Self::LoadMore => Text::GitActLoadMore,
+            Self::OpenGraph => Text::GitActOpenGraph,
+            Self::Refresh => Text::GitRefreshTip,
         }
+        .text()
     }
 
     /// The mark the button wears. Marks and not characters, because R12's three
@@ -1236,11 +1277,11 @@ pub fn build(
     // has, there is no root to ask anything else about.
     match cache.repo() {
         GitSlot::Idle | GitSlot::Pending => {
-            content.empty = Some(GIT_READING.to_owned());
+            content.empty = Some(git_reading().to_owned());
             return content;
         }
         GitSlot::Failed(GitFault::NotARepository) => {
-            content.empty = Some(GIT_NOT_A_REPOSITORY.to_owned());
+            content.empty = Some(git_not_a_repository().to_owned());
             return content;
         }
         // A machine with no git, a repository git refuses to read, a question it
@@ -1300,8 +1341,8 @@ pub fn build(
                 crate::git::remote_branches(refs).collect();
             content.rows.push(GitRow::Heading {
                 group: None,
-                label: GIT_BRANCHES_HEADING,
-                tooltip: GIT_BRANCHES_TOOLTIP,
+                label: git_branches_heading(),
+                tooltip: git_branches_tooltip(),
                 // **The locals and not the whole answer.** The number over a
                 // heading is how many rows are under it, and the remotes are
                 // under a heading of their own that carries its own count.
@@ -1381,10 +1422,11 @@ pub fn build(
         // R33: the cap read everything and shows the first two thousand, and it
         // says so in a row of its own rather than by quietly being short.
         if status.dropped > 0 && group == GitGroup::Untracked {
-            content.rows.push(GitRow::Notice(format!(
-                "{} more changed files not shown",
-                status.dropped
-            )));
+            content
+                .rows
+                .push(GitRow::Notice(crate::i18n::git_more_changed_files(
+                    status.dropped,
+                )));
         }
     }
 
@@ -1395,8 +1437,8 @@ pub fn build(
         GitSlot::Ready(log) => {
             content.rows.push(GitRow::Heading {
                 group: None,
-                label: GIT_COMMITS_HEADING,
-                tooltip: GIT_COMMITS_TOOLTIP,
+                label: git_commits_heading(),
+                tooltip: git_commits_tooltip(),
                 count: log.commits.len(),
                 act: None,
             });
@@ -1445,7 +1487,7 @@ fn push_expansion(rows: &mut Vec<GitRow>, cache: &GitCache, hash: &str) {
         }
         // **Only git answering with nothing earns the "no files" sentence.**
         Some(GitSlot::Ready(_)) => {
-            rows.push(GitRow::Notice(GIT_COMMIT_NO_FILES.to_owned()));
+            rows.push(GitRow::Notice(git_commit_no_files().to_owned()));
         }
         // A hash this cache holds no answer for is a question not yet answered,
         // and that is what this sentence says. It is unreachable by
@@ -1454,7 +1496,7 @@ fn push_expansion(rows: &mut Vec<GitRow>, cache: &GitCache, hash: &str) {
         // because if it *were* ever reached, claiming the commit touched no
         // files would be a claim about a repository nobody has asked.
         None | Some(GitSlot::Idle | GitSlot::Pending) => {
-            rows.push(GitRow::Notice(GIT_READING.to_owned()));
+            rows.push(GitRow::Notice(git_reading().to_owned()));
         }
         Some(GitSlot::Failed(fault)) => rows.push(GitRow::Notice(fault_sentence(fault))),
     }
@@ -1464,7 +1506,7 @@ fn commit_file_row(file: &GitCommitFile, hash: &str) -> GitRow {
     GitRow::CommitFile(GitCommitFileRow {
         hash: hash.to_owned(),
         tooltip: match &file.renamed_from {
-            Some(from) => format!("{} — renamed from {from}", file.path),
+            Some(from) => crate::i18n::git_renamed_from(&file.path, from),
             None => file.path.clone(),
         },
         path: file.path.clone(),
@@ -1488,13 +1530,19 @@ fn branch_row(
     let pill_font = GIT_PILL_FONT_LOGICAL_PX * scale;
     let mut pills = Vec::new();
     if branch.ahead > 0 {
-        pills.push(pill(ARROW_UP, branch.ahead, "ahead", pill_font, measure));
+        pills.push(pill(
+            ARROW_UP,
+            branch.ahead,
+            crate::i18n::git_pill_ahead(branch.ahead),
+            pill_font,
+            measure,
+        ));
     }
     if branch.behind > 0 {
         pills.push(pill(
             ARROW_DOWN,
             branch.behind,
-            "behind",
+            crate::i18n::git_pill_behind(branch.behind),
             pill_font,
             measure,
         ));
@@ -1521,11 +1569,9 @@ fn branch_row(
         // carries no verb (T9), so it says what it *is* instead of promising a
         // checkout it will not do.
         tooltip: match (branch.kind, branch.is_head) {
-            (crate::git::GitRefKind::Remote, _) => {
-                format!("{} - a branch on a remote", branch.name)
-            }
-            (_, true) => format!("{} - the branch you are on", branch.name),
-            (_, false) => format!("Check out {}", branch.name),
+            (crate::git::GitRefKind::Remote, _) => crate::i18n::git_branch_remote_tip(&branch.name),
+            (_, true) => crate::i18n::git_branch_current_tip(&branch.name),
+            (_, false) => crate::i18n::git_branch_checkout_tip(&branch.name),
         },
         remote: branch.kind == crate::git::GitRefKind::Remote,
         name: branch.name.clone(),
@@ -1547,7 +1593,10 @@ pub fn head_of(cache: &GitCache, scale: f32, measure: &mut Measure<'_>) -> GitHe
 }
 
 /// A repository whose history is empty — R7's own sentence for it.
-pub const GIT_NO_COMMITS: &str = "No commits yet";
+#[must_use]
+pub fn git_no_commits() -> &'static str {
+    Text::GitNoCommits.text()
+}
 
 /// The masthead: which branch, and how far from its upstream.
 fn masthead(
@@ -1559,8 +1608,8 @@ fn masthead(
     let pill_font = GIT_PILL_FONT_LOGICAL_PX * scale;
     let Some(status) = status else {
         return GitHead {
-            branch: GIT_READING.to_owned(),
-            branch_width: measure(GIT_READING, font, MeasureFace::PLAIN),
+            branch: git_reading().to_owned(),
+            branch_width: measure(git_reading(), font, MeasureFace::PLAIN),
             named: false,
             pills: Vec::new(),
             muted: false,
@@ -1570,20 +1619,26 @@ fn masthead(
     // name; an unborn one has a name that points at nothing, and saying only the
     // name would claim a branch that has never existed.
     let (branch, named) = match (&status.branch, status.detached, status.unborn) {
-        (_, true, _) => (GIT_DETACHED.to_owned(), false),
-        (Some(name), _, true) => (format!("{name} — {GIT_UNBORN}"), true),
+        (_, true, _) => (git_detached().to_owned(), false),
+        (Some(name), _, true) => (crate::i18n::git_unborn_masthead(name), true),
         (Some(name), _, _) => (name.clone(), true),
-        (None, _, _) => (GIT_DETACHED.to_owned(), false),
+        (None, _, _) => (git_detached().to_owned(), false),
     };
     let mut pills = Vec::new();
     if status.ahead > 0 {
-        pills.push(pill(ARROW_UP, status.ahead, "ahead", pill_font, measure));
+        pills.push(pill(
+            ARROW_UP,
+            status.ahead,
+            crate::i18n::git_pill_ahead(status.ahead),
+            pill_font,
+            measure,
+        ));
     }
     if status.behind > 0 {
         pills.push(pill(
             ARROW_DOWN,
             status.behind,
-            "behind",
+            crate::i18n::git_pill_behind(status.behind),
             pill_font,
             measure,
         ));
@@ -1617,7 +1672,7 @@ const ARROW_DOWN: char = '↓';
 fn pill(
     arrow: char,
     count: usize,
-    direction: &str,
+    tooltip: String,
     font: f32,
     measure: &mut Measure<'_>,
 ) -> GitPill {
@@ -1625,14 +1680,11 @@ fn pill(
     GitPill {
         text_width: measure(&text, font, MeasureFace::FIGURES),
         text,
-        // "1 commit ahead", not "1 commits ahead". The plural is one `if` and
-        // the alternative is a sentence that is wrong every time the count is
-        // one, which on a branch you have just committed to is most of the time.
-        tooltip: if count == 1 {
-            format!("1 commit {direction}")
-        } else {
-            format!("{count} commits {direction}")
-        },
+        // "1 commit ahead", not "1 commits ahead" — the plural is a branch of
+        // `crate::i18n::git_pill_ahead`, because a sentence that is wrong every
+        // time the count is one is wrong most of the time on a branch you have
+        // just committed to.
+        tooltip,
     }
 }
 
@@ -1654,7 +1706,7 @@ fn change_row(entry: &GitStatusEntry, group: GitGroup, cache: &GitCache) -> GitC
     let badges = badges_of(entry);
     GitChangeRow {
         tooltip: match &entry.renamed_from {
-            Some(from) => format!("{} — renamed from {from}", entry.path),
+            Some(from) => crate::i18n::git_renamed_from(&entry.path, from),
             None => entry.path.clone(),
         },
         pending: cache.write_pending(&entry.path),
@@ -1707,7 +1759,8 @@ fn commit_row(
         // its author two ways on one screen.
         tooltip: if merge {
             format!(
-                "Merge commit — another branch's history joins here\n{}\n{}",
+                "{}\n{}\n{}",
+                Text::GraphMergeCommit.text(),
                 commit.subject,
                 crate::git_graph::author_sentence(commit)
             )
@@ -1734,8 +1787,8 @@ fn commit_row(
 pub fn fault_sentence(fault: &GitFault) -> String {
     match fault {
         GitFault::GitMissing(words) | GitFault::Refused(words) => words.clone(),
-        GitFault::TimedOut => "git did not answer and was stopped".to_owned(),
-        GitFault::NotARepository => GIT_NOT_A_REPOSITORY.to_owned(),
+        GitFault::TimedOut => Text::GitFaultTimedOut.text().to_owned(),
+        GitFault::NotARepository => git_not_a_repository().to_owned(),
     }
 }
 
@@ -2096,9 +2149,9 @@ pub fn row_tooltip(row: &GitRow) -> Option<String> {
         GitRow::LoadMore => Some(GitAct::LoadMore.tooltip(false).to_owned()),
         GitRow::Remotes { open, .. } => Some(
             if *open {
-                GIT_REMOTES_TOOLTIP_OPEN
+                git_remotes_tooltip_open()
             } else {
-                GIT_REMOTES_TOOLTIP_SHUT
+                git_remotes_tooltip_shut()
             }
             .to_owned(),
         ),
@@ -2294,7 +2347,7 @@ pub fn push_git_panel(
             GitRow::LoadMore => {
                 push_row_ground(rect, hovered, scale, palette, sprites, &crop);
                 labels.push(ChromeLabel {
-                    text: GIT_LOAD_MORE.to_owned(),
+                    text: git_load_more().to_owned(),
                     rect,
                     font_size_px: GIT_ROW_FONT_LOGICAL_PX * scale,
                     color: if hovered {
@@ -2677,7 +2730,7 @@ fn push_remotes_heading(
         rect[3] - bottom_pad,
     ];
     labels.push(ChromeLabel {
-        text: format!("{GIT_REMOTES_HEADING} ({count})"),
+        text: format!("{} ({count})", git_remotes_heading()),
         rect: text_rect,
         font_size_px: GIT_LABEL_FONT_LOGICAL_PX * scale,
         color: palette.git_head_muted,
@@ -3530,13 +3583,15 @@ mod tests {
         assert!(rows.iter().skip(1).all(|row| !row.current));
         // And the heading over them carries its count (R7).
         let heading = content.rows.iter().find_map(|row| match row {
-            GitRow::Heading { label, count, .. } if *label == GIT_BRANCHES_HEADING => Some(*count),
+            GitRow::Heading { label, count, .. } if *label == git_branches_heading() => {
+                Some(*count)
+            }
             _ => None,
         });
         assert_eq!(heading, Some(3));
         // The group leads the page, right after the masthead (G25's order).
         let first = content.rows.iter().position(
-            |row| matches!(row, GitRow::Heading { label, .. } if *label == GIT_BRANCHES_HEADING),
+            |row| matches!(row, GitRow::Heading { label, .. } if *label == git_branches_heading()),
         );
         assert_eq!(first, Some(1), "branches come before anything else");
 
@@ -3613,7 +3668,7 @@ mod tests {
         // And the heading above it counts the locals, not the whole answer.
         assert_eq!(
             shut.rows.iter().find_map(|row| match row {
-                GitRow::Heading { label, count, .. } if *label == GIT_BRANCHES_HEADING =>
+                GitRow::Heading { label, count, .. } if *label == git_branches_heading() =>
                     Some(*count),
                 _ => None,
             }),
@@ -3703,7 +3758,7 @@ mod tests {
         assert_eq!(press_outcome(GitAct::OpenGraph, false), GitPress::Graph);
         assert_eq!(press_outcome(GitAct::Refresh, false), GitPress::Reread);
         assert_eq!(GitAct::Refresh.mark(), ChromeMark::Refresh);
-        assert_eq!(GitAct::Refresh.tooltip(false), GIT_REFRESH_TOOLTIP);
+        assert_eq!(GitAct::Refresh.tooltip(false), Text::GitRefreshTip.text());
         assert!(
             !GitAct::Refresh.needs_gate() && GitAct::Refresh.verb(false).is_none(),
             "it writes nothing, so it asks nothing first"
@@ -3927,12 +3982,12 @@ mod tests {
             outcome: Err(GitFault::NotARepository),
         }));
         let content = rows_of(&cache);
-        assert_eq!(content.empty.as_deref(), Some(GIT_NOT_A_REPOSITORY));
+        assert_eq!(content.empty.as_deref(), Some(git_not_a_repository()));
         assert!(content.rows.is_empty(), "and nothing else at all");
 
         // The other three faults keep git's own words, in the same place.
         for fault in [
-            GitFault::GitMissing(crate::git::GIT_NOT_FOUND.to_owned()),
+            GitFault::GitMissing(crate::git::git_not_found().to_owned()),
             GitFault::Refused("fatal: detected dubious ownership".to_owned()),
             GitFault::TimedOut,
         ] {
@@ -3945,7 +4000,7 @@ mod tests {
             let content = rows_of(&cache);
             assert_ne!(
                 content.empty.as_deref(),
-                Some(GIT_NOT_A_REPOSITORY),
+                Some(git_not_a_repository()),
                 "{fault:?} is not the same claim as 'there is no repository here'"
             );
             assert_eq!(
@@ -4322,14 +4377,14 @@ mod tests {
         let GitRow::Masthead(head) = &rows_of(&detached).rows[0] else {
             panic!("the first row is the masthead");
         };
-        assert_eq!(head.branch, GIT_DETACHED);
+        assert_eq!(head.branch, git_detached());
         assert!(!head.named, "a state is said quietly, a name is not");
 
         let unborn = answered(b"## No commits yet on main\0", Vec::new(), false);
         let GitRow::Masthead(head) = &rows_of(&unborn).rows[0] else {
             panic!("the first row is the masthead");
         };
-        assert_eq!(head.branch, format!("main — {GIT_UNBORN}"));
+        assert_eq!(head.branch, format!("main — {}", Text::GitUnborn.text()));
     }
 
     /// PIN (toast ruling, 2026-08-16) — **the page's rows stand in the same

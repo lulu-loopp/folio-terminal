@@ -1188,8 +1188,14 @@ pub enum GateTarget {
 }
 
 /// `Discard` — the destructive answer, and therefore **not** the focused one.
-pub const GATE_DISCARD_TEXT: &str = "Discard";
-pub const GATE_CANCEL_TEXT: &str = "Cancel";
+#[must_use]
+pub fn gate_discard_text() -> &'static str {
+    crate::i18n::Text::GateDiscard.text()
+}
+#[must_use]
+pub fn gate_cancel_text() -> &'static str {
+    crate::i18n::Text::GateCancel.text()
+}
 /// The button Enter answers, which is the one that changes nothing.
 pub const GATE_FOCUSED_ANSWER: GateAnswer = GateAnswer::Cancel;
 /// The title of the gate that guards unsaved preview edits.
@@ -1199,19 +1205,28 @@ pub const GATE_FOCUSED_ANSWER: GateAnswer = GateAnswer::Cancel;
 /// [`GateRequest::title`]). This is the sentence for the three the gate was built
 /// for; the fourth — a working-tree discard — asks something different and says
 /// so.
-pub const GATE_TITLE_TEXT: &str = "Discard unsaved changes?";
+#[must_use]
+pub fn gate_title_text() -> &'static str {
+    crate::i18n::Text::GateTitleUnsaved.text()
+}
 /// The title of the gate in front of a working-tree discard (R14).
 ///
 /// It says *changes*, not *unsaved changes*, and the difference is the whole
 /// point: the file on disk is saved. What is about to go is the difference
 /// between it and what git has, which no amount of saving would bring back.
-pub const GATE_GIT_DISCARD_TITLE: &str = "Discard changes?";
+#[must_use]
+pub fn gate_git_discard_title() -> &'static str {
+    crate::i18n::Text::GateTitleGitDiscard.text()
+}
 /// And the title when the file is untracked, where "discard" means *delete*.
 ///
 /// A gate that said "discard changes" over a file git has never seen would be
 /// describing the smaller of two acts. The button still says `Discard`, because
 /// that is the word the page's own verb uses; the question says what it does.
-pub const GATE_GIT_DELETE_TITLE: &str = "Delete this file?";
+#[must_use]
+pub fn gate_git_delete_title() -> &'static str {
+    crate::i18n::Text::GateTitleGitDelete.text()
+}
 /// The word on the destructive button when the thing going is a **name** rather
 /// than a file's contents (v2 ④).
 ///
@@ -1219,25 +1234,40 @@ pub const GATE_GIT_DELETE_TITLE: &str = "Delete this file?";
 /// `Delete` — a gate headed "Delete branch?" whose only other button said
 /// `Discard` would be two words for one act, and the reader would be entitled to
 /// wonder which of them the button actually does.
-pub const GATE_DELETE_TEXT: &str = "Delete";
+#[must_use]
+pub fn gate_delete_text() -> &'static str {
+    crate::i18n::Text::GateDelete.text()
+}
 /// The question over a `git branch -d` (v2 ④).
 ///
 /// It does not promise the branch will go, and that is deliberate: `-d` is the
 /// merged-only spelling, so git refuses a branch whose commits are nowhere else.
 /// The sentence under it says so in one line, and git's own refusal arrives on a
 /// card if it comes to that.
-pub const GATE_GIT_DELETE_BRANCH_TITLE: &str = "Delete this branch?";
+#[must_use]
+pub fn gate_git_delete_branch_title() -> &'static str {
+    crate::i18n::Text::GateTitleGitDeleteBranch.text()
+}
 /// And over a `git tag -d`, which git never refuses.
-pub const GATE_GIT_DELETE_TAG_TITLE: &str = "Delete this tag?";
+#[must_use]
+pub fn gate_git_delete_tag_title() -> &'static str {
+    crate::i18n::Text::GateTitleGitDeleteTag.text()
+}
 /// The question over `Clear scrollback…` — the mock-up's own first line
 /// (8250), word for word.
-pub const GATE_CLEAR_SCROLLBACK_TITLE: &str = "Clear scrollback?";
+#[must_use]
+pub fn gate_clear_scrollback_title() -> &'static str {
+    crate::i18n::Text::GateTitleClearScrollback.text()
+}
 /// The word on the button that goes through with it.
 ///
-/// The row's own verb, which is the rule [`GATE_DELETE_TEXT`] states: a gate
+/// The row's own verb, which is the rule [`gate_delete_text()`] states: a gate
 /// headed "Clear scrollback?" whose only other button said `Discard` would be
 /// two words for one act.
-pub const GATE_CLEAR_TEXT: &str = "Clear";
+#[must_use]
+pub fn gate_clear_text() -> &'static str {
+    crate::i18n::Text::GateClear.text()
+}
 
 /// The gate's own sentence — the mock-up's `Discard unsaved changes to a.txt,
 /// b.md?` (3600), split into a title and a list because a `confirm()` string has
@@ -1248,7 +1278,7 @@ pub const GATE_CLEAR_TEXT: &str = "Clear";
 /// same silence it exists to break, one sentence further on.
 #[must_use]
 pub fn gate_message(names: &[String]) -> String {
-    format!("Discard unsaved changes to {}?", names.join(", "))
+    crate::i18n::gate_unsaved_message(&names.join(", "))
 }
 
 /// What the gate is asking about, and which control the pointer is on.
@@ -1339,16 +1369,16 @@ impl GateRequest {
     #[must_use]
     pub fn title(&self) -> &'static str {
         match self {
-            Self::ClosePane(_) | Self::CloseTab(_) | Self::Shut => GATE_TITLE_TEXT,
+            Self::ClosePane(_) | Self::CloseTab(_) | Self::Shut => gate_title_text(),
             Self::GitDiscard {
                 untracked: false, ..
-            } => GATE_GIT_DISCARD_TITLE,
+            } => gate_git_discard_title(),
             Self::GitDiscard {
                 untracked: true, ..
-            } => GATE_GIT_DELETE_TITLE,
-            Self::GitDeleteBranch { .. } => GATE_GIT_DELETE_BRANCH_TITLE,
-            Self::GitDeleteTag { .. } => GATE_GIT_DELETE_TAG_TITLE,
-            Self::ClearScrollback(_) => GATE_CLEAR_SCROLLBACK_TITLE,
+            } => gate_git_delete_title(),
+            Self::GitDeleteBranch { .. } => gate_git_delete_branch_title(),
+            Self::GitDeleteTag { .. } => gate_git_delete_tag_title(),
+            Self::ClearScrollback(_) => gate_clear_scrollback_title(),
         }
     }
 
@@ -1361,10 +1391,10 @@ impl GateRequest {
     pub fn answer_text(&self) -> &'static str {
         match self {
             Self::ClosePane(_) | Self::CloseTab(_) | Self::Shut | Self::GitDiscard { .. } => {
-                GATE_DISCARD_TEXT
+                gate_discard_text()
             }
-            Self::GitDeleteBranch { .. } | Self::GitDeleteTag { .. } => GATE_DELETE_TEXT,
-            Self::ClearScrollback(_) => GATE_CLEAR_TEXT,
+            Self::GitDeleteBranch { .. } | Self::GitDeleteTag { .. } => gate_delete_text(),
+            Self::ClearScrollback(_) => gate_clear_text(),
         }
     }
 
@@ -1380,29 +1410,19 @@ impl GateRequest {
             Self::ClosePane(_) | Self::CloseTab(_) | Self::Shut => gate_message(names),
             Self::GitDiscard {
                 untracked: false, ..
-            } => format!(
-                "{} goes back to the last staged or committed version. This cannot be undone.",
-                names.join(", ")
-            ),
+            } => crate::i18n::gate_git_discard_message(&names.join(", ")),
             Self::GitDiscard {
                 untracked: true, ..
-            } => format!(
-                "{} is deleted. git has no copy of it, so this cannot be undone.",
-                names.join(", ")
-            ),
+            } => crate::i18n::gate_git_delete_message(&names.join(", ")),
             // **Short and honest** (ticket wording, v2 ④). It says what the
             // command is going to be — `-d` — without saying the word, because
             // "git will refuse if it is not merged" is what `-d` *means* and is
             // the one thing a reader needs in order to press the button without
             // being surprised by what comes back.
-            Self::GitDeleteBranch { .. } => format!(
-                "Delete branch {}? git will refuse if it is not merged.",
-                names.join(", ")
-            ),
-            Self::GitDeleteTag { .. } => format!(
-                "Delete tag {}? The commit it names stays where it is.",
-                names.join(", ")
-            ),
+            Self::GitDeleteBranch { .. } => {
+                crate::i18n::gate_delete_branch_message(&names.join(", "))
+            }
+            Self::GitDeleteTag { .. } => crate::i18n::gate_delete_tag_message(&names.join(", ")),
             // **By count, because there is no name** (§7.1.3's "by name, always"
             // read for a subject that has none): every other request on this list
             // names a file or a ref, and what this one deletes is a pane's own
@@ -1411,10 +1431,9 @@ impl GateRequest {
             // cannot see from where they are standing, since the whole of what
             // makes this row dangerous is the part that has scrolled out of
             // sight. The second sentence is the mock-up's own (8250).
-            Self::ClearScrollback(_) => format!(
-                "{} of past output is deleted. Search over it will find nothing.",
-                names.join(", ")
-            ),
+            Self::ClearScrollback(_) => {
+                crate::i18n::gate_clear_scrollback_message(&names.join(", "))
+            }
         }
     }
 }
@@ -1667,7 +1686,7 @@ pub fn gate_build(
         &mut quads,
         &mut labels,
         layout.cancel,
-        GATE_CANCEL_TEXT,
+        gate_cancel_text(),
         false,
         hover == Some(GateTarget::Cancel),
         scale,
@@ -2021,9 +2040,9 @@ mod tests {
         );
 
         let content = GateContent {
-            title: GATE_TITLE_TEXT,
+            title: gate_title_text(),
             message_lines: vec!["Discard unsaved changes to a.txt?".to_owned()],
-            discard_text: GATE_DISCARD_TEXT,
+            discard_text: gate_discard_text(),
             cancel_text_width: 40.0,
             discard_text_width: 48.0,
         };
@@ -3120,7 +3139,7 @@ in the folders you left them, as new shells."
     ///    this branch?" whose only other button says `Discard` is two words for
     ///    one act.
     ///
-    /// MUTATION: answer `GATE_DISCARD_TEXT` for either new request and ③ goes
+    /// MUTATION: answer `gate_discard_text()` for either new request and ③ goes
     /// red; drop the "will refuse" clause and ② does.
     #[test]
     fn a_ref_deletion_asks_before_it_happens_and_says_what_git_will_do() {
@@ -3133,8 +3152,8 @@ in the folders you left them, as new shells."
             root,
             name: "v0.9".to_owned(),
         };
-        assert_eq!(branch.title(), GATE_GIT_DELETE_BRANCH_TITLE);
-        assert_eq!(tag.title(), GATE_GIT_DELETE_TAG_TITLE);
+        assert_eq!(branch.title(), gate_git_delete_branch_title());
+        assert_eq!(tag.title(), gate_git_delete_tag_title());
         let names = vec!["goner".to_owned()];
         let sentence = branch.message(&names);
         assert!(sentence.contains("goner"), "by name, always: {sentence}");
@@ -3143,11 +3162,11 @@ in the folders you left them, as new shells."
             "and it says what -d does: {sentence}"
         );
         assert!(tag.message(&["v0.9".to_owned()]).contains("v0.9"));
-        assert_eq!(branch.answer_text(), GATE_DELETE_TEXT);
-        assert_eq!(tag.answer_text(), GATE_DELETE_TEXT);
+        assert_eq!(branch.answer_text(), gate_delete_text());
+        assert_eq!(tag.answer_text(), gate_delete_text());
         assert_eq!(
             GateRequest::Shut.answer_text(),
-            GATE_DISCARD_TEXT,
+            gate_discard_text(),
             "and the three the gate was built for are unchanged"
         );
         assert_eq!(
@@ -3157,7 +3176,7 @@ in the folders you left them, as new shells."
                 untracked: false,
             }
             .answer_text(),
-            GATE_DISCARD_TEXT
+            gate_discard_text()
         );
         // **Enter still changes nothing**, whichever question is being asked —
         // the one rule a gate may never get wrong.
@@ -3181,7 +3200,7 @@ in the folders you left them, as new shells."
             layer
                 .labels
                 .iter()
-                .any(|label| label.text == GATE_DELETE_TEXT),
+                .any(|label| label.text == gate_delete_text()),
             "the button says Delete: {:?}",
             layer.labels.iter().map(|l| &l.text).collect::<Vec<_>>()
         );
@@ -3189,7 +3208,7 @@ in the folders you left them, as new shells."
             layer
                 .labels
                 .iter()
-                .all(|label| label.text != GATE_DISCARD_TEXT),
+                .all(|label| label.text != gate_discard_text()),
             "and never Discard beside it"
         );
     }

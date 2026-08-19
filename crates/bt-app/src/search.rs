@@ -163,7 +163,10 @@ pub const HIT_LANDING_FRACTION: f32 = 1.0 / 3.0;
 
 /// `placeholder="Find"` (mock 8683) — **`Find`, not `Search`**, which is the verb every editor on
 /// this platform prints in this box.
-pub const FIELD_PLACEHOLDER: &str = "Find";
+#[must_use]
+pub fn field_placeholder() -> &'static str {
+    crate::i18n::Text::SearchPlaceholder.text()
+}
 /// `.sb-tg[data-t="cs"]` — `Aa`.
 pub const CASE_LABEL: &str = "Aa";
 /// `.sb-tg[data-t="ww"]` — `ab`, underlined.
@@ -180,17 +183,35 @@ pub const BROKEN_COUNT: &str = "\u{2014}";
 pub const EMPTY_COUNT: &str = "0/0";
 
 /// `title="Match case"`.
-pub const CASE_TIP: &str = "Match case";
+#[must_use]
+pub fn case_tip() -> &'static str {
+    crate::i18n::Text::SearchTipCase.text()
+}
 /// `title="Whole word"`.
-pub const WORD_TIP: &str = "Whole word";
+#[must_use]
+pub fn word_tip() -> &'static str {
+    crate::i18n::Text::SearchTipWord.text()
+}
 /// `title="Regular expression"`.
-pub const REGEX_TIP: &str = "Regular expression";
+#[must_use]
+pub fn regex_tip() -> &'static str {
+    crate::i18n::Text::SearchTipRegex.text()
+}
 /// `title="Previous match (Shift+Enter)"`.
-pub const PREVIOUS_TIP: &str = "Previous match (Shift+Enter)";
+#[must_use]
+pub fn previous_tip() -> &'static str {
+    crate::i18n::Text::SearchTipPrevious.text()
+}
 /// `title="Next match (Enter)"`.
-pub const NEXT_TIP: &str = "Next match (Enter)";
+#[must_use]
+pub fn next_tip() -> &'static str {
+    crate::i18n::Text::SearchTipNext.text()
+}
 /// `title="Close (Esc)"`.
-pub const CLOSE_TIP: &str = "Close (Esc)";
+#[must_use]
+pub fn close_tip() -> &'static str {
+    crate::i18n::Text::SearchTipClose.text()
+}
 
 // ── the state ───────────────────────────────────────────────────────────────
 
@@ -1267,12 +1288,12 @@ fn centred(rect: [f32; 4], size: f32) -> [f32; 4] {
 #[must_use]
 pub fn tip_text(element: SearchElement) -> &'static str {
     match element {
-        SearchElement::Toggle(SearchFlag::Case) => CASE_TIP,
-        SearchElement::Toggle(SearchFlag::Word) => WORD_TIP,
-        SearchElement::Toggle(SearchFlag::Regex) => REGEX_TIP,
-        SearchElement::Previous => PREVIOUS_TIP,
-        SearchElement::Next => NEXT_TIP,
-        SearchElement::Close => CLOSE_TIP,
+        SearchElement::Toggle(SearchFlag::Case) => case_tip(),
+        SearchElement::Toggle(SearchFlag::Word) => word_tip(),
+        SearchElement::Toggle(SearchFlag::Regex) => regex_tip(),
+        SearchElement::Previous => previous_tip(),
+        SearchElement::Next => next_tip(),
+        SearchElement::Close => close_tip(),
         SearchElement::Field | SearchElement::Body => "",
     }
 }

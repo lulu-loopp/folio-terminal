@@ -871,6 +871,334 @@ pub enum Text {
     /// second copy of it, which is where a folder full of `(custom 2)` comes
     /// from. One verb, two words, decided by what the row is on.
     EditScheme,
+
+    // ── the tail: every surface born after §7.1.6c-3a ──────────────────────
+    //
+    // One contiguous block at the end, for the reason the four families above
+    // it give and which is now this table's standing rule: the order of this
+    // enum carries no meaning, and an entry slotted into the middle of a family
+    // is a conflict in every lane that is adding one.
+    //
+    // What arrives here is the sweep the string inventory promised: the
+    // shortcut table's own names, the Git panel and the graph, the command
+    // rail's glance card, the search capsule, the terminal's right-click menu
+    // and the pane's `⌄`, the confirmation gate's four newer questions, and the
+    // handful of sentences that escaped the earlier slices. The rules are the
+    // ones the header states — `&'static str` throughout, technical tokens
+    // (`git`, `HEAD`, `PiP`, key caps, `folio.ps1`) untranslated because they
+    // are names, and no sentence in which this window is a party to the
+    // conversation.
+
+    // ── the Shortcuts page (`crate::shortcuts::BINDINGS`) ──────────────────
+    //
+    // **The row's name is a `Text` and not a `&'static str`, and the id beside
+    // it is still a `&'static str`.** That split is the whole of what makes the
+    // page translatable without making `keybindings.json` a translated file: a
+    // user's file names rows by `"new-tab"`, which is a byte string this table
+    // must never touch, while the words over them are read by a person.
+    //
+    // `New tab` and `Settings` are not here. They are [`Self::RailNewTab`] and
+    // [`Self::Settings`], because they are the same two verbs the rail's `+` and
+    // the gear already name — the second of those is the precedent this file set
+    // in its first slice, and one verb with two spellings is how two surfaces
+    // come to disagree.
+    /// **Nine entries and not one with a number in it**, which is the shape the
+    /// signature forces rather than a preference: a title is a `&'static str`,
+    /// and `转到标签 5` cannot be built at compile time out of a `5`. They are
+    /// nine rows in `keybindings.json`, nine chords in the audit and nine names
+    /// here; the editor folds them into [`Self::ShortcutFamilyGotoTab`] and only
+    /// a chord conflict ever names one of them alone.
+    ShortcutGotoTab1,
+    ShortcutGotoTab2,
+    ShortcutGotoTab3,
+    ShortcutGotoTab4,
+    ShortcutGotoTab5,
+    ShortcutGotoTab6,
+    ShortcutGotoTab7,
+    ShortcutGotoTab8,
+    ShortcutGotoTab9,
+    ShortcutNextTab,
+    ShortcutPrevTab,
+    ShortcutReopenClosed,
+    ShortcutJumpAttention,
+    ShortcutCommandPalette,
+    ShortcutSplitHorizontal,
+    ShortcutSplitVertical,
+    ShortcutDuplicatePaneSplit,
+    ShortcutFilesPane,
+    ShortcutGitPage,
+    ShortcutSavePreview,
+    ShortcutPrevCommandMark,
+    ShortcutNextCommandMark,
+    ShortcutOpenSearch,
+    /// The walk's two rows. **Not the search capsule's two tooltips**
+    /// ([`Self::SearchTipNext`]): those carry their key caps in parentheses
+    /// because a tooltip is the only place that chord is written down, and this
+    /// page draws the caps in a column of their own.
+    ShortcutNextMatch,
+    ShortcutPrevMatch,
+    /// `PiP` stays `PiP` — it is the feature's name, and the four slots are
+    /// numbered for the same reason the nine tabs are.
+    ShortcutSummonPip1,
+    ShortcutSummonPip2,
+    ShortcutSummonPip3,
+    ShortcutSummonPip4,
+    /// The two folded rows' own names. The en dash is a range and survives
+    /// translation the way [`Self::RootBrowse`]'s ellipsis does.
+    ShortcutFamilyGotoTab,
+    ShortcutFamilySummonPip,
+    /// Where a scoped row is in force — the first clause of the muted line under
+    /// its name.
+    ShortcutScopePreview,
+    ShortcutScopeTerminalPrimary,
+    ShortcutScopeSearchOpen,
+    /// And the second clause: the key is claimed, the verb behind it has not
+    /// arrived (§7.1.5e).
+    ShortcutNotePending,
+    /// What a folded row says about the chords it folded. **Three entries and
+    /// not one with a clause bolted on**, because the join is a `; ` in English
+    /// and a `；` in Chinese, and a formatter that composed them would have had
+    /// to carry a punctuation table nobody asked for.
+    ShortcutNoteOnePerMember,
+    ShortcutNoteNoneAssigned,
+    ShortcutNoteSomeUnassigned,
+    /// What stands where the caps would be on a row with no chord.
+    ShortcutUnbound,
+    /// The two rows the audit listed and declined, and the line under them.
+    ShortcutReservedMoveFocus,
+    ShortcutReservedResizePane,
+    ShortcutReservedAltArrow,
+    /// The recorder's two standing refusals. The chords in them are key caps and
+    /// stay as they are; what is translated is the reason.
+    ShortcutHintAltGrZone,
+    ShortcutHintShellControlLetter,
+
+    // ── the Git page (`crate::git_panel`) ──────────────────────────────────
+    //
+    // `git`, `HEAD`, `git commit` and `git.exe` are the program's own words and
+    // are spelled the same in both columns — the header's "technical tokens"
+    // rule, applied to the surface that has the most of them.
+    GitNotARepository,
+    GitReading,
+    /// Who is speaking on a card raised by a refused write. **The one entry
+    /// here whose two columns are the same string** — see `UNTRANSLATED`.
+    GitToastTitle,
+    /// Lower case: it is a clause fitted after a branch name, not a sentence.
+    GitUnborn,
+    GitDetached,
+    GitLoadMore,
+    GitCommitNoFiles,
+    /// The three status groups. **Upper case at the source** (N4): this pipeline
+    /// has no `text-transform`, and the Chinese has no case to raise.
+    GitGroupStaged,
+    GitGroupChanges,
+    GitGroupUntracked,
+    /// Their teaching sentences. They are the only place this page explains what
+    /// the index is, so the Chinese teaches too rather than naming.
+    GitGroupStagedTip,
+    GitGroupChangesTip,
+    GitGroupUntrackedTip,
+    GitBranchesHeading,
+    GitBranchesTip,
+    GitRemotesHeading,
+    GitRemotesTipShut,
+    GitRemotesTipOpen,
+    GitCommitsHeading,
+    GitCommitsTip,
+    /// One verb on one repository, seen from the panel's masthead and the
+    /// graph's toolbar — one string, for [`Self::Settings`]'s reason.
+    GitRefreshTip,
+    /// The row verbs' tooltips. `Stage` and `Unstage` are also what the row menu
+    /// writes, and they are one entry each: the menu row and the hover button
+    /// are the same act on the same file.
+    GitActStage,
+    GitActUnstage,
+    /// The two discards, which are one word to the reader and two commands to
+    /// git — the tooltip is where that difference is said.
+    GitActDeleteFile,
+    GitActDiscardChanges,
+    GitActStageAll,
+    GitActUnstageAll,
+    GitActLoadMore,
+    GitActOpenGraph,
+    /// A history with nothing in it. A capital where [`Self::GitUnborn`] has
+    /// none, because this one stands alone on a row.
+    GitNoCommits,
+    GitFaultTimedOut,
+    /// The fifth of the worker sentences, in the shape the other four wear: a
+    /// worker dying is a feature going away, and the line has to say which half
+    /// still works.
+    GitWorkerStopped,
+    /// It says what to do about it and not only what is wrong (user ruling
+    /// 2026-08-16). `Git for Windows` is a product's name and stays.
+    GitNotFound,
+
+    // ── the commit graph (`crate::git_graph`) ──────────────────────────────
+    /// The meta line's two leads. They are prefixes to a value, so the Chinese
+    /// carries the full-width colon the value hangs off.
+    GraphMetaParents,
+    GraphMetaCommittedBy,
+    /// The newer end of a comparison when it is not a commit.
+    GraphCompareWorkingTree,
+    /// The five column heads, in `.glabel` grammar and upper-cased at the source
+    /// for [`Self::GitGroupStaged`]'s reason. **Length-sensitive**: `GRAPH` is
+    /// dropped below 44 logical pixels of column, and the four beside it share a
+    /// row with the values under them.
+    GraphHeadingGraph,
+    GraphHeadingDescription,
+    GraphHeadingAuthor,
+    GraphHeadingDate,
+    GraphHeadingCommit,
+    /// The working tree's own row, which is not a commit.
+    GraphUncommitted,
+    /// What stands in its date column.
+    GraphUncommittedTime,
+    GraphSearchPlaceholder,
+    GraphSearchNone,
+    /// The filter's resting word, and the menu's first row.
+    GraphFilterAll,
+    GraphToolFilterTip,
+    GraphToolSearchTip,
+    GraphToolSearchClearTip,
+    /// A file git counted no lines in.
+    GraphFileBinary,
+    /// **One sentence, two surfaces**: the panel's commit row and the graph's.
+    /// They were two literals differing only in a dash until this slice, which
+    /// is exactly the drift the table exists to end.
+    GraphMergeCommit,
+    /// The graph's own last line on a commit row — the panel's rows have no
+    /// double-click and do not say this.
+    GraphDoubleClickCheckout,
+    /// And the uncommitted row's, which unfolds rather than checks out.
+    GraphClickToList,
+
+    // ── the command rail's glance card (`crate::cmdrail`) ──────────────────
+    /// What the card says about a mark whose text the ledger never got, and
+    /// about a hit whose line the transcript has since evicted. Both are
+    /// categories rather than quotations, which is why they are lower case and
+    /// drawn in the muted ink.
+    RailPeekEmptyCommand,
+    RailPeekEmptyLine,
+
+    // ── the search capsule (`crate::search`) ───────────────────────────────
+    //
+    // `Aa`, `ab`, `.*`, `3/17`, `0/0` and the em dash the broken pattern shows
+    // are not here: they are symbols and quantities, and a translated `Aa` would
+    // be a toggle nobody recognises.
+    SearchPlaceholder,
+    SearchTipCase,
+    SearchTipWord,
+    SearchTipRegex,
+    /// The three that carry a chord. The caps inside the parentheses are keys
+    /// and stay in both columns.
+    SearchTipPrevious,
+    SearchTipNext,
+    SearchTipClose,
+
+    // ── the terminal's right-click menu (`crate::profiles`) ────────────────
+    //
+    // **Length-sensitive as a set**: the menu is measured against its widest row
+    // and every row is drawn at that width, so the Chinese column is written to
+    // stay inside the English one's box.
+    TermMenuCopy,
+    TermMenuPaste,
+    TermMenuSelectAll,
+    /// The ellipsis is this window's promise that a row asks before it acts.
+    TermMenuFind,
+    TermMenuClearScreen,
+    TermMenuClearScrollback,
+    /// The seventh row: the shell in this pane is ended and a new one takes its
+    /// seat, on the same profile, in the last folder it reported.
+    TermMenuShellAgain,
+
+    // ── the pane's `⌄` menu (`crate::profiles`) ────────────────────────────
+    /// The submenu head. The `▸` is drawn rather than written.
+    PaneMenuSplitWith,
+    PaneMenuNewInFolder,
+    PaneMenuDuplicate,
+    PaneMenuMoveToNewTab,
+    /// The picker's caption, upper-cased at the source with the group labels it
+    /// shares its grammar with.
+    PaneMenuSplitCaption,
+    /// **One verb, three surfaces**: the pane head's `×`, this menu's own row
+    /// and the shortcut table's line for `Ctrl+Shift+W`.
+    ClosePane,
+    /// The tip on the `⌄` itself. It names what the menu is *for* rather than
+    /// what it is, and the second clause is there because the sixth entry closes
+    /// the pane.
+    PaneChevronTip,
+
+    // ── a git row's menu and the branch filter (`crate::profiles`) ─────────
+    GitMenuCheckout,
+    GitMenuCreateBranch,
+    GitMenuCreateTag,
+    GitMenuRename,
+    GitMenuDeleteTag,
+    GitMenuCheckoutTracking,
+    GitMenuOpenDiff,
+    /// `Explorer` is the name of a program on this machine and stays.
+    GitMenuReveal,
+    GitMenuCopyHash,
+    GitMenuCopySubject,
+    GitMenuCopyName,
+    GitMenuCompareSelected,
+    GitMenuCompareWorking,
+    GitFilterShowRemotes,
+    GitFilterShowTags,
+    /// What the three named prompts' empty fields say they want.
+    GitPromptBranchName,
+    GitPromptTagName,
+    GitPromptNewName,
+
+    // ── the confirmation gate (`crate::restore`) ───────────────────────────
+    //
+    // The gate had one question when this table was written and has six now.
+    // Its two buttons are shared with the menus whose verbs they carry, which is
+    // the gate's own rule stated in `GATE_DELETE_TEXT`: a gate headed
+    // `Delete this branch?` whose other button said `Discard` would be two words
+    // for one act.
+    GateDiscard,
+    GateCancel,
+    GateDelete,
+    GateClear,
+    GateTitleUnsaved,
+    /// It says *changes*, not *unsaved changes*: the file on disk is saved, and
+    /// what is about to go is the difference between it and what git has.
+    GateTitleGitDiscard,
+    GateTitleGitDelete,
+    GateTitleGitDeleteBranch,
+    GateTitleGitDeleteTag,
+    GateTitleClearScrollback,
+
+    // ── a ref name the field can already tell is impossible (`crate::git`) ──
+    //
+    // git's rule in the reader's words rather than git's: `check-ref-format`
+    // answers with an exit status and has no sentence to quote. The characters
+    // named in them are characters and are not translated.
+    RefNameEmpty,
+    RefNameSpace,
+    RefNameRange,
+    RefNameReserved,
+    RefNameDash,
+    RefNameLock,
+    RefNameShape,
+
+    // ── the file peek card and the diff document ───────────────────────────
+    /// The card's foot. `Enter` is a key cap.
+    PeekFoot,
+    /// Its refusal — the preview pane's own sentence said in one line, and a
+    /// different sentence from [`Self::PreviewRefusalBinary`] because this one
+    /// covers the unrecognised type as well.
+    PeekUnknown,
+    /// A diff with nothing in it, which is not a failure: a commit's reading of
+    /// a file it did not touch, or two copies that agree.
+    GitDocumentEmpty,
+
+    // ── a drag's landing caption, the two that escaped ─────────────────────
+    /// The captions a file row and a folder row earn over a preview seat, beside
+    /// [`Self::DragSwapPanes`] and [`Self::DragReplacePane`].
+    DragOpenInPreview,
+    DragRootTreeHere,
 }
 
 impl Text {
@@ -1532,6 +1860,306 @@ impl Text {
                 "No prompt marks, no directory, no exit codes, no hyperlinks",
                 "没有提示符标记、没有目录、没有退出码、没有超链接",
             ),
+
+            // ── the Shortcuts page ─────────────────────────────────────────
+            Self::ShortcutGotoTab1 => pick(lang, "Go to tab 1", "转到标签 1"),
+            Self::ShortcutGotoTab2 => pick(lang, "Go to tab 2", "转到标签 2"),
+            Self::ShortcutGotoTab3 => pick(lang, "Go to tab 3", "转到标签 3"),
+            Self::ShortcutGotoTab4 => pick(lang, "Go to tab 4", "转到标签 4"),
+            Self::ShortcutGotoTab5 => pick(lang, "Go to tab 5", "转到标签 5"),
+            Self::ShortcutGotoTab6 => pick(lang, "Go to tab 6", "转到标签 6"),
+            Self::ShortcutGotoTab7 => pick(lang, "Go to tab 7", "转到标签 7"),
+            Self::ShortcutGotoTab8 => pick(lang, "Go to tab 8", "转到标签 8"),
+            Self::ShortcutGotoTab9 => pick(lang, "Go to tab 9", "转到标签 9"),
+            Self::ShortcutNextTab => pick(lang, "Next tab", "下一个标签"),
+            Self::ShortcutPrevTab => pick(lang, "Previous tab", "上一个标签"),
+            Self::ShortcutReopenClosed => {
+                pick(lang, "Reopen the last closed tab", "重新打开最近关闭的标签")
+            }
+            Self::ShortcutJumpAttention => {
+                pick(lang, "Jump to the longest waiting", "跳到等待最久的那个")
+            }
+            Self::ShortcutCommandPalette => pick(lang, "Command palette", "命令面板"),
+            Self::ShortcutSplitHorizontal => pick(lang, "Split horizontally", "横向拆分"),
+            Self::ShortcutSplitVertical => pick(lang, "Split vertically", "纵向拆分"),
+            Self::ShortcutDuplicatePaneSplit => pick(
+                lang,
+                "Duplicate pane into a split",
+                "把窗格复制到一个拆分里",
+            ),
+            Self::ShortcutFilesPane => pick(lang, "Files column", "文件列"),
+            Self::ShortcutGitPage => pick(lang, "Turn the files column to Git", "把文件列切到 Git"),
+            Self::ShortcutSavePreview => pick(lang, "Save the open document", "保存打开的文档"),
+            Self::ShortcutPrevCommandMark => pick(lang, "Previous command", "上一条命令"),
+            Self::ShortcutNextCommandMark => pick(lang, "Next command", "下一条命令"),
+            Self::ShortcutOpenSearch => pick(lang, "Find in the terminal", "在终端里查找"),
+            Self::ShortcutNextMatch => pick(lang, "Next match", "下一处匹配"),
+            Self::ShortcutPrevMatch => pick(lang, "Previous match", "上一处匹配"),
+            Self::ShortcutSummonPip1 => pick(lang, "Summon PiP slot 1", "唤出 PiP 槽位 1"),
+            Self::ShortcutSummonPip2 => pick(lang, "Summon PiP slot 2", "唤出 PiP 槽位 2"),
+            Self::ShortcutSummonPip3 => pick(lang, "Summon PiP slot 3", "唤出 PiP 槽位 3"),
+            Self::ShortcutSummonPip4 => pick(lang, "Summon PiP slot 4", "唤出 PiP 槽位 4"),
+            Self::ShortcutFamilyGotoTab => pick(lang, "Go to tab 1–9", "转到标签 1–9"),
+            Self::ShortcutFamilySummonPip => pick(lang, "Summon PiP slot 1–4", "唤出 PiP 槽位 1–4"),
+            Self::ShortcutScopePreview => pick(lang, "In a preview", "在预览里"),
+            Self::ShortcutScopeTerminalPrimary => {
+                pick(lang, "On a terminal's own scrollback", "在终端自己的回滚里")
+            }
+            Self::ShortcutScopeSearchOpen => pick(lang, "While the search is open", "查找打开时"),
+            Self::ShortcutNotePending => pick(
+                lang,
+                "Bound; the verb behind it is still to come",
+                "已绑定；它背后的功能还没有到",
+            ),
+            Self::ShortcutNoteOnePerMember => pick(lang, "One chord for each", "每一个各有一组键"),
+            Self::ShortcutNoteNoneAssigned => pick(
+                lang,
+                "One chord for each; none is set yet",
+                "每一个各有一组键；目前一个都没设",
+            ),
+            Self::ShortcutNoteSomeUnassigned => pick(
+                lang,
+                "One chord for each; some are not set yet",
+                "每一个各有一组键；有些还没设",
+            ),
+            Self::ShortcutUnbound => pick(lang, "Not set", "未设置"),
+            Self::ShortcutReservedMoveFocus => {
+                pick(lang, "Move the focus between panes", "在窗格之间移动焦点")
+            }
+            Self::ShortcutReservedResizePane => pick(lang, "Resize a pane", "调整窗格大小"),
+            Self::ShortcutReservedAltArrow => pick(
+                lang,
+                "Reserved — readline reads Alt+arrow as word movement",
+                "保留 —— readline 把 Alt+方向键读作按词移动",
+            ),
+            Self::ShortcutHintAltGrZone => pick(
+                lang,
+                "Ctrl+Alt is reserved for AltGr keyboards",
+                "Ctrl+Alt 留给 AltGr 键盘",
+            ),
+            Self::ShortcutHintShellControlLetter => pick(
+                lang,
+                "Ctrl+letter belongs to the shell",
+                "Ctrl+字母属于 shell",
+            ),
+
+            // ── the Git page ───────────────────────────────────────────────
+            Self::GitNotARepository => pick(lang, "Not a git repository", "这里不是 git 仓库"),
+            Self::GitReading => pick(lang, "Reading the repository…", "正在读取仓库…"),
+            Self::GitToastTitle => pick(lang, "Git", "Git"),
+            Self::GitUnborn => pick(lang, "no commits yet", "还没有提交"),
+            Self::GitDetached => pick(lang, "detached HEAD", "HEAD 已分离"),
+            Self::GitLoadMore => pick(lang, "Load more", "加载更多"),
+            Self::GitCommitNoFiles => pick(
+                lang,
+                "No files against the first parent",
+                "对照第一个父提交没有文件",
+            ),
+            Self::GitGroupStaged => pick(lang, "STAGED", "已暂存"),
+            Self::GitGroupChanges => pick(lang, "CHANGES", "已改动"),
+            Self::GitGroupUntracked => pick(lang, "UNTRACKED", "未跟踪"),
+            Self::GitGroupStagedTip => pick(
+                lang,
+                "Packed for the next commit — 'git commit' ships exactly these",
+                "已为下一次提交打包 —— 'git commit' 提交的正是这些",
+            ),
+            Self::GitGroupChangesTip => pick(lang, "Edited but not packed yet", "已改，但还没打包"),
+            Self::GitGroupUntrackedTip => pick(
+                lang,
+                "Not in the repository yet — git is not watching these",
+                "还不在仓库里 —— git 没有盯着这些",
+            ),
+            Self::GitBranchesHeading => pick(lang, "BRANCHES", "分支"),
+            Self::GitBranchesTip => pick(
+                lang,
+                "Local branches, current one first — click one to check it out",
+                "本地分支，当前的排在最前 —— 点一个就检出它",
+            ),
+            Self::GitRemotesHeading => pick(lang, "REMOTES", "远程"),
+            Self::GitRemotesTipShut => pick(
+                lang,
+                "Branches on remotes — click to show them",
+                "远程上的分支 —— 点一下展开",
+            ),
+            Self::GitRemotesTipOpen => pick(
+                lang,
+                "Branches on remotes — click to fold them away",
+                "远程上的分支 —— 点一下收起",
+            ),
+            Self::GitCommitsHeading => pick(lang, "COMMITS", "提交"),
+            Self::GitCommitsTip => pick(
+                lang,
+                "Recent history, newest first — the curve marks a merge, where a branch's history joins this line",
+                "近期历史，最新的排在最前 —— 弧线标记一次合并，某个分支的历史在那里并入这条线",
+            ),
+            Self::GitRefreshTip => pick(lang, "Read the repository again", "再读一次仓库"),
+            Self::GitActStage => pick(lang, "Stage", "暂存"),
+            Self::GitActUnstage => pick(lang, "Unstage", "取消暂存"),
+            Self::GitActDeleteFile => pick(lang, "Delete this file", "删除这个文件"),
+            Self::GitActDiscardChanges => pick(lang, "Discard changes", "丢弃改动"),
+            Self::GitActStageAll => pick(lang, "Stage all", "全部暂存"),
+            Self::GitActUnstageAll => pick(lang, "Unstage all", "全部取消暂存"),
+            Self::GitActLoadMore => pick(lang, "Load fifty more commits", "再加载五十条提交"),
+            Self::GitActOpenGraph => pick(lang, "Open the full commit graph", "打开完整的提交图"),
+            Self::GitNoCommits => pick(lang, "No commits yet", "还没有提交"),
+            Self::GitFaultTimedOut => pick(
+                lang,
+                "git did not answer and was stopped",
+                "git 没有回答，已被停止",
+            ),
+            Self::GitWorkerStopped => pick(
+                lang,
+                "Git reading stopped; terminal input and output remain available",
+                "git 读取已停止；终端的输入输出仍然可用",
+            ),
+            Self::GitNotFound => pick(
+                lang,
+                "git.exe was not found on this machine — install Git for Windows to use this page",
+                "这台机器上找不到 git.exe —— 装上 Git for Windows 才能用这个页面",
+            ),
+
+            // ── the commit graph ───────────────────────────────────────────
+            Self::GraphMetaParents => pick(lang, "parents: ", "父提交："),
+            Self::GraphMetaCommittedBy => pick(lang, "committed by ", "提交者："),
+            Self::GraphCompareWorkingTree => pick(lang, "working tree", "工作区"),
+            Self::GraphHeadingGraph => pick(lang, "GRAPH", "图"),
+            Self::GraphHeadingDescription => pick(lang, "DESCRIPTION", "说明"),
+            Self::GraphHeadingAuthor => pick(lang, "AUTHOR", "作者"),
+            Self::GraphHeadingDate => pick(lang, "DATE", "日期"),
+            Self::GraphHeadingCommit => pick(lang, "COMMIT", "提交"),
+            Self::GraphUncommitted => pick(lang, "Uncommitted Changes", "未提交的改动"),
+            Self::GraphUncommittedTime => pick(lang, "now", "现在"),
+            Self::GraphSearchPlaceholder => pick(lang, "Search commits", "搜索提交"),
+            Self::GraphSearchNone => pick(lang, "no matches", "没有匹配"),
+            Self::GraphFilterAll => pick(lang, "All branches", "全部分支"),
+            Self::GraphToolFilterTip => pick(
+                lang,
+                "Which branches this graph is of",
+                "这张图画的是哪些分支",
+            ),
+            Self::GraphToolSearchTip => pick(
+                lang,
+                "Search commits by message, author or hash",
+                "按信息、作者或哈希搜索提交",
+            ),
+            Self::GraphToolSearchClearTip => pick(lang, "Clear the search", "清空搜索"),
+            Self::GraphFileBinary => pick(
+                lang,
+                "Binary — git has no lines to count here",
+                "二进制 —— git 在这里没有行可数",
+            ),
+            Self::GraphMergeCommit => pick(
+                lang,
+                "Merge commit — another branch's history joins here",
+                "合并提交 —— 另一个分支的历史在这里并入",
+            ),
+            Self::GraphDoubleClickCheckout => pick(
+                lang,
+                "Double-click to check this commit out",
+                "双击检出这个提交",
+            ),
+            Self::GraphClickToList => pick(lang, "Click to list them", "点一下列出它们"),
+
+            // ── the command rail's glance card ─────────────────────────────
+            Self::RailPeekEmptyCommand => pick(lang, "command", "命令"),
+            Self::RailPeekEmptyLine => pick(lang, "line", "行"),
+
+            // ── the search capsule ─────────────────────────────────────────
+            Self::SearchPlaceholder => pick(lang, "Find", "查找"),
+            Self::SearchTipCase => pick(lang, "Match case", "区分大小写"),
+            Self::SearchTipWord => pick(lang, "Whole word", "全词匹配"),
+            Self::SearchTipRegex => pick(lang, "Regular expression", "正则表达式"),
+            Self::SearchTipPrevious => pick(
+                lang,
+                "Previous match (Shift+Enter)",
+                "上一处匹配 (Shift+Enter)",
+            ),
+            Self::SearchTipNext => pick(lang, "Next match (Enter)", "下一处匹配 (Enter)"),
+            Self::SearchTipClose => pick(lang, "Close (Esc)", "关闭 (Esc)"),
+
+            // ── the terminal's right-click menu ────────────────────────────
+            Self::TermMenuCopy => pick(lang, "Copy", "复制"),
+            Self::TermMenuPaste => pick(lang, "Paste", "粘贴"),
+            Self::TermMenuSelectAll => pick(lang, "Select all", "全选"),
+            Self::TermMenuFind => pick(lang, "Find…", "查找…"),
+            Self::TermMenuClearScreen => pick(lang, "Clear screen", "清屏"),
+            Self::TermMenuClearScrollback => pick(lang, "Clear scrollback…", "清除回滚…"),
+            Self::TermMenuShellAgain => pick(lang, "Restart shell…", "重启 shell…"),
+
+            // ── the pane's `⌄` menu ────────────────────────────────────────
+            Self::PaneMenuSplitWith => pick(lang, "Split with", "拆分并运行"),
+            Self::PaneMenuNewInFolder => {
+                pick(lang, "New terminal in folder…", "在文件夹里新建终端…")
+            }
+            Self::PaneMenuDuplicate => pick(lang, "Duplicate pane", "复制窗格"),
+            Self::PaneMenuMoveToNewTab => pick(lang, "Move pane to new tab", "把窗格移到新标签"),
+            Self::PaneMenuSplitCaption => pick(lang, "SPLIT", "拆分"),
+            Self::ClosePane => pick(lang, "Close pane", "关闭窗格"),
+            Self::PaneChevronTip => pick(lang, "Split and more", "拆分等操作"),
+
+            // ── a git row's menu and the branch filter ─────────────────────
+            Self::GitMenuCheckout => pick(lang, "Checkout", "检出"),
+            Self::GitMenuCreateBranch => pick(lang, "Create branch here…", "在这里新建分支…"),
+            Self::GitMenuCreateTag => pick(lang, "Add tag here…", "在这里加标签…"),
+            Self::GitMenuRename => pick(lang, "Rename…", "重命名…"),
+            Self::GitMenuDeleteTag => pick(lang, "Delete tag", "删除标签"),
+            Self::GitMenuCheckoutTracking => {
+                pick(lang, "Checkout as local branch", "检出为本地分支")
+            }
+            Self::GitMenuOpenDiff => pick(lang, "Open diff", "打开差异"),
+            Self::GitMenuReveal => pick(lang, "Reveal in Explorer", "在资源管理器中显示"),
+            Self::GitMenuCopyHash => pick(lang, "Copy hash", "复制哈希"),
+            Self::GitMenuCopySubject => pick(lang, "Copy subject", "复制标题"),
+            Self::GitMenuCopyName => pick(lang, "Copy name", "复制名称"),
+            Self::GitMenuCompareSelected => pick(lang, "Compare with selected", "与选中的比较"),
+            Self::GitMenuCompareWorking => pick(lang, "Compare with working tree", "与工作区比较"),
+            Self::GitFilterShowRemotes => pick(lang, "Show remote branches", "显示远程分支"),
+            Self::GitFilterShowTags => pick(lang, "Show tags", "显示标签"),
+            Self::GitPromptBranchName => pick(lang, "Branch name", "分支名"),
+            Self::GitPromptTagName => pick(lang, "Tag name", "标签名"),
+            Self::GitPromptNewName => pick(lang, "New name", "新名称"),
+
+            // ── the confirmation gate ──────────────────────────────────────
+            Self::GateDiscard => pick(lang, "Discard", "放弃"),
+            Self::GateCancel => pick(lang, "Cancel", "取消"),
+            Self::GateDelete => pick(lang, "Delete", "删除"),
+            Self::GateClear => pick(lang, "Clear", "清除"),
+            Self::GateTitleUnsaved => pick(lang, "Discard unsaved changes?", "放弃未保存的改动？"),
+            Self::GateTitleGitDiscard => pick(lang, "Discard changes?", "放弃改动？"),
+            Self::GateTitleGitDelete => pick(lang, "Delete this file?", "删除这个文件？"),
+            Self::GateTitleGitDeleteBranch => pick(lang, "Delete this branch?", "删除这个分支？"),
+            Self::GateTitleGitDeleteTag => pick(lang, "Delete this tag?", "删除这个标签？"),
+            Self::GateTitleClearScrollback => pick(lang, "Clear scrollback?", "清除回滚？"),
+
+            // ── a ref name the field refuses ───────────────────────────────
+            Self::RefNameEmpty => pick(lang, "A name is needed.", "需要一个名字。"),
+            Self::RefNameSpace => pick(lang, "No spaces.", "不能有空格。"),
+            Self::RefNameRange => pick(lang, "No `..`.", "不能有 `..`。"),
+            Self::RefNameReserved => pick(lang, "None of ~ ^ : ? * [ \\", "不能有 ~ ^ : ? * [ \\"),
+            Self::RefNameDash => pick(lang, "Cannot start with `-`.", "不能以 `-` 开头。"),
+            Self::RefNameLock => pick(lang, "Cannot end with `.lock`.", "不能以 `.lock` 结尾。"),
+            Self::RefNameShape => pick(
+                lang,
+                "git will not accept this name.",
+                "git 不会接受这个名字。",
+            ),
+
+            // ── the file peek card and the diff document ───────────────────
+            Self::PeekFoot => pick(
+                lang,
+                "Enter / double-click opens the preview pane",
+                "Enter / 双击打开预览窗格",
+            ),
+            Self::PeekUnknown => pick(
+                lang,
+                "No preview — binary or unrecognized type.",
+                "无法预览 —— 二进制或无法识别的类型。",
+            ),
+            Self::GitDocumentEmpty => pick(lang, "No changes to show", "没有可显示的改动"),
+
+            // ── a drag's landing caption ───────────────────────────────────
+            Self::DragOpenInPreview => pick(lang, "Open in this preview", "在这个预览里打开"),
+            Self::DragRootTreeHere => pick(lang, "Root this tree here", "把这棵树的根设到这里"),
         }
     }
 
@@ -1547,7 +2175,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 240] = [
+    pub const ALL: [Self; 400] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -1788,6 +2416,166 @@ impl Text {
         Self::OptionBlockHeightNone,
         Self::PsReadLineUpdate,
         Self::EditScheme,
+        Self::ShortcutGotoTab1,
+        Self::ShortcutGotoTab2,
+        Self::ShortcutGotoTab3,
+        Self::ShortcutGotoTab4,
+        Self::ShortcutGotoTab5,
+        Self::ShortcutGotoTab6,
+        Self::ShortcutGotoTab7,
+        Self::ShortcutGotoTab8,
+        Self::ShortcutGotoTab9,
+        Self::ShortcutNextTab,
+        Self::ShortcutPrevTab,
+        Self::ShortcutReopenClosed,
+        Self::ShortcutJumpAttention,
+        Self::ShortcutCommandPalette,
+        Self::ShortcutSplitHorizontal,
+        Self::ShortcutSplitVertical,
+        Self::ShortcutDuplicatePaneSplit,
+        Self::ShortcutFilesPane,
+        Self::ShortcutGitPage,
+        Self::ShortcutSavePreview,
+        Self::ShortcutPrevCommandMark,
+        Self::ShortcutNextCommandMark,
+        Self::ShortcutOpenSearch,
+        Self::ShortcutNextMatch,
+        Self::ShortcutPrevMatch,
+        Self::ShortcutSummonPip1,
+        Self::ShortcutSummonPip2,
+        Self::ShortcutSummonPip3,
+        Self::ShortcutSummonPip4,
+        Self::ShortcutFamilyGotoTab,
+        Self::ShortcutFamilySummonPip,
+        Self::ShortcutScopePreview,
+        Self::ShortcutScopeTerminalPrimary,
+        Self::ShortcutScopeSearchOpen,
+        Self::ShortcutNotePending,
+        Self::ShortcutNoteOnePerMember,
+        Self::ShortcutNoteNoneAssigned,
+        Self::ShortcutNoteSomeUnassigned,
+        Self::ShortcutUnbound,
+        Self::ShortcutReservedMoveFocus,
+        Self::ShortcutReservedResizePane,
+        Self::ShortcutReservedAltArrow,
+        Self::ShortcutHintAltGrZone,
+        Self::ShortcutHintShellControlLetter,
+        Self::GitNotARepository,
+        Self::GitReading,
+        Self::GitToastTitle,
+        Self::GitUnborn,
+        Self::GitDetached,
+        Self::GitLoadMore,
+        Self::GitCommitNoFiles,
+        Self::GitGroupStaged,
+        Self::GitGroupChanges,
+        Self::GitGroupUntracked,
+        Self::GitGroupStagedTip,
+        Self::GitGroupChangesTip,
+        Self::GitGroupUntrackedTip,
+        Self::GitBranchesHeading,
+        Self::GitBranchesTip,
+        Self::GitRemotesHeading,
+        Self::GitRemotesTipShut,
+        Self::GitRemotesTipOpen,
+        Self::GitCommitsHeading,
+        Self::GitCommitsTip,
+        Self::GitRefreshTip,
+        Self::GitActStage,
+        Self::GitActUnstage,
+        Self::GitActDeleteFile,
+        Self::GitActDiscardChanges,
+        Self::GitActStageAll,
+        Self::GitActUnstageAll,
+        Self::GitActLoadMore,
+        Self::GitActOpenGraph,
+        Self::GitNoCommits,
+        Self::GitFaultTimedOut,
+        Self::GitWorkerStopped,
+        Self::GitNotFound,
+        Self::GraphMetaParents,
+        Self::GraphMetaCommittedBy,
+        Self::GraphCompareWorkingTree,
+        Self::GraphHeadingGraph,
+        Self::GraphHeadingDescription,
+        Self::GraphHeadingAuthor,
+        Self::GraphHeadingDate,
+        Self::GraphHeadingCommit,
+        Self::GraphUncommitted,
+        Self::GraphUncommittedTime,
+        Self::GraphSearchPlaceholder,
+        Self::GraphSearchNone,
+        Self::GraphFilterAll,
+        Self::GraphToolFilterTip,
+        Self::GraphToolSearchTip,
+        Self::GraphToolSearchClearTip,
+        Self::GraphFileBinary,
+        Self::GraphMergeCommit,
+        Self::GraphDoubleClickCheckout,
+        Self::GraphClickToList,
+        Self::RailPeekEmptyCommand,
+        Self::RailPeekEmptyLine,
+        Self::SearchPlaceholder,
+        Self::SearchTipCase,
+        Self::SearchTipWord,
+        Self::SearchTipRegex,
+        Self::SearchTipPrevious,
+        Self::SearchTipNext,
+        Self::SearchTipClose,
+        Self::TermMenuCopy,
+        Self::TermMenuPaste,
+        Self::TermMenuSelectAll,
+        Self::TermMenuFind,
+        Self::TermMenuClearScreen,
+        Self::TermMenuClearScrollback,
+        Self::TermMenuShellAgain,
+        Self::PaneMenuSplitWith,
+        Self::PaneMenuNewInFolder,
+        Self::PaneMenuDuplicate,
+        Self::PaneMenuMoveToNewTab,
+        Self::PaneMenuSplitCaption,
+        Self::ClosePane,
+        Self::PaneChevronTip,
+        Self::GitMenuCheckout,
+        Self::GitMenuCreateBranch,
+        Self::GitMenuCreateTag,
+        Self::GitMenuRename,
+        Self::GitMenuDeleteTag,
+        Self::GitMenuCheckoutTracking,
+        Self::GitMenuOpenDiff,
+        Self::GitMenuReveal,
+        Self::GitMenuCopyHash,
+        Self::GitMenuCopySubject,
+        Self::GitMenuCopyName,
+        Self::GitMenuCompareSelected,
+        Self::GitMenuCompareWorking,
+        Self::GitFilterShowRemotes,
+        Self::GitFilterShowTags,
+        Self::GitPromptBranchName,
+        Self::GitPromptTagName,
+        Self::GitPromptNewName,
+        Self::GateDiscard,
+        Self::GateCancel,
+        Self::GateDelete,
+        Self::GateClear,
+        Self::GateTitleUnsaved,
+        Self::GateTitleGitDiscard,
+        Self::GateTitleGitDelete,
+        Self::GateTitleGitDeleteBranch,
+        Self::GateTitleGitDeleteTag,
+        Self::GateTitleClearScrollback,
+        Self::RefNameEmpty,
+        Self::RefNameSpace,
+        Self::RefNameRange,
+        Self::RefNameReserved,
+        Self::RefNameDash,
+        Self::RefNameLock,
+        Self::RefNameShape,
+        Self::PeekFoot,
+        Self::PeekUnknown,
+        Self::GitDocumentEmpty,
+        Self::DragOpenInPreview,
+        Self::DragRootTreeHere,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
@@ -1798,11 +2586,16 @@ impl Text {
     /// program is not called. Every entry not on this list must differ between
     /// the columns and must carry Chinese in the Chinese one.
     #[cfg(test)]
-    const UNTRANSLATED: [Self; 1] = [
+    const UNTRANSLATED: [Self; 2] = [
         // The program's name. It appears untranslated inside a dozen sentences
         // in this table already; a tab that named it in Chinese would be naming
         // something else.
         Self::FilesViewGit,
+        // The same proper noun again, on the card a refused write raises.
+        // A second entry and not a reuse of the tab's, for the reason
+        // `FilesViewFiles` is not `SeatFiles`: shortening the segmented
+        // control must not be a change to a toast.
+        Self::GitToastTitle,
     ];
 }
 
@@ -2546,6 +3339,484 @@ impl CliText<'_> {
     ];
 }
 
+// ── the tail's own value-carrying strings (§7.1.6c-7) ──────────────────────
+//
+// Every one of these is a sentence with a number, a name or a path in it, which
+// is why it is here and not in the table: the table is `&'static str` and these
+// allocate. They are written as a private `…_in(lang, …)` with a public wrapper
+// that reads the language in force, which is
+// [`psreadline_row_outdated_in`]'s shape and is here for its reason — a test
+// that had to `install` a language in order to read a sentence would be a test
+// racing every other test in this file for the process's own answer.
+
+/// The recorder's third refusal: the chord is taken, and by which row.
+///
+/// **No swap is offered**, so the sentence's whole job is to name the row that
+/// has it — which is what a reader needs in order to go and clear it themselves.
+#[must_use]
+pub fn shortcut_already_used(title: &str) -> String {
+    shortcut_already_used_in(current(), title)
+}
+
+fn shortcut_already_used_in(lang: Lang, title: &str) -> String {
+    match lang {
+        Lang::English => format!("Already used by {title}"),
+        Lang::Chinese => format!("已被「{title}」占用"),
+    }
+}
+
+/// R33's own row: the status read everything and the page shows the first two
+/// thousand, and it says so rather than quietly being short.
+#[must_use]
+pub fn git_more_changed_files(count: usize) -> String {
+    git_more_changed_files_in(current(), count)
+}
+
+fn git_more_changed_files_in(lang: Lang, count: usize) -> String {
+    match lang {
+        Lang::English => format!("{count} more changed files not shown"),
+        Lang::Chinese => format!("还有 {count} 个改动的文件没有显示"),
+    }
+}
+
+/// A file git followed to a new name — **one sentence for the panel and the
+/// graph**, which spelled it with two different dashes until this slice.
+#[must_use]
+pub fn git_renamed_from(path: &str, from: &str) -> String {
+    git_renamed_from_in(current(), path, from)
+}
+
+fn git_renamed_from_in(lang: Lang, path: &str, from: &str) -> String {
+    match lang {
+        Lang::English => format!("{path} — renamed from {from}"),
+        Lang::Chinese => format!("{path} —— 从 {from} 重命名而来"),
+    }
+}
+
+/// The three sentences a branch row carries (G36).
+///
+/// A remote row carries no verb (T9), so it says what it *is* instead of
+/// promising a checkout it will not do.
+#[must_use]
+pub fn git_branch_remote_tip(name: &str) -> String {
+    git_branch_remote_tip_in(current(), name)
+}
+
+fn git_branch_remote_tip_in(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::English => format!("{name} - a branch on a remote"),
+        Lang::Chinese => format!("{name} —— 远程上的一个分支"),
+    }
+}
+
+#[must_use]
+pub fn git_branch_current_tip(name: &str) -> String {
+    git_branch_current_tip_in(current(), name)
+}
+
+fn git_branch_current_tip_in(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::English => format!("{name} - the branch you are on"),
+        Lang::Chinese => format!("{name} —— 你正在的分支"),
+    }
+}
+
+#[must_use]
+pub fn git_branch_checkout_tip(name: &str) -> String {
+    git_branch_checkout_tip_in(current(), name)
+}
+
+fn git_branch_checkout_tip_in(lang: Lang, name: &str) -> String {
+    match lang {
+        Lang::English => format!("Check out {name}"),
+        Lang::Chinese => format!("检出 {name}"),
+    }
+}
+
+/// The masthead of a repository whose first commit has not happened (R7): it has
+/// a branch name, and saying only the name would claim a branch that has never
+/// existed.
+#[must_use]
+pub fn git_unborn_masthead(name: &str) -> String {
+    git_unborn_masthead_in(current(), name)
+}
+
+fn git_unborn_masthead_in(lang: Lang, name: &str) -> String {
+    format!("{name} — {}", Text::GitUnborn.in_lang(lang))
+}
+
+/// What a count pill says (G22). **The plural is one `if`**, and the alternative
+/// is a sentence that is wrong every time the count is one — which on a branch
+/// you have just committed to is most of the time.
+#[must_use]
+pub fn git_pill_ahead(count: usize) -> String {
+    git_pill_ahead_in(current(), count)
+}
+
+fn git_pill_ahead_in(lang: Lang, count: usize) -> String {
+    match lang {
+        Lang::English if count == 1 => "1 commit ahead".to_owned(),
+        Lang::English => format!("{count} commits ahead"),
+        Lang::Chinese => format!("领先 {count} 个提交"),
+    }
+}
+
+#[must_use]
+pub fn git_pill_behind(count: usize) -> String {
+    git_pill_behind_in(current(), count)
+}
+
+fn git_pill_behind_in(lang: Lang, count: usize) -> String {
+    match lang {
+        Lang::English if count == 1 => "1 commit behind".to_owned(),
+        Lang::English => format!("{count} commits behind"),
+        Lang::Chinese => format!("落后 {count} 个提交"),
+    }
+}
+
+/// `Comparing abc1234 → def5678` (D6). The arrow is a picture and is the same
+/// in both columns.
+#[must_use]
+pub fn graph_compare(left: &str, right: &str) -> String {
+    graph_compare_in(current(), left, right)
+}
+
+fn graph_compare_in(lang: Lang, left: &str, right: &str) -> String {
+    match lang {
+        Lang::English => format!("Comparing {left} → {right}"),
+        Lang::Chinese => format!("正在比较 {left} → {right}"),
+    }
+}
+
+/// `3 of 17` — where the search is, out of what it found (T4).
+///
+/// **The Chinese is a fraction and not a sentence**, and that is a length
+/// ruling rather than a translation: the count is drawn at the right-hand end of
+/// a 180-pixel field, and `第 3 个，共 17 个` would take the field's own width to
+/// say what `3/17` says.
+#[must_use]
+pub fn graph_search_position(at: usize, total: usize) -> String {
+    graph_search_position_in(current(), at, total)
+}
+
+fn graph_search_position_in(lang: Lang, at: usize, total: usize) -> String {
+    match lang {
+        Lang::English => format!("{at} of {total}"),
+        Lang::Chinese => format!("{at}/{total}"),
+    }
+}
+
+/// What the filter's button says once branches have been picked by hand.
+#[must_use]
+pub fn graph_filter_branches(count: usize) -> String {
+    graph_filter_branches_in(current(), count)
+}
+
+fn graph_filter_branches_in(lang: Lang, count: usize) -> String {
+    match lang {
+        // `1 branches` is not English, which is the whole reason this is a
+        // function and not a suffix.
+        Lang::English if count == 1 => "1 branch".to_owned(),
+        Lang::English => format!("{count} branches"),
+        Lang::Chinese => format!("{count} 个分支"),
+    }
+}
+
+/// The counts a file row draws as two numbers, said in words — because two
+/// numbers side by side do not say which is which.
+#[must_use]
+pub fn graph_file_stat(added: u32, removed: u32) -> String {
+    graph_file_stat_in(current(), added, removed)
+}
+
+fn graph_file_stat_in(lang: Lang, added: u32, removed: u32) -> String {
+    match lang {
+        Lang::English => {
+            let added_lines = if added == 1 { "line" } else { "lines" };
+            let removed_lines = if removed == 1 { "line" } else { "lines" };
+            format!("{added} {added_lines} added, {removed} {removed_lines} removed")
+        }
+        Lang::Chinese => format!("增加 {added} 行，删除 {removed} 行"),
+    }
+}
+
+/// What the Uncommitted Changes row says when you rest on it (V5).
+#[must_use]
+pub fn graph_uncommitted_tip(count: usize) -> String {
+    graph_uncommitted_tip_in(current(), count)
+}
+
+fn graph_uncommitted_tip_in(lang: Lang, count: usize) -> String {
+    let head = Text::GraphUncommitted.in_lang(lang);
+    let foot = Text::GraphClickToList.in_lang(lang);
+    match lang {
+        Lang::English => {
+            let files = if count == 1 { "file" } else { "files" };
+            format!("{head} - {count} {files} the working tree has something to say about\n{foot}")
+        }
+        Lang::Chinese => {
+            format!("{head} —— 工作区对 {count} 个文件有话要说\n{foot}")
+        }
+    }
+}
+
+/// What the window says when something has gone on the clipboard (D7).
+///
+/// The caller has already shortened what it is quoting — see
+/// `git_graph::GRAPH_COPIED_MAX_CHARS`, which is where the ruling about how much
+/// of a subject a card may repeat lives.
+#[must_use]
+pub fn graph_copied(said: &str) -> String {
+    graph_copied_in(current(), said)
+}
+
+fn graph_copied_in(lang: Lang, said: &str) -> String {
+    match lang {
+        Lang::English => format!("Copied {said}"),
+        Lang::Chinese => format!("已复制 {said}"),
+    }
+}
+
+/// What the window says when a seek runs out of history (D2) — a notice and not
+/// a refusal: the commit is further back than this window has read, which is a
+/// fact about the reading rather than about the repository.
+#[must_use]
+pub fn graph_seek_gave_up(short: &str) -> String {
+    graph_seek_gave_up_in(current(), short)
+}
+
+fn graph_seek_gave_up_in(lang: Lang, short: &str) -> String {
+    match lang {
+        Lang::English => format!("Commit {short} is further back than the loaded history"),
+        Lang::Chinese => format!("提交 {short} 比已加载的历史还要早"),
+    }
+}
+
+/// What a **folded** tick's glance card counts, and the one it then quotes.
+///
+/// Two functions rather than one that takes three numbers: the count is a
+/// sentence about a bucket and the quotation is the newest thing in it, and the
+/// caller composes them because it is the caller that decides whether the tick
+/// is folded at all.
+#[must_use]
+pub fn rail_glance_count(matched: usize, commanded: usize) -> String {
+    rail_glance_count_in(current(), matched, commanded)
+}
+
+fn rail_glance_count_in(lang: Lang, matched: usize, commanded: usize) -> String {
+    match (lang, matched, commanded) {
+        (Lang::English, 0, commanded) => format!("{commanded} commands"),
+        (Lang::English, matched, 0) => format!("{matched} lines"),
+        (Lang::English, matched, commanded) => {
+            format!("{matched} lines, {commanded} commands")
+        }
+        (Lang::Chinese, 0, commanded) => format!("{commanded} 条命令"),
+        (Lang::Chinese, matched, 0) => format!("{matched} 行"),
+        (Lang::Chinese, matched, commanded) => format!("{matched} 行，{commanded} 条命令"),
+    }
+}
+
+/// `12 lines · latest: cargo test` — the count, and the newest member's own
+/// line after it.
+#[must_use]
+pub fn rail_glance_latest(count: &str, body: &str) -> String {
+    rail_glance_latest_in(current(), count, body)
+}
+
+fn rail_glance_latest_in(lang: Lang, count: &str, body: &str) -> String {
+    match lang {
+        Lang::English => format!("{count} · latest: {body}"),
+        Lang::Chinese => format!("{count} · 最新：{body}"),
+    }
+}
+
+/// A command with no `D` yet. Only ever a command: a matched line has no
+/// lifetime of its own to report.
+#[must_use]
+pub fn rail_glance_running(body: &str) -> String {
+    rail_glance_running_in(current(), body)
+}
+
+fn rail_glance_running_in(lang: Lang, body: &str) -> String {
+    match lang {
+        Lang::English => format!("running · {body}"),
+        Lang::Chinese => format!("运行中 · {body}"),
+    }
+}
+
+/// How a command the shell called failed ended. Zero is not reported — a card
+/// that said `exit 0` would spend its width on the ordinary case.
+#[must_use]
+pub fn rail_exit_code(code: i32) -> String {
+    rail_exit_code_in(current(), code)
+}
+
+fn rail_exit_code_in(lang: Lang, code: i32) -> String {
+    match lang {
+        Lang::English => format!("exit {code}"),
+        Lang::Chinese => format!("退出 {code}"),
+    }
+}
+
+/// The gate's own sentence over unsaved buffers — **by name, always**
+/// (§7.1.3). A gate that said "some files have unsaved changes" would be asking
+/// you to guess what you are about to lose.
+#[must_use]
+pub fn gate_unsaved_message(names: &str) -> String {
+    gate_unsaved_message_in(current(), names)
+}
+
+fn gate_unsaved_message_in(lang: Lang, names: &str) -> String {
+    match lang {
+        Lang::English => format!("Discard unsaved changes to {names}?"),
+        Lang::Chinese => format!("放弃对 {names} 未保存的改动？"),
+    }
+}
+
+/// And over a working-tree discard (R14), which is not about a buffer at all.
+#[must_use]
+pub fn gate_git_discard_message(names: &str) -> String {
+    gate_git_discard_message_in(current(), names)
+}
+
+fn gate_git_discard_message_in(lang: Lang, names: &str) -> String {
+    match lang {
+        Lang::English => format!(
+            "{names} goes back to the last staged or committed version. This cannot be undone."
+        ),
+        Lang::Chinese => format!("{names} 会回到最后一次暂存或提交的样子。这一步无法撤销。"),
+    }
+}
+
+/// The same act on a file git has never seen, where *discard* means delete.
+#[must_use]
+pub fn gate_git_delete_message(names: &str) -> String {
+    gate_git_delete_message_in(current(), names)
+}
+
+fn gate_git_delete_message_in(lang: Lang, names: &str) -> String {
+    match lang {
+        Lang::English => {
+            format!("{names} is deleted. git has no copy of it, so this cannot be undone.")
+        }
+        Lang::Chinese => format!("{names} 会被删除。git 没有它的副本，所以无法撤销。"),
+    }
+}
+
+/// **Short and honest** (v2 ④): it says what the command is going to be — `-d`
+/// — without saying the word, because "git will refuse if it is not merged" is
+/// what `-d` means and is the one thing a reader needs before pressing.
+#[must_use]
+pub fn gate_delete_branch_message(names: &str) -> String {
+    gate_delete_branch_message_in(current(), names)
+}
+
+fn gate_delete_branch_message_in(lang: Lang, names: &str) -> String {
+    match lang {
+        Lang::English => format!("Delete branch {names}? git will refuse if it is not merged."),
+        Lang::Chinese => format!("删除分支 {names}？如果它还没有合并，git 会拒绝。"),
+    }
+}
+
+/// And a tag, which git never refuses.
+#[must_use]
+pub fn gate_delete_tag_message(names: &str) -> String {
+    gate_delete_tag_message_in(current(), names)
+}
+
+fn gate_delete_tag_message_in(lang: Lang, names: &str) -> String {
+    match lang {
+        Lang::English => format!("Delete tag {names}? The commit it names stays where it is."),
+        Lang::Chinese => format!("删除标签 {names}？它指向的提交留在原处。"),
+    }
+}
+
+/// **By count, because there is no name**: what this one deletes is a pane's own
+/// past, which is not called anything.
+#[must_use]
+pub fn gate_clear_scrollback_message(amount: &str) -> String {
+    gate_clear_scrollback_message_in(current(), amount)
+}
+
+fn gate_clear_scrollback_message_in(lang: Lang, amount: &str) -> String {
+    match lang {
+        Lang::English => {
+            format!("{amount} of past output is deleted. Search over it will find nothing.")
+        }
+        Lang::Chinese => format!("{amount} 的历史输出会被删除。在其中搜索将一无所获。"),
+    }
+}
+
+/// The line over a named prompt's field — **what is being named, and where.**
+#[must_use]
+pub fn git_prompt_new_branch(subject: &str) -> String {
+    git_prompt_new_branch_in(current(), subject)
+}
+
+fn git_prompt_new_branch_in(lang: Lang, subject: &str) -> String {
+    match lang {
+        Lang::English => format!("New branch at {subject}"),
+        Lang::Chinese => format!("在 {subject} 处新建分支"),
+    }
+}
+
+#[must_use]
+pub fn git_prompt_new_tag(subject: &str) -> String {
+    git_prompt_new_tag_in(current(), subject)
+}
+
+fn git_prompt_new_tag_in(lang: Lang, subject: &str) -> String {
+    match lang {
+        Lang::English => format!("New tag at {subject}"),
+        Lang::Chinese => format!("在 {subject} 处新建标签"),
+    }
+}
+
+#[must_use]
+pub fn git_prompt_rename(subject: &str) -> String {
+    git_prompt_rename_in(current(), subject)
+}
+
+fn git_prompt_rename_in(lang: Lang, subject: &str) -> String {
+    match lang {
+        Lang::English => format!("Rename {subject}"),
+        Lang::Chinese => format!("重命名 {subject}"),
+    }
+}
+
+/// A file on disk that would not read, named (§5.3) — the file's own name and
+/// what is in force instead of it.
+///
+/// Two functions and not one with the noun passed in: what is standing in for a
+/// damaged `keybindings.json` is a *table of chords* and what stands in for a
+/// damaged `profiles.json` is a *list of profiles*, and a sentence that called
+/// both "the defaults" would be the vaguer of the two everywhere.
+#[must_use]
+pub fn keybindings_file_unreadable(file: &str) -> String {
+    keybindings_file_unreadable_in(current(), file)
+}
+
+fn keybindings_file_unreadable_in(lang: Lang, file: &str) -> String {
+    match lang {
+        Lang::English => format!("{file} could not be read; the default shortcuts are in force"),
+        Lang::Chinese => format!("{file} 无法读取；现在生效的是默认快捷键"),
+    }
+}
+
+#[must_use]
+pub fn profiles_file_unreadable(file: &str) -> String {
+    profiles_file_unreadable_in(current(), file)
+}
+
+fn profiles_file_unreadable_in(lang: Lang, file: &str) -> String {
+    match lang {
+        Lang::English => {
+            format!("{file} could not be read; the profiles this build ships are in force")
+        }
+        Lang::Chinese => format!("{file} 无法读取；现在生效的是这个版本自带的档案"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3046,5 +4317,182 @@ mod tests {
             Text::DescLanguage.in_lang(Lang::Chinese),
             "English、中文，或跟随系统设置"
         );
+    }
+
+    /// PIN — **the tail's value-carrying sentences read in both languages too.**
+    ///
+    /// The three properties the table's own gates hold are held here by hand,
+    /// because these are functions rather than arms and no `ALL` can list them:
+    /// both columns say something, the two columns differ, and the Chinese one
+    /// has Chinese in it. Each line calls the private `…_in`, so nothing here
+    /// touches the process's own language and the case can run beside every
+    /// other test in this file.
+    ///
+    /// A sentence added to that family without a line here is not caught by a
+    /// compiler — this list is not exhaustive the way `Text::ALL` is made to be
+    /// — but a sentence added *with* one is caught the moment its second column
+    /// is forgotten, which is the failure this file has actually shipped.
+    #[test]
+    fn every_sentence_the_tail_composes_reads_in_both_languages() {
+        // The one entry whose Chinese carries no Chinese, and the reason:
+        // `3 of 17` becomes `3/17`, a fraction rather than a sentence, because
+        // the count is drawn at the right-hand end of a 180-pixel search field
+        // and `第 3 个，共 17 个` would take the whole of it.
+        let numeric = ["graph_search_position"];
+        let said = |lang: Lang| {
+            vec![
+                (
+                    "shortcut_already_used",
+                    shortcut_already_used_in(lang, "Close pane"),
+                ),
+                (
+                    "git_more_changed_files",
+                    git_more_changed_files_in(lang, 12),
+                ),
+                (
+                    "git_renamed_from",
+                    git_renamed_from_in(lang, "b.rs", "a.rs"),
+                ),
+                (
+                    "git_branch_remote_tip",
+                    git_branch_remote_tip_in(lang, "origin/main"),
+                ),
+                (
+                    "git_branch_current_tip",
+                    git_branch_current_tip_in(lang, "main"),
+                ),
+                (
+                    "git_branch_checkout_tip",
+                    git_branch_checkout_tip_in(lang, "side"),
+                ),
+                ("git_unborn_masthead", git_unborn_masthead_in(lang, "main")),
+                ("git_pill_ahead", git_pill_ahead_in(lang, 1)),
+                ("git_pill_ahead_many", git_pill_ahead_in(lang, 4)),
+                ("git_pill_behind", git_pill_behind_in(lang, 1)),
+                ("git_pill_behind_many", git_pill_behind_in(lang, 4)),
+                (
+                    "graph_compare",
+                    graph_compare_in(lang, "abc1234", "def5678"),
+                ),
+                (
+                    "graph_search_position",
+                    graph_search_position_in(lang, 3, 17),
+                ),
+                ("graph_filter_branches", graph_filter_branches_in(lang, 1)),
+                (
+                    "graph_filter_branches_many",
+                    graph_filter_branches_in(lang, 3),
+                ),
+                ("graph_file_stat", graph_file_stat_in(lang, 1, 9)),
+                ("graph_uncommitted_tip", graph_uncommitted_tip_in(lang, 2)),
+                ("graph_copied", graph_copied_in(lang, "36d3949")),
+                ("graph_seek_gave_up", graph_seek_gave_up_in(lang, "fffffff")),
+                ("rail_glance_count", rail_glance_count_in(lang, 4, 2)),
+                (
+                    "rail_glance_count_commands",
+                    rail_glance_count_in(lang, 0, 2),
+                ),
+                ("rail_glance_count_lines", rail_glance_count_in(lang, 4, 0)),
+                (
+                    "rail_glance_latest",
+                    rail_glance_latest_in(lang, "4 lines", "cargo test"),
+                ),
+                (
+                    "rail_glance_running",
+                    rail_glance_running_in(lang, "cargo test"),
+                ),
+                ("rail_exit_code", rail_exit_code_in(lang, 130)),
+                (
+                    "gate_unsaved_message",
+                    gate_unsaved_message_in(lang, "a.txt, b.md"),
+                ),
+                (
+                    "gate_git_discard_message",
+                    gate_git_discard_message_in(lang, "a.txt"),
+                ),
+                (
+                    "gate_git_delete_message",
+                    gate_git_delete_message_in(lang, "a.txt"),
+                ),
+                (
+                    "gate_delete_branch_message",
+                    gate_delete_branch_message_in(lang, "side"),
+                ),
+                (
+                    "gate_delete_tag_message",
+                    gate_delete_tag_message_in(lang, "v1"),
+                ),
+                (
+                    "gate_clear_scrollback_message",
+                    gate_clear_scrollback_message_in(lang, "2,048 lines"),
+                ),
+                (
+                    "git_prompt_new_branch",
+                    git_prompt_new_branch_in(lang, "36d3949"),
+                ),
+                ("git_prompt_new_tag", git_prompt_new_tag_in(lang, "36d3949")),
+                ("git_prompt_rename", git_prompt_rename_in(lang, "side")),
+                (
+                    "keybindings_file_unreadable",
+                    keybindings_file_unreadable_in(lang, "keybindings.json"),
+                ),
+                (
+                    "profiles_file_unreadable",
+                    profiles_file_unreadable_in(lang, "profiles.json"),
+                ),
+            ]
+        };
+        let english = said(Lang::English);
+        let chinese = said(Lang::Chinese);
+        assert_eq!(english.len(), chinese.len());
+        for ((name, english), (_, chinese)) in english.into_iter().zip(chinese) {
+            assert!(!english.trim().is_empty(), "{name} says nothing in English");
+            assert!(!chinese.trim().is_empty(), "{name} says nothing in Chinese");
+            assert_ne!(
+                english, chinese,
+                "{name} was never translated — it says {english:?} in both columns"
+            );
+            for word in english.split(|c: char| !c.is_ascii_alphabetic()) {
+                assert!(
+                    !["we", "our", "ours", "us", "ourselves"]
+                        .contains(&word.to_ascii_lowercase().as_str()),
+                    "{name} says {word:?}: {english:?}"
+                );
+            }
+            if numeric.contains(&name) {
+                continue;
+            }
+            assert!(
+                chinese
+                    .chars()
+                    .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+                "{name} reads {chinese:?}, which has no Chinese in it"
+            );
+        }
+    }
+
+    /// PIN — **every row of the shortcut table has a name in both languages.**
+    ///
+    /// The page's own gate, and it is not the table's: `Text::ALL` proves that
+    /// every *entry* reads in both columns, and this proves that every *row*
+    /// points at one. A row added to `BINDINGS` with a title borrowed from the
+    /// wrong family — the failure this catches — reads perfectly well in both
+    /// languages and is still the wrong name.
+    #[test]
+    fn every_shortcut_row_is_named_in_both_languages() {
+        let mut seen: Vec<&'static str> = Vec::new();
+        for binding in crate::shortcuts::BINDINGS {
+            for lang in Lang::ALL {
+                let title = binding.title.in_lang(lang);
+                assert!(!title.trim().is_empty(), "{} has no name", binding.id);
+            }
+            let english = binding.title.in_lang(Lang::English);
+            assert!(
+                !seen.contains(&english),
+                "{} shares the name {english:?} with an earlier row",
+                binding.id
+            );
+            seen.push(english);
+        }
     }
 }

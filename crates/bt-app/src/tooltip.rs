@@ -136,7 +136,7 @@ pub enum TipFace {
     /// `#cmd-peek` — the glance card beside a command tick.
     Peek {
         /// The text is the ledger's honest gap rather than a command, so it is
-        /// drawn in `--ink3` instead of `--ink2` (`cmdrail::PEEK_EMPTY_TEXT`).
+        /// drawn in `--ink3` instead of `--ink2` (`cmdrail::peek_empty_text`).
         muted: bool,
     },
     /// The colour under the pointer in a text preview ([`crate::hex_peek`]).

@@ -178,7 +178,10 @@ pub const PEEK_VIEWPORT_MARGIN_LOGICAL_PX: f32 = 8.0;
 /// that *does* change with the file (user ruling, 2026-08-15) — see
 /// [`crate::seats::dress_foot`] — and this sentence is what gives up the width
 /// when the two meet, because it is the half you have already read.
-pub const PEEK_FOOT_TEXT: &str = "Enter / double-click opens the preview pane";
+#[must_use]
+pub fn peek_foot_text() -> &'static str {
+    crate::i18n::Text::PeekFoot.text()
+}
 
 /// The foot's own text run: the strip inside its horizontal padding.
 ///
@@ -198,7 +201,10 @@ pub fn foot_run(layout: &PeekLayout, scale: f32) -> [f32; 4] {
 
 /// **The refusal** (6406) — the same sentence the preview pane's unknown card
 /// says, said in one line.
-pub const PEEK_UNKNOWN_TEXT: &str = "No preview — binary or unrecognized type.";
+#[must_use]
+pub fn peek_unknown_text() -> &'static str {
+    crate::i18n::Text::PeekUnknown.text()
+}
 
 /// Whether `at` lies inside `rect`, half-open on the far edges the way every
 /// other hit test in this window is.
@@ -803,7 +809,7 @@ pub fn build(
             let right = layout.body[2] - px(PEEK_NONE_PADDING_X_LOGICAL_PX);
             let top = layout.body[1] + px(PEEK_NONE_PADDING_TOP_LOGICAL_PX);
             labels.push(label(
-                PEEK_UNKNOWN_TEXT,
+                peek_unknown_text(),
                 [left, top, right, layout.body[3]],
                 px(PEEK_NONE_FONT_LOGICAL_PX),
                 palette.body_hint_text,
@@ -960,7 +966,7 @@ mod tests {
         crate::seats::dress_foot(
             crate::seats::FootDress {
                 run: foot_run(layout, SCALE),
-                lead: PEEK_FOOT_TEXT,
+                lead: peek_foot_text(),
                 flash: None,
                 notice,
                 cut_left: false,
@@ -1043,7 +1049,7 @@ mod tests {
 
         // And with nothing hung on it the card is exactly what it was.
         let bare = foot(&layout, "");
-        assert_eq!(bare.lead, PEEK_FOOT_TEXT, "the sentence, whole");
+        assert_eq!(bare.lead, peek_foot_text(), "the sentence, whole");
         assert_eq!(bare.lead_box, foot_run(&layout, SCALE), "in the whole run");
     }
 
@@ -1272,7 +1278,7 @@ mod tests {
             layer
                 .labels
                 .iter()
-                .any(|label| label.text == PEEK_FOOT_TEXT),
+                .any(|label| label.text == peek_foot_text()),
             "and the foot still says how to open it"
         );
 

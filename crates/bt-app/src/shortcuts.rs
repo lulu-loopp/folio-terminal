@@ -26,6 +26,8 @@ use std::fmt::Write as _;
 
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
+use crate::i18n::Text;
+
 /// Everything the window can be asked to do from the keyboard.
 ///
 /// `JumpAttention` and `CommandPalette` are real rows with no machine behind them yet (the
@@ -209,12 +211,12 @@ impl Scope {
     /// so the ordinary wears none — the same reason the `˅` menu marks the
     /// default profile and leaves the other three unmarked.
     #[must_use]
-    pub(crate) const fn tag(self) -> Option<&'static str> {
+    pub(crate) const fn tag(self) -> Option<Text> {
         match self {
             Self::Window => None,
-            Self::Preview => Some(SCOPE_TAG_PREVIEW),
-            Self::TerminalPrimary => Some(SCOPE_TAG_TERMINAL_PRIMARY),
-            Self::SearchOpen => Some(SCOPE_TAG_SEARCH_OPEN),
+            Self::Preview => Some(Text::ShortcutScopePreview),
+            Self::TerminalPrimary => Some(Text::ShortcutScopeTerminalPrimary),
+            Self::SearchOpen => Some(Text::ShortcutScopeSearchOpen),
         }
     }
 
@@ -293,7 +295,7 @@ pub(crate) struct Binding {
     /// rows is what the shortcut-editing panel can show and edit". Two rows
     /// wanting one name would be two lines in the editor a reader could not tell
     /// apart.
-    pub(crate) title: &'static str,
+    pub(crate) title: Text,
     /// The name of the folded row this one is a member of, when it is one of a
     /// family the editor shows as a single line (`Go to tab 1–9`).
     ///
@@ -302,7 +304,7 @@ pub(crate) struct Binding {
     /// which is the same derivation the settings dialog's own headings use, and
     /// it is here for the same reason: a second list declaring the families
     /// beside the one declaring the rows is a second place to forget one.
-    pub(crate) family: Option<&'static str>,
+    pub(crate) family: Option<Text>,
     pub(crate) action: Action,
     pub(crate) chord: Option<Chord>,
     pub(crate) scope: Scope,
@@ -310,7 +312,7 @@ pub(crate) struct Binding {
 
 impl Binding {
     /// A row in force everywhere.
-    const fn window(id: &'static str, title: &'static str, action: Action, chord: Chord) -> Self {
+    const fn window(id: &'static str, title: Text, action: Action, chord: Chord) -> Self {
         Self {
             id,
             title,
@@ -329,8 +331,8 @@ impl Binding {
     /// table is a constant, so its constructors are longhand.
     const fn family(
         id: &'static str,
-        title: &'static str,
-        family: &'static str,
+        title: Text,
+        family: Text,
         action: Action,
         chord: Chord,
     ) -> Self {
@@ -345,12 +347,7 @@ impl Binding {
     }
 
     /// A member of a folded family that ships with no chord at all.
-    const fn unassigned(
-        id: &'static str,
-        title: &'static str,
-        family: &'static str,
-        action: Action,
-    ) -> Self {
+    const fn unassigned(id: &'static str, title: Text, family: Text, action: Action) -> Self {
         Self {
             id,
             title,
@@ -362,7 +359,7 @@ impl Binding {
     }
 
     /// A row in force only while the preview seat holds the focus.
-    const fn preview(id: &'static str, title: &'static str, action: Action, chord: Chord) -> Self {
+    const fn preview(id: &'static str, title: Text, action: Action, chord: Chord) -> Self {
         Self {
             id,
             title,
@@ -374,12 +371,7 @@ impl Binding {
     }
 
     /// A row in force only on a terminal showing its primary screen.
-    const fn terminal_primary(
-        id: &'static str,
-        title: &'static str,
-        action: Action,
-        chord: Chord,
-    ) -> Self {
+    const fn terminal_primary(id: &'static str, title: Text, action: Action, chord: Chord) -> Self {
         Self {
             id,
             title,
@@ -391,12 +383,7 @@ impl Binding {
     }
 
     /// A row in force only while the search capsule is up.
-    const fn search_open(
-        id: &'static str,
-        title: &'static str,
-        action: Action,
-        chord: Chord,
-    ) -> Self {
+    const fn search_open(id: &'static str, title: Text, action: Action, chord: Chord) -> Self {
         Self {
             id,
             title,
@@ -421,8 +408,8 @@ impl Binding {
         // `Not set` would be the panel contradicting itself across four inches
         // of one line — which is exactly what the real window showed.
         let pending =
-            (self.action.is_pending() && self.chord.is_some()).then_some(NOTE_MACHINE_PENDING);
-        match (self.scope.tag(), pending) {
+            (self.action.is_pending() && self.chord.is_some()).then(|| NOTE_MACHINE_PENDING.text());
+        match (self.scope.tag().map(Text::text), pending) {
             (None, None) => None,
             (Some(one), None) | (None, Some(one)) => Some(Cow::Borrowed(one)),
             (Some(scope), Some(pending)) => {
@@ -456,25 +443,25 @@ impl Action {
 pub(crate) const BINDINGS: &[Binding] = &[
     Binding::window(
         "new-tab",
-        "New tab",
+        Text::RailNewTab,
         Action::NewTab,
         Chord::new(CTRL_SHIFT, character("n")),
     ),
     Binding::window(
         "close-pane",
-        "Close pane",
+        Text::ClosePane,
         Action::ClosePane,
         Chord::new(CTRL_SHIFT, character("w")),
     ),
     Binding::window(
         "next-tab",
-        "Next tab",
+        Text::ShortcutNextTab,
         Action::NextTab,
         Chord::new(CTRL, ChordKey::Named(NamedKey::Tab)),
     ),
     Binding::window(
         "prev-tab",
-        "Previous tab",
+        Text::ShortcutPrevTab,
         Action::PrevTab,
         Chord::new(CTRL_SHIFT, ChordKey::Named(NamedKey::Tab)),
     ),
@@ -486,100 +473,100 @@ pub(crate) const BINDINGS: &[Binding] = &[
     // table.
     Binding::family(
         "goto-tab-1",
-        "Go to tab 1",
+        Text::ShortcutGotoTab1,
         FAMILY_GOTO_TAB,
         Action::GotoTab(1),
         Chord::new(CTRL_SHIFT, character("1")),
     ),
     Binding::family(
         "goto-tab-2",
-        "Go to tab 2",
+        Text::ShortcutGotoTab2,
         FAMILY_GOTO_TAB,
         Action::GotoTab(2),
         Chord::new(CTRL_SHIFT, character("2")),
     ),
     Binding::family(
         "goto-tab-3",
-        "Go to tab 3",
+        Text::ShortcutGotoTab3,
         FAMILY_GOTO_TAB,
         Action::GotoTab(3),
         Chord::new(CTRL_SHIFT, character("3")),
     ),
     Binding::family(
         "goto-tab-4",
-        "Go to tab 4",
+        Text::ShortcutGotoTab4,
         FAMILY_GOTO_TAB,
         Action::GotoTab(4),
         Chord::new(CTRL_SHIFT, character("4")),
     ),
     Binding::family(
         "goto-tab-5",
-        "Go to tab 5",
+        Text::ShortcutGotoTab5,
         FAMILY_GOTO_TAB,
         Action::GotoTab(5),
         Chord::new(CTRL_SHIFT, character("5")),
     ),
     Binding::family(
         "goto-tab-6",
-        "Go to tab 6",
+        Text::ShortcutGotoTab6,
         FAMILY_GOTO_TAB,
         Action::GotoTab(6),
         Chord::new(CTRL_SHIFT, character("6")),
     ),
     Binding::family(
         "goto-tab-7",
-        "Go to tab 7",
+        Text::ShortcutGotoTab7,
         FAMILY_GOTO_TAB,
         Action::GotoTab(7),
         Chord::new(CTRL_SHIFT, character("7")),
     ),
     Binding::family(
         "goto-tab-8",
-        "Go to tab 8",
+        Text::ShortcutGotoTab8,
         FAMILY_GOTO_TAB,
         Action::GotoTab(8),
         Chord::new(CTRL_SHIFT, character("8")),
     ),
     Binding::family(
         "goto-tab-9",
-        "Go to tab 9",
+        Text::ShortcutGotoTab9,
         FAMILY_GOTO_TAB,
         Action::GotoTab(9),
         Chord::new(CTRL_SHIFT, character("9")),
     ),
     Binding::window(
         "reopen-closed",
-        "Reopen the last closed tab",
+        Text::ShortcutReopenClosed,
         Action::ReopenClosed,
         Chord::new(CTRL_SHIFT, character("t")),
     ),
     Binding::window(
         "jump-attention",
-        "Jump to the longest waiting",
+        Text::ShortcutJumpAttention,
         Action::JumpAttention,
         Chord::new(CTRL_SHIFT, character("a")),
     ),
     Binding::window(
         "command-palette",
-        "Command palette",
+        Text::ShortcutCommandPalette,
         Action::CommandPalette,
         Chord::new(CTRL_SHIFT, character("p")),
     ),
     Binding::window(
         "split-horizontal",
-        "Split horizontally",
+        Text::ShortcutSplitHorizontal,
         Action::SplitHorizontal,
         Chord::new(ALT_SHIFT, character("-")),
     ),
     Binding::window(
         "split-vertical",
-        "Split vertically",
+        Text::ShortcutSplitVertical,
         Action::SplitVertical,
         Chord::new(ALT_SHIFT, character("=")),
     ),
     Binding::window(
         "duplicate-pane-split",
-        "Duplicate pane into a split",
+        Text::ShortcutDuplicatePaneSplit,
         Action::DuplicatePaneSplit,
         Chord::new(CTRL_SHIFT, character("d")),
     ),
@@ -599,7 +586,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
     // behaviour and VS Code's `Ctrl+B`.
     Binding::window(
         "files-pane",
-        "Files column",
+        Text::ShortcutFilesPane,
         Action::FilesPane,
         Chord::new(CTRL_SHIFT, character("b")),
     ),
@@ -617,13 +604,13 @@ pub(crate) const BINDINGS: &[Binding] = &[
     // nothing to say.
     Binding::window(
         "git-page",
-        "Turn the files column to Git",
+        Text::ShortcutGitPage,
         Action::GitPage,
         Chord::new(CTRL_SHIFT, character("g")),
     ),
     Binding::window(
         "open-settings",
-        "Settings",
+        Text::Settings,
         Action::OpenSettings,
         Chord::new(CTRL, character(",")),
     ),
@@ -636,7 +623,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
     // place where there is no terminal to take it from.
     Binding::preview(
         "save-preview",
-        "Save the open document",
+        Text::ShortcutSavePreview,
         Action::SavePreview,
         Chord::new(CTRL, character("s")),
     ),
@@ -662,13 +649,13 @@ pub(crate) const BINDINGS: &[Binding] = &[
     // keep it — see [`Scope::TerminalPrimary`].
     Binding::terminal_primary(
         "prev-command-mark",
-        "Previous command",
+        Text::ShortcutPrevCommandMark,
         Action::PrevCommandMark,
         Chord::new(CTRL_SHIFT, ChordKey::Named(NamedKey::ArrowUp)),
     ),
     Binding::terminal_primary(
         "next-command-mark",
-        "Next command",
+        Text::ShortcutNextCommandMark,
         Action::NextCommandMark,
         Chord::new(CTRL_SHIFT, ChordKey::Named(NamedKey::ArrowDown)),
     ),
@@ -700,7 +687,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
     // would have turned one argued exception into a policy nobody made.
     Binding::terminal_primary(
         "open-search",
-        "Find in the terminal",
+        Text::ShortcutOpenSearch,
         Action::OpenSearch,
         Chord::new(CTRL, character("f")),
     ),
@@ -725,13 +712,13 @@ pub(crate) const BINDINGS: &[Binding] = &[
     // whenever there is no search to walk.
     Binding::search_open(
         "next-match",
-        "Next match",
+        Text::ShortcutNextMatch,
         Action::NextMatch,
         Chord::new(ModifiersState::empty(), ChordKey::Named(NamedKey::F3)),
     ),
     Binding::search_open(
         "prev-match",
-        "Previous match",
+        Text::ShortcutPrevMatch,
         Action::PrevMatch,
         Chord::new(ModifiersState::SHIFT, ChordKey::Named(NamedKey::F3)),
     ),
@@ -742,25 +729,25 @@ pub(crate) const BINDINGS: &[Binding] = &[
     // shape this table has already refused once, four rows up.
     Binding::unassigned(
         "summon-pip-1",
-        "Summon PiP slot 1",
+        Text::ShortcutSummonPip1,
         FAMILY_SUMMON_PIP,
         Action::SummonPip(1),
     ),
     Binding::unassigned(
         "summon-pip-2",
-        "Summon PiP slot 2",
+        Text::ShortcutSummonPip2,
         FAMILY_SUMMON_PIP,
         Action::SummonPip(2),
     ),
     Binding::unassigned(
         "summon-pip-3",
-        "Summon PiP slot 3",
+        Text::ShortcutSummonPip3,
         FAMILY_SUMMON_PIP,
         Action::SummonPip(3),
     ),
     Binding::unassigned(
         "summon-pip-4",
-        "Summon PiP slot 4",
+        Text::ShortcutSummonPip4,
         FAMILY_SUMMON_PIP,
         Action::SummonPip(4),
     ),
@@ -779,35 +766,51 @@ const fn character(text: &'static str) -> ChordKey {
 // `match lang` can keep returning one of two literals without allocating.
 
 /// The name of the row the nine `Ctrl+Shift+digit` bindings fold into.
-const FAMILY_GOTO_TAB: &str = "Go to tab 1–9";
+const FAMILY_GOTO_TAB: Text = Text::ShortcutFamilyGotoTab;
 /// The name of the row the four picture-in-picture summon slots fold into.
-const FAMILY_SUMMON_PIP: &str = "Summon PiP slot 1–4";
-
-const SCOPE_TAG_PREVIEW: &str = "In a preview";
-const SCOPE_TAG_TERMINAL_PRIMARY: &str = "On a terminal's own scrollback";
-const SCOPE_TAG_SEARCH_OPEN: &str = "While the search is open";
+const FAMILY_SUMMON_PIP: Text = Text::ShortcutFamilySummonPip;
 
 /// What a stub row says about itself (§7.1.5e: the key is claimed, the machine
 /// is not here yet).
-const NOTE_MACHINE_PENDING: &str = "Bound; the verb behind it is still to come";
+const NOTE_MACHINE_PENDING: Text = Text::ShortcutNotePending;
 /// The product's own separator between two clauses of one muted line.
+///
+/// Not a table entry: it is a punctuation mark this window uses everywhere it
+/// joins two facts on one line, and it is the same mark in both languages.
 const NOTE_JOIN: &str = " · ";
-/// What a family row says about the chords it folded.
-const NOTE_ONE_PER_MEMBER: &str = "One chord for each";
-/// What a family row says when none of its members has a chord.
-const NOTE_NONE_ASSIGNED: &str = "none is set yet";
-/// What a family row says when only some of them have.
-const NOTE_SOME_UNASSIGNED: &str = "some are not set yet";
+/// What a family row says about the chords it folded, in its three states.
+///
+/// **Three whole sentences and not one with a clause appended**, which is the
+/// language table's own ruling on the join: the two halves are separated by a
+/// `; ` in English and by a `；` in Chinese, and a formatter that composed them
+/// here would have had to know that.
+const NOTE_ONE_PER_MEMBER: Text = Text::ShortcutNoteOnePerMember;
+const NOTE_NONE_ASSIGNED: Text = Text::ShortcutNoteNoneAssigned;
+const NOTE_SOME_UNASSIGNED: Text = Text::ShortcutNoteSomeUnassigned;
 
 /// What the editor prints where the caps would be on a row with no chord.
-pub const UNBOUND_CAP: &str = "Not set";
+///
+/// A function rather than the constant it was, for the reason every word on
+/// this page is now one: the answer depends on the language in force, and
+/// `Text::text` reads it at the call.
+#[must_use]
+pub fn unbound_cap() -> &'static str {
+    Text::ShortcutUnbound.text()
+}
 
 /// Why the audit listed the `Alt`+arrow families and never took them.
-const NOTE_RESERVED_ALT_ARROW: &str = "Reserved — readline reads Alt+arrow as word movement";
+const NOTE_RESERVED_ALT_ARROW: Text = Text::ShortcutReservedAltArrow;
 
 /// The three refusals, in the words the recorder shows.
-pub(crate) const HINT_ALTGR_ZONE: &str = "Ctrl+Alt is reserved for AltGr keyboards";
-pub(crate) const HINT_SHELL_CONTROL_LETTER: &str = "Ctrl+letter belongs to the shell";
+#[must_use]
+pub(crate) fn hint_altgr_zone() -> &'static str {
+    Text::ShortcutHintAltGrZone.text()
+}
+
+#[must_use]
+pub(crate) fn hint_shell_control_letter() -> &'static str {
+    Text::ShortcutHintShellControlLetter.text()
+}
 
 /// A row the audit **listed and did not take** — no [`Action`], no [`Chord`],
 /// and no way to record one.
@@ -823,17 +826,17 @@ pub(crate) const HINT_SHELL_CONTROL_LETTER: &str = "Ctrl+letter belongs to the s
 /// A row in `BINDINGS` is one this window claims; these are rows it declines,
 /// and the editor greys them to say so.
 struct ReservedRow {
-    title: &'static str,
+    title: Text,
     caps: &'static [&'static str],
 }
 
 const RESERVED_ROWS: &[ReservedRow] = &[
     ReservedRow {
-        title: "Move the focus between panes",
+        title: Text::ShortcutReservedMoveFocus,
         caps: &["Alt", ARROW_CAPS],
     },
     ReservedRow {
-        title: "Resize a pane",
+        title: Text::ShortcutReservedResizePane,
         caps: &["Alt", "Shift", ARROW_CAPS],
     },
 ];
@@ -1053,7 +1056,7 @@ impl Shortcuts {
             let Some(family) = head.family else {
                 out.push(ShortcutRow {
                     ids: vec![head.id],
-                    title: head.title,
+                    title: head.title.text(),
                     note: head.note(),
                     caps: head.chord.as_ref().map(chord_caps).unwrap_or_default(),
                     recordable: true,
@@ -1070,7 +1073,7 @@ impl Shortcuts {
             let members = &self.rows[index..end];
             out.push(ShortcutRow {
                 ids: members.iter().map(|row| row.id).collect(),
-                title: family,
+                title: family.text(),
                 note: family_note(head, members),
                 caps: fold_caps(members),
                 // **A family is shown whole and recorded one slot at a time**,
@@ -1086,8 +1089,8 @@ impl Shortcuts {
         }
         out.extend(RESERVED_ROWS.iter().map(|row| ShortcutRow {
             ids: Vec::new(),
-            title: row.title,
-            note: Some(Cow::Borrowed(NOTE_RESERVED_ALT_ARROW)),
+            title: row.title.text(),
+            note: Some(Cow::Borrowed(NOTE_RESERVED_ALT_ARROW.text())),
             caps: row.caps.iter().map(|cap| (*cap).to_owned()).collect(),
             recordable: false,
             reserved: true,
@@ -1100,15 +1103,16 @@ impl Shortcuts {
 /// What a folded line says under its name.
 fn family_note(head: &Binding, members: &[Binding]) -> Option<Cow<'static, str>> {
     let unassigned = members.iter().filter(|row| row.chord.is_none()).count();
-    let counted: Cow<'static, str> = if unassigned == 0 {
-        Cow::Borrowed(NOTE_ONE_PER_MEMBER)
+    let counted = if unassigned == 0 {
+        NOTE_ONE_PER_MEMBER
     } else if unassigned == members.len() {
-        Cow::Owned(format!("{NOTE_ONE_PER_MEMBER}; {NOTE_NONE_ASSIGNED}"))
+        NOTE_NONE_ASSIGNED
     } else {
-        Cow::Owned(format!("{NOTE_ONE_PER_MEMBER}; {NOTE_SOME_UNASSIGNED}"))
-    };
+        NOTE_SOME_UNASSIGNED
+    }
+    .text();
     match head.note() {
-        None => Some(counted),
+        None => Some(Cow::Borrowed(counted)),
         Some(note) => Some(Cow::Owned(format!("{note}{NOTE_JOIN}{counted}"))),
     }
 }
@@ -1188,7 +1192,7 @@ pub(crate) enum ChordVerdict {
     ShellControlLetter,
     /// Another row in this table already answers to it, in a focus state this
     /// one is also in force in.
-    AlreadyUsed(&'static str),
+    AlreadyUsed(Text),
 }
 
 impl ChordVerdict {
@@ -1198,9 +1202,11 @@ impl ChordVerdict {
     pub(crate) fn hint(&self) -> Cow<'static, str> {
         match self {
             Self::Free => Cow::Borrowed(""),
-            Self::AltGrZone => Cow::Borrowed(HINT_ALTGR_ZONE),
-            Self::ShellControlLetter => Cow::Borrowed(HINT_SHELL_CONTROL_LETTER),
-            Self::AlreadyUsed(title) => Cow::Owned(format!("Already used by {title}")),
+            Self::AltGrZone => Cow::Borrowed(hint_altgr_zone()),
+            Self::ShellControlLetter => Cow::Borrowed(hint_shell_control_letter()),
+            Self::AlreadyUsed(title) => {
+                Cow::Owned(crate::i18n::shortcut_already_used(title.text()))
+            }
         }
     }
 }
@@ -2199,7 +2205,11 @@ mod tests {
     fn every_row_is_named_once_and_names_itself() {
         for (index, binding) in BINDINGS.iter().enumerate() {
             assert!(!binding.id.is_empty(), "{:?} has no id", binding.action);
-            assert!(!binding.title.is_empty(), "{} has no name", binding.id);
+            assert!(
+                !binding.title.text().is_empty(),
+                "{} has no name",
+                binding.id
+            );
             for other in BINDINGS.iter().skip(index + 1) {
                 assert_ne!(binding.id, other.id, "two rows answer to one id");
             }
@@ -2427,7 +2437,7 @@ mod tests {
         );
         assert_eq!(
             table.verdict_for("new-tab", &Chord::new(CTRL_SHIFT, super::character("w"))),
-            ChordVerdict::AlreadyUsed("Close pane"),
+            ChordVerdict::AlreadyUsed(Text::ClosePane),
             "the refusal names the row that has it, which is what a user needs \
              in order to go and clear it"
         );
@@ -2484,7 +2494,7 @@ mod tests {
             chord: Some("Ctrl+Alt+Shift+P".to_owned()),
         }]);
         assert_eq!(faults.len(), 1, "the file's own line is refused too");
-        assert_eq!(faults[0].reason, HINT_ALTGR_ZONE);
+        assert_eq!(faults[0].reason, hint_altgr_zone());
         assert_eq!(
             table,
             Shortcuts::defaults(),
@@ -2797,7 +2807,7 @@ mod tests {
                 .find(|line| line.title == title)
                 .unwrap_or_else(|| panic!("{title} is a line of the page"))
         };
-        let tabs = named(FAMILY_GOTO_TAB);
+        let tabs = named(FAMILY_GOTO_TAB.text());
         assert_eq!(tabs.ids.len(), 9, "nine bindings, one line");
         assert_eq!(
             tabs.caps,
@@ -2806,7 +2816,7 @@ mod tests {
         );
         assert!(!tabs.recordable, "a family is edited a slot at a time");
 
-        let pip = named(FAMILY_SUMMON_PIP);
+        let pip = named(FAMILY_SUMMON_PIP.text());
         assert_eq!(pip.ids.len(), 4);
         assert!(
             pip.caps.is_empty(),
@@ -2815,14 +2825,14 @@ mod tests {
         assert!(
             pip.note
                 .as_deref()
-                .is_some_and(|note| note.contains(NOTE_NONE_ASSIGNED)),
+                .is_some_and(|note| note.contains(NOTE_NONE_ASSIGNED.text())),
             "and the line says so: {:?}",
             pip.note
         );
         assert!(
             pip.note
                 .as_deref()
-                .is_some_and(|note| !note.contains(NOTE_MACHINE_PENDING)),
+                .is_some_and(|note| !note.contains(NOTE_MACHINE_PENDING.text())),
             "a row with no chord does not also claim to be bound: {:?}",
             pip.note
         );
@@ -2839,14 +2849,14 @@ mod tests {
         assert_eq!(search.caps, vec!["Ctrl", "F"]);
         assert_eq!(
             search.note.as_deref(),
-            Some(SCOPE_TAG_TERMINAL_PRIMARY),
+            Some(Text::ShortcutScopeTerminalPrimary.text()),
             "and it wears the scope tag its row carries"
         );
 
         // A stub row says its machine has not arrived, or a user presses it,
         // sees nothing, and reports a decision as a bug.
         let palette = named("Command palette");
-        assert_eq!(palette.note.as_deref(), Some(NOTE_MACHINE_PENDING));
+        assert_eq!(palette.note.as_deref(), Some(NOTE_MACHINE_PENDING.text()));
 
         // A window row wears no tag at all: twenty rows saying "Anywhere" is a
         // column that says nothing twenty times.
@@ -2858,7 +2868,7 @@ mod tests {
         for line in &reserved {
             assert!(line.ids.is_empty(), "a declined row binds nothing");
             assert!(!line.recordable, "and cannot be recorded either");
-            assert_eq!(line.note.as_deref(), Some(NOTE_RESERVED_ALT_ARROW));
+            assert_eq!(line.note.as_deref(), Some(NOTE_RESERVED_ALT_ARROW.text()));
         }
         assert!(
             lines[lines.len() - reserved.len()..]
