@@ -79,15 +79,15 @@ use bt_persist::{
 };
 use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtySession, PtySize};
 use bt_render::{
-    ChromePalette, CursorStyle, FrameSource, FrameTrigger, GridSize, ImeCursorArea,
+    ChromePalette, CursorStyle, FrameSource, FrameTrigger, GpuContext, GridSize, ImeCursorArea,
     LatestFrameSlot, MathHit, MathHitTarget, PREVIEW_BODY_INSET_LOGICAL_PX, PeekImageOverlay,
-    Preedit, PresentOutcome, PreviewImage, Renderer, SeatViewport, Theme, ThemeChange,
+    Preedit, PresentOutcome, PreviewImage, SeatViewport, Theme, ThemeChange,
     WINDOW_TAB_BREATHE_MIN_OPACITY, WINDOW_TAB_BREATHE_PERIOD_MS,
     WINDOW_TAB_BREATHE_REDUCED_OPACITY, WINDOW_TAB_PIN_FADE_MS, WINDOW_TAB_PIN_REVEAL_MS,
     WINDOW_TAB_RING_INDETERMINATE_TURNS, WINDOW_TAB_RING_SPIN_PERIOD_MS,
-    WINDOW_TAB_RING_SWEEP_TRANSITION_MS, background_rgb, compose_preedit, current_cursor_style,
-    foreground_rgb, frame_content_digest, frame_is_alternate_screen, preview_image_extent,
-    scheme_in_force, set_cursor_style, set_theme, theme_revision,
+    WINDOW_TAB_RING_SWEEP_TRANSITION_MS, WindowRenderer, background_rgb, compose_preedit,
+    current_cursor_style, foreground_rgb, frame_content_digest, frame_is_alternate_screen,
+    preview_image_extent, scheme_in_force, set_cursor_style, set_theme, theme_revision,
 };
 use bt_term::{
     DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, ProgressState,
@@ -2331,7 +2331,8 @@ fn build_preview_markdown_body(
 /// given one box spanning both would claim the margin between them, which is
 /// the empty half of the pane on the right of a short last line.
 fn measure_preview_links(
-    renderer: &mut bt_render::Renderer,
+    gpu: &mut GpuContext,
+    renderer: &mut WindowRenderer,
     body: &bt_render::PreviewBody,
     sites: &[PreviewLinkSite],
 ) -> Vec<PreviewLink> {
@@ -2356,7 +2357,7 @@ fn measure_preview_links(
         };
         links.extend(
             renderer
-                .measure_preview_run_boxes(paragraph)
+                .measure_preview_run_boxes(gpu, paragraph)
                 .into_iter()
                 .filter(|boxed| boxed.run == site.run)
                 .filter_map(|boxed| bt_render::crop_to(boxed.rect, window))
@@ -4104,6 +4105,19 @@ impl PtyWakeSignal {
 /// exists to fix; keeping the arrow out of the window is what stops it being
 /// written in the first place.
 struct App {
+    /// **The device layer, one for the process** (§2.2, multiwindow slice C).
+    ///
+    /// The `wgpu` instance every surface is created by, the adapter every
+    /// format is asked of, the device and queue every window draws through, and
+    /// — the largest of the savings, and the one that is not on the GPU at all —
+    /// the one `FontSystem`: `terminal_font_system()` reads thirteen font files
+    /// off disk per call, so a device per window would be thirteen more reads
+    /// per window. §2.2 named this an `App`-layer object on the day it became a
+    /// type; this is the slice that could finally put it there, because until
+    /// there was an `App` there was nowhere for it to live but the first
+    /// window — which would have made every later window's device the property
+    /// of whichever window happened to open first.
+    gpu: GpuContext,
     event_proxy: EventLoopProxy<AppEvent>,
     math_worker: MathWorker,
     math_worker_running: bool,
@@ -4267,6 +4281,34 @@ struct App {
     /// Persisted user choice, distinct from the resolved renderer theme. Under `BT_BG` the process
     /// colors are locked but this mode is still kept across a diagnostic launch.
     theme_mode: ThemeModeV1,
+    /// **Which window `session.json` is a picture of** (multiwindow slice C).
+    ///
+    /// The file's schema holds one window — one `WindowStateV1`, one list of
+    /// tabs, one active index — and slice D is what gives it a `windows[]`.
+    /// Until then a second window has nowhere in that file to be, and the choice
+    /// is between two dishonest answers and one honest one. Letting every window
+    /// write it means whichever window moved last overwrites the others' tabs,
+    /// so opening a scratch window and closing it would destroy the session
+    /// somebody actually has; letting none write it means a single-window
+    /// launch — which is every launch today — stops remembering anything.
+    ///
+    /// So the file belongs to the window the process opened with, and says so.
+    /// A window opened later never writes it and takes nothing with it when it
+    /// closes: **its session dies with it**, which is a sentence a reader can be
+    /// told, unlike "your tabs were replaced by the ones in the window you just
+    /// shut". The mirror does not migrate when that first window closes — the
+    /// file keeps meaning the last thing it meant — because a migration would be
+    /// this slice inventing the per-window policy slice D exists to decide.
+    session_window: WindowId,
+    /// A window this application has been asked to open and has not opened yet.
+    ///
+    /// Opening one needs the `ActiveEventLoop`, which only the handler callbacks
+    /// hold, and the chord is dispatched several frames down inside a `Runtime`
+    /// that holds no such thing. Recorded here and spent by [`FolioApp`] at the
+    /// door, exactly as [`WindowRuntime::window_close_requested`] is — the same
+    /// shape for the same reason, and for closing that shape is what keeps the
+    /// shut going through the one door it always went through.
+    pending_new_window: bool,
 }
 
 /// **What is true of one window** (multiwindow slice B).
@@ -4280,7 +4322,7 @@ struct App {
 /// field into a map keyed by `WindowId`; this slice only makes that sentence
 /// something the type system can express.
 struct WindowRuntime {
-    renderer: Renderer,
+    renderer: WindowRenderer,
     tabs: Vec<TabState>,
     active_tab: usize,
     next_tab_id: u64,
@@ -5236,14 +5278,22 @@ struct WindowRuntime {
     lawful_client_size: Option<PhysicalSize<u32>>,
 }
 
-/// The two layers, while there is still one of each.
+/// **This application, doing something for one of its windows.**
 ///
-/// A facade rather than a rename: every method in this file goes on answering to
-/// `self`, so the slice moves ownership without moving a single call site into a
-/// new signature. Slice C is where the methods learn which window they are for.
-struct Runtime {
-    app: App,
-    window: WindowRuntime,
+/// A facade over two borrows rather than over two values (multiwindow slice C).
+/// Slice B made it `{ app: App, window: WindowRuntime }` so that ownership could
+/// move without a single method signature moving with it; this slice keeps every
+/// one of those signatures and changes what the `self` behind them *is*. There
+/// is exactly one `App` in the process and a `WindowRuntime` per open window, and
+/// a `Runtime` is one of the second paired with the first for the duration of one
+/// call — which is the whole of "the methods learn which window they are for".
+///
+/// It is built by [`FolioApp::runtime`] and nowhere else, so "which window" is
+/// answered once, at the event loop's own door, by the `WindowId` the event
+/// arrived with.
+struct Runtime<'a> {
+    app: &'a mut App,
+    window: &'a mut WindowRuntime,
 }
 
 /// PIN — **the facade is two layers and nothing else.**
@@ -5251,9 +5301,10 @@ struct Runtime {
 /// An exhaustive destructuring with no `..`: a field added to `Runtime` rather
 /// than to one of the two layers stops this compiling, which is the only moment
 /// at which "which layer is this?" is still a question somebody is being asked.
-/// Slice C replaces the second binding with a map keyed by `WindowId`; until
-/// then this is what keeps a third home from quietly appearing beside them.
-const _: fn(Runtime) = |Runtime { app: _, window: _ }| ();
+/// A third home beside these two would be state that belongs neither to the
+/// process nor to a window, which is state no window could be closed without
+/// orphaning.
+const _: fn(Runtime<'_>) = |Runtime { app: _, window: _ }| ();
 
 #[cfg(test)]
 mod layer_shape_tests {
@@ -5697,7 +5748,7 @@ impl TabState {
     }
 }
 
-impl Deref for Runtime {
+impl Deref for Runtime<'_> {
     type Target = TabState;
 
     fn deref(&self) -> &Self::Target {
@@ -5705,7 +5756,7 @@ impl Deref for Runtime {
     }
 }
 
-impl DerefMut for Runtime {
+impl DerefMut for Runtime<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         active_item_mut(&mut self.window.tabs, self.window.active_tab)
     }
@@ -14310,7 +14361,8 @@ impl FormulaSwitches {
 /// family differently from the hot path would draw one face until the row was
 /// touched and another one after.
 fn apply_stored_terminal_font(
-    renderer: &mut Renderer,
+    gpu: &mut GpuContext,
+    renderer: &mut WindowRenderer,
     settings: &bt_persist::SettingsV1,
 ) -> Result<bt_render::CellMetrics> {
     let family = settings.terminal_font_family.as_str();
@@ -14327,8 +14379,9 @@ fn apply_stored_terminal_font(
             .map(|candidate| candidate.files.clone())
             .unwrap_or_default()
     };
+    gpu.set_terminal_font(family, &files, f32::from(settings.terminal_font_size));
     renderer
-        .apply_terminal_font(family, &files, f32::from(settings.terminal_font_size))
+        .apply_font_change(gpu)
         .context("remeasure the terminal grid at the chosen face")
 }
 
@@ -14346,7 +14399,7 @@ fn apply_stored_terminal_font(
 /// them into a struct would move the argument list rather than shorten it.
 #[allow(clippy::too_many_arguments)]
 fn create_leaf_session(
-    renderer: &Renderer,
+    renderer: &WindowRenderer,
     body: bt_render::SeatViewport,
     wake: OutputWake,
     probe_input: Option<&[u8]>,
@@ -14585,7 +14638,7 @@ fn create_leaf_session(
 fn create_tab_state(
     id: TabId,
     seats: seats::Seats,
-    renderer: &Renderer,
+    renderer: &WindowRenderer,
     render_physical: PhysicalSize<u32>,
     wake: OutputWake,
     probe_input: Option<&[u8]>,
@@ -15681,13 +15734,261 @@ fn drain_tab_pty(tab: &mut TabState) -> Result<DrainOutcome> {
     Ok(outcome)
 }
 
-impl Runtime {
+/// **Everything a window is born with that is not the same in every window.**
+///
+/// One list rather than two constructors (multiwindow slice C). A
+/// `WindowRuntime` has a hundred and fifty-seven fields and all but these are
+/// "nothing yet" — no pointer in it, no menu up, no frame drawn — so the two
+/// doors that open a window differ in exactly the seventeen answers below, and
+/// a field added to the window layer gets its resting value in one place
+/// instead of drifting between a launch and a `New window`.
+struct NewWindowParts {
+    renderer: WindowRenderer,
+    tabs: Vec<TabState>,
+    active_tab: usize,
+    next_tab_id: u64,
+    pty_wake: PtyWakeSignal,
+    translucency_available: bool,
+    custom_window_frame: bt_platform::CustomWindowFrame,
+    compositor: bt_platform::Compositor,
+    window: Arc<Window>,
+    math_context_menu: bt_platform::MathContextMenu,
+    folder_picker: bt_platform::FolderPicker,
+    image_picker: bt_platform::ImagePicker,
+    ime_system_caret: bt_platform::ImeSystemCaret,
+    rail: seats::RailState,
+    seat_viewport: LogicalRect,
+    /// The tabs a restore prompt has still to ask about — empty for every window
+    /// but the one the session file is a picture of.
+    pending_restore: Vec<TabV1>,
+    /// The tab that is only scaffolding, if this window opened with one.
+    placeholder_tab: Option<TabId>,
+}
+
+/// Assemble a window's runtime from [`NewWindowParts`] and the resting value of
+/// everything else.
+fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
+    let NewWindowParts {
+        renderer,
+        tabs,
+        active_tab,
+        next_tab_id,
+        pty_wake,
+        translucency_available,
+        custom_window_frame,
+        compositor,
+        window,
+        math_context_menu,
+        folder_picker,
+        image_picker,
+        ime_system_caret,
+        rail,
+        seat_viewport,
+        pending_restore,
+        placeholder_tab,
+    } = parts;
+    WindowRuntime {
+        renderer,
+        tabs,
+        active_tab,
+        next_tab_id,
+        pty_wake,
+        table_paints: HashMap::new(),
+        preview_button_width: 0.0,
+        preview_opened_at: None,
+        pending_frames: LatestFrameSlot::default(),
+        modifiers: ModifiersState::default(),
+        math_context_menu,
+        folder_picker,
+        folder_pick: None,
+        image_picker,
+        image_pick_pending: None,
+        background_picture: None,
+        background_decode: BackgroundDecodeMailbox::default(),
+        settings_slider_drag: None,
+        settings_menu_bar_drag: None,
+        dwm_dark_mode: None,
+        translucency_available,
+        custom_window_frame,
+        taskbar: TaskbarMirror::default(),
+        compositor,
+        window,
+        last_layout_events: Vec::new(),
+        resize_trace_logged_transaction: 0,
+        resize_trace_logged_events: 0,
+        background_visible: None,
+        first_text_visible: None,
+        window_shown: false,
+        first_visible_present_dpi_checked: false,
+        first_text_presented: false,
+        last_presented_frame: None,
+        terminal_content_revision: 0,
+        presented_picture_revision: 0,
+        chrome_present_pending: false,
+        unpainted_pane_output: false,
+        composed_terminal_frames: 0,
+        wheel_events: 0,
+        wheel_routings: 0,
+        wheel_burst: None,
+        last_present_at: None,
+        strip_animation_ticked_at: None,
+        preedit: None,
+        ime_active: false,
+        ime_cursor_throttle: ImeCursorThrottle::default(),
+        rename_caret_line: None,
+        cursor_blink: CursorBlink::new(Instant::now()),
+        // A window is focused when it opens, and `CursorBlink` starts from
+        // the same assumption — the two must agree or the strip and the
+        // caret would disagree about whether anyone is home.
+        window_focused: true,
+        ime_system_caret,
+        pointer_position: None,
+        mouse_route: None,
+        click_tracker: ClickTracker::default(),
+        line_wheel_remainder: 0.0,
+        pixel_wheel_remainder: 0.0,
+        notch_wheel_remainder: 0.0,
+        local_wheel_subpixel_remainder: 0.0,
+        hyperlink_hover: HyperlinkHover::default(),
+        hover_pane: None,
+        underlined_image_reference: None,
+        peek_hover: PeekHover::default(),
+        peek_cache: std::collections::HashMap::new(),
+        peek_thumbnail: None,
+        peek_thumbnail_pending: None,
+        math_hover_anchor: None,
+        math_hover_clear_at: None,
+        pending_math_context_anchor: None,
+        seat_pointer: seats::ChromePointer::default(),
+        tooltip: tooltip::TooltipHost::default(),
+        layout_peek: peek_strip::PeekHost::default(),
+        tooltip_anchors: tooltip::TooltipAnchors::default(),
+        tooltip_drawn_opacity: None,
+        toasts: toast::ToastHost::default(),
+        toast_layouts: Vec::new(),
+        toasts_drawn: Vec::new(),
+        toast_pointer_drawn: toast::ToastPointer::default(),
+        command_rails: BTreeMap::new(),
+        command_rail_hover: None,
+        preview_hex_hover: None,
+        command_flash: None,
+        search: search::SearchState::default(),
+        search_layout: None,
+        search_hover: None,
+        search_scan: None,
+        search_revision: 0,
+        chrome_marks: marks::ChromeMarkRasters::default(),
+        settings: settings::SettingsPanel::default(),
+        profile_undo: None,
+        settings_scroll: 0.0,
+        profile_menu: profiles::ProfileMenu::default(),
+        chevron_turn: ChevronTurn::default(),
+        last_drawn_chevron: None,
+        pane_motion: PaneMotion::default(),
+        // The window opens on a tree that has never been edited, so the
+        // first commit that *does* edit one is the first thing to animate.
+        pane_motion_revision: 0,
+        // A tree nobody has edited is a tree whose shells are in step with
+        // it by construction: the first solve sizes them from it.
+        shells_settled_revision: 0,
+        tab_scroll: 0.0,
+        rail,
+        rail_scroll: 0.0,
+        rail_open: RevealTween::over(RAIL_TRANSITION),
+        rail_text: RevealTween::over(RAIL_TEXT_FADE),
+        // Seeded at the rail's resting fold so the first frame is the state
+        // the window restored into, not a fold arriving out of nowhere.
+        rail_fold: RevealTween::resting(f32::from(u8::from(!rail.collapsed)), RAIL_TRANSITION),
+        rail_chrome: seats::ChromeGroup::default(),
+        last_drawn_rail: None,
+        tab_press: None,
+        pane_press: None,
+        row_press: None,
+        file_peek: None,
+        peek_buffer: None,
+        peek_pane: PreviewPane::default(),
+        peek_picture: None,
+        peek_card_pending: None,
+        drag: None,
+        drop_preview: None,
+        last_drawn_dock_reveal: None,
+        seat_viewport,
+        tab_clicks: TabClicks::default(),
+        files_row_clicks: FilesRowClicks::default(),
+        preview_name_clicks: MultiClicks::default(),
+        root_menu: profiles::RootMenu::default(),
+        dirty_gate: restore::DirtyGate::default(),
+        psreadline_invite: psreadline::Invite::default(),
+        psreadline_size_changed: false,
+        window_close_requested: false,
+        preview_menu: profiles::PreviewMenu::default(),
+        preview_head_measures: BTreeMap::new(),
+        file_menu: None,
+        git_menu: None,
+        term_menu: None,
+        restarting: None,
+        pane_menu: None,
+        chevrons: ChevronGates::default(),
+        graph_filter_menu: None,
+        float: float::FloatHost::default(),
+        float_drag: None,
+        float_head_press: None,
+        float_hover: None,
+        revealed_foot: None,
+        files_name_widths: BTreeMap::new(),
+        git_pages_shown: BTreeMap::new(),
+        git_graphs_shown: BTreeMap::new(),
+        git_graph_clicks: FilesRowClicks::default(),
+        files_view_widths: BTreeMap::new(),
+        files_notice: None,
+        files_focus: FilesKeyboardFocus::default(),
+        rename: None,
+        rename_blink: CursorBlink::new(Instant::now()),
+        settings_marks: marks::ChromeMarkRasters::default(),
+        divider_drag: None,
+        resizing_card_transition: RevealTween::over(RESIZING_CARD_TRANSITION),
+        resizing_card_split: None,
+        last_drawn_resizing_card: None,
+        work_area: WorkAreaHint::NeverKnown,
+        // "It opens BEFORE it asks — like a browser, which lands you on
+        // your pages and puts 'restore?' on top of a window that already
+        // works" (mock-up 7435-7439). The window is built by the time this
+        // runs, so the question arrives over something usable.
+        restore_prompt: {
+            let mut prompt = restore::RestorePrompt::default();
+            if !pending_restore.is_empty() {
+                prompt.open();
+            }
+            prompt
+        },
+        placeholder_tab,
+        window_min_inner_size: None,
+        // The opening rectangle is the program's: either the product's own size or one
+        // `restore_window_placement` chose out of the session file. A session restored into a
+        // window too small for its tree therefore folds — the program put it there, and
+        // folding is the honest picture of "this does not fit". The first drag of the frame
+        // hands it to the user and the folds give way to panes (user ruling 2026-08-08).
+        // `None` is `claim_lawful_layout`'s standing claim, written out: the opening rectangle
+        // has been asked for and not yet answered, and the first one to arrive is it.
+        size_policy: SizePolicy::Lawful,
+        lawful_client_size: None,
+        pending_restore,
+    }
+}
+
+impl Runtime<'_> {
+    /// Open the process's device layer, its `App`, and its first window.
+    ///
+    /// Returns the two layers rather than a `Runtime` (multiwindow slice C):
+    /// the facade borrows them, so the thing a launch produces is the pair
+    /// somebody else stores — `App` once, `WindowRuntime` under the id of the
+    /// window it belongs to.
     fn create(
         event_loop: &ActiveEventLoop,
         proxy: EventLoopProxy<AppEvent>,
         startup_started: Instant,
         cli: &cli::CliRequest,
-    ) -> Result<Self> {
+    ) -> Result<(App, WindowRuntime)> {
         let trace_startup = std::env::var_os("BT_STARTUP_TRACE").is_some();
         let trace_resize = std::env::var_os("BT_RESIZE_TRACE").is_some();
         let trace_layout_events = std::env::var_os("BT_LAYOUT_EVENTS").is_some();
@@ -15897,7 +16198,7 @@ impl Runtime {
         let compositor = bt_platform::Compositor::new(hwnd)
             .map_err(|error| anyhow!(error))
             .context("open the window's DirectComposition visual tree")?;
-        let mut renderer = pollster::block_on(Renderer::new(
+        let (mut gpu, mut renderer) = pollster::block_on(GpuContext::open(
             bt_render::WindowTarget::CompositionVisual(compositor.gpu_visual_ptr()),
             physical.width,
             physical.height,
@@ -15928,7 +16229,7 @@ impl Runtime {
         // put a window on screen whose columns were counted for a different
         // cell. The hot path (`apply_terminal_font`) re-solves all of that; this
         // one has nothing to re-solve yet.
-        apply_stored_terminal_font(&mut renderer, settings_store.loaded())?;
+        apply_stored_terminal_font(&mut gpu, &mut renderer, settings_store.loaded())?;
         ensure_metrics_match_authoritative_scale(
             renderer.metrics().scale_factor,
             startup_scale_factor,
@@ -16073,7 +16374,6 @@ impl Runtime {
         let active_tab = launch_active_tab(cli_slot, plan.active_open, tabs.len());
         let recent = seed::SeedVault::from_persisted(&session_store.loaded().recent);
         let pending_restore = plan.ask.clone();
-        let has_question = !pending_restore.is_empty();
         // Only a shell we opened *because we had no answer* is scaffolding. A
         // lone restored tab is a tab, and must never be swept away by a later
         // Restore.
@@ -16094,284 +16394,85 @@ impl Runtime {
         let files_worker = files::FilesWorker::spawn(proxy.clone())?;
         let preview_worker = preview::PreviewWorker::spawn(proxy.clone())?;
         let git_worker = git::GitWorker::spawn(proxy.clone())?;
-        let mut runtime = Self {
-            app: App {
-                event_proxy: proxy.clone(),
-                git_watch: git_watch::GitWatch::default(),
-                math_worker,
-                math_worker_running: true,
-                math_worker_notice_pending: false,
-                files_worker,
-                files_worker_running: true,
-                files_worker_notice_pending: false,
-                preview_worker,
-                preview_worker_running: true,
-                preview_worker_notice_pending: false,
-                git_worker,
-                git_worker_running: true,
-                git_worker_notice_pending: false,
-                acrylic_available,
-                startup_started,
-                trace_startup,
-                trace_resize,
-                trace_layout_events,
-                trace_perf,
-                motion: read_motion_preference(),
-                scheme_watch: scheme_watch::SchemeWatch::default(),
-                profile_watch: profile_watch::ProfileWatch::default(),
-                scheme_fault: None,
-                scheme_source: [None, None],
-                profile_programs,
-                psreadline_documents: psreadline::documents_directory(),
-                psreadline_installed: psreadline::InstalledCopy::default(),
-                session_store,
-                settings_store,
-                shortcuts,
-                keybindings_store,
-                keybindings_fault,
-                cli_refusals: std::mem::take(&mut cli_plan.refusals),
-                cli_preview: cli_plan.preview.take(),
-                profiles_store,
-                profiles_fault,
-                profiles_file_broken: false,
-                recent,
-                theme_mode,
-            },
-            window: WindowRuntime {
-                renderer,
-                tabs,
-                active_tab,
-                next_tab_id: conpty_sources.len() as u64 + 1,
-                pty_wake,
-                table_paints: HashMap::new(),
-                preview_button_width: 0.0,
-                preview_opened_at: None,
-                pending_frames: LatestFrameSlot::default(),
-                modifiers: ModifiersState::default(),
-                math_context_menu,
-                folder_picker,
-                folder_pick: None,
-                image_picker,
-                image_pick_pending: None,
-                background_picture: None,
-                background_decode: BackgroundDecodeMailbox::default(),
-                settings_slider_drag: None,
-                settings_menu_bar_drag: None,
-                dwm_dark_mode: None,
-                translucency_available,
-                custom_window_frame,
-                taskbar: TaskbarMirror::default(),
-                compositor,
-                window,
-                last_layout_events: Vec::new(),
-                resize_trace_logged_transaction: 0,
-                resize_trace_logged_events: 0,
-                background_visible: None,
-                first_text_visible: None,
-                window_shown: false,
-                first_visible_present_dpi_checked: false,
-                first_text_presented: false,
-                last_presented_frame: None,
-                terminal_content_revision: 0,
-                presented_picture_revision: 0,
-                chrome_present_pending: false,
-                unpainted_pane_output: false,
-                composed_terminal_frames: 0,
-                wheel_events: 0,
-                wheel_routings: 0,
-                wheel_burst: None,
-                last_present_at: None,
-                strip_animation_ticked_at: None,
-                preedit: None,
-                ime_active: false,
-                ime_cursor_throttle: ImeCursorThrottle::default(),
-                rename_caret_line: None,
-                cursor_blink: CursorBlink::new(Instant::now()),
-                // A window is focused when it opens, and `CursorBlink` starts from
-                // the same assumption — the two must agree or the strip and the
-                // caret would disagree about whether anyone is home.
-                window_focused: true,
-                ime_system_caret,
-                pointer_position: None,
-                mouse_route: None,
-                click_tracker: ClickTracker::default(),
-                line_wheel_remainder: 0.0,
-                pixel_wheel_remainder: 0.0,
-                notch_wheel_remainder: 0.0,
-                local_wheel_subpixel_remainder: 0.0,
-                hyperlink_hover: HyperlinkHover::default(),
-                hover_pane: None,
-                underlined_image_reference: None,
-                peek_hover: PeekHover::default(),
-                peek_cache: std::collections::HashMap::new(),
-                peek_thumbnail: None,
-                peek_thumbnail_pending: None,
-                math_hover_anchor: None,
-                math_hover_clear_at: None,
-                pending_math_context_anchor: None,
-                seat_pointer: seats::ChromePointer::default(),
-                tooltip: tooltip::TooltipHost::default(),
-                layout_peek: peek_strip::PeekHost::default(),
-                tooltip_anchors: tooltip::TooltipAnchors::default(),
-                tooltip_drawn_opacity: None,
-                toasts: toast::ToastHost::default(),
-                toast_layouts: Vec::new(),
-                toasts_drawn: Vec::new(),
-                toast_pointer_drawn: toast::ToastPointer::default(),
-                command_rails: BTreeMap::new(),
-                command_rail_hover: None,
-                preview_hex_hover: None,
-                command_flash: None,
-                search: search::SearchState::default(),
-                search_layout: None,
-                search_hover: None,
-                search_scan: None,
-                search_revision: 0,
-                chrome_marks: marks::ChromeMarkRasters::default(),
-                settings: settings::SettingsPanel::default(),
-                profile_undo: None,
-                settings_scroll: 0.0,
-                profile_menu: profiles::ProfileMenu::default(),
-                chevron_turn: ChevronTurn::default(),
-                last_drawn_chevron: None,
-                pane_motion: PaneMotion::default(),
-                // The window opens on a tree that has never been edited, so the
-                // first commit that *does* edit one is the first thing to animate.
-                pane_motion_revision: 0,
-                // A tree nobody has edited is a tree whose shells are in step with
-                // it by construction: the first solve sizes them from it.
-                shells_settled_revision: 0,
-                tab_scroll: 0.0,
-                rail,
-                rail_scroll: 0.0,
-                rail_open: RevealTween::over(RAIL_TRANSITION),
-                rail_text: RevealTween::over(RAIL_TEXT_FADE),
-                // Seeded at the rail's resting fold so the first frame is the state
-                // the window restored into, not a fold arriving out of nowhere.
-                rail_fold: RevealTween::resting(
-                    f32::from(u8::from(!rail.collapsed)),
-                    RAIL_TRANSITION,
-                ),
-                rail_chrome: seats::ChromeGroup::default(),
-                last_drawn_rail: None,
-                tab_press: None,
-                pane_press: None,
-                row_press: None,
-                file_peek: None,
-                peek_buffer: None,
-                peek_pane: PreviewPane::default(),
-                peek_picture: None,
-                peek_card_pending: None,
-                drag: None,
-                drop_preview: None,
-                last_drawn_dock_reveal: None,
-                seat_viewport,
-                tab_clicks: TabClicks::default(),
-                files_row_clicks: FilesRowClicks::default(),
-                preview_name_clicks: MultiClicks::default(),
-                root_menu: profiles::RootMenu::default(),
-                dirty_gate: restore::DirtyGate::default(),
-                psreadline_invite: psreadline::Invite::default(),
-                psreadline_size_changed: false,
-                window_close_requested: false,
-                preview_menu: profiles::PreviewMenu::default(),
-                preview_head_measures: BTreeMap::new(),
-                file_menu: None,
-                git_menu: None,
-                term_menu: None,
-                restarting: None,
-                pane_menu: None,
-                chevrons: ChevronGates::default(),
-                graph_filter_menu: None,
-                float: float::FloatHost::default(),
-                float_drag: None,
-                float_head_press: None,
-                float_hover: None,
-                revealed_foot: None,
-                files_name_widths: BTreeMap::new(),
-                git_pages_shown: BTreeMap::new(),
-                git_graphs_shown: BTreeMap::new(),
-                git_graph_clicks: FilesRowClicks::default(),
-                files_view_widths: BTreeMap::new(),
-                files_notice: None,
-                files_focus: FilesKeyboardFocus::default(),
-                rename: None,
-                rename_blink: CursorBlink::new(Instant::now()),
-                settings_marks: marks::ChromeMarkRasters::default(),
-                divider_drag: None,
-                resizing_card_transition: RevealTween::over(RESIZING_CARD_TRANSITION),
-                resizing_card_split: None,
-                last_drawn_resizing_card: None,
-                work_area: WorkAreaHint::NeverKnown,
-                pending_restore,
-                // "It opens BEFORE it asks — like a browser, which lands you on
-                // your pages and puts 'restore?' on top of a window that already
-                // works" (mock-up 7435-7439). The window is built by the time this
-                // runs, so the question arrives over something usable.
-                restore_prompt: {
-                    let mut prompt = restore::RestorePrompt::default();
-                    if has_question {
-                        prompt.open();
-                    }
-                    prompt
-                },
-                placeholder_tab,
-                window_min_inner_size: None,
-                // The opening rectangle is the program's: either the product's own size or one
-                // `restore_window_placement` chose out of the session file. A session restored into a
-                // window too small for its tree therefore folds — the program put it there, and
-                // folding is the honest picture of "this does not fit". The first drag of the frame
-                // hands it to the user and the folds give way to panes (user ruling 2026-08-08).
-                // `None` is `claim_lawful_layout`'s standing claim, written out: the opening rectangle
-                // has been asked for and not yet answered, and the first one to arrive is it.
-                size_policy: SizePolicy::Lawful,
-                lawful_client_size: None,
-            },
+        let mut app = App {
+            gpu,
+            event_proxy: proxy.clone(),
+            git_watch: git_watch::GitWatch::default(),
+            math_worker,
+            math_worker_running: true,
+            math_worker_notice_pending: false,
+            files_worker,
+            files_worker_running: true,
+            files_worker_notice_pending: false,
+            preview_worker,
+            preview_worker_running: true,
+            preview_worker_notice_pending: false,
+            git_worker,
+            git_worker_running: true,
+            git_worker_notice_pending: false,
+            acrylic_available,
+            startup_started,
+            trace_startup,
+            trace_resize,
+            trace_layout_events,
+            trace_perf,
+            motion: read_motion_preference(),
+            scheme_watch: scheme_watch::SchemeWatch::default(),
+            profile_watch: profile_watch::ProfileWatch::default(),
+            scheme_fault: None,
+            scheme_source: [None, None],
+            profile_programs,
+            psreadline_documents: psreadline::documents_directory(),
+            psreadline_installed: psreadline::InstalledCopy::default(),
+            session_store,
+            settings_store,
+            shortcuts,
+            keybindings_store,
+            keybindings_fault,
+            cli_refusals: std::mem::take(&mut cli_plan.refusals),
+            cli_preview: cli_plan.preview.take(),
+            profiles_store,
+            profiles_fault,
+            profiles_file_broken: false,
+            recent,
+            theme_mode,
+            // The first window is the one `session.json` is a picture of,
+            // and it is the only window that ever will be — see
+            // `App::session_window`.
+            session_window: window.id(),
+            pending_new_window: false,
         };
-        runtime.refresh_work_area();
-        // **The window's ground, before the first frame** (§7.1.6c-4b). The
-        // clear carries the ground's alpha, so a window that put this on after
-        // its first present would flash opaque; the picture is decoded here for
-        // the same reason. A missing or unreadable file costs a card and an
-        // ordinary window, never a failed launch.
-        runtime.reload_background_picture()?;
-        runtime.apply_window_ground()?;
-        // The two postures, re-applied because they are postures: a window that
-        // was told to stay in front last week is a window that stays in front
-        // today. Both are best-effort — neither is a reason to refuse to open —
-        // and the acrylic call is skipped outright on a Windows that has no such
-        // attribute, which is also what greys its row.
-        if runtime.app.settings_store.loaded().always_on_top
-            && let Err(error) = bt_platform::set_window_topmost(hwnd, true)
-        {
-            eprintln!("recoverable always-on-top failure: {error}");
-        }
-        // Before the backdrop and not after it, though the measurement says
-        // either would do: this is also the border's colour, and a window that
-        // wore a light border for its first frame would have flickered.
-        runtime.apply_window_dark_mode()?;
-        if acrylic_available
-            && runtime.app.settings_store.loaded().acrylic
-            && let Err(error) = bt_platform::set_system_backdrop(hwnd, true)
-        {
-            eprintln!("recoverable system backdrop failure: {error}");
-        }
-        // **The pinned tabs' preview panes ask for their files here**, and this
-        // is the earliest they can: the worker is a field of the runtime, so
-        // there is nothing to ask until the struct above exists. Every other
-        // revive door (`answer_restore`, `reopen_recent`) asks the moment it
-        // pushes its tab; this is the launch door doing the same, and without it
-        // a restored pane sits on "Loading …" forever — measured on the real
-        // machine, which is also why it is a loop over every tab rather than
-        // over the active one.
-        for index in 0..runtime.window.tabs.len() {
-            runtime.request_revived_previews(index);
-        }
-        runtime.apply_window_min_inner_size()?;
-        runtime.window.window.set_title(&runtime.display_title());
-        runtime.refresh_chrome();
+        let mut window = new_window_runtime(NewWindowParts {
+            renderer,
+            tabs,
+            active_tab,
+            next_tab_id: conpty_sources.len() as u64 + 1,
+            pty_wake,
+            translucency_available,
+            custom_window_frame,
+            compositor,
+            window,
+            math_context_menu,
+            folder_picker,
+            image_picker,
+            ime_system_caret,
+            rail,
+            seat_viewport,
+            pending_restore,
+            placeholder_tab,
+        });
+        // **The facade is assembled here and dropped at the end of this
+        // function** (multiwindow slice C). `Runtime` is two borrows now, so the
+        // tail of the launch — every verb below that reads settings and writes
+        // pixels — is written exactly as it always was, and what comes back out
+        // is the two layers themselves rather than a struct that owns them.
+        let mut runtime = Runtime {
+            app: &mut app,
+            window: &mut window,
+        };
+        runtime.dress_new_window(hwnd)?;
         if trace_startup {
-            let renderer_phases = runtime.window.renderer.init_timings();
+            let renderer_phases = runtime.window.renderer.init_timings(&runtime.app.gpu);
             eprintln!(
                 "BT_STARTUP window={}ms adapter={}ms device={}ms surface={}ms fonts={}ms metrics={}ms render_resources={}ms renderer_total={}ms pty_spawn={}ms probe_input={} conpty_sources={conpty_sources:?} runtime_ready={}ms",
                 window_time.as_millis(),
@@ -16387,33 +16488,7 @@ impl Runtime {
                 startup_started.elapsed().as_millis(),
             );
         }
-        runtime.publish_frame(FrameTrigger {
-            occurred_at: Instant::now(),
-            source: FrameSource::Expose,
-        })?;
-        // A hidden surface can either accept the clear or report Occluded. In the latter case
-        // redraw() republishes the frame; the second call presents immediately after ShowWindow.
-        runtime.redraw()?;
-        // Maximize before the window is shown, not after: `SW_MAXIMIZE` reveals a
-        // hidden window itself, so this is one transition into the state the
-        // session recorded rather than a normal-sized window that jumps. The
-        // normal rectangle set above survives as the placement Windows restores
-        // the window to when the user unmaximizes it.
-        if restored.is_some_and(|placement| placement.maximized) {
-            runtime.window.window.set_maximized(true);
-        }
-        runtime.window.window.set_visible(true);
-        runtime.window.window_shown = true;
-        // Showing a hidden Win32 window can synchronously settle it onto a different monitor.
-        // Query Win32 directly: winit's cached scale can race during initial monitor placement.
-        runtime.reconcile_authoritative_dpi("show")?;
-        // Force one presentation after ShowWindow so the first-present reconciliation below is a
-        // visible startup stage even when the hidden pre-clear already succeeded.
-        runtime.publish_frame(FrameTrigger {
-            occurred_at: Instant::now(),
-            source: FrameSource::Expose,
-        })?;
-        runtime.redraw()?;
+        runtime.show_new_window(restored.is_some_and(|placement| placement.maximized))?;
         // Said now rather than at the moment of the scan, because the scan
         // happens before there is a window to say it in. Said once per launch:
         // a rescan afterwards reports only the file behind the scheme actually
@@ -16439,7 +16514,266 @@ impl Runtime {
                 background_visible.as_millis()
             );
         }
-        Ok(runtime)
+        drop(runtime);
+        Ok((app, window))
+    }
+
+    /// **Open a second window on this application** (multiwindow slice C).
+    ///
+    /// The first window's door reads four files, revives a saved tree, answers a
+    /// command line and boots a GPU; this one does none of those, and the
+    /// difference is not a shortcut — every one of them is a question about the
+    /// *process*, and the process has already answered it. What is left is what
+    /// a window is: a native window, the four Win32 bridges that hang off its
+    /// handle, a composition tree, a surface on this application's own device,
+    /// and one tab.
+    ///
+    /// **The seed is the default profile's single tab**, which is the same seed
+    /// [`Self::new_tab`] plants and the same one a cold launch with no saved
+    /// session plants. One sentence about what "new" means, not three.
+    fn open_window(
+        event_loop: &ActiveEventLoop,
+        app: &mut App,
+    ) -> Result<(WindowId, WindowRuntime)> {
+        let default_profile = profiles::default_profile(
+            &app.settings_store.loaded().default_profile,
+            &app.profile_programs,
+        );
+        // The product's own size, and pointedly not the saved one: the saved
+        // rectangle is where the window `session.json` mirrors was left, and a
+        // second window opened exactly on top of the first is a second window
+        // nobody can see. Where later windows *should* land is a placement
+        // question slice D answers, because slice D is what gives them somewhere
+        // to write the answer down.
+        let window = Arc::new(
+            event_loop
+                .create_window(opening_window_attributes(
+                    profiles::title(default_profile),
+                    LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT),
+                ))
+                .context("create native window")?,
+        );
+        install_theme_class_background(&window)?;
+        window.set_ime_allowed(true);
+        let hwnd = window_hwnd(&window)?;
+        let custom_window_frame = bt_platform::CustomWindowFrame::install(
+            hwnd,
+            bt_platform::CustomFrameGeometry {
+                title_bar_logical_px: bt_render::WINDOW_TITLE_BAR_LOGICAL_PX as u32,
+                caption_button_logical_px: bt_render::WINDOW_CAPTION_BUTTON_LOGICAL_PX as u32,
+            },
+        )
+        .map_err(|error| anyhow!(error))
+        .context("install self-drawn Win32 window frame")?;
+        let ime_system_caret = bt_platform::ImeSystemCaret::new(hwnd);
+        let math_context_menu = bt_platform::MathContextMenu::new(hwnd)
+            .map_err(|error| anyhow!(error))
+            .context("install deferred formula context menu")?;
+        let folder_picker = bt_platform::FolderPicker::new(hwnd)
+            .map_err(|error| anyhow!(error))
+            .context("install deferred folder chooser")?;
+        let image_picker = bt_platform::ImagePicker::new(hwnd)
+            .map_err(|error| anyhow!(error))
+            .context("install deferred picture chooser")?;
+        // **Spike Q5 item 3, paid at last.** `WM_NCCALCSIZE` has just made this
+        // window's client area its whole outer rectangle, so what winit built is
+        // the size asked for plus a native frame margin this window does not
+        // wear. The spike's own second window is the evidence it left: it asked
+        // for 720x420 logical and got a 1466x911 client, and a window that skips
+        // this line opens one frame margin larger every time. Slice A1 left a
+        // note at the first window's copy because there was nowhere else to put
+        // the line; this is that somewhere.
+        let opened_at = dpi_snapshot(&window)?;
+        bt_platform::set_window_outer_rect(
+            hwnd,
+            startup_window_rect(None, opened_at.rect, opened_at.authoritative_scale),
+        )
+        .map_err(|error| anyhow!(error))
+        .context("state the new window's outer rectangle")?;
+        let physical = window.inner_size();
+        let scale_factor = dpi_snapshot(&window)?.authoritative_scale;
+        // The visual tree first, because the swapchain hangs off it — §2.3's
+        // shape, once per window, because a `Compositor` is parameterised by the
+        // HWND it composes above.
+        let compositor = bt_platform::Compositor::new(hwnd)
+            .map_err(|error| anyhow!(error))
+            .context("open the window's DirectComposition visual tree")?;
+        // **This application's device, not a second one** (§2.2). The surface is
+        // created by the instance that created the device and its format is
+        // asked of the same adapter, which is the whole of the sharing contract;
+        // the atlas, both pipelines and the one `FontSystem` come with it, and
+        // that last is the saving that is not on the GPU at all.
+        let mut renderer = WindowRenderer::new(
+            &mut app.gpu,
+            bt_render::WindowTarget::CompositionVisual(compositor.gpu_visual_ptr()),
+            physical.width,
+            physical.height,
+            scale_factor,
+        )
+        .context("open the new window's surface on this application's device")?;
+        let translucency_available = renderer
+            .alpha_report()
+            .is_some_and(bt_render::SurfaceAlphaReport::is_premultiplied);
+        ensure_metrics_match_authoritative_scale(renderer.metrics().scale_factor, scale_factor)?;
+        ensure_swapchain_matches_inner(&renderer, physical)?;
+        let render_physical = presentation_physical_size(renderer.presentation_geometry());
+        let pty_wake = PtyWakeSignal::new(app.event_proxy.clone());
+        let wake = pty_wake.wake();
+        // The rail this window opens wearing is the layout the settings hold,
+        // read the same way the first window reads it: it is an application-level
+        // preference worn one window at a time (§2.4 rule 3).
+        let rail = rail_state_for(
+            render_tab_layout(app.session_store.loaded().tab_layout),
+            render_sidebar_mode(app.session_store.loaded().sidebar_mode),
+        );
+        let (tab, _) = create_tab_state(
+            TabId(1),
+            seats::Seats::lone_terminal(),
+            &renderer,
+            render_physical,
+            Arc::clone(&wake),
+            None,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &PreviewRestore::default(),
+            TabSeed::default(),
+            &app.profile_programs,
+            default_profile,
+            // The opening rectangle is this program's, exactly as the first
+            // window's is: nobody has taken hold of a frame that has not been
+            // shown yet.
+            SizePolicy::Lawful,
+            seats::RailState::default(),
+            FormulaSwitches::from_settings(app.settings_store.loaded()),
+            scrollback_quota(app.settings_store.loaded().scrollback_lines),
+        )?;
+        let tabs = vec![tab];
+        let (_, _, terminal_seat, seat_viewport) = solve_seats(
+            &tabs[0].seats,
+            &renderer,
+            render_physical,
+            SizePolicy::Lawful,
+            seats::RailState::default(),
+        );
+        renderer.set_seat_viewport(terminal_seat);
+        let id = window.id();
+        let mut window = new_window_runtime(NewWindowParts {
+            renderer,
+            tabs,
+            active_tab: 0,
+            next_tab_id: 2,
+            pty_wake,
+            translucency_available,
+            custom_window_frame,
+            compositor,
+            window,
+            math_context_menu,
+            folder_picker,
+            image_picker,
+            ime_system_caret,
+            rail,
+            seat_viewport,
+            // Nothing to ask about and nothing that is scaffolding: this window
+            // restored nothing, so it has no question outstanding and no shell
+            // that a later answer would be entitled to sweep away.
+            pending_restore: Vec::new(),
+            placeholder_tab: None,
+        });
+        let mut runtime = Runtime {
+            app,
+            window: &mut window,
+        };
+        runtime.dress_new_window(hwnd)?;
+        // Not maximized: a window nobody has told to be. The first window's
+        // answer comes out of the session file, and this window is not in it.
+        runtime.show_new_window(false)?;
+        drop(runtime);
+        Ok((id, window))
+    }
+
+    /// Everything a window owes itself between "its surface exists" and "it can
+    /// be shown", shared by both doors that open one.
+    ///
+    /// The ground and the two postures are read from settings that belong to the
+    /// application, and that is exactly why they are said once *per window*:
+    /// §2.4's third rule — the setting changes every window, but the sentence
+    /// said to DWM is one window's.
+    fn dress_new_window(&mut self, hwnd: std::num::NonZeroIsize) -> Result<()> {
+        self.refresh_work_area();
+        // **The window's ground, before the first frame** (§7.1.6c-4b). The
+        // clear carries the ground's alpha, so a window that put this on after
+        // its first present would flash opaque; the picture is decoded here for
+        // the same reason. A missing or unreadable file costs a card and an
+        // ordinary window, never a failed launch.
+        self.reload_background_picture()?;
+        self.apply_window_ground()?;
+        // The two postures, re-applied because they are postures: a window that
+        // was told to stay in front last week is a window that stays in front
+        // today. Both are best-effort — neither is a reason to refuse to open —
+        // and the acrylic call is skipped outright on a Windows that has no such
+        // attribute, which is also what greys its row.
+        if self.app.settings_store.loaded().always_on_top
+            && let Err(error) = bt_platform::set_window_topmost(hwnd, true)
+        {
+            eprintln!("recoverable always-on-top failure: {error}");
+        }
+        // Before the backdrop and not after it, though the measurement says
+        // either would do: this is also the border's colour, and a window that
+        // wore a light border for its first frame would have flickered.
+        self.apply_window_dark_mode()?;
+        if self.app.acrylic_available
+            && self.app.settings_store.loaded().acrylic
+            && let Err(error) = bt_platform::set_system_backdrop(hwnd, true)
+        {
+            eprintln!("recoverable system backdrop failure: {error}");
+        }
+        // **The pinned tabs' preview panes ask for their files here**, and this
+        // is the earliest they can: the worker is a field of the runtime, so
+        // there is nothing to ask until the struct above exists. Every other
+        // revive door (`answer_restore`, `reopen_recent`) asks the moment it
+        // pushes its tab; this is the launch door doing the same, and without it
+        // a restored pane sits on "Loading …" forever — measured on the real
+        // machine, which is also why it is a loop over every tab rather than
+        // over the active one.
+        for index in 0..self.window.tabs.len() {
+            self.request_revived_previews(index);
+        }
+        self.apply_window_min_inner_size()?;
+        self.window.window.set_title(&self.display_title());
+        self.refresh_chrome();
+        Ok(())
+    }
+
+    /// Put the window on the screen — the other half of
+    /// [`Self::dress_new_window`], with the launch trace between them.
+    fn show_new_window(&mut self, maximized: bool) -> Result<()> {
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        // A hidden surface can either accept the clear or report Occluded. In the latter case
+        // redraw() republishes the frame; the second call presents immediately after ShowWindow.
+        self.redraw()?;
+        // Maximize before the window is shown, not after: `SW_MAXIMIZE` reveals a
+        // hidden window itself, so this is one transition into the state the
+        // session recorded rather than a normal-sized window that jumps. The
+        // normal rectangle set above survives as the placement Windows restores
+        // the window to when the user unmaximizes it.
+        if maximized {
+            self.window.window.set_maximized(true);
+        }
+        self.window.window.set_visible(true);
+        self.window.window_shown = true;
+        // Showing a hidden Win32 window can synchronously settle it onto a different monitor.
+        // Query Win32 directly: winit's cached scale can race during initial monitor placement.
+        self.reconcile_authoritative_dpi("show")?;
+        // Force one presentation after ShowWindow so the first-present reconciliation below is a
+        // visible startup stage even when the hidden pre-clear already succeeded.
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        self.redraw()
     }
 
     /// The `+`'s verb: a tab on the default profile, which is what the button's
@@ -17233,9 +17567,11 @@ impl Runtime {
                     seats::TabContent {
                         mark_kind,
                         badge_text_width: if pane_count > 1 {
-                            self.window
-                                .renderer
-                                .measure_chrome_text(&pane_count.to_string(), badge_font_px)
+                            self.window.renderer.measure_chrome_text(
+                                &mut self.app.gpu,
+                                &pane_count.to_string(),
+                                badge_font_px,
+                            )
                         } else {
                             0.0
                         },
@@ -17421,6 +17757,7 @@ impl Runtime {
             .filter_map(|seat| Some((seat, self.dress_preview_foot(seat, scale, now)?)))
             .collect();
         self.window.preview_button_width = self.window.renderer.measure_chrome_text(
+            &mut self.app.gpu,
             preview_open_label,
             seats::PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX * scale,
         );
@@ -18067,7 +18404,7 @@ impl Runtime {
             .iter()
             .map(|toast| (toast.anchor(), self.toast_anchor_rect(toast.anchor())))
             .collect();
-        let renderer = &mut self.window.renderer;
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let layouts = toast::place(
             self.window.toasts.toasts(),
             |anchor| {
@@ -18078,7 +18415,7 @@ impl Runtime {
             },
             (width as f32, height as f32),
             scale,
-            &mut |run, size| renderer.measure_chrome_text(run, size),
+            &mut |run, size| renderer.measure_chrome_text(gpu, run, size),
         );
         let pointer = self.toast_pointer(&layouts);
         let palette = bt_render::chrome_palette();
@@ -18982,11 +19319,11 @@ impl Runtime {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (rect, head) = seats::search_capsule_host(&self.seats, &self.seat_layout, seat, scale)?;
         let counter = self.window.search.counter();
-        let width = self
-            .window
-            .renderer
-            .measure_chrome_text(&counter, search::COUNTER_FONT_LOGICAL_PX * scale)
-            + 2.0 * search::COUNTER_PADDING_X_LOGICAL_PX * scale;
+        let width = self.window.renderer.measure_chrome_text(
+            &mut self.app.gpu,
+            &counter,
+            search::COUNTER_FONT_LOGICAL_PX * scale,
+        ) + 2.0 * search::COUNTER_PADDING_X_LOGICAL_PX * scale;
         Some(search::lay_out(rect, head, scale, width))
     }
 
@@ -19476,10 +19813,11 @@ impl Runtime {
         );
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let font = search::FIELD_FONT_LOGICAL_PX * scale;
-        let caret_x = self
-            .window
-            .renderer
-            .measure_chrome_text(&format!("{before}{preedit}"), font);
+        let caret_x = self.window.renderer.measure_chrome_text(
+            &mut self.app.gpu,
+            &format!("{before}{preedit}"),
+            font,
+        );
         if shown.is_empty() {
             (search::field_placeholder().to_owned(), false, caret_x)
         } else {
@@ -19787,7 +20125,7 @@ impl Runtime {
             .map(|leaf| {
                 self.window
                     .renderer
-                    .measure_chrome_text(&leaf.title, font_px)
+                    .measure_chrome_text(&mut self.app.gpu, &leaf.title, font_px)
             })
             .collect();
         let Some(layout) = peek_strip::layout(
@@ -19902,7 +20240,7 @@ impl Runtime {
         // Disjoint fields, split by hand: the editor owns where its window
         // starts and the renderer owns how wide a string is, and this is the one
         // place the two have to meet.
-        let renderer = &mut self.window.renderer;
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let Some(editor) = self.window.rename.as_mut() else {
             return;
         };
@@ -19910,7 +20248,7 @@ impl Runtime {
             if text.is_empty() {
                 0.0
             } else {
-                renderer.measure_chrome_text(text, font_px)
+                renderer.measure_chrome_text(gpu, text, font_px)
             }
         };
         editor.clamp_scroll();
@@ -20016,8 +20354,8 @@ impl Runtime {
         // The menu is content-sized, so laying it out is a measuring job — the
         // same renderer, the same font, the same call `build` makes when it
         // draws the strings this width was computed from.
-        let renderer = &mut self.window.renderer;
-        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(profiles::layout(
             anchor,
             side,
@@ -20040,8 +20378,8 @@ impl Runtime {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
-        let renderer = &mut self.window.renderer;
-        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         let rows = self
             .window
             .pending_restore
@@ -20130,8 +20468,8 @@ impl Runtime {
         // popup. Handed over as a closure for `build`'s own reason — the
         // renderer owns the face, and the geometry stays a pure function of what
         // it is told.
-        let renderer = &mut self.window.renderer;
-        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         settings::layout_for_menus(
             width as f32,
             height as f32,
@@ -20545,8 +20883,8 @@ impl Runtime {
                 caret: editor_caret,
                 refusal: editor.refusal.map(i18n::Text::text),
             });
-            let renderer = &mut self.window.renderer;
-            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
             settings::build(
                 &layout,
                 hover,
@@ -20567,8 +20905,9 @@ impl Runtime {
         } else if let Some(layout) = self.profile_menu_layout() {
             {
                 let default = self.default_profile();
-                let renderer = &mut self.window.renderer;
-                let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+                let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+                let mut measure =
+                    |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
                 profiles::build(
                     &layout,
                     &self.app.profile_programs,
@@ -20597,8 +20936,8 @@ impl Runtime {
                 .map(|seat| self.files_state(seat).root)
                 .unwrap_or_default();
             let hover = self.window.root_menu.hover();
-            let renderer = &mut self.window.renderer;
-            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
             profiles::root_menu_build(&layout, &choices, &current, hover, &mut measure)
         } else if self.window.graph_filter_menu.is_some()
             && let Some(layout) = self.graph_filter_menu_layout()
@@ -20629,8 +20968,8 @@ impl Runtime {
             // however the flags are set.
             let items = self.preview_menu_items(seat);
             let hover = self.window.preview_menu.hover();
-            let renderer = &mut self.window.renderer;
-            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
             profiles::preview_menu_build(&layout, &items, hover, &mut measure)
         } else {
             Vec::new()
@@ -21008,10 +21347,11 @@ impl Runtime {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         // Only the font knows how wide a line is, so the measuring happens here,
         // beside the renderer, exactly as the tip's and the badge's do.
-        let width = self
-            .window
-            .renderer
-            .measure_chrome_text(&text, bt_render::DRAG_GHOST_FONT_LOGICAL_PX * scale);
+        let width = self.window.renderer.measure_chrome_text(
+            &mut self.app.gpu,
+            &text,
+            bt_render::DRAG_GHOST_FONT_LOGICAL_PX * scale,
+        );
         let layout = seats::drag_ghost_layout(
             [pointer.x as f32, pointer.y as f32],
             mark_logical,
@@ -21137,11 +21477,12 @@ impl Runtime {
         let gap = tooltip::TIP_GAP_LOGICAL_PX * scale;
         let max_width = (face.max_width_logical_px() * scale).min(width as f32 - 2.0 * gap);
         let (text, widths) = {
-            let renderer = &mut self.window.renderer;
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let line_height = (font_px * face.line_height()).round();
             let mut measure = |run: &str| -> f32 {
                 if face.monospace() {
                     renderer.measure_preview_paragraph_width(
+                        gpu,
                         &[bt_render::PreviewRun {
                             text: run.to_owned(),
                             color: [0, 0, 0],
@@ -21153,7 +21494,7 @@ impl Runtime {
                         line_height,
                     )
                 } else {
-                    renderer.measure_chrome_text(run, font_px)
+                    renderer.measure_chrome_text(gpu, run, font_px)
                 }
             };
             // `white-space: pre-line` and a wrap, or `nowrap` and an ellipsis —
@@ -22704,9 +23045,24 @@ impl Runtime {
     }
 
     /// Record a meaningful change and start the debounce window (§5.1).
+    ///
+    /// **Only from the window the file mirrors** (multiwindow slice C). Every
+    /// verb in this window that changes something worth remembering comes
+    /// through here, so this is the one place the rule in
+    /// [`App::session_window`] can be kept without every one of them having to
+    /// know it exists.
     fn mark_session_dirty(&mut self, now: Instant) {
+        if !self.mirrors_the_session() {
+            return;
+        }
         let snapshot = self.session_snapshot();
         self.app.session_store.record(snapshot, now);
+    }
+
+    /// Whether `session.json` is a picture of *this* window. See
+    /// [`App::session_window`].
+    fn mirrors_the_session(&self) -> bool {
+        self.app.session_window == self.window.window.id()
     }
 
     /// Commit every theme-dependent surface at one event-loop safe point. Until the resulting frame
@@ -22950,7 +23306,7 @@ impl Runtime {
         let span = bt_detect::table::table_at(&lines)?;
         let metrics = table_block::metrics(self.window.renderer.metrics().font_size_px);
         let palette = bt_render::chrome_palette();
-        let renderer = &mut self.window.renderer;
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         Some(table_block::build(
             &span,
             metrics,
@@ -22958,6 +23314,7 @@ impl Runtime {
             |cell, heading| {
                 let runs = markdown_runs(cell, &palette, heading);
                 renderer.measure_preview_paragraph_width(
+                    gpu,
                     &runs,
                     metrics.font_size,
                     metrics.line_height,
@@ -23801,7 +24158,10 @@ impl Runtime {
             .map(|editor| editor.text.clone())
             .unwrap_or_default();
         let tools = seats::PreviewHeadTools {
-            name_width: self.window.renderer.measure_chrome_text(&draft, font),
+            name_width: self
+                .window
+                .renderer
+                .measure_chrome_text(&mut self.app.gpu, &draft, font),
             ..tools
         };
         let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
@@ -23816,7 +24176,7 @@ impl Runtime {
         // Disjoint fields, split by hand: the editor owns where its window
         // starts and the renderer owns how wide a string is, and this is the one
         // place the two have to meet — `measure_open_rename`'s own division.
-        let renderer = &mut self.window.renderer;
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let Some(editor) = self.window.rename.as_mut() else {
             return (tools, None);
         };
@@ -23824,7 +24184,7 @@ impl Runtime {
             if text.is_empty() {
                 0.0
             } else {
-                renderer.measure_chrome_text(text, font)
+                renderer.measure_chrome_text(gpu, text, font)
             }
         };
         editor.clamp_scroll();
@@ -24514,6 +24874,7 @@ impl Runtime {
             return Ok(false);
         }
         let metrics = apply_stored_terminal_font(
+            &mut self.app.gpu,
             &mut self.window.renderer,
             self.app.settings_store.loaded(),
         )?;
@@ -24702,10 +25063,10 @@ impl Runtime {
         let (width, height) = (width as f32, height as f32);
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let room = restore::content_width(width, scale);
-        let renderer = &mut self.window.renderer;
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut wrap = |text: &str| {
             restore::wrap(text, room, |line| {
-                renderer.measure_chrome_text(line, restore::SUB_FONT_LOGICAL_PX * scale)
+                renderer.measure_chrome_text(gpu, line, restore::SUB_FONT_LOGICAL_PX * scale)
             })
         };
         let message_lines = wrap(&body);
@@ -24717,10 +25078,16 @@ impl Runtime {
             decline_text,
             install_text,
             install_enabled,
-            decline_text_width: renderer
-                .measure_chrome_text(decline_text, restore::BUTTON_FONT_LOGICAL_PX * scale),
-            install_text_width: renderer
-                .measure_chrome_text(install_text, restore::BUTTON_FONT_LOGICAL_PX * scale),
+            decline_text_width: renderer.measure_chrome_text(
+                gpu,
+                decline_text,
+                restore::BUTTON_FONT_LOGICAL_PX * scale,
+            ),
+            install_text_width: renderer.measure_chrome_text(
+                gpu,
+                install_text,
+                restore::BUTTON_FONT_LOGICAL_PX * scale,
+            ),
         };
         Some(restore::invite_layout(&content, width, height, scale))
     }
@@ -26032,14 +26399,16 @@ impl Runtime {
         };
         let tools = seats::PreviewHeadTools {
             switcher: pool > 1,
-            name_width: self
-                .window
-                .renderer
-                .measure_chrome_text(&name, seats::PREVIEW_NAME_FONT_LOGICAL_PX * scale),
-            count_width: self
-                .window
-                .renderer
-                .measure_chrome_text(&count, seats::PREVIEW_COUNT_FONT_LOGICAL_PX * scale),
+            name_width: self.window.renderer.measure_chrome_text(
+                &mut self.app.gpu,
+                &name,
+                seats::PREVIEW_NAME_FONT_LOGICAL_PX * scale,
+            ),
+            count_width: self.window.renderer.measure_chrome_text(
+                &mut self.app.gpu,
+                &count,
+                seats::PREVIEW_COUNT_FONT_LOGICAL_PX * scale,
+            ),
             ..tools
         };
         // **The editor, if this head is the one holding it** (user ruling
@@ -26140,8 +26509,8 @@ impl Runtime {
         let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
         let run = seats::pane_foot_geometry(rect, bt_layout::SeatKind::Preview, scale).foot_path;
         let font = seats::FILES_FOOT_FONT_LOGICAL_PX * scale;
-        let renderer = &mut self.window.renderer;
-        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(seats::dress_foot(
             seats::FootDress {
                 run,
@@ -28376,7 +28745,7 @@ impl Runtime {
         let advance = self
             .window
             .renderer
-            .preview_mono_advance(text_metrics.font_size);
+            .preview_mono_advance(&mut self.app.gpu, text_metrics.font_size);
         self.preview_pane_mut(surface).mono_advance = advance;
         let doc = match view {
             // The editor's own line model, not [`str::lines`]: a body ending in
@@ -28495,6 +28864,7 @@ impl Runtime {
                     let columns = markdown_table_columns(rows, metrics, |cell, heading| {
                         let runs = markdown_runs(cell, &palette, heading);
                         self.window.renderer.measure_preview_paragraph_width(
+                            &mut self.app.gpu,
                             &runs,
                             metrics.font_size,
                             metrics.line_height,
@@ -28517,6 +28887,7 @@ impl Runtime {
                     // scroll extent the fence never uses.
                     width: markdown_fence_width(text, metrics, |runs| {
                         self.window.renderer.measure_preview_paragraph_width(
+                            &mut self.app.gpu,
                             runs,
                             metrics.code_font,
                             metrics.code_line_height,
@@ -28543,9 +28914,9 @@ impl Runtime {
         width: f32,
         metrics: seats::PreviewMarkdownMetrics,
     ) -> Vec<MarkdownBlockLayout> {
-        let renderer = &mut self.window.renderer;
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut wrapped = |runs: &[bt_render::PreviewRun], width: f32, font: f32, line: f32| {
-            renderer.measure_preview_paragraph(runs, width, font, line)
+            renderer.measure_preview_paragraph(gpu, runs, width, font, line)
         };
         lay_markdown_out(blocks, intrinsic, width, metrics, &mut wrapped)
     }
@@ -28718,7 +29089,7 @@ fn measure_markdown_block(
     }
 }
 
-impl Runtime {
+impl Runtime<'_> {
     /// How tall the parsed document is, and how wide, in the units the scroller
     /// is clamped in.
     fn preview_content_extent(&self, surface: PreviewSurface, scale: f32) -> (f32, usize) {
@@ -28925,7 +29296,8 @@ impl Runtime {
         // paragraph landed and that answer is only true of the body as it now
         // stands. The hover's rule is drawn from the same boxes, so the line
         // under a link cannot be anywhere but under it.
-        let links = measure_preview_links(&mut self.window.renderer, &built, &sites);
+        let links =
+            measure_preview_links(&mut self.app.gpu, &mut self.window.renderer, &built, &sites);
         if let Some((hovered_surface, hovered)) = self.preview_link_hover
             && hovered_surface == surface
             && links.iter().any(|link| link.rect == hovered)
@@ -31004,9 +31376,10 @@ impl Runtime {
                 .and_then(|query| state.cache.search(query))
                 .and_then(git::GitSlot::ready)
                 .map(Vec::as_slice);
-            let renderer = &mut self.window.renderer;
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32, face: git_panel::MeasureFace| {
                 renderer.measure_chrome_label(
+                    gpu,
                     text,
                     size,
                     face.weight,
@@ -31616,8 +31989,11 @@ impl Runtime {
         // Two strings, measured once per frame rather than once per column: they
         // are the same two words in every column in the window, and the only
         // thing that could make them differ is the font, which is one font.
-        let widths = seats::FilesView::ALL
-            .map(|view| self.window.renderer.measure_chrome_text(view.label(), font));
+        let widths = seats::FilesView::ALL.map(|view| {
+            self.window
+                .renderer
+                .measure_chrome_text(&mut self.app.gpu, view.label(), font)
+        });
         let active = self.window.active_tab;
         self.seats
             .files()
@@ -31674,9 +32050,10 @@ impl Runtime {
                 .files
                 .get(&seat)
                 .is_some_and(|state| state.git_remotes_open);
-            let renderer = &mut self.window.renderer;
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32, face: git_panel::MeasureFace| {
                 renderer.measure_chrome_label(
+                    gpu,
                     text,
                     size,
                     face.weight,
@@ -31771,8 +32148,8 @@ impl Runtime {
             } else {
                 root
             };
-            let renderer = &mut self.window.renderer;
-            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
             tree.foot_path = settings::ellipsized_left(&text, room, font, &mut measure);
         }
     }
@@ -32836,14 +33213,16 @@ impl Runtime {
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         // Only the font knows how wide a line is, so the measuring happens here,
         // beside the renderer, exactly as the tip's and the ghost's do.
-        let name_width = self
-            .window
-            .renderer
-            .measure_chrome_text(&content.name, file_peek::PEEK_HEAD_FONT_LOGICAL_PX * scale);
-        let ftype_width = self
-            .window
-            .renderer
-            .measure_chrome_text(&content.ftype, file_peek::PEEK_TYPE_FONT_LOGICAL_PX * scale);
+        let name_width = self.window.renderer.measure_chrome_text(
+            &mut self.app.gpu,
+            &content.name,
+            file_peek::PEEK_HEAD_FONT_LOGICAL_PX * scale,
+        );
+        let ftype_width = self.window.renderer.measure_chrome_text(
+            &mut self.app.gpu,
+            &content.ftype,
+            file_peek::PEEK_TYPE_FONT_LOGICAL_PX * scale,
+        );
         let layout = file_peek::layout(
             &content,
             subject.row,
@@ -32871,8 +33250,8 @@ impl Runtime {
             .unwrap_or_default()
             .to_owned();
         let foot = {
-            let renderer = &mut self.window.renderer;
-            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
             seats::dress_foot(
                 seats::FootDress {
                     run: file_peek::foot_run(&layout, scale),
@@ -33128,7 +33507,14 @@ impl Runtime {
             * self.window.renderer.metrics().scale_factor as f32;
         names
             .iter()
-            .map(|(seat, name)| (*seat, self.window.renderer.measure_chrome_text(name, size)))
+            .map(|(seat, name)| {
+                (
+                    *seat,
+                    self.window
+                        .renderer
+                        .measure_chrome_text(&mut self.app.gpu, name, size),
+                )
+            })
             .collect()
     }
 
@@ -33164,8 +33550,8 @@ impl Runtime {
             return None;
         }
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
-        let renderer = &mut self.window.renderer;
-        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(profiles::root_menu_layout(
             anchor,
             (width as f32, height as f32),
@@ -33551,19 +33937,23 @@ impl Runtime {
         let (width, height) = (width as f32, height as f32);
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let room = restore::content_width(width, scale);
-        let renderer = &mut self.window.renderer;
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let content = restore::GateContent {
             title,
             message_lines: restore::wrap(&message, room, |line| {
-                renderer.measure_chrome_text(line, restore::SUB_FONT_LOGICAL_PX * scale)
+                renderer.measure_chrome_text(gpu, line, restore::SUB_FONT_LOGICAL_PX * scale)
             }),
             discard_text,
             cancel_text_width: renderer.measure_chrome_text(
+                gpu,
                 restore::gate_cancel_text(),
                 restore::BUTTON_FONT_LOGICAL_PX * scale,
             ),
-            discard_text_width: renderer
-                .measure_chrome_text(discard_text, restore::BUTTON_FONT_LOGICAL_PX * scale),
+            discard_text_width: renderer.measure_chrome_text(
+                gpu,
+                discard_text,
+                restore::BUTTON_FONT_LOGICAL_PX * scale,
+            ),
         };
         Some(restore::gate_layout(&content, width, height, scale))
     }
@@ -33612,8 +34002,8 @@ impl Runtime {
             return None;
         }
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
-        let renderer = &mut self.window.renderer;
-        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(profiles::preview_menu_layout(
             anchor,
             (width as f32, height as f32),
@@ -33701,8 +34091,8 @@ impl Runtime {
         let open_text = menu.activation.open_text();
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
-        let renderer = &mut self.window.renderer;
-        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(profiles::file_menu_layout(
             point,
             (width as f32, height as f32),
@@ -33918,8 +34308,8 @@ impl Runtime {
         let draw = self.git_menu_draw()?;
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
-        let renderer = &mut self.window.renderer;
-        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(profiles::git_menu_layout(
             draw.point,
             (width as f32, height as f32),
@@ -34830,8 +35220,8 @@ impl Runtime {
         );
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
-        let renderer = &mut self.window.renderer;
-        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(profiles::term_menu_layout(
             point,
             (width as f32, height as f32),
@@ -35115,8 +35505,8 @@ impl Runtime {
         let (point, submenu_open) = (menu.point, menu.submenu_open);
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
-        let renderer = &mut self.window.renderer;
-        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(profiles::pane_menu_layout(
             point,
             (width as f32, height as f32),
@@ -35221,8 +35611,8 @@ impl Runtime {
         // about the window rather than about the pane the menu was raised on.
         let current = self.sessions.get(&seat).map(|leaf| leaf.profile);
         let programs = &self.app.profile_programs;
-        let renderer = &mut self.window.renderer;
-        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         profiles::pane_menu_build(&layout, hover, current, programs, &mut measure)
     }
 
@@ -35556,8 +35946,8 @@ impl Runtime {
         let rows = profiles::git_filter_rows(&self.graph_filter_branches(seat));
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
-        let renderer = &mut self.window.renderer;
-        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(profiles::git_filter_menu_layout(
             anchor,
             (width as f32, height as f32),
@@ -37268,6 +37658,7 @@ impl Runtime {
     fn float_dock_label_width(&mut self, scale: f32) -> f32 {
         let font = float::FLOAT_DOCK_FONT_LOGICAL_PX * scale;
         self.window.renderer.measure_chrome_label(
+            &mut self.app.gpu,
             float_dock_label(),
             font,
             bt_render::ChromeLabelWeight::SemiBold,
@@ -37449,8 +37840,8 @@ impl Runtime {
             root
         };
         let (name, path) = {
-            let renderer = &mut self.window.renderer;
-            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
             (
                 settings::ellipsized(
                     &name,
@@ -37573,8 +37964,8 @@ impl Runtime {
         let head_font = float::FLOAT_HEAD_FONT_LOGICAL_PX * scale;
         let foot_font = float::FLOAT_FOOT_FONT_LOGICAL_PX * scale;
         let (title, foot) = {
-            let renderer = &mut self.window.renderer;
-            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
             (
                 // **Not upper-cased** (P51). The files head shouts its root
                 // because a root is a place; a filename is a name, and a name
@@ -46309,7 +46700,7 @@ impl Runtime {
         // DPI reconciliation can publish a frame, then reconcile once more against inner_size().
         self.window
             .renderer
-            .resize(physical.width, physical.height)
+            .resize(&self.app.gpu, physical.width, physical.height)
             .context("synchronize renderer swapchain with resized physical client")?;
         self.reconcile_authoritative_dpi("resized")?;
         let requested_physical = self.window.window.inner_size();
@@ -46398,7 +46789,7 @@ impl Runtime {
         if physical.width > 0 && physical.height > 0 {
             self.window
                 .renderer
-                .resize(physical.width, physical.height)
+                .resize(&self.app.gpu, physical.width, physical.height)
                 .context("reconcile swapchain with physical client size")?;
             ensure_swapchain_matches_inner(&self.window.renderer, physical)?;
         }
@@ -46475,7 +46866,7 @@ impl Runtime {
         let metrics = self
             .window
             .renderer
-            .update_scale_factor(scale_factor)
+            .update_scale_factor(&mut self.app.gpu, scale_factor)
             .context("remeasure terminal font at new DPI")?;
         ensure_metrics_match_authoritative_scale(metrics.scale_factor, scale_factor)?;
         // Every shell in every tab: a DPI change is a fact about the display, so
@@ -46627,7 +47018,7 @@ impl Runtime {
     /// normally.
     ///
     /// So there is one funnel and it is grep-pinnable: **this is the only call
-    /// to `Renderer::present_seats` in `bt-app`**, and the commit is the
+    /// to `WindowRenderer::present_frame` in `bt-app`**, and the commit is the
     /// statement after it. Two callers reach it — [`Self::redraw`] with a newly
     /// composed frame, and [`Self::present_retained_picture`] with the picture
     /// already on the glass — and a resize present is `redraw` again, not a
@@ -46642,12 +47033,13 @@ impl Runtime {
     /// nothing new for the compositor to publish and the frame is re-filed by
     /// the caller.
     fn present_seats_and_commit(
-        renderer: &mut Renderer,
+        gpu: &mut GpuContext,
+        renderer: &mut WindowRenderer,
         compositor: &bt_platform::Compositor,
         seat_frames: &[bt_render::SeatFrame<'_>],
         trigger: FrameTrigger,
     ) -> Result<PresentOutcome> {
-        let outcome = renderer.present_seats(seat_frames, trigger)?;
+        let outcome = renderer.present_frame(gpu, seat_frames, trigger)?;
         if matches!(outcome, PresentOutcome::Presented(_)) {
             compositor
                 .commit()
@@ -46741,6 +47133,7 @@ impl Runtime {
             source: FrameSource::Expose,
         };
         match Self::present_seats_and_commit(
+            &mut self.app.gpu,
             &mut self.window.renderer,
             &self.window.compositor,
             &seat_frames,
@@ -46878,6 +47271,7 @@ impl Runtime {
             });
         }
         match Self::present_seats_and_commit(
+            &mut self.app.gpu,
             &mut self.window.renderer,
             &self.window.compositor,
             &seat_frames,
@@ -46995,17 +47389,282 @@ impl Runtime {
         Ok(())
     }
 
-    fn shutdown(&mut self) -> Result<()> {
+    /// **One turn of the event loop, for one window** (multiwindow slice C).
+    ///
+    /// Every clock this window keeps, read once, and the earliest moment it
+    /// needs to be woken again — which the caller takes the minimum of over
+    /// every open window. Nothing here changed when the loop learned to route:
+    /// this is the body `about_to_wait` always had, with the window it was
+    /// implicitly about now named by the `self` it is called on.
+    ///
+    /// `application_clocks` is the one thing a window cannot decide for itself.
+    /// The three watches and the session debounce belong to the application, so
+    /// turning them once per window would be a folder re-read per window and a
+    /// debounce that fires N times; exactly one window in the process is given
+    /// the job, and it is the one that opened first — see [`FolioApp::order`].
+    fn turn(&mut self, now: Instant, application_clocks: bool) -> Result<Option<Instant>> {
+        // First, because everything below it is allowed to assume the window is
+        // where the hand last left it. This is the door the coalescing is *for*:
+        // the queue has just run dry, so whatever the wheel collected while the
+        // loop was away is one burst and gets one frame. See [`WheelBurst`].
+        self.flush_wheel()?;
+        self.apply_math_context_menu_result();
+        self.apply_folder_pick_result()?;
+        self.apply_image_pick_result()?;
+        self.drain_pty()?;
+        // Polled here rather than pushed from the probe's thread: raising a
+        // modal is a change to the window, and the window is this thread's.
+        self.raise_psreadline_invite_if_due()?;
+        self.advance_cursor_blink_if_due(now)?;
+        if application_clocks {
+            self.advance_scheme_watch(now)?;
+            self.advance_profile_watch(now)?;
+        }
+        self.advance_rename_blink_if_due(now)?;
+        // Ahead of the strip's own animation tick: paying the press's promise
+        // activates a tab, and the strip that is redrawn afterwards should be
+        // the one the switch produced.
+        self.advance_tab_press_if_due(now)?;
+        self.advance_strip_animation(now)?;
+        self.finish_synchronized_update_if_due(now)?;
+        // The watcher's own clock (R31's D), beside the rest of this window's:
+        // it asks for a wake-up only while it is holding news, and the
+        // subscriptions it keeps level with the screen are dropped here the turn
+        // after the page they were for went away.
+        //
+        // The application's, not this window's, since slice B raised it: the set
+        // it follows is the union of every window's pages, and one clock over a
+        // union is one clock. So one window turns it, as with the two watches
+        // above, and the news it produces reaches the pages through the caches
+        // those pages own.
+        if application_clocks {
+            self.advance_git_watch(now)?;
+            self.app.session_store.flush_if_due(now);
+        }
+        // **The one rule, in the one place it can be kept.** Whichever rung holds
+        // the keyboard publishes its caret here, at the tail of every pass —
+        // which is what "every frame the caret can move" means without anybody
+        // having to enumerate the ways it moves: typing, scrolling, resizing and
+        // a capsule relaid all wake this loop, and the throttle below turns a
+        // rectangle that did not move into no call at all. The terminal's rung
+        // says nothing here and everything in `publish_frame_inner`, because its
+        // caret is a property of a frame and there is no frame at this point.
+        self.offer_ime_caret(None);
+        self.flush_ime_cursor_area(now);
+        self.finish_resize_if_quiescent(now)?;
+        self.finish_preview_resize_if_quiet(now)?;
+        self.advance_live_math_if_due(now)?;
+        self.activate_hyperlink_hover_if_due(now)?;
+        self.activate_peek_if_due(now)?;
+        // Both `⌄` clocks, and the pane menu's own two. Above the tip's, on the
+        // layout peek's precedent and for its reason: a menu that has matured is
+        // already on screen when the tip asks whether it has anything to explain.
+        self.advance_chevrons(now)?;
+        self.advance_pane_menu(now)?;
+        self.clear_math_hover_if_due(now)?;
+        // Ahead of the tip's own promotion, so §6's ordering is structural and
+        // not merely a consequence of 350 being less than 380: on the frame both
+        // came due, the peek is already showing when the tip asks.
+        self.advance_layout_peek_if_due(now)?;
+        self.advance_tooltip_if_due(now)?;
+        // The notices' three clocks, beside the tip's and after it: a card that
+        // has just left frees the pixels the tip may be about to be laid over.
+        self.advance_toasts(now)?;
+        // The jump's row flash, beside the notices' clocks: it is the same shape —
+        // a fade that runs itself out with the pointer and the keyboard both
+        // still, and that nothing else in the window would wake the loop to draw.
+        self.advance_command_flash(now)?;
+        // And the rail's own three, beside the flash because they are the same
+        // shape: a hand resting on a rail moves nothing and no other clock in this
+        // window would wake the loop to finish the crest it started.
+        self.advance_command_rails(now)?;
+        // The scroll thumb's rest and fade, beside the rail's clocks because it
+        // is the same shape once more, and on the same pane's own edge (P2-9
+        // slice 1).
+        self.advance_terminal_thumbs(now)?;
+        // The glance card's own 350ms, beside the layout peek's and for the same
+        // reason it stands where it does: it is a *peek*, and a peek that has
+        // matured is already on screen when everything above it asks.
+        self.advance_file_peek(now)?;
+        // The float's two clocks and its entrance. After the tip's, because a
+        // maturing intent can *open* a window over whatever the tip was about to
+        // explain, and the frame both are due on should show that in the order
+        // they will actually be drawn.
+        self.advance_float(now)?;
+        // And the foot's own 1300ms, whichever strip is wearing it. Its own step
+        // because the two feet are drawn into two different surfaces — see
+        // `advance_foot_reveal`.
+        self.advance_foot_reveal(now)?;
+        // And the preview's own acknowledgement, on the same 1300ms clock.
+        self.advance_preview_notice(now)?;
+        // Service the PTY gate after every other due task that can mutate session state, then carry
+        // the deadline derived from that exact sample into the control-flow decision below.
+        let pty_resize_deadline = self.flush_pending_pty_resize(now)?;
+        let startup_deadline =
+            startup_poll_delay(self.window.first_text_presented).map(|delay| now + delay);
+        // Every leaf, not every tab's focused leaf: an unfocused pane runs its own resize
+        // transaction and owes its own PSReadLine repair, so its quiescence is its own deadline to
+        // wake for. Reading this through the tab's deref asked only the pane holding the keyboard,
+        // and the panes beside it had to wait for some unrelated event to carry them over the line.
+        let resize_finish_deadline = self
+            .window
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.leaves())
+            .filter_map(|(_, leaf)| leaf.session.resize_finish_deadline())
+            .min();
+        // Every leaf, for the reason the line above gives about resizes: a DEC
+        // 2026 block is a property of one screen, and
+        // `finish_synchronized_update_if_due` has always walked every leaf to
+        // time them out. Reading the deadline through the tab's deref asked only
+        // the pane holding the keyboard, so an unfocused pane that opened a block
+        // and then went quiet had nothing to wake the loop on its behalf — its
+        // own timeout could only fire if something else happened to wake the
+        // window first.
+        let synchronized_update_deadline = self
+            .window
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.leaves())
+            .filter_map(|(_, leaf)| leaf.session.synchronized_update_deadline())
+            .min();
+        let live_stability_deadline = self.session.live_stability_deadline();
+        let wake_deadline = earliest_deadline([
+            startup_deadline,
+            self.window.ime_cursor_throttle.deadline(),
+            // Only while a shell holds the keyboard: a frozen caret owes no
+            // wake-up at all (ruling 2026-08-13).
+            self.keyboard_owner_is_a_shell()
+                .then(|| self.window.cursor_blink.deadline())
+                .flatten(),
+            // The press's own 180ms, and only while it still owes one — a press
+            // that has been paid or has slipped reports nothing, so a held
+            // button costs no wake-ups at all.
+            self.window
+                .tab_press
+                .as_ref()
+                .and_then(TabPress::wake_deadline),
+            // The rename caret blinks only while there is a rename.
+            self.window
+                .rename
+                .is_some()
+                .then(|| self.window.rename_blink.deadline())
+                .flatten(),
+            self.strip_animation_deadline(now),
+            pty_resize_deadline,
+            resize_finish_deadline,
+            synchronized_update_deadline,
+            live_stability_deadline,
+            // The tip's 380ms while one is settling, and the fade's own frames
+            // until it lands. A window with no tip under the pointer reports
+            // nothing and costs no wake-ups at all.
+            self.tooltip_deadline(now),
+            // A notice's entrance landing, its life running out, its exit
+            // finishing — and nothing at all while one is held under the pointer,
+            // because a stopped clock owes no wake-ups (2026-08-16).
+            self.toast_deadline(now),
+            // The jump flash's own 950ms, at the animation's rate and only while
+            // one is running. A window that has not jumped asks for nothing.
+            self.command_flash_deadline(now),
+            // `width .1s, background .14s, opacity .12s` on the ticks of whichever
+            // rail the pointer is on — and nothing at all once the longest of the
+            // three has landed, which is what makes a rail under a still hand cost
+            // no wake-ups.
+            self.command_rail_deadline(now),
+            // A terminal thumb's rest and the fade after it — and nothing at all
+            // for a pane with no scrollback, a pane parked in history (its bar
+            // is standing, not fading) or a pane whose fade has landed.
+            self.terminal_thumb_deadline(now),
+            // The peek's 350ms while one is settling, and nothing afterwards:
+            // it has no fade, so a schematic on screen is finished and asks for
+            // no frames at all.
+            self.window.layout_peek.deadline(),
+            // The glance's 350ms while one is settling, and — since it became a
+            // card a hand can walk into (2026-08-14) — the grace that takes it
+            // down again once the pointer has left its corridor. A card standing
+            // still under a pointer that is inside it has neither clock running
+            // and asks for no wake-ups at all, which is the same silence it kept
+            // when it could not be touched.
+            self.window.file_peek.as_ref().and_then(|peek| peek.due),
+            self.window
+                .file_peek
+                .as_ref()
+                .and_then(|peek| peek.closing_at),
+            // And the dwell's own 350ms, which is the one clock in this window
+            // that has to fire under a pointer that is not moving at all — a
+            // hand resting on another row sends no events, so without this wake
+            // "停留即换" would only ever happen on the next thing to twitch.
+            self.window
+                .file_peek
+                .as_ref()
+                .and_then(|peek| peek.dwell.as_ref())
+                .and_then(|dwell| dwell.due),
+            // The intent's 180ms, the grace's 220/420, and the entrance's own
+            // frames until it lands. A window with no float and no hovered
+            // trigger reports nothing and costs no wake-ups at all.
+            self.float_deadline(now),
+            // The foot's confirmation owes exactly one wake-up: the instant it is
+            // due to turn back into a path. One entry for both feet, because
+            // there is one clock.
+            self.window
+                .revealed_foot
+                .map(|(_, at)| at + FOOT_REVEAL_FEEDBACK),
+            // The preview's "Saved", on the same clock and owing the same single
+            // wake-up: the instant it is due to go away.
+            self.preview_notice_deadline(),
+            // The two chevrons' 250/150, and nothing at all while the pointer is
+            // not on one and no menu one opened is up (2026-08-16).
+            self.window.chevrons.deadline(),
+            // And the pane menu's own clock: the heading's rest while the
+            // submenu is shut, the safety triangle's cap while it is open.
+            self.pane_menu_deadline(),
+            self.window.hyperlink_hover.show_at,
+            self.window.peek_hover.show_at,
+            self.window.math_hover_clear_at,
+            self.preview_resample_deadline(),
+            application_clocks
+                .then(|| self.app.session_store.deadline())
+                .flatten(),
+            // The schemes folder's own debounce, on the same terms: absent for
+            // every window whose folder nobody is editing.
+            application_clocks
+                .then(|| self.app.scheme_watch.deadline())
+                .flatten(),
+            // And the storage folder's, on exactly the same terms — absent for
+            // every window in which nothing at all has been written lately.
+            application_clocks
+                .then(|| self.app.profile_watch.deadline())
+                .flatten(),
+            // The debounce a change notification started (R31's D). Absent —
+            // and therefore costing nothing — for every window that is not
+            // currently holding unanswered news about a repository, which is
+            // every window most of the time.
+            application_clocks
+                .then(|| self.app.git_watch.deadline())
+                .flatten(),
+        ]);
+        self.reap_exited_tabs()?;
+        Ok(wake_deadline)
+    }
+
+    /// **Close this window** (multiwindow slice C).
+    ///
+    /// Everything here is about one window and would be owed a second time by a
+    /// second one: the rename it was in the middle of, the caret it lent the
+    /// IME, and the shells it is the only reader of. The process's own half —
+    /// dropping the run sentinel — is [`App::finish`], and it happens once, when
+    /// the last window has gone.
+    ///
+    /// The session snapshot is taken here rather than in `App::finish` because
+    /// it is a picture of *this window's* tabs, and by the time the last window
+    /// has closed there is nothing left to photograph. It writes only when this
+    /// window is the one the file mirrors — see [`App::session_window`].
+    fn close_window(&mut self) -> Result<()> {
         // §7.1.4: "未提交的重命名在序列化前提交（blur 语义,输入到一半关窗不丢
         // 新名字）". Before the snapshot below, not after — the name has to be on
         // the tab by the time the tab is written down.
         self.finish_rename(true)?;
-        // The clean-exit path (§5.5): flush whatever the debounce still owes,
-        // then drop this run's sentinel. Its absence next time is the whole
-        // signal that this run reached here at all, so it must be removed
-        // before anything below is allowed to fail.
         self.mark_session_dirty(Instant::now());
-        self.app.session_store.close();
         self.window.ime_system_caret.destroy();
         for tab in &mut self.window.tabs {
             for (_, leaf) in tab.leaves_mut() {
@@ -47018,8 +47677,47 @@ impl Runtime {
     }
 }
 
+impl App {
+    /// **Close the process** (multiwindow slice C).
+    ///
+    /// The clean-exit path (§5.5): flush whatever the debounce still owes, then
+    /// drop this run's sentinel. Its absence next time is the whole signal that
+    /// this run reached here at all, so it is spent once — after the last
+    /// window's [`Runtime::close_window`] has taken its picture, and never per
+    /// window, because a second window's shut is not this process ending.
+    fn finish(&mut self) {
+        self.session_store.close();
+    }
+}
+
+/// **The process, and every window it has open** (multiwindow slice C).
+///
+/// Slice B split what a `Runtime` knew into an application half and a window
+/// half; this is where that split stops being a shape and starts being a
+/// number. There is one `App` and a `WindowRuntime` per open window, and the
+/// event loop's whole job is to put the right pair of them together: winit
+/// stamps every window event with the id of the window it happened to, so
+/// "which window is this about" is answered by looking the id up rather than by
+/// assuming — which is what the single-window loop did, in the only way a
+/// single-window loop can.
 struct FolioApp {
-    runtime: Option<Runtime>,
+    /// The application, from the moment its first window opened it.
+    ///
+    /// `Option` because there is no `App` before `resumed`: everything in it is
+    /// read off disk or spawned, and both need an event loop to have started.
+    app: Option<App>,
+    /// Every open window, under the id its events arrive with.
+    windows: HashMap<WindowId, WindowRuntime>,
+    /// The same windows in the order they opened, which is the order every
+    /// sweep over them runs in.
+    ///
+    /// A `HashMap` has no order, and three of the things this loop does to every
+    /// window in turn are observable in the order they happen: shells are
+    /// drained, frames are published, and a `BT_PERF_TRACE` is read by a person
+    /// comparing two runs. So the order is written down rather than borrowed
+    /// from a hasher, and being the opening order it also answers the one
+    /// question the application's own clocks ask — see [`Runtime::turn`].
+    order: Vec<WindowId>,
     proxy: EventLoopProxy<AppEvent>,
     startup_started: Instant,
     /// What the process was started with, held until there is a window to honour
@@ -47031,30 +47729,119 @@ struct FolioApp {
 impl FolioApp {
     fn new(proxy: EventLoopProxy<AppEvent>, cli: cli::CliRequest) -> Self {
         Self {
-            runtime: None,
+            app: None,
+            windows: HashMap::new(),
+            order: Vec::new(),
             proxy,
             startup_started: Instant::now(),
             cli,
         }
     }
-}
 
-impl FolioApp {
+    /// **This application, doing something for one of its windows.**
+    ///
+    /// The one place a [`Runtime`] is built. Two disjoint fields of `self` are
+    /// borrowed at once, which is exactly what the facade is: an `App` that is
+    /// the same one every time paired with the window this event is about.
+    ///
+    /// `None` for an id that is not open, which is not a defect to guard
+    /// against but a race the platform is entitled to: an event posted for a
+    /// window can arrive after that window has been removed.
+    fn runtime(&mut self, id: WindowId) -> Option<Runtime<'_>> {
+        let app = self.app.as_mut()?;
+        let window = self.windows.get_mut(&id)?;
+        Some(Runtime { app, window })
+    }
+
+    /// The window at `index` in the opening order.
+    fn runtime_at(&mut self, index: usize) -> Option<Runtime<'_>> {
+        let id = *self.order.get(index)?;
+        self.runtime(id)
+    }
+
+    /// Answer for every open window in turn, oldest first, stopping at the first
+    /// failure.
+    ///
+    /// Indexed rather than iterated because the body needs `self` — the loop
+    /// reads one id out of the order and gives the borrow straight back, which
+    /// is what lets each turn hold a whole `Runtime`.
+    fn for_each_window(
+        &mut self,
+        mut answer: impl FnMut(&mut Runtime<'_>) -> Result<()>,
+    ) -> Result<()> {
+        for index in 0..self.order.len() {
+            if let Some(mut runtime) = self.runtime_at(index) {
+                answer(&mut runtime)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Take a window off the screen, and the process with it if it was the last.
+    ///
+    /// **The last window closing is the process exiting** — the semantics this
+    /// program has always had, said once here instead of assumed by a loop that
+    /// could only ever hold one window. A window that is not the last takes only
+    /// itself: its shells are shut, its surface and its tabs are dropped, and
+    /// every other window is untouched.
+    fn close(&mut self, event_loop: &ActiveEventLoop, id: WindowId) -> Result<()> {
+        let Some(mut runtime) = self.runtime(id) else {
+            return Ok(());
+        };
+        let closed = runtime.close_window();
+        self.windows.remove(&id);
+        self.order.retain(|open| *open != id);
+        if self.windows.is_empty() {
+            // The run's sentinel, dropped once — see `App::finish`. This is the
+            // only place the process's own half of the shut is spent on the
+            // ordinary path, because this is the only place "there are no
+            // windows left" first becomes true.
+            if let Some(app) = self.app.as_mut() {
+                app.finish();
+            }
+            event_loop.exit();
+        }
+        closed
+    }
+
+    /// Open a window the keyboard asked for, if one was asked for.
+    ///
+    /// Spent at the loop's door rather than where the chord was dispatched, for
+    /// [`App::pending_new_window`]'s reason: opening needs the `ActiveEventLoop`
+    /// and a `Runtime` has never held one.
+    fn open_pending_window(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        let Some(app) = self.app.as_mut() else {
+            return Ok(());
+        };
+        if !std::mem::take(&mut app.pending_new_window) {
+            return Ok(());
+        }
+        let (id, window) = Runtime::open_window(event_loop, app)?;
+        self.windows.insert(id, window);
+        self.order.push(id);
+        Ok(())
+    }
+
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: anyhow::Error) {
         eprintln!("{APP_NAME} stopped: {error:#}");
-        if let Some(runtime) = self.runtime.as_mut()
-            && let Err(shutdown_error) = runtime.shutdown()
-        {
+        // Every window, because the failure is the process's: a shell left
+        // running behind a window nobody can see is the one outcome worse than
+        // stopping.
+        if let Err(shutdown_error) = self.for_each_window(|runtime| runtime.close_window()) {
             eprintln!("child shutdown also failed: {shutdown_error:#}");
         }
-        self.runtime = None;
+        self.windows.clear();
+        self.order.clear();
+        if let Some(app) = self.app.as_mut() {
+            app.finish();
+        }
         event_loop.exit();
     }
 }
 
 impl ApplicationHandler<AppEvent> for FolioApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.runtime.is_some() {
+        if self.app.is_some() {
             return;
         }
         match Runtime::create(
@@ -47063,45 +47850,41 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             self.startup_started,
             &self.cli,
         ) {
-            Ok(runtime) => {
-                self.runtime = Some(runtime);
+            Ok((app, window)) => {
+                let id = window.window.id();
+                self.app = Some(app);
+                self.windows.insert(id, window);
+                self.order.push(id);
                 // A shortcut file that could not be read owes the user a sentence
                 // naming it (§5.3), and this is the first moment there is a window
                 // to say it on — the store was opened before one existed. Anchored
                 // at the window because a preferences file belongs to no surface
                 // inside it.
-                if let Some(runtime) = self.runtime.as_mut()
-                    && let Err(error) = runtime.announce_keybindings_fault()
-                {
-                    self.fail(event_loop, error);
-                    return;
-                }
-                // The profile file owes the same sentence for the same reason,
-                // and it is a separate notice rather than a shared one because
-                // they name two different files a user would fix in two
-                // different places.
-                if let Some(runtime) = self.runtime.as_mut()
-                    && let Err(error) = runtime.announce_profiles_fault()
-                {
-                    self.fail(event_loop, error);
-                    return;
-                }
-                // The command line's own two debts, in the same place and for the
-                // same reason: a document to show, and whatever could not be
-                // honoured. Both need a window — the preview needs a seat solved
-                // against a real rectangle, and a card needs a surface to be
-                // anchored at — so neither can be discharged inside `create`.
-                if let Some(runtime) = self.runtime.as_mut()
-                    && let Err(error) = runtime.honour_command_line()
-                {
-                    self.fail(event_loop, error);
-                    return;
-                }
-                // Output can already be buffered after the long GPU initialization path. Drain
-                // once after installing Runtime instead of waiting for another event-loop turn.
-                if let Some(runtime) = self.runtime.as_mut()
-                    && let Err(error) = runtime.drain_pty()
-                {
+                //
+                // The first window and not every window: these are the launch's
+                // own three debts, and a card repeated on a window opened an hour
+                // later would be this process telling somebody twice.
+                let launched = self.runtime(id).map_or(Ok(()), |mut runtime| {
+                    runtime
+                        .announce_keybindings_fault()
+                        // The profile file owes the same sentence for the same
+                        // reason, and it is a separate notice rather than a
+                        // shared one because they name two different files a
+                        // user would fix in two different places.
+                        .and_then(|()| runtime.announce_profiles_fault())
+                        // The command line's own two debts, in the same place and
+                        // for the same reason: a document to show, and whatever
+                        // could not be honoured. Both need a window — the preview
+                        // needs a seat solved against a real rectangle, and a card
+                        // needs a surface to be anchored at — so neither can be
+                        // discharged inside `create`.
+                        .and_then(|()| runtime.honour_command_line())
+                        // Output can already be buffered after the long GPU
+                        // initialization path. Drain once after installing the
+                        // window instead of waiting for another event-loop turn.
+                        .and_then(|()| runtime.drain_pty())
+                });
+                if let Err(error) = launched {
                     self.fail(event_loop, error);
                     return;
                 }
@@ -47114,7 +47897,14 @@ impl ApplicationHandler<AppEvent> for FolioApp {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
-        match event {
+        // **Every window, because a worker's answer carries its own address.**
+        // The four lanes are the application's (§2.4 rule 1) and their results
+        // are filed under the key of whichever pane asked; a window with nothing
+        // waiting finds nothing to apply and costs a lookup. Routing by id
+        // instead would mean the request had to remember which window it came
+        // from — a second address for the same answer, and one that can be
+        // wrong the moment a pane moves between windows.
+        let applied = match event {
             // **Nothing is done here** — the same answer, and for the same
             // reason, as [`AppEvent::GitChanged`] below.
             //
@@ -47128,70 +47918,50 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // 24-way `cargo` build with the same flood: 517 of 1504 composed
             // frames discarded with this arm draining, against 1 of 765 without
             // it.
-            AppEvent::PtyOutput => {}
-            AppEvent::MathReady => {
-                if let Some(runtime) = self.runtime.as_mut()
-                    && let Err(error) = runtime.apply_math_results()
-                {
-                    self.fail(event_loop, error);
-                }
-            }
-            AppEvent::FilesReady => {
-                if let Some(runtime) = self.runtime.as_mut()
-                    && let Err(error) = runtime.apply_files_results()
-                {
-                    self.fail(event_loop, error);
-                }
-            }
+            AppEvent::PtyOutput => Ok(()),
+            AppEvent::MathReady => self.for_each_window(|runtime| runtime.apply_math_results()),
+            AppEvent::FilesReady => self.for_each_window(|runtime| runtime.apply_files_results()),
             AppEvent::PreviewReady => {
-                if let Some(runtime) = self.runtime.as_mut()
-                    && let Err(error) = runtime.apply_preview_results()
-                {
-                    self.fail(event_loop, error);
-                }
+                self.for_each_window(|runtime| runtime.apply_preview_results())
             }
-            AppEvent::GitReady => {
-                if let Some(runtime) = self.runtime.as_mut()
-                    && let Err(error) = runtime.apply_git_results()
-                {
-                    self.fail(event_loop, error);
-                }
-            }
+            AppEvent::GitReady => self.for_each_window(|runtime| runtime.apply_git_results()),
             // Nothing is done here. The news has already been stamped into the
             // watcher's own mailbox by the thread that heard it; this only
             // brings the loop round to `about_to_wait`, where every clock in
             // this window is read and where the debounce can either fire or ask
             // for a later wake-up.
-            AppEvent::GitChanged => {}
+            AppEvent::GitChanged => Ok(()),
             // Same, one directory over: the time the folder moved at is already
             // in `scheme_watch`'s mailbox, and `about_to_wait` is where the
             // quiet window is read.
-            AppEvent::SchemesChanged => {}
+            AppEvent::SchemesChanged => Ok(()),
             // And the same again for the folder that one sits in: the time it
             // moved is in `profile_watch`'s mailbox, and `about_to_wait` is
             // where the quiet window is read.
-            AppEvent::ProfilesChanged => {}
+            AppEvent::ProfilesChanged => Ok(()),
             // The answer is already in `psreadline::probe()`; what is owed is a
             // frame that reads it. `refresh_chrome` rebuilds the row's sentence
             // from scratch — `SettingsRow::description` asks `row_state` afresh
             // every time — so there is nothing to apply, only something to draw.
-            AppEvent::PsReadLineProbed => {
-                if let Some(runtime) = self.runtime.as_mut()
-                    && runtime.refresh_chrome()
-                    && let Err(error) = runtime.present_chrome_change()
-                {
-                    self.fail(event_loop, error);
+            // On every window, because the row is a fact about this machine and
+            // any of them may be showing it.
+            AppEvent::PsReadLineProbed => self.for_each_window(|runtime| {
+                if runtime.refresh_chrome() {
+                    runtime.present_chrome_change()
+                } else {
+                    Ok(())
                 }
-            }
+            }),
             // The texture is already in the slot; what is owed is the ground
             // put in force around it, which is `apply_window_ground`'s one job.
+            // Every window: the picture is the application's setting and each
+            // window wears its own copy of it (§2.4 rule 3).
             AppEvent::BackgroundPictureReady => {
-                if let Some(runtime) = self.runtime.as_mut()
-                    && let Err(error) = runtime.adopt_background_picture()
-                {
-                    self.fail(event_loop, error);
-                }
+                self.for_each_window(|runtime| runtime.adopt_background_picture())
             }
+        };
+        if let Err(error) = applied {
+            self.fail(event_loop, error);
         }
     }
 
@@ -47201,12 +47971,16 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(runtime) = self.runtime.as_mut() else {
-            return;
-        };
-        if runtime.window.window.id() != window_id {
+        // **The one line the whole slice is about.** winit stamps the id of the
+        // window the event happened to; before this, the loop compared it against
+        // the only window there was and dropped anything else. Now it is a
+        // lookup, and an id that is not open is a window that has already gone.
+        if !self.windows.contains_key(&window_id) {
             return;
         }
+        let Some(mut runtime) = self.runtime(window_id) else {
+            return;
+        };
         // **A burst of notches is spent before anything that is not a notch.**
         // See [`WheelBurst`]: the wheel accumulates so that a run of detents
         // costs one frame instead of one frame each, and this is the line that
@@ -47218,21 +47992,22 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             self.fail(event_loop, error);
             return;
         }
+        // Whether this event asked the window to shut, answered before the
+        // borrow is given back: `raise_dirty_gate` is the one gate that has to be
+        // able to *stop* the event, which is why it is asked here rather than
+        // inside the close — past that line the window is gone, and a question
+        // asked after the answer is worthless.
+        let mut shutting = false;
         let result = match event {
             WindowEvent::CloseRequested => {
                 // **Gate ③ (P125).** "Dirty preview buffers do not survive a shut
                 // — plans carry paths, never content — so shutting asks, the same
-                // honesty as closing a tab." It is the one gate that has to be
-                // able to *stop* the event, which is why it is answered here
-                // rather than inside `shutdown`: past this line the window is
-                // gone, and a question asked after the answer is worthless.
+                // honesty as closing a tab."
                 match runtime.raise_dirty_gate(restore::GateRequest::Shut) {
                     Ok(true) => Ok(()),
                     Ok(false) => {
-                        let result = runtime.shutdown();
-                        self.runtime = None;
-                        event_loop.exit();
-                        result
+                        shutting = true;
+                        Ok(())
                     }
                     Err(error) => Err(error),
                 }
@@ -47332,368 +48107,70 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // shut belongs to the event loop, and re-requesting it means closing goes
         // through the one door it always went through instead of a second one
         // opened for the gate.
-        if let Some(runtime) = self.runtime.as_mut()
-            && std::mem::take(&mut runtime.window.window_close_requested)
-        {
-            let shut = runtime.shutdown();
-            self.runtime = None;
-            event_loop.exit();
-            if let Err(error) = result.and(shut) {
-                self.fail(event_loop, error);
-            }
-            return;
-        }
+        shutting |= std::mem::take(&mut runtime.window.window_close_requested);
+        let result = if shutting {
+            result.and(self.close(event_loop, window_id))
+        } else {
+            result
+        };
+        // And the door the other way round: a window this window's keyboard asked
+        // for. After the shut, because a chord cannot both close this window and
+        // open another, and asking in this order means a failure to open never
+        // leaves a window that should have been shut standing.
+        let result = result.and_then(|()| self.open_pending_window(event_loop));
         if let Err(error) = result {
             self.fail(event_loop, error);
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(runtime) = self.runtime.as_mut() else {
-            return;
-        };
-        // First, because everything below it is allowed to assume the window is
-        // where the hand last left it. This is the door the coalescing is *for*:
-        // the queue has just run dry, so whatever the wheel collected while the
-        // loop was away is one burst and gets one frame. See [`WheelBurst`].
-        if let Err(error) = runtime.flush_wheel() {
-            self.fail(event_loop, error);
+        if self.app.is_none() {
             return;
         }
-        runtime.apply_math_context_menu_result();
-        if let Err(error) = runtime.apply_folder_pick_result() {
-            self.fail(event_loop, error);
-            return;
-        }
-        if let Err(error) = runtime.apply_image_pick_result() {
-            self.fail(event_loop, error);
-            return;
-        }
-        if let Err(error) = runtime.drain_pty() {
+        if let Err(error) = self.open_pending_window(event_loop) {
             self.fail(event_loop, error);
             return;
         }
         let now = Instant::now();
-        // Polled here rather than pushed from the probe's thread: raising a
-        // modal is a change to the window, and the window is this thread's.
-        if let Err(error) = runtime.raise_psreadline_invite_if_due() {
-            self.fail(event_loop, error);
-            return;
-        }
-        if let Err(error) = runtime.advance_cursor_blink_if_due(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        if let Err(error) = runtime.advance_scheme_watch(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        if let Err(error) = runtime.advance_profile_watch(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        if let Err(error) = runtime.advance_rename_blink_if_due(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        // Ahead of the strip's own animation tick: paying the press's promise
-        // activates a tab, and the strip that is redrawn afterwards should be
-        // the one the switch produced.
-        if let Err(error) = runtime.advance_tab_press_if_due(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        if let Err(error) = runtime.advance_strip_animation(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        if let Err(error) = runtime.finish_synchronized_update_if_due(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        // The watcher's own clock (R31's D), beside the rest of this window's:
-        // it asks for a wake-up only while it is holding news, and the
-        // subscriptions it keeps level with the screen are dropped here the turn
-        // after the page they were for went away.
-        if let Err(error) = runtime.advance_git_watch(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        runtime.app.session_store.flush_if_due(now);
-        // **The one rule, in the one place it can be kept.** Whichever rung holds
-        // the keyboard publishes its caret here, at the tail of every pass —
-        // which is what "every frame the caret can move" means without anybody
-        // having to enumerate the ways it moves: typing, scrolling, resizing and
-        // a capsule relaid all wake this loop, and the throttle below turns a
-        // rectangle that did not move into no call at all. The terminal's rung
-        // says nothing here and everything in `publish_frame_inner`, because its
-        // caret is a property of a frame and there is no frame at this point.
-        runtime.offer_ime_caret(None);
-        runtime.flush_ime_cursor_area(now);
-        if let Err(error) = runtime.finish_resize_if_quiescent(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        if let Err(error) = runtime.finish_preview_resize_if_quiet(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        if let Err(error) = runtime.advance_live_math_if_due(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        if let Err(error) = runtime.activate_hyperlink_hover_if_due(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        if let Err(error) = runtime.activate_peek_if_due(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        // Both `⌄` clocks, and the pane menu's own two. Above the tip's, on the
-        // layout peek's precedent and for its reason: a menu that has matured is
-        // already on screen when the tip asks whether it has anything to explain.
-        if let Err(error) = runtime.advance_chevrons(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        if let Err(error) = runtime.advance_pane_menu(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        if let Err(error) = runtime.clear_math_hover_if_due(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        // Ahead of the tip's own promotion, so §6's ordering is structural and
-        // not merely a consequence of 350 being less than 380: on the frame both
-        // came due, the peek is already showing when the tip asks.
-        if let Err(error) = runtime.advance_layout_peek_if_due(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        if let Err(error) = runtime.advance_tooltip_if_due(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        // The notices' three clocks, beside the tip's and after it: a card that
-        // has just left frees the pixels the tip may be about to be laid over.
-        if let Err(error) = runtime.advance_toasts(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        // The jump's row flash, beside the notices' clocks: it is the same shape —
-        // a fade that runs itself out with the pointer and the keyboard both
-        // still, and that nothing else in the window would wake the loop to draw.
-        if let Err(error) = runtime.advance_command_flash(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        // And the rail's own three, beside the flash because they are the same
-        // shape: a hand resting on a rail moves nothing and no other clock in this
-        // window would wake the loop to finish the crest it started.
-        if let Err(error) = runtime.advance_command_rails(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        // The scroll thumb's rest and fade, beside the rail's clocks because it
-        // is the same shape once more, and on the same pane's own edge (P2-9
-        // slice 1).
-        if let Err(error) = runtime.advance_terminal_thumbs(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        // The glance card's own 350ms, beside the layout peek's and for the same
-        // reason it stands where it does: it is a *peek*, and a peek that has
-        // matured is already on screen when everything above it asks.
-        if let Err(error) = runtime.advance_file_peek(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        // The float's two clocks and its entrance. After the tip's, because a
-        // maturing intent can *open* a window over whatever the tip was about to
-        // explain, and the frame both are due on should show that in the order
-        // they will actually be drawn.
-        if let Err(error) = runtime.advance_float(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        // And the foot's own 1300ms, whichever strip is wearing it. Its own step
-        // because the two feet are drawn into two different surfaces — see
-        // `advance_foot_reveal`.
-        if let Err(error) = runtime.advance_foot_reveal(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        // And the preview's own acknowledgement, on the same 1300ms clock.
-        if let Err(error) = runtime.advance_preview_notice(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        // Service the PTY gate after every other due task that can mutate session state, then carry
-        // the deadline derived from that exact sample into the control-flow decision below.
-        let pty_resize_deadline = match runtime.flush_pending_pty_resize(now) {
-            Ok(deadline) => deadline,
-            Err(error) => {
-                self.fail(event_loop, error);
-                return;
+        // **Every window's own turn, and the earliest wake-up any of them asked
+        // for.** A loop that woke for the first window's clocks and not the
+        // second's would be a second window whose caret blinks only when the
+        // first one's does.
+        let mut wake_deadline = None;
+        for index in 0..self.order.len() {
+            let Some(mut runtime) = self.runtime_at(index) else {
+                continue;
+            };
+            // The window that opened first turns the application's clocks. See
+            // `Runtime::turn`.
+            match runtime.turn(now, index == 0) {
+                Ok(deadline) => wake_deadline = earliest_deadline([wake_deadline, deadline]),
+                Err(error) => {
+                    self.fail(event_loop, error);
+                    return;
+                }
             }
-        };
-        let startup_deadline =
-            startup_poll_delay(runtime.window.first_text_presented).map(|delay| now + delay);
-        // Every leaf, not every tab's focused leaf: an unfocused pane runs its own resize
-        // transaction and owes its own PSReadLine repair, so its quiescence is its own deadline to
-        // wake for. Reading this through the tab's deref asked only the pane holding the keyboard,
-        // and the panes beside it had to wait for some unrelated event to carry them over the line.
-        let resize_finish_deadline = runtime
-            .window
-            .tabs
-            .iter()
-            .flat_map(|tab| tab.leaves())
-            .filter_map(|(_, leaf)| leaf.session.resize_finish_deadline())
-            .min();
-        // Every leaf, for the reason the line above gives about resizes: a DEC
-        // 2026 block is a property of one screen, and
-        // `finish_synchronized_update_if_due` has always walked every leaf to
-        // time them out. Reading the deadline through the tab's deref asked only
-        // the pane holding the keyboard, so an unfocused pane that opened a block
-        // and then went quiet had nothing to wake the loop on its behalf — its
-        // own timeout could only fire if something else happened to wake the
-        // window first.
-        let synchronized_update_deadline = runtime
-            .window
-            .tabs
-            .iter()
-            .flat_map(|tab| tab.leaves())
-            .filter_map(|(_, leaf)| leaf.session.synchronized_update_deadline())
-            .min();
-        let live_stability_deadline = runtime.session.live_stability_deadline();
-        let wake_deadline = earliest_deadline([
-            startup_deadline,
-            runtime.window.ime_cursor_throttle.deadline(),
-            // Only while a shell holds the keyboard: a frozen caret owes no
-            // wake-up at all (ruling 2026-08-13).
-            runtime
-                .keyboard_owner_is_a_shell()
-                .then(|| runtime.window.cursor_blink.deadline())
-                .flatten(),
-            // The press's own 180ms, and only while it still owes one — a press
-            // that has been paid or has slipped reports nothing, so a held
-            // button costs no wake-ups at all.
-            runtime
-                .window
-                .tab_press
-                .as_ref()
-                .and_then(TabPress::wake_deadline),
-            // The rename caret blinks only while there is a rename.
-            runtime
-                .window
-                .rename
-                .is_some()
-                .then(|| runtime.window.rename_blink.deadline())
-                .flatten(),
-            runtime.strip_animation_deadline(now),
-            pty_resize_deadline,
-            resize_finish_deadline,
-            synchronized_update_deadline,
-            live_stability_deadline,
-            // The tip's 380ms while one is settling, and the fade's own frames
-            // until it lands. A window with no tip under the pointer reports
-            // nothing and costs no wake-ups at all.
-            runtime.tooltip_deadline(now),
-            // A notice's entrance landing, its life running out, its exit
-            // finishing — and nothing at all while one is held under the pointer,
-            // because a stopped clock owes no wake-ups (2026-08-16).
-            runtime.toast_deadline(now),
-            // The jump flash's own 950ms, at the animation's rate and only while
-            // one is running. A window that has not jumped asks for nothing.
-            runtime.command_flash_deadline(now),
-            // `width .1s, background .14s, opacity .12s` on the ticks of whichever
-            // rail the pointer is on — and nothing at all once the longest of the
-            // three has landed, which is what makes a rail under a still hand cost
-            // no wake-ups.
-            runtime.command_rail_deadline(now),
-            // A terminal thumb's rest and the fade after it — and nothing at all
-            // for a pane with no scrollback, a pane parked in history (its bar
-            // is standing, not fading) or a pane whose fade has landed.
-            runtime.terminal_thumb_deadline(now),
-            // The peek's 350ms while one is settling, and nothing afterwards:
-            // it has no fade, so a schematic on screen is finished and asks for
-            // no frames at all.
-            runtime.window.layout_peek.deadline(),
-            // The glance's 350ms while one is settling, and — since it became a
-            // card a hand can walk into (2026-08-14) — the grace that takes it
-            // down again once the pointer has left its corridor. A card standing
-            // still under a pointer that is inside it has neither clock running
-            // and asks for no wake-ups at all, which is the same silence it kept
-            // when it could not be touched.
-            runtime.window.file_peek.as_ref().and_then(|peek| peek.due),
-            runtime
-                .window
-                .file_peek
-                .as_ref()
-                .and_then(|peek| peek.closing_at),
-            // And the dwell's own 350ms, which is the one clock in this window
-            // that has to fire under a pointer that is not moving at all — a
-            // hand resting on another row sends no events, so without this wake
-            // "停留即换" would only ever happen on the next thing to twitch.
-            runtime
-                .window
-                .file_peek
-                .as_ref()
-                .and_then(|peek| peek.dwell.as_ref())
-                .and_then(|dwell| dwell.due),
-            // The intent's 180ms, the grace's 220/420, and the entrance's own
-            // frames until it lands. A window with no float and no hovered
-            // trigger reports nothing and costs no wake-ups at all.
-            runtime.float_deadline(now),
-            // The foot's confirmation owes exactly one wake-up: the instant it is
-            // due to turn back into a path. One entry for both feet, because
-            // there is one clock.
-            runtime
-                .window
-                .revealed_foot
-                .map(|(_, at)| at + FOOT_REVEAL_FEEDBACK),
-            // The preview's "Saved", on the same clock and owing the same single
-            // wake-up: the instant it is due to go away.
-            runtime.preview_notice_deadline(),
-            // The two chevrons' 250/150, and nothing at all while the pointer is
-            // not on one and no menu one opened is up (2026-08-16).
-            runtime.window.chevrons.deadline(),
-            // And the pane menu's own clock: the heading's rest while the
-            // submenu is shut, the safety triangle's cap while it is open.
-            runtime.pane_menu_deadline(),
-            runtime.window.hyperlink_hover.show_at,
-            runtime.window.peek_hover.show_at,
-            runtime.window.math_hover_clear_at,
-            runtime.preview_resample_deadline(),
-            runtime.app.session_store.deadline(),
-            // The schemes folder's own debounce, on the same terms: absent for
-            // every window whose folder nobody is editing.
-            runtime.app.scheme_watch.deadline(),
-            // And the storage folder's, on exactly the same terms — absent for
-            // every window in which nothing at all has been written lately.
-            runtime.app.profile_watch.deadline(),
-            // The debounce a change notification started (R31's D). Absent —
-            // and therefore costing nothing — for every window that is not
-            // currently holding unanswered news about a repository, which is
-            // every window most of the time.
-            runtime.app.git_watch.deadline(),
-        ]);
+        }
         event_loop
             .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
-        if let Err(error) = runtime.reap_exited_tabs() {
-            self.fail(event_loop, error);
-        }
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(runtime) = self.runtime.as_mut()
-            && let Err(error) = runtime.shutdown()
-        {
+        // The path the ordinary shut has already taken: `FolioApp::close` shuts
+        // the last window and spends `App::finish` at the moment the map became
+        // empty. This is the other path — a loop stopped by something that is
+        // not a window closing — and it owes both halves.
+        if self.windows.is_empty() {
+            return;
+        }
+        if let Err(error) = self.for_each_window(|runtime| runtime.close_window()) {
             eprintln!("child shutdown failed: {error:#}");
         }
-        self.runtime = None;
+        self.windows.clear();
+        self.order.clear();
+        if let Some(app) = self.app.as_mut() {
+            app.finish();
+        }
     }
 }
 
@@ -48753,7 +49230,7 @@ fn log_dpi_snapshot(
 }
 
 fn ensure_swapchain_matches_inner(
-    renderer: &Renderer,
+    renderer: &WindowRenderer,
     inner_size: PhysicalSize<u32>,
 ) -> Result<()> {
     let presentation = renderer.presentation_geometry();
@@ -49445,7 +49922,7 @@ fn leaf_resize_plan(
 /// (§4.4) — one geometry beats a cached one.
 fn solve_seats(
     seats: &seats::Seats,
-    renderer: &Renderer,
+    renderer: &WindowRenderer,
     render_physical: PhysicalSize<u32>,
     policy: SizePolicy,
     rail: seats::RailState,
