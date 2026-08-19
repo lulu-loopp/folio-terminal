@@ -285,6 +285,7 @@ pub fn order_monospace_families(mut families: Vec<MonospaceFamily>) -> Vec<Monos
 #[cfg(windows)]
 mod windows_impl {
     use std::{
+        cell::Cell,
         ffi::c_void,
         os::windows::ffi::OsStrExt,
         path::{Path, PathBuf},
@@ -356,10 +357,11 @@ mod windows_impl {
                 Common::COMDLG_FILTERSPEC, DefSubclassProc, FO_DELETE, FOF_ALLOWUNDO,
                 FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING,
                 FOLDERID_Documents, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
-                FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem, KF_FLAG_DEFAULT,
-                RemoveWindowSubclass, SHCreateItemFromParsingName, SHFILEOPSTRUCTW,
-                SHFileOperationW, SHGetKnownFolderPath, SIGDN_FILESYSPATH, SetWindowSubclass,
-                ShellExecuteW,
+                FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem, ITaskbarList3,
+                KF_FLAG_DEFAULT, RemoveWindowSubclass, SHCreateItemFromParsingName,
+                SHFILEOPSTRUCTW, SHFileOperationW, SHGetKnownFolderPath, SIGDN_FILESYSPATH,
+                SetWindowSubclass, ShellExecuteW, TBPF_ERROR, TBPF_INDETERMINATE, TBPF_NOPROGRESS,
+                TBPF_NORMAL, TBPF_PAUSED, TaskbarList,
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu,
@@ -367,20 +369,20 @@ mod windows_impl {
                 HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
                 HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsZoomed,
                 MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MF_STRING, MINMAXINFO, MessageBoxW,
-                NCCALCSIZE_PARAMS, PostMessageW, SM_CXFRAME, SM_CXPADDEDBORDER,
-                SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES, SW_SHOWNORMAL,
-                SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-                SetCaretPos, SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
-                TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CLOSE, WM_GETMINMAXINFO, WM_NCCALCSIZE,
-                WM_NCHITTEST,
+                NCCALCSIZE_PARAMS, PostMessageW, RegisterWindowMessageW, SM_CXFRAME,
+                SM_CXPADDEDBORDER, SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES,
+                SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                SWP_NOZORDER, SetCaretPos, SetClassLongPtrW, SetWindowPos, SystemParametersInfoW,
+                TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CLOSE, WM_GETMINMAXINFO,
+                WM_NCCALCSIZE, WM_NCHITTEST,
             },
         },
     };
 
     use super::{
-        CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, NonZeroIsize, ThreadPriority,
-        WheelScrollAmount, WindowRect, composition_visual_offset, custom_frame_hit_test,
-        logical_px_for_dpi,
+        CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, NonZeroIsize, TaskbarProgress,
+        TaskbarProgressState, ThreadPriority, WheelScrollAmount, WindowRect,
+        composition_visual_offset, custom_frame_hit_test, logical_px_for_dpi,
     };
 
     /// GDI brush currently owned by this process and installed on winit's shared window class.
@@ -401,7 +403,27 @@ mod windows_impl {
     const FOLDER_PICKER_SUBCLASS_ID: usize = 0x4254_4650;
     const IMAGE_PICKER_SUBCLASS_ID: usize = 0x4254_4950;
     const CUSTOM_FRAME_SUBCLASS_ID: usize = 0x4254_4346;
+    const TASKBAR_SUBCLASS_ID: usize = 0x4254_5442;
     const CAPTION_BUTTON_COUNT: i32 = 4;
+
+    /// The shell's `TaskbarButtonCreated` broadcast, registered once per process.
+    ///
+    /// `RegisterWindowMessageW` answers the same number to every process that
+    /// asks for the same string, which is how a message the shell sends and a
+    /// message this program listens for are the same message. It returns `0` on
+    /// failure, and `0` is `WM_NULL` — a real message — so every comparison
+    /// against this value has to exclude zero or a failed registration would
+    /// turn every idle-time `WM_NULL` into a taskbar re-apply.
+    static TASKBAR_BUTTON_CREATED: OnceLock<u32> = OnceLock::new();
+
+    fn taskbar_button_created_message() -> u32 {
+        *TASKBAR_BUTTON_CREATED.get_or_init(|| {
+            let name = wide_null("TaskbarButtonCreated");
+            // SAFETY: `RegisterWindowMessageW` reads one NUL-terminated string and
+            // returns an atom; `name` outlives the call.
+            unsafe { RegisterWindowMessageW(PCWSTR(name.as_ptr())) }
+        })
+    }
 
     /// The DirectComposition visual tree one window presents through.
     ///
@@ -863,6 +885,208 @@ mod windows_impl {
             }
             _ => unsafe { DefSubclassProc(hwnd, message, wparam, lparam) },
         }
+    }
+
+    /// Everything the taskbar subclass reads, kept in one stable allocation the
+    /// owning [`Taskbar`] holds for as long as the subclass is installed.
+    ///
+    /// The reading is a [`Cell`] and not an atomic because both writers are the
+    /// same thread: `set_progress` is called from the event loop, and the
+    /// subclass procedure runs on the thread that owns the HWND, which is that
+    /// same event loop. An atomic here would be a claim about sharing that is
+    /// not true.
+    struct TaskbarState {
+        list: ITaskbarList3,
+        /// What the button has been told, and what it will be told again the
+        /// next time the shell announces it. **Not** a cache of what to skip —
+        /// that gate lives with the caller, where the aggregate is computed.
+        showing: Cell<TaskbarProgress>,
+    }
+
+    impl TaskbarState {
+        fn apply(&self, hwnd: HWND) -> Result<(), String> {
+            let showing = self.showing.get();
+            let flag = match showing.state {
+                TaskbarProgressState::None => TBPF_NOPROGRESS,
+                TaskbarProgressState::Normal => TBPF_NORMAL,
+                TaskbarProgressState::Error => TBPF_ERROR,
+                TaskbarProgressState::Paused => TBPF_PAUSED,
+                TaskbarProgressState::Indeterminate => TBPF_INDETERMINATE,
+            };
+            // SAFETY: both calls are ordinary in-proc COM on the interface this
+            // object created and owns, made on the thread whose apartment
+            // created it, against an HWND this process owns.
+            unsafe {
+                self.list
+                    .SetProgressState(hwnd, flag)
+                    .map_err(|error| format!("ITaskbarList3::SetProgressState: {error}"))?;
+                // The state goes first on purpose: `SetProgressValue` is
+                // documented to do nothing at all while the button is
+                // `TBPF_NOPROGRESS` or `TBPF_INDETERMINATE`, so a value sent
+                // before the state that admits it is a value thrown away.
+                if let Some((completed, total)) = showing.value {
+                    self.list
+                        .SetProgressValue(hwnd, completed, total)
+                        .map_err(|error| format!("ITaskbarList3::SetProgressValue: {error}"))?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// One window's taskbar button, as a place to put a reading (Windows landing
+    /// block slice 1).
+    ///
+    /// # Two things this owns that are easy to get wrong
+    ///
+    /// **The apartment.** `ITaskbarList3` is apartment-threaded and this object
+    /// keeps it alive across many calls, so — unlike the shell pickers, which
+    /// initialise and balance COM inside the one call that shows a dialog — the
+    /// apartment reference has to last exactly as long as the interface does. It
+    /// is taken in [`Taskbar::new`] and returned in `Drop`, after the interface
+    /// has been released, which is the only order in which releasing an object
+    /// into an apartment that still exists is guaranteed. A thread already in a
+    /// multi-threaded apartment is reported rather than forced, on the pickers'
+    /// reasoning: a window with no progress bar is a fine outcome and not one
+    /// worth breaking somebody's apartment model over.
+    ///
+    /// **`TaskbarButtonCreated`.** The shell announces each top-level window's
+    /// button by broadcasting a registered message, and every call made before
+    /// that announcement silently does nothing. It is broadcast **again** every
+    /// time `explorer.exe` restarts, and the button that comes back is blank. So
+    /// this object listens for it and **re-applies** the reading it is carrying,
+    /// rather than initialising once and trusting the shell to remember: without
+    /// that, an explorer restart during a long build would leave the button
+    /// empty until the build's *next* state change, which for the last stretch
+    /// of a build is never.
+    pub struct Taskbar {
+        hwnd: HWND,
+        /// `Option` for one reason: `Drop::drop` runs before a struct's fields
+        /// are dropped, so releasing the interface before `CoUninitialize` needs
+        /// a `take` and cannot be left to field order.
+        state: Option<Box<TaskbarState>>,
+        /// Whether this object's own `CoInitializeEx` counted, and therefore
+        /// owes a `CoUninitialize`. `S_FALSE` — "already initialised, and this
+        /// call counted" — owes one exactly as `S_OK` does, which is why the
+        /// balance is read off `is_ok` and not off `== S_OK`.
+        com_balance: bool,
+    }
+
+    impl Taskbar {
+        pub fn new(hwnd: NonZeroIsize) -> Result<Self, String> {
+            let hwnd = HWND(hwnd.get() as *mut c_void);
+            // SAFETY: this runs on the window's own event-loop thread, which is
+            // the thread that owns the HWND and the apartment. Every failure
+            // path below releases what it took, in the order it took it.
+            unsafe {
+                let apartment =
+                    CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+                if apartment == RPC_E_CHANGED_MODE {
+                    return Err(
+                        "the event-loop thread is not a single-threaded apartment".to_owned()
+                    );
+                }
+                let com_balance = apartment.is_ok();
+                let created = (|| {
+                    let list: ITaskbarList3 =
+                        CoCreateInstance(&TaskbarList, None, CLSCTX_INPROC_SERVER)
+                            .map_err(|error| format!("CoCreateInstance(TaskbarList): {error}"))?;
+                    // `HrInit` is what tells the shell this process intends to
+                    // talk to the button; nothing else on the interface works
+                    // until it has returned.
+                    list.HrInit()
+                        .map_err(|error| format!("ITaskbarList3::HrInit: {error}"))?;
+                    Ok(list)
+                })();
+                let list = match created {
+                    Ok(list) => list,
+                    Err(error) => {
+                        if com_balance {
+                            CoUninitialize();
+                        }
+                        return Err(error);
+                    }
+                };
+                let state = Box::new(TaskbarState {
+                    list,
+                    showing: Cell::new(TaskbarProgress::CLEARED),
+                });
+                let reference_data = (&*state as *const TaskbarState) as usize;
+                let installed = SetWindowSubclass(
+                    hwnd,
+                    Some(taskbar_subclass),
+                    TASKBAR_SUBCLASS_ID,
+                    reference_data,
+                );
+                if !installed.as_bool() {
+                    let failure =
+                        format!("SetWindowSubclass(taskbar) failed: {}", GetLastError().0);
+                    // The interface goes before the apartment it lives in.
+                    drop(state);
+                    if com_balance {
+                        CoUninitialize();
+                    }
+                    return Err(failure);
+                }
+                Ok(Self {
+                    hwnd,
+                    state: Some(state),
+                    com_balance,
+                })
+            }
+        }
+
+        /// Put `progress` on this window's button, and remember it as the reading
+        /// to restore the next time the shell hands the button back.
+        pub fn set_progress(&self, progress: TaskbarProgress) -> Result<(), String> {
+            let state = self
+                .state
+                .as_ref()
+                .expect("the state is taken only while dropping");
+            state.showing.set(progress);
+            state.apply(self.hwnd)
+        }
+    }
+
+    impl Drop for Taskbar {
+        fn drop(&mut self) {
+            // SAFETY: dropped on the same event-loop thread that installed the
+            // subclass and initialised the apartment. The subclass is removed
+            // first so nothing can reach the state after it is freed, the
+            // interface is released next, and only then is the apartment let go.
+            unsafe {
+                let _ =
+                    RemoveWindowSubclass(self.hwnd, Some(taskbar_subclass), TASKBAR_SUBCLASS_ID);
+                drop(self.state.take());
+                if self.com_balance {
+                    CoUninitialize();
+                }
+            }
+        }
+    }
+
+    unsafe extern "system" fn taskbar_subclass(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _subclass_id: usize,
+        reference_data: usize,
+    ) -> LRESULT {
+        let announced = taskbar_button_created_message();
+        if announced != 0 && message == announced {
+            let state = reference_data as *const TaskbarState;
+            if !state.is_null() {
+                // SAFETY: the owning `Taskbar` holds this box for the whole
+                // installed interval and removes the subclass before freeing it,
+                // on this same thread.
+                let _ = unsafe { (*state).apply(hwnd) };
+            }
+        }
+        // Forwarded either way: a broadcast this program answers is still a
+        // broadcast every other subclass in the chain is entitled to see.
+        // SAFETY: forwarding untouched messages is the required subclass contract.
+        unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
     }
 
     fn low_word_signed(value: isize) -> i32 {
@@ -3569,10 +3793,54 @@ pub enum ThreadPriority {
     BelowNormal,
 }
 
+/// Which of the shell's five progress appearances a taskbar button is wearing.
+///
+/// One per `TBPF_*` flag and no more: this is a spelling of the Win32 enum for
+/// callers that may not name Win32 types, not a vocabulary of its own. What maps
+/// onto it — `bt_term::ProgressState`, and the rule by which a window full of
+/// them becomes one reading — is the caller's business and is stated there.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskbarProgressState {
+    /// `TBPF_NOPROGRESS` — an ordinary button with no bar at all.
+    None,
+    /// `TBPF_NORMAL` — a green determinate bar.
+    Normal,
+    /// `TBPF_ERROR` — a red bar at whatever the value says.
+    Error,
+    /// `TBPF_PAUSED` — an amber bar at whatever the value says.
+    Paused,
+    /// `TBPF_INDETERMINATE` — a sweeping bar; the value is ignored by the shell.
+    Indeterminate,
+}
+
+/// A whole reading for one taskbar button: an appearance, and how full it is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TaskbarProgress {
+    pub state: TaskbarProgressState,
+    /// `(completed, total)`, or `None` for **say nothing about the value** —
+    /// which is not the same as zero. `ITaskbarList3` remembers the last value
+    /// it was given, so a state change that carries no value repaints the bar
+    /// the button already had in the new colour: a run that fails at 30% goes
+    /// red *at 30%*, which is the more informative picture and the one the
+    /// shell gives for free. A button that has never been given a value shows
+    /// the colour full, which is also the right answer for "it failed and
+    /// nobody ever said how far it got".
+    pub value: Option<(u64, u64)>,
+}
+
+impl TaskbarProgress {
+    /// The reading of a window with nothing running: no bar, and nothing said
+    /// about the value.
+    pub const CLEARED: Self = Self {
+        state: TaskbarProgressState::None,
+        value: None,
+    };
+}
+
 #[cfg(windows)]
 pub use windows_impl::{
     Compositor, CustomWindowFrame, DirWatch, FilePickKind, FolderPicker, ImagePicker,
-    ImeSystemCaret, MathContextMenu, PROGRAM_REFUSED, adopt_parent_console,
+    ImeSystemCaret, MathContextMenu, PROGRAM_REFUSED, Taskbar, adopt_parent_console,
     client_area_animation_enabled, clipboard_text, current_thread_priority, documents_directory,
     file_product_version, get_dpi_for_window, get_window_rect, get_work_area,
     install_window_class_background, is_window_minimized, message_box, monospace_font_families,

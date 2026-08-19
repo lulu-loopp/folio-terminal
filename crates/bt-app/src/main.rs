@@ -4339,6 +4339,13 @@ struct WindowRuntime {
     /// alpha, read off the renderer's own `alpha_report` rather than assumed.
     translucency_available: bool,
     custom_window_frame: bt_platform::CustomWindowFrame,
+    /// This window's taskbar button, and what it was last told (Windows landing
+    /// block slice 1).
+    ///
+    /// On the window and not on `App` for the reason every other Win32 bridge
+    /// here is: a button belongs to an HWND, and a second window would need a
+    /// second of these, not a share of this one.
+    taskbar: TaskbarMirror,
     /// The DirectComposition tree this window's picture is published through
     /// (multiwindow slice A2 / web-preview slice 1).
     ///
@@ -9550,6 +9557,504 @@ fn indeterminate_start_milliturns(elapsed: Duration, motion: Motion) -> u16 {
 /// How far round the ring a progress report reaches, in thousandths of a turn.
 fn sweep_milliturns(percent: u8) -> u16 {
     u16::from(percent.min(100)) * 10
+}
+
+/// How loud one progress report is. Higher wins the window's taskbar button.
+///
+/// `Indeterminate` sits **below** the three determinate states rather than
+/// beside them, and that placement is the whole of the "a determinate reading
+/// wins the value" rule: a sweeping bar has nowhere to put a number, so a rule
+/// that ranked it above `Normal` would have to be followed by a second rule
+/// undoing itself for the value. It is also the least informative of the four —
+/// it says only that something is happening — so losing to a report that can
+/// say how far it has got costs nothing.
+fn taskbar_severity(state: ProgressState) -> u8 {
+    match state {
+        ProgressState::Error(_) => 3,
+        ProgressState::Paused(_) => 2,
+        ProgressState::Normal(_) => 1,
+        ProgressState::Indeterminate => 0,
+    }
+}
+
+/// How far along one progress report says it is, for ranking only.
+///
+/// A report with no percentage reads as 100 for the same reason [`ring_arc`]
+/// draws it as a full turn with nothing remembered: `OSC 9;4` states 2 and 4
+/// carry the percentage optionally because they are a change to a run already
+/// on the wire, and when no number was ever on the wire there is nothing to
+/// treat as less than finished.
+fn taskbar_completion(state: ProgressState) -> u8 {
+    match state {
+        ProgressState::Normal(percent) => percent.min(100),
+        ProgressState::Error(percent) | ProgressState::Paused(percent) => {
+            percent.map_or(100, |percent| percent.min(100))
+        }
+        ProgressState::Indeterminate => 100,
+    }
+}
+
+/// The one reading this window's taskbar button carries, folded out of every
+/// progress report in the window (Windows landing block slice 1).
+///
+/// # It mirrors one real report, whole
+///
+/// A window has one taskbar button and a button has one bar, so the fold has to
+/// end at a single reading — and the reading it ends at is **one session's
+/// report, carried across intact**, never a tuple assembled out of two. That is
+/// [`TabState::fleet_progress`]'s discipline kept ("a mean, a sum or a max would
+/// have the ring reporting a run that nothing is actually doing"), and it is why
+/// the obvious-sounding "most severe state, least-finished percentage" is *not*
+/// what this does: a window holding a failure at 80% and a download at 10% would
+/// paint the button red at 10%, a failure at a percentage that failure never
+/// had. The button says red at 80%, because that is a thing that happened.
+///
+/// # But it ranks by severity, not by seat order
+///
+/// This **overturns** `fleet_progress`'s "the first one reported, in seat order"
+/// for the window-level fold, deliberately (DESIGN.md §7.3). The ring can afford
+/// first-in-order because it is drawn *beside* the tab that owns it: whichever
+/// pane it picked, the pane is one click away and the choice is answerable. The
+/// taskbar button is one line for a whole window and it is looked at when Folio
+/// is **not on screen** — it is the only reading the user has. A rule that could
+/// hide a failed build behind an earlier-seated download that happens to still
+/// be running would make it a bar nobody can trust, and an untrustworthy bar is
+/// worse than no bar. So the window's line is its worst news:
+/// error > paused > normal > indeterminate, ties broken by the **least**
+/// finished report — the taskbar answers "how far is the least-finished thing I
+/// am waiting on" — and remaining ties by the order the reports arrive, which is
+/// tab order and then seat order, both functions of the tree and never of a
+/// hash.
+///
+/// # Every session, not every tab's pick
+///
+/// The fold runs over sessions and not over `fleet_progress` per tab, because a
+/// tab's own first-in-order pick would drop the failure before the window ever
+/// saw it — the window would inherit a rule it just overturned.
+///
+/// # What is deliberately not here
+///
+/// Only `OSC 9;4` drives this. `busy`, `unread-ok`, `unread-fail`,
+/// `waiting-for-answer` and `bell` (DESIGN.md §7.1.5b) stay off the taskbar in
+/// this slice: none of them is a *quantity*, and answering "the user is being
+/// waited on" with a paused bar at some invented fullness would be inventing
+/// semantics the protocol does not have. Surfacing attention is the attention
+/// queue's block, which owns a badge shaped like the question.
+fn window_taskbar_progress(
+    reports: impl Iterator<Item = ProgressState>,
+) -> bt_platform::TaskbarProgress {
+    // `min_by_key` returns the *first* of several equal minima, which is what
+    // makes "then the order they arrive in" a tiebreak this fold gets for free
+    // rather than a third component nobody could test.
+    let loudest = reports.min_by_key(|state| {
+        (
+            std::cmp::Reverse(taskbar_severity(*state)),
+            taskbar_completion(*state),
+        )
+    });
+    let Some(state) = loudest else {
+        return bt_platform::TaskbarProgress::CLEARED;
+    };
+    bt_platform::TaskbarProgress {
+        state: match state {
+            ProgressState::Normal(_) => bt_platform::TaskbarProgressState::Normal,
+            ProgressState::Error(_) => bt_platform::TaskbarProgressState::Error,
+            ProgressState::Paused(_) => bt_platform::TaskbarProgressState::Paused,
+            ProgressState::Indeterminate => bt_platform::TaskbarProgressState::Indeterminate,
+        },
+        // Out of 100 and not out of the run's own units, because 100 is all the
+        // protocol ever gives: `OSC 9;4` states a percentage. The `None` cases
+        // are the two the protocol leaves open — a failure or a pause that named
+        // no number keeps whatever the bar already showed, which is the run's
+        // last real percentage repainted in the new colour.
+        value: match state {
+            ProgressState::Normal(percent) => Some((u64::from(percent.min(100)), 100)),
+            ProgressState::Error(percent) | ProgressState::Paused(percent) => {
+                percent.map(|percent| (u64::from(percent.min(100)), 100))
+            }
+            ProgressState::Indeterminate => None,
+        },
+    }
+}
+
+/// This window's taskbar button, and the reading it is carrying.
+///
+/// # Why there is a cache in front of a one-line COM call
+///
+/// `ITaskbarList3` talks to `explorer.exe`, and the aggregate that feeds it is
+/// recomputed on every turn of the event loop — a mouse move over an idle window
+/// would otherwise be a cross-process call. The gate is exact equality on the
+/// whole reading, so a download reporting the same percentage twice costs one
+/// comparison and nothing else.
+///
+/// The cache starts at [`bt_platform::TaskbarProgress::CLEARED`] rather than at
+/// "unknown", because a button nobody has written to really is showing no
+/// progress. That is what makes the COM object **lazy**: a window that never
+/// sees an `OSC 9;4` never creates one, because the first reading is equal to
+/// the one already on screen.
+struct TaskbarMirror {
+    /// Created on the first reading that is not `CLEARED`, and never before.
+    button: Option<bt_platform::Taskbar>,
+    /// What the button has been told. Not `Option`: see above.
+    told: bt_platform::TaskbarProgress,
+    /// Set once the shell has refused, so a machine with no taskbar to talk to
+    /// costs one failure and one line of stderr rather than one of each per
+    /// percentage. Nothing clears it: every reason `ITaskbarList3` refuses is a
+    /// fact about the session, not about this reading.
+    refused: bool,
+}
+
+impl Default for TaskbarMirror {
+    fn default() -> Self {
+        Self {
+            button: None,
+            told: bt_platform::TaskbarProgress::CLEARED,
+            refused: false,
+        }
+    }
+}
+
+impl TaskbarMirror {
+    /// What the button has to be told for it to say `wanted`, or `None` when it
+    /// already says it.
+    ///
+    /// Split out from [`Self::show`] so the gate can be driven by a test with no
+    /// window, no shell and no COM apartment anywhere near it.
+    fn diff(
+        &mut self,
+        wanted: bt_platform::TaskbarProgress,
+    ) -> Option<bt_platform::TaskbarProgress> {
+        if self.told == wanted {
+            return None;
+        }
+        self.told = wanted;
+        Some(wanted)
+    }
+
+    /// Put `wanted` on this window's button if it is not already there.
+    ///
+    /// **Multiwindow slice C**: the HWND is the caller's, so each window will
+    /// mirror its own sessions onto its own button with no change here — the
+    /// mirror is a `WindowRuntime` field precisely so there is one per window
+    /// the day `window` becomes a map.
+    fn show(&mut self, window: &Window, wanted: bt_platform::TaskbarProgress) {
+        let Some(sending) = self.diff(wanted) else {
+            return;
+        };
+        if self.refused {
+            return;
+        }
+        if self.button.is_none() {
+            let built = window_hwnd(window)
+                .map_err(|error| error.to_string())
+                .and_then(bt_platform::Taskbar::new);
+            match built {
+                Ok(button) => self.button = Some(button),
+                Err(error) => {
+                    eprintln!("taskbar progress unavailable: {error}");
+                    self.refused = true;
+                    return;
+                }
+            }
+        }
+        if let Some(button) = self.button.as_ref()
+            && let Err(error) = button.set_progress(sending)
+        {
+            eprintln!("taskbar progress refused: {error}");
+            self.refused = true;
+        }
+    }
+}
+
+/// The window's one taskbar reading, and the gate that keeps it off the wire
+/// (Windows landing block slice 1, DESIGN.md §7.3).
+#[cfg(test)]
+mod taskbar_progress_tests {
+    use super::{ProgressState, TaskbarMirror, window_taskbar_progress};
+    use bt_platform::{TaskbarProgress, TaskbarProgressState};
+
+    fn folded(reports: &[ProgressState]) -> TaskbarProgress {
+        window_taskbar_progress(reports.iter().copied())
+    }
+
+    fn normal(percent: u64) -> TaskbarProgress {
+        TaskbarProgress {
+            state: TaskbarProgressState::Normal,
+            value: Some((percent, 100)),
+        }
+    }
+
+    /// PIN — a window with nothing running asserts nothing, and the assertion it
+    /// makes is `TBPF_NOPROGRESS` rather than "0%".
+    ///
+    /// A bar sitting empty says "something is running and has got nowhere",
+    /// which is a claim about a run nobody started.
+    #[test]
+    fn a_window_with_no_progress_carries_no_bar() {
+        assert_eq!(folded(&[]), TaskbarProgress::CLEARED);
+        assert_eq!(TaskbarProgress::CLEARED.state, TaskbarProgressState::None);
+        assert_eq!(TaskbarProgress::CLEARED.value, None);
+    }
+
+    /// PIN — one report is mirrored, whole, in each of the four states.
+    #[test]
+    fn one_report_reaches_the_button_unchanged() {
+        assert_eq!(folded(&[ProgressState::Normal(30)]), normal(30));
+        assert_eq!(
+            folded(&[ProgressState::Error(Some(70))]),
+            TaskbarProgress {
+                state: TaskbarProgressState::Error,
+                value: Some((70, 100)),
+            }
+        );
+        assert_eq!(
+            folded(&[ProgressState::Paused(Some(55))]),
+            TaskbarProgress {
+                state: TaskbarProgressState::Paused,
+                value: Some((55, 100)),
+            }
+        );
+        assert_eq!(
+            folded(&[ProgressState::Indeterminate]),
+            TaskbarProgress {
+                state: TaskbarProgressState::Indeterminate,
+                value: None,
+            }
+        );
+    }
+
+    /// PIN — **the window's line is its worst news**, whatever seat it came from.
+    ///
+    /// The overturn of `fleet_progress`'s first-in-seat-order, tested from both
+    /// ends: severity has to win when the loud report is last *and* when it is
+    /// first, or the rule is just seat order wearing a different name.
+    #[test]
+    fn the_most_severe_report_wins_the_button() {
+        for order in [
+            [ProgressState::Normal(10), ProgressState::Error(Some(80))],
+            [ProgressState::Error(Some(80)), ProgressState::Normal(10)],
+        ] {
+            assert_eq!(
+                folded(&order),
+                TaskbarProgress {
+                    state: TaskbarProgressState::Error,
+                    value: Some((80, 100)),
+                },
+                "error outranks normal in {order:?}"
+            );
+        }
+        assert_eq!(
+            folded(&[ProgressState::Normal(10), ProgressState::Paused(Some(90))]),
+            TaskbarProgress {
+                state: TaskbarProgressState::Paused,
+                value: Some((90, 100)),
+            }
+        );
+        assert_eq!(
+            folded(&[
+                ProgressState::Paused(Some(90)),
+                ProgressState::Error(Some(20)),
+            ]),
+            TaskbarProgress {
+                state: TaskbarProgressState::Error,
+                value: Some((20, 100)),
+            }
+        );
+    }
+
+    /// PIN — **the state and the value always come from the same session.**
+    ///
+    /// This is the rule that "most severe state, least-finished percentage"
+    /// would break: a failure at 80% beside a download at 10% must not paint the
+    /// button red at 10%, because no run ever failed at 10%. It is the ring's
+    /// own discipline — one real report, never a synthesis — kept at window
+    /// scale.
+    #[test]
+    fn the_button_never_wears_a_tuple_no_session_reported() {
+        let mixed = folded(&[ProgressState::Error(Some(80)), ProgressState::Normal(10)]);
+        assert_eq!(mixed.state, TaskbarProgressState::Error);
+        assert_eq!(mixed.value, Some((80, 100)));
+        assert_ne!(mixed.value, Some((10, 100)));
+    }
+
+    /// PIN — within one severity, the **least finished** report wins.
+    ///
+    /// The taskbar answers "how far is the least-finished thing I am waiting
+    /// on", so three downloads at 90, 30 and 60 leave a bar at 30. Order is
+    /// varied because a rule that only holds for one arrangement is seat order
+    /// again.
+    #[test]
+    fn the_least_finished_report_wins_a_tie_on_severity() {
+        for order in [
+            [
+                ProgressState::Normal(90),
+                ProgressState::Normal(30),
+                ProgressState::Normal(60),
+            ],
+            [
+                ProgressState::Normal(30),
+                ProgressState::Normal(60),
+                ProgressState::Normal(90),
+            ],
+            [
+                ProgressState::Normal(60),
+                ProgressState::Normal(90),
+                ProgressState::Normal(30),
+            ],
+        ] {
+            assert_eq!(folded(&order), normal(30), "least finished of {order:?}");
+        }
+    }
+
+    /// PIN — a determinate report beats an indeterminate one, in either order.
+    ///
+    /// A sweeping bar has nowhere to put a number, so the only way "a
+    /// determinate reading wins the value" can be true is for `Indeterminate` to
+    /// lose the state as well. All-indeterminate is the one case that still
+    /// sweeps.
+    #[test]
+    fn a_determinate_report_outranks_a_sweep() {
+        assert_eq!(
+            folded(&[ProgressState::Indeterminate, ProgressState::Normal(45)]),
+            normal(45)
+        );
+        assert_eq!(
+            folded(&[ProgressState::Normal(45), ProgressState::Indeterminate]),
+            normal(45)
+        );
+        assert_eq!(
+            folded(&[
+                ProgressState::Indeterminate,
+                ProgressState::Error(Some(5)),
+                ProgressState::Indeterminate,
+            ]),
+            TaskbarProgress {
+                state: TaskbarProgressState::Error,
+                value: Some((5, 100)),
+            }
+        );
+        assert_eq!(
+            folded(&[ProgressState::Indeterminate, ProgressState::Indeterminate]),
+            TaskbarProgress {
+                state: TaskbarProgressState::Indeterminate,
+                value: None,
+            }
+        );
+    }
+
+    /// PIN — a failure or a pause with no percentage says **nothing** about the
+    /// value, rather than saying zero.
+    ///
+    /// `ITaskbarList3` keeps the last value it was given, so silence repaints
+    /// the bar the run had reached in the new colour — a build that dies at 30%
+    /// goes red at 30. Sending `(0, 100)` instead would erase the one number the
+    /// user wanted.
+    #[test]
+    fn a_state_with_no_percentage_leaves_the_value_alone() {
+        assert_eq!(
+            folded(&[ProgressState::Error(None)]),
+            TaskbarProgress {
+                state: TaskbarProgressState::Error,
+                value: None,
+            }
+        );
+        assert_eq!(
+            folded(&[ProgressState::Paused(None)]),
+            TaskbarProgress {
+                state: TaskbarProgressState::Paused,
+                value: None,
+            }
+        );
+        // And it ranks as finished, so a *named* percentage in the same band
+        // still wins the tie — the one that can say how far it got is the more
+        // useful of the two.
+        assert_eq!(
+            folded(&[ProgressState::Error(None), ProgressState::Error(Some(20))]),
+            TaskbarProgress {
+                state: TaskbarProgressState::Error,
+                value: Some((20, 100)),
+            }
+        );
+    }
+
+    /// PIN — a percentage past the protocol's own ceiling is clamped, not
+    /// wrapped.
+    ///
+    /// `OSC 9;4` carries the number as text and a shell may print anything;
+    /// `SetProgressValue` with `completed > total` is a bar drawn off its own
+    /// end.
+    #[test]
+    fn a_percentage_over_a_hundred_is_clamped() {
+        assert_eq!(folded(&[ProgressState::Normal(255)]), normal(100));
+        assert_eq!(
+            folded(&[ProgressState::Paused(Some(200))]),
+            TaskbarProgress {
+                state: TaskbarProgressState::Paused,
+                value: Some((100, 100)),
+            }
+        );
+    }
+
+    /// PIN — **the same reading is never sent twice.**
+    ///
+    /// `ITaskbarList3` is a cross-process call and the fold above it runs on
+    /// every turn of the event loop, so the gate is the only thing between a
+    /// download reporting 30% for four seconds and four seconds of calls into
+    /// `explorer.exe`. The recorder is what a shell would have received.
+    #[test]
+    fn only_a_changed_reading_reaches_the_shell() {
+        let mut mirror = TaskbarMirror::default();
+        let mut sent = Vec::new();
+        for wanted in [
+            // A window that has never seen a progress report must not create a
+            // COM object to tell the shell what it already shows.
+            TaskbarProgress::CLEARED,
+            TaskbarProgress::CLEARED,
+            normal(30),
+            normal(30),
+            normal(30),
+            normal(31),
+            TaskbarProgress {
+                state: TaskbarProgressState::Error,
+                value: Some((31, 100)),
+            },
+            TaskbarProgress {
+                state: TaskbarProgressState::Error,
+                value: Some((31, 100)),
+            },
+            TaskbarProgress::CLEARED,
+            TaskbarProgress::CLEARED,
+        ] {
+            if let Some(sending) = mirror.diff(wanted) {
+                sent.push(sending);
+            }
+        }
+        assert_eq!(
+            sent,
+            vec![
+                normal(30),
+                normal(31),
+                TaskbarProgress {
+                    state: TaskbarProgressState::Error,
+                    value: Some((31, 100)),
+                },
+                TaskbarProgress::CLEARED,
+            ]
+        );
+        // And the colour alone is a change even when the number is not: the two
+        // `Error` readings above differ from `normal(31)` only in state, and the
+        // gate has to notice the state.
+        let mut mirror = TaskbarMirror::default();
+        assert!(mirror.diff(normal(31)).is_some());
+        assert!(
+            mirror
+                .diff(TaskbarProgress {
+                    state: TaskbarProgressState::Paused,
+                    value: Some((31, 100)),
+                })
+                .is_some()
+        );
+    }
 }
 
 /// The arc a [`ProgressState`] asks for: its colour, and how much of the ring
@@ -15347,6 +15852,7 @@ impl Runtime {
                 dwm_dark_mode: None,
                 translucency_available,
                 custom_window_frame,
+                taskbar: TaskbarMirror::default(),
                 compositor,
                 window,
                 last_layout_events: Vec::new(),
@@ -37762,6 +38268,32 @@ impl Runtime {
         // here is not a tick lost: [`Self::strip_animation_deadline`] is
         // clamped to the same clock, so the loop is woken exactly when the ring
         // is next allowed to move.
+        // **The taskbar is mirrored above the rate gate, and it has to be.**
+        //
+        // [`STRIP_ANIMATION_FRAME`] is a rate for *pictures*: it exists so an
+        // arc does not ease twice per composited frame. The taskbar button is
+        // not a picture this loop draws, it is a state this program is asserting
+        // to the shell, and the frame it most needs to be right on is the one
+        // where a run **ends** — which is exactly the frame nothing schedules,
+        // because a window with nothing left animating reports no deadline at
+        // all ([`Self::strip_animation_deadline`]). Under the gate, the last
+        // reading before an idle window went quiet could be a green bar that
+        // never comes down. Above it, the cost of a turn of the loop with
+        // nothing happening is one fold over the sessions and one comparison
+        // against [`TaskbarMirror::told`].
+        let wanted = window_taskbar_progress(
+            self.window
+                .tabs
+                .iter()
+                .flat_map(|tab| tab.sessions.values())
+                .filter_map(|leaf| leaf.session.status().progress),
+        );
+        // Borrowed apart rather than through `self`, because the mirror is a
+        // field of the same window whose `window` handle it needs.
+        let WindowRuntime {
+            taskbar, window, ..
+        } = &mut self.window;
+        taskbar.show(window, wanted);
         if !strip_animation_tick_is_due(self.window.strip_animation_ticked_at, now) {
             return Ok(());
         }
