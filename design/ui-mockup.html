@@ -1093,9 +1093,170 @@
   .adv.open .adv-head .adv-chev { transform: rotate(180deg); }
   @media (prefers-reduced-motion: reduce) { .adv-head .adv-chev { transition: none; } }
   .frow .tri.leaf { visibility: hidden; }
+  /* ============================================================================
+     FILE TYPE ICONS - THREE VARIANTS FOR THE CHOOSING (#46, 2026-08-19)
+     ============================================================================
+     Read with `?icons=a`, `?icons=b`, `?icons=c`. Default is `a`, which is what
+     this file drew before the ticket, so every other demo on this page opens
+     exactly as it did. ON THE DAY ONE IS CHOSEN THE OTHER TWO BLOCKS AND THE
+     `?icons=` READER GO WITH IT - same discipline as the Advanced header's
+     three treatments, which lived here for one day and left as a hybrid.
+
+     ---- THE QUESTION -------------------------------------------------------
+     The ask was type icons; the fear attached to it was "crowded, dazzling"
+     (bu yong ji / yan hua liao luan). So the exercise is not "draw icons" - it
+     is "find out how much icon this column can hold before it stops being calm",
+     and the three variants are three answers to exactly that, one variable at
+     a time: A vs B moves TYPE DIFFERENTIATION only, B vs C moves COLOUR only.
+     Whatever else changes between two screenshots is a bug in this block.
+
+     ---- WHAT THE FIELD ALREADY LEARNED -------------------------------------
+     Five mature systems, and they converge harder than expected.
+
+     1. VS Code has no default icon theme; the two that everyone installs (Seti,
+        Material Icon Theme) assign one saturated, semantically arbitrary hue
+        per extension. The most-cited complaint is not "ugly", it is CROWDING
+        OUT: microsoft/vscode#75102 opens with "I like using monochrome icon
+        themes, because otherwise the abundance of colours becomes too
+        distracting", and the actual request under it is for GIT STATUS colour
+        to be legible again - a tree already spending one hue per row has no
+        budget left for the signal that matters.
+        https://github.com/microsoft/vscode/issues/75102
+        Material Icon Theme's own answer is a `saturation` knob (0 = grey) and
+        an `opacity` knob, shipped precisely because "too colourful" is a
+        spectrum, not a preference. vscode-icons#3698 shows the same failure at
+        the size of ONE glyph: a new YAML icon is "highly contrasted,
+        distracting" and "completely falls out of my theme color palette".
+        https://github.com/material-extensions/vscode-material-icon-theme
+        https://github.com/vscode-icons/vscode-icons/issues/3698
+
+     2. JetBrains wrote the rule down. Their icon style guide caps action icons
+        at five colours, each tied to a MEANING (grey default, green start, red
+        stop, blue accent, yellow warning), forbids colour as the only
+        differentiator ("icons should be easily distinguishable by their
+        shape"), and - the sentence this column is governed by - says: "Use
+        grey color for tool window icons. Icons are placed on the perimeter of
+        the IDE, so they should not attract too much attention and distract
+        users." A files column is perimeter.
+        https://plugins.jetbrains.com/docs/intellij/icons-style.html
+
+     3. Finder and File Explorer both colour the CONTAINER and leave the
+        contents nearly neutral: one blue (or manila) folder, and ordinary
+        documents as a pale sheet whose only colour is a small owning-app
+        badge. Colour is spent on one semantic role - "this is a place you can
+        go into" - not on N roles, one per extension. Windows states the
+        drawing rule too: Segoe Fluent Icons are "drawn in a monoline style,
+        created through a single stroke", and Fluent 2 says outright "Adding
+        color to an icon may disrupt its visual balance... If including color
+        on an icon, only use one color and keep contrast in mind."
+        https://learn.microsoft.com/en-us/windows/apps/design/style/segoe-fluent-icons-font
+        https://fluent2.microsoft.design/iconography
+
+     4. GitHub's file listing is the calmest of the five and the most extreme:
+        every row, every extension, gets the identical grey Octicon. Only the
+        DIRECTORY differs, and it differs in shape (solid) rather than hue.
+        Primer's guidance: use "functional foreground colors", reserve colour
+        for state (success / danger / attention), never resize an icon, and let
+        icons "supplement text, rather than replacing it".
+        https://primer.style/octicons/usage-guidelines/
+
+     5. Terminal-land is the cautionary tale AND the sanity check. eza/lsd draw
+        Nerd Font glyphs per type; the praise eza collects is explicitly for
+        restraint - "sane, readable default colors and file-type icons that do
+        not look like a clown car... not the eye-searing rainbow some tools
+        ship" - and eza still ships `EZA_COLORS="reset"` so a user can strip the
+        whole mapping and rebuild a small one. Separately, Nerd Fonts must be
+        installed in their Mono variant or the glyphs break monospace cell
+        width, which is the same imbalance inverted: an icon lighter and
+        narrower than the text it labels.
+        https://jpk.io/dev-tools/eza-ls-replacement-review/
+        https://github.com/eza-community/eza/blob/main/man/eza_colors-explanation.5.md
+
+     ---- WHY A TREE READS "CROWDED" -----------------------------------------
+     Six mechanisms, and only the last two are about the icons themselves:
+       (1) one high-saturation hue per row, stacked = a vertical rainbow stripe
+           down the column's left edge; the eye reads the stripe, not the names.
+       (2) too many distinct hues competing in one channel - and it is the same
+           channel git status, search hits and the dirty dot need.
+       (3) icon louder than the text it labels: the label becomes the decoration
+           and the decoration becomes the label.
+       (4) real signals lose. This is (2) with a name: the thing that ACTUALLY
+           changed today is outshouted by the thing that has been a `.rs` file
+           since March.
+       (5) short rows amplify everything - 24px here, so every mechanism above
+           is at its strongest.
+       (6) uneven optical weight between glyphs: one badge that fills its page
+           and one that floats in it read as two different families.
+
+     ---- THE COUNTERMEASURES, AND WHICH ONES THIS FILE TAKES ----------------
+     Monochrome-ise (all three variants: no variant colours a page's OUTLINE).
+     Sit the icon a level BELOW the text (--ink3 against --ink2; the icon is the
+     adjective, the filename is the noun). Colour the container, not the
+     contents (all three keep folders on --accent and nothing else on it).
+     Cap the hue count (C spends three and leaves the fifth slot of its own cap
+     unspent). Let shape do the work so colour is a bonus and never the carrier
+     (B and C draw the SAME six silhouettes; C only tints three of them).
+     Hold contrast constant while hue moves (see C's arithmetic below). Let the
+     lift come from state, not identity - every variant brightens the icon on
+     hover and selection, because that is the row something is happening to.
+
+     ---- WHAT NO VARIANT DOES ----------------------------------------------
+     - No icon enters the git page. A change row already leads with its M/A/D
+       chip in the status palette, which is a signal and outranks an identity;
+       a type mark beside it would be two leading marks per row, and the second
+       one answers a question that page is not asking.
+     - No icon enters a focus-mode card's mini rows. Those draw at 11px, and the
+       one law the earlier round measured is that a badge needs the 15px page's
+       clear band. Below that the badge is noise, so the mini rows keep the two
+       shapes in every variant. A mark that cannot be read is not a smaller
+       mark, it is a dirtier row.
+     - Nothing about the row's geometry moves. 24px tall, 15px icon, 6px gap,
+       14px per indent level, and the 10px disclosure triangle in front of all
+       of it, identical in A, B and C. The icon column already existed; this
+       ticket only changes what is drawn in it.
+     ========================================================================= */
   .frow .fico { width: 15px; height: 15px; flex: none; }
   .frow .fico.folder { color: var(--accent); }
   .frow .fico.file { color: var(--ink3); }
+  /* State, not identity, is what earns brightness: the row under the pointer
+     and the row you left selected lift their mark to the text's own level.
+     This is the whole of A's colour vocabulary and most of B's. */
+  .frow:hover .fico.file, .frow.sel .fico.file { color: var(--ink2); }
+
+  /* ---- VARIANT C ONLY: three tints, and the arithmetic that keeps them quiet.
+     THE POSITION: colour is not a fourth axis, it is a shortcut on top of a
+     silhouette that already works. Remove every tint from C and you are looking
+     at B, still fully legible - which is JetBrains' accessibility rule obeyed
+     rather than quoted.
+     WHICH THREE: the types whose identity is strong enough that a reader
+     already has a colour for them - code, prose, picture. Config, tabular data
+     and plain documents stay on --ink3, because there is no colour anybody
+     agrees `.toml` is, and inventing one is exactly the arbitrary-hue-per-
+     extension move every source above warns against. The cap was five; C
+     spends three and one accent, and leaves the fifth unspent on purpose.
+     WHY NOT BLUE FOR MARKDOWN, which is the obvious pick: blue is the folder's,
+     and only the folder's. A tinted `.md` in the same blue would make the one
+     colour that means "container" mean "container, or prose". Violet is the
+     nearest hue that is not already spoken for.
+     THE ARITHMETIC: every tint is `oklch(L C H)` with L AND C FIXED and only H
+     moving. L is measured, not chosen - it is --ink3 composited over --termbg
+     (light: #A5A4A1, L 70%; dark: #727271, L 54%), so a tinted page is exactly
+     as loud as an untinted one and a column of mixed types has no brightness
+     stripe in it at all. C is .11 against the .145 the status
+     palette runs at (--warn #d9822b is oklch 70% .145 60), so a type tint can
+     never outrank a git chip sitting one page over. Only hue carries the type,
+     and hue alone at this chroma is a whisper - which is the point. */
+  body[data-icons="c"] { --fc-l: 70%; --fc-c: .11; }
+  body.dark[data-icons="c"] { --fc-l: 54%; }
+  body[data-icons="c"] .frow .fico.k-code  { color: oklch(var(--fc-l) var(--fc-c) 65); }
+  body[data-icons="c"] .frow .fico.k-md    { color: oklch(var(--fc-l) var(--fc-c) 300); }
+  body[data-icons="c"] .frow .fico.k-image { color: oklch(var(--fc-l) var(--fc-c) 150); }
+  /* the hover/selection lift is a lift in LIGHTNESS, not a jump to full
+     saturation - the tint is the file's name for itself and does not get
+     louder because a pointer went past */
+  body[data-icons="c"] .frow:hover .fico.k-code,  body[data-icons="c"] .frow.sel .fico.k-code  { color: oklch(calc(var(--fc-l) + 12%) var(--fc-c) 65); }
+  body[data-icons="c"] .frow:hover .fico.k-md,    body[data-icons="c"] .frow.sel .fico.k-md    { color: oklch(calc(var(--fc-l) + 12%) var(--fc-c) 300); }
+  body[data-icons="c"] .frow:hover .fico.k-image, body[data-icons="c"] .frow.sel .fico.k-image { color: oklch(calc(var(--fc-l) + 12%) var(--fc-c) 150); }
   .frow .fname { overflow: hidden; text-overflow: ellipsis; }
   @media (prefers-reduced-motion: reduce) { .frow .tri { transition: none; } }
 
@@ -3587,6 +3748,44 @@
   <symbol id="i-folder" viewBox="0 0 16 16"><path d="M1.6 4.2c0-.6.5-1.1 1.1-1.1h3.1l1.3 1.5h6.2c.6 0 1.1.5 1.1 1.1v6.6c0 .6-.5 1.1-1.1 1.1H2.7c-.6 0-1.1-.5-1.1-1.1z" fill="currentColor"/></symbol>
   <symbol id="i-folder-open" viewBox="0 0 16 16"><path d="M1.6 4.2c0-.6.5-1.1 1.1-1.1h3.1l1.3 1.5h6.2c.6 0 1.1.5 1.1 1.1v1H4.3c-.5 0-.9.3-1 .8L1.6 12z" fill="currentColor" opacity=".55"/><path d="M3.3 7.4c.1-.5.5-.8 1-.8h10.3c.7 0 1.2.7 1 1.4l-1.2 4.3c-.1.5-.6.8-1.1.8H2.4c-.7 0-1.2-.6-1-1.3z" fill="currentColor"/></symbol>
   <symbol id="i-file" viewBox="0 0 16 16"><path d="M3.5 1.8h5.2l3.8 3.8v8.6c0 .3-.2.5-.5.5H3.5c-.3 0-.5-.2-.5-.5V2.3c0-.3.2-.5.5-.5z" fill="none" stroke="currentColor" stroke-width="1.15"/><path d="M8.6 1.9v3.8h3.8" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round"/></symbol>
+  <!-- the type marks (#46, variants B and C) ---------------------------------
+       Six pages and a folder. Every one of them is THE SAME PAGE - `i-f-plain`
+       verbatim - with one badge dropped into the band the page keeps clear
+       between its fold and its bottom inner edge. That band is the whole
+       design: the shipped `#i-file` above draws its outline at 1.15 with a
+       3.8-unit fold, which leaves the badge y 7.4-13.4 and no air at all, and
+       that is the version `design/assets/file-icons-r2/options.html` measured
+       and judged crowded. These are its V1: outline thinned to .95, fold cut to
+       3.1, badge re-centred in the clear band at ~60% of its height. The brief
+       for this ticket asked for stroke ~1.5; the 1x rasterisation in that sheet
+       is why these are .95/1.05 instead - at 15px a 1.5 stroke is 1.4 physical
+       pixels, and a page drawn in 1.4px has no interior left to put anything in.
+
+       Badge geometry is not free-hand. Each was struck against a real 15x15
+       rasterisation and several were re-cut when that mirror caught them:
+         - md     the head is 4.2 units wide against a shortened stem, because
+                  a 3.3-unit head fuses with the stem at 1x and reads `+`.
+         - table  2 columns x 3 rows, NOT 3x3. A 2.2-unit lattice leaves 1.0px
+                  of ground at 1x and fills solid; 2.5-unit rows and a 3.1-unit
+                  column leave 1.4px and 1.9px, which survive. This is the one
+                  law that exercise paid for: a 15px page holds 2x3 and no more.
+         - code   the weakest cell in the set (arms 2.2px, gap 1.4px). It is
+                  given the band's full WIDTH and pays in height, because the
+                  gap between two chevrons IS the chevrons.
+         - plain  no badge. A badge is a claim, and the honest claim to make
+                  about a file this build does not recognise is none. -->
+  <!-- plain document - the family's anchor, and the page every other mark is built on -->
+  <symbol id="i-f-plain" viewBox="0 0 16 16"><path d="M4.2 1.85h5l3.1 3.1v8.7c0 .28-.22.5-.5.5H4.2c-.28 0-.5-.22-.5-.5V2.35c0-.28.22-.5.5-.5z" fill="none" stroke="currentColor" stroke-width=".95"/><path d="M9.2 1.95v3h3" fill="none" stroke="currentColor" stroke-width=".95" stroke-linejoin="round"/></symbol>
+  <!-- image - a hill and a sun, the one badge everybody already reads -->
+  <symbol id="i-f-image" viewBox="0 0 16 16"><path d="M4.2 1.85h5l3.1 3.1v8.7c0 .28-.22.5-.5.5H4.2c-.28 0-.5-.22-.5-.5V2.35c0-.28.22-.5.5-.5z" fill="none" stroke="currentColor" stroke-width=".95"/><path d="M9.2 1.95v3h3" fill="none" stroke="currentColor" stroke-width=".95" stroke-linejoin="round"/><path d="M5.3 11.75L7.5 8.75l2.5 3" fill="none" stroke="currentColor" stroke-width="1.05" stroke-linecap="round" stroke-linejoin="round"/><circle cx="10" cy="7.85" r=".85" fill="currentColor"/></symbol>
+  <!-- markdown / prose - the down arrow, wide-shouldered so it is not a plus -->
+  <symbol id="i-f-md" viewBox="0 0 16 16"><path d="M4.2 1.85h5l3.1 3.1v8.7c0 .28-.22.5-.5.5H4.2c-.28 0-.5-.22-.5-.5V2.35c0-.28.22-.5.5-.5z" fill="none" stroke="currentColor" stroke-width=".95"/><path d="M9.2 1.95v3h3" fill="none" stroke="currentColor" stroke-width=".95" stroke-linejoin="round"/><path d="M8 7.2v4.7M5.9 9.85L8 11.95l2.1-2.1" fill="none" stroke="currentColor" stroke-width="1.05" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <!-- code - the angle brackets, given the band's whole width -->
+  <symbol id="i-f-code" viewBox="0 0 16 16"><path d="M4.2 1.85h5l3.1 3.1v8.7c0 .28-.22.5-.5.5H4.2c-.28 0-.5-.22-.5-.5V2.35c0-.28.22-.5.5-.5z" fill="none" stroke="currentColor" stroke-width=".95"/><path d="M9.2 1.95v3h3" fill="none" stroke="currentColor" stroke-width=".95" stroke-linejoin="round"/><path d="M6.7 7.9L5 9.55l1.7 1.65M9.3 7.9l1.7 1.65-1.7 1.65" fill="none" stroke="currentColor" stroke-width="1.05" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <!-- config / data - two sliders; the knobs sit at different x so even a blurred pair is asymmetric and cannot be read as two rules -->
+  <symbol id="i-f-config" viewBox="0 0 16 16"><path d="M4.2 1.85h5l3.1 3.1v8.7c0 .28-.22.5-.5.5H4.2c-.28 0-.5-.22-.5-.5V2.35c0-.28.22-.5.5-.5z" fill="none" stroke="currentColor" stroke-width=".95"/><path d="M9.2 1.95v3h3" fill="none" stroke="currentColor" stroke-width=".95" stroke-linejoin="round"/><path d="M5.2 8.2h5.6M5.2 10.9h5.6" fill="none" stroke="currentColor" stroke-width="1.05" stroke-linecap="round"/><circle cx="6.6" cy="8.2" r="1.15" fill="currentColor"/><circle cx="9.4" cy="10.9" r="1.15" fill="currentColor"/></symbol>
+  <!-- table / tabular data - two columns by three rows, the most a 15px page holds -->
+  <symbol id="i-f-table" viewBox="0 0 16 16"><path d="M4.2 1.85h5l3.1 3.1v8.7c0 .28-.22.5-.5.5H4.2c-.28 0-.5-.22-.5-.5V2.35c0-.28.22-.5.5-.5z" fill="none" stroke="currentColor" stroke-width=".95"/><path d="M9.2 1.95v3h3" fill="none" stroke="currentColor" stroke-width=".95" stroke-linejoin="round"/><path d="M4.9 8.35h6.2M4.9 10.85h6.2M8 7.25v4.7" fill="none" stroke="currentColor" stroke-width="1.05"/></symbol>
   <symbol id="i-tri" viewBox="0 0 10 10"><path d="M3.2 2.2L6.6 5 3.2 7.8z" fill="currentColor"/></symbol>
   <!-- dock icons are side-honest: the filled panel sits where the pane will land
        (files dock left, previews dock right; user-reported mismatch) -->
@@ -7384,7 +7583,7 @@
     if (/bt|Better/i.test(leaf)) return [
       f("crates", [f("bt-term", [file("lib.rs"), file("grid.rs")]), f("bt-detect", [file("lib.rs")])]),
       f("design", [file("ui-mockup.html"), file("preview-shot.png")]),
-      f("docs", [f("spikes", [file("04-ime-cjk.md")]), file("DESIGN.md"), file("PROBLEM-LIST.md")]),
+      f("docs", [f("spikes", [file("04-ime-cjk.md")]), file("DESIGN.md"), file("PROBLEM-LIST.md"), file("bench-0819.csv")]),
       file("Cargo.toml"), file(".gitignore"), file("LICENSE"),
     ];
     return [
@@ -7393,6 +7592,76 @@
       file("Cargo.toml"), file("README.md"),
     ];
   }
+
+  /* ============================================================================
+     THE `?icons=` READER (#46) - TEMPORARY, AND IT LEAVES WITH THE LOSERS
+     ============================================================================
+     `?icons=a|b|c` picks which of the three type-icon variants the trees draw;
+     anything else, including nothing, is `a`, which is what this file drew
+     before the ticket. The variant is stamped on <body> so the whole choice is
+     one attribute and the CSS block beside `.frow .fico` can read it.
+
+       A  MINIMAL - two shapes, folder and file, and that is the entire
+          vocabulary. The folder is --accent because it is a place you can go
+          into; every file is one --ink3 page. This is the shipped state, drawn
+          as a real candidate rather than as a baseline, because "the calmest
+          answer is the one already on screen" is a possible verdict and the
+          exercise should be able to reach it. It is also GitHub's answer, and
+          GitHub's file listing is the quietest of the five surfaces surveyed.
+
+       B  RESTRAINED TYPES - six silhouettes (folder, image, prose, code,
+          config/data, table) and NOT ONE MORE, all on the same --ink3 as the
+          single page they replace. The type is carried entirely by shape, so
+          the column's colour budget is untouched: the accent still means
+          "folder", and everything a git chip or a dirty dot wants to say is
+          still the only colour on the row. This is JetBrains' perimeter rule
+          and Primer's functional-colour rule taken literally.
+
+       C  A LITTLE COLOUR - B's silhouettes with three of them tinted (code,
+          prose, image) at fixed lightness and half the status palette's
+          chroma. The claim under test is that a hue can be a shortcut without
+          becoming a stripe, if it is not allowed to change how BRIGHT the row
+          is. If the answer is no, the file to look at is B - C degrades to B
+          by deleting three lines.
+
+     Six buckets and no more is itself the ruling under test. Seti and Material
+     Icon Theme carry hundreds; the count is the crowding. Six is the number of
+     questions a reader actually asks a tree ("is this a picture / something I
+     read / something I run / something I configure / a table / a place"), and
+     the seventh answer - "something else" - is a plain page with no badge,
+     which is the only honest thing to say about a file the build has never
+     heard of. */
+  const ICONS = (() => {
+    const v = (new URLSearchParams(location.search).get("icons") || "").toLowerCase();
+    return (v === "b" || v === "c") ? v : "a";
+  })();
+  document.body.dataset.icons = ICONS;
+
+  /* Which of the six a name belongs to. This is deliberately NOT `previewFtype`
+     above: that one answers "can this pane render it", which is a question
+     about this build's capabilities and shrinks as `unknown` when they run out.
+     This one answers "what kind of thing is it", which is a question about the
+     file and is answerable for extensions no preview will ever open. Two
+     questions, two tables; merging them would make the icon change the day a
+     renderer landed. */
+  const FILE_KINDS = [
+    ["image",  /\.(png|jpe?g|gif|webp|bmp|ico|svg|avif|tiff?|heic)$/i],
+    ["md",     /\.(md|markdown|mdx|rst|adoc|txt|log)$/i],
+    ["code",   /\.(rs|wgsl|glsl|c|h|cc|cpp|hpp|cs|go|java|kt|swift|rb|php|lua|zig|py|js|mjs|cjs|jsx|ts|tsx|sh|bash|zsh|ps1|psm1|psd1|bat|cmd|html?|css|scss|sql)$/i],
+    ["config", /\.(toml|jsonc?|ya?ml|ini|cfg|conf|xml|properties|lock|env)$|^\.(gitignore|gitattributes|editorconfig|npmrc|env)$|^(Makefile|Dockerfile)$/i],
+    ["table",  /\.(csv|tsv|parquet|xlsx?|ods)$/i],
+  ];
+  const fileKind = (name) => {
+    for (const [k, re] of FILE_KINDS) if (re.test(name)) return k;
+    return "plain";
+  };
+  /* the symbol a file row wears. In A every file is the shipped page; in B and
+     C the six pages replace it, and B and C differ only in CSS - the same
+     silhouette is drawn twice and tinted once, which is what makes the two
+     screenshots comparable. */
+  const fileIconId = (name) => ICONS === "a" ? "i-file" : "i-f-" + fileKind(name);
+  /* the class that lets C tint a row without B knowing about it */
+  const fileKindClass = (name) => ICONS === "a" ? "" : " k-" + fileKind(name);
 
   /* Each files leaf owns its own {root, open:Set, sel}. Two files panes root
      independently — which, per the research, is what sidesteps "which cwd wins"
@@ -7421,13 +7690,13 @@
     if (!rows.some(r => r.path === files.sel)) files.sel = rows[0] ? rows[0].path : null;
     return rows.map(r => {
       const n = r.node, open = n.dir && files.open.has(r.path);
-      const ico = n.dir ? (open ? "i-folder-open" : "i-folder") : "i-file";
+      const ico = n.dir ? (open ? "i-folder-open" : "i-folder") : fileIconId(n.name);
       return `<div class="frow ${open ? "open" : ""} ${r.path === files.sel ? "sel" : ""}"
                    data-path="${r.path}" data-dir="${n.dir ? 1 : 0}"
                    style="padding-left:${6 + r.depth * 14}px" role="treeitem"
                    ${n.dir ? `aria-expanded="${open}"` : ""}>
         <svg class="tri ${n.dir ? "" : "leaf"}"><use href="#i-tri"/></svg>
-        <svg class="fico ${n.dir ? "folder" : "file"}"><use href="#${ico}"/></svg>
+        <svg class="fico ${n.dir ? "folder" : "file"}${n.dir ? "" : fileKindClass(n.name)}"><use href="#${ico}"/></svg>
         <span class="fname">${n.name}</span>
       </div>`;
     }).join("");
@@ -7743,8 +8012,14 @@
     const menuOpen = pm.classList.contains("show") && pm.dataset.leaf === String(leaf.id);
     /* the filename IS the buffer switcher once the pane holds more than one:
        a chevron + count say "there are others here", the dropdown lists them */
+    /* The head's mark is the file's TYPE in B and C and the plain page in A -
+       but it stays --accent in all three, because every pane head in this
+       window wears its mark in the accent and a head is not a list. The
+       crowding this ticket is about is a property of a COLUMN of marks; one
+       mark, alone, above a document, has nobody to crowd. So the head takes
+       the shape and refuses the tint. */
     const nameBits = `
-              <svg class="files-ico"><use href="#i-file"/></svg>
+              <svg class="files-ico"><use href="#${ICONS === "a" ? "i-file" : "i-f-" + fileKind(pv.name)}"/></svg>
               <span class="pv-name ${many ? "switch" : ""} ${menuOpen ? "pvopen" : ""}" data-leaf="${leaf.id}" title="${pv.path}${many ? " — click to switch files" : ""}${pv.virtual ? "" : " — double-click to rename"}">${esc(pv.name)}${many ? `<svg class="rootchev"><use href="#i-chev"/></svg><span class="pv-count ${othersDirty ? "dirty" : ""}">${pool.length}</span>` : ""}</span>`;
     return `<div class="preview-head panehead" data-leaf="${leaf.id}">
               ${nameBits}
