@@ -53,6 +53,7 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         acrylic: true,
         always_on_top: true,
         advanced_open: vec!["appearance".to_owned()],
+        scrollback_lines: 50_000,
     };
     write_settings_atomic(&path, &settings).unwrap();
 

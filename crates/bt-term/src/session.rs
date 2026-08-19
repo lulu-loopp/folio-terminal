@@ -1236,6 +1236,28 @@ impl DualPlaneSession {
         &self.transcript
     }
 
+    /// Retune how many lines of history this pane keeps (P2-9 slice 2).
+    ///
+    /// **The removals go through [`Self::delete_history`]**, which is the same road
+    /// `ESC [ 3 J` and ordinary quota eviction already take: inline images retire,
+    /// command marks retire, the document degrades every anchor into a deleted line,
+    /// the scheduler drops those sources, decorations and detection contexts go with
+    /// them, and any live record whose frozen prefix reached into a departed line
+    /// gives that prefix up. A retune that emptied the store by hand would be a
+    /// second, shorter definition of what deleting history means, and the first thing
+    /// to fall off it would be whichever structure the next slice adds.
+    ///
+    /// Lowering costs the oldest lines and does it now; raising resurrects nothing and
+    /// simply keeps more of what comes next — see
+    /// [`TranscriptStore::set_frozen_quota`] for why the asymmetry is the honest one.
+    pub fn set_frozen_quota(&mut self, quota: NonZeroUsize) {
+        let removed = self.transcript.set_frozen_quota(quota);
+        if removed.is_empty() {
+            return;
+        }
+        self.delete_history(&removed, false);
+    }
+
     /// The live grid's rows, top to bottom — **the plane the transcript does not hold**.
     ///
     /// It exists for the in-pane search (§7.1.5d, inventory R7). A terminal's text lives in three
@@ -11951,6 +11973,72 @@ mod tests {
                 inline_formulas: true,
             }
         );
+    }
+
+    /// PIN (P2-9 slice 2) — **a pane retuned to a smaller capacity loses the oldest
+    /// lines through the pipeline every other deletion goes through**, not through a
+    /// second, shorter definition of what deleting history means.
+    ///
+    /// The same argument `clear_pane_scrollback` is written under: `ESC [ 3 J` already
+    /// runs transcript, document, anchors, decorations and marks through one path, and a
+    /// retune that emptied some of those by hand would be the second definition — with
+    /// whichever structure the next slice adds being the first thing to fall off it. So
+    /// this asserts both halves: the store is smaller, *and* the document no longer
+    /// answers for the ids that went.
+    #[test]
+    fn retuning_a_session_to_a_smaller_capacity_deletes_through_the_history_pipeline() {
+        let mut session = DualPlaneSession::with_quotas(
+            nz(20),
+            nz(2),
+            NonZeroUsize::new(1).unwrap(),
+            NonZeroUsize::new(64).unwrap(),
+        );
+        for index in 0..12 {
+            session
+                .feed(format!("line {index}\r\n").as_bytes())
+                .unwrap();
+        }
+        let before = session
+            .transcript()
+            .frozen()
+            .iter()
+            .map(|line| line.id)
+            .collect::<Vec<_>>();
+        assert!(
+            before.len() >= 8,
+            "the fixture has to have history to lose: {before:?}"
+        );
+
+        session.set_frozen_quota(NonZeroUsize::new(3).unwrap());
+
+        let after = session
+            .transcript()
+            .frozen()
+            .iter()
+            .map(|line| line.id)
+            .collect::<Vec<_>>();
+        assert_eq!(after.len(), 3, "the number binds at once");
+        assert_eq!(
+            after,
+            before[before.len() - 3..],
+            "and it is the newest three that stay"
+        );
+        for id in &before[..before.len() - 3] {
+            assert!(
+                !session.document.entries().contains_key(id),
+                "history line {id:?} left the store; the document must not still answer for it"
+            );
+            assert!(
+                session.document.tombstones().contains(id),
+                "and it must be tombstoned, so an anchor into it degrades rather than dangles"
+            );
+        }
+
+        // And growing is the honest half: nothing comes back, and the new room is real.
+        session.set_frozen_quota(NonZeroUsize::new(64).unwrap());
+        assert_eq!(session.transcript().frozen().len(), 3);
+        session.feed(b"after\r\n").unwrap();
+        assert!(session.transcript().frozen().len() >= 3);
     }
 
     #[test]

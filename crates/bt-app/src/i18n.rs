@@ -1209,6 +1209,16 @@ pub enum Text {
     /// [`Self::DragSwapPanes`] and [`Self::DragReplacePane`].
     DragOpenInPreview,
     DragRootTreeHere,
+
+    // ── the Terminal page's Scrollback row (P2-9 slice 2, 2026-08-19) ──────
+    //
+    // One contiguous block at the end, per this table's standing rule.
+    /// The row that names how much of its own past a pane keeps.
+    RowScrollback,
+    /// Its sentence. Says **per pane**, because that is the half a reader
+    /// cannot infer: the number is spent once for every terminal on screen,
+    /// and a window with four of them is holding four of these.
+    DescScrollback,
 }
 
 impl Text {
@@ -2145,6 +2155,24 @@ impl Text {
             // ── a drag's landing caption ───────────────────────────────────
             Self::DragOpenInPreview => pick(lang, "Open in this preview", "在这个预览里打开"),
             Self::DragRootTreeHere => pick(lang, "Root this tree here", "把这棵树的根设到这里"),
+
+            // ── the Terminal page's Scrollback row ─────────────────────────
+            //
+            // 「回滚」is the word this product already uses for the same thing
+            // in the pane menu (`TermMenuClearScrollback`) and in the gate that
+            // asks before emptying it; a second word here would make the row
+            // and the verb look like two features.
+            Self::RowScrollback => pick(lang, "Scrollback", "回滚"),
+            // One sentence for the whole picker, the same constraint
+            // `DescBlockMaxHeight` is written under: a description is a
+            // `&'static str` and does not read the value. It says *per pane*
+            // and it says *oldest first*, which are the two things the numerals
+            // beside it do not.
+            Self::DescScrollback => pick(
+                lang,
+                "Each pane keeps this many lines; the oldest go first",
+                "每个窗格保留这么多行,最旧的先走",
+            ),
         }
     }
 
@@ -2160,7 +2188,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 397] = [
+    pub const ALL: [Self; 399] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -2558,6 +2586,8 @@ impl Text {
         Self::GitDocumentEmpty,
         Self::DragOpenInPreview,
         Self::DragRootTreeHere,
+        Self::RowScrollback,
+        Self::DescScrollback,
     ];
 
     /// The entries whose two columns are allowed to be the same string.

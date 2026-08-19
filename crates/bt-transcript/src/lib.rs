@@ -721,6 +721,38 @@ impl TranscriptStore {
     pub fn staging_len(&self) -> usize {
         self.staging_rows + self.resize_staging.len()
     }
+
+    /// How many frozen logical lines this store will hold.
+    pub fn frozen_quota(&self) -> usize {
+        self.frozen_quota
+    }
+
+    /// Name a new frozen capacity and hand back the lines it costs, oldest first.
+    ///
+    /// **The number binds now.** Installing it and waiting would not spare a single
+    /// line: [`Self::finalize`] evicts `len - quota` in one batch, so a smaller
+    /// quota already collapses history the next time anything is frozen — at
+    /// whichever later moment that happens to be. Doing the eviction here makes it
+    /// happen because of the answer that caused it, and in the same turn, which is
+    /// what lets the caller push the ids through its ordinary history-deletion
+    /// pipeline instead of discovering them later in the pending channel.
+    ///
+    /// Growing is the asymmetric half and it is honest rather than lossy: nothing
+    /// is returned, nothing is resurrected — a deleted line is gone — and the only
+    /// thing a larger number changes is how much of the future is kept.
+    ///
+    /// The removals are **returned** rather than added to `pending_evictions`,
+    /// because this is a call and not an observation: the caller is standing right
+    /// here holding the answer, whereas that channel exists for lines evicted
+    /// inside a `capture` the caller only learns about afterwards.
+    pub fn set_frozen_quota(&mut self, quota: NonZeroUsize) -> Vec<TranscriptId> {
+        self.frozen_quota = quota.get();
+        let overflow = self.frozen.len().saturating_sub(self.frozen_quota);
+        if overflow == 0 {
+            return Vec::new();
+        }
+        self.evict_oldest(overflow)
+    }
     pub fn frozen(&self) -> &VecDeque<FrozenLine> {
         &self.frozen
     }
@@ -1275,6 +1307,82 @@ mod tests {
         );
         assert_eq!(store.take_evictions(), vec![TranscriptId(1)]);
         assert_eq!(store.tombstones(), &[TranscriptId(1)]);
+    }
+
+    /// PIN — **a capacity binds the moment it is named**, and lowering one deletes
+    /// the oldest lines at once rather than waiting for output that may never come.
+    ///
+    /// The alternative was never "keep them": `finalize` already evicts
+    /// `len - quota` in one go, so a smaller number installed lazily would still
+    /// drop every overflowing line — just at whichever unpredictable later moment
+    /// the next line was frozen. Doing it here makes the deletion attributable to
+    /// the answer that caused it, which is also what lets a caller run the removed
+    /// ids through the ordinary history-deletion pipeline in the same turn.
+    #[test]
+    fn lowering_the_frozen_quota_evicts_the_oldest_at_once() {
+        let mut store = TranscriptStore::with_quotas(nz(8), nz(8));
+        for text in ["one", "two", "three", "four"] {
+            store.capture(CapturedRow::plain(text, false));
+        }
+        assert_eq!(store.frozen().len(), 4);
+        assert!(store.take_evictions().is_empty());
+
+        let removed = store.set_frozen_quota(nz(2));
+        assert_eq!(removed, vec![TranscriptId(1), TranscriptId(2)]);
+        assert_eq!(
+            store
+                .frozen()
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["three", "four"],
+            "the oldest go, because history is read from its newest end"
+        );
+        assert_eq!(store.tombstones(), &[TranscriptId(1), TranscriptId(2)]);
+        assert_eq!(store.frozen_quota(), 2);
+        assert!(
+            store.take_evictions().is_empty(),
+            "the removal is handed to the caller directly, not left in the pending \
+             channel for whoever drains it next"
+        );
+    }
+
+    /// PIN — **raising a capacity resurrects nothing and admits more**, which is
+    /// the honest asymmetry of the pair: a line already deleted is gone, so the
+    /// only thing a larger number can change is the future.
+    #[test]
+    fn raising_the_frozen_quota_keeps_what_is_there_and_admits_more() {
+        let mut store = TranscriptStore::with_quotas(nz(8), nz(2));
+        for text in ["one", "two", "three"] {
+            store.capture(CapturedRow::plain(text, false));
+        }
+        assert_eq!(store.frozen().len(), 2);
+
+        assert!(
+            store.set_frozen_quota(nz(4)).is_empty(),
+            "growing deletes nothing"
+        );
+        assert_eq!(
+            store
+                .frozen()
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["two", "three"],
+            "and `one` does not come back"
+        );
+        for text in ["four", "five"] {
+            store.capture(CapturedRow::plain(text, false));
+        }
+        assert_eq!(
+            store
+                .frozen()
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["two", "three", "four", "five"],
+            "the new room is real"
+        );
     }
 
     #[test]

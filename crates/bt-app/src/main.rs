@@ -168,8 +168,22 @@ const STRIP_ANIMATION_FRAME: Duration = Duration::from_millis(16);
 /// Winit 0.30 has no enter/exit-size-move event; the final ConPTY size is committed after this
 /// silence interval while the local surface and terminal grid continue to follow every event.
 const WINDOW_RESIZE_QUIET: Duration = bt_term::RESIZE_REQUEST_QUIET;
-/// M0-alpha's single-session frozen-line budget; later configuration work may expose it.
-const M0_FROZEN_LINE_QUOTA: NonZeroUsize = NonZeroUsize::new(100_000).unwrap();
+/// A single pane's frozen-line budget when nothing has named one — **the later
+/// configuration work M0-alpha's comment promised, now done** (P2-9 slice 2).
+///
+/// Derived from `bt_persist::DEFAULT_SCROLLBACK_LINES` rather than spelled again, so
+/// that the number a fresh `settings.json` is written with and the number a pane
+/// born without one gets are the same number by construction. It is still 100,000,
+/// which is what every build before the `Scrollback` row kept; the row moved where
+/// the answer lives, not what it is.
+const DEFAULT_FROZEN_LINE_QUOTA: NonZeroUsize =
+    match NonZeroUsize::new(bt_persist::DEFAULT_SCROLLBACK_LINES as usize) {
+        Some(quota) => quota,
+        // Unreachable by construction: the constant is a literal 100_000. A `match`
+        // rather than `expect`, because neither is available in a `const` and this
+        // one at least says which value would be wrong.
+        None => NonZeroUsize::MIN,
+    };
 const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 const HYPERLINK_HOVER_DELAY: Duration = Duration::from_millis(300);
 /// See [`i18n::Text::MathWorkerStopped`] — one of three sentences deliberately
@@ -14185,6 +14199,20 @@ fn block_max_height_px(height: u32) -> Option<std::num::NonZeroU32> {
     std::num::NonZeroU32::new(height)
 }
 
+/// `settings.json`'s scrollback capacity, as the transcript carries it.
+///
+/// **The one place a capacity of nothing is answered.** `bt_persist` stores a `u32`
+/// because the file is edited by hand and every number in it should read as a
+/// number; `TranscriptStore` takes a `NonZeroUsize` because a store that keeps zero
+/// lines is not a small store, it is a pane with no past at all — and nobody can
+/// reach that state through the picker, so a file that names it is a file somebody
+/// typed into. It is read the way §5.4 reads every other unusable value: fall to
+/// the product's own answer, honour everything beside it, and say nothing, because
+/// the alternative is a terminal that silently forgets each line as it prints.
+fn scrollback_quota(lines: u32) -> NonZeroUsize {
+    NonZeroUsize::new(lines as usize).unwrap_or(DEFAULT_FROZEN_LINE_QUOTA)
+}
+
 /// The Rendered-blocks switches a new pane must be born obeying.
 ///
 /// One struct rather than two `bool` parameters because they would sit adjacent
@@ -14259,6 +14287,11 @@ fn apply_stored_terminal_font(
 /// are filed under and which directory they open in. Keeping one builder is what
 /// stops a pane born from a split from quietly differing — a missing quota, an
 /// unset baseline, a layout key nobody seeded — from a pane born with its tab.
+///
+/// Eight arguments, and [`create_tab_state`]'s reason for its own allowance:
+/// every one of them is a different question about the same birth, and folding
+/// them into a struct would move the argument list rather than shorten it.
+#[allow(clippy::too_many_arguments)]
 fn create_leaf_session(
     renderer: &Renderer,
     body: bt_render::SeatViewport,
@@ -14267,6 +14300,14 @@ fn create_leaf_session(
     seed: &LeafSeed,
     programs: &profiles::ProfilePrograms,
     formulas: FormulaSwitches,
+    // **How much of its own past this pane will keep.** A parameter beside
+    // `formulas` rather than a field inside it: that struct is the Rendered
+    // blocks page's answers and says so, and a capacity filed under a name that
+    // means "typesetting" is a field the next reader will not look for. Passed
+    // in for the reason `formulas` is — a pane split off a neighbour must be
+    // born obeying the same switches, and a birth that read the settings for
+    // itself would be a second place for the answer to live.
+    scrollback: NonZeroUsize,
 ) -> Result<LeafSession> {
     let grid = renderer.metrics().grid_for_pixels(body.width, body.height);
     let chosen_id = profiles::id(seed.profile);
@@ -14395,7 +14436,7 @@ fn create_leaf_session(
         columns,
         rows,
         DEFAULT_STAGING_QUOTA,
-        M0_FROZEN_LINE_QUOTA,
+        scrollback,
         renderer.metrics().cell_height_subpixels(),
     );
     session.set_cell_width_subpixels(cell_width_subpixels(renderer.metrics()));
@@ -14514,6 +14555,9 @@ fn create_tab_state(
     policy: SizePolicy,
     rail: seats::RailState,
     formulas: FormulaSwitches,
+    // Every terminal seat of the new tab is born holding the same capacity, for
+    // the reason each is born obeying the same block switches.
+    scrollback: NonZeroUsize,
 ) -> Result<(TabState, String)> {
     // The new tab's seats are solved into the *current* window, so they answer
     // to whoever owns it. A tab opened while the user is working in a window
@@ -14558,6 +14602,7 @@ fn create_tab_state(
             }),
             programs,
             formulas,
+            scrollback,
         )?;
         sessions.insert(seat, leaf);
     }
@@ -15956,6 +16001,7 @@ impl Runtime {
                 // preference nobody chose.
                 seats::RailState::default(),
                 FormulaSwitches::from_settings(settings_store.loaded()),
+                scrollback_quota(settings_store.loaded().scrollback_lines),
             )?;
             tabs.push(tab);
             conpty_sources.push(conpty_source);
@@ -16400,6 +16446,7 @@ impl Runtime {
             self.window.size_policy,
             self.window.rail,
             FormulaSwitches::from_settings(self.app.settings_store.loaded()),
+            scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
         )?;
         self.window.tabs.push(tab);
         self.apply_window_min_inner_size()?;
@@ -16610,6 +16657,7 @@ impl Runtime {
             self.window.size_policy,
             self.window.rail,
             FormulaSwitches::from_settings(self.app.settings_store.loaded()),
+            scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
         )?;
         // Appended, which keeps the pinned run intact without a re-sort: a new
         // unpinned tab belongs at the end by construction.
@@ -16733,6 +16781,7 @@ impl Runtime {
                 self.window.size_policy,
                 self.window.rail,
                 FormulaSwitches::from_settings(self.app.settings_store.loaded()),
+                scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
             )?;
             self.window.tabs.push(revived);
             self.request_revived_previews(self.window.tabs.len() - 1);
@@ -20216,6 +20265,7 @@ impl Runtime {
             inline_formulas: self.app.settings_store.loaded().inline_formulas,
             tables: self.app.settings_store.loaded().tables,
             block_max_height: self.app.settings_store.loaded().block_max_height,
+            scrollback_lines: self.app.settings_store.loaded().scrollback_lines,
             git_panel: self.app.settings_store.loaded().git_panel,
             split_direction: self.app.settings_store.loaded().split_direction,
             language: self.app.settings_store.loaded().language,
@@ -21241,6 +21291,9 @@ impl Runtime {
         if let Some(height) = settings::block_max_height_requested(target) {
             self.apply_block_max_height(height)?;
         }
+        if let Some(lines) = settings::scrollback_lines_requested(target) {
+            self.apply_scrollback_lines(lines)?;
+        }
         if let Some(enabled) = settings::inline_formulas_requested(target) {
             self.apply_inline_formulas(enabled)?;
         }
@@ -21467,6 +21520,7 @@ impl Runtime {
             | Row::DefaultProfile
             | Row::Language
             | Row::PsReadLine
+            | Row::Scrollback
             // The editor's own advanced rows are put back by the page's own foot
             // verb — `Restore all defaults` on a built-in — which restores the
             // whole profile rather than four of its fields. A second verb that
@@ -22756,6 +22810,55 @@ impl Runtime {
                 leaf.session.set_math_layout_options(options);
             }
         }
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        Ok(true)
+    }
+
+    /// Point the "Scrollback" row at `lines` per pane (P2-9 slice 2, 2026-08-19).
+    ///
+    /// [`Self::apply_block_max_height`]'s shape — every pane in every tab, an
+    /// immediate write, one frame's cost — with the one difference that this row's
+    /// answer can **delete something**, and so is worth saying out loud.
+    ///
+    /// **A smaller number binds at once, and waiting would not have spared a line.**
+    /// The store evicts `len - quota` in a single batch the next time anything is
+    /// frozen, so a capacity installed lazily still collapses history — just at
+    /// whichever later moment the shell happened to print. Doing it here makes the
+    /// deletion happen *because of* the answer that caused it, in the frame the
+    /// reader is watching, rather than five minutes later during someone else's
+    /// build. It also travels the same road `Clear scrollback` travels
+    /// (`DualPlaneSession::set_frozen_quota` → `delete_history`), so anchors,
+    /// command marks, inline images and decorations go with the lines instead of
+    /// outliving them.
+    ///
+    /// **A larger number resurrects nothing**, which is the honest half of the same
+    /// coin: an evicted line is gone, and only the future can be kept differently.
+    /// The two together are why no gate asks first — a confirmation would be a new
+    /// interaction for this dialog, where no other picker confirms anything, and the
+    /// row's own sentence already says the oldest go first.
+    ///
+    /// **A pane on the alternate screen is retuned like any other.** What this
+    /// changes is the primary transcript, which `vim` is not writing to and which is
+    /// waiting for it underneath; skipping those panes would leave a window whose
+    /// answer was true of some of its terminals.
+    fn apply_scrollback_lines(&mut self, lines: u32) -> Result<bool> {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.scrollback_lines = lines;
+        if !self.app.settings_store.store(settings) {
+            return Ok(false);
+        }
+        let quota = scrollback_quota(lines);
+        for tab in &mut self.window.tabs {
+            for (_, leaf) in tab.leaves_mut() {
+                leaf.session.set_frozen_quota(quota);
+            }
+        }
+        // The scroll offset is clamped against a projection whose extent has just
+        // shrunk, so a reader parked deep in the history they no longer have is
+        // carried to the oldest line they still do rather than left over nothing.
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
@@ -25041,6 +25144,7 @@ impl Runtime {
             .unwrap_or_default();
         let wake = self.window.pty_wake.wake();
         let formulas = FormulaSwitches::from_settings(self.app.settings_store.loaded());
+        let scrollback = scrollback_quota(self.app.settings_store.loaded().scrollback_lines);
         let leaf = create_leaf_session(
             &self.window.renderer,
             body,
@@ -25049,6 +25153,7 @@ impl Runtime {
             &inherited,
             &self.app.profile_programs,
             formulas,
+            scrollback,
         )?;
         self.sessions.insert(arriving, leaf);
         debug_assert!(
@@ -34904,6 +35009,7 @@ impl Runtime {
         };
         let wake = self.window.pty_wake.wake();
         let formulas = FormulaSwitches::from_settings(self.app.settings_store.loaded());
+        let scrollback = scrollback_quota(self.app.settings_store.loaded().scrollback_lines);
         self.window.restarting = Some(seat);
         let spawned = create_leaf_session(
             &self.window.renderer,
@@ -34913,6 +35019,7 @@ impl Runtime {
             &seed,
             &self.app.profile_programs,
             formulas,
+            scrollback,
         );
         self.window.restarting = None;
         // The old leaf is dropped **here**, by the insert: `PtySession::drop`
@@ -38013,6 +38120,7 @@ impl Runtime {
             };
             let wake = self.window.pty_wake.wake();
             let formulas = FormulaSwitches::from_settings(self.app.settings_store.loaded());
+            let scrollback = scrollback_quota(self.app.settings_store.loaded().scrollback_lines);
             // The **default** profile, which is what a stand-in is: it is not
             // inherited from anything, because the pane it replaces was never
             // running a shell to inherit from.
@@ -38024,6 +38132,7 @@ impl Runtime {
                 &LeafSeed::default(),
                 &self.app.profile_programs,
                 formulas,
+                scrollback,
             )?;
             let Some(arrived) = self.seats.stand_in_terminal(&metrics, seat) else {
                 *self.preview_panes.entry(surface) = pane;
@@ -49647,6 +49756,43 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// PIN (P2-9 slice 2) — **the capacity a pane is born with and the capacity a
+    /// fresh `settings.json` is written with are the same number**, and a file that
+    /// names zero lines is read as the product's answer rather than as a pane with
+    /// no past.
+    ///
+    /// The first half is why `DEFAULT_FROZEN_LINE_QUOTA` is derived from
+    /// `bt_persist::DEFAULT_SCROLLBACK_LINES` instead of spelled twice: two literals
+    /// would agree today and drift the first time either moved, and the symptom
+    /// would be a pane that kept a different amount of history depending on whether
+    /// anyone had opened the settings dialog yet.
+    ///
+    /// The second half is §5.4 逐叶降级 at a door. Zero is unreachable through the
+    /// picker, so a file that names it was typed into by hand; a store built from it
+    /// would forget every line as it printed, which is not a small setting but a
+    /// broken terminal.
+    #[test]
+    fn a_pane_is_born_with_the_capacity_a_fresh_settings_file_names() {
+        assert_eq!(
+            super::DEFAULT_FROZEN_LINE_QUOTA.get(),
+            bt_persist::DEFAULT_SCROLLBACK_LINES as usize
+        );
+        assert_eq!(bt_persist::DEFAULT_SCROLLBACK_LINES, 100_000);
+        for lines in settings::SCROLLBACK_OPTIONS {
+            assert_eq!(super::scrollback_quota(lines).get(), lines as usize);
+        }
+        assert_eq!(
+            super::scrollback_quota(0),
+            super::DEFAULT_FROZEN_LINE_QUOTA,
+            "a hand-edited zero falls to the product's own answer rather than              leaving a pane that forgets each line as it prints"
+        );
+        assert_eq!(
+            super::scrollback_quota(7).get(),
+            7,
+            "and every other number the file can carry is honoured as written,              because `bt_persist` deliberately does not clamp this key"
+        );
+    }
+
     /// PIN (user report, 2026-08-16) — **an open cursor range is a target clause,
     /// not a caret.** winit reports `(start, end)` for the run Microsoft Pinyin
     /// has marked as the clause under conversion; the first cut read `start`
@@ -56261,7 +56407,7 @@ mod tests {
             NonZeroU32::new(8).unwrap(),
             NonZeroU32::new(2).unwrap(),
             DEFAULT_STAGING_QUOTA,
-            M0_FROZEN_LINE_QUOTA,
+            DEFAULT_FROZEN_LINE_QUOTA,
             std::num::NonZeroI64::new(22 * bt_viewport::SUBPIXELS_PER_PX).unwrap(),
         );
         session.feed(&ime_commit_bytes("A你B")).unwrap();
@@ -57805,7 +57951,7 @@ mod tests {
             nonzero_u32(120),
             nonzero_u32(6),
             DEFAULT_STAGING_QUOTA,
-            M0_FROZEN_LINE_QUOTA,
+            DEFAULT_FROZEN_LINE_QUOTA,
             std::num::NonZeroI64::new(22 * bt_viewport::SUBPIXELS_PER_PX).unwrap(),
         );
         session.feed(banner.as_bytes()).unwrap();
@@ -57853,7 +57999,7 @@ mod tests {
             nonzero_u32(80),
             nonzero_u32(6),
             DEFAULT_STAGING_QUOTA,
-            M0_FROZEN_LINE_QUOTA,
+            DEFAULT_FROZEN_LINE_QUOTA,
             std::num::NonZeroI64::new(22 * bt_viewport::SUBPIXELS_PER_PX).unwrap(),
         );
         session.feed(banner.as_bytes()).unwrap();
@@ -57889,7 +58035,7 @@ mod tests {
             nonzero_u32(80),
             nonzero_u32(6),
             DEFAULT_STAGING_QUOTA,
-            M0_FROZEN_LINE_QUOTA,
+            DEFAULT_FROZEN_LINE_QUOTA,
             std::num::NonZeroI64::new(22 * bt_viewport::SUBPIXELS_PER_PX).unwrap(),
         );
         one.feed(banner.as_bytes()).unwrap();
@@ -60380,7 +60526,7 @@ mod tests {
             nonzero_u32(columns.get()),
             nonzero_u32(rows.get()),
             DEFAULT_STAGING_QUOTA,
-            M0_FROZEN_LINE_QUOTA,
+            DEFAULT_FROZEN_LINE_QUOTA,
             std::num::NonZeroI64::new(22 * bt_viewport::SUBPIXELS_PER_PX).unwrap(),
         );
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -67824,7 +67970,7 @@ mod tests {
             columns,
             rows,
             DEFAULT_STAGING_QUOTA,
-            M0_FROZEN_LINE_QUOTA,
+            DEFAULT_FROZEN_LINE_QUOTA,
             std::num::NonZeroI64::new(22 * bt_viewport::SUBPIXELS_PER_PX).unwrap(),
         );
         session

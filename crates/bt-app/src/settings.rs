@@ -835,6 +835,44 @@ pub const BLOCK_MAX_HEIGHT_OPTIONS: [u32; 4] = [0, 120, 240, 480];
 /// items is comparing two labelled quantities.
 const BLOCK_MAX_HEIGHT_LABELS: [&str; BLOCK_MAX_HEIGHT_OPTIONS.len()] =
     ["", "120 px", "240 px", "480 px"];
+/// **The `Scrollback` row's four answers**, in lines of past output kept per pane
+/// (P2-9 slice 2).
+///
+/// **A doubling ladder with the shipped capacity on its third rung.** 100,000 is
+/// `M0_FROZEN_LINE_QUOTA`, the number every pane this product has ever drawn has
+/// kept; putting it here rather than at an end is what lets the row ship without
+/// changing anybody's terminal, and it leaves one rung of room on either side —
+/// half as much history for a machine that would rather have the memory, twice as
+/// much for an afternoon spent reading a build log.
+///
+/// **Ascending, and the default is not first.** [`FONT_SIZE_OPTIONS`]' order, not
+/// [`BLOCK_MAX_HEIGHT_OPTIONS`]': a list of quantities with no privileged member
+/// reads in its own numeric order, and 16 sits in the middle of the size picker
+/// for exactly this reason. `BLOCK_MAX_HEIGHT_OPTIONS` leads with `0` because `No
+/// limit` is a *word* and not a quantity, and there is no such word on this row —
+/// P2-9's standing ruling is that 真·无限回滚 is not a thing this product does,
+/// because unbounded history means writing output to disk and that is the
+/// 「输出历史」 honeypot under a new name.
+///
+/// **Where the ends come from, measured rather than remembered.** A frozen line of
+/// 80 columns costs 588 bytes in `TranscriptStore` on this build — 144 for
+/// `FrozenLine` itself and 444 of heap for its text, its grapheme boundaries, its
+/// style spans and its fragments. So the ladder spans about **14 MB to 112 MB per
+/// pane**, and a window with four terminals at the top rung is holding a little
+/// under half a gigabyte of its own past. That is the reason there is no fifth
+/// rung above 200,000 rather than a preference: the next doubling is a quarter of
+/// a gigabyte in one pane.
+pub const SCROLLBACK_OPTIONS: [u32; 4] = [25_000, 50_000, 100_000, 200_000];
+/// The numerals those four wear.
+///
+/// A parallel array of literals for [`FONT_SIZE_LABELS`]' reason — `option_label`
+/// hands back `&'static str` and a number is not a translatable string — and
+/// **grouped**, because five digits unbroken is a number a reader has to count
+/// rather than read. The comma is the separator both of this product's languages
+/// group thousands with. The unit is not on the item: `lines` would be a word in
+/// four places where the row's own sentence already says it once.
+const SCROLLBACK_LABELS: [&str; SCROLLBACK_OPTIONS.len()] =
+    ["25,000", "50,000", "100,000", "200,000"];
 /// What the Background image row's two items mean.
 ///
 /// A named pair rather than a `bool`, because neither of them is the *value* of
@@ -2071,6 +2109,25 @@ pub enum SettingsRow {
     /// spelled once for both the hit test and the draw, and the description
     /// carries the reason.
     PsReadLine,
+    /// **How much of its own past one pane keeps** — the Terminal page's second
+    /// row (P2-9 slice 2, 2026-08-19).
+    ///
+    /// The half of P2-9 that the vertical scrollbar was a picture of: that bar
+    /// says how far back you can go, and until now nothing could say how far
+    /// back that ought to be. The number was `M0_FROZEN_LINE_QUOTA` — a constant
+    /// whose own comment said "later configuration work may expose it" — and
+    /// this row is that work.
+    ///
+    /// **On the Terminal page and not on Appearance**, because the page is
+    /// defined as how ONE pane behaves once something is running, and this is
+    /// the most literal member of that set the dialog has: it is not what a pane
+    /// looks like, it is what a pane *is holding*.
+    ///
+    /// It is the one row in this dialog whose answer can **delete something**,
+    /// and the row's sentence says so rather than a confirmation asking — see
+    /// `Runtime::apply_scrollback_lines` for why the deletion is immediate and
+    /// why waiting would not have spared a line.
+    Scrollback,
 
     // ── the profile editor's own rows (§7.1.6c-6b) ─────────────────────────
     //
@@ -2158,7 +2215,11 @@ impl SettingsRow {
             // The row the mock-up's `Terminal` page was waiting for. It is about
             // what a shell does rather than what the window looks like, which is
             // the line that page's name draws.
-            Self::PsReadLine => SettingsCategory::Terminal,
+            // And the row it was waiting for that is about the pane rather than
+            // about the machine: what a terminal keeps of what it has already
+            // shown is the plainest reading of "how ONE pane behaves once
+            // something is running" this dialog has.
+            Self::PsReadLine | Self::Scrollback => SettingsCategory::Terminal,
             // The mock-up files what typesetting does to a block under "Rendered
             // blocks" (2570), beside that page's own Maximum height row.
             Self::Formulas | Self::InlineFormulas | Self::Tables | Self::BlockMaxHeight => {
@@ -2215,6 +2276,7 @@ impl SettingsRow {
             Self::InlineFormulas => Text::RowInlineFormulas.text(),
             Self::Tables => Text::RowTables.text(),
             Self::BlockMaxHeight => Text::RowBlockMaxHeight.text(),
+            Self::Scrollback => Text::RowScrollback.text(),
             Self::GitPanel => Text::RowGitPanel.text(),
             // Mock-up 2360.
             Self::TabLayout => Text::RowTabLayout.text(),
@@ -2299,6 +2361,11 @@ impl SettingsRow {
             // picker that already says the rest. Noted as a deviation from
             // mock-up 9939.
             Self::BlockMaxHeight => Text::DescBlockMaxHeight.text(),
+            // Two facts and no third, for `DescBlockMaxHeight`'s reason: the row is
+            // a `&'static str` that does not read its own value, so it carries
+            // what the numerals cannot — that the number is spent once per pane,
+            // and that a smaller one is paid for out of the oldest lines.
+            Self::Scrollback => Text::DescScrollback.text(),
             // Says what Off *does* rather than what it hides, because what it
             // does is the reason to reach for it: no page, no chord, and no `git`
             // process started on your behalf.
@@ -2481,6 +2548,7 @@ impl SettingsRow {
             | Self::DefaultProfile
             | Self::Language
             | Self::PsReadLine
+            | Self::Scrollback
             // The everyday half of the editor, in the order somebody decides a
             // profile: what it is called, what it runs, where it starts, what
             // colour names it.
@@ -2572,6 +2640,7 @@ impl SettingsRow {
             | Self::GitPanel
             | Self::PsReadLine => FORMULA_OPTIONS.len(),
             Self::BlockMaxHeight => BLOCK_MAX_HEIGHT_OPTIONS.len(),
+            Self::Scrollback => SCROLLBACK_OPTIONS.len(),
             Self::TerminalFont => monospace_families().len(),
             Self::FontSize => FONT_SIZE_OPTIONS.len(),
             Self::LightScheme => scheme_labels(true).len(),
@@ -2645,6 +2714,9 @@ impl SettingsRow {
                 .get(index)
                 .map(|family| family.name.as_str()),
             Self::FontSize => FONT_SIZE_LABELS.get(index).copied(),
+            // Four quantities and not one word among them, so none of the four
+            // goes through the i18n table — see [`SCROLLBACK_LABELS`].
+            Self::Scrollback => SCROLLBACK_LABELS.get(index).copied(),
             // The same `OnceLock` answer the family picker gives, for the same
             // reason: a scheme's name is a runtime string and this signature is
             // `&'static str`. See [`scheme_labels`].
@@ -2890,6 +2962,14 @@ impl SettingsRow {
             Self::BlockMaxHeight => BLOCK_MAX_HEIGHT_OPTIONS
                 .iter()
                 .position(|it| *it == values.block_max_height),
+            // `None` for a capacity this build's list does not offer, on the
+            // ruling directly above: `bt_persist` deliberately does not clamp
+            // the key, every positive value of it is a real capacity, and a
+            // picker that ticked the nearest rung would be claiming the file
+            // says a number it does not.
+            Self::Scrollback => SCROLLBACK_OPTIONS
+                .iter()
+                .position(|it| *it == values.scrollback_lines),
             Self::GitPanel => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.git_panel),
@@ -3034,6 +3114,12 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     rows.push(SettingsRow::GitPanel);
     rows.push(SettingsRow::DefaultProfile);
     rows.push(SettingsRow::PsReadLine);
+    // **Under the PSReadLine row**, which is the mock-up's own order for this page
+    // (4838, then 4862): the row that reports a fact about the machine stands
+    // first and the row that changes what a pane does stands under it. The
+    // mock-up's second row is `Line wrapping` rather than this one, and that row
+    // still has no setting behind it — see §7.1.6g for why it is not this slice.
+    rows.push(SettingsRow::Scrollback);
     rows
 }
 
@@ -3262,6 +3348,11 @@ pub struct SettingsValues {
     /// through unclamped so that the picker can decline to tick a number this
     /// build does not offer rather than pretend the file said one that it does.
     pub block_max_height: u32,
+    /// How many lines of past output one pane keeps — `bt_persist`'s own key,
+    /// carried through unclamped for [`SettingsValues::block_max_height`]'s
+    /// reason: the picker declines to tick a capacity this build does not offer
+    /// rather than pretend the file named one that it does.
+    pub scrollback_lines: u32,
     /// Whether the Files column offers its Git page at all.
     pub git_panel: bool,
     /// Which way a split with no direction of its own cuts.
@@ -3393,6 +3484,7 @@ impl SettingsValues {
             inline_formulas: true,
             tables: true,
             block_max_height: bt_persist::DEFAULT_BLOCK_MAX_HEIGHT,
+            scrollback_lines: bt_persist::DEFAULT_SCROLLBACK_LINES,
             git_panel: true,
             split_direction: SplitDirectionV1::Auto,
             language: LanguageV1::System,
@@ -5899,6 +5991,18 @@ pub fn block_max_height_requested(target: SettingsTarget) -> Option<u32> {
     match target {
         SettingsTarget::Choice(SettingsRow::BlockMaxHeight, index) => {
             BLOCK_MAX_HEIGHT_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// The "Scrollback" row's answer in lines kept per pane, if this target is one of
+/// its items.
+#[must_use]
+pub fn scrollback_lines_requested(target: SettingsTarget) -> Option<u32> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::Scrollback, index) => {
+            SCROLLBACK_OPTIONS.get(index).copied()
         }
         _ => None,
     }
@@ -10886,7 +10990,7 @@ mod tests {
         assert_eq!(
             short.max_scroll(),
             0.0,
-            "the Terminal page is one row in a dialog sized for fifteen"
+            "the Terminal page is two rows in a dialog sized for fifteen"
         );
         let last = short.rows.last().expect("the page has a row");
         assert!(
@@ -14503,8 +14607,11 @@ mod tests {
     /// empty room is a worse promise than no door.
     ///
     /// MUTATIONS:
-    /// (1) take the PSReadLine row out of `visible_rows` — `Terminal` leaves the
-    ///     rail on its own, which is the derivation working;
+    /// (1) take **both** Terminal rows out of `visible_rows` — `Terminal` leaves
+    ///     the rail on its own, which is the derivation working. It is two rows
+    ///     rather than one since P2-9 slice 2 put `Scrollback` beside the
+    ///     PSReadLine row, and that is the derivation working from the other
+    ///     side: the page stays because something is still on it;
     /// (2) list the categories in the rail from `ALL` without the filter — a
     ///     category with nothing on it appears and this goes red.
     #[test]
@@ -15272,6 +15379,123 @@ mod tests {
             None,
             "a height this build's list does not offer ticks nothing rather \
              than the nearest thing to it"
+        );
+    }
+
+    /// PIN (P2-9 slice 2) — **the Scrollback row stands on the Terminal page under
+    /// PSReadLine, and offers a doubling ladder with the shipped capacity on it.**
+    ///
+    /// The last assertion is the load-bearing one: 100,000 has to be *in* the list,
+    /// because it is `bt_persist::DEFAULT_SCROLLBACK_LINES` and therefore the value
+    /// every reader arrives holding. A ladder that omitted it would open showing no
+    /// tick at all on a machine nobody had touched — a picker reporting that the
+    /// product is in a state the product does not offer.
+    ///
+    /// Red gate: drop the row from `visible_rows` and the placement assertions go
+    /// red; move a rung and the label pinned beside it goes with it.
+    #[test]
+    fn the_scrollback_row_offers_a_doubling_ladder_around_the_capacity_it_shipped_with() {
+        let placed = open_rows_measured(
+            1.0,
+            Some(SettingsRow::Scrollback),
+            TabLayoutMode::Horizontal,
+            0.0,
+        );
+        let labels = labels_of(&placed, None, &values());
+        for text in [
+            "Scrollback",
+            "Each pane keeps this many lines; the oldest go first",
+            "25,000",
+            "50,000",
+            "100,000",
+            "200,000",
+        ] {
+            assert!(
+                labels.iter().any(|label| label.text == text),
+                "{text:?} is part of the row and is not drawn; drawn: {:?}",
+                labels.iter().map(|it| it.text.clone()).collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(SettingsRow::Scrollback.option_count(), 4);
+        assert_eq!(SCROLLBACK_OPTIONS, [25_000, 50_000, 100_000, 200_000]);
+        assert!(
+            SCROLLBACK_OPTIONS.contains(&bt_persist::DEFAULT_SCROLLBACK_LINES),
+            "the capacity every reader arrives holding has to be one of the rungs,              or an untouched machine opens this picker with nothing ticked"
+        );
+        assert!(
+            SCROLLBACK_OPTIONS.windows(2).all(|pair| pair[0] < pair[1]),
+            "ascending, which is how a list of quantities with no privileged              member reads — the font size picker's order, not the height cap's"
+        );
+        assert_eq!(
+            SettingsRow::Scrollback.category(),
+            SettingsCategory::Terminal,
+            "how ONE pane behaves once something is running"
+        );
+        assert!(
+            !SettingsRow::Scrollback.advanced(),
+            "the Terminal page has no Advanced group and this row does not open one"
+        );
+        assert_eq!(
+            visible_rows(TabLayoutMode::Horizontal)
+                .into_iter()
+                .filter(|row| row.category() == SettingsCategory::Terminal)
+                .collect::<Vec<_>>(),
+            vec![SettingsRow::PsReadLine, SettingsRow::Scrollback],
+            "the mock-up's order for this page: the row that reports a fact about              the machine first, the row that changes what a pane does under it"
+        );
+    }
+
+    /// PIN — the Scrollback row's own items ask for the capacity and nothing else
+    /// does, and the tick follows the stored number rather than approximating it.
+    ///
+    /// `BLOCK_MAX_HEIGHT`'s ruling on a second key, and the `None` is load-bearing
+    /// for the same reason: `bt_persist` deliberately does not clamp this key, so a
+    /// file naming 30,000 is honoured as 30,000, and a picker that ticked 25,000
+    /// because it was nearest would be claiming the file said a number it did not.
+    #[test]
+    fn only_the_scrollback_rows_items_ask_for_it_and_an_unlisted_capacity_ticks_nothing() {
+        for (index, lines) in SCROLLBACK_OPTIONS.into_iter().enumerate() {
+            assert_eq!(
+                scrollback_lines_requested(SettingsTarget::Choice(SettingsRow::Scrollback, index)),
+                Some(lines)
+            );
+            let values = SettingsValues {
+                scrollback_lines: lines,
+                ..values()
+            };
+            assert_eq!(
+                SettingsRow::Scrollback.selected_index(&values),
+                Some(index),
+                "{lines} must tick item {index}"
+            );
+        }
+        assert_eq!(
+            scrollback_lines_requested(SettingsTarget::Choice(SettingsRow::Scrollback, 4)),
+            None,
+            "there is no fifth option to ask for"
+        );
+        for target in [
+            SettingsTarget::Choice(SettingsRow::BlockMaxHeight, 0),
+            SettingsTarget::Choice(SettingsRow::PsReadLine, 1),
+            SettingsTarget::Combo(SettingsRow::Scrollback),
+            SettingsTarget::Scrim,
+        ] {
+            assert_eq!(scrollback_lines_requested(target), None, "{target:?}");
+        }
+        assert_eq!(
+            block_max_height_requested(SettingsTarget::Choice(SettingsRow::Scrollback, 0)),
+            None,
+            "and the height cap is not moved by the capacity row"
+        );
+
+        let odd = SettingsValues {
+            scrollback_lines: 30_000,
+            ..values()
+        };
+        assert_eq!(
+            SettingsRow::Scrollback.selected_index(&odd),
+            None,
+            "a capacity this build's list does not offer ticks nothing rather              than the nearest thing to it"
         );
     }
 
@@ -16114,7 +16338,8 @@ mod tests {
                 SettingsRow::Language,
                 SettingsRow::GitPanel,
                 SettingsRow::DefaultProfile,
-                SettingsRow::PsReadLine
+                SettingsRow::PsReadLine,
+                SettingsRow::Scrollback
             ]
         );
         assert_eq!(
@@ -16142,13 +16367,14 @@ mod tests {
                 SettingsRow::Language,
                 SettingsRow::GitPanel,
                 SettingsRow::DefaultProfile,
-                SettingsRow::PsReadLine
+                SettingsRow::PsReadLine,
+                SettingsRow::Scrollback
             ],
             "Sidebar stands directly under `Tab layout`; the two font rows stay \
              next to each other because they are one decision in two halves, the \
              three block rows together as the whole of the Rendered blocks page, \
-             and the PSReadLine row last because it is the whole of the Terminal \
-             page.
+             and the two Terminal rows last with the PSReadLine one above it, \
+             which is the mock-up's own order for that page.
 
              **Sidebar touches `Tab layout` again** (user ruling 2026-08-18, \
              reversing §7.1.6c-5's filing of it under `Advanced`): the condition \
