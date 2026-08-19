@@ -944,6 +944,29 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 
 九条纯函数测试钉住聚合表（严重度、最低完成度、indeterminate 混合、无百分比、夹取、空窗）与只发变化的闸门（同一条读数不产生调用，用一个记录器收下「shell 本来会收到什么」）；实机四态（30% 绿 / 9;4;2 红 / 9;4;3 扫动 / 9;4;0 清空）在这台机器上逐张拍下。
 
+### 7.4 资源管理器右键动词（Windows landing 块 slice 2，2026-08-19，已落地）
+
+**写下去的东西。** `HKEY_CURRENT_USER\Software\Classes` 下两棵树——`Directory\shell\Folio`（右键文件夹本身）与 `Directory\Background\shell\Folio`（右键已打开文件夹里的空白）——每棵挂三个 `REG_SZ`：默认值＝菜单字面 `Open Folio here`（中文 `在 Folio 中打开`），`Icon` ＝ `"<folio.exe 绝对路径>,0"`，`command\` 的默认值 ＝ `"<folio.exe 绝对路径>" --cwd "%V"`。落在 `bt_platform`（`ContextMenuShape` / `CONTEXT_MENU_TREES` / `install_context_menu` / `remove_context_menu` / `read_context_menu` / `context_menu_verdict`）与 `bt-app` 的 `context_menu.rs` 两处，分界是**纯与不纯**：形状、树表、判定全是纯函数，注册表那一侧只负责把这些字符串搬过去——因为"路径带空格怎么引号""图标索引怎么写""什么算不是我们会写的东西"这三件唯一会错的事，在打开任何一个键之前就已经定了。
+
+* **`%V` 而不是 `%1`，两棵树同一条命令。** `%1` 在 `Directory` 上可用而在 `Background` 上什么都不替换，于是 `%V` 是唯一能让两棵树共用一条命令的写法（spike §4 已探针验证）。
+* **`--cwd` 是必须的，不是装饰。** spike 的探针日志记下：`%V` 作为**参数**到达，而被启动进程的工作目录是 exe 自己的目录。所以 Folio 永远不读 `current_dir()`（§7.2 / `cli.rs` 头部同一条）。
+* **图标用 exe 自身的第 0 号资源**，不额外发一个 `.ico`：那会是第二个要随二进制一起搬、一起对版本的文件，而 Explorer 已经在替 `folio.exe` 画的那张图按构造就是对的。
+* **`Drive\shell` 是 spike 量到的第三棵，本片故意没写。** 盘符根在 shell 眼里不是 `Directory`，所以今天在「此电脑」里右键 `C:` 找不到这条动词。补它＝`CONTEXT_MENU_TREES` 加一项，其余（安装、回读、判定、剪枝）全部写在数组上而不是写在「二」上。
+
+**谁来写。** 产品是绿色 exe，没有 installer，所以唯一诚实的位置是程序自己里的一个开关，唯一诚实的 hive 是 `HKCU`：改的是跑 Folio 的这个账户的菜单，不要管理员，别的用户看不见（spike §6 同一条）。`Settings ▸ General ▸ Explorer context menu` 就是这个开关，行文案只陈述两件事实——菜单里会多出哪句话，以及 Windows 11 把它收在哪里。
+
+**开关读注册表，不记忆。** 这一行**不进 `settings.json`，不动 schema**。存一个 bool 等于存一份可能与机器不符的副本：手改过注册表、从另一个文件夹卸过一份 Folio、从备份恢复过系统，任意一件都会让那份副本变成谎话，而且是**静默的**谎话。行的勾从 `context_menu::state()` 读，`App::context_menu_installed` 只是一个缓存（对话框每帧要问，而问一次是四次注册表 open），在它唯一能变的三个时刻刷新：启动、装、卸。
+
+**`Stale` 也算 On。** 三态是 `Absent` / `Current` / `Stale`：机器上**有**这条动词但不是这个 build 现在会写的样子。这一态读作 On，因为用户的菜单里确实有一条；读作 Off 就既是谎话，又让他们没有任何办法把它拿掉。
+
+**exe 被移动的自愈。** `command` 里存的是绝对路径，而 Folio 是一个会被人拖来拖去的程序（下载夹里试一下，再拖到 `C:\Tools`）：一拖，菜单条目就指向了不存在的东西，点了毫无反应，而**没有任何 installer 会来发现这件事**。所以每次启动读一遍两棵树，`Stale` 就照当前路径重写一遍——静默，因为这是**用户自己的数据被改成他早就要求它说的话**；`Absent` 一律不碰，从没装过的机器启动一百次也不会突然多出一条菜单。同一条规则顺手把语言切换带进菜单、把被人手删掉一半的两棵树补回来——三件事同一个修法，所以是同一个答案。安装函数因此是幂等的，启动时的修复与设置行的安装是同一段代码而不是它的特例。
+
+**卸载只删自己造的那一个键，一个不多。** `RegDeleteTreeW` 掉 `…\shell\Folio`（连同它的 `command` 子键），`Directory\shell`、`Directory\Background\shell`、`Directory` 一律**原样留着，哪怕它们此刻是空的**。这一条是被实测改过来的，不是偏好：本片写下时先导出了这台机器的注册表，`HKCU\Software\Classes\Directory\Background\shell` 与 `HKCU\Software\Classes\Drive\shell` **在 Folio 从未运行过之前就已经存在、并且已经是空的**。一个「顺手清理空祖先」的卸载会把这两个别人先建的键删掉——那比它想避免的问题更糟：删别人的键不叫整洁，而「我看的时候它是空的」根本不是「它是我建的」的证据。真正一个祖先都没有的机器上，卸完剩下的是一个无值的空容器键——Windows 自己到处都是这个形状，Explorer 看不见它，下一次安装直接复用它。删不存在的键不是失败——这个函数回答的是「确保它不在」。
+
+**Windows 11 顶层菜单：调研结论，本片不做。** 经典 `shell\<verb>` 注册在 Win11 上一律落在「显示更多选项」（Shift+F10 的那份经典菜单），primary 菜单里那些第三方项（Windows Terminal 的「在终端中打开」、VS Code、TortoiseSVN）**每一个都是通过 sparse MSIX 包注册的 `IExplorerCommand`**——spike §4 在这台机器上逐张截图确认过。上顶层的代价是完整的一套包身份：一个 `AppxManifest.xml` 声明 `<Extension Category="windows.fileExplorerContextMenus">`、一个实现 `IExplorerCommand` 的进程内 COM DLL（不能是 exe：Explorer 要在自己进程里加载它）、**一张代码签名证书**（sparse 包必须签名才能注册，自签名证书要求用户先信任它，等于把一步安装换成三步）、以及 `Add-AppxPackage -ExternalLocation` 的注册／注销流程。也就是说它不是「再写一个注册表键」，而是「这个产品从此有了包身份」——那是一个应当为通知（slice 3 的 AUMID 其实不需要它）、为商店分发、为自动更新一起决定的事，不该由一条右键菜单单独推动。**裁决：本片走经典路线，与 Git 的放置一致；顶层留到 Folio 因别的理由需要包身份的那一天，届时 `IExplorerCommand` 与这两棵经典树可以并存（包在时 Windows 用包的，不在时用经典的）。**
+
+**顺带修掉的一处：`bt_platform::win32_io_error` 建错了错误。** 它把 `windows::core::Error` 的 `HRESULT` 原样交给 `std::io::Error::from_raw_os_error`，而 Windows 上 `std` 是按 **Win32 码**分类的：`ERROR_FILE_NOT_FOUND` 经 `HRESULT_FROM_WIN32` 到达时是 `0x8007_0002`，`std` 认得 `2` 而完全不认得 `0x8007_0002`，于是每一个这样的错误都答 `ErrorKind::Uncategorized`。后果是 `DirWatch::start` 对不存在的文件夹**永远不可能**返回 `NotFound`，`scheme_watch` 那条为「fresh install 上 `%APPDATA%\Folio\schemes` 本来就不存在」写的静默臂**从来没有被命中过**，每一次全新安装都在 stderr 上打一行关于「本该不存在的文件夹不存在」的话。修法是把 `FACILITY_WIN32`（`0x8007_xxxx`）的低 16 位取回来，其余 `HRESULT` 原样透传（它们不是穿着 HRESULT 外衣的 Win32 码，截 16 位得到的不是任何错误码）。红测两层：`win32_code` 的纯映射，与 `DirWatch::start` 对缺失文件夹／缺失父目录都答 `NotFound`；`scheme_watch` 那条臂的测试**不构造错误**，用的就是 `DirWatch::start` 真给出来的那一个——构造出来的 `NotFound` 在过去七周里每一天都会通过。`profile_watch` 故意**没有**这条臂：`%APPDATA%\Folio\` 由第一个打开的 store 建出来，它不在才是值得说的那一半。
+
 ## 8. 依赖策略
 
 同 v3 表格，关键修订：**alacritty_terminal 稳态配置 scrollback=0**。vendor seam 包含既有上滚事件钩子，以及窄事务操作：打开 primary native history、查询行数、在 coalesced final viewport 上用 vendor row/WRAPLINE/cursor 重新评估高度、一次性 `take_history(oldest→newest)`、清空并恢复 limit=0，以及只针对唯一未闭合 staging candidate 的 `restore_history(oldest→newest)`；没有可独立呈现的 transcript snapshot/backing 镜像，也不复制 reflow 算法。事务期 vendor grid 是 mutable tail 唯一权威；收割后转录层拥有 staging ID/配额/定稿权，vendor 只保留该候选的原生 row escrow 供下一事务无损交还。升级必须 diff `grid/resize.rs`/history 语义，跑 vendor 181 项与完整生命周期矩阵。

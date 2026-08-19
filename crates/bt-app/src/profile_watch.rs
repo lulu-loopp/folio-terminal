@@ -57,6 +57,15 @@ impl ProfileWatch {
     /// this build did before the watch existed, so it is a line for whoever is
     /// holding the door open and not a card. There is no retry: retrying is a
     /// timer, and a timer is the thing this mechanism exists to avoid.
+    ///
+    /// **And there is deliberately no `NotFound` arm**, which is the one place
+    /// this differs from [`crate::scheme_watch::SchemeWatch::arm`] and its
+    /// `worth_a_line`. That arm exists over there because `schemes\` legitimately
+    /// may not exist; `%APPDATA%\Folio\` is created by the first store that opens
+    /// (`SessionStore::open`, before this is ever armed), so its absence is not
+    /// an ordinary case at all — it is the interesting half of the news, and
+    /// swallowing it would hide the machine where nothing this product writes is
+    /// landing anywhere.
     pub fn arm(&mut self, proxy: &EventLoopProxy<AppEvent>) {
         let directory = crate::persist::storage_dir();
         if let Err(error) = self.news.arm(&directory, proxy, AppEvent::ProfilesChanged) {

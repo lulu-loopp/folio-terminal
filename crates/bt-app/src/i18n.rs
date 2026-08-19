@@ -358,6 +358,11 @@ pub enum Text {
     RowFormulas,
     RowInlineFormulas,
     RowGitPanel,
+    /// **The Explorer verb's switch** (§7.4), on the General page.
+    ///
+    /// Names the surface it changes — Explorer's menu — rather than the thing it
+    /// writes, which is a registry key nobody asked to hear about.
+    RowContextMenu,
     RowTabLayout,
     RowSidebar,
     RowSplitDirection,
@@ -377,6 +382,9 @@ pub enum Text {
     DescFormulas,
     DescInlineFormulas,
     DescGitPanel,
+    /// Where the entry will be found, which on Windows 11 is the surprising
+    /// half — see [`Self::ContextMenuVerb`].
+    DescContextMenu,
     DescTabLayout,
     DescSidebar,
     DescSplitDirection,
@@ -433,6 +441,27 @@ pub enum Text {
     /// page keeps the row.
     PsReadLineNotNow,
     PsReadLineRemovedToast,
+
+    // ── Explorer's context menu (§7.4) ─────────────────────────────────────
+    /// **The words in Explorer's own menu**, and the one string in this table
+    /// that is written into the registry rather than drawn by this window.
+    ///
+    /// It follows the language like every other string here, and the launch's
+    /// re-assertion is what carries a change into the menu — see
+    /// `context_menu::desired`. `MUIVerb`, which would let Explorer resolve the
+    /// words per user, needs a string resource in the binary and is recorded in
+    /// `docs/DESIGN.md` §7.4 as the route the bilingual plan will take.
+    ContextMenuVerb,
+    /// The card raised when the entry lands.
+    ContextMenuAddedToast,
+    /// And when it is taken back out.
+    ContextMenuRemovedToast,
+    /// The refusal when Windows will not say where this process's own binary is.
+    ///
+    /// There is nothing to write into a `command` value without it, and no guess
+    /// worth making: a path invented here would be a menu entry that launches
+    /// whatever happens to be at it.
+    ContextMenuNoExecutable,
 
     // ── the `˅` profile menu ───────────────────────────────────────────────
     /// Lower case is deliberate: it is an annotation, not a label.
@@ -1312,6 +1341,7 @@ impl Text {
             Self::RowFormulas => pick(lang, "Display formulas", "行间公式"),
             Self::RowInlineFormulas => pick(lang, "Inline formulas", "行内公式"),
             Self::RowGitPanel => pick(lang, "Git panel", "Git 面板"),
+            Self::RowContextMenu => pick(lang, "Explorer context menu", "资源管理器右键菜单"),
             Self::RowTabLayout => pick(lang, "Tab layout", "标签布局"),
             Self::RowSidebar => pick(lang, "Sidebar", "侧栏"),
             Self::RowSplitDirection => pick(lang, "Split direction", "分屏方向"),
@@ -1341,6 +1371,25 @@ impl Text {
                 lang,
                 "A Git page beside the file tree; off reads no repository",
                 "文件树旁的 Git 页；关闭则不读取任何仓库",
+            ),
+            // **Two facts and no opinion about either.** What the entry says,
+            // and where Windows 11 puts it — the second because it is the half a
+            // reader would otherwise discover by switching this on, right-clicking
+            // a folder, and seeing no change at all. See `context_menu`'s header
+            // for why the classic registration cannot reach the short menu.
+            //
+            // **Length-sensitive, and measured rather than guessed.** A row's
+            // sentence is drawn in the text column and ellipsises: at the
+            // dialog's width there are about 54 characters of 12px English, and
+            // the first draft ("Adds Open Folio here; Windows 11 files it under
+            // Show more options", 64) came out cut at `Show m…` — losing exactly
+            // the half the line exists for. The verb `Adds` went rather than the
+            // place, because a row whose picker reads `On`/`Off` has already said
+            // that something is being added.
+            Self::DescContextMenu => pick(
+                lang,
+                "Open Folio here, under Windows 11's Show more options",
+                "Open Folio here，在 Windows 11 的显示更多选项里",
             ),
             Self::DescTabLayout => pick(
                 lang,
@@ -1501,6 +1550,30 @@ impl Text {
                 lang,
                 "Removed. New PowerShell sessions use the module Windows ships",
                 "已移除。新开的 PowerShell 会话将使用 Windows 自带的模块",
+            ),
+
+            // ── Explorer's context menu (§7.4) ─────────────────────────────
+            //
+            // **`ContextMenuVerb` is length-sensitive in a way nothing else in
+            // this table is**: it is drawn by Explorer, in Explorer's own menu,
+            // beside whatever else that machine has registered. Short enough to
+            // sit among them, and it names the product because in that menu
+            // there is nothing else to say which program this is.
+            Self::ContextMenuVerb => pick(lang, "Open Folio here", "在 Folio 中打开"),
+            Self::ContextMenuAddedToast => pick(
+                lang,
+                "Open Folio here is in Explorer's menu, under Show more options",
+                "Open Folio here 已进入资源管理器菜单，在显示更多选项里",
+            ),
+            Self::ContextMenuRemovedToast => pick(
+                lang,
+                "Removed from Explorer's menu",
+                "已从资源管理器菜单移除",
+            ),
+            Self::ContextMenuNoExecutable => pick(
+                lang,
+                "Windows did not say where folio.exe is",
+                "Windows 没有说出 folio.exe 的位置",
             ),
 
             // ── the `˅` profile menu ───────────────────────────────────────
@@ -2204,7 +2277,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 400] = [
+    pub const ALL: [Self; 406] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -2241,6 +2314,7 @@ impl Text {
         Self::RowFormulas,
         Self::RowInlineFormulas,
         Self::RowGitPanel,
+        Self::RowContextMenu,
         Self::RowTabLayout,
         Self::RowSidebar,
         Self::RowSplitDirection,
@@ -2254,6 +2328,7 @@ impl Text {
         Self::DescFormulas,
         Self::DescInlineFormulas,
         Self::DescGitPanel,
+        Self::DescContextMenu,
         Self::DescTabLayout,
         Self::DescSidebar,
         Self::DescSplitDirection,
@@ -2282,6 +2357,10 @@ impl Text {
         Self::PsReadLineInstall,
         Self::PsReadLineNotNow,
         Self::PsReadLineRemovedToast,
+        Self::ContextMenuVerb,
+        Self::ContextMenuAddedToast,
+        Self::ContextMenuRemovedToast,
+        Self::ContextMenuNoExecutable,
         Self::ProfileHintDefault,
         Self::ProfileHintUnavailable,
         Self::ProfileHintCurrent,
@@ -2825,6 +2904,21 @@ pub fn psreadline_remove_failed(message: &str) -> String {
     match current() {
         Lang::English => format!("Could not remove PSReadLine: {message}"),
         Lang::Chinese => format!("移除 PSReadLine 失败：{message}"),
+    }
+}
+
+/// The card raised when the registry would not take the Explorer verb, carrying
+/// what Windows said.
+///
+/// One sentence for both directions, because what a reader can act on is the
+/// operating system's own code and not which way the switch was moving — and
+/// the row beside the card already says which state the machine ended up in.
+/// [`psreadline_install_failed`]'s ruling for passing the message through whole.
+#[must_use]
+pub fn context_menu_failed(message: &str) -> String {
+    match current() {
+        Lang::English => format!("Could not change Explorer's menu: {message}"),
+        Lang::Chinese => format!("修改资源管理器菜单失败：{message}"),
     }
 }
 

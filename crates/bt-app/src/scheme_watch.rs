@@ -45,6 +45,29 @@ use winit::event_loop::EventLoopProxy;
 
 use crate::{AppEvent, dir_news::DirNews};
 
+/// Whether a refusal to arm this folder's watch is worth saying out loud.
+///
+/// **A folder that is not there is the ordinary case on a fresh install and is
+/// not news.** `%APPDATA%\Folio\schemes` is created by nothing but
+/// `Customise scheme…`, so on a machine where nobody has customised one its
+/// absence is the state this product ships in. Anything else — a permission, a
+/// path on a redirected `%APPDATA%` this process may not open — is a line for
+/// whoever is holding the door open, and nothing more: the schemes already in
+/// force stay in force, the picker still works, and a file edited on disk
+/// arrives on the next launch. A toast here would be an alarm about a capability
+/// nobody asked for by name.
+///
+/// A named predicate rather than a match arm, because until 2026-08-19 the arm
+/// was **unreachable** and nothing said so: `bt_platform`'s `win32_io_error`
+/// built its `io::Error` from the raw `HRESULT`, so `DirWatch::start` on a
+/// missing folder answered `Uncategorized` and every fresh install printed the
+/// line this rule exists to suppress. What was missing was not the rule but a
+/// way to ask it a question.
+#[must_use]
+fn worth_a_line(error: &std::io::Error) -> bool {
+    error.kind() != std::io::ErrorKind::NotFound
+}
+
 /// The schemes folder's subscription and the clock its notifications feed.
 #[derive(Default)]
 pub struct SchemeWatch {
@@ -59,20 +82,13 @@ impl SchemeWatch {
     /// the thing this mechanism exists to avoid.
     pub fn arm(&mut self, proxy: &EventLoopProxy<AppEvent>) {
         let directory = crate::persist::storage_dir().join(crate::schemes::USER_SCHEME_DIR);
-        match self.news.arm(&directory, proxy, AppEvent::SchemesChanged) {
-            Ok(()) => {}
-            // A folder that is not there is the ordinary case on a fresh
-            // install and is not news. Anything else — a permission, a path on
-            // a redirected `%APPDATA%` this process may not open — is a line for
-            // whoever is holding the door open, and nothing more: the schemes
-            // already in force stay in force, the picker still works, and a file
-            // edited on disk arrives on the next launch. A toast here would be
-            // an alarm about a capability nobody asked for by name.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => eprintln!(
+        if let Err(error) = self.news.arm(&directory, proxy, AppEvent::SchemesChanged)
+            && worth_a_line(&error)
+        {
+            eprintln!(
                 "recoverable scheme watch failure on {}: {error}",
                 directory.display()
-            ),
+            );
         }
     }
 
@@ -113,5 +129,40 @@ mod tests {
         assert!(!watch.is_armed());
         assert!(!watch.due(Instant::now()));
         assert_eq!(watch.deadline(), None);
+    }
+
+    /// PIN — **the schemes folder not being there is not news**, asked of the
+    /// refusal the platform actually produces.
+    ///
+    /// The rule was written the day the watch was, and for seven weeks it was
+    /// not reachable: `bt_platform::win32_io_error` built its `io::Error` from
+    /// the raw `HRESULT`, so the kind was `Uncategorized` and the `NotFound`
+    /// arm never matched. Every fresh install printed a line about a folder
+    /// whose absence is the ordinary case.
+    ///
+    /// So the error here is **not constructed** — `io::Error::from(NotFound)`
+    /// would have passed on every one of those seven weeks. It is the one
+    /// `DirWatch::start` hands back for a folder that is not there, which is the
+    /// only thing this arm will ever be shown.
+    ///
+    /// MUTATION: put the raw `HRESULT` back in `win32_io_error` and this goes
+    /// red, which is the stderr line coming back with it.
+    #[test]
+    fn a_schemes_folder_that_is_not_there_is_not_a_line_on_stderr() {
+        let missing = std::env::temp_dir().join("folio-schemes-that-were-never-customised");
+        let _ = std::fs::remove_dir_all(&missing);
+        let error = bt_platform::DirWatch::start(&missing, || {})
+            .err()
+            .expect("a folder that is not there cannot be watched");
+        assert!(
+            !worth_a_line(&error),
+            "a fresh install is not a fault to report: {error}"
+        );
+
+        // And the other half of the rule, so that the predicate is not simply
+        // "never say anything": a refusal that is not an absence still speaks.
+        assert!(worth_a_line(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
     }
 }

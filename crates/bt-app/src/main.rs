@@ -28,6 +28,7 @@ use std::{
 
 mod cli;
 mod cmdrail;
+mod context_menu;
 mod dir_news;
 mod file_peek;
 mod files;
@@ -4238,6 +4239,19 @@ struct App {
     /// made it the second, which is how it became a module this product had
     /// installed and would not remove.
     psreadline_installed: psreadline::InstalledCopy,
+    /// Whether Explorer's right-click menu carries Folio's verb (§7.4).
+    ///
+    /// Cached for [`Self::psreadline_installed`]'s reason and no other: the
+    /// settings dialog asks on every frame it draws, and the answer is four
+    /// registry opens. It is refreshed at the three moments it can change — the
+    /// launch, an install and a removal — and at no other, because nothing else
+    /// in this process can move it.
+    ///
+    /// **Seeded by the launch's own repair**, `context_menu::reassert`: a
+    /// `folio.exe` that has been moved since the verb was written leaves a menu
+    /// entry that opens nothing, and the launch is the only moment this product
+    /// has to notice.
+    context_menu_installed: bool,
     session_store: persist::SessionStore,
     settings_store: persist::SettingsStore,
     /// The shortcut table dispatch reads: this build's defaults with the user's
@@ -16550,6 +16564,9 @@ impl Runtime<'_> {
             profile_programs,
             psreadline_documents: psreadline::documents_directory(),
             psreadline_installed: psreadline::InstalledCopy::default(),
+            // Reads the registry once and, on a machine whose `folio.exe`
+            // has moved since, writes the verb again — see the field.
+            context_menu_installed: context_menu::reassert(),
             session_store,
             settings_store,
             shortcuts,
@@ -20793,6 +20810,9 @@ impl Runtime<'_> {
             block_max_height: self.app.settings_store.loaded().block_max_height,
             scrollback_lines: self.app.settings_store.loaded().scrollback_lines,
             git_panel: self.app.settings_store.loaded().git_panel,
+            // The machine's own answer, cached at the three moments it can
+            // change — see `App::context_menu_installed`.
+            context_menu: self.app.context_menu_installed,
             split_direction: self.app.settings_store.loaded().split_direction,
             language: self.app.settings_store.loaded().language,
             default_profile: self.default_profile(),
@@ -21829,6 +21849,9 @@ impl Runtime<'_> {
         if let Some(enabled) = settings::git_panel_requested(target) {
             self.apply_git_panel(enabled)?;
         }
+        if let Some(install) = settings::context_menu_requested(target) {
+            self.apply_context_menu(install)?;
+        }
         if let Some(direction) = settings::split_direction_requested(target) {
             self.apply_split_direction(direction)?;
         }
@@ -22048,6 +22071,11 @@ impl Runtime<'_> {
             | Row::GitPanel
             | Row::DefaultProfile
             | Row::Language
+            // And doubly never: what it would be putting back is not a value in
+            // this file at all, it is two keys in the user's own registry, and
+            // `Reset to defaults` on a page is not a licence to change another
+            // program's menu.
+            | Row::ContextMenu
             | Row::PsReadLine
             | Row::Scrollback
             // The editor's own advanced rows are put back by the page's own foot
@@ -25177,6 +25205,46 @@ impl Runtime<'_> {
             }
         }
         Ok(true)
+    }
+
+    /// Put Folio's verb into Explorer's menu, or take it back out (§7.4).
+    ///
+    /// **The row is redrawn from the registry either way**, not from what was
+    /// asked for: the cached answer is re-read after the write, so a refusal
+    /// leaves the switch standing where the machine actually is rather than
+    /// where the press hoped it would be. That is the whole reason this row
+    /// stores nothing in `settings.json` — there is no second copy of the truth
+    /// to fall out of step.
+    ///
+    /// A failure carries the operating system's own sentence, because on the
+    /// machine where it fires nobody else can see it.
+    fn apply_context_menu(&mut self, install: bool) -> Result<bool> {
+        let outcome = context_menu::apply(install);
+        self.app.context_menu_installed = context_menu::installed(context_menu::state());
+        match outcome {
+            Ok(()) => {
+                self.toast(
+                    toast::ToastKind::Ok,
+                    toast::ToastAnchor::Window,
+                    None,
+                    if install {
+                        i18n::Text::ContextMenuAddedToast.text().to_owned()
+                    } else {
+                        i18n::Text::ContextMenuRemovedToast.text().to_owned()
+                    },
+                )?;
+                Ok(true)
+            }
+            Err(error) => {
+                self.toast(
+                    toast::ToastKind::Error,
+                    toast::ToastAnchor::Window,
+                    None,
+                    i18n::context_menu_failed(&error),
+                )?;
+                Ok(false)
+            }
+        }
     }
 
     fn record_psreadline_invite(&mut self, state: bt_persist::PsReadLineInviteV1) {

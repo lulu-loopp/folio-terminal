@@ -176,6 +176,148 @@ pub fn reveal_arguments(path: &std::path::Path, is_directory: bool) -> std::ffi:
     arguments
 }
 
+// ── Explorer's context menu (Windows landing block, slice 2) ───────────────
+//
+// The three values one classic shell verb is made of, the trees it is written
+// into, and the arithmetic that decides whether what is on the machine is what
+// this build would write. Everything in this section is **pure**: it is a
+// description of a registry, not a registry. The reads and the writes are
+// `windows_impl`'s [`read_context_menu`], [`install_context_menu`] and
+// [`remove_context_menu`], which do nothing but carry these strings across.
+//
+// That division is not tidiness. A test that had to *write* to decide whether
+// the shape was right would be a test writing into the reader's own Explorer
+// menu, and the only shapes worth pinning — the quoting of a path with a space
+// in it, the `,0` on the icon, what counts as "not what we would write now" —
+// are all decided before any key is opened.
+
+/// The three `REG_SZ` values one Explorer verb is made of.
+///
+/// `label` is the words in the menu, `icon` is `"<path>,<index>"` — the shell's
+/// own spelling for "the n-th icon in that file" — and `command` is the literal
+/// command line the shell runs, `%V` and all.
+///
+/// Held together in one struct because they are written together, read back
+/// together and **compared together**: see [`context_menu_verdict`], where a
+/// verb whose command still points at yesterday's folder and a verb whose label
+/// is in the language the reader has since left are the same finding.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContextMenuShape {
+    /// The menu label.
+    pub label: String,
+    /// `Icon`, as `"<absolute path to the exe>,0"`.
+    pub icon: String,
+    /// The `command` subkey's own default value.
+    pub command: String,
+}
+
+/// The key each verb is written under, one level below its tree.
+///
+/// The product's own name and not a GUID: a classic verb's key name is what
+/// `ShellExecuteEx`'s `lpVerb` addresses it by, it is visible to anyone who
+/// opens `regedit`, and it is the thing a user who wants this gone by hand goes
+/// looking for.
+pub const CONTEXT_MENU_VERB_KEY: &str = "Folio";
+
+/// Where per-user class registrations live, under `HKEY_CURRENT_USER`.
+///
+/// **`HKCU` and never `HKLM`.** Everything this product writes to the registry
+/// belongs to the account that ran it, needs no elevation to write or to remove,
+/// and is invisible to every other user of the machine — which is the only
+/// honest shape for a program that ships as a bare `.exe` with no installer
+/// behind it (`docs/spikes/spike-win-landing.md` §6).
+pub const CONTEXT_MENU_CLASSES: &str = r"Software\Classes";
+
+/// The shell trees this verb is written into, relative to [`CONTEXT_MENU_CLASSES`].
+///
+/// Two, because two different things get right-clicked: a folder's own icon in a
+/// listing, and the empty space *inside* a folder that is already open. They are
+/// separate trees in the registry and a verb in one of them is invisible from
+/// the other.
+///
+/// **`Drive\shell` is the third the spike measured and is deliberately not here**
+/// (`spike-win-landing.md` §4). A drive root is not a `Directory` as far as the
+/// shell is concerned, so right-clicking `C:` in *This PC* finds no verb today.
+/// Adding it is one entry in this array and nothing else — every other part of
+/// this section, the install, the read-back, the verdict and the prune, is
+/// written over the array rather than over the number two.
+pub const CONTEXT_MENU_TREES: [&str; 2] = [r"Directory\shell", r"Directory\Background\shell"];
+
+/// The three values this build would write for `exe`, given the menu's words.
+///
+/// **`%V` for both trees, and `%1` for neither.** `%1` works for `Directory` and
+/// would silently do nothing for `Directory\Background`, where the clicked
+/// object is the folder's window rather than a folder; `%V` is the substitution
+/// that means "the thing that was right-clicked" in all of them, so it is the
+/// uniform choice and there is no per-tree command.
+///
+/// The path is quoted and the `%V` is quoted, and both matter: `C:\Program
+/// Files\…` unquoted is two arguments, and a folder with a space in its name is
+/// the ordinary case rather than the exotic one.
+#[must_use]
+pub fn context_menu_shape(exe: &std::path::Path, label: &str) -> ContextMenuShape {
+    let exe = exe.display();
+    ContextMenuShape {
+        label: label.to_owned(),
+        // `,0` — the first icon in the executable's own resources, which is the
+        // application icon. An `.ico` beside the exe would be a second file that
+        // has to be shipped, found and kept in step with the binary; the icon
+        // Explorer already draws for `folio.exe` is by construction the right
+        // one.
+        icon: format!("{exe},0"),
+        command: format!("\"{exe}\" --cwd \"%V\""),
+    }
+}
+
+/// What the machine's registry says about this verb, against what this build
+/// would write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextMenuState {
+    /// No tree carries the verb. The row reads `Off` and there is nothing to
+    /// re-assert.
+    Absent,
+    /// Every tree carries exactly the shape this build would write now.
+    Current,
+    /// At least one tree carries the verb, and what is written is not what this
+    /// build would write now.
+    ///
+    /// The case this exists for is a **moved `folio.exe`**: the `command` value
+    /// holds an absolute path, so a binary dragged to another folder leaves a
+    /// menu entry that opens nothing at all, and there is no installer to notice.
+    /// It is also the case of a verb written in a language the reader has since
+    /// left, and of a set of trees somebody deleted half of by hand. All three
+    /// have the same repair — write the shape again — so they are one answer.
+    Stale,
+}
+
+/// Read the trees' answers as one verdict.
+///
+/// `found` is parallel to [`CONTEXT_MENU_TREES`]: `None` where the tree carries
+/// no verb, `Some` with whatever was actually read where it does.
+///
+/// **A partial set is `Stale` and not `Absent`.** The difference is what happens
+/// next: `Absent` means the switch reads `Off` and the launch leaves the
+/// registry alone, and a machine whose folder verb survived while its background
+/// verb was deleted would then have a switch reading `Off` over a menu entry
+/// that is still there.
+#[must_use]
+pub fn context_menu_verdict(
+    found: &[Option<ContextMenuShape>],
+    desired: &ContextMenuShape,
+) -> ContextMenuState {
+    if found.iter().all(Option::is_none) {
+        return ContextMenuState::Absent;
+    }
+    if found.len() == CONTEXT_MENU_TREES.len()
+        && found
+            .iter()
+            .all(|shape| shape.as_ref().is_some_and(|shape| shape == desired))
+    {
+        return ContextMenuState::Current;
+    }
+    ContextMenuState::Stale
+}
+
 /// The extensions this product will decode a picture from, lower case.
 ///
 /// **One list, three readers.** It is the file chooser's filter
@@ -318,9 +460,9 @@ mod windows_impl {
 
     use windows::Win32::{
         Foundation::{
-            COLORREF, CloseHandle, ERROR_CANCELLED, GENERIC_WRITE, GetLastError, GlobalFree,
-            HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT, RPC_E_CHANGED_MODE, SetLastError,
-            WAIT_EVENT, WAIT_OBJECT_0, WIN32_ERROR, WPARAM,
+            COLORREF, CloseHandle, ERROR_CANCELLED, ERROR_FILE_NOT_FOUND, GENERIC_WRITE,
+            GetLastError, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT,
+            RPC_E_CHANGED_MODE, SetLastError, WAIT_EVENT, WAIT_OBJECT_0, WIN32_ERROR, WPARAM,
         },
         Globalization::{GetUserDefaultUILanguage, GetUserPreferredUILanguages, MUI_LANGUAGE_NAME},
         Graphics::DirectComposition::{
@@ -364,6 +506,14 @@ mod windows_impl {
             },
             IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
             Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
+            // Explorer's context menu is a handful of `REG_SZ` values under
+            // `HKEY_CURRENT_USER`, and nothing else — see
+            // `install_context_menu`.
+            Registry::{
+                HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+                REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW,
+                RegQueryValueExW, RegSetValueExW,
+            },
             Threading::{
                 CreateEventW, GetCurrentThread, GetThreadPriority, INFINITE, ResetEvent, SetEvent,
                 SetThreadPriority, THREAD_PRIORITY, THREAD_PRIORITY_ABOVE_NORMAL,
@@ -3052,6 +3202,297 @@ mod windows_impl {
         }
     }
 
+    // ── the registry side of Explorer's context menu ───────────────────────
+    //
+    // Three functions, and between them they open no key this product did not
+    // name: every path below is `HKEY_CURRENT_USER\<classes>\<tree>\<verb>`,
+    // built from the constants beside [`super::ContextMenuShape`] and from the
+    // `classes` the caller hands in.
+    //
+    // **`classes` is a parameter and not the constant.** The product always
+    // passes [`super::CONTEXT_MENU_CLASSES`]; the suite passes a subkey of its
+    // own, because a test that wrote the real one would be a test that changes
+    // the right-click menu of whoever is running it — and would then have to be
+    // trusted to put it back. The parameter is the isolation.
+
+    /// The verb's own key under one tree, as a path below `HKEY_CURRENT_USER`.
+    fn context_menu_key(classes: &str, tree: &str) -> String {
+        format!(
+            "{classes}\\{tree}\\{verb}",
+            verb = super::CONTEXT_MENU_VERB_KEY
+        )
+    }
+
+    /// Write `value` into `key`'s named value, creating every key on the way.
+    ///
+    /// `name` empty is the key's **default** value, which is where the shell
+    /// keeps a verb's label and a `command`'s command line.
+    fn write_registry_string(key: &str, name: &str, value: &str) -> Result<(), String> {
+        let key_units = wide_null(key);
+        let mut opened = HKEY::default();
+        // SAFETY: both buffers stay live and NUL-terminated across the call, and
+        // the out-parameter is a handle this function closes on every path.
+        let status = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR(key_units.as_ptr()),
+                None,
+                PCWSTR::null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_WRITE,
+                None,
+                &mut opened,
+                None,
+            )
+        };
+        if status.is_err() {
+            return Err(format!(
+                "RegCreateKeyExW({key}) failed with {code}",
+                code = status.0
+            ));
+        }
+        let name_units = wide_null(name);
+        let value_units = wide_null(value);
+        // A `REG_SZ` is measured in BYTES and the terminator is part of it: a
+        // length that forgot the NUL leaves the shell reading a string whose end
+        // is whatever follows it in the hive.
+        let bytes = std::mem::size_of_val(value_units.as_slice());
+        // SAFETY: `value_units` outlives the call and `bytes` is its own size in
+        // bytes, so the slice handed over is exactly the buffer that exists.
+        let status = unsafe {
+            RegSetValueExW(
+                opened,
+                PCWSTR(name_units.as_ptr()),
+                None,
+                REG_SZ,
+                Some(std::slice::from_raw_parts(
+                    value_units.as_ptr().cast::<u8>(),
+                    bytes,
+                )),
+            )
+        };
+        // SAFETY: `opened` came from the `RegCreateKeyExW` above and is not used
+        // again after this.
+        unsafe {
+            let _ = RegCloseKey(opened);
+        }
+        if status.is_err() {
+            return Err(format!(
+                "RegSetValueExW({key}\\{name}) failed with {code}",
+                code = status.0
+            ));
+        }
+        Ok(())
+    }
+
+    /// One `REG_SZ` value, or `None` if the key or the value is not there.
+    ///
+    /// A value of any other type also reads as `None`: this function's question
+    /// is "did this build write that", and a `REG_DWORD` under the name of a
+    /// verb's label is not a label somebody else's Folio left behind.
+    fn read_registry_string(key: &str, name: &str) -> Option<String> {
+        let key_units = wide_null(key);
+        let mut opened = HKEY::default();
+        // SAFETY: the buffer is live and NUL-terminated across the call; the
+        // handle is closed on every path below.
+        let status = unsafe {
+            RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR(key_units.as_ptr()),
+                None,
+                KEY_READ,
+                &mut opened,
+            )
+        };
+        if status.is_err() {
+            return None;
+        }
+        let name_units = wide_null(name);
+        let mut kind = REG_VALUE_TYPE::default();
+        let mut bytes = 0u32;
+        // First call sizes the value; `lpdata` null with a live `lpcbdata` is
+        // the documented way to ask.
+        // SAFETY: both out-parameters are owned locals and the name buffer is
+        // live across the call.
+        let status = unsafe {
+            RegQueryValueExW(
+                opened,
+                PCWSTR(name_units.as_ptr()),
+                None,
+                Some(&mut kind),
+                None,
+                Some(&mut bytes),
+            )
+        };
+        let text = if status.is_ok() && kind == REG_SZ && bytes > 0 {
+            // Rounded up: a hand-written `REG_SZ` is allowed to hold an odd
+            // number of bytes, and a `u16` buffer short by one would be a
+            // truncating read.
+            let mut buffer = vec![0u16; bytes.div_ceil(2) as usize];
+            let mut size = std::mem::size_of_val(buffer.as_slice()) as u32;
+            // SAFETY: `buffer` holds `size` bytes and stays live across the
+            // call; `size` is updated to what was actually written.
+            let status = unsafe {
+                RegQueryValueExW(
+                    opened,
+                    PCWSTR(name_units.as_ptr()),
+                    None,
+                    Some(&mut kind),
+                    Some(buffer.as_mut_ptr().cast::<u8>()),
+                    Some(&mut size),
+                )
+            };
+            if status.is_ok() && kind == REG_SZ {
+                let units = (size as usize / 2).min(buffer.len());
+                Some(String::from_utf16_lossy(
+                    &buffer[..units]
+                        .iter()
+                        .copied()
+                        .take_while(|unit| *unit != 0)
+                        .collect::<Vec<u16>>(),
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        // SAFETY: `opened` came from the `RegOpenKeyExW` above and is not used
+        // again after this.
+        unsafe {
+            let _ = RegCloseKey(opened);
+        }
+        text
+    }
+
+    /// Whether a key exists at all, whatever it holds.
+    ///
+    /// The question the removal's own claim asks — "is it gone", and its harder
+    /// twin "is *that* one still there" — and the one `read_registry_string`
+    /// cannot answer, since a key that is there with no values and a key that is
+    /// not there both read as `None`.
+    ///
+    /// Behind `cfg(test)` because nothing the product does needs it: the removal
+    /// deletes unconditionally and the read-back reads values. `DirNews::is_armed`'s
+    /// own ruling — a question only the suite asks is a question the shipped
+    /// binary should not carry.
+    #[cfg(test)]
+    pub(super) fn registry_key_exists(key: &str) -> bool {
+        let key_units = wide_null(key);
+        let mut opened = HKEY::default();
+        // SAFETY: the buffer is live and NUL-terminated across the call.
+        let status = unsafe {
+            RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR(key_units.as_ptr()),
+                None,
+                KEY_READ,
+                &mut opened,
+            )
+        };
+        if status.is_err() {
+            return false;
+        }
+        // SAFETY: `opened` came from the `RegOpenKeyExW` immediately above.
+        unsafe {
+            let _ = RegCloseKey(opened);
+        }
+        true
+    }
+
+    /// `RegDeleteTreeW` on one key of `HKEY_CURRENT_USER`, with a key that is
+    /// not there counted as success.
+    ///
+    /// Shared by [`remove_context_menu`] and by the suite's own teardown, so the
+    /// isolated class store a test writes into is taken away by the same call
+    /// that takes the verb away.
+    pub(super) fn delete_registry_tree(key: &str) -> Result<(), String> {
+        let key_units = wide_null(key);
+        // SAFETY: the buffer is live and NUL-terminated across the call and names
+        // a subkey of `HKEY_CURRENT_USER` built from this build's own constants.
+        let status = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(key_units.as_ptr())) };
+        if status.is_err() && status != ERROR_FILE_NOT_FOUND {
+            return Err(format!(
+                "RegDeleteTreeW({key}) failed with {code}",
+                code = status.0
+            ));
+        }
+        Ok(())
+    }
+
+    /// Write the verb into every tree of [`super::CONTEXT_MENU_TREES`].
+    ///
+    /// **Idempotent, and that is what makes it the repair as well as the
+    /// install.** Writing a value that is already there costs one call and
+    /// changes nothing, so the launch-time re-assertion of a moved `folio.exe`
+    /// is this same function with no special case in it.
+    ///
+    /// The first tree that refuses stops the run and carries the operating
+    /// system's own code out. Half a menu is a state the caller has to be told
+    /// about, and the verdict it reads afterwards says so on its own —
+    /// [`super::context_menu_verdict`] calls a partial set `Stale`.
+    pub fn install_context_menu(
+        classes: &str,
+        shape: &super::ContextMenuShape,
+    ) -> Result<(), String> {
+        for tree in super::CONTEXT_MENU_TREES {
+            let key = context_menu_key(classes, tree);
+            write_registry_string(&key, "", &shape.label)?;
+            write_registry_string(&key, "Icon", &shape.icon)?;
+            write_registry_string(&format!("{key}\\command"), "", &shape.command)?;
+        }
+        Ok(())
+    }
+
+    /// Take the verb back out of every tree.
+    ///
+    /// **Exactly the keys this product created and not one more.** The verb key
+    /// and its `command` child go; `Directory\shell`, `Directory\Background\shell`
+    /// and `Directory` itself are left standing whether or not they are now
+    /// empty, and the reason is a measurement rather than a preference: on the
+    /// machine this was written on, `HKCU\Software\Classes\Directory\Background\shell`
+    /// and `HKCU\Software\Classes\Drive\shell` **already existed and were already
+    /// empty** before Folio was ever run. A removal that swept up empty ancestors
+    /// would have deleted two keys that were there first, which is a worse
+    /// failure than the one it was written to avoid — deleting somebody else's
+    /// key is not tidiness, and "was empty when I looked" is not evidence that I
+    /// made it.
+    ///
+    /// What is left behind on a machine that genuinely had none of them is an
+    /// empty container key with no values: the shape Windows itself leaves
+    /// everywhere, invisible to Explorer, and the shape the next install reuses.
+    ///
+    /// Missing keys are not failures: this is the function that answers "make
+    /// sure it is not there", and a machine where it never was is a machine
+    /// where it is not there now.
+    pub fn remove_context_menu(classes: &str) -> Result<(), String> {
+        for tree in super::CONTEXT_MENU_TREES {
+            delete_registry_tree(&context_menu_key(classes, tree))?;
+        }
+        Ok(())
+    }
+
+    /// What each tree actually holds, in [`super::CONTEXT_MENU_TREES`]'s order.
+    ///
+    /// A tree with no `command` reads as `None` even if a label is somehow
+    /// sitting there: the command line is the whole of what the verb *does*, and
+    /// a key without one is not a menu entry anybody can press.
+    #[must_use]
+    pub fn read_context_menu(classes: &str) -> Vec<Option<super::ContextMenuShape>> {
+        super::CONTEXT_MENU_TREES
+            .iter()
+            .map(|tree| {
+                let key = context_menu_key(classes, tree);
+                let command = read_registry_string(&format!("{key}\\command"), "")?;
+                Some(super::ContextMenuShape {
+                    label: read_registry_string(&key, "").unwrap_or_default(),
+                    icon: read_registry_string(&key, "Icon").unwrap_or_default(),
+                    command,
+                })
+            })
+            .collect()
+    }
+
     #[cfg(test)]
     mod tests {
         use super::{
@@ -3624,8 +4065,45 @@ mod windows_impl {
         }
     }
 
+    /// A `windows::core::Error` as the `std::io::Error` the rest of this
+    /// workspace matches on.
+    ///
+    /// **The unwrapping is the whole of it.** `windows::core::Error` carries an
+    /// `HRESULT`, and a Win32 error that reaches it has been through
+    /// `HRESULT_FROM_WIN32` on the way: `ERROR_FILE_NOT_FOUND` (2) arrives as
+    /// `0x8007_0002`. `std::io::Error::from_raw_os_error` on Windows classifies
+    /// by matching *Win32* codes — it knows `2` and knows nothing at all about
+    /// `0x8007_0002` — so handing it the raw `HRESULT` produced an error that
+    /// printed the right sentence and answered
+    /// [`std::io::ErrorKind::Uncategorized`] to every question about it.
+    ///
+    /// The symptom that found it: `DirWatch::start` on a folder that is not
+    /// there could never return `NotFound`, so `scheme_watch`'s quiet arm — the
+    /// one written for exactly the fresh install where `%APPDATA%\Folio\schemes`
+    /// has never existed — was unreachable, and every such launch printed a line
+    /// about a folder whose absence is the ordinary case.
+    ///
+    /// Codes outside `FACILITY_WIN32` are passed through whole. They are not
+    /// Win32 errors wearing an `HRESULT`; they are `HRESULT`s, and 16 bits of
+    /// one of those is not an error code at all.
     fn win32_io_error(error: windows::core::Error) -> std::io::Error {
-        std::io::Error::from_raw_os_error(error.code().0)
+        std::io::Error::from_raw_os_error(win32_code(error.code()))
+    }
+
+    /// `HRESULT_FROM_WIN32`, undone — see [`win32_io_error`].
+    ///
+    /// Split out so the mapping can be claimed by a test that does not have to
+    /// make the operating system fail in a particular way first.
+    pub(super) fn win32_code(code: HRESULT) -> i32 {
+        // `HRESULT_FROM_WIN32(x)` is `0x8007_0000 | (x & 0xFFFF)` for every
+        // `x` that fits, which is every Win32 error code there is.
+        const FACILITY_WIN32_FAILURE: u32 = 0x8007_0000;
+        let raw = code.0 as u32;
+        if raw & 0xFFFF_0000 == FACILITY_WIN32_FAILURE {
+            (raw & 0xFFFF) as i32
+        } else {
+            code.0
+        }
     }
 
     /// Put the calling thread in one of the three bands. See [`ThreadPriority`].
@@ -3939,13 +4417,13 @@ pub use windows_impl::{
     Compositor, CustomWindowFrame, DirWatch, FilePickKind, FolderPicker, ImagePicker,
     ImeSystemCaret, MathContextMenu, PROGRAM_REFUSED, Taskbar, adopt_parent_console,
     client_area_animation_enabled, clipboard_text, current_thread_priority, documents_directory,
-    file_product_version, get_dpi_for_window, get_window_rect, get_work_area,
+    file_product_version, get_dpi_for_window, get_window_rect, get_work_area, install_context_menu,
     install_window_class_background, is_window_minimized, message_box, monospace_font_families,
-    open_local_file, open_local_path, open_system_fonts_page, os_ui_language, recycle,
-    request_window_close, reveal_in_explorer, set_clipboard_text, set_current_thread_priority,
-    set_system_backdrop, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
-    shell_execute, spawn_at_priority, system_backdrop_available, wheel_scroll_amount,
-    write_to_console,
+    open_local_file, open_local_path, open_system_fonts_page, os_ui_language, read_context_menu,
+    recycle, remove_context_menu, request_window_close, reveal_in_explorer, set_clipboard_text,
+    set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
+    set_window_topmost, shell_execute, spawn_at_priority, system_backdrop_available,
+    wheel_scroll_amount, write_to_console,
 };
 
 /// The bands, asked of the kernel rather than of the source.
@@ -4114,14 +4592,74 @@ mod dir_watch_tests {
     /// network share. What it must never be is an error a user is shown or a
     /// thing that is retried, because retrying on a schedule is the polling this
     /// whole mechanism exists to avoid.
+    /// PIN — and **the refusal says which refusal it is**.
+    ///
+    /// `NotFound` and not merely "an error", because that is the distinction two
+    /// callers act on: `scheme_watch` swallows a missing folder in silence —
+    /// `%APPDATA%\Folio\schemes` does not exist on a fresh install and its
+    /// absence is the ordinary case — and reports every other refusal on
+    /// stderr. Until this was pinned, `win32_io_error` handed
+    /// `std::io::Error::from_raw_os_error` the raw `HRESULT` `0x8007_0002`
+    /// rather than the Win32 `2` it classifies by, so this kind was
+    /// `Uncategorized`, the quiet arm was unreachable, and every fresh install
+    /// printed a line about a folder that was never supposed to be there.
+    ///
+    /// Both codes, because Windows uses them for different shapes of absence: a
+    /// leaf that is not there is `ERROR_FILE_NOT_FOUND`, a *parent* that is not
+    /// there is `ERROR_PATH_NOT_FOUND`, and a folder under a folder that does
+    /// not exist is the second.
     #[test]
     fn a_directory_that_is_not_there_declines_to_be_watched() {
         let missing = std::env::temp_dir().join("bt-dir-watch-no-such-directory-ever");
         let _ = std::fs::remove_dir_all(&missing);
-        assert!(
-            DirWatch::start(&missing, || {}).is_err(),
-            "nothing to subscribe to, and no thread left running to say so later"
+        let error = DirWatch::start(&missing, || {})
+            .err()
+            .expect("nothing to subscribe to, and no thread left running to say so later");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "a missing folder is missing, not merely a failure: {error}"
         );
+
+        let deeper = missing.join("nor").join("this");
+        let error = DirWatch::start(&deeper, || {}).err().expect("nor this one");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "and a folder whose parent is missing reports the same thing: {error}"
+        );
+    }
+}
+
+/// The `HRESULT`-to-Win32 unwrapping, without having to make Windows fail.
+#[cfg(all(test, windows))]
+mod win32_error_tests {
+    use super::windows_impl::win32_code;
+    use windows::core::HRESULT;
+
+    /// PIN — **`HRESULT_FROM_WIN32` is undone, and nothing else is touched.**
+    ///
+    /// MUTATIONS:
+    /// ① return `code.0` unconditionally — what this file did until 2026-08-19
+    ///    — and the first two go red, which is `DirWatch::start` never
+    ///    answering `NotFound` again;
+    /// ② mask every code regardless of facility and the last goes red:
+    ///    `E_NOINTERFACE` would come out as Win32 error `0x4002`, a number that
+    ///    means nothing at all, and `std` would describe a COM refusal as some
+    ///    unrelated filesystem condition.
+    #[test]
+    fn a_facility_win32_hresult_comes_back_as_the_win32_code_it_wraps() {
+        // ERROR_FILE_NOT_FOUND and ERROR_PATH_NOT_FOUND, wrapped. The second is
+        // the shape a folder under a folder that does not exist arrives in.
+        assert_eq!(win32_code(HRESULT(0x8007_0002_u32 as i32)), 2);
+        assert_eq!(win32_code(HRESULT(0x8007_0003_u32 as i32)), 3);
+        // ERROR_ACCESS_DENIED, which is the other refusal `DirWatch` can meet
+        // and the one that must go on being reported.
+        assert_eq!(win32_code(HRESULT(0x8007_0005_u32 as i32)), 5);
+        // An `HRESULT` outside `FACILITY_WIN32` is not a Win32 code in a coat
+        // and is carried through whole.
+        let no_interface = 0x8000_4002_u32 as i32;
+        assert_eq!(win32_code(HRESULT(no_interface)), no_interface);
     }
 }
 
@@ -4376,6 +4914,242 @@ mod reveal_tests {
             reveal_arguments(spaced, false).to_string_lossy(),
             "/select,\"C:\\My Documents\\a file.md\""
         );
+    }
+}
+
+#[cfg(test)]
+mod context_menu_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn desired() -> ContextMenuShape {
+        context_menu_shape(
+            Path::new(r"C:\Program Files\Folio\folio.exe"),
+            "Open Folio here",
+        )
+    }
+
+    /// PIN — **the command line the shell will run, quoted the way the shell
+    /// parses it.**
+    ///
+    /// Two quotes and one flag, and every one of them is load-bearing. The
+    /// spike's own probe log (`spike-win-landing.md` §4) is why `--cwd` is
+    /// there rather than nothing: `%V` arrives as an *argument* and the launched
+    /// process's working directory is `folio.exe`'s own folder, so a build that
+    /// read `current_dir()` would open every right-click in wherever the binary
+    /// lives.
+    ///
+    /// MUTATIONS:
+    /// ① drop the quotes round the path and `C:\Program Files\…` becomes two
+    ///    arguments — the second assertion goes red, and on a real machine the
+    ///    verb launches nothing;
+    /// ② drop the quotes round `%V` and every folder with a space in its name
+    ///    opens the wrong place, which is the failure that reports success;
+    /// ③ write `%1` instead of `%V` and the folder tree still works while the
+    ///    background tree silently stops substituting anything at all.
+    #[test]
+    fn the_verb_runs_the_exe_with_the_clicked_folder_quoted() {
+        let shape = desired();
+        assert_eq!(shape.label, "Open Folio here");
+        assert_eq!(
+            shape.command,
+            r#""C:\Program Files\Folio\folio.exe" --cwd "%V""#
+        );
+        assert_eq!(shape.icon, r"C:\Program Files\Folio\folio.exe,0");
+    }
+
+    /// PIN — **the three answers the launch and the switch are both reading.**
+    ///
+    /// `Absent` is the fresh machine, `Current` is the machine that needs
+    /// nothing done to it, and `Stale` is every way the registry can hold this
+    /// verb and be wrong: a `folio.exe` that has since been moved, a label in a
+    /// language the reader has left, and a set of trees somebody deleted half
+    /// of.
+    ///
+    /// MUTATIONS:
+    /// ① make a partial set `Absent` and the fourth assertion goes red — a
+    ///    machine with a live menu entry would show a switch reading `Off`;
+    /// ② compare only the command and the second-to-last goes red, so a
+    ///    language change would never be carried into the menu;
+    /// ③ ignore the tree count and a build that grew a third tree would call
+    ///    a two-tree machine `Current` and never write the third.
+    #[test]
+    fn a_verdict_tells_a_fresh_machine_from_one_that_needs_rewriting() {
+        let desired = desired();
+        let absent = vec![None, None];
+        assert_eq!(
+            context_menu_verdict(&absent, &desired),
+            ContextMenuState::Absent
+        );
+
+        let current = vec![Some(desired.clone()), Some(desired.clone())];
+        assert_eq!(
+            context_menu_verdict(&current, &desired),
+            ContextMenuState::Current
+        );
+
+        let moved = context_menu_shape(Path::new(r"D:\tools\folio.exe"), "Open Folio here");
+        assert_eq!(
+            context_menu_verdict(&[Some(moved.clone()), Some(moved)], &desired),
+            ContextMenuState::Stale,
+            "an exe that has been moved leaves a menu entry that opens nothing"
+        );
+
+        assert_eq!(
+            context_menu_verdict(&[Some(desired.clone()), None], &desired),
+            ContextMenuState::Stale,
+            "half a menu is not no menu"
+        );
+
+        let renamed = context_menu_shape(
+            Path::new(r"C:\Program Files\Folio\folio.exe"),
+            "\u{5728} Folio \u{4e2d}\u{6253}\u{5f00}",
+        );
+        assert_eq!(
+            context_menu_verdict(&[Some(renamed.clone()), Some(renamed)], &desired),
+            ContextMenuState::Stale,
+            "the label is part of the shape, so a language change is a rewrite"
+        );
+
+        let short = vec![Some(desired.clone())];
+        assert_eq!(
+            context_menu_verdict(&short, &desired),
+            ContextMenuState::Stale,
+            "fewer trees than this build writes is not a machine that is current"
+        );
+    }
+}
+
+/// The registry half, against a class store of the suite's own.
+///
+/// **Nothing here touches `Software\Classes`.** Every call is given an isolated
+/// prefix of its own under `HKCU\Software`, so a run of the suite cannot change
+/// the right-click menu of whoever is running it — and the teardown that follows
+/// is about the suite's own litter rather than about somebody's Explorer.
+///
+/// **The prefix is one key deep on purpose.** The first draft nested it —
+/// `Software\Folio\test-context-menu\<pid>-<thread>-<name>` — and the teardown
+/// removed the leaf, which left `Software\Folio\test-context-menu` standing with
+/// one more empty child after every single run: ten runs of the suite on the
+/// machine this was written on, ten keys, growing without bound in a developer's
+/// own registry. One level means the only ancestor is `Software`, which was
+/// there first and is nobody's to delete.
+#[cfg(all(test, windows))]
+mod context_menu_registry_tests {
+    use super::windows_impl::{delete_registry_tree, registry_key_exists};
+    use super::{
+        CONTEXT_MENU_TREES, CONTEXT_MENU_VERB_KEY, ContextMenuState, context_menu_shape,
+        context_menu_verdict, install_context_menu, read_context_menu, remove_context_menu,
+    };
+    use std::path::Path;
+
+    /// A class store nothing but this test will ever look in, removed **whole**
+    /// on the way out however the test ends.
+    ///
+    /// `delete_registry_tree` on the store's own root and not
+    /// `remove_context_menu`: the product's removal deliberately leaves the
+    /// container keys standing (see its note), so a teardown built on it would
+    /// leave a growing pile of empty `test-context-menu\<pid>-…` keys in the
+    /// registry of whoever runs the suite.
+    struct Isolated(String);
+
+    impl Isolated {
+        fn new(name: &str) -> Self {
+            let root = format!(
+                "Software\\folio-context-menu-test-{}-{:?}-{name}",
+                std::process::id(),
+                std::thread::current().id()
+            );
+            let _ = delete_registry_tree(&root);
+            Self(root)
+        }
+
+        /// The verb's own key under one tree of this store.
+        fn verb(&self, tree: &str) -> String {
+            format!("{}\\{tree}\\{CONTEXT_MENU_VERB_KEY}", self.0)
+        }
+    }
+
+    impl Drop for Isolated {
+        fn drop(&mut self) {
+            let _ = delete_registry_tree(&self.0);
+        }
+    }
+
+    /// PIN — **install, read back, repair, and remove exactly what was made.**
+    ///
+    /// The four claims the product rests on: what was written is what
+    /// [`context_menu_verdict`] calls `Current`; a second install over the first
+    /// is not an error, which is what makes the launch-time repair the same code
+    /// as the install; a moved exe is `Stale` and one more write makes it
+    /// `Current` again; and the removal takes the verb key away **and leaves the
+    /// container keys where it found them**, which is the half that keeps this
+    /// from deleting keys that were somebody else's.
+    ///
+    /// MUTATIONS:
+    /// ① write the label without its NUL in the byte count and the read-back
+    ///    comes off the end of the string — the first `Current` goes red;
+    /// ② give the removal an ancestor prune and the last assertion goes red,
+    ///    which on a real machine is `HKCU\Software\Classes\Directory\Background\shell`
+    ///    — a key that was there, and empty, before Folio ever ran — being
+    ///    deleted by a program that did not create it.
+    #[test]
+    fn a_verb_installs_reads_back_and_removes_exactly_what_it_made() {
+        let store = Isolated::new("roundtrip");
+        let shape = context_menu_shape(Path::new(r"C:\tools\folio.exe"), "Open Folio here");
+
+        assert_eq!(
+            context_menu_verdict(&read_context_menu(&store.0), &shape),
+            ContextMenuState::Absent,
+            "nothing has been written yet"
+        );
+
+        install_context_menu(&store.0, &shape).expect("write the verb into an isolated store");
+        assert_eq!(
+            context_menu_verdict(&read_context_menu(&store.0), &shape),
+            ContextMenuState::Current
+        );
+
+        // Idempotent: this is the repair path, run on a machine that needs no
+        // repair.
+        install_context_menu(&store.0, &shape).expect("write it a second time");
+        assert_eq!(
+            context_menu_verdict(&read_context_menu(&store.0), &shape),
+            ContextMenuState::Current
+        );
+
+        // And the repair proper: the exe has moved.
+        let moved = context_menu_shape(Path::new(r"D:\elsewhere\folio.exe"), "Open Folio here");
+        assert_eq!(
+            context_menu_verdict(&read_context_menu(&store.0), &moved),
+            ContextMenuState::Stale
+        );
+        install_context_menu(&store.0, &moved).expect("write the new path over the old");
+        assert_eq!(
+            context_menu_verdict(&read_context_menu(&store.0), &moved),
+            ContextMenuState::Current,
+            "one idempotent write is the whole of the self-repair"
+        );
+
+        remove_context_menu(&store.0).expect("take it back out");
+        assert!(
+            read_context_menu(&store.0).iter().all(Option::is_none),
+            "the verb is gone from every tree"
+        );
+        for tree in CONTEXT_MENU_TREES {
+            assert!(
+                !registry_key_exists(&store.verb(tree)),
+                "the verb's own key went with its values: {tree}"
+            );
+            assert!(
+                registry_key_exists(&format!("{}\\{tree}", store.0)),
+                "and the container it sat in is left where it was found — a key \
+                 that is empty now is not a key this product created: {tree}"
+            );
+        }
+
+        // Removing what is not there is what "make sure it is gone" means.
+        remove_context_menu(&store.0).expect("a second removal is not a failure");
     }
 }
 
