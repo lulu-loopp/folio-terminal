@@ -28,13 +28,43 @@ use crate::marks::OverlayLayer;
 use crate::settings::push_float_window;
 use crate::{EASE, Motion, cubic_bezier};
 
-/// How long the pointer must rest on an anchor before its tip appears
+/// How long the pointer must rest on a chrome anchor before its tip appears
 /// (mock-up 8716).
 ///
-/// This really is the 300-500ms case the guidance is about: a tip is content
-/// laid *over* what you are reading, so a false positive costs you the view.
-/// (The hover-peek flyout is the opposite case and gets its own, shorter clock.)
+/// This really is the 300-500ms case the guidance is about, and what it guards
+/// against is *transit*: the window's controls are strung along the paths a
+/// pointer takes to somewhere else, so the wait is what tells a hand that was
+/// only passing from a hand that is asking. A tip is content laid over what you
+/// are reading, and a false positive costs you the view.
+///
+/// Not every face is passed over — [`PEEK_INTENT_DELAY`] is the other story, and
+/// the two constants are written side by side because they are one decision seen
+/// twice. (The tab strip's hover-peek flyout is a third clock again, and lives
+/// with the flyout in [`crate::peek_strip`].)
 pub const TOOLTIP_DELAY: Duration = Duration::from_millis(380);
+
+/// How long the pointer must rest on a command tick before its glance card
+/// appears (user report, 2026-08-19).
+///
+/// Shorter than [`TOOLTIP_DELAY`] because the two faces answer different pointer
+/// stories. A chrome control is *passed over*; a rail tick is *travelled to*. The
+/// rail is a two-pixel-thick column standing on the pane's right edge — nothing
+/// is on the way to it, and a hand only arrives there by leaving what it was
+/// doing and crossing the pane on purpose. The question is asked by the journey,
+/// so by the time the pointer lands the transit guard has nothing left to guard
+/// and the rest of it is the waiting the report is about.
+///
+/// Not zero, though. The band answers the *nearest ordinal* rather than the tick
+/// under the pixel, so a hand walking down the rail changes subject every few
+/// pixels; with no settle at all the card would flicker through every command it
+/// passed on the way to the one it wants. This is the length of that settle and
+/// nothing else.
+///
+/// Neither of this window's other 120s: `cmdrail::TICK_OPACITY_TRANSITION` is how
+/// long a tick takes to *change colour*, which is a transition and not a wait, and
+/// `file_peek::PEEK_INTENT_MS` is 350 because a file row is a row in a list the
+/// pointer runs down — the passed-over story again, wearing a peek.
+pub const PEEK_INTENT_DELAY: Duration = Duration::from_millis(120);
 
 /// `transition: opacity .09s ease` (mock-up 1220).
 pub const TOOLTIP_FADE: Duration = Duration::from_millis(90);
@@ -123,12 +153,24 @@ pub const SWATCH_GAP_LOGICAL_PX: f32 = 8.0;
 /// Which of the faces a tip is drawn in.
 ///
 /// D-19 ruled that `#cmd-peek` reuses this module rather than becoming a second
-/// popup, and this is the shape of that reuse: one enum carrying the six things
-/// that differ — type, leading, padding, radius, width bound, and whether the text
-/// wraps or is cut — so that everything which does *not* differ (the 380ms delay,
-/// the fade, [`TooltipAnchors`], [`TooltipHost`], the surface, the shadow) has
-/// exactly one implementation. A second popup would have meant a second clock, and
-/// two clocks over one pointer is how a window ends up showing two boxes at once.
+/// popup, and this is the shape of that reuse: one enum carrying the seven things
+/// that differ — type, leading, padding, radius, width bound, whether the text
+/// wraps or is cut, and how long the pointer must hold still — so that everything
+/// which does *not* differ (the fade, [`TooltipAnchors`], [`TooltipHost`], the
+/// surface, the shadow) has exactly one implementation.
+///
+/// **The delay was on the shared side of that list until 2026-08-19**, when a user
+/// reported the rail's card as slow and it turned out to be the shared 380ms doing
+/// exactly what it was written to do, in the one place there was nothing to guard
+/// against. The sentence that put it there was not quite true: what the faces
+/// share is *one clock* — one host, one countdown, one subject at a time — and
+/// that is the thing D-19 was protecting, because two clocks over one pointer is
+/// how a window ends up showing two boxes at once. **How long** that one countdown
+/// runs is a separate question, and the faces answer it differently because they
+/// answer different pointer stories: a chrome control is passed over, a rail tick
+/// is travelled to. [`TOOLTIP_DELAY`] and [`PEEK_INTENT_DELAY`] carry the two
+/// halves of that argument; [`Self::intent_delay`] is where they meet. A second
+/// popup would still have meant a second clock, and this does not add one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TipFace {
     /// `.tip` — the window talking about its own controls.
@@ -150,6 +192,27 @@ pub enum TipFace {
 }
 
 impl TipFace {
+    /// How long the pointer must hold still on this face's anchor before its box
+    /// is due.
+    ///
+    /// The one place either number is read. [`TooltipHost`] arms exactly one
+    /// deadline, in exactly one line, and asks this for its length — so the day a
+    /// fourth face arrives it answers here and nothing downstream learns a new
+    /// word.
+    ///
+    /// The swatch keeps the chrome tip's wait, and that is not an oversight: a
+    /// `#rrggbb` in a preview is a run of six characters in the middle of a
+    /// document the pointer crosses on its way to anywhere, which is the
+    /// passed-over story exactly. It shares the card's *type* because it quotes a
+    /// document, and the tip's *clock* because it is stumbled upon.
+    #[must_use]
+    pub fn intent_delay(self) -> Duration {
+        match self {
+            Self::Chrome | Self::Swatch { .. } => TOOLTIP_DELAY,
+            Self::Peek { .. } => PEEK_INTENT_DELAY,
+        }
+    }
+
     #[must_use]
     pub fn font_logical_px(self) -> f32 {
         match self {
@@ -571,16 +634,27 @@ pub struct TooltipHost {
 }
 
 impl TooltipHost {
-    /// Track the anchor under the pointer. `None` means "nothing tippable", and
-    /// every suppression the design asks for is spelled as `None` by the caller:
-    /// a drag in flight, the anchor that owns an open menu (I94), the tab being
-    /// renamed. Returns whether anything visible changed.
+    /// Track the anchor under the pointer and the face its tip would wear. `None`
+    /// means "nothing tippable", and every suppression the design asks for is
+    /// spelled as `None` by the caller: a drag in flight, the anchor that owns an
+    /// open menu (I94), the tab being renamed. Returns whether anything visible
+    /// changed.
+    ///
+    /// The face comes in with the anchor because this is the only line in the
+    /// window that arms a deadline, and since 2026-08-19 the length of that
+    /// deadline is the face's own ([`TipFace::intent_delay`]). One host, one
+    /// countdown, one subject — the face decides how long, not how many.
     ///
     /// Resting on the anchor that is *already* showing is not a new subject and
     /// must not re-arm anything — otherwise a hand that trembles on a button
-    /// takes the tip down and puts it back up 380ms later, forever.
-    pub fn observe(&mut self, anchor: Option<TooltipAnchorId>, now: Instant) -> bool {
-        if anchor.is_some() && anchor == self.active() {
+    /// takes the tip down and puts it back up a delay later, forever. Sameness is
+    /// asked of the *anchor* and never of the pair: a card whose ledger just
+    /// handed it a real command where it had only the honest gap changes face
+    /// without the pointer having moved, and that must not restart anything
+    /// either.
+    pub fn observe(&mut self, anchor: Option<(TooltipAnchorId, TipFace)>, now: Instant) -> bool {
+        let subject = anchor.map(|(id, _)| id);
+        if subject.is_some() && subject == self.active() {
             self.settling = None;
             return false;
         }
@@ -589,9 +663,9 @@ impl TooltipHost {
         // way in and simply loses `.show` on the way out.
         let hidden = self.showing.take().is_some();
         match anchor {
-            Some(anchor) => {
-                if self.settling.map(|(id, _)| id) != Some(anchor) {
-                    self.settling = Some((anchor, now + TOOLTIP_DELAY));
+            Some((id, face)) => {
+                if self.settling.map(|(settling, _)| settling) != Some(id) {
+                    self.settling = Some((id, now + face.intent_delay()));
                 }
             }
             None => self.settling = None,
@@ -616,10 +690,9 @@ impl TooltipHost {
     /// whether a *visible* tip was taken down.
     ///
     /// Both states, not just the showing one, and that is the whole point: a tab
-    /// closed during the 380ms wait would otherwise leave a candidate that
-    /// matures into a tip with no anchor — a box that cannot be laid out, cannot
-    /// be painted, and cannot stop asking for the frame it will never manage to
-    /// draw. "The thing it describes is still there" is one condition and it
+    /// closed during the wait would otherwise leave a candidate that matures into
+    /// a tip with no anchor — a box that cannot be laid out, cannot be painted,
+    /// and cannot stop asking for the frame it will never manage to draw. "The thing it describes is still there" is one condition and it
     /// applies to a tip that is coming as much as to one that has arrived.
     pub fn retain(&mut self, exists: impl Fn(TooltipAnchorId) -> bool) -> bool {
         if self.settling.is_some_and(|(id, _)| !exists(id)) {
@@ -1492,10 +1565,10 @@ mod tests {
     // ── M137 / M142: the two clocks ────────────────────────────────────────
 
     #[test]
-    fn a_tip_waits_three_hundred_and_eighty_milliseconds_and_not_a_moment_less() {
+    fn a_chrome_tip_waits_three_hundred_and_eighty_milliseconds_and_not_a_moment_less() {
         let mut host = TooltipHost::default();
         let start = Instant::now();
-        host.observe(Some(TooltipAnchorId::Settings), start);
+        host.observe(Some((TooltipAnchorId::Settings, TipFace::Chrome)), start);
 
         assert!(!host.activate_if_due(start + Duration::from_millis(379)));
         assert_eq!(host.active(), None);
@@ -1507,11 +1580,14 @@ mod tests {
     fn resting_on_a_showing_tip_does_not_restart_its_clock() {
         let mut host = TooltipHost::default();
         let start = Instant::now();
-        host.observe(Some(TooltipAnchorId::Settings), start);
+        host.observe(Some((TooltipAnchorId::Settings, TipFace::Chrome)), start);
         assert!(host.activate_if_due(start + TOOLTIP_DELAY));
 
         // A hand that trembles on the button reports the same anchor again.
-        let changed = host.observe(Some(TooltipAnchorId::Settings), start + TOOLTIP_DELAY);
+        let changed = host.observe(
+            Some((TooltipAnchorId::Settings, TipFace::Chrome)),
+            start + TOOLTIP_DELAY,
+        );
         assert!(!changed, "nothing changed");
         assert_eq!(
             host.active(),
@@ -1532,11 +1608,11 @@ mod tests {
     fn moving_to_a_new_anchor_takes_the_old_tip_down_and_starts_over() {
         let mut host = TooltipHost::default();
         let start = Instant::now();
-        host.observe(Some(TooltipAnchorId::Settings), start);
+        host.observe(Some((TooltipAnchorId::Settings, TipFace::Chrome)), start);
         assert!(host.activate_if_due(start + TOOLTIP_DELAY));
 
         let moved = start + TOOLTIP_DELAY + Duration::from_millis(1);
-        assert!(host.observe(Some(TooltipAnchorId::Minimize), moved));
+        assert!(host.observe(Some((TooltipAnchorId::Minimize, TipFace::Chrome)), moved));
         assert_eq!(host.active(), None, "the old tip is gone at once");
         // And the new one waits its own full delay rather than inheriting.
         assert!(!host.activate_if_due(moved + Duration::from_millis(379)));
@@ -1550,7 +1626,7 @@ mod tests {
     fn leaving_an_anchor_clears_the_timer_as_well_as_the_tip() {
         let mut host = TooltipHost::default();
         let start = Instant::now();
-        host.observe(Some(TooltipAnchorId::Settings), start);
+        host.observe(Some((TooltipAnchorId::Settings, TipFace::Chrome)), start);
         host.observe(None, start + Duration::from_millis(10));
 
         // Asked *before* anything is polled: the clock has to be gone the moment
@@ -1571,7 +1647,7 @@ mod tests {
         for settle in [false, true] {
             let mut host = TooltipHost::default();
             let start = Instant::now();
-            host.observe(Some(TooltipAnchorId::Settings), start);
+            host.observe(Some((TooltipAnchorId::Settings, TipFace::Chrome)), start);
             if settle {
                 assert!(host.activate_if_due(start + TOOLTIP_DELAY));
             }
@@ -1589,7 +1665,7 @@ mod tests {
     fn a_subject_that_leaves_takes_its_pending_tip_with_it() {
         let mut host = TooltipHost::default();
         let start = Instant::now();
-        host.observe(Some(TooltipAnchorId::Tab(3)), start);
+        host.observe(Some((TooltipAnchorId::Tab(3), TipFace::Chrome)), start);
 
         // The tab closes 100ms into the wait.
         assert!(
@@ -1608,7 +1684,7 @@ mod tests {
     fn a_subject_that_leaves_takes_its_showing_tip_with_it() {
         let mut host = TooltipHost::default();
         let start = Instant::now();
-        host.observe(Some(TooltipAnchorId::Tab(3)), start);
+        host.observe(Some((TooltipAnchorId::Tab(3), TipFace::Chrome)), start);
         assert!(host.activate_if_due(start + TOOLTIP_DELAY));
 
         assert!(
@@ -1617,7 +1693,7 @@ mod tests {
         );
         assert_eq!(host.active(), None);
         // And a subject that is still there is left entirely alone.
-        host.observe(Some(TooltipAnchorId::Tab(1)), start);
+        host.observe(Some((TooltipAnchorId::Tab(1), TipFace::Chrome)), start);
         assert!(host.activate_if_due(start + TOOLTIP_DELAY));
         assert!(!host.retain(|_| true));
         assert_eq!(host.active(), Some(TooltipAnchorId::Tab(1)));
@@ -1627,7 +1703,7 @@ mod tests {
     fn an_armed_host_asks_to_be_woken_exactly_when_the_delay_is_up() {
         let mut host = TooltipHost::default();
         let start = Instant::now();
-        host.observe(Some(TooltipAnchorId::Settings), start);
+        host.observe(Some((TooltipAnchorId::Settings, TipFace::Chrome)), start);
         assert_eq!(
             host.deadline(start, Motion::Full, Duration::from_millis(16)),
             Some(start + TOOLTIP_DELAY)
@@ -1640,7 +1716,7 @@ mod tests {
     fn the_tip_fades_in_over_ninety_milliseconds_and_owes_frames_while_it_does() {
         let mut host = TooltipHost::default();
         let start = Instant::now();
-        host.observe(Some(TooltipAnchorId::Settings), start);
+        host.observe(Some((TooltipAnchorId::Settings, TipFace::Chrome)), start);
         let shown = start + TOOLTIP_DELAY;
         assert!(host.activate_if_due(shown));
 
@@ -1673,7 +1749,7 @@ mod tests {
     fn the_fade_follows_the_mockups_own_ease_curve() {
         let mut host = TooltipHost::default();
         let start = Instant::now();
-        host.observe(Some(TooltipAnchorId::Settings), start);
+        host.observe(Some((TooltipAnchorId::Settings, TipFace::Chrome)), start);
         let shown = start + TOOLTIP_DELAY;
         host.activate_if_due(shown);
         let half = host.opacity(shown + TOOLTIP_FADE / 2, Motion::Full);
@@ -1687,7 +1763,7 @@ mod tests {
     fn stillness_skips_the_fade_and_owes_nothing() {
         let mut host = TooltipHost::default();
         let start = Instant::now();
-        host.observe(Some(TooltipAnchorId::Settings), start);
+        host.observe(Some((TooltipAnchorId::Settings, TipFace::Chrome)), start);
         let shown = start + TOOLTIP_DELAY;
         host.activate_if_due(shown);
 
@@ -2060,29 +2136,99 @@ mod tests {
         assert_ne!(palette.menu_item_hint_text, palette.menu_item_text);
     }
 
-    /// The card is a tip, so it is the tip's clocks that raise it — there is no
-    /// second delay and no second fade anywhere in this module.
+    /// The card is a tip: it is raised by this host and no other, and it fades in
+    /// on the tip's own 90ms. Since 2026-08-19 the *wait* in front of that is its
+    /// own, which is why the face is handed in rather than assumed.
     #[test]
-    fn the_glance_card_arrives_on_the_tips_own_delay_and_takes_the_tips_own_fade() {
+    fn the_glance_card_is_raised_by_the_tips_host_and_takes_the_tips_own_fade() {
         let seat = bt_layout::SeatId(3);
         let anchor = TooltipAnchorId::CommandTick(
             seat,
             crate::cmdrail::Target::Command(bt_term::CommandMarkId(11)),
         );
+        let face = TipFace::Peek { muted: false };
         let mut host = TooltipHost::default();
         let now = Instant::now();
-        host.observe(Some(anchor), now);
+        host.observe(Some((anchor, face)), now);
         assert_eq!(host.active(), None, "still settling");
-        assert!(!host.activate_if_due(now + TOOLTIP_DELAY - Duration::from_millis(1)));
-        assert!(host.activate_if_due(now + TOOLTIP_DELAY));
+        assert!(!host.activate_if_due(now + PEEK_INTENT_DELAY - Duration::from_millis(1)));
+        assert!(host.activate_if_due(now + PEEK_INTENT_DELAY));
         assert_eq!(host.active(), Some(anchor));
         // And the fade is the tip's 90ms, not a number of the card's own.
-        assert!(host.is_fading(now + TOOLTIP_DELAY, Motion::Full));
-        assert!(!host.is_fading(now + TOOLTIP_DELAY + TOOLTIP_FADE, Motion::Full));
+        assert!(host.is_fading(now + PEEK_INTENT_DELAY, Motion::Full));
+        assert!(!host.is_fading(now + PEEK_INTENT_DELAY + TOOLTIP_FADE, Motion::Full));
         // A tick that is no longer under the pointer takes its card with it —
         // which is how the rail's own `pointerleave` reaches the card.
         assert!(host.retain(|_| false));
         assert_eq!(host.active(), None);
+    }
+
+    /// The report of 2026-08-19, driven straight at the state machine: one
+    /// observation, and the instant it comes due is the face's answer.
+    ///
+    /// The chrome tip's 380 is asserted in the same test rather than left to the
+    /// ones above, because what was reported is a *difference* — a card that made
+    /// the reader wait as long as a title bar button — and a regression that moved
+    /// both numbers together would leave every other assertion in this file green.
+    #[test]
+    fn the_rail_card_is_due_at_a_hundred_and_twenty_while_the_chrome_tip_keeps_its_three_eighty() {
+        assert_eq!(PEEK_INTENT_DELAY, Duration::from_millis(120));
+        assert_eq!(TOOLTIP_DELAY, Duration::from_millis(380));
+        let tick = TooltipAnchorId::CommandTick(
+            bt_layout::SeatId(1),
+            crate::cmdrail::Target::Command(bt_term::CommandMarkId(2)),
+        );
+        let start = Instant::now();
+        let frame = Duration::from_millis(16);
+
+        // The card, in both of its texts: an empty ledger is answered no slower
+        // than a quoted command, because muteness is a fact about the words and
+        // not about the journey the hand made to reach them.
+        for muted in [false, true] {
+            let mut host = TooltipHost::default();
+            host.observe(Some((tick, TipFace::Peek { muted })), start);
+            assert_eq!(
+                host.deadline(start, Motion::Full, frame),
+                Some(start + Duration::from_millis(120)),
+                "the loop is asked to wake at 120ms, not merely to notice later"
+            );
+            assert!(!host.activate_if_due(start + Duration::from_millis(119)));
+            assert!(host.activate_if_due(start + Duration::from_millis(120)));
+        }
+
+        // The chrome tip, unmoved.
+        let mut host = TooltipHost::default();
+        host.observe(Some((TooltipAnchorId::Settings, TipFace::Chrome)), start);
+        assert_eq!(
+            host.deadline(start, Motion::Full, frame),
+            Some(start + Duration::from_millis(380))
+        );
+        assert!(!host.activate_if_due(start + Duration::from_millis(379)));
+        assert!(host.activate_if_due(start + Duration::from_millis(380)));
+
+        // A hand that leaves the button for the rail is on the rail's clock from
+        // the moment it arrives — the new subject brings its own length rather
+        // than serving out whatever the old one had left.
+        let crossed = start + Duration::from_millis(380);
+        assert!(host.observe(Some((tick, TipFace::Peek { muted: false })), crossed));
+        assert_eq!(
+            host.deadline(crossed, Motion::Full, frame),
+            Some(crossed + Duration::from_millis(120))
+        );
+
+        // And the swatch keeps the chrome clock while wearing the card's type.
+        let mut host = TooltipHost::default();
+        host.observe(
+            Some((
+                TooltipAnchorId::PreviewHex(crate::PreviewSurface::Seat(bt_layout::SeatId(1)), 12),
+                TipFace::Swatch {
+                    rgba: [0x22, 0x88, 0xff, 0xff],
+                },
+            )),
+            start,
+        );
+        assert!(!host.activate_if_due(start + Duration::from_millis(379)));
+        assert!(host.activate_if_due(start + Duration::from_millis(380)));
     }
 
     /// The face travels on the anchor, because muteness is a fact about the text.
