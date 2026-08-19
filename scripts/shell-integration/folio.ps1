@@ -38,9 +38,29 @@ $originalReadLine = if ($readLineCommand -is [System.Management.Automation.Funct
 
 $Global:__FolioShellIntegration = @{
     Installed = $true
-    OriginalPrompt = $originalPrompt
+    # The prompts this one stands in front of, outermost first. Index 0 is what `prompt` was when
+    # Folio wrapped it; a customizer that wraps *us* afterwards is adopted onto the front of this
+    # list by `prompt` itself (see the re-hoist there), so the chain is always "every prompt in the
+    # session, in the order they must run", and Folio is always the one the host calls first.
+    PromptChain = @($originalPrompt)
+    # How deep in that chain this session currently is. Only depth 0 — the invocation the host
+    # itself made — reads `$?` and writes markers; a copy of this same function reached again
+    # through a wrapper forwards and stays silent.
+    PromptDepth = 0
     OriginalReadLine = $originalReadLine
+    # True between the `133;C` written for a submitted command and the `133;D` that answers it.
+    # It is armed by `PSConsoleHostReadLine` when a line that will actually run something is
+    # submitted, and disarmed by the `D` — so a prompt drawn for any other reason (PSReadLine's
+    # `InvokePrompt` after a resize, a nested prompt) reports no status, and a line that runs
+    # nothing gets neither marker.
     CommandStarted = $false
+    # `$LASTEXITCODE` as it stood when the submitted line was about to run. A native command that
+    # fails moves it; that movement is the one signal for "this command exited non-zero" that no
+    # prompt customizer running before us can launder, because `$?` can be.
+    ExitCodeAtLineStart = $null
+    # False for a submitted line PowerShell's parser refused. Such a line runs nothing, so the two
+    # variables above keep the previous command's answer and cannot speak for this one.
+    LineParsed = $true
     # OSC 7 working-directory URI builder, kept in this table rather than as a global function so
     # the integration adds no command name to the user's session.
     WorkingDirectoryUri = {
@@ -530,15 +550,62 @@ if (-not $psReadLineSelfAnchors -and $psReadLineVersion.Major -eq 2 -and $psRead
 }
 
 function Global:PSConsoleHostReadLine {
-    $original = $Global:__FolioShellIntegration.OriginalReadLine
-    $commandLine = & $original
-    # [char]27: Windows PowerShell 5.1 has no `e escape; this form works on both generations.
-    [Console]::Write(([string][char]27) + ']133;C' + [char]7)
+    $state = $Global:__FolioShellIntegration
+    $commandLine = & $state.OriginalReadLine
+
+    # This is the last moment before the host runs the line, and the only one at which
+    # `$LASTEXITCODE` still holds the *previous* command's code. Reading it here is what lets the
+    # prompt tell "this command exited 3" from "some command three lines ago exited 3": the
+    # variable is a session-wide leftover, not a per-command fact, and PowerShell offers nothing
+    # else that says which command last wrote it. Recorded after the read-line returns, so a
+    # customizer that shells out to a native helper while the user is typing (oh-my-posh's
+    # transient prompt does) is part of the baseline rather than mistaken for the command.
+    $state.ExitCodeAtLineStart = $Global:LASTEXITCODE
+
+    # `C` opens an output region that only `D` closes, so it is owed only by a line that is
+    # actually going to run something. An empty line, a line of whitespace, a line that is nothing
+    # but a comment, and the empty string PSReadLine returns when Ctrl+C abandons what was typed
+    # all run no command at all: PowerShell's own parser is asked, and an input that parses cleanly
+    # into no statements gets no markers rather than a zero-length command in the ledger carrying
+    # the status of whatever ran before it. An input that does *not* parse is a command as far as
+    # this contract goes — the host answers it with an error, and that error is a status.
+    $runsSomething = $false
+    $state.LineParsed = $true
+    if (-not [string]::IsNullOrWhiteSpace($commandLine)) {
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+            $commandLine, [ref]$null, [ref]$parseErrors)
+        if ($parseErrors.Count -gt 0) {
+            # A line the parser rejects still owes a region: the host answers it with an error
+            # under the prompt, and that error is the command's whole output. Nothing runs, so
+            # neither `$?` nor `$LASTEXITCODE` will move — the prompt is told here, because this is
+            # the only place that knows.
+            $runsSomething = $true
+            $state.LineParsed = $false
+        } else {
+            # The three blocks a top-level input can be spelled with on both supported generations.
+            # `clean` and `dynamicparam` exist only inside a function body, which is a statement in
+            # one of these, and naming a property 5.1's AST does not have would throw under a
+            # profile that runs `Set-StrictMode`.
+            foreach ($block in $ast.BeginBlock, $ast.ProcessBlock, $ast.EndBlock) {
+                if ($null -ne $block -and $block.Statements.Count -gt 0) {
+                    $runsSomething = $true
+                }
+            }
+        }
+    }
+
+    if ($runsSomething) {
+        $state.CommandStarted = $true
+        # [char]27: Windows PowerShell 5.1 has no `e escape; this form works on both generations.
+        [Console]::Write(([string][char]27) + ']133;C' + [char]7)
+    }
     return $commandLine
 }
 
 function Global:prompt {
-    # Capture status before prompt code or history inspection can overwrite it.
+    # These two statements are first, and nothing may move ahead of them: `$?` is overwritten by
+    # the very next thing this session does, and `$LASTEXITCODE` by the next native command.
     $lastSucceeded = $?
     $nativeExitCode = $Global:LASTEXITCODE
     $state = $Global:__FolioShellIntegration
@@ -546,15 +613,71 @@ function Global:prompt {
     $bel = [string][char]7
     $out = ''
 
-    if ($state.CommandStarted) {
-        if ($lastSucceeded) {
+    # Where in the chain this invocation is, and which prompt it owes a call to.
+    $depth = $state.PromptDepth
+    $inner = $depth
+
+    # Folio's prompt has to be the *outermost* one, because everything a prompt customizer runs —
+    # conda's `Write-Host` of `(base) `, oh-my-posh's own executable — overwrites the two variables
+    # above before we could read them. Installation makes it outermost; a customizer initialised
+    # afterwards (`conda init powershell` writes into the all-hosts profile, which loads *before*
+    # the per-host one that usually carries the `.` of this script) renames this function out of
+    # the way and puts its own in front, and from then on every status Folio reports is that
+    # customizer's own success. So the moment this function notices it is no longer what `prompt`
+    # resolves to, it takes the name back and keeps the customizer in the chain — one prompt later
+    # the order is right again and stays right, without either prompt losing its output.
+    if ($depth -eq 0) {
+        $installed = Get-Command prompt -CommandType Function -ErrorAction SilentlyContinue
+        if ($null -ne $installed -and
+            -not [object]::ReferenceEquals($installed.ScriptBlock, $state.SelfPrompt)) {
+            $alreadyChained = $false
+            foreach ($link in $state.PromptChain) {
+                if ([object]::ReferenceEquals($link, $installed.ScriptBlock)) {
+                    $alreadyChained = $true
+                }
+            }
+            if (-not $alreadyChained) {
+                $state.PromptChain = @($installed.ScriptBlock) + $state.PromptChain
+            }
+            Set-Item -LiteralPath Function:Global:prompt -Value $state.SelfPrompt
+            # This invocation is already running inside the wrapper just adopted — it called us —
+            # so the prompt still owed is the one after it. Its text is written once, and the
+            # status reported for this one prompt is the laundered one; the next is honest.
+            $inner = $depth + 1
+        }
+    }
+
+    if ($state.CommandStarted -and $depth -eq 0) {
+        # Three facts, in the order of how much they can be trusted.
+        #
+        # `$LASTEXITCODE` having *moved* since the line was submitted is the only one no prompt
+        # code can fake: a native command wrote it, and if what it wrote is non-zero then this
+        # line's own program failed, whatever `$?` was talked into saying afterwards.
+        #
+        # `$?` is next: it is the shell's own verdict, false for a failed cmdlet that never
+        # touches `$LASTEXITCODE`, and true for a command that succeeded after an older native
+        # failure left a non-zero code lying around.
+        #
+        # `$LASTEXITCODE` on its own is last, and only as a number: when `$?` says the command
+        # failed and the variable is non-zero, it is the code the shell itself would show, so it
+        # is the code reported — even though a cmdlet failure standing behind an older native
+        # failure cannot be told apart from that native command being run again, which is the one
+        # thing this derivation still cannot resolve. It costs the digits, never the verdict:
+        # nothing that failed is reported as 0, and nothing that succeeded is reported as failed.
+        if (-not $state.LineParsed) {
+            $exitCode = 1
+        } elseif ($nativeExitCode -is [int] -and $nativeExitCode -ne 0 -and
+            -not ($nativeExitCode -eq $state.ExitCodeAtLineStart)) {
+            $exitCode = $nativeExitCode
+        } elseif ($lastSucceeded) {
             $exitCode = 0
-        } elseif ($null -ne $nativeExitCode) {
+        } elseif ($nativeExitCode -is [int] -and $nativeExitCode -ne 0) {
             $exitCode = $nativeExitCode
         } else {
             $exitCode = 1
         }
         $out += $esc + ']133;D;' + $exitCode + $bel
+        $state.CommandStarted = $false
     }
 
     # OSC 7: the authoritative working directory, reported once per prompt. It is what lets
@@ -563,19 +686,40 @@ function Global:prompt {
     # one. A location on a non-filesystem provider (HKLM:, Cert:, …) has no directory to resolve
     # against, so the report is sent empty, which retracts the previous one instead of leaving it
     # to answer for a place the shell has left.
-    $location = $ExecutionContext.SessionState.Path.CurrentLocation
-    if ($location.Provider.Name -eq 'FileSystem') {
-        $out += $esc + ']7;' + (& $state.WorkingDirectoryUri $location.ProviderPath) + $bel
-    } else {
-        $out += $esc + ']7;' + $bel
+    if ($depth -eq 0) {
+        $location = $ExecutionContext.SessionState.Path.CurrentLocation
+        if ($location.Provider.Name -eq 'FileSystem') {
+            $out += $esc + ']7;' + (& $state.WorkingDirectoryUri $location.ProviderPath) + $bel
+        } else {
+            $out += $esc + ']7;' + $bel
+        }
+        $out += $esc + ']133;A' + $bel
     }
 
-    $out += $esc + ']133;A' + $bel
-    $out += (& $state.OriginalPrompt)
-    $out += $esc + ']133;B' + $bel
-    $state.CommandStarted = $true
+    # The rest of the chain, still returning its text to the host through us. Depth is restored
+    # even if a customizer's prompt throws, because a prompt that failed once must not leave the
+    # session reporting every later prompt as a nested one.
+    $state.PromptDepth = $inner + 1
+    try {
+        $next = $state.PromptChain[$inner]
+        if ($null -ne $next) {
+            $out += (& $next)
+        }
+    } finally {
+        $state.PromptDepth = $depth
+    }
+
+    if ($depth -eq 0) {
+        $out += $esc + ']133;B' + $bel
+    }
     return $out
 }
+
+# The identity `prompt` is checked against on every draw. Taken after the definition above, it is
+# the object itself, so a rename — which is how a prompt customizer nests one prompt inside
+# another — moves the function without changing what this holds.
+$Global:__FolioShellIntegration.SelfPrompt =
+    (Get-Command prompt -CommandType Function).ScriptBlock
 
 # pwsh reports its executable path as the initial console title on some hosts. Establish the
 # profile's stable default only after integration is installed; later OSC/title writes from child
