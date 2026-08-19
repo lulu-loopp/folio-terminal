@@ -268,6 +268,19 @@
   .tab.squeezed .pin, .tab.squeezed .tab-files { display: none; }
   .tab.squeezed:not(.active) .close { display: none; }
   .window[data-tabs="horizontal"] .tabs-inline { display: flex; }
+  /* FOCUS MODE SUPERSEDES THE WINDOW'S NORMAL TAB CHROME (user ruling
+     2026-08-19). It is a layout LAYER, not a capability of one Tab layout: while
+     it is on, neither the horizontal strip nor the ordinary vertical rail is
+     drawn, because the card rail's own per-tab grouping already says which tab
+     each pane belongs to, and a tab strip beside it would be the same fact
+     twice. Exiting restores whatever `Tab layout` and `Sidebar` were set to —
+     the mode never writes them. */
+  .window.focusmode .tabs-inline { display: none; }
+  .window.focusmode .panel-toggle { display: none; }
+  /* the name comes back with the strip's departure: `.apptitle` is hidden under
+     a horizontal strip because the strip is standing in that space, and with the
+     strip gone an empty title bar is not a design, it is a leftover */
+  .window.focusmode .apptitle { display: inline; }
   /* Every tab gets the same width: an equal share of the strip, up to a cap.
      Add more and they all shrink together rather than each sizing to its title. */
   .tab {
@@ -1125,6 +1138,14 @@
     background: var(--panel); padding-bottom: 4px; margin-bottom: -4px;
   }
   .window[data-tabs="vertical"] .rail { display: flex; }
+  /* the card rail is ALWAYS card-width while the mode is on, from either Tab
+     layout: `Sidebar`'s rest states (Expanded / Icons / collapsed) govern the
+     NORMAL vertical rail, and the card rail neither reads nor writes them —
+     cards ARE this mode's reason to exist, and an icon strip has nowhere to put
+     one. (A future narrow "dots-only" census would be a focus-mode preference of
+     its own, not a Sidebar state.) The classes those rest states ride on are not
+     even applied while the mode is on — see `render`. */
+  .window.focusmode .rail { display: flex; }
   .window.rail-collapsed .rail { width: 0; padding-left: 0; padding-right: 0; border-right: none; opacity: 0; }
 
   /* Icon rail: parked as a strip of icons, opening over the terminal rather than
@@ -1223,7 +1244,8 @@
     font-size: 11px; font-weight: 600; letter-spacing: .04em;
     color: var(--ink3); padding: 4px 10px 6px; flex: none;
   }
-  .rail-new, #focus-cards, .tab-cards { flex: none; }   /* nothing in the rail compresses */
+  .rail-new, #focus-rail, .tab-cards { flex: none; }   /* nothing in the rail compresses */
+  #focus-rail > .fgroup { flex: none; }
   /* monitor expansion: same furniture as the focus column, minus the controls */
   .tab-cards { display: flex; flex-direction: column; gap: 8px; padding: 4px 10px 10px 22px; }
   /* expand-to-monitor chevron (§7.1.6b ③): other tabs only, hover-revealed via
@@ -1303,7 +1325,6 @@
 
   /* the tab you are holding rides above the ones getting out of its way */
   .tab.grabbed, .vtab.grabbed { z-index: 20; }
-  .fcard.grabbed { position: relative; z-index: 20; box-shadow: 0 6px 18px rgba(0,0,0,.3); }
   .vtab.grabbed { box-shadow: 0 5px 16px rgba(0, 0, 0, .14); }
   body.dark .vtab.grabbed { box-shadow: 0 5px 16px rgba(0, 0, 0, .4); }
 
@@ -2253,44 +2274,93 @@
   #pv-float .pv-dirty { width: 12px; flex: none; color: var(--accent); font-size: 13px;
     opacity: 0; text-align: center; }
   #pv-float .pv-dirty.on { opacity: 1; }
-  /* ── serial/parallel focus mode (§7.1.6b, prototype v1) ──
-     One pane full-bleed; every sibling (plus the tab's standby sessions) lives
-     in a floating card column: live mini content, not thumbnails — a card you
-     can READ is the whole point (hover principle: zero-click ongoing query). */
+  /* ── focus mode (§7.1.6b) — CROSS-TAB form, user ruling 2026-08-18 ──
+     One pane full-bleed on the stage; the rail becomes THE WINDOW'S CENSUS —
+     every pane of every tab of this window, as a live card, grouped by the tab
+     it belongs to. Cards carry real content, never thumbnails: a card you can
+     READ is the whole point (hover principle — zero-click ongoing query).
+
+     WHAT THE PER-TAB FORM LEFT BEHIND (2026-07-17/18 → 2026-08-18). Recorded as
+     a dated note rather than struck through, per this file's convention:
+       · the column was `#focus-cards`, ONE box hung under the ACTIVE tab's row,
+         holding that tab's siblings plus an invisible-until-exit standby pool.
+         It is now `#focus-rail`: the rail's entire contents while the mode is
+         on, a run of `.fgroup`s — one per tab, each with a sticky name label and
+         a hairline above it. The grouping the user built by MAKING tabs must not
+         evaporate the moment they put the glasses on (ruling ②).
+       · `#fcard-add`, `.fc-cap` (the "4 / 4" whisper), `.fcard-ghost`,
+         `.drop-hot`, `#focus-cards.drop-deny` and `.fcard.grabbed` are deleted
+         with the machinery they dressed: the 4+1+1 cap is dead and the rail
+         scrolls instead (ruling ③), the standby pool died with it (under a
+         cross-tab census every session already has a home pane), and card
+         dragging is a stated left-out for v1 (ruling ⑥ — see the JS block).
+       · `.fc-dot` / `@keyframes fcbreathe` / `@keyframes fcpulse` were already
+         dead CSS before this rewrite: a card wears the session's own `stateIcon`,
+         dots, ring and all (§7.1.6b ⑥: a card is a small tab and wears tab
+         clothes). "State dots on cards" is served by that icon, and there is no
+         second dot vocabulary here.
+  */
   .focus-host { position: absolute; inset: 0; display: flex; }
   .focus-host > .pane { flex: 1; }
-  /* the card column EMBEDS in the vertical rail under the active tab — the
-     sidebar is the one home of session navigation, and serial mode is its
-     expanded density (user ruling 2026-07-17: vertical text mode only) */
-  #focus-cards {
-    display: flex; flex-direction: column; gap: 8px;
-    padding: 4px 10px 10px 22px;
-  }
-  /* the column arrives with the mode, not after it — one mount animation on the
-     BOX (innerHTML refreshes don't replay it). Monitor boxes slide open/closed
-     instead (height-animated in syncFocusCards / the chevron handler). */
-  #focus-cards { animation: cards-in .18s ease; }
+  /* the census lives in the rail, which is the one home of session navigation
+     (user ruling 2026-07-17) — same furniture, different contents. The rail's own
+     `overflow-y: auto` does the scrolling the dead 4/4 cap used to prevent. */
+  #focus-rail { display: flex; flex-direction: column; gap: 4px; }
+  /* the census arrives WITH the mode, not after it — one mount animation on the
+     BOX (innerHTML refreshes don't replay it) */
+  #focus-rail { animation: cards-in .18s ease; }
   @keyframes cards-in { from { opacity: 0; transform: translateY(-6px); } }
-  @media (prefers-reduced-motion: reduce) { #focus-cards, .tab-cards { animation: none; transition: none !important; } }
-  /* join preview: the stand-in card IS the affordance (no frame around the
-     column); deny = full (the 4/4 whisper turns loud) or won't fit */
-  .fcard-ghost { display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
-  .fcard-ghost .fcard { border-style: dashed; border-color: var(--accent); opacity: .6; }
-  /* the singleton seat's occupant, about to be replaced by the hovering drop */
-  .fcard.drop-hot { border-style: dashed; border-color: var(--accent); }
-  #focus-cards.drop-deny { outline: 2px dashed var(--warn); outline-offset: 2px; border-radius: 12px; }
-  #focus-cards.drop-deny .fc-cap { color: var(--warn); opacity: 1; }
-  .fc-cap {
-    text-align: center; font-size: 10px; color: var(--ink3);
-    padding: 2px 0; flex: none; opacity: .7;
+  @media (prefers-reduced-motion: reduce) {
+    #focus-rail, .tab-cards { animation: none; transition: none !important; }
+    .fcard.attn { animation: none; }
   }
+  /* a group is a tab. The hairline sits BETWEEN groups only: a rule above the
+     first would read as a heading separator belonging to the rail itself. */
+  .fgroup { display: flex; flex-direction: column; gap: 8px; padding-bottom: 6px; }
+  .fgroup + .fgroup { border-top: 1px solid var(--border-soft); padding-top: 4px; }
+  /* the label sticks while its own cards scroll past it, so "which tab is this?"
+     survives a long census — the one question the grouping exists to answer.
+     `top: -6px` cancels the rail's own 6px padding-top, the same trick
+     `.rail-new` plays at the other end with `bottom: -10px`. */
+  .fgroup-head {
+    position: sticky; top: -6px; z-index: 4;
+    display: flex; align-items: center; gap: 7px;
+    padding: 5px 4px 5px 2px; background: var(--panel);
+    font-size: 11px; color: var(--ink3);
+  }
+  .fgroup-head .fg-name {
+    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-weight: 600; letter-spacing: .02em; color: var(--ink2);
+  }
+  .fgroup-head .fg-count { font-variant-numeric: tabular-nums; flex: none; }
+  .fgroup-head .pinsvg { width: 12px; height: 12px; flex: none; color: var(--ink3); }
+  /* the cards indent under their label, so the census reads as a list of tabs
+     first and a list of panes second */
+  .fgroup .fcards { display: flex; flex-direction: column; gap: 8px; padding-left: 12px; }
   .fcard {
     background: var(--menu); border: 1px solid var(--border); border-radius: 10px;
     box-shadow: 0 3px 12px rgba(0,0,0,.22); cursor: pointer; overflow: hidden; flex: none;
     transition: border-color .12s ease, transform .12s ease;
   }
   .fcard:hover { border-color: var(--accent); transform: translateX(2px); }
-  .fcard.attn { border-color: var(--warn); }
+  /* THE PANE YOU ARE LOOKING AT, marked in the census rather than removed from
+     it (the per-tab form omitted the staged pane's card entirely). A group whose
+     count says 3 and shows 2 is a lie, and after a scroll "where am I" is exactly
+     the question the rail has to answer at a glance. Contrast, not hue — the
+     accent belongs to hover and the warn belongs to the attention queue; this is
+     the same collision the pane header settled the same way. */
+  .fcard.staged { border-color: var(--ink3); background: var(--active); }
+  .fcard.staged .fc-head { background: var(--active); color: var(--ink); }
+  /* THE ATTENTION QUEUE'S VISIBLE FORM (ruling ⑤): a session blocked on you
+     pulses in the census, so the queue is something you SEE among the panes
+     rather than a number in the title bar. `Ctrl+Shift+A` walks these. */
+  .fcard.attn { border-color: var(--warn); animation: fcard-wait 1.7s ease-in-out infinite; }
+  @keyframes fcard-wait {
+    50% { box-shadow: 0 3px 12px rgba(0,0,0,.22),
+                      0 0 0 3px color-mix(in srgb, var(--warn) 24%, transparent); }
+  }
+  /* monitor cards are windows you look through, not handles (§7.1.6b ③) */
+  .tab-cards .fcard .fc-close { display: none; }
   .fc-head {
     display: flex; align-items: center; gap: 6px; padding: 5px 8px;
     font-size: 11px; color: var(--ink2); background: var(--hover);
@@ -2305,11 +2375,11 @@
   .fcard:hover .fc-close { visibility: visible; }
   .fc-head .fc-close:hover { background: var(--active); color: var(--ink); }
   .fc-head .fc-close svg { width: 8px; height: 8px; pointer-events: none; }
-  .fc-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--border); }
-  .fc-dot.busy { background: var(--accent); animation: fcbreathe 2s infinite; }
-  .fc-dot.attn { background: var(--warn); animation: fcpulse .9s infinite; }
-  @keyframes fcbreathe { 50% { opacity: .45; } }
-  @keyframes fcpulse { 50% { transform: scale(1.5); } }
+  /* THE BODY IS THE ONLY THING RULING ③ CHARGES FOR. A card outside the rail's
+     scrollport keeps this box — same 72px, so the scrollbar never lies about how
+     long the census is — and gets nothing drawn in it (`.fcard.parked`, set by
+     `paintCards`). Its head, its name and its dot go on updating regardless:
+     the ledger is not pixels. */
   .fc-mini {
     height: 72px; padding: 4px 8px 6px; overflow: hidden;
     display: flex; flex-direction: column; justify-content: flex-end;
@@ -2338,16 +2408,6 @@
     font-size: 9px; color: #fff; background: #d9822b; border-radius: 4px;
     padding: 0 5px; flex: none;
   }
-  #fcard-add {
-    border: 1px dashed var(--border); border-radius: 10px; color: var(--ink3);
-    text-align: center; padding: 6px; cursor: pointer; font-size: 14px; flex: none;
-  }
-  #fcard-add:hover { color: var(--ink); border-color: var(--accent); }
-  /* a drop hovering the "+": the button itself is the affordance — it lights
-     up instead of a ghost card being drawn on top of it */
-  #fcard-add.drop-hot { color: var(--accent); border-color: var(--accent); border-style: solid; background: color-mix(in srgb, var(--accent) 8%, transparent); }
-  #fcard-add.disabled { opacity: .35; cursor: default; }
-  #fcard-add.disabled:hover { color: var(--ink3); border-color: var(--border); }
   .peek-grid { display: flex; width: 210px; height: 92px; gap: 3px; }
   /* the schematic shows the shape; this row guarantees you can read every name
      even when a pane is too narrow to fit its own label */
@@ -4012,6 +4072,37 @@
           </div>
         </div>
 
+        <!-- FOCUS MODE IS A ROW, AND IT SITS IN THIS FAMILY (user ruling
+             2026-08-19). The earlier reading — "a mode entered many times a day
+             is a verb, not a preference, and a modal you must dismiss is the
+             wrong home for it" — was answered by Stage Manager: this is a layout
+             mode somebody may LIVE in, and the thing you live in has a settings
+             entry even when it also has a fast switch. Apple ships exactly that
+             pair for Stage Manager, a Control Centre toggle and a System
+             Settings row, over ONE bit. So: this row and the quick doors write
+             the same `state.focusMode`, and the row is what makes it PERSIST — a
+             window closed in focus mode reopens in focus mode (`settings.json`
+             v13 → v14). It stands beside `Tab layout` and `Sidebar` because the
+             three answer one question between them: what shape is this window.
+             Unlike those two it carries no condition — it works from either tab
+             layout (see the `.window.focusmode` rules).
+             Preferences ABOUT the mode — live card thumbnails vs names only, as
+             a performance choice; a narrower census — are candidates for later
+             rows, and are not this one. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Focus mode</div>
+            <div class="desc">One pane fills the window; every pane of every tab waits in a card rail, grouped by tab. Double-clicking a pane's header, its ⌄ menu and the shortcut all turn this same setting</div>
+          </div>
+          <div class="combo" data-combo="focusmode">
+            <button aria-haspopup="listbox"><span class="value">Off</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item" data-v="on" role="option"><span class="tick">✓</span>On</div>
+              <div class="combo-item selected" data-v="off" role="option"><span class="tick">✓</span>Off</div>
+            </div>
+          </div>
+        </div>
+
         <!-- SIDEBAR TOUCHES TAB LAYOUT AGAIN (user ruling 2026-08-18),
              reversing the 2026-08-17 filing of it under Advanced. The argument
              for the move was that the CONDITION carries the dependency once the
@@ -5157,32 +5248,14 @@
     const at = cur ? q.findIndex(s => s.uid === cur.uid) : -1;
     focusSessionByUid(q[(at + 1) % q.length].uid);
   }
+  /* Every session lives in a pane of some tab — there is no pool to look in any
+     more — so the jump is one search and one stage. In focus mode that IS the
+     verb ruling ⑤ was owed: the pulsing card takes the stage. The twenty lines
+     of standby-swap this replaced were the price of the pool, not of the jump. */
   function focusSessionByUid(uid) {
     for (const w of state.tabs) {
       const leaf = leavesOf(w.tree).find(l => l.kind === "term" && l.uid === uid);
-      if (leaf) {
-        state.active = w.id;
-        w.focus = leaf.id;
-        if (w.focusLeaf != null) w.focusLeaf = leaf.id;   /* focus mode: onto the stage */
-        render();
-        return;
-      }
-      /* standby card in a focus-mode pool: the jump OPENS the session there
-         too (user ruling 2026-07-18) — swap it onto the stage, the same trade
-         as clicking its card. A non-terminal stage has no seat to trade:
-         land on the tab and let the card's attention border point. */
-      if (w.focusLeaf != null
-          && (w.standby || []).some(x => typeof x === "number" && x === uid)) {
-        state.active = w.id;
-        const fl = findLeafIn(w, w.focusLeaf);
-        if (fl && !isFilesLeaf(fl) && !isPreviewLeaf(fl)) {
-          const i = w.standby.indexOf(uid);
-          w.standby[i] = fl.uid;
-          fl.uid = uid;
-        }
-        render();
-        return;
-      }
+      if (leaf) { stageCard(w, leaf.id); return; }
     }
   }
   $("attn-chip").addEventListener("click", jumpAttention);
@@ -5442,13 +5515,15 @@
     ["horizontal", "vertical"].forEach(v => items.push({
       icon: svgIcon("i-panel"), label: `Tabs: ${v[0].toUpperCase()}${v.slice(1)}`,
       run: () => { state.layoutMode = v; render(); syncCombo("layout", v); } }));
-    if (state.layoutMode === "vertical" && (termLeaf || (w && w.focusLeaf != null))
-        && termLeaves(w).length <= FOCUS_MAX)
+    /* the palette keeps the door it always had; only the semantics under it
+       changed. No capacity gate any more — the census scrolls (cross-tab ③) —
+       and no leaf argument, because the stage is whatever pane the window is
+       already looking at (④). The chord this row is still missing belongs to the
+       P2-7 table and is an open question in the plan file. */
+    if (state.focusMode || fl)
       items.push({ icon: svgIcon("i-max"),
-        label: w.focusLeaf != null ? "Exit focus mode" : "Enter focus mode",
-        run: () => { const before = snapshotPanes();
-          if (w.focusLeaf != null) exitFocus(w); else { w.focusLeaf = fl.id; w.focus = fl.id; }
-          renderWithPaneFlip(before); } });
+        label: state.focusMode ? "Exit focus mode" : "Enter focus mode",
+        run: () => state.focusMode ? exitFocus() : enterFocus() });
     items.push({ icon: svgIcon("i-folder"), label: "Git panel",
       run: () => {
         let l = leavesOf(activeTab().tree).find(isFilesLeaf);
@@ -5707,6 +5782,18 @@
     railMode: "expanded",    // expanded | icons
     theme: "system",
     railCollapsed: false,
+    /* Focus mode is a WINDOW fact, not a tab's (§7.1.6b cross-tab ①④): a lens
+       over "which pane is this window looking at", staging `focusedLeaf(activeTab())`.
+       In the native build the live flag lives on `WindowRuntime` beside `tabs` /
+       `active_tab` (DESIGN §2.4).
+       IT IS ALSO A PERSISTED SETTING (user ruling 2026-08-19, arguing from Stage
+       Manager and Apple's own dual placement — a Control Center toggle AND a
+       System Settings entry for one bit). Focus mode is a layout mode somebody
+       may simply LIVE in, not only a verb they flick; so `Appearance ▸ Focus
+       mode` writes this bit, the quick doors write the SAME bit, and a window
+       closed in focus mode reopens in it. `settings.json` v13 → v14 carries one
+       new key; the doors are accelerators, never a second source of truth. */
+    focusMode: false,
     defaultProfile: 0,       // index into PROFILES: new tabs, and startup
     blockMax: 0,             // px ceiling on a rendered block; 0 means none
     wrap: true,              // fold long lines (P2-9); rendered blocks follow it
@@ -5752,6 +5839,11 @@
     }, 700);
   })();
   state.active = state.tabs[0].id;
+
+  /* the cross-tab census's demo window is furnished further down, after the
+     tree ops it calls — splitting a tab needs `runDemand`, and a const cannot
+     be reached before its own line runs. See "the demo window the CROSS-TAB
+     census needs". */
 
   /* ── lookups ── */
   const session = (uid) => state.sessions.find(s => s.uid === uid);
@@ -5801,34 +5893,39 @@
        card   = focus-mode card html */
   const folderMark = () => `<span class="ticon"><svg class="pmark" style="color:var(--accent)"><use href="#i-folder"/></svg></span>`;
   const fileMark = () => `<span class="ticon"><svg class="pmark" style="color:var(--accent)"><use href="#i-file"/></svg></span>`;
-  /* one drawing for every preview card — tree-leaf cards, standby-pv cards and
-     join ghosts all call this with their own data attrs */
-  function pvCardHtml(pv, attrs) {
-    let mini;
+  /* one drawing for every preview card, wherever it appears — the census, a
+     monitor box, whatever comes next — called with its own data attrs */
+  function pvCardMini(pv) {
     if (pv.ftype === "image") {
-      mini = `<svg width="120" height="52" viewBox="0 0 120 52">
+      return `<svg width="120" height="52" viewBox="0 0 120 52">
         <rect width="120" height="52" rx="4" fill="#20262d"/>
         <path d="M0 44 L26 30 L52 38 L80 18 L120 26 L120 52 L0 52 Z" fill="#2a3a55"/>
         <path d="M0 44 L26 30 L52 38 L80 18 L120 26" fill="none" stroke="#4da3ff" stroke-width="1.5"/></svg>`;
-    } else if (pv.content != null) {
-      mini = pv.content.split("\n").slice(0, 4).map(t => `<div>${esc(t)}</div>`).join("");
-    } else {
-      mini = `<div>No preview</div>`;
     }
+    if (pv.content != null)
+      return pv.content.split("\n").slice(0, 4).map(t => `<div>${esc(t)}</div>`).join("");
+    return `<div>No preview</div>`;
+  }
+  function pvCardHtml(pv, attrs, cls) {
     /* no height override: every card body shares .fc-mini's default — a column
        of uniform cards reads as one instrument (user ruling 2026-07-18) */
-    return `<div class="fcard" ${attrs}>
+    return `<div class="fcard ${cls || ""}" ${attrs}>
       <div class="fc-head"><svg class="pmark" style="color:var(--accent);width:12px;height:12px"><use href="#i-file"/></svg>
       <span class="name">${esc(pv.name)}</span>${pv.dirty ? `<span class="fc-badge">●</span>` : ""}
       <span class="fc-close" title="Close">${closeSvg}</span></div>
-      <div class="fc-mini">${mini}</div></div>`;
+      <div class="fc-mini"></div></div>`;
   }
+  /* every card in the census names the pane it is a picture OF: which tab, which
+     leaf. The per-tab form only needed a leaf id, because there was only ever one
+     tab in the column (§7.1.6b cross-tab ①). */
+  const cardAttrs = (l, w) => `data-kind="${l.kind}" data-ws="${w.id}" data-leaf="${l.id}"`;
   const CONTENT = {
     term: {
       mark: (l) => { const s = leafSession(l); return s ? `<span class="ticon">${s.icon}</span>` : `<span class="ticon"></span>`; },
       status: (l) => { const s = leafSession(l); return s ? stateIcon(s, s.busy, s.unread) : `<span class="ticon"></span>`; },
       title: (l) => { const s = leafSession(l); return s ? cwdLeaf(s) : "…"; },
-      card: (l) => { const s = session(l.uid); return s ? termCardHtml(s, `data-kind="leaf" data-leaf="${l.id}"`) : ""; },
+      card: (l, w, cls) => { const s = session(l.uid); return s ? termCardHtml(s, cardAttrs(l, w), cls) : ""; },
+      mini: (l) => { const s = session(l.uid); return s ? termCardMini(s) : ""; },
     },
     files: {
       mark: folderMark,
@@ -5836,17 +5933,15 @@
       title: (l) => cwdLeaf({ cwd: l.files.root }),
       /* a files card has a BODY like every other card: the first visible rows
          of the very tree the pane shows (user report 2026-07-18: bare head) */
-      card: (l) => {
-        const rows = filesVisibleRows(l.files).slice(0, 4).map(r =>
-          `<div class="fcm-row" style="padding-left:${r.depth * 10}px">
-             <svg class="fico ${r.node.dir ? "folder" : "file"}"><use href="#${r.node.dir ? "i-folder" : "i-file"}"/></svg>
-             <span>${esc(r.node.name)}</span></div>`).join("");
-        return `<div class="fcard" data-kind="leaf" data-leaf="${l.id}">
+      card: (l, w, cls) => `<div class="fcard ${cls || ""}" ${cardAttrs(l, w)}>
           <div class="fc-head"><svg class="pmark" style="color:var(--accent);width:12px;height:12px"><use href="#i-folder"/></svg>
           <span class="name">${cwdLeaf({ cwd: l.files.root })}</span>
           <span class="fc-close" title="Close">${closeSvg}</span></div>
-          <div class="fc-mini fc-files">${rows}</div></div>`;
-      },
+          <div class="fc-mini fc-files"></div></div>`,
+      mini: (l) => filesVisibleRows(l.files).slice(0, 4).map(r =>
+        `<div class="fcm-row" style="padding-left:${r.depth * 10}px">
+           <svg class="fico ${r.node.dir ? "folder" : "file"}"><use href="#${r.node.dir ? "i-folder" : "i-file"}"/></svg>
+           <span>${esc(r.node.name)}</span></div>`).join(""),
     },
     preview: {
       mark: fileMark,
@@ -5854,7 +5949,8 @@
       title: (l) => esc(l.preview.name),
       /* a preview card has a BODY too — mini real content, same philosophy as
          the terminal cards (user report: "聚焦模式下预览没有窗口") */
-      card: (l) => pvCardHtml(l.preview, `data-kind="leaf" data-leaf="${l.id}"`),
+      card: (l, w, cls) => pvCardHtml(l.preview, cardAttrs(l, w), cls),
+      mini: (l) => pvCardMini(l.preview),
     },
   };
   const contentOf = (l) => CONTENT[(l && l.kind) || "term"];
@@ -6081,8 +6177,10 @@
     w.focus = leaf.id;
     renderWithPaneFlip(before);
   }
-  function closePane(leafId) {
-    const w = activeTab();
+  /* `w0` names the tab when the caller is not the active one — a card's × in
+     the census can close a pane of any tab of this window (cross-tab ①) */
+  function closePane(leafId, w0) {
+    const w = w0 || activeTab();
     const closing = findLeafIn(w, leafId);
     if (closing && isPreviewLeaf(closing)) {
       /* the pool outlives any ONE pane — only the LAST preview pane's close
@@ -6208,14 +6306,12 @@
       leaf.files.root = seed.root; leaf.files.open = new Set(seed.open); leaf.files.sel = seed.sel;
       if (seed.width) leaf.files.width = seed.width;   /* a resized column keeps its width across float→dock */
     }
-    /* focus mode: files holds ONE seat (fixed column, no 2×2 share) — docking
-       lands in it, replacing the view if the seat is occupied. This also closes
-       the cap bypass the old unconditional split opened (user report
-       2026-07-18). */
-    if (w.focusLeaf != null) {
-      const existing = leavesOf(w.tree).find(isFilesLeaf);
-      if (existing) { existing.files = leaf.files; render(); return; }
-    }
+    /* Docking behaves identically in and out of focus mode (cross-tab ruling
+       ④). The branch that used to stand here — "focus mode: files holds ONE seat,
+       replace its view if occupied" — was a patch over the 4+1+1 cap's bypass,
+       and it went with the cap: a docked column is one column of THIS tab's
+       layout, and the census shows it as a card in this tab's own group like
+       any other pane. */
     const before = snapshotPanes();
     splitRootOf(w, "left", leaf);
     /* no ratio math: the files column is fixed-width (leaf.files.width), so it
@@ -6854,24 +6950,37 @@
   function paintStrip() {
     const strip = $("tabstrip"), rail = $("rail");
     const ids = stripIds();
+    /* FOCUS MODE: the rail stops being a tab list and becomes the window's
+       census, grouped by tab (§7.1.6b cross-tab ①②). It has its own painter and
+       its own cache key; the tab list's key is cleared while the mode is on, so
+       leaving it rebuilds the list from scratch rather than diffing against rows
+       that are not there. */
+    const census = state.focusMode;
+    if (census) { paintFocusRail(rail); rail.dataset.ids = ""; }
+    else delete rail.dataset.frk;
     if (strip.dataset.ids !== ids) {
       /* the membership or the order changed: there is no node to keep */
       strip.innerHTML = stripHtml("tab", "ttitle", false) +
         `<button class="newtab nt-main" title="New tab (${defaultProfile().title})"><svg><use href="#i-plus"/></svg></button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button>`;
-      rail.innerHTML = `<div class="label">Tabs</div>` + stripHtml("vtab", "title", true) +
-        `<div class="rail-new"><button class="newtab nt-main" title="New tab (${defaultProfile().title})"><span class="ticon"><svg><use href="#i-plus"/></svg></span><span>New tab</span></button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button></div>`;
-      strip.dataset.ids = rail.dataset.ids = ids;
-    } else {
-      /* same tabs in the same places: replace only the ones that actually differ,
-         and leave every other node — and every gesture aimed at one — alone */
-      state.tabs.forEach(w => {
-        const k = tabKey(w);
-        [[strip, "tab", "ttitle"], [rail, "vtab", "title"]].forEach(([host, cls, tc]) => {
-          const el = host.querySelector(`.${cls}[data-ws="${w.id}"]`);
-          if (el && el.dataset.tk !== k) el.outerHTML = tabHtml(w, cls, tc);
-        });
-      });
+      strip.dataset.ids = ids;
     }
+    if (!census && rail.dataset.ids !== ids) {
+      rail.innerHTML = `<div class="label">Tabs</div>` + stripHtml("vtab", "title", true) +
+        railNewHtml();
+      rail.dataset.ids = ids;
+    }
+    /* same tabs in the same places: replace only the ones that actually differ,
+       and leave every other node — and every gesture aimed at one — alone.
+       After a full rebuild every key already matches, so this costs nothing. */
+    state.tabs.forEach(w => {
+      const k = tabKey(w);
+      const hosts = [[strip, "tab", "ttitle"]];
+      if (!census) hosts.push([rail, "vtab", "title"]);
+      hosts.forEach(([host, cls, tc]) => {
+        const el = host.querySelector(`.${cls}[data-ws="${w.id}"]`);
+        if (el && el.dataset.tk !== k) el.outerHTML = tabHtml(w, cls, tc);
+      });
+    });
     /* everything that changes without changing the structure */
     state.tabs.forEach(w => {
       const busy = tabBusy(w), unread = tabUnread(w);
@@ -7053,11 +7162,10 @@
   function renderNode(node, w) {
     if (node.type === "leaf") {
       const focused = node.id === w.focus;
-      /* the focus-mode stage always wears its header even when the parked tree
-         has a single leaf — it carries the pane's identity and the dblclick
-         exit affordance (user bug report 2026-07-18: header vanished when
-         every other seat was standby) */
-      const multi = paneCount(w) > 1 || w.focusLeaf != null;
+      /* the focus-mode stage always wears its header even when the tab holds a
+         single pane — the header carries the pane's identity and the dblclick
+         that leaves the mode (user bug report 2026-07-18) */
+      const multi = paneCount(w) > 1 || state.focusMode;
       /* A files leaf is a pane like any other — same .pane shell, same header,
          same close button — so it drags/docks/resizes through the identical code.
          Only the body differs: a tree instead of a terminal. */
@@ -7765,133 +7873,264 @@
   const filesPaneKey = (e, leaf) => filesTreeKey(e, leaf.files, render,
     (p) => openPreview(fileRowFullPath(leaf.files.root, p), fileRowName(p)));
 
-  /* ── focus-mode cards (§7.1.6b) ──
-     Every sibling leaf plus the tab's STANDBY sessions (sessions the tab holds
-     that are not placed in the tree — "会话属于 tab,pane 是视图位"). Cards show
-     live tail content; auxiliary panes appear as cards too, styled by identity
-     (zero special cases: click swaps, same as terminals). */
-  const focusCardHtml = (l) => contentOf(l).card(l);
-  /* the card body IS the terminal, just small (user ruling 2026-07-17,
-     superseding the chip summary): real content on the terminal's own dark
-     ground, rich blocks scaled down in place — the prototype stand-in for the
-     native read-only mini projection (§3.3). */
-  function termCardHtml(s, attrs) {
-    const mini = s.lines.slice(-6).map(l => `<div>${l}</div>`).join("");
-    /* the head wears the session's own icon — the same stateIcon the tab wears,
-       busy/unread included (user ruling 2026-07-18: no abstract dots; a card is
-       a small tab, so it shows tab identity) */
-    /* no "等你" text badge: the stateIcon's unread dot already says it, and the
-       attn border says it louder (user ruling 2026-07-18 — one fact, one voice) */
-    return `<div class="fcard ${s.unread || s.awaiting ? "attn" : ""}" ${attrs}>
+  /* ── focus mode: the window's census (§7.1.6b, CROSS-TAB form) ──
+     RATIFIED 2026-08-18. The form this replaces (2026-07-17/18) was per-TAB: a
+     column of the ACTIVE tab's siblings plus an invisible-until-exit standby
+     pool, capped at 4 terminals + 1 files + 1 preview, with cards you could drag
+     into and out of the set. Six rulings replace it. Each is written where it
+     bites; they are stated once here so nobody re-derives the dead ones.
+
+       ① SCOPE. The census is ALL panes of ALL tabs of THIS window — per-window
+          once the multiwindow block lands `HashMap<WindowId, WindowRuntime>`
+          (DESIGN §2.4, 片 C). Not the app's sessions: a window is what one
+          person arranged, and a census reaching into another window would answer
+          a question nobody asked of this one.
+       ② GROUPING. Cards group BY TAB — a hairline and a sticky name label
+          between groups. The user already sorted these sessions once, by making
+          tabs; the mode must not flatten that work into one anonymous column.
+       ③ NO CAP. The old 4 (and its 4+1+1 refinement) is DEAD; the rail scrolls.
+          Only cards inside the scrollport are composited — off-screen sessions
+          cost no pixels — but every session's DOT keeps updating wherever it is:
+          THE LEDGER IS NOT PIXELS. `paintCards` is that sentence in code.
+       ④ A CLICK IS A LOOK, NOT A MOVE. Clicking a card stages it and moves
+          NOTHING between tabs. Focus mode is a pair of glasses, not a moving
+          crew — which is why the mode is a BOOLEAN and not a location. The stage
+          IS `focusedLeaf(activeTab())`, so staging a card is literally "make that
+          the window's focused pane", and the exit rule — 你最后看着谁，回来就站在
+          谁面前 — is not a rule at all: it is what taking the glasses off leaves
+          behind. Nothing to reconcile, nothing to keep in step, and `exitFocus`
+          is one assignment instead of a materialisation pass.
+       ⑤ THE ATTENTION VERB LANDS HERE. `Ctrl+Shift+A` (P1-8: bound since
+          2026-07-18, verbless ever since) is the census's own gesture — the
+          pulsing orange card IS the queue's visible form, and jumping to the
+          longest waiting session is staging its card. `focusSessionByUid` used
+          to need a twenty-line standby special case for this; under ④ it needs
+          none, because setting `state.active` and `w.focus` IS staging.
+       ⑥ NO CARD DRAGGING IN V1 — a stated left-out, not an oversight. Dragging
+          a card from one tab's group into another's would be the single gesture
+          in the mode that MOVES something, and it would have to decide, entirely
+          behind the stage, what becomes of the pane's old seat, its tab's title,
+          its pin and its layout. `Move pane to new tab` (drag the pane header
+          out to the strip, in the parallel view) is the front door and stays it.
+          Dead with the gesture: `cardSeq` (a hand-curated order, which under ②
+          is the tab order and needs no second store), the join/leave ghosts, and
+          the "+" that bore standby sessions.
+
+     DEAD WITH THE OLD FORM, so nobody goes looking: `w.focusLeaf` (the per-tab
+     stage), `w.standby` / `w.cardSeq`, `FOCUS_MAX` / `focusCount` /
+     `focusPvSeat` / the "4 / 4" whisper, `spawnStandby` / `#fcard-add`,
+     `exitFocus`'s materialise-into-the-tree pass and `autoPlaceLeaf`,
+     `joinFocus*` / `joinPvStandby` / `fcardToTab` / every `fcard` drag path.
+
+     FILES AND PREVIEW CARDS UNDER ④ (recommendation, 2026-08-19 — reasoning in
+     full in the plan file). §7.1.6b ⑨ gave focus mode "ONE files seat and ONE
+     preview seat" on top of its four terminals. That was a CAPACITY rule, and
+     capacity died with ③. What survives of it was always a per-TAB truth wearing
+     a window-level costume: a tab has one preview pane by §7.1.3's singleton
+     reuse, and a docked files tree is one fixed column of that tab's layout. So
+     the census simply shows each tab's files and preview panes as ordinary cards
+     inside that tab's own group — at most one of each per group, which is the
+     rule already in force outside the mode, enforced by nothing new. Docking a
+     files tree while the mode is on therefore behaves exactly as it does outside
+     it (the old `addFilesPane` branch that replaced an occupied "seat" was purely
+     a cap-bypass patch, and is gone with the cap). The flyout channels (`Ctrl+E`
+     and friends) keep working, as §7.1.6b ④ already promised. The ONE thing not
+     carried over is §7.1.6b ⑦'s "drop a file on the card column and it joins as
+     a preview card": there is no pool left for it to join, and a rail that is now
+     a census has no non-arbitrary tab for the drop to land in. The rail refuses
+     file drops; the door is the same one every other view uses.
+
+     NATIVE NOTE. `bt-layout` already has the stage: `LayoutMode::Focus { stage:
+     SeatId }` / `solve_focused` give one seat the viewport with the tree
+     untouched, and `Edit::FocusModeToggled` is its edit. Because of ④ the stage
+     is ALWAYS a seat of the active tab, so that per-tab primitive is exactly
+     right and needs no cross-tab generalisation — the cross-tab part of this
+     ruling is entirely the rail. */
+
+  /* NO ELIGIBILITY GATE AT ALL (user ruling 2026-08-19, retiring the 2026-07-17
+     one). The per-tab form made focus mode a capability of the vertical text
+     rail — `focusEligible` refused to enter from a horizontal strip or an icon
+     rail, and `focusSurvives` threw you out if you switched to one mid-mode. Both
+     are gone: focus mode is its own LAYOUT LAYER that supersedes the window's
+     normal tab chrome while it is on, so there is no furniture for it to be
+     missing. Entering hides the horizontal strip and the ordinary rail alike;
+     leaving restores whatever `Tab layout` and `Sidebar` said, because the mode
+     never touched them. Collapsing the sidebar no longer has any meaning here
+     either — the census is not the sidebar, it is what the rail column holds
+     while the glasses are on. */
+
+  /* enter/exit ride the tree's own FLIP (2026-07-18): the stage pane glides
+     between its slot and full-bleed, and on exit the other panes fade back into
+     their seats. The tree is never touched — the mode is a lens. */
+  function enterFocus() {
+    if (state.focusMode) return;
+    const before = snapshotPanes();
+    state.focusMode = true;
+    renderWithPaneFlip(before);
+    syncFocusCombo();
+  }
+  function exitFocus() {
+    if (!state.focusMode) return;
+    const before = snapshotPanes();
+    state.focusMode = false;
+    renderWithPaneFlip(before);
+    syncFocusCombo();
+  }
+  /* One bit, several doors, one face: whichever door was used, the Appearance row
+     shows what is true. `syncCombo` moves the tick and the button's word; this is
+     the same contract every other two-state row keeps, it just has four ways in
+     instead of one. */
+  const syncFocusCombo = () => syncCombo("focusmode", state.focusMode ? "on" : "off");
+  /* Ruling ④, entire. Staging is "the window is now looking at this pane", and
+     because the stage is `focusedLeaf(activeTab())` that is one assignment per
+     axis. Unread clears for the pane you looked at and for no other: a card
+     click is a look at ONE pane, not the whole-tab acknowledgement `selectTab`
+     performs. The flyout is dismissed on a tab change for the same reason
+     `selectTab` dismisses it — a transient peek belongs to the tab that summoned
+     it. Out of focus mode this same function serves a monitor card's click,
+     which §7.1.6b ③ already defined as explicit navigation. */
+  function stageCard(w, leafId) {
+    if (!w || !findLeafIn(w, leafId)) return;
+    const before = snapshotPanes();
+    if (state.active !== w.id && flyoutState && !flyoutState.pinned) closeFlyout();
+    state.active = w.id;
+    w.focus = leafId;
+    const s = leafSession(findLeafIn(w, leafId));
+    if (s) s.unread = false;
+    renderWithPaneFlip(before);
+  }
+
+  /* A card's HEAD is its ledger — the name plus the session's own stateIcon,
+     dots, progress ring and all (user ruling 2026-07-18: no abstract circles; a
+     card is a small tab and wears tab clothes). Its BODY is its picture. The two
+     are built by SEPARATE verbs (`card` and `mini` in the content table), and
+     that split is ruling ③ made structural rather than remembered: the body is
+     the only thing an off-screen card is spared. */
+  function termCardHtml(s, attrs, cls) {
+    /* THE RING IS THE ATTENTION QUEUE'S, AND ONLY ITS. The per-tab form lit it
+       for `unread || awaiting`, which put one colour on two claims — §7.1.5b is
+       explicit that 未读·失败 is a RED DOT on the icon and 等你回答 is the
+       pulsing orange one, severity picking between them, and that a card wearing
+       the ring is a card `Ctrl+Shift+A` will walk to (ruling ⑤). A failed run
+       says so on its dot and does not summon you.
+       No "等你" text badge either: the dot already says it and the ring says it
+       louder — one fact, one voice. */
+    return `<div class="fcard ${s.awaiting ? "attn" : ""} ${cls || ""}" ${attrs}>
       <div class="fc-head">${stateIcon(s, s.busy, s.unread)}
         <span class="name">${esc(displayName(s))}</span>
         <span class="fc-close" title="Close">${closeSvg}</span></div>
-      <div class="fc-mini">${mini}</div></div>`;
+      <div class="fc-mini"></div></div>`;
   }
-  const focusEligible = () =>
-    state.layoutMode === "vertical" && state.railMode !== "icons" && !state.railCollapsed;
-  /* survival is looser than entry (user ruling 2026-07-18): COLLAPSING the rail
-     means "give the stage the room", not "leave the layout" — the cards hide
-     with the rail and come back with it. The mode only dies when its home
-     layout does (horizontal / icon rail). */
-  const focusSurvives = () =>
-    state.layoutMode === "vertical" && state.railMode !== "icons";
-  /* serial and parallel are two views of the SAME ≤4 windows (user ruling
-     2026-07-17, superseding the invisible standby pool): everything in focus
-     mode gets a seat on exit, so nothing ever hides. 4 = the honest 2×2
-     capacity of MIN_PANE sizes; herd more agents with more tabs. */
-  const FOCUS_MAX = 4;
-  /* capacity is per CONTENT CLASS (user ruling 2026-07-18): 4 is the honest
-     2×2 of TERMINAL seats. A files column is fixed-width — it never takes a
-     proportional seat — and THE preview pane is a singleton that replaces
-     (§7.1.3), so files and preview each hold ONE seat of their own: 4+1+1. */
-  const focusCount = (w) =>
-    leavesOf(w.tree).filter(l => l.kind === "term").length
-    + (w.standby || []).filter(x => typeof x === "number").length;
-  /* the preview seat's current occupant: the unpinned preview leaf or the
-     standby preview entry — the thing a newly dropped file would REPLACE */
-  const focusPvSeat = (w) =>
-    leavesOf(w.tree).find(l => isPreviewLeaf(l) && !l.pvPinned)
-    || (w.standby || []).find(x => typeof x === "object" && x.pv) || null;
-  function autoPlaceLeaf(w, leaf) {
-    const host = $("termhost").getBoundingClientRect();
-    const rects = rectsOf(w.tree, 0, 0, Math.max(400, host.width), Math.max(300, host.height));
-    let best = rects[0];
-    for (const r of rects) if (r.w * r.h > best.w * best.h) best = r;
-    splitLeafIn(w, best.id, best.w >= best.h ? "right" : "bottom", leaf);
+  /* the prototype stand-in for the native read-only mini projection (§3.3): the
+     transcript's tail, re-projected at card width. Real content on the terminal's
+     own dark ground, rich blocks scaled down in place. */
+  const termCardMini = (s) => s.lines.slice(-6).map(l => `<div>${l}</div>`).join("");
+
+  /* ── the census, painted ──
+     Structure, staging and content are three passes with three costs. The rail's
+     HTML is rebuilt only when its structure changes (which tabs, which panes,
+     what they are called); staging is a class toggle; bodies are an innerHTML
+     pass over the visible ones. Neither of the last two costs the rail its scroll
+     position, which matters now that the rail is a thing you scroll — a rebuild
+     on every stage would jump the census out from under the pointer. */
+  const focusRailKey = () => state.tabs.map(w =>
+    `${w.id}~${w.pinned ? 1 : 0}~${tabLabel(w)}~` +
+    leavesOf(w.tree).map(l => `${l.id}.${l.kind}.${l.kind === "term" ? l.uid : ""}`).join(",")
+  ).join("|");
+
+  /* one group per tab, in strip order: the census's order IS the tab order, which
+     is the order the user arranged (ruling ⑥ — there is no second one to keep) */
+  function focusRailHtml() {
+    return `<div id="focus-rail">` + state.tabs.map(w => {
+      const leaves = leavesOf(w.tree);
+      return `<div class="fgroup" data-ws="${w.id}">
+        <div class="fgroup-head" title="${esc(tabTip(w))}">
+          ${tabIcon(w)}<span class="fg-name">${esc(tabLabel(w))}</span>
+          ${w.pinned ? pinnedSvg : ""}
+          <span class="fg-count">${leaves.length}</span>
+        </div>
+        <div class="fcards">${leaves.map(l => contentOf(l).card(l, w, "")).join("")}</div>
+      </div>`;
+    }).join("") + `</div>`;
   }
-  function exitFocus(w) {
-    /* "+"-born sessions MATERIALIZE into the tree — largest pane splits along
-       its wider axis, so four seats settle into a 2×2 on their own */
-    /* seats land in the order the cards were arranged — the column you curated
-       IS the seating plan */
-    const seq = w.cardSeq || [];
-    const entKey = (ent) => typeof ent === "number" ? `s:${ent}` : `p:${ent.pv.path}`;
-    const ordered = [...(w.standby || [])].sort((a, b) => {
-      const ia = seq.indexOf(entKey(a)), ib = seq.indexOf(entKey(b));
-      return (ia < 0 ? seq.length : ia) - (ib < 0 ? seq.length : ib);
-    });
-    for (const ent of ordered) {
-      if (typeof ent === "number") { if (session(ent)) autoPlaceLeaf(w, mkLeaf(ent)); }
-      else {
-        /* the standby preview lands in THE preview pane if the tree has one —
-           singleton reuse (§7.1.3), not a second proportional seat */
-        const host = leavesOf(w.tree).find(l => isPreviewLeaf(l) && !l.pvPinned);
-        if (host) host.preview = ent.pv;
-        else autoPlaceLeaf(w, mkPreviewLeaf(ent.pv));
-      }
+
+  function paintFocusRail(rail) {
+    const key = focusRailKey();
+    if (rail.dataset.frk !== key) {
+      const top = rail.scrollTop;
+      rail.innerHTML = focusRailHtml() + railNewHtml();
+      rail.dataset.frk = key;
+      rail.scrollTop = top;      /* a rebuild must not move the census */
     }
-    w.standby = [];
-    w.cardSeq = null;
-    w.focusLeaf = null;
+    const aw = activeTab();
+    rail.querySelectorAll("#focus-rail .fcard").forEach(el =>
+      el.classList.toggle("staged",
+        !!aw && +el.dataset.ws === state.active && +el.dataset.leaf === aw.focus));
+    paintCards(rail);
   }
-  function focusCardsInner(w) {
-    const items = leavesOf(w.tree)
-      .filter(l => l.id !== w.focusLeaf)
-      .map(l => ({ key: `l:${l.id}`, html: focusCardHtml(l, w) }));
-    for (const ent of (w.standby || [])) {
-      if (typeof ent === "number") {
-        const s = session(ent);
-        if (s) items.push({ key: `s:${ent}`, html: termCardHtml(s, `data-kind="standby" data-uid="${ent}"`) });
-      } else {
-        items.push({ key: `p:${ent.pv.path}`, html: pvCardHtml(ent.pv, `data-kind="standby-pv" data-path="${esc(ent.pv.path)}"`) });
+
+  /* RULING ③, MADE LITERAL: composition follows VISIBILITY; the ledger does not.
+     A card outside the rail's scrollport (plus a screenful of margin, so a scroll
+     never uncovers an empty box) keeps its head — name, icon, dot, ring — and
+     gets NO body at all. In the native build that is the difference between
+     re-projecting a transcript tail at card width and compositing its quads, and
+     doing nothing whatsoever; here it is the difference between an innerHTML and
+     an empty string. The 72px box stays either way, so the scrollbar never lies
+     about how long the census is.
+     The head's live pass runs for EVERY card, on screen or not: a session that
+     starts waiting three screens down still turns its dot orange, still wears its
+     ring, and still enters the attention queue. */
+  const CARD_DRAW_MARGIN = 240;
+  function paintCards(rail) {
+    const cards = rail.querySelectorAll(".fcard");
+    if (!cards.length) return;
+    const port = rail.getBoundingClientRect();
+    cards.forEach(el => {
+      const w = tabById(+el.dataset.ws);
+      const l = w && findLeafIn(w, +el.dataset.leaf);
+      if (!l) return;
+      const s = leafSession(l);
+      if (s) {
+        el.classList.toggle("attn", !!s.awaiting);
+        const ic = el.querySelector(".ticon");
+        if (ic) ic.classList.toggle("working", !!s.busy);
+        const dot = el.querySelector(".unreaddot");
+        if (dot) {
+          dot.className = "unreaddot " + stateDotClass(s, s.busy, s.unread);
+          dot.title = stateDotTitle(s, s.unread);
+        }
+        el.querySelector(".ticon-wrap")?.classList.toggle("dead", !!s.dead);
       }
-    }
-    /* user-arranged order survives re-renders: known keys keep their cardSeq
-       positions, newcomers append in natural order (sort is stable). Reorder is
-       POSITION ONLY — it never switches the stage (user ruling 2026-07-18). */
-    const seq = w.cardSeq || [];
-    items.sort((a, b) => {
-      const ia = seq.indexOf(a.key), ib = seq.indexOf(b.key);
-      return (ia < 0 ? seq.length : ia) - (ib < 0 ? seq.length : ib);
+      const r = el.getBoundingClientRect();
+      const on = r.bottom >= port.top - CARD_DRAW_MARGIN
+              && r.top <= port.bottom + CARD_DRAW_MARGIN;
+      el.classList.toggle("parked", !on);
+      const body = el.querySelector(".fc-mini");
+      if (!body) return;
+      if (!on) { if (body.innerHTML !== "") body.innerHTML = ""; return; }
+      body.innerHTML = contentOf(l).mini(l);
     });
-    w.cardSeq = items.map(i => i.key);
-    const cards = items.map(i => i.html);
-    const full = focusCount(w) >= FOCUS_MAX;
-    /* at capacity the dead button leaves; a whisper of "4 / 4" stays to answer
-       "why can't I add" without furnishing a control that never works */
-    return cards.join("") +
-      (full
-        ? `<div class="fc-cap" title="Focus mode holds at most 4 terminals (plus one files, one preview)">4 / 4</div>`
-        : `<div id="fcard-add" title="New session — gets a seat when you leave focus mode">+</div>`);
+    typeset(rail);
   }
-  /* the cards node lives INSIDE the rail, right under the active tab — inserted
-     and removed imperatively because paintStrip keeps rail children stable */
-  function syncFocusCards(w) {
+
+  /* the "New tab" foot, shared by the tab list and the census: the front door
+     ruling ⑥ names stays exactly where it always was */
+  const railNewHtml = () =>
+    `<div class="rail-new"><button class="newtab nt-main" title="New tab (${defaultProfile().title})"><span class="ticon"><svg><use href="#i-plus"/></svg></span><span>New tab</span></button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button></div>`;
+
+  /* Monitor expansions (§7.1.6b ③) are the OUT-of-focus-mode half of the same
+     idea: unfold any other tab's cards under its row to watch it without
+     switching to it. Inside focus mode they are redundant — the census already
+     shows every tab — and there are no `.vtab` rows left to unfold, so this does
+     nothing there. The box is the census minus its controls: every seat as a live
+     card, no "+", no cap, nothing draggable and nothing closable (it is a window
+     you look through, not a handle). */
+  const monitorCardsInner = (w) =>
+    leavesOf(w.tree).map(l => contentOf(l).card(l, w, "")).join("");
+
+  function syncMonitorCards() {
     const rail = $("rail");
-    let box = $("focus-cards");
-    const on = w && w.focusLeaf != null && focusEligible();
-    if (!on) { if (box) box.remove(); }
-    else {
-      if (!box) { box = document.createElement("div"); box.id = "focus-cards"; }
-      box.innerHTML = focusCardsInner(w);
-      const anchor = rail.querySelector(`.vtab[data-ws="${w.id}"]`);
-      if (anchor && anchor.nextSibling !== box) anchor.after(box);
-    }
-    /* monitor expansions (§7.1.6b ③, now real): any OTHER tab the user
-       unfolded shows its cards beneath its row — expanding is WATCHING,
-       never switching. Active tab is served by focus mode, not by this. */
-    const railLive = state.layoutMode === "vertical"
+    const railLive = !state.focusMode && state.layoutMode === "vertical"
       && state.railMode !== "icons" && !state.railCollapsed;
     document.querySelectorAll(".tab-cards").forEach(el => {
       const t = tabById(+el.dataset.ws);
@@ -7922,288 +8161,32 @@
           }, 200);
         }
       }
+      paintCards(rail);
     }
     document.querySelectorAll(".vtab").forEach(el => {
       const t = tabById(+el.dataset.ws);
       if (t) el.classList.toggle("cards-open", !!t.cardsOpen && t.id !== state.active);
     });
   }
-  /* the monitor flavour of the card column: every seat (all leaves + standby),
-     the user's cardSeq order respected but never rewritten, no "+" and no cap —
-     a window you look through, not a set you edit */
-  function monitorCardsInner(w) {
-    const items = leavesOf(w.tree).map(l => ({ key: `l:${l.id}`, html: focusCardHtml(l, w) }));
-    for (const ent of (w.standby || [])) {
-      if (typeof ent === "number") {
-        const s = session(ent);
-        if (s) items.push({ key: `s:${ent}`, html: termCardHtml(s, `data-kind="standby" data-uid="${ent}"`) });
-      } else {
-        items.push({ key: `p:${ent.pv.path}`, html: pvCardHtml(ent.pv, `data-kind="standby-pv" data-path="${esc(ent.pv.path)}"`) });
-      }
-    }
-    const seq = w.cardSeq || [];
-    items.sort((a, b) => {
-      const ia = seq.indexOf(a.key), ib = seq.indexOf(b.key);
-      return (ia < 0 ? seq.length : ia) - (ib < 0 ? seq.length : ib);
-    });
-    return items.map(i => i.html).join("");
-  }
-  const within = (r, e) =>
-    e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
-  /* join affordance: one dashed stand-in card per joining session, standing at
-     the slot the pointer names — any position, not just the tail (user ruling
-     2026-07-18, third pass). The drop preview IS the outcome. */
-  function placeJoinGhost(html, idx) {
-    const cards = $("focus-cards");
-    if (!cards) return;
-    const ghost = document.createElement("div");
-    ghost.className = "fcard-ghost";
-    ghost.innerHTML = html;
-    const sibs = [...cards.querySelectorAll(":scope > .fcard")];
-    cards.insertBefore(ghost, sibs[idx] || cards.querySelector("#fcard-add, .fc-cap"));
-  }
-  /* the slot under the pointer, measured against the ghost-less layout (the
-     per-tick cleanup has already removed the old ghost) */
-  function joinIndexAt(e) {
-    const cards = $("focus-cards");
-    let idx = 0;
-    for (const el of cards.querySelectorAll(":scope > .fcard")) {
-      const r = el.getBoundingClientRect();
-      if (e.clientY > r.top + r.height / 2) idx++;
-    }
-    return idx;
-  }
-  function showJoinPreview(srcWsId, idx) {
-    const src = tabById(srcWsId);
-    if (!src) return;
-    placeJoinGhost(leavesOf(src.tree)
-      .map(l => { const s = session(l.uid); return s ? termCardHtml(s, "") : ""; }).join(""), idx);
-  }
-  const clearJoinPreview = () =>
-    document.querySelectorAll(".fcard-ghost").forEach(el => el.remove());
-  /* every transient drop hint the card column can wear, cleared as one */
-  function clearCardDropHints() {
-    clearJoinPreview();
-    const cards = $("focus-cards");
-    if (cards) {
-      cards.classList.remove("drop-deny");
-      cards.querySelectorAll(".fcard.drop-hot").forEach(el => el.classList.remove("drop-hot"));
-    }
-    $("fcard-add")?.classList.remove("drop-hot");
-  }
-  const fcardKeyOf = (el) =>
-    el.dataset.kind === "leaf" ? `l:${el.dataset.leaf}`
-    : el.dataset.kind === "standby" ? `s:${el.dataset.uid}`
-    : `p:${el.dataset.path}`;
-  /* ── card reorder, tab-strip style ──
-     The carried card RIDES THE POINTER (user ruling 2026-07-18, third pass:
-     following, not teleporting-on-crossing); a neighbour glides aside the
-     moment the carried card covers half of it. No re-render during the drag —
-     the DOM is moved directly and cardSeq mirrors it, so a background render
-     can't fight the hand. */
-  const CARD_GAP = 8;   /* #focus-cards flex gap */
-  const CARD_EASE = "transform .2s cubic-bezier(.2, 0, 0, 1)";
-  function flipNudge(el, fromDy) {
-    el.style.transition = "none";
-    el.style.transform = `translateY(${fromDy}px)`;
-    el.getBoundingClientRect();
-    el.style.transition = CARD_EASE;
-    el.style.transform = "";
-    setTimeout(() => { el.style.transition = ""; }, 220);
-  }
-  function cardGrabFollow(e) {
-    const cards = $("focus-cards");
-    const el = cards && [...cards.querySelectorAll(":scope > .fcard")]
-      .find(x => fcardKeyOf(x) === drag.key);
-    if (!el) return;
-    if (!drag.cardGrab) {
-      /* baseline is the PRESS point, not the first post-threshold move — else
-         the card starts life lagging the pointer by the drag threshold */
-      drag.cardGrab = { lastY: drag.y0, shift: 0 };
-      el.classList.add("grabbed");
-      el.style.transition = "none";
-    }
-    const g = drag.cardGrab;
-    g.shift += e.clientY - g.lastY;
-    g.lastY = e.clientY;
-    el.style.transform = `translateY(${g.shift}px)`;
-    /* swap once the carried card's visual middle passes a neighbour's middle;
-       the shift is rebased so the card doesn't jump when its slot moves */
-    for (let guard = 8; guard > 0; guard--) {
-      const sibs = [...cards.querySelectorAll(":scope > .fcard")];
-      const i = sibs.indexOf(el);
-      const myR = el.getBoundingClientRect();
-      const myMid = myR.top + myR.height / 2;
-      const next = sibs[i + 1], prev = sibs[i - 1];
-      if (next) {
-        const r = next.getBoundingClientRect();
-        if (myMid > r.top + r.height / 2) {
-          next.after(el);
-          g.shift -= r.height + CARD_GAP;
-          el.style.transform = `translateY(${g.shift}px)`;
-          flipNudge(next, myR.height + CARD_GAP);
-          continue;
-        }
-      }
-      if (prev) {
-        const r = prev.getBoundingClientRect();
-        if (myMid < r.top + r.height / 2) {
-          prev.before(el);
-          g.shift += r.height + CARD_GAP;
-          el.style.transform = `translateY(${g.shift}px)`;
-          flipNudge(prev, -(myR.height + CARD_GAP));
-          continue;
-        }
-      }
-      break;
-    }
-    activeTab().cardSeq = [...cards.querySelectorAll(":scope > .fcard")].map(fcardKeyOf);
-  }
-  function releaseCardGrab(d, settle) {
-    if (!d || !d.cardGrab) return;
-    d.cardGrab = null;
-    const cards = $("focus-cards");
-    const el = cards && [...cards.querySelectorAll(":scope > .fcard")]
-      .find(x => fcardKeyOf(x) === d.key);
-    if (!el) return;
-    el.classList.remove("grabbed");
-    if (settle) {
-      el.style.transition = CARD_EASE;
-      el.style.transform = "";
-      setTimeout(() => { el.style.transition = ""; }, 220);
-    } else {
-      el.style.transition = "";
-      el.style.transform = "";
-    }
-  }
-  /* same ghost, preview flavour: what the file card will look like once joined */
-  function showJoinPvPreview(d, idx) {
-    placeJoinGhost(pvCardHtml({ name: d.name, ftype: previewFtype(d.name), content: null, dirty: false }, ""), idx);
-  }
-  function joinPvStandby(d) {
-    const w = activeTab();
-    if (w.focusLeaf == null) return;
-    const buf = poolBuffer(w, d.path, d.name);
-    const seat = focusPvSeat(w);
-    if (seat) {
-      /* THE preview seat is a singleton: another file replaces its content,
-         exactly like the docked preview pane does (§7.1.3) */
-      if (seat.type === "leaf") seat.preview = buf; else seat.pv = buf;
-      render();
-      return;
-    }
-    (w.standby || (w.standby = [])).push({ pv: buf });
-    /* land where the ghost stood, not at the tail */
-    if (d.joinIdx != null && w.cardSeq) w.cardSeq.splice(d.joinIdx, 0, `p:${buf.path}`);
-    render();
-  }
-  /* a tab dropped on the card strip JOINS the focus set (user ruling 2026-07-18):
-     its sessions become standby cards — seats on exit, same law as "+". Only
-     all-terminal tabs fit: cards are terminals, and half-joining a tab that also
-     holds files/preview panes would tear it in two. Capacity is the same 4 the
-     "+" obeys. */
-  function joinFocusFits(srcWsId, w) {
-    const src = tabById(srcWsId);
-    if (!src) return false;
-    const leaves = leavesOf(src.tree);
-    return leaves.every(l => l.kind === "term")
-        && focusCount(w) + leaves.length <= FOCUS_MAX;
-  }
-  function joinFocus(srcWsId, idx) {
-    const w = activeTab(), src = tabById(srcWsId);
-    if (!w || w.focusLeaf == null || !joinFocusFits(srcWsId, w)) return;
-    const keys = [];
-    for (const l of leavesOf(src.tree)) {
-      (w.standby || (w.standby = [])).push(l.uid);
-      keys.push(`s:${l.uid}`);
-    }
-    if (src.pinned) w.pinned = true;   /* pin follows the content (same law as merge) */
-    state.tabs.splice(state.tabs.indexOf(src), 1);
-    if (idx != null && w.cardSeq) w.cardSeq.splice(idx, 0, ...keys);   /* land where the ghost stood */
-    render();
-  }
-  /* the join's mirror: a card dragged OUT of the strip leaves the focus set and
-     becomes its own tab. A leaf card takes its pane out of the parked tree; a
-     standby card was never in the tree, so it just becomes a fresh tab. */
-  /* card × = close the CONTENT, same verb the pane/tab × speaks: a leaf card
-     closes its pane, a standby session dies (busy confirms), a standby preview
-     is dropped (dirty confirms; a clean unshown buffer leaves the pool with it) */
-  function closeFocusCard(card) {
-    const w = activeTab();
-    if (card.dataset.kind === "leaf") { closePane(+card.dataset.leaf); return; }
-    if (card.dataset.kind === "standby-pv") {
-      const i = (w.standby || []).findIndex(x => typeof x === "object" && x.pv && x.pv.path === card.dataset.path);
-      if (i < 0) return;
-      const buf = w.standby[i].pv;
-      if (buf.dirty && !window.confirm(`Discard unsaved changes to ${buf.name}?`)) return;
-      w.standby.splice(i, 1);
-      const displayed = leavesOf(w.tree).some(l => isPreviewLeaf(l) && l.preview === buf);
-      if (!buf.dirty && !displayed) {
-        const p = poolOf(w), j = p.indexOf(buf);
-        if (j >= 0) p.splice(j, 1);
-      }
-      render();
-      return;
-    }
-    const uid = +card.dataset.uid;
-    const i = (w.standby || []).indexOf(uid);
-    if (i < 0) return;
-    const s = session(uid);
-    if (s && s.busy && !window.confirm("The shell is busy — close anyway?\nThe running command will be killed.")) return;
-    w.standby.splice(i, 1);
-    state.sessions = state.sessions.filter(x => x.uid !== uid);
-    render();
-  }
-  function fcardToTab(d, index) {
-    const w = activeTab();
-    if (d.leafId != null) { extractPaneToTab(d.leafId, index); return; }
-    let leaf;
-    if (d.pvPath != null) {
-      /* standby preview → its own preview tab; the buffer OBJECT migrates
-         between pools (state travels, edits included) */
-      const i = (w.standby || []).findIndex(x => typeof x === "object" && x.pv && x.pv.path === d.pvPath);
-      if (i < 0) return;
-      const buf = w.standby.splice(i, 1)[0].pv;
-      const op = poolOf(w), oi = op.indexOf(buf);
-      if (oi >= 0) op.splice(oi, 1);
-      leaf = mkPreviewLeaf(buf);
-      const nw0 = { id: wsSeq++, tree: leaf, focus: leaf.id, pinned: false };
-      poolOf(nw0).push(buf);
-      const minIdx0 = state.tabs.filter(t => t.pinned).length;
-      state.tabs.splice(Math.max(index, minIdx0), 0, nw0);
-      render();
-      return;
-    }
-    const i = (w.standby || []).indexOf(d.uid);
-    if (i < 0) return;
-    w.standby.splice(i, 1);
-    leaf = mkLeaf(d.uid);
-    const nw = { id: wsSeq++, tree: leaf, focus: leaf.id, pinned: false };
-    const minIdx = state.tabs.filter(t => t.pinned).length;
-    state.tabs.splice(Math.max(index, minIdx), 0, nw);
-    /* stay in focus mode — same contract as extractPaneToTab: the card waits
-       in the strip, the stage you were working at is undisturbed */
-    render();
-  }
-  function spawnStandby() {
-    const w = activeTab();
-    if (focusCount(w) >= FOCUS_MAX) return;
-    const p = defaultProfile();
-    const s = mkSession(p.title.split(" ·")[0], p.icon, p.make(), false,
-                        focusedSession()?.cwd || HOME, p.make);
-    (w.standby || (w.standby = [])).push(s.uid);
-    render();
-  }
+
+  /* the census re-composites as it scrolls, without a render: scrolling changes
+     which cards are visible, and visibility is the only thing ruling ③ charges
+     for */
+  $("rail").addEventListener("scroll", () => paintCards($("rail")), { passive: true });
 
   function render() {
     $("win").dataset.tabs = state.layoutMode;
-    $("win").classList.toggle("rail-collapsed", state.railCollapsed);
+    /* the mode is a layer over the window's chrome, not a state of the rail:
+       while it is on, the rail's rest states are not applied at all (ruling
+       2026-08-19), so nothing has to be undone when it ends */
+    $("win").classList.toggle("focusmode", state.focusMode);
+    $("win").classList.toggle("rail-collapsed", state.railCollapsed && !state.focusMode);
     /* railMode only means anything where there is a rail. Without the layout
        check the class survived into horizontal mode, where the rail is display:
        none but the terminal was still keeping its 46px clear — a strip of dead
        space with nothing in it. */
-    $("win").classList.toggle("rail-icons",
-      state.layoutMode === "vertical" && state.railMode === "icons" && !state.railCollapsed);
+    $("win").classList.toggle("rail-icons", !state.focusMode
+      && state.layoutMode === "vertical" && state.railMode === "icons" && !state.railCollapsed);
     $("row-railmode").style.display = state.layoutMode === "vertical" ? "" : "none";
     /* Sidebar arriving or leaving changes the Appearance page's height, and the
        dialog's frame is the TALLEST page's — so it is re-measured rather than
@@ -8240,25 +8223,16 @@
        are DOM — captured here, put back by remountSearch */
     const sbState = ae && ae.closest && ae.closest(".srchbar")
       ? { s: ae.selectionStart, e: ae.selectionEnd } : null;
-    /* serial mode: one leaf full-bleed, cards embedded in the rail; the TREE is
-       untouched (focusLeaf is a lens, not a layout edit) — exit restores it
-       verbatim. Leaving the eligible layout (vertical text rail) exits focus:
-       the cards' home just vanished, and a mode without its furniture is
-       exactly the "no fixed address" mess the ruling forbids. A COLLAPSED rail
-       is different (user ruling 2026-07-18): the furniture is stowed, not gone —
-       the mode survives and the cards return with the rail. */
-    if (aw.focusLeaf != null && !focusSurvives()) exitFocus(aw);
-    const focusLeaf = aw.focusLeaf != null ? findLeafIn(aw, aw.focusLeaf) : null;
-    if (focusLeaf) {
-      $("termhost").innerHTML =
-        `<div class="focus-host">${renderNode(focusLeaf, aw)}</div>` +
-        `<div id="dock-shift"></div><div id="dock-preview"></div>`;
-    } else {
-      aw.focusLeaf = null;   /* the leaf vanished (closed elsewhere): fall back to the tree */
-      $("termhost").innerHTML = renderNode(aw.tree, aw) +
-        `<div id="dock-shift"></div><div id="dock-preview"></div>`;
-    }
-    syncFocusCards(aw);
+    /* FOCUS MODE: one leaf full-bleed, the census in the rail. The TREE is
+       untouched — the mode is a lens, not a layout edit — and the staged pane is
+       simply `focusedLeaf(activeTab())` (cross-tab ④), which is why leaving needs
+       no restoration pass and no stale-leaf fallback: `focusedLeaf` already
+       answers with the first pane when the focused one has gone. */
+    const stage = state.focusMode ? focusedLeaf(aw) : null;
+    $("termhost").innerHTML =
+      (stage ? `<div class="focus-host">${renderNode(stage, aw)}</div>` : renderNode(aw.tree, aw)) +
+      `<div id="dock-shift"></div><div id="dock-preview"></div>`;
+    syncMonitorCards();
     updateTabSqueeze();
     fitCmdRails();
     renderAttnChip();
@@ -8358,13 +8332,14 @@
            a left PRESS chooses the tab, but the switch lands ~180ms later — a
            quick drag-out to split never flashes the pressed tab's content over
            the layout you are aiming at. Holding still (or reordering in the
-           strip) commits the activation; focus mode defers to release entirely
-           (a press there may be a join-drag at the card strip). */
+           strip) commits the activation. (Focus mode used to defer this to
+           release, because a press in the rail could be the start of a join-drag
+           at the card column; with no cards to join and no `.vtab` in the rail
+           while the mode is on, there is nothing left to defer for.) */
         const homeWs = state.active;
         const wsId = +el.dataset.ws;
         let activateT = 0;
-        if (e.button === 0 && !e.target.closest(".close")
-            && activeTab().focusLeaf == null && wsId !== state.active) {
+        if (e.button === 0 && !e.target.closest(".close") && wsId !== state.active) {
           activateT = setTimeout(() => {
             if (drag && drag.kind === "tab" && drag.wsId === wsId && !drag.started
                 && tabById(wsId)) {
@@ -8427,32 +8402,47 @@
     document.querySelectorAll(".panehead").forEach(el => {
       el.addEventListener("pointerdown", (e) => {
         if (e.target.closest(".pane-close, .pane-files, .pane-split, .pv-tool")) return;
-        if (activeTab().focusLeaf != null) return;   /* focus mode: the tree is parked, no pane drags */
+        if (state.focusMode) return;   /* focus mode: the tree is parked, no pane drags */
         startDrag(e, { kind: "pane", leafId: +el.dataset.leaf });
       });
-      /* serial/parallel toggle (§7.1.6b): double-click a pane header focuses it
-         full-bleed; double-click again (or Esc) restores the tree untouched */
+      /* ── THE DOORS INTO FOCUS MODE (ruling 2026-08-19) ──
+         Four, and SETTINGS IS NOT ONE OF THEM. A mode entered many times a day
+         is a VERB, not a preference, and the settings dialog is a modal you have
+         to dismiss before you can look at the thing you just changed — putting
+         the toggle there would make the act of entering cost more than the mode
+         saves. Settings may later hold preferences ABOUT the mode (live card
+         thumbnails vs dots-only, as a performance choice; rail width) — those are
+         preferences and belong there; the toggle is not and does not.
+           1. DOUBLE-CLICK A PANE HEADER — enter, with that pane on the stage.
+              This handler. Symmetric: double-clicking the stage's own header
+              leaves. (The stage keeps its header even in a one-pane tab exactly
+              so this exit exists — see `renderNode`'s `multi`.)
+           2. THE PANE ⌄ MENU — `Enter focus mode` / `Exit focus mode`, in
+              `openPaneMenu`. The discoverable door: nobody guesses a
+              double-click, and this menu already hangs off the thing the mode
+              acts on.
+           3. ESC — leaves only, and from the bottom rung of the ladder, under
+              every float, flyout and search capsule (see the Escape handler).
+           4. ONE CHORD, rebindable through the P2-7 shortcuts table. Not yet
+              defaulted: the row is an open question in the plan file, weighing
+              `Ctrl+Shift+F` (just freed by the retired find-alias, but it is
+              Find's muscle memory on every platform) against `Ctrl+Shift+Z`
+              (free, no shell meaning, no AltGr risk — but Redo's on some).
+         Plus the command palette, which is the standing debtor for every
+         keyboard entry §7.1.6 has not yet given a chord.
+
+         What is behind door 1 changed, not the door itself: no capacity gate any
+         more (the census scrolls), and the pane is staged by FOCUSING it, because
+         the stage is the focused pane (cross-tab ④). */
       el.addEventListener("dblclick", (e) => {
         if (e.target.closest(".pane-close, .pane-files, .pane-split, .pv-tool")) return;
-        if (!focusEligible()) return;   /* serial mode is a vertical-text-rail capability */
+        if (state.focusMode) { exitFocus(); return; }
         const w = activeTab();
         const id = +el.dataset.leaf;
-        /* enter/exit ride the same FLIP the tree uses: the stage pane glides
-           between its slot and full-bleed instead of teleporting (queue item
-           2026-07-18); panes that (re)appear fade in via renderWithPaneFlip */
-        if (w.focusLeaf === id) {
-          const before = snapshotPanes();
-          exitFocus(w);
-          renderWithPaneFlip(before);
-          return;
-        }
-        if (termLeaves(w).length > FOCUS_MAX) return;   /* >4 TERMINAL panes: no serial view */
-        const before = snapshotPanes();
-        w.focusLeaf = id;
         w.focus = id;
         const s = leafSession(findLeafIn(w, id));
         if (s) s.unread = false;
-        renderWithPaneFlip(before);
+        enterFocus();
       });
     });
   }
@@ -8743,13 +8733,7 @@
       /* the search capsule sits inside a pane — floats and flyouts above it
          close first; focus mode below it exits after */
       if (srch.leaf != null) { closeSearch(); return; }
-      const wfm = activeTab();
-      if (wfm && wfm.focusLeaf != null) {
-        const before = snapshotPanes();
-        exitFocus(wfm);
-        renderWithPaneFlip(before);
-        return;
-      }
+      if (state.focusMode) { exitFocus(); return; }
       return;
     }
     /* Nothing is typing into a terminal that is not on screen. Found the moment
@@ -8911,8 +8895,9 @@
     /* a tab whose cards are already unfolded beneath it needs no schematic —
        the real thing is on screen, and the popup would sit on top of it
        (user report 2026-07-18) */
+    if (state.focusMode) return;   /* no `.vtab` to hover in the first place */
     if (state.layoutMode === "vertical" && !state.railCollapsed && state.railMode !== "icons"
-        && ((w.id === state.active && w.focusLeaf != null) || w.cardsOpen)) return;
+        && w.cardsOpen) return;
     peekTimer = setTimeout(() => showPeek(el, w), 350);
   }
   function showPeek(el, w) {
@@ -9167,13 +9152,6 @@
       } else if (drag.kind === "folder") {
         ph.innerHTML = `<span class="ticon-wrap">${folderMark()}</span>
           <span class="${titleCls}">${esc(drag.name)}</span>`;
-      } else if (drag.kind === "fcard" && drag.uid != null) {
-        /* same dress as a real terminal tab — stateIcon + title, not bare text */
-        const s = session(drag.uid);
-        ph.innerHTML = `${s ? stateIcon(s, s.busy, s.unread) : ""}<span class="${titleCls}">${s ? esc(displayName(s)) : ""}</span>`;
-      } else if (drag.kind === "fcard" && drag.pvPath != null) {
-        ph.innerHTML = `<span class="ticon-wrap">${fileMark()}</span>
-          <span class="${titleCls}">${esc(drag.pvName || "")}</span>`;
       } else {
         const leaf = findLeafIn(activeTab(), drag.leafId);
         const c = contentOf(leaf);
@@ -9185,12 +9163,7 @@
       strip.appendChild(ph);
     }
     const entries = stripEntries();
-    let ref = entries[idx] || (entries.length ? entries[entries.length - 1].nextSibling : null);
-    /* the focus cards hang directly under their tab — a slot never opens between
-       a tab and its own cards, so the preview lands BELOW the card column
-       (user report: dragging a card downward showed the slot above the cards) */
-    const cards = $("focus-cards");
-    if (cards && ref === cards) ref = cards.nextSibling;
+    const ref = entries[idx] || (entries.length ? entries[entries.length - 1].nextSibling : null);
     strip.insertBefore(ph, ref);
   }
   function clearDropPreview() {
@@ -9388,13 +9361,6 @@
       return `${fileMark()}${esc(d.name)}`;
     }
     if (d.kind === "folder") return `${folderMark()}${esc(d.name)}`;
-    if (d.kind === "fcard" && d.uid != null) {   /* standby card: no leaf, just a session */
-      const s = session(d.uid);
-      return s ? esc(displayName(s)) : "";
-    }
-    if (d.kind === "fcard" && d.pvPath != null) {   /* standby preview card */
-      return `${fileMark()}${esc(d.pvName || "")}`;
-    }
     const leaf = d.kind === "tab" ? focusedLeaf(tabById(d.wsId)) : findLeafIn(activeTab(), d.leafId);
     const c = contentOf(leaf);
     return `${c.mark(leaf)}${c.title(leaf)}`;
@@ -9418,7 +9384,6 @@
     const pv = $("dock-preview");
     drag.target = null;
     clearDropPreview();
-    clearCardDropHints();
     drag.ghost.style.opacity = "";
 
     /* home ground: a terminal-born image released over ITSELF goes back where
@@ -9435,119 +9400,30 @@
        dragged along it reorders live; a FILE becomes a new preview tab */
     const sr = stripEl().getBoundingClientRect();
     if (e.clientX >= sr.left && e.clientX <= sr.right && e.clientY >= sr.top && e.clientY <= sr.bottom) {
+      /* FOCUS MODE: the rail is a census, not a strip. Nothing docks into it —
+         there are no rows to land beside, cards do not move (cross-tab ⑥), and a
+         file dropped on a census has no non-arbitrary tab to land in. One guard
+         replaces the four focus-mode drop paths the per-tab form kept here (tab
+         joins the column, card reorders, file joins as a preview card, folder
+         denied): all four belonged to the standby pool. */
+      if (state.focusMode) { hidePreview(); clearDropPreview(); drag.target = null; return; }
       if (drag.kind === "pane" && paneCount(activeTab()) > 1) {
         const idx = insertIndexAt(e);
         drag.target = { strip: true, index: idx };
         showDropPreview(idx);
         drag.ghost.style.opacity = "0";   /* the preview in the strip is the ghost now */
       } else if (drag.kind === "tab") {
-        const fw = activeTab();
-        const cards = $("focus-cards");
-        /* focus mode: the card strip is a drop TARGET — a tab dropped on it
-           joins the focus set (§7.0 落点定容器; user ruling 2026-07-18) */
-        if (fw.focusLeaf != null && cards && drag.wsId !== state.active
-            && within(cards.getBoundingClientRect(), e)) {
-          /* the affordance is the CARD ITSELF, previewed: a dashed stand-in at
-             the end of the column — what you see is what joining makes (user
-             ruling 2026-07-18: no big frame around the whole column). The tab
-             settles home and the floating chip hides: the stand-in/lit "+" is
-             the thing in hand now (user report: a lingering ghost chip) */
-          releaseGrabbed(true);
-          drag.ghost.style.opacity = "0";
-          if (joinFocusFits(drag.wsId, fw)) {
-            /* over the "+" AND anywhere below it the button itself lights up —
-               it IS the entrance. The stand-in card only appears once the
-               pointer is up in the card stack; drawing it while the pointer is
-               still under the "+" put the promise on the wrong side of the
-               button (user report 2026-07-18, second pass) */
-            const add = $("fcard-add");
-            if (add && e.clientY >= add.getBoundingClientRect().top) {
-              add.classList.add("drop-hot");
-              drag.joinIdx = null;   /* the entrance appends */
-            } else {
-              drag.joinIdx = joinIndexAt(e);
-              showJoinPreview(drag.wsId, drag.joinIdx);
-            }
-            drag.target = { joinFocus: true };
-          } else {
-            cards.classList.add("drop-deny");
-            drag.target = null;
-          }
-          hidePreview();
-          return;
-        }
         /* reordering IS commitment to the strip context: the tab in hand shows
            itself (Edge behaviour), whether or not the press timer had fired */
-        if (activeTab().focusLeaf == null && state.active !== drag.wsId) {
+        if (state.active !== drag.wsId) {
           selectTab(drag.wsId);
           drag.pressActivated = true;
         }
         reorderWhileDragging(e);
         drag.target = { reordered: true };
         drag.ghost.style.opacity = "0";   /* the tab itself is the feedback */
-      } else if (drag.kind === "fcard") {
-        const cards = $("focus-cards");
-        /* inside the column: POSITION-ONLY reorder, the card riding the
-           pointer — moving a card never takes you to it (user ruling
-           2026-07-18) */
-        if (cards && within(cards.getBoundingClientRect(), e)) {
-          drag.ghost.style.opacity = "0";   /* the card itself is in hand */
-          cardGrabFollow(e);
-          drag.target = { cardReorder: true };
-          hidePreview();
-          return;
-        }
-        /* left the column: the card settles into its slot, the slot preview
-           in the strip takes over */
-        releaseCardGrab(drag, true);
-        const idx = insertIndexAt(e);
-        drag.target = { strip: true, index: idx };
-        showDropPreview(idx);
-        drag.ghost.style.opacity = "0";
-      } else if (drag.kind === "file") {
-        /* focus mode: a file dropped on the card column joins as a standby
-           PREVIEW card (§7.1.6b ④: preview panes are not special — so neither
-           are preview cards; user ask 2026-07-18: image → focus card) */
-        const fw = activeTab();
-        const cards = $("focus-cards");
-        if (fw.focusLeaf != null && cards && within(cards.getBoundingClientRect(), e)) {
-          drag.ghost.style.opacity = "0";   /* the stand-in card is the thing in hand */
-          const seat = focusPvSeat(fw);
-          if (seat) {
-            /* the singleton seat is taken: this drop REPLACES its content —
-               say so on the occupant's own card, no second card is coming */
-            const occ = seat.type === "leaf"
-              ? cards.querySelector(`.fcard[data-kind="leaf"][data-leaf="${seat.id}"]`)
-              : cards.querySelector(`.fcard[data-kind="standby-pv"]`);
-            occ?.classList.add("drop-hot");
-            drag.joinIdx = null;
-          } else {
-            const add = $("fcard-add");
-            if (add && e.clientY >= add.getBoundingClientRect().top) {
-              add.classList.add("drop-hot");
-              drag.joinIdx = null;
-            } else {
-              drag.joinIdx = joinIndexAt(e);
-              showJoinPvPreview(drag, drag.joinIdx);
-            }
-          }
-          drag.target = { joinPv: true };
-          hidePreview();
-          return;
-        }
-        const idx = insertIndexAt(e);
-        drag.target = { strip: true, index: idx };
-        showDropPreview(idx);
-        drag.ghost.style.opacity = "0";
-      } else if (drag.kind === "folder") {
-        const fw = activeTab();
-        const cards = $("focus-cards");
-        if (fw.focusLeaf != null && cards && within(cards.getBoundingClientRect(), e)) {
-          cards.classList.add("drop-deny");   /* a place has no card seat */
-          drag.target = null;
-          hidePreview();
-          return;
-        }
+      } else {
+        /* a file or a folder over the strip becomes its own tab, as it always has */
         const idx = insertIndexAt(e);
         drag.target = { strip: true, index: idx };
         showDropPreview(idx);
@@ -9557,7 +9433,6 @@
       return;
     }
     /* left the strip: the tab drops back into its slot, the ghost takes over */
-    if (drag.kind === "fcard") releaseCardGrab(drag, true);
     if (drag.kind === "tab") {
       releaseGrabbed(true);
       /* press-activation's counterpart: aiming below the strip flips the view
@@ -9599,7 +9474,7 @@
        change would only surface at exit, far from the hand that made it. Space
        verbs are refused wholesale; the overlay points at the one honest target
        (user ruling 2026-07-18). */
-    const refuseFocusStage = (text, guideCards) => {
+    const refuseFocusStage = (text) => {
       promise("focus-stage");
       pv.classList.add("refused");
       pv.textContent = text;
@@ -9608,19 +9483,12 @@
       pv.style.height = Math.max(0, host.height - SHIFT_INSET * 2) + "px";
       pv.classList.add("show");
       $("dock-shift")?.classList.remove("show");
-      /* guide by showing the outcome where it belongs: the stand-in card in the
-         column (or the column's deny state when it is full) */
-      if (guideCards) {
-        if (joinFocusFits(drag.wsId, activeTab())) showJoinPreview(drag.wsId);
-        else $("focus-cards")?.classList.add("drop-deny");
-      }
       drag.target = null;
     };
-    if (activeTab().focusLeaf != null && (drag.kind === "tab" || drag.kind === "fcard")) {
-      refuseFocusStage(drag.kind === "tab"
-        ? "Focus mode — drop on the cards to join"
-        : "Drop on the tab strip to give it its own tab",
-        drag.kind === "tab");
+    if (state.focusMode && drag.kind === "tab") {
+      /* the guiding stand-in card this used to draw died with the join gesture
+         (cross-tab ⑥); the sentence alone points at the honest target */
+      refuseFocusStage("Focus mode — the layout is parked");
       return;
     }
     /* One drawing for every dock: build the layout the drop would make, put the
@@ -9712,8 +9580,8 @@
                   top: cy - host.top, bottom: host.bottom - cy };
     const nearRim = Object.keys(rim).reduce((a, b) => rim[a] <= rim[b] ? a : b);
     if (rim[nearRim] < OUTER_RIM && paneCount(activeTab()) > 1) {
-      if (activeTab().focusLeaf != null) {   /* file rim-split is a space verb too */
-        refuseFocusStage("Focus mode — the layout is parked", false);
+      if (state.focusMode) {   /* file rim-split is a space verb too */
+        refuseFocusStage("Focus mode — the layout is parked");
         return;
       }
       drawPlan(nearRim, null, `root:${nearRim}`);
@@ -9793,8 +9661,8 @@
       drag.target = ok ? { leafId, zone: "center", save: saveHere } : null;
       return;
     }
-    if (activeTab().focusLeaf != null) {   /* file edge-split on the stage: parked too */
-      refuseFocusStage("Focus mode — the layout is parked", false);
+    if (state.focusMode) {   /* file edge-split on the stage: parked too */
+      refuseFocusStage("Focus mode — the layout is parked");
       return;
     }
     drawPlan(zone, leafId, `${leafId}:${zone}`);
@@ -9819,7 +9687,6 @@
     drag = null;
     if (d.activateT) clearTimeout(d.activateT);
     if (d.kind === "tab" && d.started) releaseGrabbed(true);
-    if (d.kind === "fcard") releaseCardGrab(d, true);
     /* the press chose this tab; a cancelled drag doesn't unchoose it */
     if (d.kind === "tab" && d.pressActivated && state.active !== d.wsId
         && tabById(d.wsId)) selectTab(d.wsId);
@@ -9827,7 +9694,6 @@
     document.body.classList.remove("dragging");
     hidePreview();
     clearDropPreview();
-    clearCardDropHints();
     const pv = $("dock-preview");
     if (pv) delete pv.dataset.promise;
   }
@@ -9839,15 +9705,12 @@
     if (!drag) return;
     const d = drag;
     if (d.kind === "tab" && d.started) releaseGrabbed(true);   /* settle into the slot */
-    if (d.kind === "fcard") releaseCardGrab(d, true);          /* card glides into its slot */
     drag = null;
     if (d.started && d.kind === "file" && d.save) imgClickSquelched = true;
     if (d.ghost) d.ghost.remove();
     document.body.classList.remove("dragging");
     const pv = $("dock-preview");
     if (pv) { pv.classList.remove("show"); delete pv.dataset.promise; }
-    clearCardDropHints();
-    if (d.kind === "fcard" && d.started) fcardClickSquelched = true;
     if (d.activateT) clearTimeout(d.activateT);
     if (!d.started || !d.target || d.target.reordered) {
       clearDropPreview();
@@ -9857,9 +9720,6 @@
           && tabById(d.wsId)) selectTab(d.wsId);
       return;
     }
-    if (d.target.joinFocus) { clearDropPreview(); joinFocus(d.wsId, d.joinIdx); return; }
-    if (d.target.joinPv) { clearDropPreview(); joinPvStandby(d); return; }
-    if (d.target.cardReorder) { clearDropPreview(); return; }   /* order already applied live */
     /* Do NOT clear the preview first. It is holding the slot the new tab is about
        to take, and removing it makes the strip re-lay out — every tab widens to
        close the gap — only for the render below to insert the tab and squeeze
@@ -9870,7 +9730,6 @@
     if (d.target.strip) {
       if (d.kind === "file") { fileToTab(d, d.target.index); return; }
       if (d.kind === "folder") { folderToTab(d, d.target.index); return; }
-      if (d.kind === "fcard") { fcardToTab(d, d.target.index); return; }
       extractPaneToTab(d.leafId, d.target.index);
       return;
     }
@@ -10446,6 +10305,14 @@
           combo.querySelector(".value").textContent =
             item.dataset.v === "icons" ? "Icons" : "Expanded";
           render();
+        }
+        if (kind === "focusmode") {
+          /* the row and the doors are one bit: this goes through `enterFocus` /
+             `exitFocus` rather than assigning the flag, so the dialog's path and
+             the double-click's path cannot drift apart (and the row inherits the
+             FLIP for free) */
+          if (item.dataset.v === "on") enterFocus(); else exitFocus();
+          combo.querySelector(".value").textContent = state.focusMode ? "On" : "Off";
         }
         if (kind === "attnchip") {
           state.attnChip = item.dataset.v === "on";
@@ -11127,7 +10994,14 @@
   function openPaneMenu(leafId, x, y) {
     closeAllPopups();
     const menu = $("pane-menu");
-    menu.innerHTML =
+    /* the ⌄ menu carries focus mode for DISCOVERABILITY (coordinator ruling
+       2026-08-19): a double-click is a gesture nobody guesses, and this is the
+       menu already hanging off the thing the mode acts on. It reads the verb it
+       will perform, so the same row is the way out while the mode is on. */
+    const focusRow =
+      `<div class="tm-item" data-act="focus"><svg><use href="#i-max"/></svg><span>${state.focusMode ? "Exit focus mode" : "Enter focus mode"}</span></div>
+         <div class="tm-sep"></div>`;
+    menu.innerHTML = focusRow +
       `<div class="tm-item" data-act="right"><svg><use href="#i-split-right"/></svg><span>Split right</span></div>
        <div class="tm-item" data-act="down"><svg><use href="#i-split-down"/></svg><span>Split down</span></div>
        <div class="tm-sep"></div>
@@ -11136,7 +11010,13 @@
       e.stopPropagation();
       menu.classList.remove("show");
       const act = el.dataset.act;
-      if (act === "close") closePane(leafId);
+      if (act === "focus") {
+        if (state.focusMode) exitFocus();
+        /* the pane the menu belongs to is the pane that takes the stage — the
+           stage is the focused pane (cross-tab ④), so this is one assignment */
+        else { activeTab().focus = leafId; enterFocus(); }
+      }
+      else if (act === "close") closePane(leafId);
       else splitPane(leafId, act === "right" ? "right" : "bottom");
     }));
     menu.classList.add("show");
@@ -11512,7 +11392,6 @@
   /* inline terminal image: click = preview; drag = file verbs + save-into-folder.
      A completed drag must not read as the click it started life as. */
   let imgClickSquelched = false;
-  let fcardClickSquelched = false;
   $("termhost").addEventListener("pointerdown", (e) => {
     const img = e.target.closest(".timg");
     if (!img || e.button !== 0) return;
@@ -11529,88 +11408,27 @@
     if (imgClickSquelched) { imgClickSquelched = false; return; }
     openPreview(img.dataset.path, img.dataset.name);
   });
-  /* focus-mode cards: click a sibling card = it takes the stage (the previous
-     occupant returns to the cards); click a standby card = it SWAPS into the
-     focused terminal leaf (leaf keeps its tree seat, sessions trade places);
-     "+" births a session into the standby pool, not the tree. Cards live in
-     the rail now, so the delegation does too. */
-  /* delegated, because syncFocusCards rebuilds the cards' DOM on every render —
-     per-element wiring would evaporate with them */
-  $("rail").addEventListener("pointerdown", (e) => {
-    const card = e.target.closest(".fcard");
-    if (!card || activeTab().focusLeaf == null) return;
-    if (card.closest(".tab-cards")) return;   /* monitor cards are windows, not handles */
-    if (e.target.closest(".fc-close")) return;   /* a close press is not a drag */
-    fcardClickSquelched = false;   /* a stale squelch must not eat this press's click */
-    const kind = card.dataset.kind;
-    startDrag(e, { kind: "fcard",
-                   leafId: kind === "leaf" ? +card.dataset.leaf : null,
-                   uid: kind === "standby" ? +card.dataset.uid : null,
-                   pvPath: kind === "standby-pv" ? card.dataset.path : null,
-                   pvName: kind === "standby-pv"
-                     ? (card.querySelector(".name")?.textContent || "") : null,
-                   key: kind === "leaf" ? `l:${card.dataset.leaf}`
-                      : kind === "standby" ? `s:${card.dataset.uid}`
-                      : `p:${card.dataset.path}` });
-  });
+  /* CARDS IN THE RAIL, ONE HANDLER (§7.1.6b cross-tab ④⑥). Every card names its
+     tab and its leaf, so one gesture reads them all: a click stages the pane it
+     pictures — in the census, and equally in a monitor box, where §7.1.6b ③
+     already called a card click explicit navigation ("expanding is watching,
+     clicking is going"). There is no pointerdown handler because there is no
+     drag: card dragging is v1's stated left-out, and with it went the
+     click-squelch that told a finished drag from a click.
+     Delegated, because the census rebuilds its DOM whenever its structure
+     changes — per-element wiring would evaporate with it. */
   $("rail").addEventListener("click", (e) => {
-    if (e.target.closest("#fcard-add")) { spawnStandby(); return; }
     const card = e.target.closest(".fcard");
     if (!card) return;
-    /* the click that ends a card drag is not a "take the stage" click */
-    if (fcardClickSquelched) { fcardClickSquelched = false; return; }
-    /* a card click in a MONITOR box is explicit navigation: expanding was
-       watching; clicking is going — jump to that tab, focus that pane */
-    const mon = card.closest(".tab-cards");
-    if (mon) {
-      const t = tabById(+mon.dataset.ws);
-      if (!t) return;
-      if (card.dataset.kind === "leaf") {
-        const id = +card.dataset.leaf;
-        t.focus = id;
-        if (t.focusLeaf != null) t.focusLeaf = id;
-      }
-      selectTab(t.id);
-      return;
-    }
-    if (e.target.closest(".fc-close")) { closeFocusCard(card); return; }
-    const w = activeTab();
-    if (card.dataset.kind === "leaf") {
-      const id = +card.dataset.leaf;
-      const before = snapshotPanes();   /* the incoming stage fades in (FLIP's no-before path) */
-      w.focusLeaf = id;
-      w.focus = id;
-      const s = leafSession(findLeafIn(w, id));
-      if (s) s.unread = false;
-      renderWithPaneFlip(before);
-      return;
-    } else if (card.dataset.kind === "standby-pv") {
-      /* a standby preview can only take a PREVIEW stage (buffers trade places);
-         a terminal stage has no seat for it — flash instead of silence */
-      const fl = findLeafIn(w, w.focusLeaf);
-      const ent = (w.standby || []).find(x => typeof x === "object" && x.pv && x.pv.path === card.dataset.path);
-      if (!ent) return;
-      if (fl && isPreviewLeaf(fl)) {
-        const old = fl.preview;
-        fl.preview = ent.pv;
-        ent.pv = old;
-      } else {
-        card.classList.add("attn");
-        setTimeout(() => card.classList.remove("attn"), 400);
-        return;
-      }
-    } else {
-      const uid = +card.dataset.uid;
-      const fl = findLeafIn(w, w.focusLeaf);
-      if (!fl || isFilesLeaf(fl) || isPreviewLeaf(fl)) return;   /* only terminal seats swap */
-      const i = (w.standby || []).indexOf(uid);
-      if (i < 0) return;
-      w.standby[i] = fl.uid;
-      fl.uid = uid;
-      const s = session(uid);
-      if (s) s.unread = false;
-    }
-    render();
+    const w = tabById(+card.dataset.ws);
+    if (!w) return;
+    const id = +card.dataset.leaf;
+    /* the × closes the CONTENT, the same verb the pane's and the tab's × speak —
+       and it can now reach a pane of any tab of this window, which is why
+       `closePane` learned to be told which tab. Monitor cards have no × (they
+       are windows you look through, not handles). */
+    if (e.target.closest(".fc-close")) { closePane(id, w); return; }
+    stageCard(w, id);
   });
   $("files-flyout").addEventListener("contextmenu", (e) => {
     const row = e.target.closest(".frow");
@@ -12016,6 +11834,46 @@
     const pick = new URLSearchParams(location.search).get("adv");
     if (["a", "b", "c"].includes(pick)) document.body.dataset.adv = pick;
   }
+
+  /* ── the demo window the CROSS-TAB census needs (2026-08-19) ──
+     A census of a window with one pane per tab shows nothing the tab list did
+     not already show, and a rail that does not overflow cannot demonstrate the
+     ruling that killed the 4/4 cap. So the window is furnished: the landing
+     screen (tab 1) is untouched, and the seats live in the tabs behind it —
+     enough of them that the rail scrolls, with one card in each of the three
+     states §7.1.5b names first (等你回答 pulsing orange, 未读·失败 red, busy
+     breathing) and one card of each non-terminal content class, because the
+     files/preview rules are exactly what the cross-tab form had to re-decide. */
+  (() => {
+    const t2 = state.tabs[1], t3 = state.tabs[2];
+    /* tab 2: a files column down the left, the blocked claude, and a test run
+       that came back non-zero — three content classes are two of them */
+    const failed = mkSession("PowerShell", mark("pwsh"), powershell(), false,
+                             "C:\\Users\\Weiyi\\Developer\\BetterTerminal", powershell);
+    failed.lines = failed.lines.concat([
+      `<div><span class="prompt">PS&gt;</span> cargo test -p bt-viewport</div>`,
+      `<div class="dim">running 214 tests</div>`,
+      `<div class="dim">test reflow::wide_at_edge ... <span style="color:#e5534b">FAILED</span></div>`,
+      `<div style="color:#e5534b">error: test failed, to rerun pass \`-p bt-viewport\`</div>`]);
+    failed.unread = true; failed.lastExit = "fail";
+    splitLeafIn(t2, leavesOf(t2.tree)[0].id, "right", mkLeaf(failed.uid));
+    splitRootOf(t2, "left", mkFilesLeaf("C:\\Users\\Weiyi\\Developer\\BetterTerminal"));
+    /* tab 3: the downloading wsl session plus the preview pane its README opens
+       into — §7.1.3's per-tab singleton, drawn as one card in this tab's group */
+    splitLeafIn(t3, leavesOf(t3.tree)[0].id, "bottom",
+                mkPreviewLeaf(poolBuffer(t3, "/README.md", "README.md")));
+    /* two more tabs, so the census is longer than the rail is tall */
+    const node = mkSession("PowerShell", mark("pwsh"), powershell(), true,
+                           "C:\\Users\\Weiyi\\Developer\\folio-site", powershell, "npm run dev");
+    const agent = mkSession("claude", mark("claude"), claude(), true,
+                            "C:\\Users\\Weiyi\\Developer\\bt-corpus", claude, "corpus triage");
+    const t4 = mkWs(node);
+    splitLeafIn(t4, leavesOf(t4.tree)[0].id, "bottom", mkLeaf(agent.uid));
+    state.tabs.push(t4);
+    const py = mkSession("PowerShell", mark("pwsh"), powershell(), false,
+                         "C:\\Users\\Weiyi\\Developer\\bt-corpus\\tools", powershell);
+    state.tabs.push(mkWs(py));
+  })();
 
   applyTheme();
   render();
