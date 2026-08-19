@@ -61,8 +61,9 @@ use crate::text_field::TextField;
 /// surface — which is the other half of the ruling: this is still a modal you
 /// dismiss, not a place you go.
 const DIALOG_MAX_WIDTH_LOGICAL_PX: f32 = 720.0;
-/// `.settings { max-height: min(600px, calc(100% - 72px)) }` — the cap on the
-/// other axis, and the second half of "a modal you dismiss, not a place you go".
+/// `.settings { max-height: min(600px, calc(100% - 72px)) }` — the ceiling on
+/// the other axis, and the second half of "a modal you dismiss, not a place you
+/// go".
 ///
 /// **Born of the height ruling's own consequence** (user report, 2026-08-17).
 /// One height whatever page is up means the tallest page sets it, and the
@@ -71,20 +72,42 @@ const DIALOG_MAX_WIDTH_LOGICAL_PX: f32 = 720.0;
 /// exact shape the width's cap was chosen to avoid; the height needs the same
 /// sentence said on its own axis.
 ///
-/// **600 is where an everyday page stops needing a scroll bar.** The dialog
-/// spends `2 * 1` of border and 56 of header before the body, so 600 leaves 542
-/// for a page, and a page spends `10 + 18` on its own two paddings and 25 on its
-/// one heading: 489 of rows, which is nine of the dialog's 54px rows — or eight
-/// of them plus a folded `Advanced` disclosure (38.5), the shape `Appearance`
-/// actually has. Every page this build draws fits: `General` (3 rows),
-/// `Appearance` folded (7 rows and the disclosure, 469.5), `Terminal` (1),
-/// `Rendered blocks` (2). What is left to scroll is exactly what should —
-/// the shortcut table, and an `Advanced` group somebody opened.
+/// **600 is no longer the number that answers** (user ruling 2026-08-18). It was
+/// chosen as "where an everyday page stops needing a scroll bar", read off the
+/// page that needed the most — and a literal that is really a measurement is a
+/// literal that stops being the measurement the day a row is added. The cap is
+/// now *derived* from that same sentence: see [`everyday_cap`]. 600 stays here
+/// as the ceiling over the derivation, because the sentence it was written for —
+/// this is a dialog and not a surface — is a fact about dialogs rather than
+/// about the rows this build happens to draw, and a page that one day grows past
+/// 600 must scroll rather than swallow the window.
 const DIALOG_MAX_HEIGHT_LOGICAL_PX: f32 = 600.0;
 const DIALOG_WIDTH_RATIO: f32 = 0.92;
-/// `.settings { margin: 54px auto 0 }` — the drop from the window's top, and
-/// `auto` on both sides, which is what centres it.
+/// The **floor** on the drop from the window's top, and what the drop is on a
+/// window with nothing to spare.
+///
+/// **The dialog is optically centred, not hung** (user ruling 2026-08-18). It
+/// used to hang from a fixed 54, which was right while the height was the
+/// window's; with the height capped, a tall window left the whole of the slack
+/// underneath and the dialog sat with its shoulders against the caption. Optical
+/// centring is the convention every dialog in every system obeys: the free space
+/// is split [`DIALOG_OPTICAL_TOP_SHARE`] above to the rest below, slightly above
+/// the geometric middle, because a box placed at the true middle of a rectangle
+/// reads as low.
+///
+/// The floor is what makes the two rules one rule rather than a special case: on
+/// a window whose slack is under `54 / 0.4`, the share would put the dialog
+/// nearer the caption than the old margin ever did, and 54 is where the mock-up
+/// says a dialog stops. The bottom is [`DIALOG_BOTTOM_LOGICAL_PX`] by
+/// construction — the floor only binds where the height was already clamped to
+/// `available`, and there the remaining 18 is exactly what the clamp left.
 const DIALOG_TOP_LOGICAL_PX: f32 = 54.0;
+/// How much of a window's spare height stands *above* the dialog.
+///
+/// `.scrim { grid-template-rows: minmax(54px, 2fr) auto minmax(18px, 3fr) }` —
+/// the closest CSS, and an exact one: two parts over three is 0.4, and the two
+/// `minmax` floors are this file's two margins.
+const DIALOG_OPTICAL_TOP_SHARE: f32 = 0.4;
 /// `.settings { max-height: calc(100% - 72px) }`, of which 54 is the margin
 /// above; this is what the rule leaves below.
 const DIALOG_BOTTOM_LOGICAL_PX: f32 = 18.0;
@@ -674,6 +697,31 @@ const DISCLOSURE_HEIGHT_LOGICAL_PX: f32 =
 const DISCLOSURE_MARK_LOGICAL_PX: f32 = crate::seats::FILES_ROW_TRI_LOGICAL_PX;
 /// Between the triangle and the word it turns.
 const DISCLOSURE_GAP_LOGICAL_PX: f32 = 8.0;
+/// **The triangle's own gutter, to the left of the page's text column** (user
+/// report 2026-08-18).
+///
+/// The word used to start where the triangle ended, which put `Advanced` ten
+/// pixels and a gap to the right of every other title on the page — a heading
+/// out of line with the list it heads, in a dialog whose whole left edge is one
+/// column. The files tree settled this shape already: `push_files_tree` places a
+/// row's triangle at `content_left` and the name at `content_left + tri + gap`,
+/// so a file with no triangle still starts its name where a folder's does. The
+/// triangle lives in a gutter; the text column does not move for it.
+///
+/// Here the gutter hangs *outside* the row rather than inside it, because this
+/// dialog has only the one disclosure and the column it must line up with is the
+/// column every other row already owns. `.adv-head .tri { margin-left: -18px }`
+/// is the mock-up's way of saying the same thing, and 18 is this constant: the
+/// 10px mark and the 8px gap. It reaches back into `.content`'s own 22px
+/// padding, which is what leaves it room.
+///
+/// **The hit box does not move with it.** The mock-up's own sentence — "a 10px
+/// triangle is not a thing to ask anybody to hit, and the word beside it is what
+/// they were aiming at" — is what makes the whole `.row` band the control, and
+/// the band is the row: from the text column to the right margin, exactly like
+/// every other row's. The triangle is the mark that says which way the row is
+/// pointing, not a second target.
+const DISCLOSURE_GUTTER_LOGICAL_PX: f32 = DISCLOSURE_MARK_LOGICAL_PX + DISCLOSURE_GAP_LOGICAL_PX;
 
 // ── every word this dialog puts in front of a person ───────────────────────
 //
@@ -742,6 +790,31 @@ pub const SIDEBAR_OPTIONS: [RailMode; 2] = [RailMode::Expanded, RailMode::Icons]
 /// (`data-combo="wrap"`, `data-combo="attnchip"`) and the order a reader expects
 /// when the affirmative is the default.
 pub const FORMULA_OPTIONS: [bool; 2] = [true, false];
+/// **The `Maximum height` row's four answers**, in logical pixels, with `0` for
+/// no cap at all — the mock-up's own list (4373), taken as it stands.
+///
+/// Uncapped first, because that is the default and the state every build before
+/// this row shipped in; then a doubling ladder, which is what a list of four has
+/// to be if it is to span the useful range at all. 120 is about four rows of a
+/// 27px line — a formula and a hair more — 240 is a small table, and 480 is
+/// half a tall window: past that a cap is not saving a reader anything they
+/// could not have got by scrolling the pane.
+///
+/// **Pixels and not rows.** What is capped is a picture: a raster and a
+/// laid-out table are scaled by the window's DPI, and neither is a whole number
+/// of text rows by the time the clamp reads it — see
+/// `bt_term::Session::decorate_math_frame`, which multiplies this number by
+/// `dpi_milli` and by `SUBPIXELS_PER_PX` and never by a line height.
+pub const BLOCK_MAX_HEIGHT_OPTIONS: [u32; 4] = [0, 120, 240, 480];
+/// The words those four wear.
+///
+/// A parallel array for [`FONT_SIZE_LABELS`]' reason — `option_label` hands back
+/// `&'static str` — and the first is the one entry that goes through the i18n
+/// table, because it is a word and the other three are quantities. `px` rides on
+/// the numerals rather than in the row's sentence so that a reader comparing two
+/// items is comparing two labelled quantities.
+const BLOCK_MAX_HEIGHT_LABELS: [&str; BLOCK_MAX_HEIGHT_OPTIONS.len()] =
+    ["", "120 px", "240 px", "480 px"];
 /// What the Background image row's two items mean.
 ///
 /// A named pair rather than a `bool`, because neither of them is the *value* of
@@ -1762,6 +1835,23 @@ pub enum SettingsRow {
     /// program printed is drawn as a table. Its own row for the reason `InlineFormulas` has one —
     /// a pipe is ordinary punctuation and a `$$` is not, so the two carry different risk and a
     /// reader must be able to answer them separately.
+    /// **The Rendered blocks page's own `Maximum height`** (mock-up 4370, built
+    /// 2026-08-18): how tall a rendered block may stand before it scrolls inside
+    /// itself, and `No limit` for not at all.
+    ///
+    /// The one row on this page that is not a switch, and the mock-up drew it
+    /// first — it stood there with a working picker and nothing behind it while
+    /// the three switches beside it were wired, which is the state a control is
+    /// least allowed to be in. `bt_term` has clamped and scrolled blocks to
+    /// `MathLayoutOptions::block_max_height_px` since the formula slice; what was
+    /// missing was a way for a person to name the number.
+    ///
+    /// **Its options are the mock-up's own** — `No limit`, 120, 240, 480 — and
+    /// they are pixels because the thing being capped is a picture. A raster and
+    /// a laid-out table are both scaled by the window's DPI and neither is a
+    /// whole number of text rows, so a limit counted in rows would land between
+    /// two of them by the time the clamp read it.
+    BlockMaxHeight,
     Tables,
     /// The Git panel's master switch (user ruling, 2026-08-15) — the Files
     /// group's only row.
@@ -1939,7 +2029,7 @@ impl SettingsRow {
             Self::PsReadLine => SettingsCategory::Terminal,
             // The mock-up files what typesetting does to a block under "Rendered
             // blocks" (2570), beside that page's own Maximum height row.
-            Self::Formulas | Self::InlineFormulas | Self::Tables => {
+            Self::Formulas | Self::InlineFormulas | Self::Tables | Self::BlockMaxHeight => {
                 SettingsCategory::RenderedBlocks
             }
             // Both were headings over one row apiece — `FILES` and `STARTUP` —
@@ -1992,6 +2082,7 @@ impl SettingsRow {
             Self::Formulas => Text::RowFormulas.text(),
             Self::InlineFormulas => Text::RowInlineFormulas.text(),
             Self::Tables => Text::RowTables.text(),
+            Self::BlockMaxHeight => Text::RowBlockMaxHeight.text(),
             Self::GitPanel => Text::RowGitPanel.text(),
             // Mock-up 2360.
             Self::TabLayout => Text::RowTabLayout.text(),
@@ -2068,6 +2159,14 @@ impl SettingsRow {
             // text" because a reader who is told only that tables stop being drawn will expect
             // them to disappear rather than to go back to being what the program printed.
             Self::Tables => Text::DescTables.text(),
+            // **One sentence for both ends of the picker**, where the mock-up's
+            // prototype swapped between two. A row's description here is
+            // `&'static str` and does not read the value — the i18n ruling's own
+            // constraint — and the swap is not worth breaking it for: what the
+            // reader needs is what a cap *does*, and `No limit` is a word in the
+            // picker that already says the rest. Noted as a deviation from
+            // mock-up 9939.
+            Self::BlockMaxHeight => Text::DescBlockMaxHeight.text(),
             // Says what Off *does* rather than what it hides, because what it
             // does is the reason to reach for it: no page, no chord, and no `git`
             // process started on your behalf.
@@ -2245,6 +2344,7 @@ impl SettingsRow {
             | Self::Formulas
             | Self::InlineFormulas
             | Self::Tables
+            | Self::BlockMaxHeight
             | Self::GitPanel
             | Self::DefaultProfile
             | Self::Language
@@ -2339,6 +2439,7 @@ impl SettingsRow {
             | Self::Tables
             | Self::GitPanel
             | Self::PsReadLine => FORMULA_OPTIONS.len(),
+            Self::BlockMaxHeight => BLOCK_MAX_HEIGHT_OPTIONS.len(),
             Self::TerminalFont => monospace_families().len(),
             Self::FontSize => FONT_SIZE_OPTIONS.len(),
             Self::LightScheme => scheme_labels(true).len(),
@@ -2393,6 +2494,18 @@ impl SettingsRow {
             | Self::Tables
             | Self::GitPanel
             | Self::PsReadLine => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
+            // The one item that is a word goes through the i18n table and the
+            // three that are quantities do not — the table's own header lists
+            // quantities among the things that stay put in both languages. The
+            // empty string in the parallel array is the zero entry's placeholder
+            // and is never drawn.
+            Self::BlockMaxHeight => BLOCK_MAX_HEIGHT_OPTIONS.get(index).map(|height| {
+                if *height == 0 {
+                    Text::OptionBlockHeightNone.text()
+                } else {
+                    BLOCK_MAX_HEIGHT_LABELS[index]
+                }
+            }),
             // `&'static str` out of a runtime string, without a leak per call:
             // the list is enumerated once into a `static`, which outlives every
             // caller by construction. See [`monospace_families`].
@@ -2456,6 +2569,18 @@ impl SettingsRow {
     /// row is a copy of.
     #[must_use]
     pub fn value_text(self, values: &SettingsValues) -> Option<&'static str> {
+        // **Before the editor's own gate**, because this row is not the editor's
+        // and its answer is a fact about the machine rather than about a profile.
+        // `Update` is not one of the row's two items and never can be — `On` and
+        // `Off` are what a reader does to this row — but it is what the row's
+        // *value* is when an older Folio build is the module on disk, and the
+        // button is the one place on the row a reader looks for that
+        // (§7.1.6c-3b, user ruling 2026-08-18).
+        if self == Self::PsReadLine
+            && values.psreadline == crate::psreadline::RowState::UpdateAvailable
+        {
+            return Some(Text::PsReadLineUpdate.text());
+        }
         let editor = values.editor?;
         match self {
             Self::ProfileStartAt => editor.fixed_folder,
@@ -2561,6 +2686,15 @@ impl SettingsRow {
                 .iter()
                 .position(|it| *it == values.inline_formulas),
             Self::Tables => FORMULA_OPTIONS.iter().position(|it| *it == values.tables),
+            // **`None` for a height this build's list does not offer**, which is
+            // the honest reading and not a fallback: `bt_persist` deliberately
+            // does not clamp the key, every value of it is meaningful, and a
+            // picker that ticked the nearest number would be claiming the file
+            // says something it does not. The same shape `BackgroundImage` uses
+            // when the answer is the file itself.
+            Self::BlockMaxHeight => BLOCK_MAX_HEIGHT_OPTIONS
+                .iter()
+                .position(|it| *it == values.block_max_height),
             Self::GitPanel => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.git_panel),
@@ -2584,7 +2718,15 @@ impl SettingsRow {
             // whether they were asked, which is a different question and has no
             // picker.
             Self::PsReadLine => FORMULA_OPTIONS.iter().position(|it| {
-                *it == (values.psreadline == crate::psreadline::RowState::InstalledByFolio)
+                *it == matches!(
+                    values.psreadline,
+                    // An older Folio build's module is still a module that is
+                    // *there*, so the tick stands on `On` and the button says
+                    // `Update` beside it. A tick on `Off` would be the row
+                    // claiming the directory is empty while offering to empty it.
+                    crate::psreadline::RowState::InstalledByFolio
+                        | crate::psreadline::RowState::UpdateAvailable
+                )
             }),
             // The *resolved* default, which is why the caller hands over an index
             // rather than the stored id. **Mock-up bug not copied** (2471): its
@@ -2692,6 +2834,7 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     rows.push(SettingsRow::Formulas);
     rows.push(SettingsRow::InlineFormulas);
     rows.push(SettingsRow::Tables);
+    rows.push(SettingsRow::BlockMaxHeight);
     rows.push(SettingsRow::Language);
     rows.push(SettingsRow::GitPanel);
     rows.push(SettingsRow::DefaultProfile);
@@ -2730,6 +2873,15 @@ pub struct SettingsContent<'a> {
     /// through [`Self::page_rows`], so none of them carries a second copy of the
     /// rule "a collapsed group's rows are not there".
     pub advanced: AdvancedOpen,
+    /// **The user's own scheme files** (user report 2026-08-18), as the
+    /// `Delete scheme…` menu lists them.
+    ///
+    /// Beside the shortcut lines and the profile rows, for their reason: this is
+    /// a fact about the machine — what is in `%APPDATA%\Folio\schemes\` — and
+    /// [`SettingsValues`] is a snapshot of *settings*. Bundled schemes are never
+    /// in it: they travel inside the executable and there is nothing of them on
+    /// disk to send anywhere.
+    pub scheme_files: &'a [SchemeFileLine],
     /// **The profile the editor sub-page is open on** (§7.1.6c-6b), or `None`
     /// while the Profiles page is showing its list.
     ///
@@ -2910,6 +3062,11 @@ pub struct SettingsValues {
     pub inline_formulas: bool,
     /// Whether a proven markdown table in command output is drawn as a block.
     pub tables: bool,
+    /// How tall a rendered block may stand before it scrolls inside itself, in
+    /// logical pixels, and `0` for no limit — `bt_persist`'s own key, carried
+    /// through unclamped so that the picker can decline to tick a number this
+    /// build does not offer rather than pretend the file said one that it does.
+    pub block_max_height: u32,
     /// Whether the Files column offers its Git page at all.
     pub git_panel: bool,
     /// Which way a split with no direction of its own cuts.
@@ -3040,6 +3197,7 @@ impl SettingsValues {
             display_formulas: true,
             inline_formulas: true,
             tables: true,
+            block_max_height: bt_persist::DEFAULT_BLOCK_MAX_HEIGHT,
             git_panel: true,
             split_direction: SplitDirectionV1::Auto,
             language: LanguageV1::System,
@@ -3229,6 +3387,13 @@ pub struct SettingsPanel {
     editor: Option<ProfileEditor>,
     /// Which row's `⋯` is open, by its index in the profile table.
     row_menu: Option<usize>,
+    /// Whether the foot's `Delete scheme…` menu is open (user report
+    /// 2026-08-18).
+    ///
+    /// A `bool` and not an index, because there is one of it: the foot belongs
+    /// to the page and the menu lists the folder, so unlike a row's `⋯` there is
+    /// no second one it could be confused with.
+    delete_menu: bool,
 }
 
 /// The editor sub-page's own state: which profile, and the text of its three
@@ -3422,6 +3587,7 @@ impl SettingsPanel {
         // nothing to save and nothing to ask.
         self.editor = None;
         self.row_menu = None;
+        self.delete_menu = false;
         self.focus = Some(SettingsTarget::Nav(category));
         true
     }
@@ -3449,6 +3615,7 @@ impl SettingsPanel {
         self.focus_visible = false;
         self.editor = None;
         self.row_menu = None;
+        self.delete_menu = false;
         self.category = content.first_category();
         self.focus = self
             .open
@@ -3481,6 +3648,15 @@ impl SettingsPanel {
         if let Some(index) = self.row_menu.take() {
             self.hover = None;
             self.focus = Some(SettingsTarget::ProfileMore(index));
+            return true;
+        }
+        // The scheme menu is the same rung on the other page: innermost thing
+        // open, and closing it hands the keyboard back to the button it hangs
+        // from.
+        if self.delete_menu {
+            self.delete_menu = false;
+            self.hover = None;
+            self.focus = Some(SettingsTarget::DeleteScheme);
             return true;
         }
         if let Some(row) = self.menu {
@@ -3521,6 +3697,7 @@ impl SettingsPanel {
         self.focus_visible = false;
         self.editor = None;
         self.row_menu = None;
+        self.delete_menu = false;
     }
 
     /// The editor sub-page's state, or `None` while the list is the view.
@@ -3540,6 +3717,31 @@ impl SettingsPanel {
         self.row_menu
     }
 
+    /// Whether the foot's `Delete scheme…` menu is showing.
+    #[must_use]
+    pub fn delete_menu(&self) -> bool {
+        self.delete_menu
+    }
+
+    /// A press on `Delete scheme…`: open it, or shut the one already open —
+    /// [`Self::toggle_menu`]'s own shape, because it is the same gesture.
+    ///
+    /// **It takes the picker's place**, and the scroll with it. Both popups are
+    /// capped at the same eight items and both are navigated by the same
+    /// `menu_scroll`, so a second one open behind the first would be two boxes
+    /// answering one number — and the wheel would move the one nobody is looking
+    /// at.
+    pub fn toggle_delete_menu(&mut self) {
+        self.delete_menu = !self.delete_menu;
+        self.menu = None;
+        self.menu_scroll = 0.0;
+    }
+
+    pub fn close_delete_menu(&mut self) {
+        self.delete_menu = false;
+        self.menu_scroll = 0.0;
+    }
+
     /// A press on a row's `⋯`: open it, or shut the one already open on this
     /// row — [`Self::toggle_menu`]'s own shape, because it is the same gesture.
     pub fn toggle_row_menu(&mut self, index: usize) {
@@ -3555,6 +3757,7 @@ impl SettingsPanel {
     /// about to type into.
     pub fn open_editor(&mut self, editor: ProfileEditor) {
         self.row_menu = None;
+        self.delete_menu = false;
         self.menu = None;
         self.menu_scroll = 0.0;
         self.focus = Some(SettingsTarget::Field(SettingsRow::ProfileName));
@@ -3649,6 +3852,17 @@ impl SettingsPanel {
         }) {
             self.row_menu = None;
         }
+        // And the scheme menu's, which is the same sentence: a press anywhere
+        // that is not this menu or the button it hangs from closes it, and a
+        // press on the button belongs to `toggle_delete_menu`.
+        if self.delete_menu
+            && !matches!(
+                target,
+                SettingsTarget::DeleteScheme | SettingsTarget::DeleteSchemeItem(_)
+            )
+        {
+            self.delete_menu = false;
+        }
         match target {
             SettingsTarget::Close
             | SettingsTarget::Combo(_)
@@ -3695,6 +3909,12 @@ impl SettingsPanel {
             SettingsTarget::ProfileMoreItem(index, _) => {
                 self.focus = Some(SettingsTarget::ProfileMore(index));
             }
+            // An item of the scheme menu focuses the button it hangs from, for
+            // the same reason: the menu is about to close, and the ring belongs
+            // on the thing that stays.
+            SettingsTarget::DeleteSchemeItem(_) => {
+                self.focus = Some(SettingsTarget::DeleteScheme);
+            }
             // An item's own row is what the keyboard lands on: the menu is about
             // to close, and a focus naming an item of a shut picker names
             // nothing.
@@ -3736,6 +3956,26 @@ impl SettingsPanel {
             && menu == row
             && rows.contains(&row)
             && index < row.option_count()
+        {
+            return;
+        }
+        // **And the same for the two menus that are not pickers**, which the
+        // clause above had never been told about: a row's `⋯` and the foot's
+        // `Delete scheme…` are popups open *inside* a page exactly as a picker
+        // is, so their items are legal places for the focus and are in no Tab
+        // order. Without this the first arrow key inside either one threw the
+        // ring back to the top of the page — the menu still drawn, the keyboard
+        // no longer in it.
+        if let (Some(open), Some(SettingsTarget::ProfileMoreItem(index, _))) =
+            (self.row_menu, self.focus)
+            && open == index
+            && index < content.profiles.len()
+        {
+            return;
+        }
+        if self.delete_menu
+            && let Some(SettingsTarget::DeleteSchemeItem(index)) = self.focus
+            && index < content.scheme_files.len()
         {
             return;
         }
@@ -4077,10 +4317,31 @@ impl SettingsPanel {
             // A verb with nothing to act on refuses Enter, exactly as a greyed
             // row does: the ring may stand on it and the reason beside it may be
             // read, and nothing more.
-            Some(SettingsTarget::DeleteScheme) if !delete_scheme_enabled(values) => {
+            Some(SettingsTarget::DeleteScheme) if !delete_scheme_enabled(content) => {
                 SettingsKeyVerdict::Inert
             }
-            Some(target @ SettingsTarget::DeleteScheme) => SettingsKeyVerdict::Chose(target),
+            // **It opens its menu here**, the way the `⋯` does and for the same
+            // reason: opening a menu changes nothing outside this dialog, so
+            // there is nothing for the runtime to be told. The ring lands on the
+            // first file so the arrows have somewhere to start.
+            Some(SettingsTarget::DeleteScheme) => {
+                if content.scheme_files.is_empty() {
+                    return SettingsKeyVerdict::Inert;
+                }
+                self.delete_menu = true;
+                self.focus = Some(SettingsTarget::DeleteSchemeItem(0));
+                SettingsKeyVerdict::Moved
+            }
+            // Choosing a file *is* a file operation, so it leaves through
+            // `Chose` exactly as the verbs beside it do — this type has no way
+            // to reach a Recycle Bin.
+            Some(target @ SettingsTarget::DeleteSchemeItem(index)) => {
+                if content.scheme_files.get(index).is_none() {
+                    return SettingsKeyVerdict::Inert;
+                }
+                self.delete_menu = false;
+                SettingsKeyVerdict::Chose(target)
+            }
             // **`Enter` on a row of the Profiles list opens its editor** (plan
             // §3.5). `Space` does not, and the asymmetry is the point: a row is
             // not a switch, and the key that toggles things everywhere else in
@@ -4179,6 +4440,19 @@ impl SettingsPanel {
                 return false;
             }
             self.focus = Some(SettingsTarget::ProfileMoreItem(index, items[next].verb));
+            return true;
+        }
+        // The scheme menu owns them for the same reason, and it is the simpler
+        // of the two: every line in it is live, so a step is a step.
+        if self.delete_menu
+            && let Some(SettingsTarget::DeleteSchemeItem(at)) = self.focus
+        {
+            let last = content.scheme_files.len().saturating_sub(1);
+            let next = at.saturating_add_signed(delta).min(last);
+            if next == at {
+                return false;
+            }
+            self.focus = Some(SettingsTarget::DeleteSchemeItem(next));
             return true;
         }
         match (self.menu, self.focus) {
@@ -4764,6 +5038,13 @@ pub enum SettingsTarget {
     /// reason: there is one scheme in force and this verb sends *its* file to
     /// the Recycle Bin.
     DeleteScheme,
+    /// One file in the `Delete scheme…` menu, by its index in
+    /// [`SettingsContent::scheme_files`].
+    ///
+    /// **An index and not a name**, which is [`SettingsTarget::Choice`]'s own
+    /// shape: a target is a place in this frame's dialog, and the frame that
+    /// drew the menu is the frame that answers for it.
+    DeleteSchemeItem(usize),
 }
 
 /// **Whether `Delete scheme` can act** (§7.1.6c-4d, user ruling 2026-08-18).
@@ -4774,12 +5055,37 @@ pub enum SettingsTarget {
 /// click it lights a button that does nothing, spelled only at the draw it
 /// leaves a dark button that still acts.
 ///
-/// A bundled scheme travels inside the executable and has no file anywhere to
-/// send to the Recycle Bin; the stored default (`""`) is a bundled scheme by
-/// definition. Both come back `false`, and the foot says why.
+/// **It is enabled whenever the folder holds a scheme the reader wrote** (user
+/// report 2026-08-18), and dark only when it holds none.
+///
+/// It used to act on the scheme *in force*, and that was the bug: a reader with
+/// two custom schemes whose row was sitting on a bundled one found the verb dark
+/// under a sentence about built-in schemes, with no way to reach their own files
+/// short of selecting each one first — a select-then-delete dance nobody
+/// discovers. The verb now opens a menu of the folder's own files, so what it
+/// can act on is what is in the folder, and the only honest reason for it to be
+/// dark is that there is nothing there.
+/// **What the foot's first verb says**, which depends on what the row in force
+/// is on (user report 2026-08-18).
+///
+/// `Customise scheme…` over a bundled scheme, because there is nothing of it on
+/// disk and the verb has to make one; `Edit scheme…` over a file the reader
+/// already owns, because there is nothing left to copy and copying anyway is
+/// what filled a folder with `(custom 2)`. One verb and two words rather than
+/// two buttons: the reader's intent is the same either way — put this scheme in
+/// front of me so I can change it — and only the first step differs.
 #[must_use]
-pub fn delete_scheme_enabled(values: &SettingsValues) -> bool {
-    values.scheme_in_force_is_user_file
+pub fn customise_scheme_verb(values: &SettingsValues) -> &'static str {
+    if values.scheme_in_force_is_user_file {
+        Text::EditScheme.text()
+    } else {
+        Text::CustomiseScheme.text()
+    }
+}
+
+#[must_use]
+pub fn delete_scheme_enabled(content: SettingsContent<'_>) -> bool {
+    !content.scheme_files.is_empty()
 }
 
 /// One row's three boxes, and which row they belong to.
@@ -4894,6 +5200,30 @@ pub struct ProfileLineLayout {
     pub edit: [f32; 4],
     /// The `⋯` that opens the rest.
     pub more: [f32; 4],
+}
+
+/// One line of the `Delete scheme…` menu: a scheme file the reader wrote.
+///
+/// **The name and the file, both.** The name is what the menu draws, because it
+/// is the word the reader picked in the picker and the only one they have ever
+/// seen; the file is what goes to the Recycle Bin, and it is what the card
+/// afterwards names, because a file in the bin is spelled the way the file was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemeFileLine {
+    pub name: String,
+    pub file: String,
+}
+
+/// The `Delete scheme…` menu, placed (user report 2026-08-18).
+///
+/// It borrows the pickers' popup whole through [`menu_layout`], exactly as a
+/// row's `⋯` menu does, and hangs from the button that opened it. No tick
+/// column: nothing in it is a current value, it is a list of files to act on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SchemeMenuLayout {
+    pub frame: [f32; 4],
+    /// The lines, top to bottom, paired with their boxes.
+    pub items: Vec<([f32; 4], SchemeFileLine)>,
 }
 
 /// One line of a row's `⋯` menu — which verb, and whether it can be pressed.
@@ -5034,6 +5364,11 @@ pub struct SettingsLayout {
     customise_scheme: Option<[f32; 4]>,
     /// `Delete scheme`, on exactly those terms again.
     delete_scheme: Option<[f32; 4]>,
+    /// Whether that verb can act — resolved here, once, off the content, so the
+    /// hit test and the draw read one answer rather than each asking.
+    delete_enabled: bool,
+    /// The `Delete scheme…` menu, when it is open.
+    delete_menu: Option<SchemeMenuLayout>,
     /// The muted line **above** the foot's verbs, where `Delete scheme` says
     /// what it will do or why it cannot (§7.1.6c-4d).
     ///
@@ -5142,6 +5477,19 @@ impl SettingsLayout {
     #[must_use]
     pub fn delete_scheme(&self) -> Option<[f32; 4]> {
         self.delete_scheme
+    }
+
+    /// Whether `Delete scheme…` can act — the folder holds a file it could send
+    /// to the Recycle Bin.
+    #[must_use]
+    pub fn delete_enabled(&self) -> bool {
+        self.delete_enabled
+    }
+
+    /// The open `Delete scheme…` menu, if there is one.
+    #[must_use]
+    pub fn delete_menu(&self) -> Option<&SchemeMenuLayout> {
+        self.delete_menu.as_ref()
     }
 
     /// The open picker's scrollable body, or `None` while none is open.
@@ -5259,6 +5607,11 @@ impl SettingsLayout {
             SettingsTarget::ResetAdvanced(_) => self.reset_advanced,
             SettingsTarget::CustomiseScheme => self.customise_scheme,
             SettingsTarget::DeleteScheme => self.delete_scheme,
+            SettingsTarget::DeleteSchemeItem(index) => self
+                .delete_menu
+                .as_ref()
+                .and_then(|menu| menu.items.get(index))
+                .map(|(box_of, _)| *box_of),
             SettingsTarget::Nav(_)
             | SettingsTarget::Close
             | SettingsTarget::Scrim
@@ -5377,6 +5730,18 @@ pub fn display_formulas_requested(target: SettingsTarget) -> Option<bool> {
 pub fn tables_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::Tables, index) => FORMULA_OPTIONS.get(index).copied(),
+        _ => None,
+    }
+}
+
+/// The "Maximum height" row's answer in logical pixels, `0` being no cap, if
+/// this target is one of its items.
+#[must_use]
+pub fn block_max_height_requested(target: SettingsTarget) -> Option<u32> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::BlockMaxHeight, index) => {
+            BLOCK_MAX_HEIGHT_OPTIONS.get(index).copied()
+        }
         _ => None,
     }
 }
@@ -5766,12 +6131,55 @@ pub(crate) fn ellipsized_left(
               have been scrolled, and the font — which is the caller's because \
               only the renderer has one, exactly as `build`'s is"
 )]
+#[cfg(test)]
 pub fn layout_for_menu(
     surface_width: f32,
     surface_height: f32,
     scale: f32,
     menu_kind: Option<SettingsRow>,
     row_menu: Option<usize>,
+    content_of: SettingsContent<'_>,
+    category: SettingsCategory,
+    scroll: f32,
+    menu_scroll: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> Option<SettingsLayout> {
+    layout_for_menus(
+        surface_width,
+        surface_height,
+        scale,
+        menu_kind,
+        row_menu,
+        false,
+        content_of,
+        category,
+        scroll,
+        menu_scroll,
+        measure,
+    )
+}
+
+/// The same, told whether the foot's `Delete scheme…` menu is open as well
+/// (user report 2026-08-18).
+///
+/// Two entry points and not an eleventh parameter on the only one, because the
+/// scheme menu is the one popup in this dialog that does not hang from a row:
+/// every caller above answers "which row's picker" and "which row's `⋯`", and
+/// for all of them the answer to this third question is `false` by construction.
+/// The window's own draw calls this one.
+#[must_use]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "see `layout_for_menu`: one more fact only the caller has, which is \
+              whether the foot's own menu is open"
+)]
+pub fn layout_for_menus(
+    surface_width: f32,
+    surface_height: f32,
+    scale: f32,
+    menu_kind: Option<SettingsRow>,
+    row_menu: Option<usize>,
+    delete_menu_open: bool,
     content_of: SettingsContent<'_>,
     category: SettingsCategory,
     scroll: f32,
@@ -5799,8 +6207,11 @@ pub fn layout_for_menu(
     let width = px(DIALOG_MAX_WIDTH_LOGICAL_PX)
         .min(surface_width * DIALOG_WIDTH_RATIO)
         .round();
-    let top = px(DIALOG_TOP_LOGICAL_PX).round();
-    let available = (surface_height - top - px(DIALOG_BOTTOM_LOGICAL_PX)).round();
+    // The room a dialog may take, and it is still measured from the two margins
+    // the mock-up declares: optical centring moves the box inside the window, it
+    // does not give the box more window to fill.
+    let available =
+        (surface_height - px(DIALOG_TOP_LOGICAL_PX) - px(DIALOG_BOTTOM_LOGICAL_PX)).round();
     let page_height = metrics.page_height(content_of, category);
     // **The dialog is as tall as its tallest page, whatever page is up** (user
     // ruling 2026-08-17).
@@ -5832,8 +6243,9 @@ pub fn layout_for_menu(
     // Three bounds, and the smallest wins: what the window can host, what a
     // dialog is allowed to be, and what the tallest page actually needs. The cap
     // is why the shortcut table's forty lines do not turn this into a
-    // whole-window surface — see [`DIALOG_MAX_HEIGHT_LOGICAL_PX`].
+    // whole-window surface — see [`everyday_cap`].
     let height = (2.0 * border + header + body_height)
+        .min(2.0 * border + header + everyday_cap(metrics))
         .min(px(DIALOG_MAX_HEIGHT_LOGICAL_PX))
         .min(available)
         .round();
@@ -5846,6 +6258,11 @@ pub fn layout_for_menu(
         return None;
     }
     let left = ((surface_width - width) / 2.0).round();
+    // **Optically centred, and only now** — the drop cannot be known until the
+    // height is, because what is being divided is the height's own leftover.
+    let top = (((surface_height - height) * DIALOG_OPTICAL_TOP_SHARE)
+        .max(px(DIALOG_TOP_LOGICAL_PX)))
+    .round();
     let frame = [left, top, left + width, top + height];
     let inner = [
         frame[0] + border,
@@ -6108,10 +6525,15 @@ pub fn layout_for_menu(
                 cursor += metrics.disclosure_height;
                 let side = px(DISCLOSURE_MARK_LOGICAL_PX);
                 let middle = (band[1] + band[3]) / 2.0;
+                // **The gutter is outside the band**, which is the whole of the
+                // fix: the word starts at the row's own text column and the
+                // triangle hangs back into the content padding beside it. See
+                // [`DISCLOSURE_GUTTER_LOGICAL_PX`].
+                let mark_left = band[0] - px(DISCLOSURE_GUTTER_LOGICAL_PX);
                 let mark = [
-                    band[0],
+                    mark_left,
                     middle - side / 2.0,
-                    band[0] + side,
+                    mark_left + side,
                     middle + side / 2.0,
                 ];
                 placed_advanced = Some(AdvancedLayout {
@@ -6120,7 +6542,7 @@ pub fn layout_for_menu(
                     band,
                     mark,
                     label: [
-                        mark[2] + px(DISCLOSURE_GAP_LOGICAL_PX),
+                        band[0],
                         band[1] + px(ROW_PADDING_Y_LOGICAL_PX),
                         band[2],
                         band[1] + px(ROW_PADDING_Y_LOGICAL_PX + ROW_TITLE_LINE_LOGICAL_PX),
@@ -6535,6 +6957,51 @@ pub fn layout_for_menu(
             items: geometry.items.into_iter().zip(items).collect(),
         })
     });
+    // The scheme menu hangs off the button that opened it, on the row menu's own
+    // terms — and it is placed only when the button itself was, so a page whose
+    // foot is not drawn cannot leave a menu hanging in the air.
+    //
+    // **It is capped and scrolled exactly as a picker is**, which is not a
+    // flourish: a reader with nine schemes of their own would otherwise have two
+    // of them drawn outside the box that is being painted. `menu_layout` caps at
+    // `MENU_MAX_VISIBLE_ITEMS` for every popup in this dialog, and the three
+    // numbers that make the cap navigable — the body, the bar and the reach —
+    // ride on the layout's own picker fields, because the two popups are never
+    // open at once (`toggle_delete_menu` shuts the picker) and one scroll for one
+    // open popup is what the runtime's wheel and its `shows_item` already read.
+    let mut delete_geometry = None;
+    let delete_menu = delete_scheme
+        .filter(|_| delete_menu_open && !content_of.scheme_files.is_empty())
+        .map(|button| {
+            let font = px(COMBO_FONT_LOGICAL_PX);
+            let widest = content_of
+                .scheme_files
+                .iter()
+                .map(|line| measure(&line.name, font))
+                .fold(px(ROW_MENU_MIN_WIDTH_LOGICAL_PX), f32::max);
+            let geometry = menu_layout(
+                button,
+                surface_width,
+                surface_height,
+                scale,
+                border,
+                content_of.scheme_files.len(),
+                widest,
+                false,
+                menu_scroll,
+            );
+            let placed = SchemeMenuLayout {
+                frame: geometry.frame,
+                items: geometry
+                    .items
+                    .iter()
+                    .copied()
+                    .zip(content_of.scheme_files.iter().cloned())
+                    .collect(),
+            };
+            delete_geometry = Some(geometry);
+            placed
+        });
     Some(SettingsLayout {
         scale,
         surface: [surface_width, surface_height],
@@ -6563,15 +7030,26 @@ pub fn layout_for_menu(
         reset_advanced,
         customise_scheme,
         delete_scheme,
+        delete_enabled: delete_scheme_enabled(content_of),
+        delete_menu,
         delete_reason,
         menu: popup.as_ref().map(|menu| menu.frame),
         items: popup
             .as_ref()
             .map_or_else(Vec::new, |menu| menu.items.clone()),
         menu_kind: active.map(|(row, _)| row),
-        menu_body: popup.as_ref().map(|menu| menu.body),
-        menu_bar: popup.as_ref().and_then(|menu| menu.bar),
-        menu_max_scroll: popup.as_ref().map_or(0.0, |menu| menu.max_scroll),
+        menu_body: popup
+            .as_ref()
+            .or(delete_geometry.as_ref())
+            .map(|menu| menu.body),
+        menu_bar: popup
+            .as_ref()
+            .or(delete_geometry.as_ref())
+            .and_then(|menu| menu.bar),
+        menu_max_scroll: popup
+            .as_ref()
+            .or(delete_geometry.as_ref())
+            .map_or(0.0, |menu| menu.max_scroll),
     })
 }
 
@@ -6797,6 +7275,7 @@ impl StackMetrics {
 
     /// One page's whole height, paddings included — what the dialog has to be
     /// tall enough for if this page is not to scroll.
+    #[must_use]
     fn page_height(self, content: SettingsContent<'_>, category: SettingsCategory) -> f32 {
         let px = |value: f32| value * self.scale;
         let mut stack: f32 = page_items(content, category)
@@ -6824,6 +7303,53 @@ impl StackMetrics {
         }
         px(CONTENT_PADDING_TOP_LOGICAL_PX) + stack + px(CONTENT_PADDING_BOTTOM_LOGICAL_PX)
     }
+}
+
+/// **The height an everyday page needs**, and so the height the dialog stops at
+/// (user ruling 2026-08-18).
+///
+/// The 600 this replaces was never really a number: it was the sentence "600 is
+/// where an everyday page stops needing a scroll bar", measured once off the
+/// page that needed the most and then written down as a literal. A measurement
+/// kept as a literal is a measurement that is right until somebody adds a row —
+/// and the failure is silent, because a page that has outgrown the cap simply
+/// grows a scroll bar. Saying the sentence in arithmetic makes the cap follow
+/// the rows instead of the rows having to remember the cap.
+///
+/// **Everyday means: with every `Advanced` group folded, and without the two
+/// lists.** Those are exactly the three things the ruling already left below the
+/// fold, and each is left for its own reason. A disclosure the reader opened is
+/// a reader asking for more than a page — sizing the frame for the opened state
+/// would mean the dialog is permanently as tall as its longest *possible* page.
+/// The shortcut table and the profile list are lists: their length is a fact
+/// about the machine and the user's own file, and a dialog whose height depended
+/// on how many profiles somebody has made is a dialog with no height at all.
+/// The editor sub-page goes with them — its environment table grows a row per
+/// variable, and the frame may not breathe when it does.
+///
+/// **Read off the rows this build can draw, not the rows this window is
+/// drawing.** `Sidebar` is conditional — it exists only under the vertical rail
+/// — and the rail is switched from a row on the very page it would join. A cap
+/// that followed the window would therefore grow the dialog by one row *while
+/// the pointer was inside it*, which is the exact sin "one height whatever page
+/// is up" was written against; it would only be saying it about windows instead
+/// of pages. So the maximal list answers, and the horizontal window carries a
+/// row's worth of empty body it never fills. That is the same spare room a short
+/// page already leaves, and the ruling already says what happens to it: nothing.
+fn everyday_cap(metrics: StackMetrics) -> f32 {
+    let rows = visible_rows(TabLayoutMode::Vertical);
+    let everyday = SettingsContent {
+        rows: &rows,
+        shortcuts: &[],
+        profiles: &[],
+        scheme_files: &[],
+        advanced: AdvancedOpen::default(),
+        editor: None,
+    };
+    SettingsCategory::ALL
+        .into_iter()
+        .map(|category| metrics.page_height(everyday, category))
+        .fold(0.0, f32::max)
 }
 
 /// The widest label this row's picker will draw, in the face that will draw it.
@@ -7115,6 +7641,23 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
             return SettingsTarget::ProfileMore(menu.index);
         }
     }
+    // And the scheme menu, on identical terms. The two are never open together —
+    // one hangs off a row of the Profiles list and the other off the Appearance
+    // page's foot — so the order between them is arbitrary and stated only so it
+    // is not accidental.
+    if let Some(menu) = layout.delete_menu() {
+        for (index, (box_of, _)) in menu.items.iter().enumerate() {
+            // An item the cap scrolled out of the body is menu body — the same
+            // sentence the picker's own items answer to, and for the same
+            // reason: an item drawn nowhere must not answer a press.
+            if layout.shows_item(*box_of) && contains(*box_of, x, y) {
+                return SettingsTarget::DeleteSchemeItem(index);
+            }
+        }
+        if contains(menu.frame, x, y) {
+            return SettingsTarget::DeleteScheme;
+        }
+    }
     if let (Some(menu), Some(row)) = (layout.menu, layout.menu_kind) {
         for (index, item) in layout.items.iter().enumerate() {
             // **An item the cap scrolled out of the body is menu body**, which
@@ -7310,7 +7853,7 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
     if let Some(delete) = layout.delete_scheme
         && layout.shows(delete)
         && contains(delete, x, y)
-        && delete_scheme_enabled(values)
+        && layout.delete_enabled()
     {
         return SettingsTarget::DeleteScheme;
     }
@@ -7944,6 +8487,73 @@ pub fn build(
             }
         }
     }
+    // The scheme menu, in the same popup layer and on the same recipe. It has no
+    // refusal column: every line in it is a file that can be recycled, which is
+    // the whole reason the list is the folder's own contents.
+    if let Some(menu) = layout.delete_menu() {
+        push_float_window(
+            &mut popup.quads,
+            menu.frame,
+            px(MENU_RADIUS_LOGICAL_PX),
+            border,
+            px(FLOAT_WINDOW_SHADOW_LOGICAL_PX),
+            palette.menu_surface,
+            palette.menu_shadow,
+            alpha(palette.menu_popup_shadow_inner_alpha),
+            alpha(palette.menu_popup_shadow_outer_alpha),
+            palette.menu_border,
+            alpha(palette.menu_border_alpha),
+        );
+        for (index, (box_of, line)) in menu.items.iter().enumerate() {
+            if !layout.shows_item(*box_of) {
+                continue;
+            }
+            let hovered = hover == Some(SettingsTarget::DeleteSchemeItem(index));
+            if hovered {
+                popup.quads.extend(rounded_overlay_fill(
+                    *box_of,
+                    px(ITEM_RADIUS_LOGICAL_PX),
+                    palette.menu_item_hover,
+                    1.0,
+                ));
+            }
+            let font = px(COMBO_FONT_LOGICAL_PX);
+            let inset = px(ITEM_PADDING_X_LOGICAL_PX);
+            popup.labels.push(ChromeLabel {
+                // **The scheme's name and not the file's.** The name is the word
+                // this reader chose in the picker and the only one they have
+                // seen; the file is what the card afterwards names, because a
+                // file in the Recycle Bin is spelled the way the file was.
+                text: ellipsized(
+                    &line.name,
+                    (box_of[2] - inset) - (box_of[0] + inset),
+                    font,
+                    measure,
+                ),
+                rect: [box_of[0] + inset, box_of[1], box_of[2] - inset, box_of[3]],
+                font_size_px: font,
+                color: if hovered {
+                    palette.menu_item_text_selected
+                } else {
+                    palette.menu_item_text
+                },
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                clip: None,
+            });
+            if focus == Some(SettingsTarget::DeleteSchemeItem(index)) {
+                popup
+                    .quads
+                    .extend(focus_ring(*box_of, scale, palette.accent));
+            }
+        }
+        if let Some(bar) = layout.menu_bar {
+            push_menu_bar(&mut popup.quads, bar, palette);
+        }
+    }
 
     let content = OverlayLayer {
         quads,
@@ -8057,7 +8667,7 @@ fn push_advanced_group(
             &mut stack.quads,
             &mut stack.labels,
             customise,
-            Text::CustomiseScheme.text(),
+            customise_scheme_verb(values),
             hover == Some(SettingsTarget::CustomiseScheme),
             scale,
             border,
@@ -8075,7 +8685,7 @@ fn push_advanced_group(
     // button's own, the word goes to the hint ink, and the reason takes the
     // empty half of the line it is standing on.
     if let Some(delete) = layout.delete_scheme {
-        let enabled = delete_scheme_enabled(values);
+        let enabled = layout.delete_enabled();
         push_button(
             &mut stack.quads,
             &mut stack.labels,
@@ -8105,7 +8715,7 @@ fn push_advanced_group(
             let text = if enabled {
                 Text::DeleteSchemeUserFile.text()
             } else {
-                Text::DeleteSchemeBundled.text()
+                Text::DeleteSchemeNoFiles.text()
             };
             stack.labels.push(ChromeLabel {
                 text: ellipsized(text, hint[2] - hint[0], font, measure),
@@ -9519,6 +10129,30 @@ mod tests {
         58.0 + page
     }
 
+    /// **The cap the build derives** (user ruling 2026-08-18), stated here the
+    /// way a reader would derive it by hand rather than as the 581.5 it comes
+    /// to: the tallest page with every `Advanced` group folded and neither list
+    /// on it is `Appearance`, and it is tallest under the vertical rail, where
+    /// it carries `Sidebar` as well.
+    ///
+    /// [`the_height_cap_is_the_tallest_everyday_page_and_not_a_number`] is what
+    /// binds this hand derivation to [`everyday_cap`]'s sweep; every other claim
+    /// below reads it through [`fixed_dialog_height`].
+    fn everyday_cap_height() -> f32 {
+        let rows = visible_rows(TabLayoutMode::Vertical)
+            .into_iter()
+            .filter(|row| row.category() == SettingsCategory::Appearance && !row.advanced())
+            .count();
+        dialog_around(page_height(rows) + DISCLOSURE_HEIGHT)
+    }
+
+    /// **Where a dialog that tall lands in a window that tall** — 40% of the
+    /// slack above it, and never nearer the caption than the mock-up's 54.
+    fn optical_top(surface_height: f32, dialog_height: f32) -> f32 {
+        (((surface_height - dialog_height) * DIALOG_OPTICAL_TOP_SHARE).max(DIALOG_TOP_LOGICAL_PX))
+            .round()
+    }
+
     /// The dialog's height at scale 1 for a page holding `rows` rows and no
     /// disclosure.
     fn dialog_height(rows: usize) -> f32 {
@@ -9533,13 +10167,15 @@ mod tests {
     /// tallest page sets it, the tallest page is the shortcut table, and a
     /// dialog sized for forty lines is a whole-window surface. On this fixture's
     /// window the cap is what answers — `Appearance` with its group open is 947
-    /// — so every claim below that reads this number is reading 600.
+    /// — so every claim below that reads this number is reading the cap.
     fn fixed_dialog_height(tab_layout: TabLayoutMode) -> f32 {
         let on_page = visible_rows(tab_layout)
             .into_iter()
             .filter(|row| row.category() == SettingsCategory::Appearance)
             .count();
-        dialog_around(page_height_disclosed(on_page)).min(DIALOG_MAX_HEIGHT_LOGICAL_PX)
+        dialog_around(page_height_disclosed(on_page))
+            .min(everyday_cap_height())
+            .round()
     }
 
     /// The rows a dialog holds with the tabs across the top — the state the app
@@ -9591,6 +10227,7 @@ mod tests {
             rows,
             shortcuts,
             profiles: &[],
+            scheme_files: &[],
             advanced,
             // The list, which is where the Profiles page opens. The pins that
             // are about the editor open it themselves.
@@ -9792,6 +10429,50 @@ mod tests {
         shaped_scrolled(category, advanced, menu, UNSCROLLED)
     }
 
+    /// **Two scheme files of the reader's own**, which is the shape the report
+    /// was made in: a `Folio Dark (custom)` and a `(custom 2)`, both dark, with
+    /// the row sitting on a bundled scheme.
+    fn scheme_file_lines() -> Vec<SchemeFileLine> {
+        vec![
+            SchemeFileLine {
+                name: "Folio Dark (custom)".to_owned(),
+                file: "folio-dark-custom.json".to_owned(),
+            },
+            SchemeFileLine {
+                name: "Folio Dark (custom 2)".to_owned(),
+                file: "folio-dark-custom-2.json".to_owned(),
+            },
+        ]
+    }
+
+    /// The Appearance page with its group open, told what the schemes folder
+    /// holds and whether the foot's menu is up.
+    fn shaped_foot(files: &[SchemeFileLine], menu_open: bool, scroll: f32) -> SettingsLayout {
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        layout_for_menus(
+            SURFACE.0,
+            SURFACE.1,
+            1.0,
+            None,
+            None,
+            menu_open,
+            SettingsContent {
+                rows: &rows,
+                shortcuts: &lines,
+                profiles: &[],
+                scheme_files: files,
+                advanced: every_group_open(),
+                editor: None,
+            },
+            SettingsCategory::Appearance,
+            scroll,
+            MENU_UNSCROLLED,
+            &mut flat(0.0),
+        )
+        .expect("this window hosts the dialog")
+    }
+
     /// The same, scrolled this far down the page.
     fn shaped_scrolled(
         category: SettingsCategory,
@@ -9863,8 +10544,10 @@ mod tests {
                     height(placed.frame)
                 );
                 assert_eq!(
-                    placed.frame[1], DIALOG_TOP_LOGICAL_PX,
-                    "{category:?} at {surface:?}: and it still hangs from the top"
+                    placed.frame[1],
+                    optical_top(surface.1, height(placed.frame)),
+                    "{category:?} at {surface:?}: and it takes its own share of \
+                     the slack, floored at the mock-up's margin"
                 );
                 heights.push((category, height(placed.frame)));
             }
@@ -10538,32 +11221,47 @@ mod tests {
         assert_eq!(terminal.delete_scheme(), None, "and so does its opposite");
     }
 
-    /// PIN (user ruling 2026-08-18) — **`Delete scheme` acts only on a file the
-    /// user owns, and says why when it cannot.**
+    /// PIN (user report 2026-08-18) — **the foot's first verb reads `Edit
+    /// scheme…` over a file the reader already owns, and `Customise scheme…`
+    /// only over a bundled one.**
     ///
-    /// A bundled scheme travels inside the executable, and the stored default is
-    /// a bundled scheme by definition; neither has a file in the folder to send
-    /// to the Recycle Bin. The verb is greyed rather than hidden, for the
-    /// greyed-row ruling's reason — the reason is what a reader came for — and
-    /// the greying is one reading, refused by the hit test and by `activate`
-    /// alike.
+    /// The report: the reader pressed `Customise scheme…` expecting to edit the
+    /// scheme they were wearing, and got a second copy of it. That is where a
+    /// folder full of `(custom 2)` comes from — the verb copies unconditionally,
+    /// and over a scheme that is already a file of theirs the copy is pure
+    /// litter.
     ///
-    /// Red gate: drop the `delete_scheme_enabled` clause out of `hit` and the
-    /// press assertion goes red; drop it out of `activate` and the Enter one
-    /// does; draw the word in the title ink unconditionally and the last does.
+    /// One verb with two words rather than two buttons: the reader's intent is
+    /// the same either way — put this scheme in front of me so I can change it —
+    /// and only the first step differs, so only the word does.
+    ///
+    /// Red gate: return `Text::CustomiseScheme` unconditionally and the second
+    /// assertion goes red; swap the two arms and the first does.
     #[test]
-    fn delete_scheme_is_live_only_for_a_scheme_the_user_owns() {
+    fn the_foot_offers_to_edit_a_scheme_the_reader_already_owns() {
         let bundled = values();
         assert!(
-            !delete_scheme_enabled(&bundled),
-            "a fresh install wears a bundled scheme and has nothing to delete"
+            !bundled.scheme_in_force_is_user_file,
+            "the fixture wears a bundled scheme, which is what a fresh install does"
         );
+        assert_eq!(
+            customise_scheme_verb(&bundled),
+            Text::CustomiseScheme.text(),
+            "over a bundled scheme there is no file yet, so the verb makes one"
+        );
+
         let owned = SettingsValues {
             scheme_in_force_is_user_file: true,
             ..values()
         };
-        assert!(delete_scheme_enabled(&owned));
+        assert_eq!(
+            customise_scheme_verb(&owned),
+            Text::EditScheme.text(),
+            "over a file of the reader's own there is nothing left to copy"
+        );
+        assert_ne!(Text::EditScheme.text(), Text::CustomiseScheme.text());
 
+        // And the word is drawn on the button, not merely computed.
         let open = shaped(SettingsCategory::Appearance, every_group_open(), None);
         let at_foot = shaped_scrolled(
             SettingsCategory::Appearance,
@@ -10571,51 +11269,163 @@ mod tests {
             None,
             open.max_scroll(),
         );
-        let delete = at_foot.delete_scheme().expect("the verb is on the page");
-        let (x, y) = centre(delete);
-
+        let button = at_foot
+            .customise_scheme()
+            .expect("the verb is on the foot of the open group");
+        for (values, word) in [
+            (&bundled, Text::CustomiseScheme.text()),
+            (&owned, Text::EditScheme.text()),
+        ] {
+            let drawn = labels_of(&at_foot, None, values);
+            let label = drawn
+                .iter()
+                .find(|label| label.rect == button)
+                .expect("the button carries a word");
+            assert_eq!(label.text, word);
+        }
         assert_eq!(
-            hit(&at_foot, &bundled, x, y),
-            SettingsTarget::Panel,
-            "a verb that cannot act takes no press: the pointer never lights it"
+            width(button),
+            CUSTOMISE_SCHEME_WIDTH_LOGICAL_PX,
+            "one box for both words: a foot whose buttons moved when a scheme \
+             was chosen would be a row of verbs that shifts under the pointer"
         );
-        assert_eq!(
-            hit(&at_foot, &owned, x, y),
-            SettingsTarget::DeleteScheme,
-            "and does the moment there is a file behind it"
-        );
+    }
 
-        // The ring may stand on it either way — a ring is not an action — and
-        // Enter is what the two answers differ on.
+    /// PIN (user report 2026-08-18) — **`Delete scheme…` opens a menu of the
+    /// reader's own scheme files, and is dark only when there are none.**
+    ///
+    /// The report: two custom schemes the reader could not delete. The verb
+    /// acted on the scheme *in force*, their Dark row was sitting on a bundled
+    /// `Solarized Dark`, and so the button was greyed under a sentence about
+    /// built-in schemes having no file — with both of their own files a folder
+    /// away and no way to reach them but to select each one first. A
+    /// select-then-delete dance nobody discovers is a verb that does not work.
+    ///
+    /// So the verb lists the folder. What it can act on is what is in the
+    /// folder, the only honest reason for it to be dark is an empty one, and the
+    /// row in force stops being part of the question — which is what makes
+    /// deleting a scheme nobody is wearing a pure file operation.
+    ///
+    /// MUTATIONS:
+    /// (1) go back to `values.scheme_in_force_is_user_file` — the first
+    ///     assertion goes red, because these two files exist and the row is on a
+    ///     bundled scheme;
+    /// (2) list `entries()` instead of the user's own — a bundled name appears
+    ///     in the menu and the count goes red;
+    /// (3) drop the hit-test arm — a press on a file answers `DeleteScheme` and
+    ///     the menu never chooses anything.
+    #[test]
+    fn delete_scheme_lists_the_readers_own_files_and_is_dark_only_without_them() {
+        let files = scheme_file_lines();
         let rows = flat_rows();
         let lines = shortcut_lines();
-        let mut panel = SettingsPanel::default();
-        panel.toggle(content(&rows, &lines));
-        panel.select_category(SettingsCategory::Appearance);
-        panel.press(SettingsTarget::DeleteScheme);
-        assert_eq!(panel.focus(), Some(SettingsTarget::DeleteScheme));
-        assert_eq!(
-            panel.activate(content(&rows, &lines), &bundled),
-            SettingsKeyVerdict::Inert,
-            "Enter on a verb with nothing to act on does nothing"
+        assert!(
+            delete_scheme_enabled(SettingsContent {
+                rows: &rows,
+                shortcuts: &lines,
+                profiles: &[],
+                scheme_files: &files,
+                advanced: every_group_open(),
+                editor: None,
+            }),
+            "two files of the reader's own is two files this verb can act on, \
+             whatever the row in force is sitting on"
         );
-        assert_eq!(
-            panel.activate(content(&rows, &lines), &owned),
-            SettingsKeyVerdict::Chose(SettingsTarget::DeleteScheme)
+        assert!(
+            !delete_scheme_enabled(SettingsContent {
+                rows: &rows,
+                shortcuts: &lines,
+                profiles: &[],
+                scheme_files: &[],
+                advanced: every_group_open(),
+                editor: None,
+            }),
+            "and an empty folder is the one thing that darkens it"
         );
 
-        // And the reason is on screen, in the hint ink, on the muted line above
-        // the verbs — **in both states**, so an Advanced group's height does not
-        // depend on which colour scheme happens to be in force.
-        let hint = at_foot.delete_reason.expect("the foot has its hint line");
-        assert_eq!(hint[3], delete[1], "the line sits directly above the verbs");
-        assert_eq!(hint[0], at_foot.rows[0].band[0], "and spans the whole row");
-        let greyed = labels_of(&at_foot, None, &bundled);
-        let said = greyed
-            .iter()
-            .find(|label| label.text == Text::DeleteSchemeBundled.text())
-            .expect("a greyed verb says why");
-        assert_eq!(said.rect, hint);
+        // Shut, at the foot of the page, with the folder holding two files.
+        let shut = shaped_foot(&files, false, 0.0);
+        let scroll = shut.max_scroll();
+        let shut = shaped_foot(&files, false, scroll);
+        assert!(shut.delete_enabled());
+        assert_eq!(
+            shut.delete_menu(),
+            None,
+            "a menu nobody opened is not drawn"
+        );
+        let delete = shut.delete_scheme().expect("the verb is on the foot");
+        let (x, y) = centre(delete);
+        assert_eq!(
+            hit(&shut, &values(), x, y),
+            SettingsTarget::DeleteScheme,
+            "the button answers a press where it is drawn"
+        );
+        assert!(
+            labels_of(&shut, None, &values())
+                .iter()
+                .any(|label| label.text == Text::DeleteSchemeUserFile.text()),
+            "and the line above it says what choosing one will do"
+        );
+
+        // Open: exactly the two files, by the names the picker lists them under.
+        let open = shaped_foot(&files, true, scroll);
+        let menu = open.delete_menu().expect("the menu is up");
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|(_, line)| line.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Folio Dark (custom)", "Folio Dark (custom 2)"],
+            "the folder's own contents, in the catalogue's order"
+        );
+        let drawn = labels_of(&open, None, &values());
+        for line in &files {
+            assert!(
+                drawn.iter().any(|label| label.text == line.name),
+                "{:?} is in the menu and is not drawn; drawn: {:?}",
+                line.name,
+                drawn.iter().map(|it| it.text.clone()).collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            !drawn.iter().any(|label| label.text == "Solarized Dark"),
+            "and nothing bundled is: there is no file of it to delete"
+        );
+        for (index, (box_of, _)) in menu.items.iter().enumerate() {
+            let (x, y) = centre(*box_of);
+            assert_eq!(
+                hit(&open, &values(), x, y),
+                SettingsTarget::DeleteSchemeItem(index),
+                "every line answers for itself"
+            );
+        }
+        let (x, y) = centre(menu.frame);
+        assert!(
+            matches!(
+                hit(&open, &values(), x, y),
+                SettingsTarget::DeleteSchemeItem(_) | SettingsTarget::DeleteScheme
+            ),
+            "and the menu's own body belongs to the menu, never to the page \
+             under it"
+        );
+
+        // Dark, with an empty folder: the word goes to the hint ink and the
+        // line says the only thing that is true.
+        let empty = shaped_foot(&[], false, scroll);
+        assert!(!empty.delete_enabled());
+        assert_eq!(
+            empty.delete_menu(),
+            None,
+            "and a menu cannot be opened over nothing"
+        );
+        let greyed = labels_of(&empty, None, &values());
+        assert!(
+            greyed
+                .iter()
+                .any(|label| label.text == Text::DeleteSchemeNoFiles.text()),
+            "a dark verb says why: {:?}",
+            greyed.iter().map(|it| it.text.clone()).collect::<Vec<_>>()
+        );
         assert_eq!(
             greyed
                 .iter()
@@ -10625,17 +11435,97 @@ mod tests {
             chrome_palette().menu_item_hint_text,
             "the word goes to the hint ink, which is what greyed means here"
         );
-        let live = labels_of(&at_foot, None, &owned);
-        assert!(
-            live.iter()
-                .any(|label| label.text == Text::DeleteSchemeUserFile.text()),
-            "and a live verb says what it will do instead"
+        let delete = empty.delete_scheme().expect("the verb keeps its box");
+        let (x, y) = centre(delete);
+        assert_eq!(
+            hit(&empty, &values(), x, y),
+            SettingsTarget::Panel,
+            "and a dark button answers the surface it stands on"
         );
-        assert!(
-            !live
-                .iter()
-                .any(|label| label.text == Text::DeleteSchemeBundled.text())
+    }
+
+    /// PIN (user report 2026-08-18) — **the keyboard opens the menu, walks it,
+    /// chooses from it, and Esc leaves it before it leaves the page.**
+    ///
+    /// The same ladder a row's `⋯` climbs, because it is the same shape: a popup
+    /// open inside a page. `Enter` on the verb opens rather than deletes — the
+    /// verb no longer has one file to act on — and lands the ring on the first
+    /// line so the arrows have somewhere to start.
+    #[test]
+    fn the_scheme_menu_opens_walks_and_unwinds_under_the_keyboard() {
+        let files = scheme_file_lines();
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        let content = SettingsContent {
+            rows: &rows,
+            shortcuts: &lines,
+            profiles: &[],
+            scheme_files: &files,
+            advanced: every_group_open(),
+            editor: None,
+        };
+        let mut panel = SettingsPanel::default();
+        panel.toggle(content);
+        panel.select_category(SettingsCategory::Appearance);
+        panel.press(SettingsTarget::DeleteScheme);
+        assert!(!panel.delete_menu(), "a press is not an open by itself");
+
+        assert_eq!(
+            panel.key(SettingsKey::Activate, content, &values()),
+            SettingsKeyVerdict::Moved,
+            "Enter opens the menu here, because opening one changes nothing \
+             outside this dialog"
         );
+        assert!(panel.delete_menu());
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::DeleteSchemeItem(0)),
+            "and the ring lands on the first file"
+        );
+        assert!(panel.key(SettingsKey::Down, content, &values()) != SettingsKeyVerdict::Inert);
+        assert_eq!(panel.focus(), Some(SettingsTarget::DeleteSchemeItem(1)));
+        panel.key(SettingsKey::Down, content, &values());
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::DeleteSchemeItem(1)),
+            "the walk stops at the end rather than wrapping"
+        );
+
+        assert!(panel.close_one_layer());
+        assert!(!panel.delete_menu(), "Esc leaves the menu first");
+        assert_eq!(
+            panel.focus(),
+            Some(SettingsTarget::DeleteScheme),
+            "and hands the keyboard back to the button it hung from"
+        );
+        assert!(panel.is_open(), "the page is still up");
+
+        // And choosing one leaves through `Chose`, because a Recycle Bin is not
+        // something this type can reach.
+        panel.key(SettingsKey::Activate, content, &values());
+        assert!(panel.delete_menu());
+        panel.key(SettingsKey::Down, content, &values());
+        assert_eq!(
+            panel.key(SettingsKey::Activate, content, &values()),
+            SettingsKeyVerdict::Chose(SettingsTarget::DeleteSchemeItem(1))
+        );
+        assert!(!panel.delete_menu(), "and the menu shuts behind it");
+
+        // An empty folder refuses the open outright: a menu of nothing is a
+        // popup with no lines in it.
+        let empty = SettingsContent {
+            scheme_files: &[],
+            ..content
+        };
+        let mut panel = SettingsPanel::default();
+        panel.toggle(empty);
+        panel.select_category(SettingsCategory::Appearance);
+        panel.press(SettingsTarget::DeleteScheme);
+        assert_eq!(
+            panel.key(SettingsKey::Activate, empty, &values()),
+            SettingsKeyVerdict::Inert
+        );
+        assert!(!panel.delete_menu());
     }
 
     /// PIN (§7.1.6c-4c) — **a picker re-lists when the catalogue's revision
@@ -11011,7 +11901,12 @@ mod tests {
         );
         let placed = open(1.0, false);
         assert_eq!(width(placed.frame), 720.0, "min(720px, 92%) at 1280 wide");
-        assert_eq!(placed.frame[1], 54.0, "margin-top: 54px");
+        assert_eq!(
+            placed.frame[1],
+            optical_top(SURFACE.1, height(placed.frame)),
+            "and the drop is `minmax(54px, 2fr)` and not the old flat 54: two \
+             parts of the window's slack above, three below"
+        );
         assert_eq!(
             placed.frame[0],
             (SURFACE.0 - 720.0) / 2.0,
@@ -11021,8 +11916,8 @@ mod tests {
             height(placed.frame),
             fixed_dialog_height(TabLayoutMode::Horizontal),
             "the tallest page decides the height, its one heading and its \
-             Advanced group included — under the 600 cap, which on this window \
-             is the bound that answers"
+             Advanced group included — under the everyday cap, which on this \
+             window is the bound that answers"
         );
 
         // The 92% share takes over below 720/0.92 ~= 782.6 logical pixels.
@@ -11136,7 +12031,11 @@ mod tests {
                 height(placed.frame),
                 "the dialog's height",
             );
-            near(54.0 * scale, placed.frame[1], "the dialog's drop");
+            near(
+                optical_top((SURFACE.1 * scale).round(), height(placed.frame)),
+                placed.frame[1],
+                "the dialog's drop",
+            );
             near(30.0 * scale, width(placed.close), "the close button");
             near(30.0 * scale, height(placed.close), "the close button");
             near(118.0 * scale, width(combo), "the combo");
@@ -11485,8 +12384,13 @@ mod tests {
         let rows = many_rows(20);
         let placed = scrolled(&rows, 0.0);
         assert_eq!(
-            placed.frame[1], DIALOG_TOP_LOGICAL_PX,
-            "the dialog keeps its fixed top margin"
+            placed.frame[1],
+            optical_top(SURFACE.1, height(placed.frame)),
+            "the dialog keeps its share of the window's slack above it"
+        );
+        assert!(
+            placed.frame[1] >= DIALOG_TOP_LOGICAL_PX,
+            "and never comes nearer the caption than the mock-up's margin"
         );
         assert!(
             placed.frame[3] <= SURFACE.1 - DIALOG_BOTTOM_LOGICAL_PX,
@@ -12755,8 +13659,9 @@ mod tests {
         }
     }
 
-    /// PIN (user report 2026-08-17) — **the dialog is 600 tall on a window that
-    /// could host far more, and every everyday page fits inside it unscrolled.**
+    /// PIN (user report 2026-08-17, derivation 2026-08-18) — **the dialog stops
+    /// at its tallest everyday page on a window that could host far more, and
+    /// every everyday page fits inside it unscrolled.**
     ///
     /// The report: one height whatever page is up means the *tallest* page sets
     /// it, the tallest page is the forty-line shortcut table, and the dialog
@@ -12764,18 +13669,17 @@ mod tests {
     /// — a whole-window surface, which is the one shape the width's own cap was
     /// chosen to avoid.
     ///
-    /// So the height takes a cap of its own, and the number is chosen against
-    /// what a page holds rather than against a screen: 600 leaves 542 for the
-    /// body, a page spends 28 on its two paddings and 25 on its one heading, and
-    /// the 489 left is nine of the dialog's 54px rows — or eight of them plus a
-    /// folded `Advanced` (38.5), which is the shape `Appearance` actually has.
-    /// Every everyday page is named here rather than swept, so the day a page
-    /// grows a tenth row this pin says so instead of the page quietly growing a
-    /// scroll bar.
+    /// So the height takes a cap of its own, and the cap is measured rather than
+    /// chosen: it is the tallest page with every `Advanced` group folded and
+    /// neither of the two lists on it — the three things the ruling already left
+    /// below the fold. 600 was that measurement written down as a literal on the
+    /// day it was taken; [`everyday_cap`] is the measurement itself, so the day a
+    /// page grows a row the cap grows with it instead of the page quietly
+    /// growing a scroll bar.
     ///
-    /// Red gate: drop the `.min(px(DIALOG_MAX_HEIGHT_LOGICAL_PX))` and the first
-    /// assertion goes red at 947; take the constant down to 500 and the second
-    /// does, on `Appearance`.
+    /// Red gate: drop the `.min(… everyday_cap …)` and the first assertion goes
+    /// red at 947; fold the shortcut lines back into the sweep and it goes red
+    /// the other way.
     #[test]
     fn the_capped_dialog_holds_every_everyday_page_and_only_the_long_ones_scroll() {
         for category in [
@@ -12787,7 +13691,7 @@ mod tests {
             let placed = shaped(category, AdvancedOpen::default(), None);
             assert_eq!(
                 height(placed.frame),
-                DIALOG_MAX_HEIGHT_LOGICAL_PX,
+                everyday_cap_height().round(),
                 "{category:?}: a {}px window still gets a dialog and not a surface",
                 SURFACE.1
             );
@@ -12831,6 +13735,281 @@ mod tests {
             MOCKUP.contains("max-height: min(600px, calc(100% - 72px));"),
             "`design/ui-mockup.html` says `.settings {{ max-height: \
              min(600px, calc(100% - 72px)) }}`"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-18) — **the height cap is the tallest everyday
+    /// page, measured, and 600 is only the ceiling over it.**
+    ///
+    /// The three exclusions are the whole of the claim, and each is stated
+    /// separately because each would fail differently. Open an `Advanced` group
+    /// and the cap must not move — otherwise the dialog is permanently as tall
+    /// as its longest possible page. Hand it a shortcut table or a profile list
+    /// and the cap must not move — otherwise the dialog's height is a fact about
+    /// the user's own files. And the answer must not depend on which tab layout
+    /// this window is in, because the row that differs (`Sidebar`) is switched
+    /// from a row on the very page it joins: a cap that followed the window
+    /// would resize the dialog under the pointer.
+    ///
+    /// Red gate: drop `advanced: AdvancedOpen::default()` from [`everyday_cap`]
+    /// and the second assertion goes red at 947; drop `shortcuts: &[]` and the
+    /// third does; read `content.rows` instead of the maximal list and the
+    /// fourth does, 54 apart.
+    #[test]
+    fn the_height_cap_is_the_tallest_everyday_page_and_not_a_number() {
+        let metrics = StackMetrics::new(1.0);
+        assert_eq!(
+            dialog_around(everyday_cap(metrics)),
+            everyday_cap_height(),
+            "the sweep and the hand derivation are one number: `Appearance` \
+             under the vertical rail, its Advanced folded"
+        );
+        assert!(
+            everyday_cap_height() < DIALOG_MAX_HEIGHT_LOGICAL_PX,
+            "and it is under the 600 ceiling, which is why the ceiling is not \
+             what answers today: {}",
+            everyday_cap_height()
+        );
+
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        let profiles = profile_lines();
+
+        // The two lists at every length a machine can hand over, the group both
+        // ways, and both rails. **The shortcut table is in every one of them**
+        // because it is in every dialog the app opens: forty lines is longer
+        // than any page, so the cap is what answers, and what this loop is
+        // pinning is that the answer never moves.
+        for tab_layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
+            let rows = visible_rows(tab_layout);
+            for profiles in [&[][..], &profiles[..]] {
+                for advanced in [AdvancedOpen::default(), every_group_open()] {
+                    let placed = layout_for_menu(
+                        SURFACE.0,
+                        SURFACE.1,
+                        1.0,
+                        None,
+                        None,
+                        SettingsContent {
+                            rows: &rows,
+                            shortcuts: &lines,
+                            profiles,
+                            scheme_files: &[],
+                            advanced,
+                            editor: None,
+                        },
+                        SettingsCategory::Appearance,
+                        UNSCROLLED,
+                        MENU_UNSCROLLED,
+                        &mut flat(0.0),
+                    )
+                    .expect("this window hosts the dialog");
+                    assert_eq!(
+                        height(placed.frame),
+                        everyday_cap_height().round(),
+                        "{tab_layout:?}: neither list nor an opened group nor \
+                         the rail's own row may move the frame — {} profiles, \
+                         group open {}",
+                        profiles.len(),
+                        advanced.is_open(SettingsCategory::Appearance)
+                    );
+                }
+            }
+        }
+
+        // And the cap is a ceiling and not a floor: a dialog whose pages are all
+        // shorter than it stays the height of its tallest page. This is the
+        // fixture without the shortcut table, which no real window is, and it is
+        // here so that "capped" is never mistaken for "padded out to".
+        let short = layout_for_menu(
+            SURFACE.0,
+            SURFACE.1,
+            1.0,
+            None,
+            None,
+            SettingsContent {
+                rows: &rows,
+                shortcuts: &[],
+                profiles: &[],
+                scheme_files: &[],
+                advanced: AdvancedOpen::default(),
+                editor: None,
+            },
+            SettingsCategory::Appearance,
+            UNSCROLLED,
+            MENU_UNSCROLLED,
+            &mut flat(0.0),
+        )
+        .expect("this window hosts the dialog");
+        assert!(
+            height(short.frame) < everyday_cap_height(),
+            "with no table to be tall for, the tallest page is what answers: {}",
+            height(short.frame)
+        );
+    }
+
+    /// PIN (user ruling 2026-08-18) — **the dialog is optically centred: two
+    /// parts of the window's slack above it and three below, never nearer the
+    /// caption than 54.**
+    ///
+    /// The old rule was a flat 54 drop, which was right while the height was the
+    /// window's own. Once the height stopped at a cap, a tall window put every
+    /// spare pixel underneath and the dialog sat with its shoulders against the
+    /// caption. 0.4 rather than 0.5 is the convention every system's dialogs
+    /// obey and the ruling names: a box at the true middle of a rectangle reads
+    /// as low.
+    ///
+    /// The floor is the second half. It binds exactly where the height was
+    /// already clamped to the window, and there it hands the bottom margin back
+    /// the 18 the clamp reserved — so the two margins are still the mock-up's
+    /// two margins on the window that has nothing to spare.
+    ///
+    /// Red gate: drop the `.max(px(DIALOG_TOP_LOGICAL_PX))` and the short
+    /// window's assertion goes red at 28; take the share to 0.5 and the tall
+    /// window's does.
+    #[test]
+    fn the_dialog_is_optically_centred_and_never_rides_above_its_floor() {
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        for surface_height in [1100.0_f32, 900.0, 700.0, 640.0, 400.0] {
+            let placed = layout_for_menu(
+                SURFACE.0,
+                surface_height,
+                1.0,
+                None,
+                None,
+                content(&rows, &lines),
+                SettingsCategory::Appearance,
+                UNSCROLLED,
+                MENU_UNSCROLLED,
+                &mut flat(0.0),
+            )
+            .expect("every one of these windows hosts the dialog");
+            let tall = height(placed.frame);
+            let slack = surface_height - tall;
+            assert!(
+                placed.frame[1] >= DIALOG_TOP_LOGICAL_PX,
+                "{surface_height}: the floor holds — {:?}",
+                placed.frame
+            );
+            assert_eq!(
+                placed.frame[1],
+                (slack * DIALOG_OPTICAL_TOP_SHARE)
+                    .max(DIALOG_TOP_LOGICAL_PX)
+                    .round(),
+                "{surface_height}: two parts above, three below"
+            );
+            assert!(
+                surface_height - placed.frame[3] >= DIALOG_BOTTOM_LOGICAL_PX - 0.5,
+                "{surface_height}: and the bottom margin the mock-up reserves \
+                 survives the move — {:?} in {surface_height}",
+                placed.frame
+            );
+        }
+
+        // The two ends of the rule, named rather than swept: a window with room
+        // to spare gives the share, and a window with none gives the floor.
+        let roomy = layout_for_menu(
+            SURFACE.0,
+            1100.0,
+            1.0,
+            None,
+            None,
+            content(&rows, &lines),
+            SettingsCategory::Appearance,
+            UNSCROLLED,
+            MENU_UNSCROLLED,
+            &mut flat(0.0),
+        )
+        .expect("a 1100px window hosts the dialog");
+        assert!(
+            roomy.frame[1] > DIALOG_TOP_LOGICAL_PX,
+            "1100 tall: the dialog comes down off the caption — {:?}",
+            roomy.frame
+        );
+        let tight = layout_for_menu(
+            SURFACE.0,
+            400.0,
+            1.0,
+            None,
+            None,
+            content(&rows, &lines),
+            SettingsCategory::Appearance,
+            UNSCROLLED,
+            MENU_UNSCROLLED,
+            &mut flat(0.0),
+        )
+        .expect("a 400px window hosts the dialog");
+        assert_eq!(
+            tight.frame[1], DIALOG_TOP_LOGICAL_PX,
+            "400 tall: the floor is what answers"
+        );
+        assert_eq!(
+            tight.frame[3],
+            400.0 - DIALOG_BOTTOM_LOGICAL_PX,
+            "and the window's other margin is exactly what is left"
+        );
+    }
+
+    /// PIN (user report 2026-08-18) — **`Advanced` starts in the page's title
+    /// column and its triangle hangs in a gutter to the left of it.**
+    ///
+    /// The report: the word was pushed a triangle and a gap to the right of
+    /// every other title on the page, so the one heading inside the list stood
+    /// out of line with the list. The files tree settled this shape first — a
+    /// row's triangle sits in its own column and the name starts where every
+    /// other name starts — and this borrows the discipline along with the glyph.
+    ///
+    /// The band does not move with the mark. The mock-up's reason is that a 10px
+    /// triangle is not a thing to ask anybody to hit and the word beside it is
+    /// what they were aiming at, so the control is the whole row; a band that
+    /// grew a gutter would be a hover fill reaching further left than every row
+    /// above it for no reason a reader could see.
+    ///
+    /// Red gate: put the label back at `mark[2] + gap` and the first assertion
+    /// goes red 18 out; put the mark back at `band[0]` and the second does.
+    #[test]
+    fn the_advanced_word_stands_in_the_title_column_with_its_triangle_in_the_gutter() {
+        let placed = shaped(SettingsCategory::Appearance, AdvancedOpen::default(), None);
+        let group = placed.advanced().expect("Appearance has an Advanced group");
+        let title = placed
+            .rows
+            .iter()
+            .map(|row| row.title[0])
+            .fold(f32::INFINITY, f32::min);
+        assert_eq!(
+            group.label[0], title,
+            "the word starts where every row's title starts"
+        );
+        assert_eq!(
+            group.band[0], title,
+            "and so does its band, which is the control"
+        );
+        assert_eq!(
+            group.mark[2],
+            group.label[0] - DISCLOSURE_GAP_LOGICAL_PX,
+            "the triangle ends one gap before the word"
+        );
+        assert_eq!(
+            group.mark[0],
+            group.label[0] - DISCLOSURE_GUTTER_LOGICAL_PX,
+            "and begins a whole gutter before it"
+        );
+        assert!(
+            group.mark[0] > placed.content[0],
+            "the gutter hangs into the content's own padding and not out of the \
+             page: mark {:?} in content {:?}",
+            group.mark,
+            placed.content
+        );
+        assert_eq!(
+            width(group.mark),
+            DISCLOSURE_MARK_LOGICAL_PX,
+            "and the triangle keeps the files tree's own 10px square"
+        );
+        assert!(
+            MOCKUP.contains(".adv-head .tri { margin-left: -18px; }"),
+            "`design/ui-mockup.html` hangs the triangle in the same gutter"
         );
     }
 
@@ -12932,6 +14111,7 @@ mod tests {
                 let thinner = SettingsContent {
                     rows: &kept,
                     profiles: &[],
+                    scheme_files: &[],
                     shortcuts: if absent == SettingsCategory::Shortcuts {
                         &[]
                     } else {
@@ -13000,6 +14180,7 @@ mod tests {
             rows: &without,
             shortcuts: &lines,
             profiles: &[],
+            scheme_files: &[],
             advanced: AdvancedOpen::default(),
             editor: None,
         };
@@ -13471,9 +14652,11 @@ mod tests {
             vec![
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
-                SettingsRow::Tables
+                SettingsRow::Tables,
+                SettingsRow::BlockMaxHeight
             ],
-            "and it stands last of the three, under the two it is a variant of"
+            "and it stands last of the three switches, under the two it is a \
+             variant of — with the page's one measurement below all three"
         );
     }
 
@@ -13519,6 +14702,200 @@ mod tests {
                 "tables={tables} must tick item {expected}"
             );
         }
+    }
+
+    /// PIN (2026-08-18) — **the `Maximum height` row the mock-up drew, built.**
+    ///
+    /// It stood in `design/ui-mockup.html` from the day the Rendered blocks page
+    /// did (4370), with a working picker over a machine that had already been
+    /// clamping and scrolling blocks to `block_max_height_px` since the formula
+    /// slice — and no way for a person to name the number. A control drawn in
+    /// the authority and missing from the product is the one state a control is
+    /// least allowed to be in, because every reader who goes looking for it is
+    /// told the product has it.
+    ///
+    /// The four items are the mock-up's own and in pixels for the reason the
+    /// mock-up's are: what is capped is a picture, scaled by the window's DPI,
+    /// and a limit counted in text rows would land between two of them by the
+    /// time `decorate_math_frame` read it.
+    ///
+    /// Red gate: drop the row from `visible_rows` and the last assertion goes
+    /// red; change a number in `BLOCK_MAX_HEIGHT_OPTIONS` and the label pinned
+    /// against the mock-up's own `data-v` goes with it.
+    #[test]
+    fn the_maximum_height_row_offers_the_mock_ups_own_four_heights() {
+        let placed = open_rows_measured(
+            1.0,
+            Some(SettingsRow::BlockMaxHeight),
+            TabLayoutMode::Horizontal,
+            0.0,
+        );
+        let labels = labels_of(&placed, None, &values());
+        for text in [
+            "Maximum height",
+            "Blocks taller than this scroll inside themselves",
+            "No limit",
+            "120 px",
+            "240 px",
+            "480 px",
+        ] {
+            assert!(
+                labels.iter().any(|label| label.text == text),
+                "{text:?} is part of the row and is not drawn; drawn: {:?}",
+                labels.iter().map(|it| it.text.clone()).collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(SettingsRow::BlockMaxHeight.option_count(), 4);
+        assert_eq!(BLOCK_MAX_HEIGHT_OPTIONS, [0, 120, 240, 480]);
+        assert_eq!(
+            SettingsRow::BlockMaxHeight.category(),
+            SettingsCategory::RenderedBlocks,
+            "the page the mock-up drew it on"
+        );
+        assert!(
+            !SettingsRow::BlockMaxHeight.advanced(),
+            "the Rendered blocks page has no Advanced group and this row does \
+             not open one"
+        );
+        for height in BLOCK_MAX_HEIGHT_OPTIONS {
+            assert!(
+                MOCKUP.contains(&format!(r#"data-v="{height}""#)),
+                "the mock-up's picker offers {height} and this build must \
+                 offer exactly its four"
+            );
+        }
+        assert_eq!(
+            visible_rows(TabLayoutMode::Horizontal)
+                .into_iter()
+                .rfind(|row| row.category() == SettingsCategory::RenderedBlocks),
+            Some(SettingsRow::BlockMaxHeight),
+            "and it stands under the three switches: they say whether a block \
+             is drawn at all, and this says how much room one may take"
+        );
+    }
+
+    /// PIN — the height row's own items ask for the height and nothing else
+    /// does, and the tick follows the stored number rather than approximating
+    /// it.
+    ///
+    /// The `None` is the load-bearing half. `bt_persist` deliberately does not
+    /// clamp the key — every value of it is meaningful, unlike a scheme name —
+    /// so a file naming 200 is honoured as 200, and a picker that ticked 240
+    /// because it was nearest would be claiming the file said something it did
+    /// not.
+    #[test]
+    fn only_the_height_rows_items_ask_for_it_and_an_unlisted_height_ticks_nothing() {
+        for (index, height) in BLOCK_MAX_HEIGHT_OPTIONS.into_iter().enumerate() {
+            assert_eq!(
+                block_max_height_requested(SettingsTarget::Choice(
+                    SettingsRow::BlockMaxHeight,
+                    index
+                )),
+                Some(height)
+            );
+            let values = SettingsValues {
+                block_max_height: height,
+                ..values()
+            };
+            assert_eq!(
+                SettingsRow::BlockMaxHeight.selected_index(&values),
+                Some(index),
+                "{height} must tick item {index}"
+            );
+        }
+        assert_eq!(
+            block_max_height_requested(SettingsTarget::Choice(SettingsRow::BlockMaxHeight, 4)),
+            None,
+            "there is no fifth option to ask for"
+        );
+        for target in [
+            SettingsTarget::Choice(SettingsRow::Tables, 0),
+            SettingsTarget::Choice(SettingsRow::Formulas, 1),
+            SettingsTarget::Combo(SettingsRow::BlockMaxHeight),
+            SettingsTarget::Scrim,
+        ] {
+            assert_eq!(block_max_height_requested(target), None, "{target:?}");
+        }
+        assert_eq!(
+            tables_requested(SettingsTarget::Choice(SettingsRow::BlockMaxHeight, 0)),
+            None,
+            "and the Tables switch is not moved by the height row"
+        );
+
+        let odd = SettingsValues {
+            block_max_height: 200,
+            ..values()
+        };
+        assert_eq!(
+            SettingsRow::BlockMaxHeight.selected_index(&odd),
+            None,
+            "a height this build's list does not offer ticks nothing rather \
+             than the nearest thing to it"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-18) — **the PSReadLine row reads `Update` when an
+    /// older Folio build's module is the one on disk, and its two items are
+    /// still `On` and `Off`.**
+    ///
+    /// The value and the items answer two different questions — what this row is
+    /// *at*, and what a reader may do to it — and only the first of them has a
+    /// third answer. A third item would have been a second way to say what `On`
+    /// already says, on the one row in the dialog whose `Off` deletes a directory
+    /// outside this product's own data folder.
+    ///
+    /// Red gate: drop the `value_text` arm and the button falls back to `On`,
+    /// which is the row saying nothing about the newer module it is holding.
+    #[test]
+    fn the_psreadline_row_says_update_over_an_older_folio_build() {
+        use crate::psreadline::RowState;
+
+        let updatable = SettingsValues {
+            psreadline: RowState::UpdateAvailable,
+            psreadline_install_available: true,
+            psreadline_remove_available: true,
+            ..values()
+        };
+        assert_eq!(
+            SettingsRow::PsReadLine.value_text(&updatable),
+            Some(Text::PsReadLineUpdate.text()),
+            "the button says what pressing it would do"
+        );
+        assert_eq!(
+            SettingsRow::PsReadLine.selected_index(&updatable),
+            Some(0),
+            "and the tick stays on On, because the module *is* there — a tick \
+             on Off would be the row claiming an empty directory it is \
+             offering to empty"
+        );
+        assert_eq!(
+            SettingsRow::PsReadLine.option_count(),
+            2,
+            "two items, not three: On and Off are what a reader does to this row"
+        );
+        assert!(SettingsRow::PsReadLine.option_enabled(0, &updatable));
+        assert!(SettingsRow::PsReadLine.option_enabled(1, &updatable));
+
+        // And the row that is simply installed says nothing extra.
+        let installed = SettingsValues {
+            psreadline: RowState::InstalledByFolio,
+            psreadline_install_available: false,
+            psreadline_remove_available: true,
+            ..values()
+        };
+        assert_eq!(SettingsRow::PsReadLine.value_text(&installed), None);
+        assert_eq!(SettingsRow::PsReadLine.selected_index(&installed), Some(0));
+
+        // The word is drawn where the button is, and not only computed.
+        let placed = shaped(SettingsCategory::Terminal, AdvancedOpen::default(), None);
+        let labels = labels_of(&placed, None, &updatable);
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.text == Text::PsReadLineUpdate.text()),
+            "drawn: {:?}",
+            labels.iter().map(|it| it.text.clone()).collect::<Vec<_>>()
+        );
     }
 
     /// PIN: clicking an item asks for exactly the value that item stands for,
@@ -14292,6 +15669,7 @@ mod tests {
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
                 SettingsRow::Tables,
+                SettingsRow::BlockMaxHeight,
                 SettingsRow::Language,
                 SettingsRow::GitPanel,
                 SettingsRow::DefaultProfile,
@@ -14319,6 +15697,7 @@ mod tests {
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
                 SettingsRow::Tables,
+                SettingsRow::BlockMaxHeight,
                 SettingsRow::Language,
                 SettingsRow::GitPanel,
                 SettingsRow::DefaultProfile,
@@ -16425,6 +17804,7 @@ mod tests {
             rows,
             shortcuts,
             profiles,
+            scheme_files: &[],
             advanced: every_group_open(),
             editor: None,
         }
@@ -16675,6 +18055,7 @@ mod tests {
             rows,
             shortcuts: &[],
             profiles,
+            scheme_files: &[],
             advanced: every_group_open(),
             editor: Some(subject),
         }

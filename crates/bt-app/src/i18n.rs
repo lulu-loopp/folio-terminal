@@ -624,7 +624,7 @@ pub enum Text {
     /// Why that verb is dark. A bundled scheme travels inside the executable and
     /// has no file to send anywhere, and saying so is the whole of what a reader
     /// standing in front of a greyed button needs.
-    DeleteSchemeBundled,
+    DeleteSchemeNoFiles,
     /// And what it will do when it is live. The line the two share is always
     /// there, so it always says something: the reason a verb is dark, or the
     /// fact about the verb that is not.
@@ -843,6 +843,34 @@ pub enum Text {
     /// what the answer costs rather than the category it falls in.
     CapNoneLong,
     CapNoneLongNoLinks,
+
+    // ── the Rendered blocks page's fourth row (2026-08-18) ─────────────────
+    //
+    // Appended for `RowTables`' own reason, which has not changed: the order of
+    // this enum carries no meaning — `visible_rows` decides what the dialog
+    // shows and in what order — and a new entry in the middle of the settings
+    // family is a conflict in every lane that is adding one.
+    RowBlockMaxHeight,
+    DescBlockMaxHeight,
+    /// **The PSReadLine row's fourth value** (2026-08-18): an older Folio build's
+    /// module is installed and this one carries a newer patch. It stands where a
+    /// picker draws its ticked item, because that is the one place on the row a
+    /// reader is already looking for its state — and the two items behind it are
+    /// still `On` and `Off`, which is what the ruling asked for.
+    PsReadLineUpdate,
+    /// The uncapped end of the `Maximum height` picker: the one option that is a
+    /// word rather than a quantity, which is why it is in this table and the
+    /// three numbers beside it are not.
+    OptionBlockHeightNone,
+    /// **What the foot's first verb says when the scheme in force is already a
+    /// file of the reader's own** (user report 2026-08-18).
+    ///
+    /// `Customise scheme…` copies and then opens, which is the right sentence
+    /// over a bundled scheme and the wrong one over a file that is already
+    /// theirs: a reader who pressed it expecting to edit their scheme got a
+    /// second copy of it, which is where a folder full of `(custom 2)` comes
+    /// from. One verb, two words, decided by what the row is on.
+    EditScheme,
 }
 
 impl Text {
@@ -1283,16 +1311,27 @@ impl Text {
             Self::CustomiseScheme => pick(lang, "Customise scheme…", "自定义配色…"),
             Self::SchemeInUseBroken => pick(lang, "Colour scheme not reloaded", "配色未重新载入"),
             Self::SchemeInUseGone => pick(lang, "Colour scheme not found", "找不到配色"),
-            Self::DeleteScheme => pick(lang, "Delete scheme", "删除配色"),
-            Self::DeleteSchemeBundled => pick(
+            // **The ellipsis arrived with the menu** (2026-08-18): since the
+            // verb opens a list of the folder's own files rather than acting on
+            // the scheme in force, it means what an ellipsis means everywhere in
+            // this window — the answer is somewhere else.
+            Self::DeleteScheme => pick(lang, "Delete scheme…", "删除配色…"),
+            // **Why the verb is dark, and the only reason it can be since
+            // 2026-08-18** (user report): it opens a menu of the folder's own
+            // files, so the one thing that can stop it is an empty folder. The
+            // sentence it replaces — "Built-in schemes have no file to delete" —
+            // was true of a verb that acted on the scheme in force, and that
+            // verb was the bug: a reader with two custom schemes and a bundled
+            // one selected read it as a refusal about *their* schemes.
+            Self::DeleteSchemeNoFiles => pick(
                 lang,
-                "Built-in schemes have no file to delete",
-                "内置配色没有可删除的文件",
+                "No colour schemes of your own yet",
+                "还没有自己的配色文件",
             ),
             Self::DeleteSchemeUserFile => pick(
                 lang,
-                "Deleting sends this scheme's file to the Recycle Bin",
-                "删除会把这套配色的文件移入回收站",
+                "Choosing one sends its file to the Recycle Bin",
+                "选中一项会把它的文件移入回收站",
             ),
             Self::SchemeDeleted => pick(lang, "Colour scheme deleted", "配色已删除"),
             Self::BackgroundPictureRefused => {
@@ -1341,6 +1380,26 @@ impl Text {
                 "Draw markdown tables in output; off shows the pipe text",
                 "绘制输出里的 markdown 表格；关闭则显示管道符原文",
             ),
+            // 「最大高度」is the row, and the sentence is the mock-up's own
+            // (9941): it says what the cap *does* rather than what it forbids,
+            // which is the difference between a cap a reader will reach for and
+            // one they will assume truncates their output. It fits the 150px
+            // sentence column the dialog gives every row, which the mock-up's
+            // longer second version did not.
+            Self::RowBlockMaxHeight => pick(lang, "Maximum height", "最大高度"),
+            Self::DescBlockMaxHeight => pick(
+                lang,
+                "Blocks taller than this scroll inside themselves",
+                "更高的块在自己内部滚动",
+            ),
+            Self::OptionBlockHeightNone => pick(lang, "No limit", "不限"),
+            // The ellipsis is `CustomiseScheme`'s own and means what it means
+            // everywhere in this window: the answer is somewhere else — here, a
+            // file in a preview pane.
+            Self::EditScheme => pick(lang, "Edit scheme…", "编辑配色…"),
+            // A verb, because that is what pressing `On` here does. 「更新」is
+            // the word every Chinese software updater uses for exactly this.
+            Self::PsReadLineUpdate => pick(lang, "Update", "更新"),
 
             // ── the profile editor (§7.1.6c-6b) ────────────────
             Self::ProfilesEdit => pick(lang, "Edit", "编辑"),
@@ -1488,7 +1547,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 235] = [
+    pub const ALL: [Self; 240] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -1649,7 +1708,7 @@ impl Text {
         Self::SchemeInUseBroken,
         Self::SchemeInUseGone,
         Self::DeleteScheme,
-        Self::DeleteSchemeBundled,
+        Self::DeleteSchemeNoFiles,
         Self::DeleteSchemeUserFile,
         Self::SchemeDeleted,
         Self::BackgroundPictureRefused,
@@ -1724,6 +1783,11 @@ impl Text {
         Self::CapCmdNoLinks,
         Self::CapNoneLong,
         Self::CapNoneLongNoLinks,
+        Self::RowBlockMaxHeight,
+        Self::DescBlockMaxHeight,
+        Self::OptionBlockHeightNone,
+        Self::PsReadLineUpdate,
+        Self::EditScheme,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
@@ -1882,6 +1946,20 @@ pub fn psreadline_row_installed_in(lang: Lang, patched: &str) -> String {
     match lang {
         Lang::English => format!("{patched} · installed by Folio"),
         Lang::Chinese => format!("{patched} · 由 Folio 安装"),
+    }
+}
+
+/// The row's line when an older Folio build's module is the one on disk
+/// (2026-08-18).
+///
+/// It names **both** builds because the reader's question in this state is not
+/// "what have I got" but "what would pressing On change", and a sentence naming
+/// only one of the two answers neither half of it.
+#[must_use]
+pub fn psreadline_row_update_in(lang: Lang, installed: &str, available: &str) -> String {
+    match lang {
+        Lang::English => format!("{installed} · installed by Folio · {available} available"),
+        Lang::Chinese => format!("{installed} · 由 Folio 安装 · 有 {available} 可用"),
     }
 }
 
@@ -2205,11 +2283,22 @@ pub fn unknown_profile_banner_text(unknown: &str, started: &str) -> String {
 /// nothing to do. The second clause names the scheme now in force, for
 /// [`scheme_in_use_gone`]'s reason: the row moved, and a row that moves without
 /// saying where is a row the reader has to go and check.
+/// **The second clause only when a row actually moved** (user report
+/// 2026-08-18). Since the verb became a menu over the whole folder, the ordinary
+/// case is deleting a scheme nobody is wearing — and a card announcing which
+/// scheme "is in force" after an operation that changed no colours would be
+/// reporting a move that did not happen.
 #[must_use]
-pub fn scheme_deleted(file: &str, fallback: &str) -> String {
-    match current() {
-        Lang::English => format!("{file} — moved to the Recycle Bin. {fallback} is in force."),
-        Lang::Chinese => format!("{file} —— 已移入回收站。当前使用 {fallback}。"),
+pub fn scheme_deleted(file: &str, fallback: Option<&str>) -> String {
+    match (current(), fallback) {
+        (Lang::English, Some(fallback)) => {
+            format!("{file} — moved to the Recycle Bin. {fallback} is in force.")
+        }
+        (Lang::Chinese, Some(fallback)) => {
+            format!("{file} —— 已移入回收站。当前使用 {fallback}。")
+        }
+        (Lang::English, None) => format!("{file} — moved to the Recycle Bin."),
+        (Lang::Chinese, None) => format!("{file} —— 已移入回收站。"),
     }
 }
 

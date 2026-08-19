@@ -945,6 +945,18 @@
     transition: transform 120ms cubic-bezier(.2,0,0,1);
   }
   .frow.open > .tri, .adv.open > .adv-head > .tri { transform: rotate(90deg); }
+  /* THE TRIANGLE HANGS IN A GUTTER, THE WORD KEEPS THE TITLE COLUMN (user report
+     2026-08-18). `.adv-head` is a `.row` with `gap: 8px`, so the triangle used
+     to push `Advanced` ten pixels and a gap right of every other title on the
+     page — the one heading inside the list, out of line with the list. The files
+     tree settled this shape first: a row's triangle sits in its own column and
+     the name starts where every other name starts. 18 is the 10px mark plus the
+     8px gap, and it reaches back into `.content`'s own 22px padding, which is
+     what leaves it room. The BAND does not move with it — see the note on
+     `.adv-head` below: the whole row is the control, and a hover fill reaching
+     further left than every row above it would be a gutter nobody asked to
+     hit. */
+  .adv-head .tri { margin-left: -18px; }
   .frow .tri.leaf { visibility: hidden; }
   .frow .fico { width: 15px; height: 15px; flex: none; }
   .frow .fico.folder { color: var(--accent); }
@@ -2309,7 +2321,25 @@
        clickable through it */
     display: none; z-index: 70;
   }
-  .overlay.show { display: block; }
+  /* THE DIALOG IS OPTICALLY CENTRED, NOT HUNG (user ruling 2026-08-18). It used
+     to carry `margin: 54px auto 0`, which was right while its height was the
+     window's own; once the height stopped at a cap, a tall window left every
+     spare pixel underneath and the dialog sat with its shoulders against the
+     caption. The free space is split two parts above to three below — slightly
+     above the geometric middle, because a box at the true middle of a rectangle
+     reads as low — and never nearer the caption than the 54 this rule used to
+     be, nor nearer the floor than the 18 the `max-height` reserves.
+
+     `grid-template-rows: minmax(54px, 2fr) auto minmax(18px, 3fr)` says exactly
+     that and says it once: 2fr over 3fr IS 0.4, and the two `minmax` floors ARE
+     the two margins the old `margin` shorthand carried. The native build's
+     `top = max(54, 0.4 * (window - dialog))` is this declaration solved. */
+  .overlay.show {
+    display: grid;
+    grid-template-rows: minmax(54px, 2fr) auto minmax(18px, 3fr);
+    grid-template-columns: 1fr auto 1fr;
+  }
+  .overlay.show > .settings { grid-row: 2; grid-column: 2; }
   .settings {
     /* 480 until the category rail arrived (user ruling Q2 = A, 2026-08-17).
        The widening is arithmetic and not taste: 168 of rail plus the 22px
@@ -2319,7 +2349,10 @@
        against, and it stays a centred dialog rather than becoming a whole-window
        surface - this is still a modal you dismiss, not a place you go. */
     width: min(720px, 92%);
-    margin: 54px auto 0;
+    /* `margin: 54px auto 0` until 2026-08-18 — the drop now belongs to the grid
+       above, which is what optical centring needs and a flat top margin cannot
+       express. `auto` on the sides is the `1fr` columns beside it. */
+    justify-self: center;
     /* THE HEIGHT IS THE TALLEST PAGE'S, WHATEVER PAGE IS UP (§7.1.6c-5, user
        ruling 2026-08-17). It used to be the height of the page showing, so the
        frame, the header and the `×` all jumped every time a word in the rail was
@@ -2350,12 +2383,19 @@
        shape `width: min(720px, 92%)` was chosen to avoid. The height needs the
        same sentence said on its own axis.
 
-       600 is where an everyday page stops needing a scroll bar: 2 of border and
-       56 of header leave 542 for the body, a page spends 10 + 18 on its own
-       paddings and 10 + 13 + 2 on its one heading, and the 489 left is nine
-       54px rows — or eight of them plus a folded `Advanced` (38.5), which is the
-       shape Appearance has. What is left to scroll is exactly what should: the
-       shortcut table, and an `Advanced` group somebody opened. */
+       600 WAS "where an everyday page stops needing a scroll bar", measured once
+       off the page that needed the most and then written down as a literal —
+       and a measurement kept as a literal is right until somebody adds a row,
+       silently, because the page that outgrew it simply grows a scroll bar. So
+       since 2026-08-18 the number is DERIVED (`everyday_cap`): the tallest page
+       with every `Advanced` group folded and neither of the two lists on it,
+       which today is Appearance under the vertical rail — 8 rows and a folded
+       disclosure, 581.5 — and which follows the rows from here on. 600 stays as
+       the CEILING over that derivation, because "this is a dialog and not a
+       surface" is a fact about dialogs rather than about the rows this build
+       happens to draw. What is left to scroll is exactly what the derivation
+       excludes: the shortcut table, the profile list, and an `Advanced` group
+       somebody opened. */
     max-height: min(600px, calc(100% - 72px));
     display: flex; flex-direction: column;
     background: var(--win);
@@ -4335,8 +4375,32 @@
              will do, or why it cannot. -->
         <div class="adv-foot-hint">Deleting sends this scheme's file to the Recycle Bin</div>
         <div class="adv-foot">
+          <!-- IT READS `Edit scheme…` OVER A FILE THE READER ALREADY OWNS
+               (user report 2026-08-18). `Customise scheme…` copies and then
+               opens, which is right over a bundled scheme and wrong over a file
+               that is already theirs: pressing it expecting to edit produced
+               `(custom 2)`, which is where a folder full of copies comes from.
+               One verb with two words rather than two buttons — the intent is
+               the same either way, and only the first step differs — and one
+               box, because a foot whose buttons moved when a scheme was chosen
+               would be a row of verbs that shifts under the pointer. -->
           <button class="btn adv-customise">Customise scheme…</button>
-          <button class="btn adv-delete">Delete scheme</button>
+          <!-- IT OPENS A MENU OF THE READER'S OWN SCHEME FILES (user report
+               2026-08-18), and deletes nothing by itself. It used to act on the
+               scheme IN FORCE: a reader with two custom schemes whose Dark row
+               was sitting on a bundled `Solarized Dark` found it greyed under a
+               sentence about built-in schemes having no file, with both of
+               their own files a folder away and no way to reach them but to
+               select each one first. A select-then-delete dance nobody
+               discovers is a verb that does not work.
+
+               The menu is the pickers' own popup (no tick column: nothing in it
+               is a current value), it lists the folder's files under the names
+               the picker lists them by, both canvases together, and never
+               anything bundled — there is no file of a bundled scheme to send
+               anywhere. Greyed only when the folder is empty, which is now the
+               only honest reason for it to be. -->
+          <button class="btn adv-delete">Delete scheme…</button>
           <button class="btn adv-reset">Reset to defaults</button>
         </div>
         </div>
@@ -4371,6 +4435,17 @@
             <div class="title">PSReadLine patch</div>
             <div class="desc" id="psrl-desc">2.0.0 on this machine · the resize repair does nothing</div>
           </div>
+          <!-- THE VALUE CAN READ `Update` (user ruling 2026-08-18), and the two
+               items stay `On` and `Off`. A module an older Folio installed used
+               to answer "not mine" to both halves of this row — the byte
+               comparison did not recognise it and the probe reported the same
+               `2.4.6` every `-bt` build reports — so the one row in the product
+               that exists to manage that module could neither remove nor
+               replace it. The native build recognises the `2.4.6-bt.*` family
+               by the `ProductVersion` in the DLL's own version resource; the
+               button then says what pressing `On` would do, which is the same
+               road the Background image row's button takes when its answer is
+               not one of its own items. -->
           <div class="combo" data-combo="psreadline">
             <button aria-haspopup="listbox"><span class="value">Off</span><span class="chev">▼</span></button>
             <div class="combo-menu" role="listbox">
@@ -4399,6 +4474,27 @@
         <div class="row">
           <div class="text">
             <div class="title">Maximum height</div>
+            <!-- BUILT 2026-08-18. This row stood here with a working picker and
+                 nothing behind it from the day this page was drawn, over a
+                 machine that had been clamping and scrolling blocks to
+                 `block_max_height_px` since the formula slice. A control drawn
+                 in the authority and missing from the product is the one state
+                 a control is least allowed to be in, because every reader who
+                 goes looking for it is told the product has it.
+
+                 The native build takes these four values exactly, and in
+                 PIXELS for the reason they are pixels here: what is capped is a
+                 picture, scaled by the window's DPI, and neither a raster nor a
+                 laid-out table is a whole number of text rows by the time the
+                 clamp reads it.
+
+                 ONE SENTENCE AND NOT TWO, a stated deviation: this prototype
+                 swaps the line below between "shows in full" and "scroll inside
+                 themselves", and the native row's description is a
+                 `&'static str` that does not read the value (the i18n ruling's
+                 own constraint). It carries the second of the two, because
+                 `No limit` is a word in the picker that already says the
+                 first. -->
             <div class="desc" id="blockmax-desc">Rendered blocks show in full, however tall they are</div>
           </div>
           <div class="combo" data-combo="blockmax">

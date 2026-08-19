@@ -57,7 +57,11 @@ use serde::{Deserialize, Serialize};
 /// **v12 carries one field**, `tables`, and it is v11's reason again: a different day, a
 /// different reader. It carries a behaviour forward rather than choosing a new default — see
 /// `migrate_settings_v11_to_v12`.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 12;
+///
+/// **v13 carries `block_max_height`**, the Rendered blocks page's own `Maximum height` row, and
+/// it is the same shape once more: one key, its own day, and a migration that writes the answer
+/// every build before it gave — no cap at all.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 13;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -156,14 +160,23 @@ pub const DEFAULT_BACKGROUND_OPACITY: u8 = 100;
 /// made unreadable.
 pub const MINIMUM_BACKGROUND_OPACITY: u8 = 30;
 
-/// `settings.json` v12 — docs/M2-persistence-schema-v1.md §2:
+/// The height cap a `settings.json` that has never named one is read as: **none**.
+///
+/// Zero is the value and "no limit" is the sentence, and it is the default because it is what
+/// every build before the row existed did. A product that started capping blocks the day it grew
+/// a control for capping them would be answering a question on the reader's behalf with the one
+/// answer they cannot have asked for.
+pub const DEFAULT_BLOCK_MAX_HEIGHT: u32 = 0;
+
+/// `settings.json` v13 — docs/M2-persistence-schema-v1.md §2:
 /// ```json
 /// {
-///   "schema_version": 12,
+///   "schema_version": 13,
 ///   "theme_mode": "System" | "Light" | "Dark",
 ///   "display_formulas": true | false,
 ///   "inline_formulas": true | false,
 ///   "tables": true | false,
+///   "block_max_height": 0 | 120 | 240 | 480,
 ///   "default_profile": "pwsh" | "wsl" | "gitbash" | "cmd" | "",
 ///   "git_panel": true | false,
 ///   "split_direction": "Auto" | "Right" | "Down",
@@ -217,6 +230,29 @@ pub struct SettingsV1 {
     /// pipe is ordinary punctuation, and someone who wants typeset formulas with
     /// every `|` in their logs left alone has to be able to say exactly that.
     pub tables: bool,
+    /// **How tall a rendered block may stand before it scrolls inside itself**, in logical
+    /// pixels, and `0` for no limit at all (the Rendered blocks page's `Maximum height` row,
+    /// mock-up 4370).
+    ///
+    /// `0` and not `Option<u32>`, because the file is meant to be read and edited by hand and
+    /// `"block_max_height": 0` says "no limit" in the same shape every other number in this
+    /// document says its own value; a key that is sometimes `null` and sometimes a number asks a
+    /// person editing it to know which of two grammars this line is in. The type that *does*
+    /// carry the distinction is `bt_term::MathLayoutOptions::block_max_height_px`, which is a
+    /// `NonZeroU32` — and the conversion happens once, at the door, where zero stops being a
+    /// number and becomes an absence.
+    ///
+    /// **Logical pixels, not rows.** The cap is applied to a *picture*: a formula raster and a
+    /// table's laid-out box are both scaled by the window's DPI and neither is a whole number of
+    /// text rows, so a limit counted in rows would have to be converted into the units the
+    /// clamp actually works in and would land somewhere between two of them. The mock-up's own
+    /// list — 120, 240, 480 — is in pixels for that reason and this stores exactly what it
+    /// offers.
+    ///
+    /// This crate does not clamp it. A file naming a height this build's picker does not offer
+    /// is honoured as written — the number is meaningful at every value, unlike a scheme name or
+    /// a profile id — and the picker simply shows no tick. See `settings::block_max_height_index`.
+    pub block_max_height: u32,
     /// Which profile a new tab — and the window's opening tab — starts from.
     ///
     /// **A profile id, never an index.** The mock-up's `state.defaultProfile` is
@@ -443,6 +479,7 @@ impl Default for SettingsV1 {
             display_formulas: true,
             inline_formulas: true,
             tables: true,
+            block_max_height: DEFAULT_BLOCK_MAX_HEIGHT,
             default_profile: DEFAULT_PROFILE_UNSET.to_owned(),
             git_panel: true,
             split_direction: SplitDirectionV1::default(),

@@ -1402,6 +1402,17 @@ impl DualPlaneSession {
         changed
     }
 
+    /// The options this session is laying blocks out under.
+    ///
+    /// Read back rather than remembered by the caller, so that a setting that
+    /// moves one field — the Rendered blocks page's `Maximum height` — can hand
+    /// the rest of the struct back untouched instead of rebuilding it from
+    /// defaults and quietly resetting whatever else the pane was born with.
+    #[must_use]
+    pub fn math_layout_options(&self) -> MathLayoutOptions {
+        self.math_layout_options
+    }
+
     pub fn set_math_layout_options(&mut self, options: MathLayoutOptions) {
         if self.math_layout_options.detect_image_paths && !options.detect_image_paths {
             let retired = self

@@ -4822,14 +4822,19 @@ struct Runtime {
     /// than re-asked because both the row and the dialog need it and a known
     /// folder lookup is a COM call.
     psreadline_documents: Option<PathBuf>,
-    /// Whether the module Folio installs is on disk **right now**, byte for
-    /// byte.
+    /// Which copy of Folio's module is on disk **right now** — this build's, an
+    /// older Folio build's, or none.
     ///
-    /// Cached because it is nine file reads and the settings dialog asks on
-    /// every frame it draws; refreshed at the two moments it can change — an
-    /// install and a removal — and once when the probe lands, which is the first
-    /// point at which anything wants to know.
-    psreadline_installed: bool,
+    /// Cached because it is nine file reads and a version-resource walk, and the
+    /// settings dialog asks on every frame it draws; refreshed at the two moments
+    /// it can change — an install and a removal — and once when the probe lands,
+    /// which is the first point at which anything wants to know.
+    ///
+    /// **Three answers since 2026-08-18**, and the middle one is why: a module an
+    /// older Folio wrote is neither "ours" nor "somebody else's", and a `bool`
+    /// made it the second, which is how it became a module this product had
+    /// installed and would not remove.
+    psreadline_installed: psreadline::InstalledCopy,
     /// Whether the size row has been answered since the invitation was refused.
     ///
     /// The one exception in the trigger table, and it is deliberately *not*
@@ -13326,6 +13331,17 @@ struct TablePaint {
     stamp: (u32, [u8; 3], [u8; 3], [u8; 3]),
 }
 
+/// `settings.json`'s height cap, as the layout options carry it.
+///
+/// **This is where zero stops being a number and becomes an absence.** The file
+/// stores `0` because a document a person edits by hand should say "no limit" in
+/// the same grammar it says 240; `MathLayoutOptions` stores `Option<NonZeroU32>`
+/// because a clamp of zero would mean a block of no height at all. One
+/// conversion, at the door, so neither side has to know the other's spelling.
+fn block_max_height_px(height: u32) -> Option<std::num::NonZeroU32> {
+    std::num::NonZeroU32::new(height)
+}
+
 /// The Rendered-blocks switches a new pane must be born obeying.
 ///
 /// One struct rather than two `bool` parameters because they would sit adjacent
@@ -13341,6 +13357,12 @@ struct FormulaSwitches {
     inline: bool,
     /// "Tables" - presentation only; a proven pipe table may be a block.
     tables: bool,
+    /// "Maximum height" - how tall a block may stand before it scrolls inside
+    /// itself, in logical pixels, and `0` for no cap. Not a switch, and here
+    /// anyway for this struct's own reason: it is a Rendered-blocks answer a new
+    /// pane must be born obeying, and a pane split off a capped one that drew its
+    /// blocks whole would be the same bug the three bools are here to prevent.
+    max_height: u32,
 }
 
 impl FormulaSwitches {
@@ -13349,6 +13371,7 @@ impl FormulaSwitches {
             display: settings.display_formulas,
             inline: settings.inline_formulas,
             tables: settings.tables,
+            max_height: settings.block_max_height,
         }
     }
 }
@@ -13536,6 +13559,7 @@ fn create_leaf_session(
     session.set_ascii_baseline_subpixels(renderer.metrics().ascii_baseline_subpixels());
     session.set_math_layout_options(MathLayoutOptions {
         detect_image_paths: true,
+        block_max_height_px: block_max_height_px(formulas.max_height),
         ..MathLayoutOptions::default()
     });
     // A pane born from a split must obey the switches its neighbours already
@@ -15276,7 +15300,7 @@ impl Runtime {
             dirty_gate: restore::DirtyGate::default(),
             psreadline_invite: psreadline::Invite::default(),
             psreadline_documents: psreadline::documents_directory(),
-            psreadline_installed: false,
+            psreadline_installed: psreadline::InstalledCopy::default(),
             psreadline_size_changed: false,
             window_close_requested: false,
             preview_menu: profiles::PreviewMenu::default(),
@@ -18970,8 +18994,8 @@ impl Runtime {
         // disappears with the Tab layout combo, the shortcut lines change as the
         // user records, and the height, the hit test and the draw all come off
         // this one call, so all three follow it in the same frame.
-        let (rows, shortcuts, profile_lines) = self.settings_content();
-        let content = self.settings_dialog(&rows, &shortcuts, &profile_lines);
+        let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
+        let content = self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files);
         // **The probe's second trigger** (§7.1.6c-5), and it is here because this
         // is the one place that knows which page is being shown *and* is reached
         // by every road to showing it — the gear, a press on the rail, an arrow
@@ -18994,12 +19018,13 @@ impl Runtime {
         // it is told.
         let renderer = &mut self.renderer;
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
-        settings::layout_for_menu(
+        settings::layout_for_menus(
             width as f32,
             height as f32,
             scale,
             menu,
             self.settings.row_menu(),
+            self.settings.delete_menu(),
             content,
             category,
             scroll,
@@ -19022,6 +19047,7 @@ impl Runtime {
         Vec<settings::SettingsRow>,
         Vec<shortcuts::ShortcutRow>,
         Vec<profiles::ProfileLine>,
+        Vec<settings::SchemeFileLine>,
     ) {
         (
             settings::visible_rows(self.rail.layout),
@@ -19031,6 +19057,19 @@ impl Runtime {
             // copy kept on the struct is a copy that has to be refreshed by
             // whoever changed the table, in every place they changed it.
             profiles::page_lines(&self.profile_programs, self.default_profile()),
+            // And the folder, for the third list's own reason: what
+            // `Delete scheme…` offers is what is in `%APPDATA%\Folio\schemes\`
+            // *now*, and the catalogue is re-read on a reason rather than on a
+            // clock — so reading it here is reading the same revision the
+            // pickers above are drawn from.
+            schemes::catalogue()
+                .user_files()
+                .into_iter()
+                .map(|(name, file)| settings::SchemeFileLine {
+                    name: name.to_owned(),
+                    file: file.to_owned(),
+                })
+                .collect(),
         )
     }
 
@@ -19048,11 +19087,13 @@ impl Runtime {
         rows: &'a [settings::SettingsRow],
         shortcuts: &'a [shortcuts::ShortcutRow],
         profiles: &'a [profiles::ProfileLine],
+        scheme_files: &'a [settings::SchemeFileLine],
     ) -> settings::SettingsContent<'a> {
         settings::SettingsContent {
             rows,
             shortcuts,
             profiles,
+            scheme_files,
             advanced: self.advanced_open(),
             editor: self.editor_subject(),
         }
@@ -19166,6 +19207,7 @@ impl Runtime {
             display_formulas: self.settings_store.loaded().display_formulas,
             inline_formulas: self.settings_store.loaded().inline_formulas,
             tables: self.settings_store.loaded().tables,
+            block_max_height: self.settings_store.loaded().block_max_height,
             git_panel: self.settings_store.loaded().git_panel,
             split_direction: self.settings_store.loaded().split_direction,
             language: self.settings_store.loaded().language,
@@ -20094,9 +20136,13 @@ impl Runtime {
     /// between the pointer and the gear it is over — the highlight would be a
     /// button claiming to be reachable through a modal.
     fn toggle_settings_panel(&mut self) -> Result<()> {
-        let (rows, shortcuts, profile_lines) = self.settings_content();
-        self.settings
-            .toggle(self.settings_dialog(&rows, &shortcuts, &profile_lines));
+        let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
+        self.settings.toggle(self.settings_dialog(
+            &rows,
+            &shortcuts,
+            &profile_lines,
+            &scheme_files,
+        ));
         // A dialog opens at its top. The distance belongs to the sitting the
         // wheel moved, not to the preference the dialog edits, so it does not
         // outlive the dialog being shut.
@@ -20136,6 +20182,9 @@ impl Runtime {
         }
         if let Some(enabled) = settings::tables_requested(target) {
             self.apply_tables(enabled)?;
+        }
+        if let Some(height) = settings::block_max_height_requested(target) {
+            self.apply_block_max_height(height)?;
         }
         if let Some(enabled) = settings::inline_formulas_requested(target) {
             self.apply_inline_formulas(enabled)?;
@@ -20209,8 +20258,15 @@ impl Runtime {
         if let settings::SettingsTarget::ResetAdvanced(category) = target {
             self.reset_advanced_group(category)?;
         }
+        // **The verb opens its menu and deletes nothing** (user report
+        // 2026-08-18). It used to act on the scheme in force, which left every
+        // scheme that was not in force unreachable without selecting it first.
         if target == settings::SettingsTarget::DeleteScheme {
-            self.delete_scheme_in_force()?;
+            self.settings.toggle_delete_menu();
+        }
+        if let settings::SettingsTarget::DeleteSchemeItem(index) = target {
+            self.settings.close_delete_menu();
+            self.delete_scheme_file(index)?;
         }
         if target == settings::SettingsTarget::CustomiseScheme {
             self.customise_scheme()?;
@@ -20218,8 +20274,8 @@ impl Runtime {
         // Tab layout is the one choice that changes which rows exist, and the
         // focus may be standing on the row it just deleted. So is the
         // disclosure, which is the same sentence with eight rows in it.
-        let (rows, shortcuts, profile_lines) = self.settings_content();
-        let content = self.settings_dialog(&rows, &shortcuts, &profile_lines);
+        let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
+        let content = self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files);
         self.settings.keep_focus_reachable(content);
         Ok(())
     }
@@ -20262,9 +20318,9 @@ impl Runtime {
     /// this discards is exactly the eight rows the reader is looking at while
     /// they press it.
     fn reset_advanced_group(&mut self, category: settings::SettingsCategory) -> Result<()> {
-        let (rows, shortcuts, profile_lines) = self.settings_content();
+        let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
         let advanced = self
-            .settings_dialog(&rows, &shortcuts, &profile_lines)
+            .settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files)
             .advanced_rows(category);
         for row in advanced {
             self.reset_advanced_row(row)?;
@@ -20338,6 +20394,7 @@ impl Runtime {
             | Row::Formulas
             | Row::InlineFormulas
             | Row::Tables
+            | Row::BlockMaxHeight
             | Row::GitPanel
             | Row::DefaultProfile
             | Row::Language
@@ -20389,8 +20446,8 @@ impl Runtime {
             _ => return Ok(()),
         }
         self.store_keybindings();
-        let (rows, shortcuts, profile_lines) = self.settings_content();
-        let content = self.settings_dialog(&rows, &shortcuts, &profile_lines);
+        let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
+        let content = self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files);
         self.settings.keep_focus_reachable(content);
         Ok(())
     }
@@ -21129,8 +21186,9 @@ impl Runtime {
                     self.shortcuts.set(id, chord);
                     self.store_keybindings();
                 }
-                let (rows, shortcuts, profile_lines) = self.settings_content();
-                let content = self.settings_dialog(&rows, &shortcuts, &profile_lines);
+                let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
+                let content =
+                    self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files);
                 self.settings.keep_focus_reachable(content);
             }
         }
@@ -21236,7 +21294,8 @@ impl Runtime {
             | settings::SettingsTarget::CustomiseScheme
             | settings::SettingsTarget::ProfileUp(_)
             | settings::SettingsTarget::ProfileDown(_)
-            | settings::SettingsTarget::DeleteScheme) => {
+            | settings::SettingsTarget::DeleteScheme
+            | settings::SettingsTarget::DeleteSchemeItem(_)) => {
                 self.apply_settings_choice(target)?;
             }
             // A press on the dialog's own body, or inside the open menu but on
@@ -21568,6 +21627,35 @@ impl Runtime {
         Ok(true)
     }
 
+    /// Point the "Maximum height" row at `height` logical pixels, `0` being no
+    /// cap at all (2026-08-18).
+    ///
+    /// Presentation, so it is [`Self::apply_tables`] exactly: every pane in every
+    /// tab, an immediate write, and one frame's cost. The clamp is read where the
+    /// frame is decorated rather than where a block is proven — `decorate_math_frame`
+    /// asks `block_max_height_px` afresh every frame — so nothing is re-scanned,
+    /// no raster is thrown away, and a block that was scrolled inside itself is
+    /// still scrolled to the same place when the cap is lifted.
+    fn apply_block_max_height(&mut self, height: u32) -> Result<bool> {
+        let mut settings = self.settings_store.loaded().clone();
+        settings.block_max_height = height;
+        if !self.settings_store.store(settings) {
+            return Ok(false);
+        }
+        for tab in &mut self.tabs {
+            for (_, leaf) in tab.leaves_mut() {
+                let mut options = leaf.session.math_layout_options();
+                options.block_max_height_px = block_max_height_px(height);
+                leaf.session.set_math_layout_options(options);
+            }
+        }
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        Ok(true)
+    }
+
     /// The stamp a table picture laid out now would carry.
     fn table_paint_stamp(
         &self,
@@ -21888,6 +21976,16 @@ impl Runtime {
         if !self.settings_store.store(settings) {
             return Ok(false);
         }
+        // **A row that just changed is coming from a different file**, and what
+        // each row is coming from is the whole of what lets a rename be followed
+        // (§7.1.6c-7). `refresh_scheme_sources` has always named "a row pressed"
+        // among the moments it is owed and was never called at one: the memory
+        // stayed on whatever the row had been wearing when the window opened, so
+        // a scheme chosen and then renamed parted from its file unnoticed.
+        //
+        // Before the early return below, because that return is about the
+        // *palette* not having moved and this is about which file answered.
+        self.refresh_scheme_sources();
         if adopt_stored_schemes(self.settings_store.loaded()) == ThemeChange::Unchanged {
             return Ok(false);
         }
@@ -22277,6 +22375,27 @@ impl Runtime {
     /// **A failure to write stops at step two** and says so. Everything after it
     /// is about a file that exists.
     fn customise_scheme(&mut self) -> Result<()> {
+        // **A scheme that is already the reader's own file is edited, not
+        // copied** (user report 2026-08-18). The verb reads `Edit scheme…` in
+        // that state and this is the half that makes the word true: steps two
+        // and three have nothing to do — the file exists and the row is already
+        // on it — so what is left is the door, which is steps four and five
+        // unchanged. Pressing it expecting to edit and getting `(custom 2)` is
+        // where a folder full of copies comes from.
+        if let Some((_, file)) = self.scheme_in_force() {
+            let path = match schemes::user_dir() {
+                Ok(directory) => directory.join(&file),
+                Err(error) => {
+                    return self.toast(
+                        toast::ToastKind::Error,
+                        toast::ToastAnchor::Window,
+                        Some(i18n::Text::EditScheme.text().to_owned()),
+                        i18n::not_saved(&error.to_string()),
+                    );
+                }
+            };
+            return self.open_scheme_for_editing(path);
+        }
         let light = bt_render::background_is_light(bt_render::background_rgb());
         let settings = self.settings_store.loaded();
         let stored = if light {
@@ -22316,6 +22435,17 @@ impl Runtime {
             self.apply_scheme(None, Some(name))?;
         }
         self.refresh_scheme_sources();
+        self.open_scheme_for_editing(path)
+    }
+
+    /// Put a scheme file in front of the reader, with the keyboard in it.
+    ///
+    /// The tail both halves of the foot's first verb share: `Customise scheme…`
+    /// writes a copy and comes here, `Edit scheme…` comes straight here. One
+    /// function because everything from this point on is about a file that
+    /// exists, and two copies of it would be two answers to "where does a scheme
+    /// open".
+    fn open_scheme_for_editing(&mut self, path: PathBuf) -> Result<()> {
         // **The dialog goes.** It is the one verb in it whose answer is a
         // document, and a modal standing over the document it just handed you is
         // a modal in the way.
@@ -22375,14 +22505,34 @@ impl Runtime {
     /// derived from the two **stored names**, step 2 has already made this one
     /// the default, and a default resolves to a bundled scheme that cannot go
     /// missing. Pinned by `a_deletion_this_window_made_raises_one_card_not_two`.
-    fn delete_scheme_in_force(&mut self) -> Result<()> {
-        // Asked again rather than passed in from the draw: a frame's worth of
-        // staleness between the button lighting and the press landing is a
-        // frame in which the file could have been renamed underneath it.
-        let Some((_, file)) = self.scheme_in_force() else {
+    fn delete_scheme_file(&mut self, index: usize) -> Result<()> {
+        // **Read again from the catalogue rather than taken from the menu that
+        // was drawn**: a frame's worth of staleness between the menu opening and
+        // an item being pressed is a frame in which the folder could have moved
+        // under it, and the one thing this verb must never do is recycle a file
+        // the reader did not point at.
+        let Some((_, file)) = schemes::catalogue()
+            .user_files()
+            .get(index)
+            .map(|(name, file)| ((*name).to_owned(), (*file).to_owned()))
+        else {
             return Ok(());
         };
-        let light = bt_render::background_is_light(bt_render::background_rgb());
+        // **Which rows this file was answering for**, asked before it goes. A
+        // scheme that is not in force needs no fallback at all — deleting it
+        // changes nothing on screen — and one that is needs the default put in
+        // its row, which is the rule this verb has always had, now asked per row
+        // instead of assumed about the canvas in force.
+        let in_force = [
+            self.settings_store.loaded().light_scheme.clone(),
+            self.settings_store.loaded().dark_scheme.clone(),
+        ];
+        let catalogue = schemes::catalogue();
+        let falls: [bool; 2] = [true, false].map(|light| {
+            let index = usize::from(!light);
+            catalogue.user_file_of(&in_force[index], light) == Some(file.as_str())
+        });
+        drop(catalogue);
         let path = match schemes::user_dir() {
             Ok(directory) => directory.join(&file),
             Err(error) => {
@@ -22409,17 +22559,22 @@ impl Runtime {
                 );
             }
         }
-        if light {
-            self.apply_scheme(Some(String::new()), None)?;
-        } else {
-            self.apply_scheme(None, Some(String::new()))?;
+        // Only the rows this file was actually answering for fall back, and a
+        // row that was on something else is not touched: `apply_scheme` takes
+        // `None` for "leave this canvas alone", which is what makes deleting a
+        // scheme nobody is wearing a pure file operation.
+        if falls[0] || falls[1] {
+            self.apply_scheme(falls[0].then(String::new), falls[1].then(String::new))?;
         }
         // Ahead of the watcher, so the picker has lost the entry by the next
         // frame rather than by the next quiet window — and so the verdict the
         // watcher does eventually reach is about a folder that already matches
         // the settings.
         let after = schemes::rescan();
-        let fallback = after.default_name(light).to_owned();
+        // The canvas whose row moved is the one whose default the card names,
+        // and a file nobody was wearing moves no row at all — so there is
+        // nothing to name and the sentence says only that the file has gone.
+        let fallback = (falls[0] || falls[1]).then(|| after.default_name(falls[0]).to_owned());
         drop(after);
         self.refresh_scheme_sources();
         self.toast(
@@ -22429,7 +22584,7 @@ impl Runtime {
             // **The file and not the scheme's name**: what is in the Recycle Bin
             // is spelled the way the file was, and that is the string somebody
             // going to fetch it back has to recognise.
-            i18n::scheme_deleted(&file, &fallback),
+            i18n::scheme_deleted(&file, fallback.as_deref()),
         )
     }
 
@@ -22513,6 +22668,27 @@ impl Runtime {
                 i18n::scheme_in_use_broken(&file, &reason),
             )?;
         }
+        // **A rename follows the file** (user report 2026-08-18). A scheme's
+        // name lives inside its file and `settings.json` stores the name, so
+        // editing it parts the row from the file it came from: the row stops
+        // resolving, falls to the default, and the reader has to go and pick
+        // their own scheme again — which is the product fighting a change they
+        // made on purpose. The watcher already tracks the *file* each row came
+        // from, so the new name is simply written into the row that was wearing
+        // the old one. Both rows follow when both were pointing at one file.
+        //
+        // No card. The colours did not move (the verdict resolved through the
+        // new name and `set_schemes` above has already put them in force), the
+        // reader is looking at the file they just saved, and a card telling them
+        // what they typed is a card about nothing.
+        for (index, name) in verdict.renamed {
+            if index == 0 {
+                self.apply_scheme(Some(name), None)?;
+            } else {
+                self.apply_scheme(None, Some(name))?;
+            }
+        }
+        self.refresh_scheme_sources();
         for (name, fallback) in verdict.gone {
             self.toast(
                 toast::ToastKind::Info,
@@ -22615,7 +22791,7 @@ impl Runtime {
         let installed = self
             .psreadline_documents
             .as_deref()
-            .is_some_and(psreadline::is_folios_copy);
+            .map_or(psreadline::InstalledCopy::None, psreadline::installed_copy);
         let changed = self.psreadline_installed != installed;
         self.psreadline_installed = installed;
         changed
@@ -22707,7 +22883,13 @@ impl Runtime {
             // The first reading, taken when the probe lands. A module already on
             // disk answers the question before it is asked.
         }
-        if self.psreadline_installed {
+        // **Any Folio copy silences the invitation**, this build's or an older
+        // one's: the offer is "let Folio put its module on this machine", and it
+        // is already there. What the older copy is owed is an *update*, and the
+        // Terminal page's row is where that is offered — an unbidden modal for a
+        // patch bump would be this product interrupting a reader over its own
+        // release history.
+        if self.psreadline_installed != psreadline::InstalledCopy::None {
             return Ok(());
         }
         let decision = psreadline::invite_decision(
@@ -43128,8 +43310,8 @@ impl Runtime {
             }
             let key = settings_key_of(&event.logical_key, self.modifiers, event.repeat);
             let before = self.settings.category();
-            let (rows, shortcuts, profile_lines) = self.settings_content();
-            let content = self.settings_dialog(&rows, &shortcuts, &profile_lines);
+            let (rows, shortcuts, profile_lines, scheme_files) = self.settings_content();
+            let content = self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files);
             let verdict = self.settings.key(key, content, &self.settings_values());
             // Turning a page puts the reader at its top — the wheel's distance
             // belonged to the page they left. Read off the panel rather than
@@ -52235,6 +52417,7 @@ mod tests {
             rows: &rows,
             shortcuts: &[],
             profiles: &[],
+            scheme_files: &[],
             advanced: settings::AdvancedOpen::default(),
             editor: None,
         });

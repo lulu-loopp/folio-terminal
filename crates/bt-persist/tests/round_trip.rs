@@ -560,7 +560,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 12,
+        SETTINGS_SCHEMA_VERSION, 13,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -575,7 +575,9 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          one bump because four of them describe one ground nobody can set a \
          quarter of, and because a schema version is a file format rather than a \
          changelog — and the Advanced disclosure's own list the v10→v11, one key \
-         on its own day, and the Tables switch the v11-to-v12, one key on \n         its own day again"
+         on its own day, the Tables switch the v11-to-v12, and the Rendered \
+         blocks page's own Maximum height the v12-to-v13 — one key on one \
+         day, three times running"
     );
     assert!(
         defaults.advanced_open.is_empty(),
@@ -1058,6 +1060,64 @@ fn settings_v11_migrates_with_tables_on_and_v12_keeps_the_answer_it_was_given() 
     let (round_tripped, report) = read_settings(&path);
     assert_eq!(report, ReadReport::Loaded);
     assert_eq!(round_tripped, off);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// PIN (the Maximum height row) - a v12 file migrates to v13 with no cap at all, and a v13 file
+/// naming a height is read as naming it.
+///
+/// The migration half pins the third running of the same shape: a v12 build drew every block at
+/// its full height because it had no control that could say otherwise, so `0` is that behaviour
+/// written down rather than a new default chosen on the reader's behalf. The second half pins
+/// that the number survives the write and the read - and that it survives *as a number*, because
+/// `0` is a legal value of this key and a serializer that dropped it, or a reader that read a
+/// missing key as "no opinion", would silently uncap a reader who had capped.
+#[test]
+fn settings_v12_migrates_uncapped_and_v13_keeps_the_height_it_was_given() {
+    let (migrated, report) = read_settings(&fixture_path("settings_v12_tables_off.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(migrated.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        migrated.block_max_height, 0,
+        "a v12 file drew every block whole, and that is what it keeps doing"
+    );
+    assert!(
+        !migrated.tables,
+        "one key crosses; every sibling crosses untouched"
+    );
+
+    let (capped, report) = read_settings(&fixture_path("settings_v13_block_max_height.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(capped.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(capped.block_max_height, 240, "a reader who capped is heard");
+
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-settings-v13-blockmax-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    write_settings_atomic(&path, &capped).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains(r#""block_max_height": 240"#),
+        "the height is written as its own key: {on_disk}"
+    );
+    let (round_tripped, report) = read_settings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, capped);
+
+    // And zero is a value, not an absence.
+    let uncapped = SettingsV1 {
+        block_max_height: 0,
+        ..capped
+    };
+    write_settings_atomic(&path, &uncapped).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains(r#""block_max_height": 0"#),
+        "no limit is written down rather than left out: {on_disk}"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

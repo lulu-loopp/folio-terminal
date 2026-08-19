@@ -14497,6 +14497,7 @@ mod tests {
                 rows: &rows,
                 shortcuts: &[],
                 profiles: &[],
+                scheme_files: &[],
                 advanced: crate::settings::AdvancedOpen::default(),
                 editor: None,
             },

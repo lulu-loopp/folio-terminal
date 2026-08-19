@@ -704,21 +704,20 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Action::OpenSearch,
         Chord::new(CTRL, character("f")),
     ),
-    // **The alias**, bound in the same breath by the same ruling.
+    // **The alias is retired** (user ruling 2026-08-18). `open-search-alias` was
+    // a second row naming the same verb, so that a reader whose muscles knew
+    // `Ctrl+Shift+F` from another product would find the box — and the cost was
+    // a table with two lines for one action, a chord this window took from every
+    // shell for a convenience nobody had asked for, and a page where the one
+    // duplicated verb had to be explained. The ruling is that somebody who wants
+    // that chord records it: the row above is recordable, the recorder writes
+    // `keybindings.json`, and one line in a file is a smaller thing than a
+    // permanent second default.
     //
-    // Two rows and not a special case in the matcher, because two rows is what
-    // the shortcut-editing panel can show and edit: a reader whose muscles know
-    // `Ctrl+Shift+F` from another product finds the box, and a reader who wants
-    // `^F` back for their shell can take this row's chord and delete the other's
-    // without the panel having to explain that one of them was a hidden twin.
-    // It carries its own id and its own name for exactly that reason — two lines
-    // a reader cannot tell apart are two lines they cannot choose between.
-    Binding::terminal_primary(
-        "open-search-alias",
-        "Find in the terminal (second chord)",
-        Action::OpenSearch,
-        Chord::new(CTRL_SHIFT, character("f")),
-    ),
+    // The id is not reused. A `keybindings.json` still naming it is read, its
+    // other rows land, and the retired line is reported by id rather than
+    // swallowed — see
+    // `a_file_naming_the_retired_alias_still_loads_and_says_which_row_it_lost`.
     // `F3` / `Shift+F3` (B81) — the walk that works while the terminal still has
     // the keyboard. Bare, because a function key is not a control code and the
     // discipline has nothing to say about it, and scoped so that a shell which
@@ -1758,8 +1757,8 @@ mod tests {
         );
         assert_eq!(
             press_on_primary_screen(character("f"), CTRL_SHIFT),
-            Some(Action::OpenSearch),
-            "the alias reaches the same verb"
+            None,
+            "and the retired alias reaches nothing (user ruling 2026-08-18)"
         );
         assert_eq!(
             press_with_search_open(Key::Named(NamedKey::F3), ModifiersState::empty()),
@@ -1775,17 +1774,20 @@ mod tests {
     /// control letter this table takes from a terminal, and it hands it straight
     /// back the moment there is a full-screen program on the glass.**
     ///
-    /// Five promises, one assertion each: the chord opens the capsule on a
-    /// scrollback; the alias reaches the same verb; the alternate screen keeps
-    /// both, so `less` still pages forward; and a document is not a scrollback.
+    /// Four promises, one assertion each: the chord opens the capsule on a
+    /// scrollback; `Ctrl+Shift+F` is nobody's, because the second-chord row was
+    /// retired on 2026-08-18 and this window does not take a chord it has no row
+    /// for; the alternate screen keeps `^F`, so `less` still pages forward; and
+    /// a document is not a scrollback.
     ///
     /// MUTATIONS:
-    /// (1) give the rows `Scope::Window` — the alternate-screen assertions go
+    /// (1) give the row `Scope::Window` — the alternate-screen assertion goes
     ///     red, and so does `bare_control_letters_stay_with_the_terminal`, which
     ///     is discipline (1) noticing;
-    /// (2) drop the alias row — the second assertion goes red;
+    /// (2) put the alias row back — the second assertion goes red, which is the
+    ///     retirement refusing to be undone by a later tidy-up;
     /// (3) move the row to `CTRL_SHIFT` alone — the first goes red, which is the
-    ///     ruling refusing to be renegotiated by a later tidy-up.
+    ///     ruling refusing to be renegotiated the same way.
     #[test]
     fn control_f_opens_the_search_on_a_scrollback_and_passes_through_on_the_alternate_screen() {
         assert_eq!(
@@ -1794,17 +1796,14 @@ mod tests {
         );
         assert_eq!(
             press_on_primary_screen(character("f"), CTRL_SHIFT),
-            Some(Action::OpenSearch)
+            None,
+            "`Ctrl+Shift+F` goes to the shell: the second chord is something \
+             a reader records, not something this build takes"
         );
         assert_eq!(
             press(character("f"), CTRL),
             None,
             "on the alternate screen ^F is the program's page-forward and reaches it untouched"
-        );
-        assert_eq!(
-            press(character("f"), CTRL_SHIFT),
-            None,
-            "and so is the alias - the whole row is out of the table there"
         );
         assert_eq!(
             press_in_preview(character("f"), CTRL),
@@ -2149,12 +2148,22 @@ mod tests {
 
     #[test]
     fn the_table_holds_exactly_the_ruled_rows_and_no_chord_is_claimed_twice() {
-        // 19 single actions plus GotoTab(1..=9), plus one alias row: `Ctrl+Shift+F`
-        // is a second chord for `OpenSearch` and is the only place in this table
-        // where two rows name one verb (user ruling 2026-08-16). Plus the four
-        // picture-in-picture summon slots (2026-08-17), of which only the first
-        // ships with a chord.
-        assert_eq!(BINDINGS.len(), 33);
+        // 19 single actions plus GotoTab(1..=9), plus the four picture-in-picture
+        // summon slots (2026-08-17), of which only the first ships with a chord.
+        //
+        // **No row names a verb twice** (user ruling 2026-08-18). `Ctrl+Shift+F`
+        // used to ride here as a second chord for `OpenSearch`, and it was the
+        // only place in the table where two rows meant one thing; it is retired,
+        // and anybody who wants it records it onto a row of their own.
+        assert_eq!(BINDINGS.len(), 32);
+        assert_eq!(
+            BINDINGS
+                .iter()
+                .filter(|binding| binding.action == Action::OpenSearch)
+                .count(),
+            1,
+            "one verb, one row"
+        );
 
         // Two rows may share a chord only if no focus state has both in force —
         // which is what a scope is *for*, and also the one way scopes could
@@ -2515,7 +2524,7 @@ mod tests {
                 chord: Some("Ctrl+Shift+Y".to_owned()),
             },
             Override {
-                id: "open-search-alias".to_owned(),
+                id: "next-match".to_owned(),
                 chord: None,
             },
         ]);
@@ -2532,19 +2541,20 @@ mod tests {
             None,
             "and the chord it replaced is nobody's"
         );
-        let on_scrollback = Focus {
+        let searching = Focus {
             preview: false,
             terminal_primary: true,
-            search_open: false,
+            search_open: true,
         };
+        let f3 = Key::Named(NamedKey::F3);
         assert_eq!(
-            table.lookup(&key("f"), &key("f"), CTRL_SHIFT, on_scrollback),
+            table.lookup(&f3, &f3, ModifiersState::empty(), searching),
             None,
             "an explicitly cleared row is unbound, not defaulted"
         );
         assert_eq!(
-            table.lookup(&key("f"), &key("f"), CTRL, on_scrollback),
-            Some(Action::OpenSearch),
+            table.lookup(&f3, &f3, ModifiersState::SHIFT, searching),
+            Some(Action::PrevMatch),
             "and its sibling row is untouched"
         );
 
@@ -2556,7 +2566,7 @@ mod tests {
                     chord: Some("Ctrl+Shift+y".to_owned()),
                 },
                 Override {
-                    id: "open-search-alias".to_owned(),
+                    id: "next-match".to_owned(),
                     chord: None,
                 },
             ],
@@ -2573,13 +2583,13 @@ mod tests {
         assert_eq!(
             table.overrides(),
             vec![Override {
-                id: "open-search-alias".to_owned(),
+                id: "next-match".to_owned(),
                 chord: None,
             }],
             "a line that says what the default says is a line that would freeze it"
         );
 
-        table.restore("open-search-alias");
+        table.restore("next-match");
         assert!(table.overrides().is_empty());
         assert_eq!(table, Shortcuts::defaults());
     }
@@ -2670,6 +2680,78 @@ mod tests {
         );
     }
 
+    /// PIN (user ruling 2026-08-18) — **a `keybindings.json` written before the
+    /// second-chord row was retired still loads, and the row it lost is named.**
+    ///
+    /// Retiring a row is the one edit to this table that reaches back into files
+    /// people already have. The contract is the one §5.4 states for every stored
+    /// document and this table already keeps for an id from a *newer* build: the
+    /// line that cannot be honoured costs its own line and nothing else. So the
+    /// user's other bindings all land, the retired line is reported by id — the
+    /// window puts that sentence in front of them — and the id is not silently
+    /// re-bound to the row that kept the verb, because a chord this build gave
+    /// away is not a chord it may take back on a user's behalf.
+    ///
+    /// The stale line also removes itself: `overrides()` is derived by walking
+    /// the live table, so the next time anything in this dialog is edited the
+    /// file is rewritten without it.
+    ///
+    /// Red gate: keep `open-search-alias` in `BINDINGS` and the fault
+    /// disappears; make `apply_overrides` stop at the first unknown id and the
+    /// second assertion goes red.
+    #[test]
+    fn a_file_naming_the_retired_alias_still_loads_and_says_which_row_it_lost() {
+        let mut table = Shortcuts::defaults();
+        let faults = table.apply_overrides(&[
+            Override {
+                id: "open-search-alias".to_owned(),
+                chord: Some("Ctrl+Shift+F".to_owned()),
+            },
+            Override {
+                id: "new-tab".to_owned(),
+                chord: Some("Ctrl+Shift+Y".to_owned()),
+            },
+        ]);
+        assert_eq!(
+            faults
+                .iter()
+                .map(|fault| fault.id.as_str())
+                .collect::<Vec<_>>(),
+            ["open-search-alias"],
+            "the retired row is named, once: {faults:?}"
+        );
+        let key = |text: &str| Key::Character(text.into());
+        assert_eq!(
+            table.lookup(&key("y"), &key("y"), CTRL_SHIFT, Focus::default()),
+            Some(Action::NewTab),
+            "and every other line in the file landed"
+        );
+        let on_scrollback = Focus {
+            preview: false,
+            terminal_primary: true,
+            search_open: false,
+        };
+        assert_eq!(
+            table.lookup(&key("f"), &key("f"), CTRL_SHIFT, on_scrollback),
+            None,
+            "the chord the retired row carried is nobody's again, and the file \
+             asking for it does not put it back"
+        );
+        assert_eq!(
+            table.lookup(&key("f"), &key("f"), CTRL, on_scrollback),
+            Some(Action::OpenSearch),
+            "while the row that kept the verb is untouched"
+        );
+        assert_eq!(
+            table.overrides(),
+            vec![Override {
+                id: "new-tab".to_owned(),
+                chord: Some("Ctrl+Shift+y".to_owned()),
+            }],
+            "and the stale line is not written back out"
+        );
+    }
+
     /// PIN (S1/S3/S67, 2026-08-17) — **the editor's list is the table, folded,
     /// with the rows the audit declined after it.**
     ///
@@ -2745,13 +2827,18 @@ mod tests {
             pip.note
         );
 
-        // The alias is its own line with its own name, because two lines a
-        // reader cannot tell apart are two lines they cannot choose between.
-        let alias = named("Find in the terminal (second chord)");
-        assert_eq!(alias.ids, vec!["open-search-alias"]);
-        assert_eq!(alias.caps, vec!["Ctrl", "Shift", "F"]);
+        // **The alias is gone from the page** (user ruling 2026-08-18). One verb
+        // is one line; the second chord is something a reader records.
+        assert!(
+            !lines.iter().any(|line| line.title.contains("second chord")),
+            "the retired alias must not still be listed: {:?}",
+            lines.iter().map(|line| line.title).collect::<Vec<_>>()
+        );
+        let search = named("Find in the terminal");
+        assert_eq!(search.ids, vec!["open-search"]);
+        assert_eq!(search.caps, vec!["Ctrl", "F"]);
         assert_eq!(
-            alias.note.as_deref(),
+            search.note.as_deref(),
             Some(SCOPE_TAG_TERMINAL_PRIMARY),
             "and it wears the scope tag its row carries"
         );

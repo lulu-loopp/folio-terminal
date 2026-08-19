@@ -58,6 +58,43 @@ use crate::i18n::{self, Text};
 /// header; `folio.ps1` holds the other half and a test binds them together.
 pub const PATCHED_VERSION: &str = "2.4.6";
 
+/// **The build stamp inside the module this build carries**, and the whole of
+/// how one Folio-patched PSReadLine is told from another.
+///
+/// `PATCHED_VERSION` is the module's `ModuleVersion` — the number PowerShell
+/// resolves, the number `folio.ps1` gates on, and a number that has been `2.4.6`
+/// for every `-bt` build this product has ever shipped. The *patch* is Folio's
+/// own (see 33d9ec9: `2.4.6-bt.anchorfix` seeded its resize anchor from a column
+/// the starting width had already reduced, and `2.4.6-bt.2` takes it from where
+/// the console says the cursor is), and the only place its identity is written
+/// down is the `ProductVersion` string in the DLL's Win32 version resource.
+///
+/// So this is the number the *upgrade door* reads. Pinned to the shipped bytes
+/// by `the_bundled_module_carries_the_build_this_file_names`, exactly as
+/// `PATCHED_VERSION` is pinned to `folio.ps1`: a literal that agrees today and
+/// diverges at the next patch is the one shape this file has already refused
+/// once.
+pub const PATCHED_BUILD: &str = "2.4.6-bt.2";
+
+/// What every Folio-patched build's `ProductVersion` begins with.
+///
+/// Derived rather than written, so that the day `PATCHED_VERSION` moves to
+/// `2.5.0` the family moves with it and a `2.4.6-bt.*` left on disk stops being
+/// recognised as this build's family — which is correct: it would then be a
+/// module for a version this build no longer patches, and the row would offer to
+/// replace it exactly as it offers to replace a stock 2.0.0.
+#[must_use]
+pub fn family_prefix() -> String {
+    format!("{PATCHED_VERSION}-bt.")
+}
+
+/// The file whose version resource carries the build stamp.
+///
+/// The patched assembly and not the manifest beside it: the manifest says
+/// `ModuleVersion = '2.4.6'` in every bundle this product has shipped, so it
+/// cannot tell two of them apart, and it is not where the patch lives anyway.
+const BUILD_STAMP_FILE: &str = "Microsoft.PowerShell.PSReadLine.dll";
+
 /// Where a per-user module for `Windows PowerShell 5.1` lives, under Documents.
 ///
 /// `WindowsPowerShell` and not `PowerShell`: the two editions keep separate
@@ -452,25 +489,62 @@ pub enum RowState {
     Outdated,
     /// Folio wrote the module and it is still on disk.
     InstalledByFolio,
+    /// **A Folio build wrote the module and it was not this one** (user ruling
+    /// 2026-08-18).
+    ///
+    /// The hole this closes: `is_folios_copy` recognised only the bytes of the
+    /// build asking, so a module an *older* Folio installed answered "not mine"
+    /// to both halves of the row. `Off` was dark because the guard would not
+    /// delete it, and `On` was dark because the probe reported `2.4.6` and
+    /// `already_current` was true — the module PowerShell was loading could
+    /// therefore be neither removed nor replaced from the one row in the product
+    /// that exists to manage it, and the reader was left to do it by hand in
+    /// `Documents`.
+    UpdateAvailable,
     /// The machine's own module is already new enough.
     AlreadyCurrent,
     /// `settings.json` says Folio installed it and it is not there any more.
     RemovedElsewhere,
 }
 
+/// Which Folio-written copy, if any, is on disk under a Documents root.
+///
+/// Three answers and not a `bool`, because the middle one is the whole of the
+/// 2026-08-18 ruling: "there is a module here and Folio's family wrote it, but
+/// not this build" is a different sentence from either "this build wrote it" or
+/// "nothing of ours is here", and a caller handed a `bool` has to pick one of
+/// the two to lie with.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum InstalledCopy {
+    /// Nothing of Folio's family is in the module directory.
+    #[default]
+    None,
+    /// Byte for byte, or build for build, what this executable carries.
+    ThisBuild,
+    /// A `2.4.6-bt.*` that is not this one — an older Folio's work.
+    OlderBuild,
+}
+
 /// Reconcile the probe with the stored state.
 ///
-/// `installed_on_disk` is a filesystem question the caller answers, because this
+/// `installed` is a filesystem question the caller answers, because this
 /// function is pure and the answer changes under it: the user may install or
 /// remove during the session, long after the probe's one reading.
 #[must_use]
 pub fn row_state(
     probe: Option<Probe>,
     invite: bt_persist::PsReadLineInviteV1,
-    installed_on_disk: bool,
+    installed: InstalledCopy,
 ) -> RowState {
-    if installed_on_disk {
-        return RowState::InstalledByFolio;
+    match installed {
+        InstalledCopy::ThisBuild => return RowState::InstalledByFolio,
+        // **Ahead of the probe deliberately.** The probe reports the module's
+        // `ModuleVersion`, which every `-bt` build says is `2.4.6`, so
+        // `already_current` is true of an older Folio copy and would file it
+        // under `AlreadyCurrent` — the row telling a reader their module is
+        // fine while shipping a newer repair for it.
+        InstalledCopy::OlderBuild => return RowState::UpdateAvailable,
+        InstalledCopy::None => {}
     }
     if invite == bt_persist::PsReadLineInviteV1::Installed {
         // The file says Folio installed it and the directory is gone. Said out
@@ -519,6 +593,7 @@ pub fn row_description_in(state: RowState, lang: i18n::Lang) -> &'static str {
     static OUTDATED: [OnceLock<String>; i18n::Lang::COUNT] = [OnceLock::new(), OnceLock::new()];
     static INSTALLED: [OnceLock<String>; i18n::Lang::COUNT] = [OnceLock::new(), OnceLock::new()];
     static CURRENT: [OnceLock<String>; i18n::Lang::COUNT] = [OnceLock::new(), OnceLock::new()];
+    static UPDATE: [OnceLock<String>; i18n::Lang::COUNT] = [OnceLock::new(), OnceLock::new()];
     let slot = lang.index();
     match state {
         RowState::Probing => Text::PsReadLineProbing.in_lang(lang),
@@ -530,6 +605,21 @@ pub fn row_description_in(state: RowState, lang: i18n::Lang) -> &'static str {
             .as_str(),
         RowState::InstalledByFolio => INSTALLED[slot]
             .get_or_init(|| i18n::psreadline_row_installed_in(lang, PATCHED_VERSION))
+            .as_str(),
+        // **The one sentence in this row that names two builds**, because the
+        // reader's question here is not "what have I got" but "what would
+        // pressing On change". The `OnceLock` is sound for the reason the three
+        // above it are: the installed build is read once per state, and reaching
+        // this state at all means the directory held that build when the row was
+        // last refreshed.
+        RowState::UpdateAvailable => UPDATE[slot]
+            .get_or_init(|| {
+                i18n::psreadline_row_update_in(
+                    lang,
+                    installed_build_text().as_deref().unwrap_or(PATCHED_VERSION),
+                    PATCHED_BUILD,
+                )
+            })
             .as_str(),
         RowState::AlreadyCurrent => CURRENT[slot]
             .get_or_init(|| {
@@ -550,7 +640,15 @@ pub fn install_available(probe: Option<Probe>, state: RowState) -> bool {
         return false;
     };
     !probe.policy.refuses_unsigned_modules()
-        && matches!(state, RowState::Outdated | RowState::RemovedElsewhere)
+        && matches!(
+            state,
+            // **The update is the same verb**, and that is the ruling's own
+            // wording: On means "have Folio's module", and turning it on over an
+            // older Folio module writes this build's files into the same
+            // directory. A third item would have been a second way to say the
+            // one thing this row says.
+            RowState::Outdated | RowState::RemovedElsewhere | RowState::UpdateAvailable
+        )
 }
 
 /// Whether the row's `Off` item can be chosen.
@@ -560,7 +658,15 @@ pub fn install_available(probe: Option<Probe>, state: RowState) -> bool {
 /// which is the same sentence the default-profile picker's greyed rows speak.
 #[must_use]
 pub fn remove_available(state: RowState) -> bool {
-    state == RowState::InstalledByFolio
+    // A module an older Folio wrote is still a module Folio wrote, and the
+    // reader who wants it gone must not have to find `Documents` to do it. What
+    // guards the delete is the `-bt` stamp — a string only this project's own
+    // builds put in that file — and never a version number a stock module also
+    // carries. See [`installed_copy`].
+    matches!(
+        state,
+        RowState::InstalledByFolio | RowState::UpdateAvailable
+    )
 }
 
 // ── the invitation ──────────────────────────────────────────────────────────
@@ -787,14 +893,99 @@ pub fn is_folios_copy(documents: &Path) -> bool {
     })
 }
 
-/// Delete the module, and only if [`is_folios_copy`] says it is Folio's.
+/// The `ProductVersion` stamped into the module installed under `documents`, if
+/// there is one and it belongs to **Folio's own patch family**.
+///
+/// `None` for a directory that is not there, a file with no version resource,
+/// and — the case that matters — a perfectly good stock `2.4.6` somebody
+/// installed from the gallery. Only this project's builds put `-bt.` in that
+/// string, so the prefix is a claim about *who wrote the file* and not about how
+/// new it is, which is exactly the claim [`remove_from`] needs before it deletes
+/// anything.
+///
+/// Read from the DLL's Win32 version resource rather than from the `.psd1`
+/// beside it. The manifest carries `ModuleVersion = '2.4.6'` in every `-bt`
+/// bundle ever shipped, so it cannot tell two of them apart; the version
+/// resource is where the patch's own identity is stamped, and it is already
+/// there in every copy an older Folio wrote — which a marker file invented today
+/// could never be.
+#[must_use]
+pub fn installed_build(documents: &Path) -> Option<String> {
+    let stamp = module_directory(documents).join(BUILD_STAMP_FILE);
+    let build = file_product_version(&stamp)?;
+    build.starts_with(&family_prefix()).then_some(build)
+}
+
+/// Which copy of Folio's module is under `documents`.
+///
+/// **Byte identity first, and it stays the rule for "did Folio write exactly
+/// this".** It is the strongest answer available and it costs one read of files
+/// that are already in the page cache. The family stamp is the fallback and
+/// answers a strictly weaker question — "did some build of Folio's patch write
+/// this" — which is the only question a copy from an older release can answer at
+/// all, and it is enough for both things the row does with it: replacing a
+/// module of ours, and deleting one.
+///
+/// **A copy stamped with this build but not byte-identical to it is `None`**,
+/// which is `a_module_this_build_did_not_write_survives_a_removal` still holding
+/// its ground: an edited `psm1` beside our own DLL is somebody's own module now,
+/// and the strongest answer available about it is available, so the weaker one
+/// does not get to overrule it. The stamp is consulted only where byte identity
+/// *cannot* answer - a build whose bytes this executable does not carry - and
+/// there it is the only claim anybody can make.
+#[must_use]
+pub fn installed_copy(documents: &Path) -> InstalledCopy {
+    if is_folios_copy(documents) {
+        return InstalledCopy::ThisBuild;
+    }
+    match installed_build(documents) {
+        // Our own family, our own build number, and bytes that are not ours:
+        // this directory has been edited since Folio wrote it. See above.
+        Some(build) if build == PATCHED_BUILD => InstalledCopy::None,
+        Some(_) => InstalledCopy::OlderBuild,
+        None => InstalledCopy::None,
+    }
+}
+
+/// The installed build's stamp as the row's sentence wants it.
+fn installed_build_text() -> Option<String> {
+    installed_build(&documents_directory()?)
+}
+
+/// A file's `ProductVersion`, asked of Windows — and `None` everywhere else.
+///
+/// The `cfg` is `documents_directory`'s, for `documents_directory`'s reason:
+/// this crate builds on hosts that have no version resources at all, and a
+/// machine that cannot be asked has no Folio module on it either.
+fn file_product_version(path: &Path) -> Option<String> {
+    #[cfg(windows)]
+    {
+        bt_platform::file_product_version(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Delete the module, and only if [`installed_copy`] says a Folio build wrote
+/// it.
 ///
 /// The check is inside rather than at the call site, because a delete guarded
 /// from outside is a delete that the next caller performs unguarded. `Ok(false)`
 /// means the directory was left alone — there was nothing there, or what was
-/// there was not this build's.
+/// there was somebody else's.
+///
+/// **Widened from byte identity on 2026-08-18**, and only as far as the ruling
+/// asked. What may be deleted is a directory whose module carries Folio's own
+/// `-bt` build stamp; a stock `2.4.6` from the gallery, a fork with its own
+/// stamp, and a directory holding somebody's hand-edited module all still say no
+/// — they have no `2.4.6-bt.` in them. The old guard could not delete what an
+/// older Folio had written, which left the reader with a module this product had
+/// put on their machine and would not take off it.
 pub fn remove_from(documents: &Path) -> io::Result<bool> {
-    if !is_folios_copy(documents) {
+    if installed_copy(documents) == InstalledCopy::None {
         return Ok(false);
     }
     std::fs::remove_dir_all(module_directory(documents))?;
@@ -1062,22 +1253,37 @@ mod tests {
             version: Version::parse("2.4.6"),
             policy: ExecutionPolicy::RemoteSigned,
         });
-        assert_eq!(row_state(None, State::NotAsked, false), RowState::Probing);
-        assert_eq!(row_state(old, State::NotAsked, false), RowState::Outdated);
+        let nothing = InstalledCopy::None;
+        assert_eq!(row_state(None, State::NotAsked, nothing), RowState::Probing);
+        assert_eq!(row_state(old, State::NotAsked, nothing), RowState::Outdated);
         assert_eq!(
-            row_state(current, State::NotAsked, false),
+            row_state(current, State::NotAsked, nothing),
             RowState::AlreadyCurrent
         );
         assert_eq!(
-            row_state(old, State::Installed, true),
+            row_state(old, State::Installed, InstalledCopy::ThisBuild),
             RowState::InstalledByFolio
         );
         assert_eq!(
-            row_state(old, State::Installed, false),
+            row_state(old, State::Installed, nothing),
             RowState::RemovedElsewhere,
             "the file says Folio wrote it and the directory is gone — a fact the \
              row owes the reader rather than one to quietly correct"
         );
+        // **And the state the 2026-08-18 ruling added, from both sides of the
+        // probe.** An older Folio module reports its `ModuleVersion` as 2.4.6,
+        // so the probe says `already_current` and the old `bool` filed it under
+        // `AlreadyCurrent` - the row telling a reader nothing was owed while
+        // this build carried a newer repair for the very module in front of it.
+        for probe in [old, current, None] {
+            for invite in [State::NotAsked, State::Declined, State::Installed] {
+                assert_eq!(
+                    row_state(probe, invite, InstalledCopy::OlderBuild),
+                    RowState::UpdateAvailable,
+                    "what is on disk decides this one, not the probe and not the file: {probe:?} / {invite:?}"
+                );
+            }
+        }
     }
 
     /// PIN — the two picker items are dark exactly where the action would be a
@@ -1110,6 +1316,10 @@ mod tests {
             "and nothing is written before the machine has been read"
         );
         assert!(remove_available(RowState::InstalledByFolio));
+        assert!(
+            remove_available(RowState::UpdateAvailable),
+            "a module an older Folio wrote is still Folio's to take back"
+        );
         for state in [
             RowState::Probing,
             RowState::Outdated,
@@ -1188,6 +1398,211 @@ mod tests {
         std::fs::remove_file(root.join("License.txt")).unwrap();
         assert!(!is_folios_copy(&documents));
         assert!(!remove_from(&documents).unwrap());
+        std::fs::remove_dir_all(&documents).unwrap();
+    }
+
+    /// Rewrite the installed module's `ProductVersion` string **in place**, so a
+    /// test can stand a module some other build wrote in front of the row.
+    ///
+    /// The version resource stores its strings with a length in the header, so
+    /// the replacement is padded with NULs to exactly the units the original
+    /// occupied and the block stays walkable — which is what makes this a
+    /// faithful fixture rather than a corrupted file. What comes out the other
+    /// end is byte for byte what an older release's DLL is, as far as the only
+    /// thing that reads it is concerned.
+    ///
+    /// Returns how many occurrences were rewritten, which is asserted rather
+    /// than assumed: a fixture that silently changed nothing would make every
+    /// claim below vacuously true.
+    #[cfg(windows)]
+    fn stamp_installed_build(root: &Path, build: &str) -> usize {
+        let dll = root.join(BUILD_STAMP_FILE);
+        let mut bytes = std::fs::read(&dll).unwrap();
+        let units = PATCHED_BUILD.encode_utf16().count();
+        assert!(
+            build.encode_utf16().count() <= units,
+            "a longer stamp would not fit the resource's own length"
+        );
+        let needle: Vec<u8> = PATCHED_BUILD
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let mut padded: Vec<u16> = build.encode_utf16().collect();
+        padded.resize(units, 0);
+        let replacement: Vec<u8> = padded.into_iter().flat_map(u16::to_le_bytes).collect();
+
+        let mut rewritten = 0;
+        let mut at = 0;
+        while at + needle.len() <= bytes.len() {
+            if bytes[at..at + needle.len()] == needle[..] {
+                bytes[at..at + needle.len()].copy_from_slice(&replacement);
+                rewritten += 1;
+                at += needle.len();
+            } else {
+                at += 1;
+            }
+        }
+        std::fs::write(&dll, &bytes).unwrap();
+        rewritten
+    }
+
+    /// PIN (2026-08-18) — **the build stamp this file names is the one the
+    /// shipped bytes carry.**
+    ///
+    /// `PATCHED_VERSION`'s own pin, one level down. That one binds this file to
+    /// `folio.ps1`; this one binds it to the DLL, because the upgrade door is
+    /// decided entirely by a string comparison and a literal that drifts from
+    /// the bundle turns every installed copy into "an older build" — the row
+    /// would offer an update that installs the same bytes, for ever.
+    ///
+    /// Read out of an install rather than out of the source tree, so that what
+    /// is measured is what `install_into` actually writes.
+    ///
+    /// MUTATION: bump `PATCHED_BUILD` alone and this fails naming both strings.
+    #[cfg(windows)]
+    #[test]
+    fn the_bundled_module_carries_the_build_this_file_names() {
+        let documents = temp_dir("build-stamp");
+        install_into(&documents).unwrap();
+        assert_eq!(
+            installed_build(&documents).as_deref(),
+            Some(PATCHED_BUILD),
+            "the module this build installs stamps a different build than \
+             PATCHED_BUILD says"
+        );
+        assert!(
+            PATCHED_BUILD.starts_with(&family_prefix()),
+            "and the stamp is inside the family the row recognises: \
+             {PATCHED_BUILD} against {}",
+            family_prefix()
+        );
+        std::fs::remove_dir_all(&documents).unwrap();
+    }
+
+    /// PIN (user ruling 2026-08-18) — **a module an older Folio installed is
+    /// offered an update, and both verbs on the row work on it.**
+    ///
+    /// The hole: `is_folios_copy` compares against *this* build's bytes, so an
+    /// older Folio's module answered "not mine" — and the probe, which reads
+    /// `ModuleVersion` and gets `2.4.6` from every `-bt` build alike, answered
+    /// "already current". The row therefore greyed both items over a module this
+    /// product had put there itself, and the only way out was `Documents`.
+    ///
+    /// What the row does about it is the ruling's own shape: the verbs stay `On`
+    /// and `Off`, the value reads `Update`, and turning it on writes this build's
+    /// files over the older ones in the same directory.
+    ///
+    /// MUTATIONS:
+    /// (1) drop the family arm from `installed_copy` — the state goes back to
+    ///     `AlreadyCurrent` and both `_available` assertions go red;
+    /// (2) leave `remove_from` guarded on byte identity — the removal at the end
+    ///     returns `false` and the directory survives, which is the bug reported.
+    #[cfg(windows)]
+    #[test]
+    fn a_module_an_older_folio_wrote_is_offered_an_update_and_answers_both_verbs() {
+        let documents = temp_dir("older-build");
+        let root = install_into(&documents).unwrap();
+        assert!(stamp_installed_build(&root, "2.4.6-bt.1") > 0);
+
+        assert_eq!(installed_build(&documents).as_deref(), Some("2.4.6-bt.1"));
+        assert!(
+            !is_folios_copy(&documents),
+            "byte identity still answers the question it was asked: these are \
+             not the bytes this build ships"
+        );
+        assert_eq!(installed_copy(&documents), InstalledCopy::OlderBuild);
+
+        // The probe reports the *manifest's* version, which every -bt build says
+        // is 2.4.6 — which is exactly why the disk has to be believed over it.
+        let machine = Some(Probe {
+            version: Version::parse(PATCHED_VERSION),
+            policy: ExecutionPolicy::RemoteSigned,
+        });
+        let state = row_state(machine, State::Installed, installed_copy(&documents));
+        assert_eq!(state, RowState::UpdateAvailable);
+        assert!(
+            install_available(machine, state),
+            "On is what performs the update"
+        );
+        assert!(
+            remove_available(state),
+            "and Off takes an older Folio's module off the machine, which is \
+             the other half of the report"
+        );
+        // The sentence, asserted through the words rather than through
+        // `row_description_in`: that function reads *this machine's* Documents
+        // (and caches per language, as the three states beside it do), so a
+        // claim about a temporary directory made through it would be a claim
+        // about the developer's own module.
+        for lang in i18n::Lang::ALL {
+            let line = i18n::psreadline_row_update_in(lang, "2.4.6-bt.1", PATCHED_BUILD);
+            assert!(
+                line.contains("2.4.6-bt.1") && line.contains(PATCHED_BUILD),
+                "{lang:?}: the row names what is installed and what is available: {line:?}"
+            );
+        }
+
+        // On, over the older build.
+        install_into(&documents).unwrap();
+        assert!(is_folios_copy(&documents));
+        assert_eq!(installed_copy(&documents), InstalledCopy::ThisBuild);
+        assert_eq!(
+            row_state(machine, State::Installed, installed_copy(&documents)),
+            RowState::InstalledByFolio,
+            "and once replaced there is nothing left to offer"
+        );
+
+        // Off, over an older build again.
+        assert!(stamp_installed_build(&root, "2.4.6-bt.1") > 0);
+        assert!(remove_from(&documents).unwrap());
+        assert!(!root.exists());
+        std::fs::remove_dir_all(&documents).unwrap();
+    }
+
+    /// PIN (user ruling 2026-08-18) — **somebody's own 2.4.6 is not Folio's
+    /// family, is offered no update, and is never deleted.**
+    ///
+    /// The other side of widening the guard, and the side that has to be
+    /// airtight: what may be removed is a module carrying Folio's own `-bt`
+    /// stamp — a string only this project's builds put in that file — and never
+    /// a module that merely reaches the same version number. A stock 2.4.6 from
+    /// the gallery says `2.4.6` in the same field.
+    ///
+    /// MUTATION: match the family on `PATCHED_VERSION` instead of on
+    /// `family_prefix()` and this deletes a stranger's module.
+    #[cfg(windows)]
+    #[test]
+    fn a_stock_module_at_the_same_version_is_not_folios_and_is_left_alone() {
+        let documents = temp_dir("stock-current");
+        let root = install_into(&documents).unwrap();
+        assert!(stamp_installed_build(&root, PATCHED_VERSION) > 0);
+
+        assert_eq!(
+            installed_build(&documents),
+            None,
+            "no -bt, no family: {:?}",
+            installed_build(&documents)
+        );
+        assert_eq!(installed_copy(&documents), InstalledCopy::None);
+        assert!(
+            !remove_from(&documents).unwrap(),
+            "and the guard refuses to delete it"
+        );
+        assert!(root.exists());
+
+        let machine = Some(Probe {
+            version: Version::parse(PATCHED_VERSION),
+            policy: ExecutionPolicy::RemoteSigned,
+        });
+        let state = row_state(machine, State::NotAsked, installed_copy(&documents));
+        assert_eq!(
+            state,
+            RowState::AlreadyCurrent,
+            "a machine whose own module is new enough is told so, and offered \
+             nothing"
+        );
+        assert!(!install_available(machine, state));
+        assert!(!remove_available(state));
         std::fs::remove_dir_all(&documents).unwrap();
     }
 

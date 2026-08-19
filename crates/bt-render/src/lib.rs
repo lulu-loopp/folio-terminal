@@ -10546,6 +10546,7 @@ mod tests {
                 top_subpixels: i64::from(row) * 22 * SUBPIXELS_PER_PX,
                 height_subpixels: 22 * SUBPIXELS_PER_PX,
                 live_grid_row: Some(row),
+                continues: false,
             })
             .collect()
     }
@@ -10560,6 +10561,7 @@ mod tests {
                 top_subpixels: i64::from(row) * height,
                 height_subpixels: height,
                 live_grid_row: Some(row),
+                continues: false,
             })
             .collect()
     }
@@ -11577,21 +11579,25 @@ mod tests {
                     top_subpixels: -22 * unit,
                     height_subpixels: 40 * unit,
                     live_grid_row: Some(0),
+                    continues: false,
                 },
                 bt_viewport::FrameVisualRow {
                     top_subpixels: 18 * unit,
                     height_subpixels: 18 * unit,
                     live_grid_row: Some(1),
+                    continues: false,
                 },
                 bt_viewport::FrameVisualRow {
                     top_subpixels: 36 * unit,
                     height_subpixels: 18 * unit,
                     live_grid_row: Some(2),
+                    continues: false,
                 },
                 bt_viewport::FrameVisualRow {
                     top_subpixels: 54 * unit,
                     height_subpixels: 18 * unit,
                     live_grid_row: Some(3),
+                    continues: false,
                 },
             ],
             selection_spans: vec![bt_viewport::SelectionSpan {
@@ -11759,16 +11765,19 @@ mod tests {
                     top_subpixels: -7 * unit,
                     height_subpixels: 18 * unit,
                     live_grid_row: Some(0),
+                    continues: false,
                 },
                 bt_viewport::FrameVisualRow {
                     top_subpixels: 11 * unit,
                     height_subpixels: 18 * unit,
                     live_grid_row: Some(1),
+                    continues: false,
                 },
                 bt_viewport::FrameVisualRow {
                     top_subpixels: 29 * unit,
                     height_subpixels: 18 * unit,
                     live_grid_row: None,
+                    continues: false,
                 },
             ],
             selection_spans: Vec::new(),
@@ -12100,6 +12109,7 @@ mod tests {
                     top_subpixels: i64::from(row) * cell,
                     height_subpixels: cell,
                     live_grid_row: Some(row),
+                    continues: false,
                 })
                 .collect(),
             cursor: bt_viewport::GridCursor {
@@ -12219,6 +12229,7 @@ mod tests {
             top_subpixels: grid_rows as i64 * 22 * SUBPIXELS_PER_PX,
             height_subpixels: 22 * SUBPIXELS_PER_PX,
             live_grid_row: None,
+            continues: false,
         });
         overscan.cursor.row = grid_rows as u32;
         overscan.selection_spans.push(SelectionSpan {
