@@ -19,6 +19,92 @@ live grid to staging to transcript. Before a resize, a live region also captures
 command text; after vendor reflow, that content witness re-seats its endpoints on the new physical
 rows. Resize therefore changes only projection, not input/output ownership.
 
+## What the exit code in `133;D` means
+
+PowerShell answers "did that fail?" in two variables and neither is the answer. `$?` is the last
+statement's success, and it is overwritten by the *next* statement — including any statement a
+prompt runs. `$LASTEXITCODE` is the exit code of the last **native** command, and it is a
+session-wide leftover: a cmdlet that fails never touches it, so it keeps answering for a program
+that ran three commands ago. bash has neither problem — `$?` there *is* the status, and
+`folio.bash` reads it as its first statement and puts it back for the user's own hook — so this
+section is PowerShell's alone.
+
+`folio.ps1` reads both as the first two statements of `prompt`, records what `$LASTEXITCODE` was
+when the line was submitted, and derives the code in this order:
+
+1. **The line was refused by the parser.** Nothing ran; the host printed a syntax error and that
+   error is the whole of the command's output. Reported as `1`, because neither variable moved and
+   neither can speak for it.
+2. **`$LASTEXITCODE` moved since the line was submitted, and moved to something non-zero.** A
+   native command in this line wrote it. This is the one signal no prompt code can launder, so it
+   is consulted before `$?`, and it is why the baseline is taken in `PSConsoleHostReadLine` — the
+   last moment before the host runs the line, and after any helper a prompt customizer shells out
+   to while the user is still typing.
+3. **`$?`.** True is `0`: the shell's own verdict that the command succeeded, including a command
+   that succeeded behind an older native failure whose code is still lying in `$LASTEXITCODE`.
+4. **`$?` is false.** The code reported is `$LASTEXITCODE` when that is non-zero, and `1` when it
+   is zero or unset — a failing cmdlet, a failing pipeline, a terminating error, a command stopped
+   with Ctrl+C. Ctrl+C is the one line of the table below that a harness cannot press, because
+   stopping a pipeline needs a real console; it reaches this tier by the rule rather than by
+   measurement, and Ctrl+C at an *empty* prompt leaves PSReadLine returning the empty string, which
+   is the "not a command" row.
+
+`(Get-History -Count 1).ExecutionStatus` is not in that list because it cannot be: it reads
+`Completed` for a failing native command, a failing cmdlet and a `Write-Error` alike. History
+records what was typed, not how it went.
+
+| what happened | `133;D` |
+|---|---|
+| native command exits 3 | `3` |
+| native command exits 0 | `0` |
+| the same failing native command run twice | `3`, then `3` |
+| native command exits 3 inside a pipeline | `3` |
+| cmdlet fails, nothing native ran this session | `1` |
+| **cmdlet fails after a native command exited 0** | **`1`** |
+| cmdlet fails after a native command exited 3 | `3` — the residual below |
+| cmdlet succeeds after a native command exited 3 | `0` |
+| failing pipeline, `Write-Error`, `throw` | `1` |
+| assignment or any statement that runs nothing native | `0` |
+| a line the parser refuses | `1` |
+| Enter on an empty line, a line of whitespace, a line that is only a comment | *no `C`, no `D`* |
+| the prompt drawn again mid-line (a resize) | *no `D`* |
+
+The last two rows are boundaries of the marker pair rather than of the arithmetic. `C` opens an
+output region that only `D` closes, so it is owed only by a line that will actually run something:
+the submitted text is handed to PowerShell's own parser, and an input that parses cleanly into no
+statements gets no markers at all instead of a zero-length command in the ledger wearing the
+previous command's status. And `D` is written only for a `C` that is still open, so PSReadLine
+redrawing the prompt — which `InvokePrompt` does on every resize, at Folio's own request — reports
+no status where it has none to report.
+
+### Folio's prompt has to be the outermost one
+
+Everything a prompt customizer runs overwrites `$?` before an inner prompt could read it. Conda is
+the plain example: its `prompt` writes `(base) ` with `Write-Host` and then calls the prompt it
+renamed out of the way, so a Folio nested inside it reads the success of `Write-Host` and reports
+every command as `0`. Which way the two nest is decided by nothing better than which profile file
+each was written into — `conda init powershell` writes its hook into the **all-hosts** profile,
+which loads *before* the per-host file that usually carries the `.` of this script.
+
+So the script does not depend on the order. Installing it wraps whatever `prompt` is; and a
+customizer that renames that function afterwards and puts its own in front is noticed by the next
+draw, which takes the name back and keeps the customizer in the chain — the same discipline
+`folio.bash` already applies to `PS1`, for the same reason. Both prompts keep their output, in
+their order; only the outermost one reads the status and writes the markers.
+`scripts/shell-integration/tests/exit-status.ps1` runs the whole table above in a real PowerShell
+of each generation, three times over: this script alone, conda installed before it, conda installed
+after it.
+
+**The residue, stated.** A cmdlet that fails while an older native failure is still in
+`$LASTEXITCODE` is reported with that older code — `3` where `1` was meant. Nothing distinguishes
+it from the same native command being run again, and of the two readings the one that keeps a
+retried failure's own code is worth more than the one that renumbers it; either way the verdict is
+right and only the digits are borrowed, which is exactly what the reader would see if they typed
+`$LASTEXITCODE` themselves. A customizer installed after this script gets **one** prompt — the one
+that discovers it — reported with its laundered status. And a customizer that replaces `prompt`
+without calling the function it displaced takes the markers away entirely; there is nothing left of
+Folio in that session to notice, and no status is better than a wrong one.
+
 ## OSC 7: the authoritative working directory
 
 The same script also emits `OSC 7` once per prompt, immediately before `133;A`:
