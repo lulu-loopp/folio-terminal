@@ -25713,6 +25713,507 @@ mod tests {",
         rail_geometry(618.0, 1.0, trailers, pinned, 0.0, state).expect("a rail is on screen")
     }
 
+    // ── §7.1.6b′: focus mode, slice F1 ──────────────────────────────────────
+
+    /// A window in focus mode, on whichever tab layout the caller names.
+    fn focus_rail(layout: TabLayoutMode) -> RailState {
+        RailState {
+            layout,
+            focus: true,
+            ..RailState::default()
+        }
+    }
+
+    /// The focus column, solved, for a window holding `tabs` tabs.
+    fn focus_of(state: RailState, tabs: usize) -> FocusRailGeometry {
+        focus_rail_geometry(618.0, 1.0, tabs, EXIT_CAPTION, 0.0, state)
+            .expect("focus mode puts a column on screen")
+    }
+
+    /// A plausible measured width for the word on door 5, so the button has a
+    /// box. The number is a fixture and nothing is pinned to it.
+    const EXIT_CAPTION: f32 = 22.0;
+
+    /// One card's worth of tab, with whatever it has to report.
+    fn card_tab(title: &str, pane_count: usize, mark: TabMarkState, pinned: bool) -> TabContent {
+        TabContent {
+            mark_kind: ChromeMark::ProfilePowerShell,
+            title: title.to_owned(),
+            pane_count,
+            badge_text_width: if pane_count > 1 { 6.0 } else { 0.0 },
+            mark,
+            trailer: TabTrailer {
+                pinned,
+                ..TabTrailer::default()
+            },
+            offset: 0.0,
+            landing: 0.0,
+            edit: None,
+        }
+    }
+
+    /// The whole window's chrome at scale 1, with the rail in whatever state the
+    /// caller names — [`strip_chrome_of`]'s shape, kept apart from it so the two
+    /// halves of [`WindowChrome`] can be inspected separately.
+    fn window_chrome_with_rail(
+        tabs: &[TabContent],
+        active_tab: usize,
+        rail: RailState,
+        hover: Option<ChromeTarget>,
+    ) -> WindowChrome {
+        let metrics = seat_metrics(1_000);
+        // **A split tree, so the stage has something in it.** A lone terminal
+        // draws no chrome at all below the title bar, and a comparison of two
+        // empty lists is an assertion that cannot fail - which this repo has
+        // shipped three times and written down about.
+        let mut seats = Seats::lone_terminal();
+        let first = seats.terminal();
+        seats
+            .split_terminal(&metrics, first, Axis::Row, false)
+            .expect("a 960x600 window has room for two terminals");
+        let layout = solved(&seats, viewport_of(960, 600, 1_000), &metrics);
+        build_chrome_for_tabs(
+            &seats,
+            &layout,
+            1.0,
+            ChromePointer {
+                hover,
+                ..ChromePointer::default()
+            },
+            ChromeContent {
+                tabs,
+                active_tab,
+                grabbed: None,
+                strip_preview: None,
+                float_shown: &[],
+                tab_scroll: 0.0,
+                rail,
+                rail_scroll: 0.0,
+                exit_caption_width: EXIT_CAPTION,
+                preview_titles: &[],
+                terminal_names: &NO_TERMINAL_NAMES,
+                leaf_marks: &NO_LEAF_MARKS,
+                files_names: &NO_FILES_NAMES,
+                files_name_widths: &NO_FILES_NAME_WIDTHS,
+                files_root_open: None,
+                files_trees: &NO_FILES_TREES,
+                files_views: &NO_FILES_VIEWS,
+                git_pages: &NO_GIT_PAGES,
+                git_graphs: &NO_GIT_GRAPHS,
+                preview_messages: &[],
+                preview_feet: &[],
+                preview_heads: &[],
+                preview_cards: &[],
+                fit_overflow: None,
+                profile_menu_open: false,
+                chevron_turn: 0.0,
+                pane_motion: PaneMotionFrame::default(),
+                resizing_cards: None,
+            },
+        )
+    }
+
+    fn three_cards() -> Vec<TabContent> {
+        vec![
+            card_tab("alpha", 1, TabMarkState::default(), false),
+            card_tab("beta", 3, TabMarkState::default(), false),
+            card_tab("gamma", 1, TabMarkState::default(), true),
+        ]
+    }
+
+    /// **THE STRUCTURAL PIN** (§7.1.6b′): *"`render` 里没有聚焦分支，画的仍是
+    /// `renderNode(activeTab().tree)`，进出因此不需要恢复代码"*.
+    ///
+    /// Said in a form this build can check: over **one solved layout**, the
+    /// chrome the *stage* is drawn from is byte-identical with the mode on and
+    /// with it off. Every difference the mode makes lives in the other half of
+    /// [`WindowChrome`] — the panel — which is the whole claim: there is no
+    /// second picture of the tree, so there is nothing to put back.
+    ///
+    /// The layout is shared deliberately. In the product the mode does change
+    /// what the solver is handed — the viewport starts 220 further in, which is
+    /// [`RailState::terminal_inset_logical_px`] and one number — and this pin is
+    /// about what happens *after* that: given the same rectangles, the same
+    /// picture. A build that grew a focus branch inside the seat walk would fail
+    /// here even though the panel it also drew was correct.
+    ///
+    /// Red gate: give any seat-side painter a `rail.focus` condition and the
+    /// first assertion goes red; move the card column into the `seats` group and
+    /// the second does.
+    #[test]
+    fn the_stage_is_the_same_picture_with_the_mode_on_and_with_it_off() {
+        let tabs = three_cards();
+        for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
+            let off = window_chrome_with_rail(
+                &tabs,
+                1,
+                RailState {
+                    layout,
+                    ..RailState::default()
+                },
+                None,
+            );
+            let on = window_chrome_with_rail(&tabs, 1, focus_rail(layout), None);
+            // **The stage is what lies below the title bar.** The bar itself is
+            // chrome the mode is entitled to change - it is where the inline
+            // strip lives, and taking that strip away is half of what the mode
+            // *is* - so the comparison is drawn at the one boundary that
+            // separates the window's frame from the tree inside it.
+            let top = (WINDOW_TITLE_BAR_LOGICAL_PX * 1.0).round();
+            let stage = |chrome: &WindowChrome| {
+                (
+                    chrome
+                        .seats
+                        .quads
+                        .iter()
+                        .filter(|it| it.rect[1] >= top)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    chrome
+                        .seats
+                        .labels
+                        .iter()
+                        .filter(|it| it.rect[1] >= top)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    chrome
+                        .seats
+                        .sprites
+                        .iter()
+                        .filter(|it| it.rect[1] >= top)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+            };
+            let (quads, labels, sprites) = stage(&off);
+            assert!(
+                !quads.is_empty() || !labels.is_empty() || !sprites.is_empty(),
+                "{layout:?}: the fixture has to put something on the stage, or this pin is two empty lists agreeing"
+            );
+            assert_eq!(
+                stage(&off),
+                stage(&on),
+                "{layout:?}: the stage is drawn from the same tree either way"
+            );
+            assert_ne!(
+                (&off.rail.quads, &off.rail.labels, &off.rail.sprites),
+                (&on.rail.quads, &on.rail.labels, &on.rail.sprites),
+                "{layout:?}: and the panel beside it is the whole of the difference"
+            );
+        }
+    }
+
+    /// PIN (§7.1.6b′) — **the mode supersedes the window's normal tab chrome, in
+    /// both tab layouts, and puts one card per tab in its place.**
+    ///
+    /// Three claims, one per thing that has to stop or start. The ordinary rail
+    /// stops: its `Tabs` heading is the label only it draws. The horizontal strip
+    /// stops: a tab's name is the label only *it* draws inside the 40px title
+    /// bar. And the column starts, with exactly as many cards as there are tabs —
+    /// *"a list of five tabs that shows four is a lie"*.
+    ///
+    /// Red gate: draw the strip under focus mode and the second assertion goes
+    /// red in the horizontal case; let `rail_geometry` answer while the mode is
+    /// on and the first goes red in the vertical one.
+    #[test]
+    fn the_mode_takes_the_strip_and_the_rail_and_leaves_one_card_per_tab() {
+        let tabs = three_cards();
+        let titles: Vec<&str> = tabs.iter().map(|tab| tab.title.as_str()).collect();
+        for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
+            let chrome = window_chrome_with_rail(&tabs, 1, focus_rail(layout), None);
+            let (_, labels, _) = chrome.flattened();
+            assert!(
+                !labels
+                    .iter()
+                    .any(|label| label.text == crate::i18n::Text::RailTabs.text()),
+                "{layout:?}: the ordinary rail's heading is not on screen"
+            );
+            let title_bar = (WINDOW_TITLE_BAR_LOGICAL_PX * 1.0).round();
+            assert!(
+                !labels.iter().any(|label| {
+                    titles.contains(&label.text.as_str()) && label.rect[3] <= title_bar
+                }),
+                "{layout:?}: no tab name is drawn in the title bar, so the inline \
+                 strip is not being drawn"
+            );
+            assert!(
+                labels
+                    .iter()
+                    .any(|label| label.text == crate::i18n::Text::RowFocusMode.text()),
+                "{layout:?}: the column carries its own heading"
+            );
+            assert_eq!(
+                focus_of(focus_rail(layout), tabs.len()).cards.len(),
+                tabs.len(),
+                "{layout:?}: one card per tab, and no card without one"
+            );
+        }
+    }
+
+    /// PIN (§7.1.6b′) — **pressing a card is pressing that tab, and pressing its
+    /// `×` is pressing that tab's `×`.**
+    ///
+    /// The ruling's own sentence — *"点卡调用的是 `selectTab` 本身而不是它的表亲"*
+    /// — made true where it can be enforced rather than re-implemented above the
+    /// hit test: the column answers the very [`ChromeTarget`]s the strip and the
+    /// rail answer, so every handler downstream (the activation, the middle-click
+    /// close, the dirty gate a close has to pass) is reached without knowing this
+    /// surface exists.
+    ///
+    /// Red gate: give the column targets of its own and both assertions go red
+    /// while the column still looks right on screen — which is exactly the bug
+    /// this shape prevents.
+    #[test]
+    fn pressing_a_card_is_pressing_that_tab_and_its_close_is_that_tabs_close() {
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let trailers = resting(3);
+        let column = focus_of(state, trailers.len());
+        for (index, card) in column.cards.iter().enumerate() {
+            let hit = |rect: [f32; 4]| {
+                hit_focus_rail(
+                    618.0,
+                    1.0,
+                    &trailers,
+                    EXIT_CAPTION,
+                    0.0,
+                    state,
+                    f64::from((rect[0] + rect[2]) / 2.0),
+                    f64::from((rect[1] + rect[3]) / 2.0),
+                )
+            };
+            assert_eq!(
+                hit(card.close),
+                Some(ChromeTarget::TabClose(index)),
+                "the `×` on card {index} closes tab {index}"
+            );
+            // The body is asked away from the `×`, which sits at its trailing
+            // end: the smallest target answers first, so the middle of the card
+            // is the surface under it.
+            assert_eq!(
+                hit([card.body[0], card.body[1], card.mark[2], card.body[3]]),
+                Some(ChromeTarget::Tab(index)),
+                "and the card itself selects tab {index}"
+            );
+        }
+    }
+
+    /// PIN (§7.1.6b′ ⑤) — **the way out is a target of its own, at the head of
+    /// the column, and the list scrolls under it rather than over it.**
+    ///
+    /// *"一个只能靠记住快捷键才出得来的模式是个陷阱"*. The bar stands where the
+    /// rail's own heading stands, and the cards' clip box begins below it — which
+    /// is `position: sticky` expressed the way this module already expresses it,
+    /// and is what stops a long column scrolling the exit away.
+    ///
+    /// Red gate: fold the exit into the bar's own target and the first assertion
+    /// goes red; start the list at the column's top and the second does.
+    #[test]
+    fn door_five_is_its_own_target_and_the_cards_scroll_beneath_it() {
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let trailers = resting(30);
+        let column = focus_of(state, trailers.len());
+        let exit = column.exit;
+        assert_eq!(
+            hit_focus_rail(
+                618.0,
+                1.0,
+                &trailers,
+                EXIT_CAPTION,
+                0.0,
+                state,
+                f64::from((exit[0] + exit[2]) / 2.0),
+                f64::from((exit[1] + exit[3]) / 2.0),
+            ),
+            Some(ChromeTarget::FocusExit)
+        );
+        assert!(
+            exit[2] > exit[0] && exit[3] > exit[1],
+            "and it is a box somebody can hit: {exit:?}"
+        );
+        assert!(
+            column.viewport[0] >= column.bar[3],
+            "the cards' clip box begins below the bar, so scrolling never takes \
+             the way out off the screen"
+        );
+        assert!(
+            column.max_scroll > 0.0,
+            "a column of thirty cards outruns this window, which is what makes the \
+             claim above worth making"
+        );
+    }
+
+    /// PIN (§7.1.6b′) — **a card's dot is the tab strip's own, not a second
+    /// aggregation.**
+    ///
+    /// The ruling is explicit that the card takes `tabIcon`/`tabDotClass`'s
+    /// answer — *"不新写第二套聚合"* — so what is pinned here is that the colour
+    /// travels through [`TabContent::mark`] untouched, and that the same content
+    /// paints the same dot on the rail. A tab with a session waiting on the
+    /// reader turns its card's edge to the same warn, which is the attention
+    /// queue reaching the column for free.
+    ///
+    /// Red gate: recompute the dot inside `focus_rail_chrome` from anything at
+    /// all and the first assertion can drift; drop the warn edge and the second
+    /// goes red.
+    #[test]
+    fn a_cards_dot_is_the_strips_dot_and_a_waiting_tab_turns_its_card_warn() {
+        let palette = chrome_palette();
+        let waiting = TabMarkState {
+            dot: Some(palette.status_warn),
+            ..TabMarkState::default()
+        };
+        let tabs = vec![
+            card_tab("quiet", 1, TabMarkState::default(), false),
+            card_tab("waiting", 1, waiting, false),
+        ];
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let column = window_chrome_with_rail(&tabs, 0, state, None).rail;
+        let geometry = focus_of(state, tabs.len());
+        // The dot hangs off the mark slot's top-right corner and reaches past
+        // it, so it is looked for in the slot's neighbourhood rather than
+        // strictly inside it - and it is the *small* pill there, the card's own
+        // fill being the whole box.
+        let dot_of = |card: &FocusCardGeometry| {
+            column
+                .sprites
+                .iter()
+                .filter(|sprite| {
+                    matches!(sprite.mark, ChromeMark::ControlPill { .. })
+                        && sprite.rect[2] - sprite.rect[0] <= WINDOW_TAB_MARK_LOGICAL_PX
+                        && sprite.rect[0] >= card.mark[0]
+                        && sprite.rect[1] >= card.body[1]
+                        && sprite.rect[3] <= card.body[3]
+                        && sprite.rect[2] <= card.mark[2] + WINDOW_TAB_MARK_LOGICAL_PX
+                })
+                .map(|sprite| sprite.color)
+                .next()
+        };
+        assert_eq!(
+            dot_of(&geometry.cards[0]),
+            None,
+            "a tab with nothing to report puts no dot on its card"
+        );
+        assert_eq!(
+            dot_of(&geometry.cards[1]),
+            Some(palette.status_warn),
+            "and one with a session waiting wears the very colour `TabContent` \
+             handed over, in the same slot the strip and the rail use"
+        );
+        assert!(
+            column.sprites.iter().any(|sprite| {
+                sprite.color == palette.status_warn
+                    && matches!(sprite.mark, ChromeMark::ControlPillRing { .. })
+                    && sprite.rect[1] >= geometry.cards[1].body[1] - 1.0
+                    && sprite.rect[3] <= geometry.cards[1].body[3] + 1.0
+            }),
+            "the whole card is edged in it, which is the attention queue arriving \
+             in the column without a second rule being written for it"
+        );
+    }
+
+    /// PIN (§7.1.6b′ ③ and ④) — **the card column offers a drag nowhere to
+    /// land, and is still the surface that answers it.**
+    ///
+    /// Two halves, and the second is the one that is easy to get wrong. The
+    /// column refuses file drops — *"一份 tab 清单没有一个非任意的 tab 可以接住
+    /// 一个文件"* — and v1 has no card reordering, so it has no slots. But a
+    /// surface with no slots must not become a *hole*: the band still covers the
+    /// column, so a drop over it is refused rather than handed to the pane the
+    /// panel is standing in front of.
+    ///
+    /// Red gate: answer `None` for the run in focus mode and the second
+    /// assertion goes red; fill `slots` with the cards' boxes and the first does,
+    /// and a drag would compute a reorder the column cannot perform.
+    #[test]
+    fn the_card_column_refuses_every_drag_without_becoming_a_hole() {
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let column = focus_of(state, 4);
+        let run = focus_rail_run(&column);
+        assert!(
+            run.slots.is_empty(),
+            "no slot is an offer to land, and the column makes none"
+        );
+        assert_eq!(run.band, column.body, "but it claims its own rectangle");
+        for card in &column.cards {
+            assert!(
+                run.contains(
+                    f64::from((card.body[0] + card.body[2]) / 2.0),
+                    f64::from((card.body[1] + card.body[3]) / 2.0),
+                ),
+                "so a drop over a card is refused by the column rather than \
+                 falling through to the pane behind it"
+            );
+        }
+    }
+
+    /// PIN (§7.1.6b′) — **the mode is orthogonal to `Tab layout` and `Sidebar`:
+    /// it can be entered from either layout, it is card-width whatever the
+    /// sidebar says, and leaving it restores both by never having written
+    /// them.**
+    ///
+    /// The last clause is the one that buys the feature its simplicity, and it
+    /// is checked by construction: the state that comes back out of the mode is
+    /// compared field for field with the state that went in.
+    ///
+    /// Red gate: gate the mode on a layout and the first loop goes red; read
+    /// `Sidebar` for the column's width and the second assertion does; store
+    /// anything to put back and the third does.
+    #[test]
+    fn the_mode_is_orthogonal_to_the_two_rows_that_describe_the_ordinary_chrome() {
+        for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
+            for mode in [RailMode::Expanded, RailMode::Icons] {
+                for collapsed in [false, true] {
+                    let ordinary = RailState {
+                        layout,
+                        mode,
+                        collapsed,
+                        ..RailState::default()
+                    };
+                    let focused = RailState {
+                        focus: true,
+                        ..ordinary
+                    };
+                    assert_eq!(
+                        focused.terminal_inset_logical_px(),
+                        RAIL_WIDTH_LOGICAL_PX,
+                        "{layout:?}/{mode:?}/collapsed={collapsed}: the column is \
+                         card-width in every one of them — no layout is a gate, \
+                         and the sidebar's three states govern the other panel"
+                    );
+                    assert!(
+                        !focused.draws_icon_rail(),
+                        "{layout:?}/{mode:?}: and no icon rail is drawn beside it"
+                    );
+                    assert!(
+                        focus_rail_geometry(618.0, 1.0, 3, EXIT_CAPTION, 0.0, focused).is_some()
+                            && rail_geometry(618.0, 1.0, &resting(3), 0, 0.0, focused).is_none(),
+                        "{layout:?}/{mode:?}: exactly one of the two panels is on screen"
+                    );
+                    // Leaving is turning the bit off, and nothing else: the state
+                    // that comes back is the state that went in.
+                    assert_eq!(
+                        RailState {
+                            focus: false,
+                            ..focused
+                        },
+                        ordinary,
+                        "{layout:?}/{mode:?}: leaving restores the ordinary chrome \
+                         because the mode never wrote it"
+                    );
+                    assert_eq!(
+                        ordinary.terminal_inset_logical_px(),
+                        RailState {
+                            focus: false,
+                            ..focused
+                        }
+                        .terminal_inset_logical_px(),
+                        "{layout:?}/{mode:?}: down to the width the terminal gets back"
+                    );
+                }
+            }
+        }
+    }
+
     /// Q171/Q172: the rail's own box and the column inside it, against the
     /// mock-up as measured — 220px wide, an 8px inset either side, and a
     /// content run of 203px because the border is *inside* the width.

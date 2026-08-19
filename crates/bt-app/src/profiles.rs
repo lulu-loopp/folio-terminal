@@ -7168,12 +7168,33 @@ pub fn pane_menu_layout(
 
 /// Where the `Split with` submenu hangs.
 ///
-/// **To the right of the parent, level with the heading's own top padding, and
-/// flipped to the left when the window's right edge is too close** — the two
-/// rules every submenu in every product follows, and the second is not optional:
-/// a menu opened on a pane head near the right edge is a menu whose child has
-/// nowhere to go on that side, and a child clamped instead of flipped would sit
-/// *on top of* the parent it hangs from.
+/// **Outside the parent's right edge, level with the heading's own top padding,
+/// and flipped to outside its left edge when the window's right edge is too
+/// close** — the two rules every submenu in every product follows, and the
+/// second is not optional: a menu opened on a pane head near the right edge is a
+/// menu whose child has nowhere to go on that side, and a child clamped instead
+/// of flipped would sit *on top of* the parent it hangs from.
+///
+/// **Outside, and never over** (user report 2026-08-19). This used to seat the
+/// child `border + padding` *inside* the parent's edge, on the argument that two
+/// surfaces sharing a seam read as one object with a fold in it. On screen they
+/// do not: the child covered the right-hand column of every row it stood beside,
+/// including the `▸` on the very heading it hangs from, so the parent looked
+/// truncated rather than folded. The child now stands clear by
+/// [`MENU_OFFSET_LOGICAL_PX`], which is the same 4px every other popup in this
+/// file keeps from the control that opened it, and the two read as parent and
+/// child because that is what they are.
+///
+/// The corridor the safety triangle has to cover grows by exactly that gap,
+/// which costs it nothing: `safe_triangle_holds` aims at the child's near
+/// vertical edge wherever it is, and four pixels of travel is well inside the
+/// slop a hand already has.
+///
+/// **When neither side fits**, the child takes whichever has more room and is
+/// cropped by the window rather than moved over the parent. That is a window
+/// narrower than two menus side by side, and of the two failures available —
+/// a child running off the screen, or a child hiding the rows you are choosing
+/// between — only the first leaves the parent readable.
 #[allow(clippy::too_many_arguments)]
 fn pane_submenu_layout(
     parent: [f32; 4],
@@ -7206,17 +7227,21 @@ fn pane_submenu_layout(
 
     let (surface_width, surface_height) = surface;
     let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
-    // Overlapping the parent's edge by its own border and padding, so the two
-    // surfaces read as one object with a fold in it rather than as two windows
-    // with a seam — and, more practically, so the corridor the safety triangle
-    // has to cover is as short as it can be.
-    let overlap = border + padding;
-    let right_of = parent[2] - overlap;
-    let left_of = parent[0] + overlap - width;
+    let gap = px(MENU_OFFSET_LOGICAL_PX);
+    let right_of = parent[2] + gap;
+    let left_of = parent[0] - gap - width;
     let left = if right_of + width + edge <= surface_width {
         right_of
+    } else if left_of >= edge {
+        left_of
+    } else if parent[0] >= surface_width - parent[2] {
+        // Neither side holds it. Take the side with more room and let the
+        // window crop it — clamping to `edge` here is what would put the child
+        // back on top of the parent, which is the one outcome this placement
+        // exists to prevent.
+        left_of
     } else {
-        left_of.max(edge)
+        right_of
     }
     .round();
     let top = (heading[1] - border - padding)
@@ -11437,6 +11462,67 @@ mod tests {
     }
 
     // ── the submenu and the safety triangle (queue item #53) ────────────────
+
+    /// PIN (user report 2026-08-19) — **the submenu stands outside the parent,
+    /// on whichever side has room, and never over it.**
+    ///
+    /// The report was a screenshot: the child's left edge fell *inside* the
+    /// parent and covered its right-hand column, including the `▸` on the very
+    /// heading it hangs from. The cause was a deliberate `border + padding`
+    /// overlap, written so the two surfaces would read as one object with a fold
+    /// in it; on screen they read as a parent that had been truncated.
+    ///
+    /// Three claims, because three things can go wrong separately. With room on
+    /// the right the child stands to the right, clear by the same 4px every
+    /// other popup here keeps. With no room on the right it flips to the left,
+    /// clear by the same gap — and not clamped, because clamping is what put it
+    /// back on top. And in neither case do the two rectangles intersect, which
+    /// is the claim the report was actually about and the one that would still
+    /// be false if a future gap were made negative again.
+    ///
+    /// Red gate: restore `let overlap = border + padding` and both the gap
+    /// assertions and the intersection assertion go red on the right-hand case;
+    /// restore `left_of.max(edge)` and the flipped case overlaps in a window
+    /// this narrow.
+    #[test]
+    fn the_submenu_stands_clear_of_the_parent_on_whichever_side_has_room() {
+        let gap = MENU_OFFSET_LOGICAL_PX;
+        let disjoint = |parent: [f32; 4], child: [f32; 4]| {
+            child[2] <= parent[0] || child[0] >= parent[2]
+        };
+
+        // Room on the right: the child hangs off the parent's right edge.
+        let roomy = pane_menu_layout([300.0, 120.0], (1600.0, 900.0), 1.0, true, &mut fake_measure);
+        let parent = roomy.frame;
+        let child = roomy.submenu_frame().expect("an open submenu has a frame");
+        assert_eq!(
+            child[0], parent[2] + gap,
+            "the child stands clear of the parent's right edge by the house's own 4px"
+        );
+        assert!(
+            disjoint(parent, child),
+            "and the two rectangles do not intersect: {parent:?} against {child:?}"
+        );
+
+        // The same menu opened hard against the window's right edge: no room on
+        // that side, so it flips — and stands clear on the other one.
+        let cramped =
+            pane_menu_layout([1500.0, 120.0], (1600.0, 900.0), 1.0, true, &mut fake_measure);
+        let parent = cramped.frame;
+        let child = cramped.submenu_frame().expect("an open submenu has a frame");
+        assert!(
+            child[2] <= parent[0],
+            "with no room on the right the child flips to the left of the parent:              {parent:?} against {child:?}"
+        );
+        assert_eq!(
+            child[2], parent[0] - gap,
+            "clear by the same gap on that side"
+        );
+        assert!(
+            disjoint(parent, child),
+            "and still no intersection: {parent:?} against {child:?}"
+        );
+    }
 
     /// PIN — **the submenu is the profile list, hung beside its heading, and the
     /// pane's own profile is marked.**
