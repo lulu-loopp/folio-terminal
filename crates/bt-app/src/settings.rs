@@ -2034,6 +2034,26 @@ pub enum SettingsRow {
     /// would leave the reading in place, which is the half a user turning this off
     /// is actually asking about.
     GitPanel,
+    /// **Folio's verb in Explorer's right-click menu** (§7.4, Windows landing
+    /// block slice 2) — the General page's fourth row.
+    ///
+    /// **The second row in this dialog whose answer is a fact about the machine
+    /// rather than a line in `settings.json`**, and it is filed beside
+    /// [`Self::PsReadLine`] in every respect but its page. What is being decided
+    /// is whether two keys exist under `HKCU\Software\Classes`, and the tick is
+    /// read back off the registry every time the dialog is drawn — see
+    /// [`crate::context_menu`]. A stored boolean would be a claim that could
+    /// disagree with the machine the moment anybody edited the registry by hand
+    /// or restored a backup, and it would disagree *silently*, which is the one
+    /// thing a switch may not do.
+    ///
+    /// So `settings.json` gains nothing for this row and there is no schema
+    /// bump. Its state lives where the state actually is.
+    ///
+    /// On `General` and not on `Appearance`: what it changes is not this window
+    /// at all, it is another program's menu. `General` is where the rows about
+    /// what this product *is on this machine* already are.
+    ContextMenu,
     /// **Which way a split with no direction of its own cuts** (user ruling,
     /// 2026-08-16).
     ///
@@ -2234,7 +2254,11 @@ impl SettingsRow {
             // window *looks* like, and a language is what it *says*. A reader
             // hunting for it under a heading about looks would be hunting for the
             // wrong noun.
-            Self::GitPanel | Self::DefaultProfile | Self::Language => SettingsCategory::General,
+            // And the row that is about what this product is on this machine
+            // rather than about what this window looks like — see the variant.
+            Self::GitPanel | Self::DefaultProfile | Self::Language | Self::ContextMenu => {
+                SettingsCategory::General
+            }
             // The editor's eight, which are the Profiles page's second view.
             Self::ProfileName
             | Self::ProfileProgram
@@ -2278,6 +2302,7 @@ impl SettingsRow {
             Self::BlockMaxHeight => Text::RowBlockMaxHeight.text(),
             Self::Scrollback => Text::RowScrollback.text(),
             Self::GitPanel => Text::RowGitPanel.text(),
+            Self::ContextMenu => Text::RowContextMenu.text(),
             // Mock-up 2360.
             Self::TabLayout => Text::RowTabLayout.text(),
             // Mock-up 2374.
@@ -2370,6 +2395,11 @@ impl SettingsRow {
             // does is the reason to reach for it: no page, no chord, and no `git`
             // process started on your behalf.
             Self::GitPanel => Text::DescGitPanel.text(),
+            // Two facts about Windows and no opinion about either: what the
+            // entry says, and where Windows 11 files it. The second is there
+            // because without it a reader switches this on, right-clicks a
+            // folder, sees the short menu, and concludes the switch is broken.
+            Self::ContextMenu => crate::context_menu::row_description(),
             // Mock-up 2361.
             Self::TabLayout => Text::DescTabLayout.text(),
             // Mock-up 2375.
@@ -2547,6 +2577,11 @@ impl SettingsRow {
             | Self::GitPanel
             | Self::DefaultProfile
             | Self::Language
+            // Not advanced, on `PsReadLine`'s own measure: it is a row that
+            // repairs something the reader has already gone looking for, and a
+            // reader who wants Folio in their right-click menu has no reason to
+            // guess that the answer is behind a disclosure.
+            | Self::ContextMenu
             | Self::PsReadLine
             | Self::Scrollback
             // The everyday half of the editor, in the order somebody decides a
@@ -2638,6 +2673,7 @@ impl SettingsRow {
             | Self::InlineFormulas
             | Self::Tables
             | Self::GitPanel
+            | Self::ContextMenu
             | Self::PsReadLine => FORMULA_OPTIONS.len(),
             Self::BlockMaxHeight => BLOCK_MAX_HEIGHT_OPTIONS.len(),
             Self::Scrollback => SCROLLBACK_OPTIONS.len(),
@@ -2694,6 +2730,7 @@ impl SettingsRow {
             | Self::InlineFormulas
             | Self::Tables
             | Self::GitPanel
+            | Self::ContextMenu
             | Self::PsReadLine => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
             // The one item that is a word goes through the i18n table and the
             // three that are quantities do not — the table's own header lists
@@ -2973,6 +3010,12 @@ impl SettingsRow {
             Self::GitPanel => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.git_panel),
+            // The *state of the machine*, like `PsReadLine` below and for the
+            // same reason: what is ticked is whether Explorer's menu carries the
+            // verb, which is a question only the registry can answer.
+            Self::ContextMenu => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.context_menu),
             Self::TabLayout => TAB_LAYOUT_OPTIONS
                 .iter()
                 .position(|it| *it == values.tab_layout),
@@ -3113,6 +3156,10 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     rows.push(SettingsRow::Language);
     rows.push(SettingsRow::GitPanel);
     rows.push(SettingsRow::DefaultProfile);
+    // Last on its page, because it is the only row here that changes something
+    // **outside this window**: the three above it say how Folio behaves, and
+    // this one says what another program's menu contains.
+    rows.push(SettingsRow::ContextMenu);
     rows.push(SettingsRow::PsReadLine);
     // **Under the PSReadLine row**, which is the mock-up's own order for this page
     // (4838, then 4862): the row that reports a fact about the machine stands
@@ -3355,6 +3402,14 @@ pub struct SettingsValues {
     pub scrollback_lines: u32,
     /// Whether the Files column offers its Git page at all.
     pub git_panel: bool,
+    /// Whether Explorer's right-click menu carries Folio's verb — **read off the
+    /// registry, not out of `settings.json`**.
+    ///
+    /// [`SettingsValues::psreadline`]'s ruling for a second row: what the tick
+    /// says is what the machine is, so a hand-edited registry, a copy of Folio
+    /// uninstalled from another folder or a restored backup all move this row
+    /// rather than leaving it claiming something that is no longer true.
+    pub context_menu: bool,
     /// Which way a split with no direction of its own cuts.
     pub split_direction: SplitDirectionV1,
     /// Which language the window writes in — **the stored mode**, not the
@@ -3486,6 +3541,9 @@ impl SettingsValues {
             block_max_height: bt_persist::DEFAULT_BLOCK_MAX_HEIGHT,
             scrollback_lines: bt_persist::DEFAULT_SCROLLBACK_LINES,
             git_panel: true,
+            // A machine that never installed the verb, which is what a fresh
+            // one is.
+            context_menu: false,
             split_direction: SplitDirectionV1::Auto,
             language: LanguageV1::System,
             default_profile: profiles::fallback_profile(),
@@ -6151,6 +6209,17 @@ pub fn always_on_top_requested(target: SettingsTarget) -> Option<bool> {
 pub fn git_panel_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::GitPanel, index) => FORMULA_OPTIONS.get(index).copied(),
+        _ => None,
+    }
+}
+
+/// Whether Explorer's menu was asked for the verb, or asked to give it back.
+#[must_use]
+pub fn context_menu_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::ContextMenu, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
         _ => None,
     }
 }
@@ -16345,6 +16414,7 @@ mod tests {
                 SettingsRow::Language,
                 SettingsRow::GitPanel,
                 SettingsRow::DefaultProfile,
+                SettingsRow::ContextMenu,
                 SettingsRow::PsReadLine,
                 SettingsRow::Scrollback
             ]
@@ -16374,6 +16444,7 @@ mod tests {
                 SettingsRow::Language,
                 SettingsRow::GitPanel,
                 SettingsRow::DefaultProfile,
+                SettingsRow::ContextMenu,
                 SettingsRow::PsReadLine,
                 SettingsRow::Scrollback
             ],
@@ -17098,7 +17169,12 @@ mod tests {
         lacking.default_profile = profiles::fallback_profile();
 
         let mut panel = keyboarded_on(SettingsRow::DefaultProfile.category());
+        // `End` and then one step back: `Explorer context menu` closes this page
+        // (§7.4) and `Default profile` is the row above it. The assertion below
+        // is what keeps the two presses honest — a page reordered under this
+        // test lands the ring somewhere else and says so.
         panel.key(SettingsKey::End, content(&flat, &lines), &lacking);
+        panel.key(SettingsKey::Up, content(&flat, &lines), &lacking);
         assert_eq!(
             panel.focus(),
             Some(SettingsTarget::Combo(SettingsRow::DefaultProfile))

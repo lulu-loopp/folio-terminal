@@ -27,6 +27,11 @@ windows = { version = "0.62.2", features = [
     # caller stops it with (`Win32_System_Threading`). See `DirWatch`.
     "Win32_System_IO",
     "Win32_System_Memory",
+    # The Explorer verb: `RegCreateKeyExW`, `RegSetValueExW`, `RegQueryValueExW`
+    # and `RegDeleteTreeW`, all against `HKEY_CURRENT_USER`. `RegCreateKeyExW`
+    # also needs `Win32_Security` above, for the `SECURITY_ATTRIBUTES` it takes
+    # and nothing here ever passes.
+    "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
