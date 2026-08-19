@@ -325,8 +325,8 @@ mod windows_impl {
             FILE_FLAGS_AND_ATTRIBUTES, FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE,
             FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_DIR_NAME,
             FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
-            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-            ReadDirectoryChangesW,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileVersionInfoSizeW,
+            GetFileVersionInfoW, OPEN_EXISTING, ReadDirectoryChangesW, VerQueryValueW,
         },
         System::{
             Com::{
@@ -2501,6 +2501,81 @@ mod windows_impl {
         }
     }
 
+    /// The `ProductVersion` string out of a file's own Win32 version resource.
+    ///
+    /// **The one field that can carry a pre-release tag.** `VS_FIXEDFILEINFO`
+    /// holds four `u16`s and can only ever say `2.4.6.0`; the string table beside
+    /// it is where a build stamps what it actually is, and PSReadLine's own
+    /// packaging puts `2.4.6-bt.2` there. That is the whole reason this exists:
+    /// `psreadline::installed_build` has to tell one Folio-patched build of the
+    /// module from another, and the two agree in every number a fixed-info read
+    /// would return.
+    ///
+    /// Asked of the *file* rather than of the module manifest beside it, because
+    /// the manifest is where the number a build did **not** stamp lives: every
+    /// `-bt` bundle this product has ever shipped carries the same
+    /// `ModuleVersion = '2.4.6'` in its `.psd1`, so a manifest read cannot
+    /// distinguish them, and a marker file written next to them would only ever
+    /// answer for the copies written after the marker was invented.
+    ///
+    /// `\VarFileInfo\Translation` first and then the string table it names,
+    /// which is the documented order: the block is keyed by language and code
+    /// page, and hard-coding `040904B0` is the bug where a file built under any
+    /// other locale reads as having no version at all.
+    ///
+    /// `None` on anything that is not a file, has no version resource, or has
+    /// one this walk cannot read. A caller that cannot tell those apart is a
+    /// caller that should not act, which is exactly how the PSReadLine row reads
+    /// it: no answer means not Folio's.
+    #[must_use]
+    pub fn file_product_version(path: &Path) -> Option<String> {
+        let file: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let file = PCWSTR(file.as_ptr());
+        let mut ignored_handle = 0u32;
+        let size = unsafe { GetFileVersionInfoSizeW(file, Some(&mut ignored_handle)) };
+        if size == 0 {
+            return None;
+        }
+        let mut block = vec![0u8; size as usize];
+        unsafe { GetFileVersionInfoW(file, None, size, block.as_mut_ptr().cast()) }.ok()?;
+
+        // The block owns every string this reads; `VerQueryValue` hands back
+        // pointers *into* it and allocates nothing, so `block` has to outlive
+        // both reads and neither pointer may leave this function.
+        let query = |sub_block: &str| -> Option<(*mut core::ffi::c_void, u32)> {
+            let wide: Vec<u16> = sub_block.encode_utf16().chain(Some(0)).collect();
+            let mut value: *mut core::ffi::c_void = std::ptr::null_mut();
+            let mut units = 0u32;
+            let found = unsafe {
+                VerQueryValueW(
+                    block.as_ptr().cast(),
+                    PCWSTR(wide.as_ptr()),
+                    &mut value,
+                    &mut units,
+                )
+            };
+            (found.as_bool() && !value.is_null() && units > 0).then_some((value, units))
+        };
+
+        let (translation, bytes) = query(r"\VarFileInfo\Translation")?;
+        if bytes < 4 {
+            return None;
+        }
+        let language = unsafe { translation.cast::<u16>().read_unaligned() };
+        let code_page = unsafe { translation.cast::<u16>().add(1).read_unaligned() };
+        let (text, units) = query(&format!(
+            r"\StringFileInfo\{language:04x}{code_page:04x}\ProductVersion"
+        ))?;
+        // `units` counts UTF-16 units and includes the terminator on every
+        // Windows this runs on; trimming NULs rather than subtracting one is
+        // what makes that an observation instead of a dependency.
+        let value =
+            unsafe { std::slice::from_raw_parts(text.cast::<u16>(), units as usize) }.to_vec();
+        let value = String::from_utf16_lossy(&value);
+        let value = value.trim_end_matches(char::from(0)).trim().to_owned();
+        (!value.is_empty()).then_some(value)
+    }
+
     /// Every monospaced family installed on this machine, named and located,
     /// in the order a list draws them.
     ///
@@ -3499,12 +3574,12 @@ pub use windows_impl::{
     Compositor, CustomWindowFrame, DirWatch, FilePickKind, FolderPicker, ImagePicker,
     ImeSystemCaret, MathContextMenu, PROGRAM_REFUSED, adopt_parent_console,
     client_area_animation_enabled, clipboard_text, current_thread_priority, documents_directory,
-    get_dpi_for_window, get_window_rect, get_work_area, install_window_class_background,
-    is_window_minimized, message_box, monospace_font_families, open_local_file, open_local_path,
-    os_ui_language, recycle, request_window_close, reveal_in_explorer, set_clipboard_text,
-    set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
-    set_window_topmost, shell_execute, spawn_at_priority, system_backdrop_available,
-    wheel_scroll_amount, write_to_console,
+    file_product_version, get_dpi_for_window, get_window_rect, get_work_area,
+    install_window_class_background, is_window_minimized, message_box, monospace_font_families,
+    open_local_file, open_local_path, os_ui_language, recycle, request_window_close,
+    reveal_in_explorer, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
+    set_window_dark_mode, set_window_outer_rect, set_window_topmost, shell_execute,
+    spawn_at_priority, system_backdrop_available, wheel_scroll_amount, write_to_console,
 };
 
 /// The bands, asked of the kernel rather than of the source.

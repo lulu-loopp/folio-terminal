@@ -35,6 +35,7 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         theme_mode: ThemeModeV1::Dark,
         display_formulas: false,
         tables: false,
+        block_max_height: 480,
         inline_formulas: false,
         default_profile: "gitbash".to_owned(),
         git_panel: false,

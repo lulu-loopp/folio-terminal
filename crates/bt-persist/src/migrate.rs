@@ -47,6 +47,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (9, migrate_settings_v9_to_v10),
     (10, migrate_settings_v10_to_v11),
     (11, migrate_settings_v11_to_v12),
+    (12, migrate_settings_v12_to_v13),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -280,6 +281,23 @@ fn migrate_settings_v11_to_v12(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(12));
         object.insert("tables".to_owned(), Value::from(true));
+    }
+    value
+}
+
+/// One key, and it carries a behaviour forward for the third time running. Every build that
+/// wrote a v12 file drew every rendered block at its full height, whatever that was, because
+/// there was no control that could have said otherwise; `0` is that behaviour written down, and
+/// it is the same `0` a fresh install gets. Choosing a cap here would be capping blocks on a
+/// reader who never asked for it, on the strength of a control they have not seen yet. See
+/// `SettingsV1::block_max_height`.
+fn migrate_settings_v12_to_v13(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(13));
+        object.insert(
+            "block_max_height".to_owned(),
+            Value::from(crate::DEFAULT_BLOCK_MAX_HEIGHT),
+        );
     }
     value
 }

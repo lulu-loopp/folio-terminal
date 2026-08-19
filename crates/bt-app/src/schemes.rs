@@ -277,6 +277,48 @@ impl Catalogue {
             .map(|entry| entry.file.as_str())
     }
 
+    /// The name a **file** is currently listed under, on the canvas it paints.
+    ///
+    /// The inverse of [`Self::file_of`], and it exists for the one question that
+    /// cannot be asked the other way round: a user who renames their scheme
+    /// edits the `name` inside the file, and `settings.json` stores the *name* —
+    /// so the row's stored string stops resolving while the file it came from is
+    /// still sitting in the folder, listed under something else. Asked of the
+    /// tracked file, this says what that something else is, and the rename can be
+    /// followed instead of reported as a disappearance (user report 2026-08-18).
+    ///
+    /// Canvas-checked, because a file whose background was edited across the
+    /// light/dark line is not a rename — it is the same file painting the other
+    /// canvas, and the row that was wearing it is genuinely without a scheme.
+    #[must_use]
+    pub fn name_of_file(&self, file: &str, light: bool) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|entry| entry.light == light && entry.file == file)
+            .map(|entry| entry.name.as_str())
+    }
+
+    /// The user's own scheme files, as the `Delete scheme…` menu lists them.
+    ///
+    /// **Files and not schemes**: what the verb does is send a file to the
+    /// Recycle Bin, so what it offers is the folder's contents. Bundled entries
+    /// travel inside the executable and are never listed — there is nothing of
+    /// them on disk to delete — which is the same clause [`Self::user_file_of`]
+    /// carries, asked over the whole catalogue rather than about one name.
+    ///
+    /// Both canvases in one list, deliberately. A reader who made a light custom
+    /// must be able to delete it while a dark canvas is in force, and having to
+    /// select a scheme before its file can be removed is exactly the dance this
+    /// menu exists to end (user report 2026-08-18).
+    #[must_use]
+    pub fn user_files(&self) -> Vec<(&str, &str)> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.origin == SchemeOrigin::User)
+            .map(|entry| (entry.name.as_str(), entry.file.as_str()))
+            .collect()
+    }
+
     /// The reason a named file was skipped, if it was.
     #[must_use]
     pub fn reject_reason(&self, file: &str) -> Option<&str> {
@@ -580,6 +622,21 @@ pub struct RescanVerdict {
     pub report: Option<(String, String)>,
     /// `(name, fallback)` for each canvas whose file has left the folder.
     pub gone: Vec<(String, String)>,
+    /// `(index, new name)` for each canvas whose tracked file is still in the
+    /// folder under a **different** name — the reader renamed their scheme
+    /// (user report 2026-08-18).
+    ///
+    /// The index is into the caller's `[light, dark]` pair rather than a
+    /// canvas flag, because the caller's job with this is to write the new name
+    /// into the settings row of that index — and both rows can be pointing at
+    /// one file, in which case both are here and both follow.
+    ///
+    /// A rename is neither of the other two outcomes and must not be reported as
+    /// either. `gone` would fall the row to the default and say the scheme had
+    /// vanished, over a file the reader is looking at; keeping the old name would
+    /// leave the row unresolvable until they picked it again by hand, which is
+    /// the bug reported.
+    pub renamed: Vec<(usize, String)>,
 }
 
 /// Read the three outcomes out of a fresh catalogue.
@@ -616,6 +673,7 @@ pub fn rescan_verdict(
     );
     let mut fault: Option<(String, String)> = None;
     let mut gone = Vec::new();
+    let mut renamed = Vec::new();
     for (index, light) in [true, false].into_iter().enumerate() {
         let name = stored[index];
         if after.file_of(name, light).is_some() {
@@ -635,6 +693,27 @@ pub fn rescan_verdict(
                 }
                 fault.get_or_insert((file.clone(), reason.to_owned()));
             }
+            // **The file is still there, under another name.** The reader edited
+            // the `name` field, which is where a scheme's name lives, and the
+            // settings row stores the name — so the row and the file have come
+            // apart while both are perfectly intact. Followed rather than
+            // reported: the file is the thing that was tracked, this is what it
+            // is called now, and the caller writes that into the row.
+            //
+            // Resolved through the *new* name, so the colours in force are the
+            // file's own and not a default the row is about to stop naming.
+            None if after.name_of_file(file, light).is_some() => {
+                let now = after
+                    .name_of_file(file, light)
+                    .expect("just matched Some")
+                    .to_owned();
+                if light {
+                    schemes.0 = after.resolve(&now, true);
+                } else {
+                    schemes.1 = after.resolve(&now, false);
+                }
+                renamed.push((index, now));
+            }
             None => gone.push((name.to_owned(), after.default_name(light).to_owned())),
         }
     }
@@ -646,6 +725,7 @@ pub fn rescan_verdict(
         fault: fault.map(|(file, _)| file),
         report,
         gone,
+        renamed,
     }
 }
 
@@ -1118,6 +1198,194 @@ mod tests {
         assert!(
             relapse.report.is_some(),
             "a fault that was good in between is news again"
+        );
+    }
+
+    /// PIN (user report 2026-08-18) — **a scheme renamed inside its own file is
+    /// followed, not lost.**
+    ///
+    /// A scheme's name lives in the file's `name` field and `settings.json`
+    /// stores that name, so editing it parts the row from the file it came from:
+    /// the stored name stops resolving while the file sits in the folder under a
+    /// new one. The standing answer was "gone" — fall to the default, raise a
+    /// card — over a change the reader had just made on purpose, and the only
+    /// way back was to open the picker and choose their own scheme again.
+    ///
+    /// The watcher already tracks each row's *file*, which is the fact a rename
+    /// leaves alone, so the new name is read off it and handed back for the
+    /// caller to write into the row. Both rows follow when both were on one
+    /// file, and a row that was on something else is untouched.
+    ///
+    /// MUTATIONS:
+    /// (1) drop the `name_of_file` arm — `renamed` is empty and `gone` says the
+    ///     reader's scheme disappeared;
+    /// (2) resolve through the *stored* name instead of the new one — the
+    ///     colours fall to the default while the row's name follows, which is
+    ///     the worst of the two.
+    #[test]
+    fn a_scheme_renamed_in_its_own_file_is_followed_by_the_row_that_wore_it() {
+        // A scheme of the reader's own — a name no bundled entry holds, which
+        // is the ordinary case and the one this is about. (A rename *onto* a
+        // bundled name is its own pin below, because the format has a rule for
+        // that and the rule is what decides.)
+        let renamed = Catalogue::build(
+            bundled_sources().chain([SchemeSource {
+                file: "mine.json".to_owned(),
+                origin: SchemeOrigin::User,
+                text: Ok(include_str!("../../../assets/schemes/nord.json")
+                    .replace("\"name\": \"Nord\"", "\"name\": \"Midnight\"")
+                    .replace("\"background\": \"#2e3440\"", "\"background\": \"#111827\"")),
+            }]),
+        );
+        let in_force = (bt_render::FOLIO_LIGHT, bt_render::FOLIO_DARK);
+
+        let verdict = rescan_verdict(
+            &renamed,
+            ["", "Mine"],
+            [None, Some(("Mine".to_owned(), "mine.json".to_owned()))],
+            in_force,
+            None,
+        );
+        assert_eq!(
+            verdict.renamed,
+            [(1, "Midnight".to_owned())],
+            "the dark row follows its own file to the name it now carries"
+        );
+        assert!(
+            verdict.gone.is_empty(),
+            "and nothing disappeared: the file is right there"
+        );
+        assert_eq!(verdict.report, None);
+        assert_eq!(
+            verdict.schemes.1.background,
+            [0x11, 0x18, 0x27],
+            "the colours in force are the file's own and not the default the \
+             row is about to stop naming"
+        );
+
+        // Both rows on one file, both following. (One file can only paint one
+        // canvas, so this is the case where a reader has pointed the light row
+        // at a dark scheme's name — legal, and `resolve` gives the light row the
+        // light default while the name still follows.)
+        let both = rescan_verdict(
+            &renamed,
+            ["Mine", "Mine"],
+            [
+                Some(("Mine".to_owned(), "mine.json".to_owned())),
+                Some(("Mine".to_owned(), "mine.json".to_owned())),
+            ],
+            in_force,
+            None,
+        );
+        assert_eq!(
+            both.renamed,
+            [(1, "Midnight".to_owned())],
+            "and only the canvas the file actually paints follows it: the other \
+             row was never resolving through this file"
+        );
+
+        // A row wearing something else is not touched by somebody else's rename.
+        let elsewhere = rescan_verdict(
+            &renamed,
+            ["", "Folio Dark"],
+            [
+                None,
+                Some(("Folio Dark".to_owned(), "folio-dark.json".to_owned())),
+            ],
+            in_force,
+            None,
+        );
+        assert!(elsewhere.renamed.is_empty());
+        assert!(elsewhere.gone.is_empty());
+    }
+
+    /// PIN (user report 2026-08-18) — **a rename onto a name the catalogue
+    /// already holds is a replacement, and the row follows it there.**
+    ///
+    /// The honest outcome rather than a refusal, and it is the file format's own
+    /// rule showing through: `Catalogue::build` lets a user file whose `name` is
+    /// a bundled scheme's **replace** it, because overriding a bundled scheme by
+    /// name is the only way to retune one without forking the build. So renaming
+    /// a scheme to `Nord` does exactly what putting a file called `Nord` in the
+    /// folder has always done — the reader's file is what `Nord` means now — and
+    /// the row that was wearing the old name is pointed at `Nord`.
+    ///
+    /// Nothing is lost either way: the bundled scheme is still in the executable
+    /// and comes back the moment the name is freed.
+    #[test]
+    fn a_rename_onto_a_name_the_catalogue_holds_replaces_it_and_the_row_follows() {
+        // The reader's file, saved with `"name": "Nord"` — a name the
+        // executable already carries.
+        let collided =
+            Catalogue::build(bundled_sources().chain([
+                SchemeSource {
+                    file: "mine.json".to_owned(),
+                    origin: SchemeOrigin::User,
+                    text:
+                        Ok(
+                            include_str!("../../../assets/schemes/nord.json").replace(
+                                "\"background\": \"#2e3440\"",
+                                "\"background\": \"#111827\"",
+                            ),
+                        ),
+                },
+            ]));
+        assert_eq!(
+            collided.file_of("Nord", false),
+            Some("mine.json"),
+            "the reader's file is what the name means now — the format's own rule"
+        );
+
+        let verdict = rescan_verdict(
+            &collided,
+            ["", "Mine"],
+            [None, Some(("Mine".to_owned(), "mine.json".to_owned()))],
+            (bt_render::FOLIO_LIGHT, bt_render::FOLIO_DARK),
+            None,
+        );
+        assert_eq!(
+            verdict.renamed,
+            [(1, "Nord".to_owned())],
+            "the row follows the file to the name it took over"
+        );
+        assert_eq!(
+            verdict.schemes.1.background,
+            [0x11, 0x18, 0x27],
+            "and wears the file's colours, which is what the reader edited"
+        );
+        assert!(verdict.gone.is_empty());
+    }
+
+    /// PIN (user report 2026-08-18) — **the menu lists the reader's own files
+    /// and never a bundled one.**
+    #[test]
+    fn the_user_files_list_is_the_folder_and_only_the_folder() {
+        let folder = Catalogue::build(
+            bundled_sources().chain([
+                SchemeSource {
+                    file: "mine.json".to_owned(),
+                    origin: SchemeOrigin::User,
+                    text: Ok(include_str!("../../../assets/schemes/nord.json")
+                        .replace("\"name\": \"Nord\"", "\"name\": \"Midnight\"")),
+                },
+                SchemeSource {
+                    file: "day.json".to_owned(),
+                    origin: SchemeOrigin::User,
+                    text: Ok(include_str!("../../../assets/schemes/folio-light.json")
+                        .replace("\"name\": \"Folio Light\"", "\"name\": \"Day\"")),
+                },
+            ]),
+        );
+        assert_eq!(
+            folder.user_files(),
+            [("Midnight", "mine.json"), ("Day", "day.json")],
+            "both canvases in one list: a light scheme must be deletable while \
+             a dark one is in force, which is the dance the menu exists to end"
+        );
+        assert!(
+            Catalogue::build(bundled_sources()).user_files().is_empty(),
+            "a folder with nothing in it offers nothing, whatever the \
+             executable carries"
         );
     }
 

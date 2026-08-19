@@ -236,6 +236,17 @@ pub struct FrameVisualRow {
     pub top_subpixels: i64,
     pub height_subpixels: i64,
     pub live_grid_row: Option<u32>,
+    /// True when this presented row soft-wraps into the next one — the same fact
+    /// `CapturedRow::continues` carries on the live grid and `layout_frozen_line`
+    /// knows by construction on the frozen plane, brought through to the frame
+    /// because it is the only thing that can tell a wrapped link from two links.
+    ///
+    /// **Carried rather than inferred.** Two cells on adjacent rows look exactly
+    /// alike whether one line wrapped or two lines were printed; every rule that
+    /// tried to guess (the earlier row reaching the last column, the cells
+    /// between being blank) is a guess that reads a list of identical links as
+    /// one link. This is the answer the terminal already had.
+    pub continues: bool,
 }
 
 /// Byte budget of the GPU texture cache every projected artifact competes in.
@@ -722,17 +733,11 @@ impl ViewportFrame {
         let index = row as usize * self.columns.get() as usize + column as usize;
         let link = self.cells.get(index)?.hyperlink.as_ref()?;
         if link.id.is_some() {
-            // OSC 8 with a grouping id (the vendor synthesizes one per emission when the
-            // application omits it): the link is every cell carrying the same (id, uri), even
-            // across layout-indent gaps between soft-wrapped segments.
-            let first = self
-                .cells
-                .iter()
-                .position(|cell| cell_in_link_group(cell, link))?;
-            let last = self
-                .cells
-                .iter()
-                .rposition(|cell| cell_in_link_group(cell, link))?;
+            // OSC 8 with a grouping id: the link is the **geometrically continuous** run of
+            // same-(id, uri) cells around this one, joined across the layout-indent gaps a
+            // soft wrap leaves behind. See [`Self::link_group_run`] for why the group is
+            // narrowed to a run and what the id is still for.
+            let (first, last) = self.link_group_run(index, link)?;
             return Some(HyperlinkHit {
                 uri: link.uri.clone(),
                 id: link.id.clone(),
@@ -761,6 +766,78 @@ impl ViewportFrame {
         })
     }
 
+    /// One id-group's **geometrically continuous run** around a hit cell, as a pair of flat
+    /// cell indices.
+    ///
+    /// # Why a run and not the whole group
+    ///
+    /// OSC 8's convention is that cells sharing an id are one link, and the convention was
+    /// written for the case it is named for: a link that soft-wraps arrives as two runs with
+    /// layout indent between them, and only the id can say they are one thing. Claude Code
+    /// stamps the same id on **every occurrence of the same URL in its output**, which is
+    /// within the letter of the spec and turns hovering one file path into every copy of that
+    /// path on the screen lighting at once (user report 2026-08-18).
+    ///
+    /// So the grouping is narrowed, deliberately and only here: what lights is the run the
+    /// pointer is actually on. The id still governs everything else — it is what joins the two
+    /// halves of a wrapped link across the indent, it is carried on the hit, and activation
+    /// reads the hit's `uri` exactly as before. What changes is which cells wear the solid
+    /// underline, which is a statement about *this* occurrence and was never a statement the
+    /// other occurrences had a claim on.
+    ///
+    /// # What "continuous" means
+    ///
+    /// Two group cells with no group cell between them are the same run when either they are
+    /// adjacent in the same row, or the earlier one's row soft-wraps into the later one's and
+    /// nothing but blank cells stands between them. `row_map[..].continues` is the terminal's
+    /// own answer to the first half; the blank test is the second, and it is what keeps a
+    /// wrapped line that names the same URL twice from being read as one link.
+    fn link_group_run(
+        &self,
+        index: usize,
+        link: &bt_transcript::CellHyperlink,
+    ) -> Option<(usize, usize)> {
+        if !cell_in_link_group(self.cells.get(index)?, link) {
+            return None;
+        }
+        let columns = self.columns.get() as usize;
+        let blank = |cell: &bt_transcript::CapturedCell| {
+            cell.text.is_empty() || cell.text.chars().all(char::is_whitespace)
+        };
+        // Whether the gap between two group cells is one the link may cross.
+        let joined = |earlier: usize, later: usize| {
+            let (row, next_row) = (earlier / columns, later / columns);
+            if row == next_row {
+                return later == earlier + 1;
+            }
+            next_row == row + 1
+                && self.row_map.get(row).is_some_and(|mapped| mapped.continues)
+                && self.cells[earlier + 1..later].iter().all(blank)
+        };
+        let mut first = index;
+        while let Some(previous) = self.cells[..first]
+            .iter()
+            .rposition(|cell| cell_in_link_group(cell, link))
+        {
+            if !joined(previous, first) {
+                break;
+            }
+            first = previous;
+        }
+        let mut last = index;
+        while let Some(next) = self.cells[last + 1..]
+            .iter()
+            .position(|cell| cell_in_link_group(cell, link))
+            .map(|offset| last + 1 + offset)
+        {
+            if !joined(last, next) {
+                break;
+            }
+            last = next;
+        }
+        Some((first, last))
+    }
+
     /// Add the ordinary terminal underline flag to the active link in this frame only. Source
     /// cells and transcript styles remain unchanged.
     pub fn underline_hyperlink(&mut self, hyperlink: &HyperlinkHit) -> bool {
@@ -769,21 +846,21 @@ impl ViewportFrame {
                 id: hyperlink.id.clone(),
                 uri: hyperlink.uri.clone(),
             };
-            let Some(first) = self
-                .cells
-                .iter()
-                .position(|cell| cell_in_link_group(cell, &group))
-            else {
+            // **The hit names which run**, through the anchor it was taken at — which is the
+            // shape the no-id path below has always had, and the reason the id path can now
+            // borrow it: a group with three runs on screen has three hits, and the one being
+            // hovered is the one whose first cell carries this anchor.
+            let Some(hit) = self.cells.iter().enumerate().find_map(|(index, cell)| {
+                (cell_in_link_group(cell, &group)
+                    && self.cell_anchors[index].start == hyperlink.start)
+                    .then_some(index)
+            }) else {
                 return false;
             };
-            let Some(last) = self
-                .cells
-                .iter()
-                .rposition(|cell| cell_in_link_group(cell, &group))
-            else {
+            let Some((first, last)) = self.link_group_run(hit, &group) else {
                 return false;
             };
-            // The hit must describe this frame's group, not a stale frame's.
+            // The hit must describe this frame's run, not a stale frame's.
             if self.cell_anchors[first].start != hyperlink.start
                 || self.cell_anchors[last].end != hyperlink.end
             {
@@ -1028,6 +1105,8 @@ impl Error for FrameShapeError {}
 struct VisualRow {
     cells: Vec<CapturedCell>,
     anchors: Vec<CellAnchor>,
+    /// Whether this row soft-wraps into the next. See [`FrameVisualRow::continues`].
+    continues: bool,
 }
 
 /// The single projection-time source of truth for one rectangular presentation row. Flattened
@@ -1074,6 +1153,7 @@ fn flatten_presented_rows(
             top_subpixels: next_top,
             height_subpixels: row.height_subpixels,
             live_grid_row: row.live_grid_row,
+            continues: row.visual.continues,
         });
         next_top = next_top.saturating_add(row.height_subpixels);
         cells.extend(row.visual.cells);
@@ -3393,6 +3473,8 @@ fn endpoint(anchor: &ContentAnchor, bias: Bias) -> ContentAnchor {
 
 fn blank_visual_row(columns: usize, anchor: impl Fn(usize, Bias) -> ContentAnchor) -> VisualRow {
     VisualRow {
+        // Padding below the last real row, which continues into nothing.
+        continues: false,
         cells: vec![CapturedCell::default(); columns],
         anchors: (0..columns)
             .map(|column| CellAnchor {
@@ -3424,6 +3506,7 @@ fn captured_visual_row(
     columns: usize,
     anchor: impl Fn(usize, Bias) -> ContentAnchor,
 ) -> VisualRow {
+    let continues = row.continues;
     let mut cells = row.cells;
     let mut anchors = Vec::with_capacity(columns);
     let mut lead = 0usize;
@@ -3437,7 +3520,11 @@ fn captured_visual_row(
         });
     }
     apply_implicit_hyperlinks(&mut cells);
-    VisualRow { cells, anchors }
+    VisualRow {
+        cells,
+        anchors,
+        continues,
+    }
 }
 
 fn captured_staged_visual_row(
@@ -3466,7 +3553,11 @@ fn captured_staged_visual_row(
     }
     let mut cells = staged.row.cells.clone();
     apply_implicit_hyperlinks(&mut cells);
-    VisualRow { cells, anchors }
+    VisualRow {
+        cells,
+        anchors,
+        continues: staged.row.continues,
+    }
 }
 
 fn apply_implicit_hyperlinks(cells: &mut [CapturedCell]) {
@@ -3636,9 +3727,13 @@ fn layout_frozen_line(line: &FrozenLine, columns: usize) -> Vec<VisualRow> {
             })
         })
         .collect::<Vec<_>>();
+    // Every row this produces but the last is a soft wrap **by construction**:
+    // one frozen logical line is being cut into as many rows as it takes, and the
+    // cut is the wrap. The last is fixed up once the count is known.
     let mut rows = vec![VisualRow {
         cells: Vec::with_capacity(columns),
         anchors: Vec::with_capacity(columns),
+        continues: true,
     }];
     for (grapheme_index, cluster) in graphemes(&line.text).enumerate() {
         let width = cluster_width(cluster).min(columns);
@@ -3656,6 +3751,7 @@ fn layout_frozen_line(line: &FrozenLine, columns: usize) -> Vec<VisualRow> {
             rows.push(VisualRow {
                 cells: Vec::with_capacity(columns),
                 anchors: Vec::with_capacity(columns),
+                continues: true,
             });
         }
         let byte_start = line.grapheme_boundaries[grapheme_index];
@@ -3714,7 +3810,11 @@ fn layout_frozen_line(line: &FrozenLine, columns: usize) -> Vec<VisualRow> {
         }
     }
     let end_offset = line.grapheme_boundaries.len().saturating_sub(1);
-    pad_frozen_row(rows.last_mut().unwrap(), line, columns, end_offset);
+    let last = rows.last_mut().unwrap();
+    pad_frozen_row(last, line, columns, end_offset);
+    // The line ends here, so this row wraps into nothing — whatever is drawn
+    // under it is the next logical line.
+    last.continues = false;
     rows
 }
 
@@ -4562,6 +4662,182 @@ mod tests {
                     .flags
                     .intersects(CellFlags::UNDERLINE | CellFlags::DOTTED_UNDERLINE),
                 "gap column {column}"
+            );
+        }
+    }
+
+    /// PIN (user report 2026-08-18) — **two separate runs sharing one OSC 8 id are two
+    /// links to hover, and only the one under the pointer lights.**
+    ///
+    /// Claude Code stamps the same emission id on every occurrence of the same URL it
+    /// prints, which is within the letter of OSC 8 and means a screen listing one file
+    /// eight times carries eight cells-worth of one "link". Hovering any of them used to
+    /// light all eight: the grouping rule walked the whole frame for `(id, uri)` and took
+    /// the first cell to the last, indent gaps, other rows and unrelated text included.
+    ///
+    /// The narrowing is deliberate and it is only about *lighting*. The id still joins a
+    /// wrapped link across its indent — the pin above — and the hit still carries it, so
+    /// activation is unchanged; what the pointer is over is one occurrence, and one
+    /// occurrence is what may claim the solid underline.
+    ///
+    /// MUTATIONS:
+    /// (1) go back to `position`/`rposition` over the whole frame and the first block goes
+    ///     red with the second row lit;
+    /// (2) drop the `continues` test from `joined` and these two rows merge into one run,
+    ///     because nothing but blanks separates them;
+    /// (3) drop the blank test and a wrapped line naming one URL twice merges likewise.
+    #[test]
+    fn two_runs_sharing_an_id_light_one_at_a_time() {
+        let link = CellHyperlink {
+            id: Some("7_alacritty".to_owned()),
+            uri: "file:///C:/notes.md".to_owned(),
+        };
+        let row_with_link = || {
+            let mut cells = CapturedRow::plain("  notes.md  ", false).cells;
+            for cell in &mut cells[2..11] {
+                cell.hyperlink = Some(link.clone());
+            }
+            CapturedRow {
+                cells,
+                // Two printed lines, not one wrapped one — which is the whole
+                // difference between this fixture and the pin above it.
+                continues: false,
+                shell_mark: None,
+            }
+        };
+        let projection = ViewportProjection::new(
+            key(12),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let mut frame = projection
+            .live_frame(
+                nz32(12),
+                vec![row_with_link(), row_with_link()],
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: false,
+                },
+            )
+            .unwrap();
+
+        let upper = frame.hyperlink_at(0, 4).unwrap();
+        let lower = frame.hyperlink_at(1, 4).unwrap();
+        assert_ne!(upper, lower, "two occurrences are two things to hover");
+        assert_eq!(upper.uri, lower.uri);
+        assert_eq!(
+            upper.id, lower.id,
+            "and the id is still on both, because it is what activation and the \
+             wrap-joining read"
+        );
+
+        assert!(frame.underline_hyperlink(&upper));
+        let columns = frame.columns.get() as usize;
+        let solid = |frame: &ViewportFrame, row: usize, column: usize| {
+            let flags = frame.cells[row * columns + column].style.flags;
+            flags.contains(CellFlags::UNDERLINE) && !flags.contains(CellFlags::DOTTED_UNDERLINE)
+        };
+        for column in 2..11 {
+            assert!(solid(&frame, 0, column), "the hovered run, column {column}");
+            assert!(
+                !solid(&frame, 1, column),
+                "the other occurrence keeps its resting dots, column {column}"
+            );
+        }
+
+        // And the other way round, on a frame that has not been touched.
+        let mut frame = projection
+            .live_frame(
+                nz32(12),
+                vec![row_with_link(), row_with_link()],
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: false,
+                },
+            )
+            .unwrap();
+        assert!(frame.underline_hyperlink(&lower));
+        for column in 2..11 {
+            assert!(solid(&frame, 1, column), "the hovered run, column {column}");
+            assert!(!solid(&frame, 0, column), "and only it, column {column}");
+        }
+    }
+
+    /// PIN — **a wrapped link whose continuation names the same URL again is still two
+    /// links**, and the seam is what tells them apart.
+    ///
+    /// The case `continues` alone cannot answer: row 0 really does soft-wrap into row 1,
+    /// so the wrap test says yes, and what says no is that the cells between the two runs
+    /// are not blank — there is text there, and a link that stops for text and starts again
+    /// has stopped.
+    #[test]
+    fn a_wrapped_line_naming_one_url_twice_keeps_its_two_runs_apart() {
+        let link = CellHyperlink {
+            id: Some("9_alacritty".to_owned()),
+            uri: "file:///C:/a.png".to_owned(),
+        };
+        let mut first_row = CapturedRow::plain("a.png and", true).cells;
+        for cell in &mut first_row[..5] {
+            cell.hyperlink = Some(link.clone());
+        }
+        let mut second_row = CapturedRow::plain("so a.png ", false).cells;
+        for cell in &mut second_row[3..8] {
+            cell.hyperlink = Some(link.clone());
+        }
+        let projection = ViewportProjection::new(
+            key(9),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let mut frame = projection
+            .live_frame(
+                nz32(9),
+                vec![
+                    CapturedRow {
+                        cells: first_row,
+                        continues: true,
+                        shell_mark: None,
+                    },
+                    CapturedRow {
+                        cells: second_row,
+                        continues: false,
+                        shell_mark: None,
+                    },
+                ],
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: false,
+                },
+            )
+            .unwrap();
+        assert_ne!(
+            frame.hyperlink_at(0, 1).unwrap(),
+            frame.hyperlink_at(1, 4).unwrap(),
+            "the word between them ends the first run"
+        );
+        let hit = frame.hyperlink_at(0, 1).unwrap();
+        assert!(frame.underline_hyperlink(&hit));
+        let columns = frame.columns.get() as usize;
+        let solid = |frame: &ViewportFrame, row: usize, column: usize| {
+            let flags = frame.cells[row * columns + column].style.flags;
+            flags.contains(CellFlags::UNDERLINE) && !flags.contains(CellFlags::DOTTED_UNDERLINE)
+        };
+        for column in 0..5 {
+            assert!(solid(&frame, 0, column), "the hovered run, column {column}");
+        }
+        for column in 3..8 {
+            assert!(
+                !solid(&frame, 1, column),
+                "the second mention is its own link, column {column}"
             );
         }
     }
