@@ -862,13 +862,13 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 
 **与会话恢复的合成规则（本节的裁决）。** `--cwd` / `--profile` / `<path>` 三者任一出现 = **调用者要一个属于他自己的新地方**，于是：
 
-1. 命令行的 tab **排在最前，并且是激活的那个**（`launch_active_tab`）。要求了 `D:\proj` 却落在复活出来的第三个 tab 上，等于在看不见的地方兑现了这个参数。
-2. **pinned 的 tab 照常打开**，排在它旁边——pin 本身就是已经给过的答复（§7.1.4 / mock-up 7426-7431），命令行不重开这个问题。
+1. **pinned 的 tab 照常打开，并且照常领跑标签条**——pin 本身就是已经给过的答复（§7.1.4 / mock-up 7426-7431），命令行不重开这个问题；而在标签条上，「不重开」就是「不把它们挪开」。**pin 是一条分区而不是一件装饰**（mock-up 3379「pinned tabs lead the strip」，代码里的 F57），标签条的头部由它占着，这是全称成立的不变量（`seed::pins_are_normalized`，每帧被 `tab_trailers` 问一次）。
+2. **命令行的 tab 紧跟在那一段 pinned run 之后——没有 pinned 时即最前——并且是激活的那个**（`cli_tab_slot` / `launch_active_tab`）。要求了 `D:\proj` 却落在复活出来的第三个 tab 上，等于在看不见的地方兑现了这个参数；所以它要「排头」，而排的是**没有被 pin 说过话的那些 tab 的头**。**两条「排头」的优先序在此定死**（缺陷修复 2026-08-19：本片与 F57 各自写下「最前」而互不点名，一台带 pinned tab 的机器上 `folio --cwd` 同时踩中两条，debug 版在第一帧断言崩）——**任何插入都落在 pinned run 之后，除非它自己也是 pinned**。这不是新裁决，只是把已有的那条读到底：小样早就为另一个「点名槽位」的手势判过同一件事——拖出成新 tab 不继承 pin，理由正是「pinned tabs lead, so the tab you placed at slot 3 would jump to slot 0」（6118），指针点的名让位于分区，参数点的名同理。落地上也不需要第二套算法：`cli_tab_slot` 就是跨界拖放用的那一条 `strip_insert_slot(0, …)` 钳位，而 **pinned run 的末尾与 unpinned run 的开头是同一个槽**，所以命令行的 tab 将来若能被 pin，同一个答案对它照样成立，不必再加分支。
 3. **未 pin 的 tab 照常进 restore 提示**，规则不变：非模态、不自动恢复、恢复=追加。
 4. **命令行的 tab 不是占位（placeholder）**。占位只为「什么都没 pin，窗口总得有点东西」而存在；用户点名了文件夹的那个 pane 是他要的东西，`answer_restore` 不许把它扫掉。
 5. **§7.1.4 的「孤零零一个未 pin 的 tab 直接复活、不问」在有命令行时暂停**。那条捷径成立的前提是「拒绝就只剩一个开在错文件夹里的新 shell，严格更差」；被告知了文件夹的这次启动已经开在对的地方，拒绝就是保留他要的东西——问题重新成立，于是照问。
 
-三条纯函数钉住它：`plan_launch(saved, active, cli_wants_pane)`、`launch_active_tab(...)`、`cli::resolve(...)`。
+四条纯函数钉住它：`plan_launch(saved, active, cli_wants_pane)`、`cli_tab_slot(revived_pinned)`、`launch_active_tab(cli_slot, active_open, tabs)`、`cli::resolve(...)`。中间两条收的是**同一个槽号**（`Runtime::create` 只算一次、既拿去插 tab 又拿去坐座位），所以「排在哪」与「哪个是激活的」不可能各说各话。
 
 **Explorer 右键动词（slice 2，本片不注册任何注册表项）。** 动词的 `command` 值就是 `"…\folio.exe" --cwd "%V"`（spike §4 的三棵 `HKCU\Software\Classes\...\shell\Folio` 树，`Background` 只认 `%V`）。spike 的探针日志同时记下了本片存在的理由：`%V` 作为**参数**到达，而被启动进程的工作目录是 exe 自己的目录——所以 `--cwd` 是必须的，且 Folio 永远不读 `current_dir()`。今天单窗口，动词只能「起一个新进程」；多窗块之后再谈开新窗还是开新 tab。
 

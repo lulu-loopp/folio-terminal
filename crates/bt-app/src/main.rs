@@ -13515,22 +13515,75 @@ struct LaunchPlan {
     placeholder: bool,
 }
 
+/// **Where the command line's tab stands, once the pinned run has had its say.**
+///
+/// §7.2 as slice 0 wrote it said the command line's tab leads the strip; F57 says
+/// the pinned run does. Both were written as "first" — the pin partition on 2026-08-10, the
+/// command line on 2026-08-18 — and neither sentence mentions the other, so a
+/// launch given `--cwd` over a session holding a pinned tab could only satisfy
+/// one of them by breaking the other. `seed::pins_are_normalized` caught it on
+/// the first frame that tried to draw such a strip, which is exactly what that
+/// assert is for and is the whole of the report this function answers.
+///
+/// **The pinned run wins, and that is not a new ruling.** Pin is a partition
+/// rather than a decoration (mock-up 3379: *pinned tabs lead the strip*), and
+/// every other slot in this build is already clamped to it — a cross-boundary
+/// drop by [`strip_insert_slot`], a reorder by `seats::strip_reorder_slot`, a
+/// flag that changed under a standing tab by [`settle_pin_partition`]. The
+/// mock-up settled this very shape once before, for the other gesture that names
+/// a slot out loud: a pane torn out to slot 3 deliberately does *not* inherit its
+/// tab's pin, **because** "pinned tabs lead, so the tab you placed at slot 3
+/// would jump to slot 0" (6118). A slot the pointer named yields to the partition
+/// there; a slot an argument named yields to it here.
+///
+/// So §7.2's "first" is first **among the tabs no pin has already spoken for** —
+/// which is what its own list was reaching for one line further up anyway: a pin
+/// is an answer already given (mock-up 7426-7431) and the rule above this one
+/// says a command line does not reopen that question. Reading it as "ahead of the
+/// pinned tabs too" would have reopened it in the only way a strip can, by moving
+/// them. §7.2 now states the two as one ordered sentence rather than as two.
+///
+/// Answered **by [`strip_insert_slot`]** rather than by counting `plan.open`, so
+/// the strip keeps one authority on where the seam is and a launch is clamped by
+/// the same line a drop is. Asked with `0` because a command line does ask for
+/// the front; the clamp is what turns that into the front of what is left.
+///
+/// **The arriving tab's own pin does not enter into it**, and does not need to:
+/// the head of the unpinned run and the end of the pinned run are one slot, so a
+/// command line that could ask for a pinned tab — none can today — would land in
+/// the same place and be right there for the other reason.
+fn cli_tab_slot(revived_pinned: &[bool]) -> usize {
+    strip_insert_slot(0, revived_pinned)
+}
+
 /// Which tab a launch opens on, once the command line's tab — if there is one —
-/// is in front of the revived ones.
+/// has taken its slot among the revived ones.
 ///
 /// **A command line takes the seat.** Somebody who typed `folio --cwd D:\proj`
 /// asked to be put in `D:\proj`, and a launch that revived four pinned tabs and
 /// landed on the third of them would have honoured the argument somewhere behind
-/// what is on screen.
+/// what is on screen. It takes the seat wherever [`cli_tab_slot`] stood it:
+/// since the pinned run leads the strip, "the tab that is active" and "the tab
+/// that is first" stopped being one sentence, and this function is the first
+/// half of it rather than a second opinion about the second.
+///
+/// The slot arrives as a number rather than as the bool it used to be, so the
+/// two halves cannot disagree — a `cli_wants_pane` here and a placement over
+/// there would be the same rule written twice, and the copy that drifts is the
+/// one nothing draws.
 ///
 /// Pure and named rather than written inline, because the `+1` it does not need
 /// is the bug it would otherwise have: `active_open` indexes `plan.open`, and
 /// that index stops being the index of the same tab the moment anything is put
 /// in front of it.
-fn launch_active_tab(cli_wants_pane: bool, active_open: Option<usize>, tabs: usize) -> usize {
+fn launch_active_tab(cli_slot: Option<usize>, active_open: Option<usize>, tabs: usize) -> usize {
     debug_assert!(tabs > 0, "a launch always opens at least one tab");
-    if cli_wants_pane {
-        return 0;
+    if let Some(slot) = cli_slot {
+        debug_assert!(
+            slot < tabs,
+            "the command line's tab is one of the tabs that opened"
+        );
+        return slot;
     }
     active_open.unwrap_or(0).min(tabs.saturating_sub(1))
 }
@@ -15950,6 +16003,13 @@ impl Runtime {
                 PreviewRestore::default(),
             )
         });
+        // **The one slot both the strip and the seat are read off** — see
+        // [`cli_tab_slot`] for why it is not `0`. Computed from the *plan* and
+        // not from the built tabs, because it is also what `launch_active_tab`
+        // is told, and a number derived twice is a number that can differ twice.
+        let cli_slot = cli_root
+            .is_some()
+            .then(|| cli_tab_slot(&plan.open.iter().map(|tab| tab.pinned).collect::<Vec<_>>()));
         let restored_roots: Vec<_> = if plan.open.is_empty() && cli_root.is_none() {
             vec![(
                 seats::Seats::lone_terminal(),
@@ -15959,10 +16019,11 @@ impl Runtime {
                 PreviewRestore::default(),
             )]
         } else {
-            cli_root
-                .into_iter()
-                .chain(plan.open.iter().map(revive_plan))
-                .collect()
+            let mut roots: Vec<_> = plan.open.iter().map(revive_plan).collect();
+            if let (Some(cli_root), Some(slot)) = (cli_root, cli_slot) {
+                roots.insert(slot, cli_root);
+            }
+            roots
         };
         let mut tabs = Vec::with_capacity(restored_roots.len());
         let mut conpty_sources = Vec::with_capacity(restored_roots.len());
@@ -16009,7 +16070,7 @@ impl Runtime {
         // The tab you were on comes back on top, if it was one of the ones that
         // came back. A placeholder shell is index 0 either way, and so is a tab
         // the command line asked for.
-        let active_tab = launch_active_tab(cli_plan.wants_pane, plan.active_open, tabs.len());
+        let active_tab = launch_active_tab(cli_slot, plan.active_open, tabs.len());
         let recent = seed::SeedVault::from_persisted(&session_store.loaded().recent);
         let pending_restore = plan.ask.clone();
         let has_question = !pending_restore.is_empty();
@@ -51158,26 +51219,123 @@ mod tests {
         assert!(plan.ask.is_empty());
     }
 
-    /// PIN (§7.2) — **the command line's tab takes the seat**, and without one
-    /// the tab you were on still does.
+    /// PIN (§7.2 ∧ F57) — **the pinned run is the head of the strip, and
+    /// the command line's tab is the first thing after it.**
+    ///
+    /// The two "first" rules were written eight days apart and neither named the
+    /// other, so `folio --cwd D:\proj` over a session with a pinned tab put an
+    /// unpinned tab at slot 0 ahead of a pinned one — a broken partition, which
+    /// `tab_trailers` asserts against on the first frame it tries to draw.
+    ///
+    /// Red gate: make [`cli_tab_slot`] answer `0` — which is literally what
+    /// `Runtime::create` used to do, by chaining the command line's root in front
+    /// of the revived ones — and the first two cases fail on the flags.
+    #[test]
+    fn a_command_line_tab_falls_in_behind_the_pinned_run() {
+        // The report: one pinned tab in the session file, one `--cwd` on the
+        // command line. Slot 0 is not available; slot 1 is the front of what is
+        // left, and the strip that comes out is still partitioned.
+        assert_eq!(cli_tab_slot(&[true]), 1);
+        assert!(
+            seed::pins_are_normalized(&strip_with_cli_tab(&[true], false), |pinned| *pinned),
+            "F57 holds over the strip a command line actually composed"
+        );
+
+        // A whole run, not just its first tab: the seam is where the run ends.
+        assert_eq!(cli_tab_slot(&[true, true, true]), 3);
+        assert!(seed::pins_are_normalized(
+            &strip_with_cli_tab(&[true, true, true], false),
+            |pinned| *pinned
+        ));
+
+        // With nothing pinned, §7.2's "first" is unqualified and reads exactly as
+        // it was written — this is the case the rule was tested against, and the
+        // clamp must not have quietly moved it.
+        assert_eq!(
+            cli_tab_slot(&[]),
+            0,
+            "a first run has no seam to sit behind"
+        );
+        assert_eq!(
+            cli_tab_slot(&[false, false]),
+            0,
+            "unpinned tabs never displace the tab that was asked for"
+        );
+
+        // The arriving tab's own pin is not asked, and does not need to be: the
+        // end of the pinned run and the head of the unpinned one are one slot, so
+        // a command line that could ask for a pinned tab lands right for the
+        // other reason. Written down because the day such a flag exists, this is
+        // the line that says nothing has to change.
+        assert!(seed::pins_are_normalized(
+            &strip_with_cli_tab(&[true, true], true),
+            |pinned| *pinned
+        ));
+    }
+
+    /// The strip a launch composes, as the flags F57 is asked about: the revived
+    /// tabs in `plan.open` order with the command line's tab inserted where
+    /// [`cli_tab_slot`] puts it — the one line `Runtime::create` does with the
+    /// roots themselves.
+    fn strip_with_cli_tab(revived_pinned: &[bool], cli_pinned: bool) -> Vec<bool> {
+        let mut strip = revived_pinned.to_vec();
+        strip.insert(cli_tab_slot(revived_pinned), cli_pinned);
+        strip
+    }
+
+    /// PIN (§7.2) — **the command line's tab takes the seat**, wherever the
+    /// partition stood it, and without one the tab you were on still does.
     ///
     /// MUTATION: return `active_open.unwrap_or(0)` unconditionally and the
     /// first case fails — `folio --cwd D:\proj` with two pinned tabs saved would
     /// honour the argument behind the tab it landed on.
     #[test]
     fn a_command_line_takes_the_seat_and_otherwise_the_tab_you_were_on_keeps_it() {
-        assert_eq!(launch_active_tab(true, None, 1), 0);
+        assert_eq!(launch_active_tab(Some(0), None, 1), 0);
         assert_eq!(
-            launch_active_tab(true, Some(1), 3),
-            0,
-            "the revived tabs shifted along behind it"
+            launch_active_tab(Some(2), Some(1), 3),
+            2,
+            "the seat follows the tab, and the tab is behind the pinned run"
         );
-        assert_eq!(launch_active_tab(false, Some(1), 3), 1);
-        assert_eq!(launch_active_tab(false, None, 3), 0);
+        assert_eq!(launch_active_tab(None, Some(1), 3), 1);
+        assert_eq!(launch_active_tab(None, None, 3), 0);
         assert_eq!(
-            launch_active_tab(false, Some(9), 3),
+            launch_active_tab(None, Some(9), 3),
             2,
             "an index off the end of a shorter list is the last tab, never a panic"
+        );
+    }
+
+    /// The pure functions §7.2 names, put together over the one launch that
+    /// used to break: a session with an unpinned tab and two pinned ones, and a
+    /// `--cwd` on the command line.
+    ///
+    /// Red gate: with [`cli_tab_slot`] answering `0`, the strip is
+    /// `cli, pinned, pinned` and the active tab is the one at slot 0 — the first
+    /// of those is what `debug_assert!` in `tab_trailers` fired on.
+    #[test]
+    fn a_launch_told_a_folder_opens_it_at_the_head_of_the_unpinned_run() {
+        let saved = [
+            saved_tab("pwsh", "C:\\a", None, false),
+            saved_tab("pwsh", "C:\\b", None, true),
+            saved_tab("pwsh", "C:\\c", None, true),
+        ];
+        let plan = plan_launch(&saved, 1, true);
+        assert_eq!(plan.open, vec![saved[1].clone(), saved[2].clone()]);
+        assert_eq!(plan.ask, vec![saved[0].clone()], "the rest is still asked");
+
+        let pins = plan.open.iter().map(|tab| tab.pinned).collect::<Vec<_>>();
+        let slot = cli_tab_slot(&pins);
+        assert_eq!(slot, 2, "both pinned tabs keep the head they were promised");
+        assert!(
+            seed::pins_are_normalized(&strip_with_cli_tab(&pins, false), |pinned| *pinned),
+            "F57: the pinned run leads the strip"
+        );
+        assert_eq!(
+            launch_active_tab(Some(slot), plan.active_open, plan.open.len() + 1),
+            2,
+            "and it is still the tab you are put in, rather than the pinned tab \
+             you were last on"
         );
     }
 
