@@ -23802,6 +23802,93 @@ mod tests {
         assert!(!marks[0].failed(), "unknown is not failed");
     }
 
+    /// A prompt redrawn over the line it is still reading is the *same* command, however many times
+    /// it is redrawn.
+    ///
+    /// PSReadLine's `InvokePrompt` — which this terminal asks for by chord after a resize, and
+    /// which every other line editor has some equivalent of — re-runs the prompt function, so a
+    /// window dragged while a command is being typed sends `A` and `B` again on every repaint. The
+    /// shell is not describing a new command there; it is describing the same one at its new
+    /// coordinates. A ledger that opened a record per `B` filled the rail with blank cards that
+    /// carried no text and no status and could never carry either, because the only `C` and `D`
+    /// this line will ever produce belong to the record the last repaint opened.
+    #[test]
+    fn a_prompt_redrawn_over_the_line_it_is_reading_keeps_one_mark() {
+        let mut session = DualPlaneSession::new(nz(80), nz(10));
+        session
+            .feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07ls -la")
+            .unwrap();
+        // Three repaints: erase from the prompt row down, then prompt, markers and buffer again —
+        // the shape `InvokePrompt` writes.
+        for _ in 0..3 {
+            session
+                .feed(b"\x1b[1;1H\x1b[J\x1b]133;A\x07PS> \x1b]133;B\x07ls -la")
+                .unwrap();
+        }
+        assert_eq!(
+            session.command_marks().len(),
+            1,
+            "each repaint of one prompt is not another command: {:?}",
+            command_texts(&session)
+        );
+
+        session.feed(b"\x1b]133;C\x07").unwrap();
+        session.feed(b"\r\nfile.txt\r\n\x1b]133;D;0\x07").unwrap();
+
+        let marks = session.command_marks();
+        assert_eq!(marks.len(), 1, "{:?}", command_texts(&session));
+        assert_eq!(
+            marks[0].command_text, "ls -la",
+            "the text belongs to the one mark, not to a card the repaints left behind"
+        );
+        assert_eq!(marks[0].exit_code, Some(0));
+        assert!(marks[0].executed.is_some());
+        assert!(
+            marks[0].prompt.is_some(),
+            "the reclaimed mark takes the redrawn prompt's own coordinate"
+        );
+    }
+
+    /// The other half of that rule: a prompt that follows a command which *ran* opens a new record.
+    /// Reclaiming is for a mark that recorded nothing at all, never for the next command.
+    #[test]
+    fn a_prompt_after_a_command_that_ran_opens_its_own_mark() {
+        let mut session = DualPlaneSession::new(nz(80), nz(10));
+        run_command(&mut session, "echo one", "one", "0");
+        run_command(&mut session, "echo two", "two", "3");
+
+        let marks = session.command_marks();
+        assert_eq!(marks.len(), 2, "{:?}", command_texts(&session));
+        assert_eq!(marks[0].command_text, "echo one");
+        assert_eq!(marks[0].exit_code, Some(0));
+        assert_eq!(marks[1].command_text, "echo two");
+        assert_eq!(marks[1].exit_code, Some(3));
+        assert_ne!(marks[0].id, marks[1].id);
+    }
+
+    /// And a command abandoned at the prompt keeps its own record, because it has one thing to
+    /// keep: the text that was typed. That is what separates it from a repaint — a repaint records
+    /// nothing, and an empty record was never a command.
+    #[test]
+    fn a_command_abandoned_at_the_prompt_is_not_reclaimed_by_the_next_one() {
+        let mut session = DualPlaneSession::new(nz(80), nz(10));
+        session
+            .feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07rm -rf /")
+            .unwrap();
+        // Ctrl+C: the line editor returns nothing, the host prints a newline and draws the prompt
+        // again. No `C` ever names this line.
+        session.feed(b"\r\n").unwrap();
+        run_command(&mut session, "echo safe", "safe", "0");
+
+        let marks = session.command_marks();
+        assert_eq!(marks.len(), 2, "{:?}", command_texts(&session));
+        assert_eq!(marks[0].command_text, "rm -rf /");
+        assert_eq!(marks[0].executed, None, "it never ran");
+        assert_eq!(marks[0].exit_code, None, "and was never told how it ended");
+        assert_eq!(marks[1].command_text, "echo safe");
+        assert_eq!(marks[1].exit_code, Some(0));
+    }
+
     /// C13, stated as a test. `cmd.exe` emits no OSC 133 and neither does a PowerShell whose
     /// profile never installed the integration; both produce an empty ledger and no complaint.
     /// There is no prompt-shaped-line heuristic here to accidentally rescue them.

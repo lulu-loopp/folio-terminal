@@ -109,6 +109,18 @@ impl CommandMark {
         self.exit_code.is_some_and(|code| code != 0)
     }
 
+    /// Has this mark been told anything at all? No text read off the line, no `C` that submitted
+    /// it, no `D` that ended it — a record that is nothing but the fact that a prompt was drawn.
+    ///
+    /// This is the whole of the redraw rule in [`CommandMarkLedger::open_command`], and the reason
+    /// it is stated as "nothing recorded" rather than "not executed": a command abandoned at the
+    /// prompt has not executed either, but it *does* carry the text that was typed, and that text
+    /// is a fact about a real line the reader wrote. A repaint carries nothing, and an empty record
+    /// was never a command.
+    fn is_blank_draft(&self) -> bool {
+        self.executed.is_none() && self.finished.is_none() && self.command_text.is_empty()
+    }
+
     /// How long this command ran: `C` to `D`.
     ///
     /// `None` for anything that did not have both ends — still running, never executed, or a shell
@@ -174,13 +186,48 @@ impl CommandMarkLedger {
         self.open.is_some()
     }
 
-    /// `B`. Open a mark. It is visible in [`Self::marks`] immediately, with `finished: None`.
+    /// `B`. Open a mark — or reclaim the blank one a redrawn prompt left behind. It is visible in
+    /// [`Self::marks`] immediately, with `finished: None`.
+    ///
+    /// **A prompt drawn again for a line that has not run yet is the same command.** A line editor
+    /// repainting its input — PSReadLine's `InvokePrompt`, which this terminal asks for by chord
+    /// after every resize, and the equivalent every other editor has — re-runs the prompt function,
+    /// so `A` and `B` arrive again for a line the reader is still typing. The shell is not
+    /// describing a second command there, it is describing the same one at its new coordinates: the
+    /// only `C` and `D` this line will ever produce will name the record the *last* repaint opened,
+    /// so a record per `B` is a record that can never be completed. Dragging a window while typing
+    /// used to leave one such blank card in the rail per repaint.
+    ///
+    /// Reclaiming is therefore not a filter over what the ledger shows — a filter would have to
+    /// keep deciding, frame after frame, whether a record is still worth hiding, and the empty
+    /// records would still be there to be counted, stepped through and jumped to. There is one
+    /// record because there was one command.
+    ///
+    /// The reclaimed mark keeps its `id` — a rail tick or a painter's cache holding it across the
+    /// repaint is still holding the same command — and takes the redrawn prompt's own coordinates,
+    /// which are the ones that describe where the line now is. The old ones named cells the
+    /// repaint erased.
+    ///
+    /// Nothing here asks *why* the prompt was drawn again, because OSC 133 does not say and no
+    /// shell can be relied on to. What separates a repaint from an abandoned command is what the
+    /// mark was told, not what the shell meant: see [`CommandMark::is_blank_draft`].
     pub fn open_command(&mut self, start: AnchorId) -> CommandMarkId {
+        let prompt = self.pending_prompt.take();
+        if let Some(mark) = self.marks.last_mut().filter(|mark| mark.is_blank_draft()) {
+            // A `B` with no `A` before it leaves the prompt this mark already had: the repaint
+            // reported no new one, so the old one is still the best coordinate we were given.
+            mark.prompt = prompt.or(mark.prompt);
+            mark.start = start;
+            let id = mark.id;
+            self.open = Some(id);
+            self.revision += 1;
+            return id;
+        }
         self.next_id += 1;
         let id = CommandMarkId(self.next_id);
         self.marks.push(CommandMark {
             id,
-            prompt: self.pending_prompt.take(),
+            prompt,
             start,
             executed: None,
             finished: None,
