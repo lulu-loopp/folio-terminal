@@ -12854,6 +12854,87 @@ mod tests {
                 >= 3,
             "the enumeration above must actually have found bands to check"
         );
+
+        // ── the vertical rail, in every posture that puts one on screen ──
+        //
+        // The list is walked rather than sampled for the reason the bands above
+        // are: the 2026-08-18 report is a *second* surface left behind, and the
+        // rail is drawn by a function the first four never pass through. A rail
+        // whose panel is not a ground is a dark column down the edge of a window
+        // you can otherwise see the desk through.
+        let trailers = [TabTrailer::default(), TabTrailer::default()];
+        let tabs = [pinnable_tab(trailers[0]), pinnable_tab(trailers[1])];
+        for (name, state) in [
+            ("an expanded rail", expanded_rail()),
+            ("a parked icon rail", icon_rail(0.0)),
+            ("an icon rail halfway open", icon_rail(0.5)),
+            ("an icon rail fully open", icon_rail(1.0)),
+            // Mid-fold: `collapsed` with a `fold` still running is the one
+            // posture where the panel is on screen *and* the layer carrying it
+            // is at less than full opacity — which is exactly where a ground
+            // drawn as ink goes opaque while it fades. It is a state, so it is
+            // in the list.
+            (
+                "an expanded rail folding away",
+                RailState {
+                    collapsed: true,
+                    fold: Some(0.5),
+                    ..expanded_rail()
+                },
+            ),
+            (
+                "an open icon rail folding away",
+                RailState {
+                    collapsed: true,
+                    fold: Some(0.25),
+                    ..icon_rail(1.0)
+                },
+            ),
+        ] {
+            let (rail_quads, _, _) = rail_paint_of(1.0, &tabs, 0, None, None, state, None);
+            let geometry = rail_geometry(600.0, 1.0, &trailers, 0, 0.0, state)
+                .expect("every state in this list puts a rail on screen");
+            let panel = rail_quads
+                .iter()
+                .find(|quad| quad.rect == geometry.body)
+                .unwrap_or_else(|| panic!("{name} paints its own panel"));
+            assert_eq!(
+                panel.surface,
+                ChromeSurface::Ground,
+                "{name} is the window at that rectangle and must carry its alpha"
+            );
+            for (part, rect) in [("its edge", geometry.edge), ("its seam", geometry.seam)] {
+                let Some(rect) = rect else { continue };
+                let mark = rail_quads
+                    .iter()
+                    .find(|quad| quad.rect == rect)
+                    .unwrap_or_else(|| panic!("{name} paints {part}"));
+                assert_eq!(
+                    mark.surface,
+                    ChromeSurface::Ink,
+                    "{name}: {part} is struck on the panel and stays opaque"
+                );
+            }
+        }
+        // The two postures with no rail at all have no ground to lose: a
+        // horizontal layout draws the strip instead, and a rail whose fold has
+        // landed measures exactly zero. Named here so "hidden" is a checked
+        // state rather than a gap in the list.
+        for (name, state) in [
+            ("a horizontal layout", RailState::default()),
+            (
+                "a collapsed rail",
+                RailState {
+                    collapsed: true,
+                    ..expanded_rail()
+                },
+            ),
+        ] {
+            assert!(
+                rail_geometry(600.0, 1.0, &trailers, 0, 0.0, state).is_none(),
+                "{name} puts no rail on screen, so it owes the glass nothing"
+            );
+        }
     }
 
     /// PIN (D2): the pane head is [`SEAT_TITLE_BAR_LOGICAL_PX`] pixels
