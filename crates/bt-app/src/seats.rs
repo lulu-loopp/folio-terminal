@@ -86,6 +86,71 @@ pub const PANE_MARK_UNFOCUSED_OPACITY: f32 = 0.5;
 /// follow it into a setting about terminal cursors.
 pub const TAB_RENAME_CARET_LOGICAL_PX: f32 = 1.0;
 
+/// **The line an inline name editor's caret and selection stand in** (user
+/// ruling 2026-08-19).
+///
+/// The tab's own mark slot, and the preview head borrows it rather than
+/// measuring a line of its own: both editors set a name at the same size, and
+/// two surfaces that decided this number separately would be two editors that
+/// look alike until one of them is touched. It is the axis everything else in a
+/// tab is centred on, which is what makes the caret exactly as tall as the row
+/// it is standing in — and, on a preview head, exactly as tall as the NAME
+/// rather than as tall as the head.
+///
+/// A head is not a row: the preview head's content band is the height of a pane
+/// header, and a caret drawn to it came out a full-height rule beside a 12.5px
+/// name. That was reported from a real window and is what this constant exists
+/// to make unrepeatable.
+pub const INLINE_RENAME_LINE_LOGICAL_PX: f32 = bt_render::WINDOW_TAB_MARK_LOGICAL_PX;
+
+/// **The two rectangles an inline name editor draws besides its text.**
+///
+/// `None` for either means "there is nothing to draw": no selection, or a caret
+/// in the dark half of its blink or walked outside the box it belongs to.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct InlineRenameMarks {
+    pub selection: Option<[f32; 4]>,
+    pub caret: Option<[f32; 4]>,
+}
+
+/// **Where one inline name editor's selection and caret go**, given the box its
+/// text is drawn in (user ruling 2026-08-19).
+///
+/// ONE FUNCTION FOR EVERY SURFACE THAT EDITS A NAME IN PLACE — the tab strip,
+/// the vertical rail and the preview head. They differ in what they are editing
+/// and in nothing else, so the geometry of "a prefix is selected and a hairline
+/// stands at the caret" is written once and read three times. Copying it a
+/// fourth time is how a second editor is born.
+///
+/// The band is [`INLINE_RENAME_LINE_LOGICAL_PX`] centred in `box_`, never
+/// `box_`'s own height: a tab body and a pane header are different heights and
+/// the name inside them is not.
+#[must_use]
+pub fn inline_rename_marks(box_: [f32; 4], edit: &TabEdit, scale: f32) -> InlineRenameMarks {
+    let line = (INLINE_RENAME_LINE_LOGICAL_PX * scale).round();
+    let middle = (box_[1] + box_[3]) / 2.0;
+    let (top, bottom) = ((middle - line / 2.0).round(), (middle + line / 2.0).round());
+    let selection = (edit.selection_px > 0.0)
+        .then(|| {
+            [
+                box_[0],
+                top,
+                (box_[0] + edit.selection_px).min(box_[2]),
+                bottom,
+            ]
+        })
+        .filter(|band| band[2] > band[0]);
+    let width = (TAB_RENAME_CARET_LOGICAL_PX * scale).round().max(1.0);
+    let left = (box_[0] + edit.caret_px).round();
+    let caret = (edit.caret_lit && left >= box_[0] && left + width <= box_[2]).then_some([
+        left,
+        top,
+        left + width,
+        bottom,
+    ]);
+    InlineRenameMarks { selection, caret }
+}
+
 /// `@keyframes tab-land`'s `from`, read straight off mock-up 962-965.
 ///
 /// `background: color-mix(in srgb, var(--accent) 9%, transparent)` — the accent
@@ -7001,27 +7066,30 @@ fn window_tab_strip(
                     // only selection this editor has, and drawing it is what
                     // makes "type and the old name is gone" a thing you can see
                     // coming rather than a surprise.
-                    if let Some(edit) = &content.edit
-                        && edit.selection_px > 0.0
+                    // **The band and the caret come from `inline_rename_marks`**
+                    // (user ruling 2026-08-19): one derivation for the strip, the
+                    // rail and the preview head, so the three inline editors are
+                    // one editor rather than three that look alike.
+                    let marks = content.edit.as_ref().map(|edit| {
+                        inline_rename_marks(
+                            [title_box[0], tab_top, title_box[2], tab_bottom],
+                            edit,
+                            scale,
+                        )
+                    });
+                    if let Some(band) = marks.and_then(|marks| marks.selection)
+                        && within_strip(viewport, band)
                     {
-                        let band = [
-                            title_box[0],
-                            (tab_top + (tab_bottom - tab_top - mark) / 2.0).round(),
-                            (title_box[0] + edit.selection_px).min(title_box[2]),
-                            (tab_top + (tab_bottom - tab_top + mark) / 2.0).round(),
-                        ];
-                        if band[2] > band[0] && within_strip(viewport, band) {
-                            sprites.push(ChromeSprite::new(
-                                ChromeMark::Fill,
-                                band,
-                                // `--active`, already composited over this tab's
-                                // own surface. The mock-up declares no
-                                // `::selection` and leans on the browser's; what
-                                // it *does* have is one neutral wash meaning
-                                // "this is the chosen thing", and it is this one.
-                                palette.tab_close_pill_on_content,
-                            ));
-                        }
+                        sprites.push(ChromeSprite::new(
+                            ChromeMark::Fill,
+                            band,
+                            // `--active`, already composited over this tab's own
+                            // surface. The mock-up declares no `::selection` and
+                            // leans on the browser's; what it *does* have is one
+                            // neutral wash meaning "this is the chosen thing",
+                            // and it is this one.
+                            palette.tab_close_pill_on_content,
+                        ));
                     }
                     labels.push(ChromeLabel {
                         text,
@@ -7036,36 +7104,18 @@ fn window_tab_strip(
                         clip: None,
                     });
                     // The caret last: it is the one thing in the box that has to
-                    // be visible over the letters as well as over the fill.
-                    if let Some(edit) = &content.edit
-                        && edit.caret_lit
+                    // be visible over the letters as well as over the fill. The
+                    // terminal's own hairline, because an insertion point is an
+                    // insertion point — two carets in one window that disagree
+                    // about their width read as two different applications.
+                    if let Some(caret) = marks.and_then(|marks| marks.caret)
+                        && within_strip(viewport, caret)
                     {
-                        // The terminal's own hairline (`CURSOR_BAR_WIDTH_LOGICAL_PX`),
-                        // because an insertion point is an insertion point: two
-                        // carets in one window that disagree about their width
-                        // read as two different applications.
-                        let width = (TAB_RENAME_CARET_LOGICAL_PX * scale).round().max(1.0);
-                        let left = (title_box[0] + edit.caret_px).round();
-                        // The tab's own content band — the 15px the mark beside
-                        // it occupies — so the caret is exactly as tall as the
-                        // row it stands in and sits on the same axis everything
-                        // else in the tab is centred on.
-                        let caret = [
-                            left,
-                            (tab_top + (tab_bottom - tab_top - mark) / 2.0).round(),
-                            left + width,
-                            (tab_top + (tab_bottom - tab_top + mark) / 2.0).round(),
-                        ];
-                        if caret[0] >= title_box[0]
-                            && caret[2] <= title_box[2]
-                            && within_strip(viewport, caret)
-                        {
-                            sprites.push(ChromeSprite::new(
-                                ChromeMark::Fill,
-                                caret,
-                                palette.pane_title_focus,
-                            ));
-                        }
+                        sprites.push(ChromeSprite::new(
+                            ChromeMark::Fill,
+                            caret,
+                            palette.pane_title_focus,
+                        ));
                     }
                 }
             }
@@ -7971,26 +8021,25 @@ fn rail_chrome(
                     Some(edit) => (ink, edit.text.clone()),
                     None => (ink, content.title.clone()),
                 };
-                let band = |left: f32, right: f32| {
-                    let mark_height = row.mark[3] - row.mark[1];
-                    [
-                        left,
-                        (row.body[1] + (row.body[3] - row.body[1] - mark_height) / 2.0).round(),
-                        right,
-                        (row.body[1] + (row.body[3] - row.body[1] + mark_height) / 2.0).round(),
-                    ]
-                };
+                // **`inline_rename_marks` decides both** (user ruling
+                // 2026-08-19) — the same call the strip and the preview head make,
+                // so the three inline editors keep one caret and one band between
+                // them. What is this axis's own is the fade and the list clip
+                // below, which are facts about a rail and not about an editor.
+                let marks = content.edit.as_ref().map(|edit| {
+                    inline_rename_marks(
+                        [row.title[0], row.body[1], title_right, row.body[3]],
+                        edit,
+                        scale,
+                    )
+                });
                 // Before the text and after the row's own silhouette, which is
                 // why these are sprites: a quad would go under the active row's
                 // fill, which is itself a mark.
-                if let Some(edit) = &content.edit
-                    && edit.selection_px > 0.0
+                if let Some(selection) = marks.and_then(|marks| marks.selection)
+                    && in_list(selection)
                 {
-                    let selection = band(
-                        row.title[0],
-                        (row.title[0] + edit.selection_px).min(title_right),
-                    );
-                    if selection[2] > selection[0] && in_list(selection) {
+                    {
                         let mut sprite = ChromeSprite::new(
                             ChromeMark::Fill,
                             clip_to_list(selection),
@@ -8043,21 +8092,16 @@ fn rail_chrome(
                 // visible over the letters as well as over the fill. The same
                 // hairline the strip's editor and the terminal's own cursor use,
                 // because an insertion point is an insertion point.
-                if let Some(edit) = &content.edit
-                    && edit.caret_lit
+                if let Some(caret) = marks.and_then(|marks| marks.caret)
+                    && in_list(caret)
                 {
-                    let width = (TAB_RENAME_CARET_LOGICAL_PX * scale).round().max(1.0);
-                    let left = (row.title[0] + edit.caret_px).round();
-                    let caret = band(left, left + width);
-                    if caret[0] >= row.title[0] && caret[2] <= title_right && in_list(caret) {
-                        let mut sprite = ChromeSprite::new(
-                            ChromeMark::Fill,
-                            clip_to_list(caret),
-                            palette.rail_tab_active_text,
-                        );
-                        sprite.opacity = text;
-                        sprites.push(sprite);
-                    }
+                    let mut sprite = ChromeSprite::new(
+                        ChromeMark::Fill,
+                        clip_to_list(caret),
+                        palette.rail_tab_active_text,
+                    );
+                    sprite.opacity = text;
+                    sprites.push(sprite);
                 }
             }
             // ── the trailing cluster: `[pin] [×]`, in the mock-up's own order ──
@@ -8790,6 +8834,40 @@ pub struct PreviewHeadContent<'a> {
     pub pinned: bool,
     /// Whether this pane's switcher is open, which turns the chevron over.
     pub menu_open: bool,
+    /// **The open name editor, when this head is the one holding it** (user
+    /// ruling 2026-08-19).
+    ///
+    /// The tab strip's own [`TabEdit`], borrowed whole: the field IS the label —
+    /// same box, same face, same weight, same ink, no border and no fill —
+    /// because what is under it is already the right shape, and a box drawn on
+    /// top would be a field *about* the name rather than the name in edit mode.
+    /// A head that is not being edited carries `None` and draws exactly what it
+    /// drew before this existed.
+    ///
+    /// Borrowed rather than owned, because this whole struct is `Copy` and is
+    /// rebuilt per frame off strings the caller keeps — the same two-step
+    /// `name` and `count` already take.
+    pub edit: Option<PreviewNameEdit<'a>>,
+}
+
+/// **The open name editor, as the head has to draw it** (user ruling
+/// 2026-08-19).
+///
+/// [`TabEdit`] with its strings borrowed and its placeholder gone. A file has no
+/// name under its name — that is the whole difference between renaming a file
+/// and renaming a tab — so the one field of `TabEdit` this cannot use is the
+/// layer underneath, and a field carried as permanently empty would be a promise
+/// this surface cannot keep.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreviewNameEdit<'a> {
+    /// The draft from its first visible character on.
+    pub text: &'a str,
+    /// The caret's offset from the name box's left edge.
+    pub caret_px: f32,
+    /// How much of the visible draft is selected, from that same edge.
+    pub selection_px: f32,
+    /// Whether the caret is in the lit half of its blink.
+    pub caret_lit: bool,
 }
 
 /// What the preview head has to lay out this frame.
@@ -9899,7 +9977,15 @@ pub fn hit_preview_head(
         if hit(geometry.pin) {
             return Some(ChromeTarget::PreviewPin(placement.id));
         }
-        if hit(geometry.pill) {
+        // **The name answers the pointer whether or not it is a switcher** (user
+        // ruling 2026-08-19). The pill exists only while the pool holds more
+        // than one buffer — it is the switcher's ground — and until the name
+        // became editable that was the only thing a press on it could mean, so
+        // a pane showing one file had no target here at all. Double-clicking it
+        // now opens the file's name for editing, and that is true of every
+        // preview head; the pill is still tried first, because when there IS a
+        // switcher its box is the larger one and its inset is the affordance.
+        if hit(geometry.pill) || contains(geometry.name, x, y) {
             return Some(ChromeTarget::PreviewName(placement.id));
         }
     }
@@ -10295,14 +10381,59 @@ fn push_preview_head(
             ));
         }
     }
+    // **The selection band goes down before the text**, exactly as the tab
+    // strip's does and as a sprite for the same reason: quads are drawn under
+    // every mark, and the pill this name may be wearing is a mark. It is the
+    // only selection this editor has, and drawing it is what makes "type and the
+    // old name is gone" a thing you can see coming rather than a surprise.
+    //
+    // **The band and the caret come from `inline_rename_marks`**, the same call
+    // the tab strip and the rail make (user ruling 2026-08-19). A preview head
+    // is taller than a tab body and the name inside it is not, so the marks are
+    // centred on the editor's own line rather than filling the box: the first
+    // draft drew a caret the height of a pane header beside a 12.5px name, and
+    // it was reported from a real window as a rule rather than an insertion
+    // point.
+    let marks = content.edit.map(|edit| {
+        inline_rename_marks(
+            [
+                geometry.name[0],
+                head.title[1],
+                geometry.name[2],
+                head.content_bottom,
+            ],
+            &TabEdit {
+                text: edit.text.to_owned(),
+                placeholder: String::new(),
+                caret_px: edit.caret_px,
+                selection_px: edit.selection_px,
+                caret_lit: edit.caret_lit,
+            },
+            scale,
+        )
+    });
+    if let Some(band) = marks.and_then(|marks| marks.selection) {
+        sprites.push(ChromeSprite::new(
+            ChromeMark::Fill,
+            band,
+            palette.pane_close_pill,
+        ));
+    }
     labels.push(ChromeLabel {
-        text: content.name.to_owned(),
+        // **The same label with a different string.** The editor takes the
+        // name's own box and its metrics and changes only what is written in it,
+        // so the head cannot jump when the editor opens or closes.
+        text: content
+            .edit
+            .map_or_else(|| content.name.to_owned(), |edit| edit.text.to_owned()),
         rect: geometry.name,
         font_size_px: PREVIEW_NAME_FONT_LOGICAL_PX * scale,
         // `.pv-name { color: var(--ink2); font-weight: 600 }` — and the focused
         // pane's own step up to `--ink`, which is the one hierarchy `.panehead`
-        // expresses and which a preview head inherits like every other.
-        color: if focused {
+        // expresses and which a preview head inherits like every other. An open
+        // editor is always in the focused pane — the first click of the pair put
+        // it there — so it changes the ink by not changing it.
+        color: if focused || content.edit.is_some() {
             palette.pane_title_focus
         } else {
             palette.files_row_text
@@ -10314,6 +10445,15 @@ fn push_preview_head(
         tabular_numerals: false,
         clip: Some(geometry.name),
     });
+    // The caret last: it is the one thing in the box that has to be visible over
+    // the letters as well as over the fill.
+    if let Some(caret) = marks.and_then(|marks| marks.caret) {
+        sprites.push(ChromeSprite::new(
+            ChromeMark::Fill,
+            caret,
+            palette.pane_title_focus,
+        ));
+    }
     if let Some(chevron) = geometry.chevron {
         sprites.push(
             ChromeSprite::new(
@@ -13821,6 +13961,158 @@ mod tests {
         let pin = geometry.pin.expect("a pin box");
         assert!(save[2] <= flip[0] && flip[2] <= popout[0] && popout[2] <= pin[0]);
         assert!(geometry.pill.expect("a pill")[2] <= save[0]);
+
+        // **A head with no switcher still answers on its name** (user ruling
+        // 2026-08-19). The pill is the switcher's ground and exists only while
+        // the pool holds more than one buffer; the name became editable on
+        // every head, so a pane showing one file must have a target here too.
+        //
+        // Red gate: hit-test the pill alone and this goes red — which is exactly
+        // the state a real window was found in, where double-clicking the name
+        // of a lone file did nothing at all.
+        let lone = PreviewHeadTools {
+            switcher: false,
+            count_width: 0.0,
+            ..tools
+        };
+        let alone = preview_head_geometry(&head, 1.0, lone);
+        assert_eq!(alone.pill, None, "no switcher, no pill");
+        let (x, y) = centre(alone.name);
+        assert_eq!(
+            hit_preview_head(&layout, 1.0, &[(seat, lone)], x, y),
+            Some(ChromeTarget::PreviewName(seat)),
+            "and the name answers for itself"
+        );
+    }
+
+    /// PIN (user report on a real window, 2026-08-19) — **an inline name
+    /// editor's caret is a hairline as tall as its TEXT LINE, on every surface
+    /// that has one.**
+    ///
+    /// The preview head drew it to the name's own box, and that box is a pane
+    /// header's content band: a full-height rule stood beside a 12.5px file
+    /// name, which reads as a divider rather than as an insertion point. The tab
+    /// strip had it right all along — the tab's 15px mark slot — and the fix is
+    /// not to copy that number here but to have one function answer for all
+    /// three surfaces.
+    ///
+    /// This asserts the property rather than the number: whatever box the
+    /// editor is drawn in, the caret and the selection are
+    /// [`INLINE_RENAME_LINE_LOGICAL_PX`] tall and centred in it.
+    ///
+    /// Red gate: give the preview head back `geometry.name`'s own height and the
+    /// second case goes red by the difference between a pane header and a line
+    /// of text.
+    #[test]
+    fn an_inline_editors_caret_is_as_tall_as_its_line_and_never_as_tall_as_its_box() {
+        let edit = TabEdit {
+            text: "notes.md".to_owned(),
+            placeholder: String::new(),
+            caret_px: 20.0,
+            selection_px: 34.0,
+            caret_lit: true,
+        };
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let line = (INLINE_RENAME_LINE_LOGICAL_PX * scale).round();
+            // A tab body and a preview head are very different heights; the name
+            // inside them is not, which is the whole claim.
+            for box_ in [
+                [100.0, 0.0, 300.0, 32.0 * scale],
+                [100.0, 0.0, 300.0, 44.0 * scale],
+                [100.0, 12.0 * scale, 300.0, 12.0 * scale + 19.0 * scale],
+            ] {
+                let marks = inline_rename_marks(box_, &edit, scale);
+                let caret = marks.caret.expect("a lit caret inside the box");
+                let band = marks.selection.expect("a selection with width");
+                assert!(
+                    (caret[3] - caret[1] - line).abs() <= 1.0,
+                    "scale {scale}, box {box_:?}: caret is {} tall, wanted {line}",
+                    caret[3] - caret[1]
+                );
+                assert_eq!(
+                    [caret[1], caret[3]],
+                    [band[1], band[3]],
+                    "the caret and the band stand on one line"
+                );
+                let middle = (box_[1] + box_[3]) / 2.0;
+                assert!(
+                    ((caret[1] + caret[3]) / 2.0 - middle).abs() <= 1.0,
+                    "and that line is centred in the box"
+                );
+                assert!(
+                    caret[3] - caret[1] < box_[3] - box_[1],
+                    "a caret is never as tall as the box it stands in"
+                );
+                let width = (TAB_RENAME_CARET_LOGICAL_PX * scale).round().max(1.0);
+                assert_eq!(caret[2] - caret[0], width, "and it is a hairline");
+            }
+        }
+        // A caret walked past the box's own edge is not drawn at all, which is
+        // what keeps the strip's `within_strip` from being the only guard.
+        let outside = TabEdit {
+            caret_px: 4_000.0,
+            ..edit.clone()
+        };
+        assert_eq!(
+            inline_rename_marks([100.0, 0.0, 300.0, 32.0], &outside, 1.0).caret,
+            None
+        );
+        let dark = TabEdit {
+            caret_lit: false,
+            ..edit
+        };
+        assert_eq!(
+            inline_rename_marks([100.0, 0.0, 300.0, 32.0], &dark, 1.0).caret,
+            None,
+            "and neither is one in the dark half of its blink"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-19) — **there is ONE inline name editor, and
+    /// every surface that has one goes through it.**
+    ///
+    /// The report was about consistency rather than about a pixel: "改名的方式
+    /// 不应该做得和 tab 的类似吗,不然 UI/UX 就不连贯不一致了". Two editors
+    /// that look alike are two editors, and the way for them to diverge is for
+    /// one of them to be touched.
+    ///
+    /// Written against the SOURCE rather than against a rendered frame, because
+    /// what is being pinned is that nobody minted a second caret — a claim about
+    /// the code, which a picture of one surface cannot make. The state machine
+    /// is shared one crate over (`TabRename`, `rename_key`, `RenameVerdict`,
+    /// `finish_rename`, `KeyboardOwner::Rename`); this is the drawing half.
+    ///
+    /// Red gate: hand-roll the caret rectangle at any of the three sites and the
+    /// second assertion finds the arithmetic that was supposed to have one home.
+    #[test]
+    fn one_function_draws_every_inline_name_editors_caret() {
+        // Split at the test module rather than at the first `#[cfg(test)]`:
+        // this file carries test-only helpers well above it, and a split there
+        // would read a tenth of the file and call it the whole.
+        let source = include_str!("seats.rs")
+            .split(
+                "
+mod tests {",
+            )
+            .next()
+            .expect("a split always yields a first piece");
+        assert_eq!(
+            source.matches("inline_rename_marks(").count(),
+            4,
+            "one definition and three callers — the strip, the rail and the              preview head"
+        );
+        // The hairline's width and the line it stands on are named in exactly
+        // one place each, and that place is the shared function.
+        assert_eq!(
+            source.matches("TAB_RENAME_CARET_LOGICAL_PX").count(),
+            2,
+            "the caret's width is declared once and read once"
+        );
+        assert_eq!(
+            source.matches("INLINE_RENAME_LINE_LOGICAL_PX").count(),
+            3,
+            "and so is the line it stands in — its declaration, the doc line              that names it from `inline_rename_marks`, and the one read"
+        );
     }
 
     /// Opening the preview narrows the terminal and closing it hands the pixels

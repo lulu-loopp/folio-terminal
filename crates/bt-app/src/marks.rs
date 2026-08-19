@@ -561,6 +561,18 @@ pub enum ChromeMark {
     /// *this is gone*, and it stands over the row that runs the full §3.1 ED3
     /// deletion. The broom above it sweeps a surface; this rubs a record out.
     Eraser,
+    /// `#i-pencil` — **open this file** (user ruling 2026-08-19).
+    ///
+    /// The first of the two verbs a colour scheme of the reader's own reveals in
+    /// the picker that lists it. A pencil and not a gear or an arrow, because
+    /// what the press opens is a text file with the keyboard already in it: the
+    /// mark says *you are about to write in this*, which is the one thing a
+    /// reader has to know before they press it.
+    ///
+    /// It is drawn at twelve against the ×'s ten beside it, and that is one
+    /// optical size rather than two: this glyph carries its ink inside a
+    /// sixteen-unit box's margins, `#i-close` fills its ten corner to corner.
+    Pencil,
     /// The mini graph's merge curve — a branch's history joining this line.
     ///
     /// The mock-up's own path (line 4933), in the mock-up's own `0 0 14 27` box,
@@ -681,6 +693,7 @@ impl ChromeMark {
             Self::SelectAll => "i-select",
             Self::Broom => "i-broom",
             Self::Eraser => "i-clear",
+            Self::Pencil => "i-pencil",
             Self::GitMergeCurve => "git-merge-curve",
             // One id for four mirrorings and every span, exactly as the chevron
             // has one id for every angle: `mark_key` adds the rest.
@@ -1531,6 +1544,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::SelectAll => 36,
         ChromeMark::Broom => 37,
         ChromeMark::Eraser => 38,
+        ChromeMark::Pencil => 39,
         ChromeMark::GitMergeCurve => 30,
         ChromeMark::Split => 31,
         ChromeMark::SplitRight => 32,
@@ -1558,7 +1572,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
 /// how a generated glyph comes to sit a pixel off the ones beside it.
 const PROFILE_CHASSIS_VIEW_BOX: &str = "0 0 16 16";
 
-const SYMBOL_VIEW_BOX: [&str; 39] = [
+const SYMBOL_VIEW_BOX: [&str; 40] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -1629,11 +1643,14 @@ const SYMBOL_VIEW_BOX: [&str; 39] = [
     "0 0 16 16",
     "0 0 16 16",
     "0 0 16 16",
+    // `#i-pencil`, the house sixteen: it stands in a run beside `#i-close` and
+    // has to be cut in the same units as every other mark in this dialog.
+    "0 0 16 16",
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 39] = [
+const SYMBOL_BODY: [&str; 40] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min
@@ -1879,6 +1896,12 @@ const SYMBOL_BODY: [&str; 39] = [
     concat!(
         r#"<path d="M6.4 12.6H13" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#,
         r#"<path d="M9.1 3.3l3.6 3.6c.4.4.4 1 0 1.4l-3.8 3.8c-.4.4-1 .4-1.4 0L3.9 8.5c-.4-.4-.4-1 0-1.4l3.8-3.8c.4-.4 1-.4 1.4 0z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>"#,
+    ),
+    // `#i-pencil` — mock-up 3452, verbatim: the ferrule, then the body of the
+    // pencil with its point.
+    concat!(
+        r#"<path d="M10.6 2.4l3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#,
+        r#"<path d="M11.5 1.5l3 3-8.4 8.4-3.9.9.9-3.9z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>"#,
     ),
 ];
 

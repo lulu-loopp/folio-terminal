@@ -595,16 +595,38 @@ pub enum Text {
     /// The heading of the collapsed group at the foot of a page. Progressive
     /// disclosure **per page** (user ruling 2026-08-17), so the word is a page's
     /// own and not a switch the whole dialog shares.
+    ///
+    /// **Upper-cased at the source** (user ruling 2026-08-19), for
+    /// [`Text::CategoryAppearance`]'s reason and now for its own: the header
+    /// wears `.group-label`'s type, the chrome text path has no
+    /// `text-transform`, and "大写是内容不是样式" — a `to_uppercase`
+    /// here would be a rule somebody has to remember does not apply to 高级.
     AdvancedGroup,
     /// The verb that ends every Advanced group: it puts that page's advanced
     /// rows back, and nothing else on the page.
     ResetAdvanced,
 
     // ── customising a colour scheme (§7.1.6c-4c) ─────────────────────────
-    /// The verb that copies the scheme in force into the user's own folder and
-    /// opens the copy. The ellipsis is the interface convention it is: pressing
-    /// it does not finish the job, it hands you the file.
-    CustomiseScheme,
+    // Moved onto the picker's own rows by the 2026-08-19 ruling.
+    /// **The verb both scheme pickers end with**, behind a hairline: it copies
+    /// the scheme in force into the reader's own folder and opens the copy.
+    ///
+    /// It is `Customise scheme…` in everything but where it is written, and the
+    /// words got shorter because the place answered half of them. The scheme in
+    /// force is the item ticked two rows above the verb, so the verb no longer
+    /// has to say which scheme it will copy — the reader can see it. The
+    /// ellipsis stays: pressing it does not finish the job, it hands you a file.
+    AddScheme,
+    /// **The verb the font picker ends with**, on the same terms and behind the
+    /// same hairline: it opens the system's own Fonts page, where a font is
+    /// installed by dropping a file on it.
+    ///
+    /// The list is every monospaced family DirectWrite reports, which makes the
+    /// honest answer to "my font isn't here" *install it* — and until this row
+    /// existed the picker ended without saying so, leaving a reader who had
+    /// downloaded a Nerd Font ten minutes earlier no way to learn that the
+    /// machine, not this product, was the thing that had not heard of it yet.
+    InstallFonts,
     /// The title of the card raised when the scheme **in force** stops parsing.
     ///
     /// Separate from [`Self::SchemeFileSkipped`], which is the startup card
@@ -617,18 +639,15 @@ pub enum Text {
     SchemeInUseGone,
 
     // ── deleting a colour scheme (§7.1.6c-4d, user ruling 2026-08-18) ──────
-    /// The second verb on the Advanced foot: it sends the scheme in force to
-    /// the Recycle Bin. The ellipsis is not here — see `DeleteScheme`'s note in
-    /// `settings.rs`: this verb finishes the job it names.
-    DeleteScheme,
-    /// Why that verb is dark. A bundled scheme travels inside the executable and
-    /// has no file to send anywhere, and saying so is the whole of what a reader
-    /// standing in front of a greyed button needs.
-    DeleteSchemeNoFiles,
-    /// And what it will do when it is live. The line the two share is always
-    /// there, so it always says something: the reason a verb is dark, or the
-    /// fact about the verb that is not.
-    DeleteSchemeUserFile,
+    //
+    // **Three strings left this table on 2026-08-19** — `Delete scheme…` and the
+    // two halves of the line above it — and none of them was replaced. The verb
+    // is a `×` on the row it acts on now, which needs no word; the line said
+    // which scheme the button would act on, and a mark on a row says that by
+    // standing on it; and the refusal said a bundled scheme has no file, which a
+    // bundled row now says by revealing no marks at all. A sentence deleted
+    // because the picture already says it is the best kind of translation work
+    // there is.
     /// The title of the card raised when a scheme file has been recycled.
     SchemeDeleted,
 
@@ -862,15 +881,6 @@ pub enum Text {
     /// word rather than a quantity, which is why it is in this table and the
     /// three numbers beside it are not.
     OptionBlockHeightNone,
-    /// **What the foot's first verb says when the scheme in force is already a
-    /// file of the reader's own** (user report 2026-08-18).
-    ///
-    /// `Customise scheme…` copies and then opens, which is the right sentence
-    /// over a bundled scheme and the wrong one over a file that is already
-    /// theirs: a reader who pressed it expecting to edit their scheme got a
-    /// second copy of it, which is where a folder full of `(custom 2)` comes
-    /// from. One verb, two words, decided by what the row is on.
-    EditScheme,
 
     // ── the tail: every surface born after §7.1.6c-3a ──────────────────────
     //
@@ -1634,33 +1644,12 @@ impl Text {
             Self::FilesViewGit => pick(lang, "Git", "Git"),
 
             // ── the Advanced disclosure and its Reset ──────────────────────
-            Self::AdvancedGroup => pick(lang, "Advanced", "高级"),
+            Self::AdvancedGroup => pick(lang, "ADVANCED", "高级"),
             Self::ResetAdvanced => pick(lang, "Reset to defaults", "恢复默认值"),
-            Self::CustomiseScheme => pick(lang, "Customise scheme…", "自定义配色…"),
+            Self::AddScheme => pick(lang, "Add scheme…", "添加配色…"),
+            Self::InstallFonts => pick(lang, "Install fonts…", "安装字体…"),
             Self::SchemeInUseBroken => pick(lang, "Colour scheme not reloaded", "配色未重新载入"),
             Self::SchemeInUseGone => pick(lang, "Colour scheme not found", "找不到配色"),
-            // **The ellipsis arrived with the menu** (2026-08-18): since the
-            // verb opens a list of the folder's own files rather than acting on
-            // the scheme in force, it means what an ellipsis means everywhere in
-            // this window — the answer is somewhere else.
-            Self::DeleteScheme => pick(lang, "Delete scheme…", "删除配色…"),
-            // **Why the verb is dark, and the only reason it can be since
-            // 2026-08-18** (user report): it opens a menu of the folder's own
-            // files, so the one thing that can stop it is an empty folder. The
-            // sentence it replaces — "Built-in schemes have no file to delete" —
-            // was true of a verb that acted on the scheme in force, and that
-            // verb was the bug: a reader with two custom schemes and a bundled
-            // one selected read it as a refusal about *their* schemes.
-            Self::DeleteSchemeNoFiles => pick(
-                lang,
-                "No colour schemes of your own yet",
-                "还没有自己的配色文件",
-            ),
-            Self::DeleteSchemeUserFile => pick(
-                lang,
-                "Choosing one sends its file to the Recycle Bin",
-                "选中一项会把它的文件移入回收站",
-            ),
             Self::SchemeDeleted => pick(lang, "Colour scheme deleted", "配色已删除"),
             Self::BackgroundPictureRefused => {
                 pick(lang, "Background picture not shown", "背景图未显示")
@@ -1721,10 +1710,6 @@ impl Text {
                 "更高的块在自己内部滚动",
             ),
             Self::OptionBlockHeightNone => pick(lang, "No limit", "不限"),
-            // The ellipsis is `CustomiseScheme`'s own and means what it means
-            // everywhere in this window: the answer is somewhere else — here, a
-            // file in a preview pane.
-            Self::EditScheme => pick(lang, "Edit scheme…", "编辑配色…"),
             // A verb, because that is what pressing `On` here does. 「更新」is
             // the word every Chinese software updater uses for exactly this.
             Self::PsReadLineUpdate => pick(lang, "Update", "更新"),
@@ -2175,7 +2160,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 400] = [
+    pub const ALL: [Self; 397] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -2332,12 +2317,10 @@ impl Text {
         Self::FilesViewGit,
         Self::AdvancedGroup,
         Self::ResetAdvanced,
-        Self::CustomiseScheme,
+        Self::AddScheme,
+        Self::InstallFonts,
         Self::SchemeInUseBroken,
         Self::SchemeInUseGone,
-        Self::DeleteScheme,
-        Self::DeleteSchemeNoFiles,
-        Self::DeleteSchemeUserFile,
         Self::SchemeDeleted,
         Self::BackgroundPictureRefused,
         Self::NavProfiles,
@@ -2415,7 +2398,6 @@ impl Text {
         Self::DescBlockMaxHeight,
         Self::OptionBlockHeightNone,
         Self::PsReadLineUpdate,
-        Self::EditScheme,
         Self::ShortcutGotoTab1,
         Self::ShortcutGotoTab2,
         Self::ShortcutGotoTab3,
@@ -3021,6 +3003,27 @@ pub fn preview_loading(file_name: &str) -> String {
 #[must_use]
 pub fn image_preview_title(name: &str, width: u32, height: u32) -> String {
     format!("{name} \u{2014} {width}\u{00d7}{height}")
+}
+
+/// The preview head's own refusal when the filesystem would not let a file go
+/// (user ruling 2026-08-19).
+///
+/// **The only refusal this rename speaks.** Every other one — an empty name, an
+/// unchanged name, a reserved character, a name another file in the folder
+/// already has — is a fact about the draft, and the draft is in a box the reader
+/// is looking at: the name snaps back and the picture has said it. A handle
+/// another program is holding is a fact about the machine, which nothing on
+/// screen can say.
+///
+/// The `{reason}` is an `io::Error` — the OS's own sentence in the OS's own
+/// language, a known seam recorded in the inventory's §E and not papered over
+/// here, exactly as [`not_saved`] leaves it.
+#[must_use]
+pub fn not_renamed(reason: &str) -> String {
+    match current() {
+        Lang::English => format!("Not renamed — {reason}"),
+        Lang::Chinese => format!("未重命名 —— {reason}"),
+    }
 }
 
 /// A save that did not happen, and why. The `{reason}` is either

@@ -683,9 +683,33 @@
      that it did not read off the disk. They carry `virtual` and the affordance
      is absent — not refused, absent — which is the same sentence a bundled
      colour scheme's missing marks make one page away. */
+  /* **IT IS THE TAB STRIP'S EDITOR AND NOT A SECOND ONE** (user ruling
+     2026-08-19). The element carries `class="rename pv-rename"`, so `.rename`'s
+     own five declarations — no border, no outline, no padding, no margin, a
+     transparent ground and `font: inherit` — arrive here unchanged and are not
+     restated; what is left below is the two things a header differs from a tab
+     in, and nothing else.
+
+     `font: inherit` is doing the work the old `font-size: 12.5px; font-weight:
+     600` was doing by hand: `.pv-name` is already 12.5/600, the field is inside
+     the head that sets it, and a size written twice is two sizes the day one of
+     them is touched. Same for the ink — `.rename { color: var(--ink) }` is the
+     tab's own answer and it is the right one here for the same reason: an open
+     editor is always in the focused pane.
+
+     THE TWO DIFFERENCES. A tab's box fills its tab (`flex: 1 1 auto; width:
+     100%`), which is right in a fixed-width box and wrong in a header that lays
+     its parts out from the left — filling here would shove the dirty dot and the
+     tools to the far edge and drag them back on commit. And `min-width: 40px`
+     goes with it: the box is sized to the name it holds, by the `size`
+     attribute.
+
+     The native build says the same thing in one function: the caret and the
+     selection band on all three surfaces — strip, rail and preview head — come
+     out of `seats::inline_rename_marks`, so a name being edited stands on the
+     same line and wears the same hairline wherever it is. */
   .preview-head .pv-rename {
     flex: none; width: auto; min-width: 0;
-    font-size: 12.5px; font-weight: 600; color: var(--ink);
   }
   .preview-head .pv-count {
     font-size: 10px; font-weight: 700; color: var(--ink3); background: var(--hover);
@@ -987,135 +1011,77 @@
      terminal, dimmer, so you can see where you left off */
   .frow.sel { background: var(--active); color: var(--ink); }
   .files-tree:focus-visible .frow.sel { box-shadow: inset 0 0 0 1.5px var(--accent); }
-  /* `.adv-head` rides these three declarations rather than drawing a second
-     triangle of its own (§7.1.6c-5): the settings dialog's Advanced group is a
-     disclosure, this is what a disclosure looks like in this window, and a
-     reader who has opened a folder here has already learned the glyph and the
-     120ms it turns in. Two glyphs would have taught them that the two are
-     different things. */
-  .frow .tri, .adv-head .tri {
+  /* The files tree's own triangle, and now the only one in this window that
+     turns: the settings dialog's Advanced header used to ride these three
+     declarations and no longer does — see the block below for what it wears
+     instead. */
+  .frow .tri {
     width: 10px; height: 10px; flex: none; color: var(--ink3);
     transition: transform 120ms cubic-bezier(.2,0,0,1);
   }
-  .frow.open > .tri, .adv.open > .adv-head > .tri { transform: rotate(90deg); }
-  /* THE TRIANGLE HANGS IN A GUTTER, THE WORD KEEPS THE TITLE COLUMN (user report
-     2026-08-18). `.adv-head` is a `.row` with `gap: 8px`, so the triangle used
-     to push `Advanced` ten pixels and a gap right of every other title on the
-     page — the one heading inside the list, out of line with the list. The files
-     tree settled this shape first: a row's triangle sits in its own column and
-     the name starts where every other name starts. 18 is the 10px mark plus the
-     8px gap, and it reaches back into `.content`'s own 22px padding, which is
-     what leaves it room. The BAND does not move with it — see the note on
-     `.adv-head` below: the whole row is the control, and a hover fill reaching
-     further left than every row above it would be a gutter nobody asked to
-     hit. */
-  .adv-head .tri { margin-left: -18px; }
+  .frow.open > .tri { transform: rotate(90deg); }
 
-  /* ══ THE GUTTER IS TOO NARROW TO STAND IN (user report 2026-08-19) ═════════
-     「挺丑，左侧的箭头与左侧的边距好窄」. The arithmetic the gutter was cut out of
-     is exact and the picture it draws is cramped, which is what happens when a
-     column is subtracted from a margin instead of added to a page:
+  /* ══ THE ADVANCED HEADER, SETTLED (user ruling 2026-08-19) ══════════════════
+     Three treatments were drawn here for the choosing (A, a gutter the page
+     grew; B, the group-label family; C, a trailing chevron and no leading mark)
+     and the answer was a HYBRID of the last two, which is why neither of them
+     stands here alone.
 
-         .settings .content   padding-left  22
-         .row                 padding-left   2   → the title column is at 24
-         .adv-head .tri       margin-left  -18   → the 10px BOX begins at   6
-         #i-tri's own ink starts 3.2/10 into that box → the INK begins at 9.2
+     THE WORD IS B'S. `.group-label`'s own five declarations — 11px, 600, .05em,
+     uppercase, `--ink3` — borrowed rather than restated, because the header of
+     a group IS a heading and had only ever been a row impersonating one. The
+     gutter question is not answered so much as withdrawn: nothing hangs to the
+     left of the word at all.
 
-     Six pixels of paper to the left of a mark, under a page whose every other
-     edge respects twenty-two. Nothing is misaligned — the word is exactly where
-     the ruling put it — and it still reads as a glyph that fell off the page.
+     THE MARK IS C'S. One 10×6 chevron at the row's TRAILING edge, turning 180°
+     rather than swapping glyphs, which is this file's ruling for the preview
+     head's chevron and the tab strip's. What A and B were arguing about was
+     where to put a leading triangle; the hybrid's answer is that a disclosure
+     inside a list of rows does not need one, because every row on the page
+     already ends in a control and the eye is walking that column anyway.
 
-     THREE ANSWERS ARE DRAWN HERE AND ONE WILL BE KEPT. `<body data-adv>` picks;
-     `?adv=a|b|c` in the address sets it at load, which is how the three are
-     photographed side by side. The DOM is one shape for all three (a leading
-     `.tri` and a trailing `.adv-chev`, each shown by exactly one variant), so
-     choosing is deleting the two blocks below that lost, and nothing else.
+     WHAT IS LOST AND WHY IT IS AFFORDABLE: the kinship with the files tree.
+     A reader who learned the triangle there learns a second mark here — and
+     they learn it in the one place in this dialog that is not a value, next to
+     a word set in the only type on the page that is not a row's. Two marks with
+     two jobs, rather than one mark doing two.
 
-       A — BREATHING GUTTER. The gutter stops being carved out of the margin and
-           becomes a column the PAGE grew: the page's left inset goes 22 → 38 and
-           the title column with it, 24 → 40, so the triangle's box lands on 22 —
-           the same 22 the header's own title, every group label and every row on
-           every page already stand on. 38 = 22 + 18 − 2 (the margin, plus the
-           gutter, less the row's own padding). The header moves with the content
-           because `Settings` is the title column's first word and a heading that
-           stopped agreeing with the rows under it would be a worse fault than
-           the one being fixed. THE PRICE IS 16px OF ROW WIDTH, and it is paid on
-           every page rather than on this one, because the pages are one shape:
-           a dialog whose text column moved when you pressed `Appearance` would
-           be a rail that resizes what it selects.
+     THE TWO EDGES ANSWER TO TWO COLUMNS, and that is the whole of the
+     arithmetic. `padding-left: 0` puts `ADVANCED` on 22 — flush with
+     `APPEARANCE` at the top of the same page, which is the comparison the word
+     was chosen for. The row's own `padding-right: 2` stays, so the chevron ends
+     on 24 from the dialog's right edge, byte-aligned with where every picker on
+     the page ends. Two pixels apart, and each edge is exactly where the thing
+     standing on it belongs: a heading on the heading column, a control on the
+     control column.
 
-       B — GROUP-LABEL FAMILY. The header stops being a row that looks like a
-           heading and becomes a heading: 11px, 600, .05em, uppercase, `--ink3` —
-           `.group-label`'s own five declarations, borrowed rather than restated —
-           with the triangle before it and no hairline under it. The gutter
-           question does not get answered so much as withdrawn: what hangs there
-           is an 8px mark in the ink of a label, not a 10px control the reader is
-           aiming at, and the band is still the whole hit target. 14 = 8 + 6,
-           and the word lands on 22 — flush with `APPEARANCE` at the top of the
-           same page, which is the comparison this variant is for.
-
-       C — TRAILING CHEVRON. No leading mark at all: `Advanced` starts on 24 with
-           every other title, and the disclosure's chevron sits at the row's
-           trailing edge, where every picker on the page ends (24 from the
-           dialog's right edge — `.content`'s 22 plus the row's 2). It turns over
-           rather than swapping glyphs, which is this file's own ruling for the
-           preview head's chevron and for the tab strip's. It is the idiom every
-           collapsible section on Windows uses, and it costs the page nothing:
-           no inset, no new column, no borrowed type. What it gives up is the
-           kinship with the files tree — a reader who learned the triangle there
-           learns a second mark here.
-
-     The variants touch NOTHING but the header. The rows inside the group, the
-     `Reset to defaults` foot, the height lock and the keyboard are all one
-     implementation under all three. */
-  /* One 10×6 chevron, drawn only by C, turning only when C is up. It borrows
-     `.frow .tri`'s duration and curve rather than declaring a second one: this
-     window has one speed at which a disclosure turns. */
-  .adv-head .adv-chev {
-    display: none;
-    width: 10px; height: 6px; flex: none; color: var(--ink3);
-    transition: transform 120ms cubic-bezier(.2,0,0,1);
-  }
-  @media (prefers-reduced-motion: reduce) { .adv-head .adv-chev { transition: none; } }
-
-  /* ── A ── the page grows the gutter; see the arithmetic above. Both insets in
-     one place so they cannot drift apart. */
-  body[data-adv="a"] .settings .content { padding-left: 38px; }
-  body[data-adv="a"] .settings header { padding-left: 38px; }
-
-  /* ── B ── `.group-label`'s five declarations, and the mark sized to the type
-     that carries it: an 8px triangle against 11px caps, where the shipped 10
-     against 13.5 would have been the loudest thing in a muted line. `padding:
-     2px 0` is the 2 the group label leaves under itself said as padding, so the
-     band that turns the disclosure is a band and not a text baseline; 14 above
-     is the 16 a heading inside a list needs to stand off the row above it, less
-     that 2. No hairline in either state — a heading does not close the list
-     above it, and `.adv:not(.open) .adv-head` was already saying so for one of
-     the two. */
-  body[data-adv="b"] .adv-head {
-    padding: 2px 0; margin: 14px 0 0; border-bottom: none; gap: 6px;
-  }
-  body[data-adv="b"] .adv.open .adv-head { border-bottom: none; }
-  body[data-adv="b"] .adv-head .title {
+     THE BAND IS STILL THE WHOLE ROW and still the whole hit target, from the
+     word's own left edge to the chevron's right one. `.row`'s 11px paddings are
+     untouched — a heading whose band shrank to its text baseline would be a
+     10px chevron asking to be hit, which is the fault this file has ruled
+     against twice. The line box is the group label's 13 rather than the row
+     title's 16.5, because the type changed; the band is 35 and not 38.5, and
+     that is arithmetic falling out of a face rather than a number anybody
+     picked. Keyboard is unchanged: a focus stop, Enter and Space turn it. */
+  .adv-head { padding-left: 0; }
+  .adv-head .title {
     font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
     color: var(--ink3);
   }
-  body[data-adv="b"] .adv-head .tri { width: 8px; height: 8px; margin-left: -14px; }
-
-  /* ── C ── the leading mark is gone rather than hidden (`display: none` takes
-     its flex gap with it, which is what puts `Advanced` back on 24 with no
-     second number), and the chevron takes the control column's trailing edge
-     because `.text { flex: 1 }` already pushes it there — the same mechanism
-     that puts every picker on this page against the same right edge. */
-  body[data-adv="c"] .adv-head .tri { display: none; }
-  body[data-adv="c"] .adv-head .adv-chev { display: block; }
-  body[data-adv="c"] .adv.open .adv-head .adv-chev { transform: rotate(180deg); }
+  /* It borrows `.frow .tri`'s duration and curve rather than declaring a second
+     one: this window has one speed at which a disclosure turns. */
+  .adv-head .adv-chev {
+    width: 10px; height: 6px; flex: none; color: var(--ink3);
+    transition: transform 120ms cubic-bezier(.2,0,0,1);
+  }
+  .adv.open .adv-head .adv-chev { transform: rotate(180deg); }
+  @media (prefers-reduced-motion: reduce) { .adv-head .adv-chev { transition: none; } }
   .frow .tri.leaf { visibility: hidden; }
   .frow .fico { width: 15px; height: 15px; flex: none; }
   .frow .fico.folder { color: var(--accent); }
   .frow .fico.file { color: var(--ink3); }
   .frow .fname { overflow: hidden; text-overflow: ellipsis; }
-  @media (prefers-reduced-motion: reduce) { .frow .tri, .adv-head .tri { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .frow .tri { transition: none; } }
 
   /* Vertical rail */
   .rail {
@@ -2792,9 +2758,33 @@
      because the marks are verbs about a row rather than part of what the row
      says. Bundled rows reveal nothing: there is no file to open and none to
      recycle, which is a fact about the row and not a state of it, so the run is
-     simply absent rather than drawn dark. 15 and not `.pf-act`'s 26: a
+     simply absent rather than drawn dark. 18 and not `.pf-act`'s 26: a
      combo item is 27.5 tall, and a 26px hit box inside it would be a button
-     wearing the row. */
+     wearing the row. (This sentence said 15 for a day, against its own CSS's
+     18 — a number written in prose beside the number that draws, which is the
+     thing every other measurement in this file is written to avoid. The CSS
+     was what was photographed, so the CSS is what the sentence now reads.)
+
+     THE KEYBOARD REACHES THEM WITH ← AND → (user ruling 2026-08-19, native
+     build's to own). A picker is walked with ↑ and ↓ and always has been, so
+     the row is the unit the vertical keys move between and the two marks are a
+     SECOND AXIS on the row the walk is standing on: → steps the highlight from
+     the item to the pencil to the × and stops there, ← steps back and stops on
+     the item, and Enter or Space presses whichever of the three is lit. The
+     column resets to the item on every ↑/↓, because a reader who moves to
+     another scheme is choosing a scheme — landing on somebody's × because the
+     row above happened to leave the highlight there is the one thing this
+     surface must never do.
+
+     A BUNDLED ROW HAS NO SECOND AXIS and neither does `+ Add scheme…`: ← and →
+     do nothing at all on them, which is the same sentence their missing marks
+     make with the pointer. Nothing is greyed, nothing is skipped over — there
+     is simply one column on those rows and three on a row that is a file.
+     `:focus-within` above is this rule's other half: the run is revealed while
+     the keyboard is anywhere in it, so a mark that can be pressed can be seen.
+     This prototype has no keyboard walk inside a picker at all (see the note in
+     the combo's own click handler), so the rule is recorded here and the native
+     build owns it. */
   .combo-sep { height: 1px; background: var(--border-soft); margin: 4px 6px; }
   /* An ACTION and not a value: no tick (nothing here is ever the current answer)
      and a `+` in a mark column of exactly the tick's 14, so `Add your own
@@ -3354,7 +3344,7 @@
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 6px; }
 </style>
 </head>
-<body data-adv="a">
+<body>
 
 <svg style="display:none" xmlns="http://www.w3.org/2000/svg">
   <symbol id="i-min" viewBox="0 0 10 10"><path d="M0 5h10" stroke="currentColor" stroke-width="1"/></symbol>
@@ -3869,7 +3859,7 @@
                 <button class="ci-act ci-del" title="Send this scheme's file to the Recycle Bin" aria-label="Delete Paper (custom)"><svg><use href="#i-close"/></svg></button>
               </span></div>
               <div class="combo-sep"></div>
-              <div class="combo-item act" data-act="addscheme" role="option"><span class="actmark">+</span>Add your own scheme…</div>
+              <div class="combo-item act" data-act="addscheme" role="option"><span class="actmark">+</span>Add scheme…</div>
             </div>
           </div>
         </div>
@@ -3882,7 +3872,7 @@
                The three semantics this list now carries, in the order the eye
                meets them:
 
-               `+ Add your own scheme…`  COPIES THE SCHEME IN FORCE and opens the
+               `+ Add scheme…`  COPIES THE SCHEME IN FORCE and opens the
                    copy. It is `Customise scheme…` unchanged in everything but
                    where it is written: the scheme in force is the one ticked two
                    rows above the verb, so the verb no longer has to say which
@@ -3938,7 +3928,7 @@
                 <button class="ci-act ci-del" title="Send this scheme's file to the Recycle Bin" aria-label="Delete Folio Dark (custom)"><svg><use href="#i-close"/></svg></button>
               </span></div>
               <div class="combo-sep"></div>
-              <div class="combo-item act" data-act="addscheme" role="option"><span class="actmark">+</span>Add your own scheme…</div>
+              <div class="combo-item act" data-act="addscheme" role="option"><span class="actmark">+</span>Add scheme…</div>
             </div>
           </div>
         </div>
@@ -4171,11 +4161,10 @@
              records why. -->
         <div class="adv" id="adv-appearance">
         <div class="row adv-head" tabindex="0" role="button" aria-expanded="false" aria-controls="adv-appearance-rows">
-          <svg class="tri"><use href="#i-tri"/></svg>
+          <!-- The word carries no leading mark: `.adv-head .title` sets it in
+               the group label's own type and `padding-left: 0` puts it on the
+               column `APPEARANCE` starts in. The chevron is the disclosure. -->
           <div class="text"><div class="title">Advanced</div></div>
-          <!-- Drawn by variant C only (see `.adv-head .adv-chev`). It is in the
-               markup under all three so that choosing a variant is deleting CSS
-               and not editing every disclosure in the dialog. -->
           <svg class="adv-chev"><use href="#i-chev"/></svg>
         </div>
         <div class="adv-rows" id="adv-appearance-rows">
@@ -4541,7 +4530,7 @@
              it is served by — because those four are what the disclosure exists
              for, by the same measure that put writing a colour scheme by hand
              behind one. (That verb has since moved onto the scheme picker's own
-             rows and reads `+ Add your own scheme…`; the measure it was cited
+             rows and reads `+ Add scheme…`; the measure it was cited
              for — an everyday choice in front, a file to edit behind — is what
              is being borrowed here and is unchanged.)
 
@@ -4689,11 +4678,10 @@
 
         <div class="adv" id="adv-profile">
         <div class="row adv-head" tabindex="0" role="button" aria-expanded="false" aria-controls="adv-profile-rows">
-          <svg class="tri"><use href="#i-tri"/></svg>
+          <!-- The word carries no leading mark: `.adv-head .title` sets it in
+               the group label's own type and `padding-left: 0` puts it on the
+               column `APPEARANCE` starts in. The chevron is the disclosure. -->
           <div class="text"><div class="title">Advanced</div></div>
-          <!-- Drawn by variant C only (see `.adv-head .adv-chev`). It is in the
-               markup under all three so that choosing a variant is deleting CSS
-               and not editing every disclosure in the dialog. -->
           <svg class="adv-chev"><use href="#i-chev"/></svg>
         </div>
         <div class="adv-rows" id="adv-profile-rows">
@@ -10164,7 +10152,7 @@
   /* AN ITEM'S OWN WORDS. Everything between the tick column and whatever trails
      the row — the name, and only the name. Written once because three things
      now want it: the button's label, the toasts the marks raise, and the scheme
-     `+ Add your own scheme…` copies. Reading `lastChild` would have worked until
+     `+ Add scheme…` copies. Reading `lastChild` would have worked until
      the day a row grew a trailing run, which is this day. */
   const itemWords = (item) => [...(item?.childNodes || [])]
     .filter(n => n.nodeType === 3).map(n => n.textContent).join("").trim();
@@ -10223,28 +10211,44 @@
         const mark = e.target.closest(".ci-act");
         if (mark) {
           const name = itemWords(item);
-          combo.classList.remove("open");
           if (mark.classList.contains("ci-edit")) {
-            /* the native build shuts this dialog and opens the file in a preview
+            /* THE PENCIL CLOSES THE LIST, because what it opens needs the room:
+               the native build shuts this dialog and opens the file in a preview
                pane with the keyboard in it; the folder is watched, so Ctrl+S
-               recolours the window while the dialog is gone */
+               recolours the window while the dialog is gone. */
+            combo.classList.remove("open");
             notifyToast(`Opened ${name}.json`);
-          } else {
-            /* the card says where it went, which is both the fact and the undo;
-               the fallback (§7.1.6c-4d) is unchanged and only fires when the
-               scheme recycled was the one in force */
-            const inForce = item.classList.contains("selected");
-            item.remove();
-            notifyToast(`${name} went to the Recycle Bin`);
-            if (inForce) {
-              const home = combo.querySelector(".combo-item:not(.act)");
-              home?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-            }
-            lockSettingsHeight();
+            return;
           }
+          /* × LEAVES THE LIST STANDING (user ruling 2026-08-19). Every other
+             press in a picker answers the row's question and the popup has
+             done its job; this one does not answer anything — it is management,
+             and management comes in runs. A reader tidying three schemes out of
+             a folder would otherwise reopen the same menu three times, and each
+             reopen puts the list back under the pointer with the row they were
+             aiming at next moved up by one. So the menu closes on a VALUE, on
+             Escape and on a press outside it, exactly as it always did, and not
+             on a verb about one of its own rows.
+
+             The card says where the file went, which is both the fact and the
+             undo; the fallback (§7.1.6c-4d) is unchanged and only fires when the
+             scheme recycled was the one in force. */
+          const inForce = item.classList.contains("selected");
+          item.remove();
+          notifyToast(`${name} went to the Recycle Bin`);
+          if (inForce) {
+            /* SET, NOT CLICKED: a synthetic click on the home row would run the
+               value path below and close the menu this ruling just kept open. */
+            const home = combo.querySelector(".combo-item:not(.act)");
+            if (home) {
+              home.classList.add("selected");
+              combo.querySelector(".value").textContent = itemWords(home);
+            }
+          }
+          lockSettingsHeight();
           return;
         }
-        /* AN ACTION IS NOT A VALUE (2026-08-19). `+ Add your own scheme…` and
+        /* AN ACTION IS NOT A VALUE (2026-08-19). `+ Add scheme…` and
            `Install fonts…` close their lists behind a hairline, and the one thing
            they must not do is what every item above them does — take the tick and
            become the button's label. They act and leave the row's answer exactly
@@ -11824,16 +11828,6 @@
     document.addEventListener("pointerup", up);
     document.addEventListener("pointercancel", up);
   });
-
-  /* ── the Advanced-header variant, for as long as there are three ──
-     `?adv=a|b|c` sets `<body data-adv>` at load; everything else about the three
-     is CSS (see `.adv-head .adv-chev` and the block above it). Nothing in the
-     product will ship this line: the day one variant is chosen, the two losing
-     blocks and this reader go together and `data-adv` stops existing. */
-  {
-    const pick = new URLSearchParams(location.search).get("adv");
-    if (["a", "b", "c"].includes(pick)) document.body.dataset.adv = pick;
-  }
 
   /* ── the demo window the CROSS-TAB census needs (2026-08-19) ──
      A census of a window with one pane per tab shows nothing the tab list did
