@@ -9659,7 +9659,7 @@ fn push_caps(
             return;
         }
         stack.labels.push(ChromeLabel {
-            text: crate::shortcuts::UNBOUND_CAP.to_owned(),
+            text: crate::shortcuts::unbound_cap().to_owned(),
             rect: [box_[0], box_[1], box_[2], box_[3]],
             font_size_px: px(ROW_DESC_FONT_LOGICAL_PX),
             color: palette.menu_item_hint_text,
@@ -17326,7 +17326,7 @@ mod tests {
                 assert!(
                     labels
                         .iter()
-                        .any(|label| label.text == crate::shortcuts::UNBOUND_CAP
+                        .any(|label| label.text == crate::shortcuts::unbound_cap()
                             && label.rect[1] >= box_.band[1] - 0.5
                             && label.rect[3] <= box_.band[3] + 0.5),
                     "{}: a row with no chord says so rather than drawing nothing",
@@ -17404,13 +17404,13 @@ mod tests {
             panel.record(RecordInput::Candidate {
                 caps: caps("Ctrl+Alt+P"),
                 chord: chord("Ctrl+Alt+P"),
-                refusal: Some(crate::shortcuts::HINT_ALTGR_ZONE.to_owned()),
+                refusal: Some(crate::shortcuts::hint_altgr_zone().to_owned()),
             }),
             RecordVerdict::Moved
         );
         assert_eq!(
             panel.recording_state().and_then(|(_, _, hint)| hint),
-            Some(crate::shortcuts::HINT_ALTGR_ZONE),
+            Some(crate::shortcuts::hint_altgr_zone()),
             "the refusal is shown"
         );
         assert_eq!(panel.recording_row(), Some(1), "and the box stays open");
@@ -17555,14 +17555,14 @@ mod tests {
             &lines,
             &[],
             "",
-            Some((0, &waiting, Some(crate::shortcuts::HINT_ALTGR_ZONE))),
+            Some((0, &waiting, Some(crate::shortcuts::hint_altgr_zone()))),
             None,
             &mut measure,
         );
         let hint = refused
             .iter()
             .flat_map(|layer| layer.labels.clone())
-            .find(|label| label.text == fitted(crate::shortcuts::HINT_ALTGR_ZONE))
+            .find(|label| label.text == fitted(crate::shortcuts::hint_altgr_zone()))
             .expect("the refusal is drawn");
 
         // **A capture started with the pointer has no ring**, and must still

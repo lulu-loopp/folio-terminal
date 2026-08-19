@@ -117,8 +117,10 @@ const GIT_POLL_INTERVAL: Duration = Duration::from_millis(2);
 /// Worded like [`crate::files::files_worker_stopped_notice()`] and for the same
 /// reason: a worker dying is a feature going away, not a session ending, and the
 /// sentence has to say which half still works.
-pub const GIT_WORKER_STOPPED_NOTICE: &str =
-    "Git reading stopped; terminal input and output remain available";
+#[must_use]
+pub fn git_worker_stopped_notice() -> &'static str {
+    crate::i18n::Text::GitWorkerStopped.text()
+}
 
 /// What [`GitFault::GitMissing`] says when there is no `git.exe` at all.
 ///
@@ -128,8 +130,10 @@ pub const GIT_WORKER_STOPPED_NOTICE: &str =
 /// step rather than a dead end. Kept in one sentence because it stands where
 /// the rows would, in the muted ink, and a paragraph there would read as an
 /// error page.
-pub const GIT_NOT_FOUND: &str =
-    "git.exe was not found on this machine — install Git for Windows to use this page";
+#[must_use]
+pub fn git_not_found() -> &'static str {
+    crate::i18n::Text::GitNotFound.text()
+}
 
 // ── The questions ──────────────────────────────────────────────────────────
 
@@ -531,14 +535,15 @@ impl RefNameFault {
     #[must_use]
     pub fn sentence(self) -> &'static str {
         match self {
-            Self::Empty => "A name is needed.",
-            Self::Space => "No spaces.",
-            Self::Range => "No `..`.",
-            Self::Reserved => "None of ~ ^ : ? * [ \\",
-            Self::Dash => "Cannot start with `-`.",
-            Self::Lock => "Cannot end with `.lock`.",
-            Self::Shape => "git will not accept this name.",
+            Self::Empty => crate::i18n::Text::RefNameEmpty,
+            Self::Space => crate::i18n::Text::RefNameSpace,
+            Self::Range => crate::i18n::Text::RefNameRange,
+            Self::Reserved => crate::i18n::Text::RefNameReserved,
+            Self::Dash => crate::i18n::Text::RefNameDash,
+            Self::Lock => crate::i18n::Text::RefNameLock,
+            Self::Shape => crate::i18n::Text::RefNameShape,
         }
+        .text()
     }
 }
 
@@ -3740,7 +3745,7 @@ impl GitWorker {
                         }
                         None => faulted(
                             &request.question,
-                            GitFault::GitMissing(GIT_NOT_FOUND.to_owned()),
+                            GitFault::GitMissing(git_not_found().to_owned()),
                         ),
                     };
                     if response_tx
@@ -3786,7 +3791,7 @@ pub fn disable_git_worker_state(running: &mut bool, notice_pending: &mut bool) -
 
 pub fn take_git_worker_notice(notice_pending: &mut bool) -> Option<&'static str> {
     if std::mem::take(notice_pending) {
-        Some(GIT_WORKER_STOPPED_NOTICE)
+        Some(git_worker_stopped_notice())
     } else {
         None
     }
@@ -4501,7 +4506,7 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
 
         // And the same when there was never a program to try: every one of the
         // six questions comes back wearing the fault rather than being dropped.
-        let fault = GitFault::GitMissing(GIT_NOT_FOUND.to_owned());
+        let fault = GitFault::GitMissing(git_not_found().to_owned());
         for question in [
             GitQuestion::RepoProbe {
                 dir: PathBuf::from(r"D:\repo"),
@@ -5381,7 +5386,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
         assert!(!disable_git_worker_state(&mut running, &mut pending));
         assert_eq!(
             take_git_worker_notice(&mut pending),
-            Some(GIT_WORKER_STOPPED_NOTICE)
+            Some(git_worker_stopped_notice())
         );
         assert_eq!(take_git_worker_notice(&mut pending), None);
     }

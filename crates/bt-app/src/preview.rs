@@ -1595,7 +1595,10 @@ impl PreviewSource {
 /// file it did not touch, and a tracked file whose two copies agree. Neither is
 /// a failure, so neither gets the refusal card; they get one line where the body
 /// would have been.
-pub const GIT_DOCUMENT_EMPTY: &str = "No changes to show";
+#[must_use]
+pub fn git_document_empty() -> &'static str {
+    crate::i18n::Text::GitDocumentEmpty.text()
+}
 
 /// Which of a repository's copies of a file a diff is taken **against**.
 ///
@@ -1901,7 +1904,7 @@ impl PreviewBuffer {
             && !matches!(self.source, PreviewSource::GitGraph { .. })
             && self.load == PreviewLoad::Ready
             && self.content.as_ref().is_none_or(|body| body.is_empty()))
-        .then_some(GIT_DOCUMENT_EMPTY)
+        .then_some(git_document_empty())
     }
 
     /// **The repository would not answer** (G-3) — git's sentence, kept whole.
@@ -4517,7 +4520,7 @@ mod tests {
         assert_eq!(empty.load, PreviewLoad::Ready);
         assert_eq!(
             empty.body_notice(),
-            Some(GIT_DOCUMENT_EMPTY),
+            Some(git_document_empty()),
             "a diff with nothing in it says so"
         );
 

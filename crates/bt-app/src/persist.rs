@@ -237,8 +237,8 @@ impl KeybindingsStore {
         let fault = match &report {
             ReadReport::FellBackToDefaults { reason } => {
                 eprintln!("BT_PERSIST {KEYBINDINGS_FILE_NAME} fell back to defaults: {reason:?}");
-                Some(format!(
-                    "{KEYBINDINGS_FILE_NAME} could not be read; the default shortcuts are in force"
+                Some(crate::i18n::keybindings_file_unreadable(
+                    KEYBINDINGS_FILE_NAME,
                 ))
             }
             ReadReport::NotFound | ReadReport::Loaded => None,
@@ -323,10 +323,7 @@ impl ProfilesStore {
         let fault = match &report {
             ReadReport::FellBackToDefaults { reason } => {
                 eprintln!("BT_PERSIST {PROFILES_FILE_NAME} fell back to defaults: {reason:?}");
-                Some(format!(
-                    "{PROFILES_FILE_NAME} could not be read; the profiles this build ships are in \
-                     force"
-                ))
+                Some(crate::i18n::profiles_file_unreadable(PROFILES_FILE_NAME))
             }
             ReadReport::NotFound | ReadReport::Loaded => None,
         };

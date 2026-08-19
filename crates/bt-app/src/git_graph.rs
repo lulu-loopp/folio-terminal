@@ -13,6 +13,7 @@
 use bt_render::{ChromeLabel, ChromeLabelWeight, ChromePalette, ChromeQuad};
 
 use crate::git::GitCommit;
+use crate::i18n::Text;
 use crate::marks::{ChromeMark, ChromeSprite};
 
 // ── The lane algorithm ─────────────────────────────────────────────────────
@@ -345,18 +346,24 @@ pub const GRAPH_DETAIL_GAP_LOGICAL_PX: f32 = 6.0;
 /// The gap between two parent hashes on the meta line.
 pub const GRAPH_PARENT_GAP_LOGICAL_PX: f32 = 8.0;
 /// What the meta line says before the parents.
-pub const GRAPH_META_PARENTS: &str = "parents: ";
+#[must_use]
+pub fn graph_meta_parents() -> &'static str {
+    Text::GraphMetaParents.text()
+}
 /// What it says before a committer who is not the author.
-pub const GRAPH_META_COMMITTED_BY: &str = "committed by ";
+#[must_use]
+pub fn graph_meta_committed_by() -> &'static str {
+    Text::GraphMetaCommittedBy.text()
+}
 /// The `\u{b7}` every clause of the meta line is joined with — the same
 /// separator [`crate::preview::PreviewSource::composed_lead`] uses, because it
 /// is the same job: two facts about one thing on one line.
 pub const GRAPH_META_SEPARATOR: &str = " \u{b7} ";
-/// `Comparing abc1234 \u{2192} def5678` (D6).
-pub const GRAPH_COMPARE_LEAD: &str = "Comparing ";
-pub const GRAPH_COMPARE_ARROW: &str = " \u{2192} ";
 /// What the newer end of a comparison is called when it is the working tree.
-pub const GRAPH_COMPARE_WORKING_TREE: &str = "working tree";
+#[must_use]
+pub fn graph_compare_working_tree() -> &'static str {
+    Text::GraphCompareWorkingTree.text()
+}
 /// How far a seek will page before it gives up (D2).
 ///
 /// **Twenty pages is a thousand commits**, which is further back than any parent
@@ -430,16 +437,31 @@ pub const GRAPH_HEADER_HEIGHT_LOGICAL_PX: f32 = crate::git_panel::GIT_LABEL_LINE
     + 4.0;
 
 /// The header's five words, in `.glabel` grammar (V2).
-pub const GRAPH_HEADING_GRAPH: &str = "GRAPH";
+#[must_use]
+pub fn graph_heading_graph() -> &'static str {
+    Text::GraphHeadingGraph.text()
+}
 /// The narrowest graph column that gets the word GRAPH over it — five tracked
 /// capitals at 9.5 px are about forty pixels, and a column of three lanes is
 /// the first that clears it. Below this the column has no heading (see
 /// `push_column_header`).
 pub const GRAPH_HEADING_GRAPH_MIN_LOGICAL_PX: f32 = 44.0;
-pub const GRAPH_HEADING_DESCRIPTION: &str = "DESCRIPTION";
-pub const GRAPH_HEADING_AUTHOR: &str = "AUTHOR";
-pub const GRAPH_HEADING_DATE: &str = "DATE";
-pub const GRAPH_HEADING_COMMIT: &str = "COMMIT";
+#[must_use]
+pub fn graph_heading_description() -> &'static str {
+    Text::GraphHeadingDescription.text()
+}
+#[must_use]
+pub fn graph_heading_author() -> &'static str {
+    Text::GraphHeadingAuthor.text()
+}
+#[must_use]
+pub fn graph_heading_date() -> &'static str {
+    Text::GraphHeadingDate.text()
+}
+#[must_use]
+pub fn graph_heading_commit() -> &'static str {
+    Text::GraphHeadingCommit.text()
+}
 
 /// What the **Uncommitted Changes** row answers to where a commit would give a
 /// hash (V5).
@@ -451,9 +473,15 @@ pub const GRAPH_HEADING_COMMIT: &str = "COMMIT";
 /// that this row is not a commit.
 pub const GRAPH_UNCOMMITTED_HASH: &str = "*";
 /// What the row says, before its count.
-pub const GRAPH_UNCOMMITTED: &str = "Uncommitted Changes";
+#[must_use]
+pub fn graph_uncommitted() -> &'static str {
+    Text::GraphUncommitted.text()
+}
 /// What stands in its date column: the working tree is now, by definition.
-pub const GRAPH_UNCOMMITTED_TIME: &str = "now";
+#[must_use]
+pub fn graph_uncommitted_time() -> &'static str {
+    Text::GraphUncommittedTime.text()
+}
 /// `<circle fill="none"/>` — the working tree is not a commit, and a hollow dot
 /// is how a graph has always said so.
 pub const GRAPH_UNCOMMITTED_DOT_STROKE_LOGICAL_PX: f32 = 1.7;
@@ -1394,11 +1422,15 @@ pub const GRAPH_REFRESH_MARK_LOGICAL_PX: f32 = 13.0;
 /// How wide the search field is when there is room for it.
 pub const GRAPH_SEARCH_WIDTH_LOGICAL_PX: f32 = 180.0;
 /// What it says when nothing has been typed.
-pub const GRAPH_SEARCH_PLACEHOLDER: &str = "Search commits";
-/// The word between the two numbers of `3 of 17`.
-pub const GRAPH_SEARCH_OF: &str = " of ";
+#[must_use]
+pub fn graph_search_placeholder() -> &'static str {
+    Text::GraphSearchPlaceholder.text()
+}
 /// What the count says when git matched nothing.
-pub const GRAPH_SEARCH_NONE: &str = "no matches";
+#[must_use]
+pub fn graph_search_none() -> &'static str {
+    Text::GraphSearchNone.text()
+}
 /// The caret in the search field — the window's own one-pixel bar.
 pub const GRAPH_SEARCH_CARET_LOGICAL_PX: f32 = 1.5;
 /// How far it stops short of the field's own edges.
@@ -1429,13 +1461,14 @@ impl GraphTool {
     #[must_use]
     pub fn tooltip(self) -> &'static str {
         match self {
-            Self::Filter => "Which branches this graph is of",
-            Self::Search => "Search commits by message, author or hash",
-            Self::SearchClear => "Clear the search",
+            Self::Filter => Text::GraphToolFilterTip,
+            Self::Search => Text::GraphToolSearchTip,
+            Self::SearchClear => Text::GraphToolSearchClearTip,
             // The panel's masthead button says the same thing, from the same
-            // constant — see [`crate::git_panel::GIT_REFRESH_TOOLTIP`].
-            Self::Refresh => crate::git_panel::GIT_REFRESH_TOOLTIP,
+            // entry — see [`crate::git_panel::GitAct::tooltip`].
+            Self::Refresh => Text::GitRefreshTip,
         }
+        .text()
     }
 }
 
@@ -1656,11 +1689,10 @@ pub struct GraphFilter {
 }
 
 /// "All branches" — the filter's own resting word, and the menu's first row.
-pub const GRAPH_FILTER_ALL: &str = "All branches";
-/// What the button says when branches have been picked: `N branches`.
-pub const GRAPH_FILTER_MANY: &str = " branches";
-/// And what it says for exactly one, because `1 branches` is not English.
-pub const GRAPH_FILTER_ONE: &str = " branch";
+#[must_use]
+pub fn graph_filter_all() -> &'static str {
+    Text::GraphFilterAll.text()
+}
 
 /// The resting filter, as a value a borrow can point at.
 ///
@@ -1725,9 +1757,8 @@ impl GraphFilter {
     #[must_use]
     pub fn label(&self) -> String {
         match self.branches.len() {
-            0 => GRAPH_FILTER_ALL.to_owned(),
-            1 => format!("1{GRAPH_FILTER_ONE}"),
-            count => format!("{count}{GRAPH_FILTER_MANY}"),
+            0 => graph_filter_all().to_owned(),
+            count => crate::i18n::graph_filter_branches(count),
         }
     }
 
@@ -1894,7 +1925,7 @@ pub fn build(
             return content;
         }
         crate::git::GitSlot::Idle | crate::git::GitSlot::Pending => {
-            content.empty = Some(crate::git_panel::GIT_READING.to_owned());
+            content.empty = Some(crate::git_panel::git_reading().to_owned());
             return content;
         }
     };
@@ -1907,7 +1938,7 @@ pub fn build(
     content.toolbar = Some(toolbar_of(state, look, busy, scale, measure));
 
     if log.commits.is_empty() {
-        content.empty = Some(crate::git_panel::GIT_NO_COMMITS.to_owned());
+        content.empty = Some(crate::git_panel::git_no_commits().to_owned());
         return content;
     }
 
@@ -2102,7 +2133,7 @@ pub fn build(
                     index,
                     hash: GRAPH_UNCOMMITTED_HASH.to_owned(),
                     tooltip: match &file.path.1 {
-                        Some(from) => format!("{} - renamed from {from}", file.path.0),
+                        Some(from) => crate::i18n::git_renamed_from(&file.path.0, from),
                         None => file.path.0.clone(),
                     },
                     path: file.path.0.clone(),
@@ -2285,7 +2316,7 @@ fn toolbar_of(
         &typed[look.search.before_caret.len().min(typed.len())..]
     );
     let search = if shown.is_empty() {
-        GRAPH_SEARCH_PLACEHOLDER.to_owned()
+        graph_search_placeholder().to_owned()
     } else {
         shown.clone()
     };
@@ -2358,11 +2389,11 @@ fn search_count(search: GraphSearchLook<'_>) -> String {
         return String::new();
     };
     if matches.is_empty() {
-        return GRAPH_SEARCH_NONE.to_owned();
+        return graph_search_none().to_owned();
     }
     let total = matches.len();
     match search.at {
-        Some(at) => format!("{}{GRAPH_SEARCH_OF}{total}", at + 1),
+        Some(at) => crate::i18n::graph_search_position(at + 1, total),
         // Matches found but not stepped into yet: the total on its own, because
         // `0 of 17` would name a match that is not there.
         None => total.to_string(),
@@ -2503,12 +2534,12 @@ fn commit_detail(
     if commit.committer_name != commit.author_name || commit.committer_email != commit.author_email
     {
         meta.push_str(GRAPH_META_SEPARATOR);
-        meta.push_str(GRAPH_META_COMMITTED_BY);
+        meta.push_str(graph_meta_committed_by());
         meta.push_str(&committer_sentence(commit));
     }
     if !commit.parents.is_empty() {
         meta.push_str(GRAPH_META_SEPARATOR);
-        meta.push_str(GRAPH_META_PARENTS);
+        meta.push_str(graph_meta_parents());
     }
     let meta_font = GRAPH_META_FONT_LOGICAL_PX * scale;
     let meta_width = measure(&meta, meta_font, crate::git_panel::MeasureFace::PLAIN);
@@ -2559,11 +2590,8 @@ fn compare_sentence(a: &str, b: Option<&str>, log: &crate::git::GitLog) -> Strin
             .find(|commit| commit.hash == hash)
             .map_or_else(|| short_hash(hash), |commit| commit.short.clone())
     };
-    let right = b.map_or_else(|| GRAPH_COMPARE_WORKING_TREE.to_owned(), &named);
-    format!(
-        "{GRAPH_COMPARE_LEAD}{}{GRAPH_COMPARE_ARROW}{right}",
-        named(a)
-    )
+    let right = b.map_or_else(|| graph_compare_working_tree().to_owned(), &named);
+    crate::i18n::graph_compare(&named(a), &right)
 }
 
 /// How this product names the person who committed one: `Name <email>`.
@@ -2579,21 +2607,20 @@ pub fn committer_sentence(commit: &GitCommit) -> String {
 /// What a commit's file row says when you rest on it.
 fn file_tooltip(entry: &crate::git::GitCommitFile) -> String {
     let mut text = match &entry.renamed_from {
-        Some(from) => format!("{} - renamed from {from}", entry.path),
+        Some(from) => crate::i18n::git_renamed_from(&entry.path, from),
         None => entry.path.clone(),
     };
     // The counts again, in words, because the row draws them as two numbers and
     // two numbers side by side do not say which is which.
     match entry.stat {
         Some(stat) => {
-            let added = if stat.added == 1 { "line" } else { "lines" };
-            let removed = if stat.removed == 1 { "line" } else { "lines" };
-            text.push_str(&format!(
-                "\n{} {added} added, {} {removed} removed",
-                stat.added, stat.removed
-            ));
+            text.push('\n');
+            text.push_str(&crate::i18n::graph_file_stat(stat.added, stat.removed));
         }
-        None => text.push_str("\nBinary - git has no lines to count here"),
+        None => {
+            text.push('\n');
+            text.push_str(Text::GraphFileBinary.text());
+        }
     }
     text
 }
@@ -2638,10 +2665,7 @@ fn working_files(cache: &crate::git::GitCache) -> Vec<WorkingFile> {
 
 /// What the Uncommitted Changes row says when you rest on it.
 fn uncommitted_tooltip(count: usize) -> String {
-    let files = if count == 1 { "file" } else { "files" };
-    format!(
-        "{GRAPH_UNCOMMITTED} - {count} {files} the working tree has something to say about\nClick to list them"
-    )
+    crate::i18n::graph_uncommitted_tip(count)
 }
 
 /// How this product names the person who wrote a commit: `Name <email>` (V4).
@@ -2666,15 +2690,17 @@ pub fn author_sentence(commit: &GitCommit) -> String {
 /// adds (V4): a tooltip that repeated only what the column already says would be
 /// a tooltip nobody would open twice.
 fn commit_tooltip(commit: &GitCommit) -> String {
+    let checkout = Text::GraphDoubleClickCheckout.text();
     if commit.parents.len() > 1 {
         format!(
-            "Merge commit - another branch's history joins here\n{}\n{}\nDouble-click to check this commit out",
+            "{}\n{}\n{}\n{checkout}",
+            Text::GraphMergeCommit.text(),
             commit.subject,
             author_sentence(commit)
         )
     } else {
         format!(
-            "{}\n{}\nDouble-click to check this commit out",
+            "{}\n{}\n{checkout}",
             commit.subject,
             author_sentence(commit)
         )
@@ -3040,7 +3066,7 @@ pub fn graph_copied(said: &str) -> String {
     if said.chars().count() > GRAPH_COPIED_MAX_CHARS {
         short.push_str(GRAPH_BODY_ELLIPSIS);
     }
-    format!("Copied {short}")
+    crate::i18n::graph_copied(&short)
 }
 
 /// What the window says when a seek runs out of history (D2).
@@ -3050,10 +3076,7 @@ pub fn graph_copied(said: &str) -> String {
 /// a fact about the reading rather than about the repository.
 #[must_use]
 pub fn graph_seek_gave_up(hash: &str) -> String {
-    format!(
-        "Commit {} is further back than the loaded history",
-        short_hash(hash)
-    )
+    crate::i18n::graph_seek_gave_up(&short_hash(hash))
 }
 
 // ── the keyboard (V14) ─────────────────────────────────────────────────────
@@ -3724,19 +3747,19 @@ fn push_column_header(
     // heading — the lanes say "graph" well enough on their own.
     if column_right - (rect[0] + pad) >= (GRAPH_HEADING_GRAPH_MIN_LOGICAL_PX * scale).round() {
         word(
-            GRAPH_HEADING_GRAPH,
+            graph_heading_graph(),
             [rect[0] + pad, rect[1], column_right, rect[3]],
             false,
         );
     }
     if let Some(box_) = rects.author {
-        word(GRAPH_HEADING_AUTHOR, box_, true);
+        word(graph_heading_author(), box_, true);
     }
     if let Some(box_) = rects.date {
-        word(GRAPH_HEADING_DATE, box_, true);
+        word(graph_heading_date(), box_, true);
     }
     if let Some(box_) = rects.hash {
-        word(GRAPH_HEADING_COMMIT, box_, true);
+        word(graph_heading_commit(), box_, true);
     }
     // Last, because where the description *starts* is the one column edge that
     // is not fixed: it begins after the graph column, which is as wide as the
@@ -3747,7 +3770,7 @@ fn push_column_header(
     // does change the rows' text moves with it; a heading that stayed put would
     // then be the one thing on the page not over what it names.
     word(
-        GRAPH_HEADING_DESCRIPTION,
+        graph_heading_description(),
         [
             column_right + gap,
             rect[1],
@@ -4424,7 +4447,7 @@ fn push_uncommitted_row(
         true,
     );
     column_label(
-        GRAPH_UNCOMMITTED_TIME.to_owned(),
+        graph_uncommitted_time().to_owned(),
         rects.date,
         crate::git_panel::GIT_TIME_FONT_LOGICAL_PX * scale,
         true,
@@ -4436,7 +4459,7 @@ fn push_uncommitted_row(
         rect[3],
     ];
     labels.push(ChromeLabel {
-        text: format!("{GRAPH_UNCOMMITTED} ({})", head.count),
+        text: format!("{} ({})", graph_uncommitted(), head.count),
         rect: text_rect,
         font_size_px: crate::git_panel::GIT_ROW_FONT_LOGICAL_PX * scale,
         color: ground.text(palette),
@@ -5097,12 +5120,12 @@ mod tests {
         push_column_header(header, content.columns, 1, 1.0, &palette, &mut labels);
         let words: Vec<&str> = labels.iter().map(|label| label.text.as_str()).collect();
         assert!(
-            !words.contains(&GRAPH_HEADING_GRAPH),
+            !words.contains(&graph_heading_graph()),
             "a one-lane column has no room for its heading: {words:?}"
         );
         let description = labels
             .iter()
-            .find(|label| label.text == GRAPH_HEADING_DESCRIPTION)
+            .find(|label| label.text == graph_heading_description())
             .expect("the description is always headed");
         assert_eq!(
             description.rect[0],
@@ -5118,7 +5141,7 @@ mod tests {
         push_column_header(header, content.columns, 3, 1.0, &palette, &mut labels);
         let graph = labels
             .iter()
-            .find(|label| label.text == GRAPH_HEADING_GRAPH)
+            .find(|label| label.text == graph_heading_graph())
             .expect("three lanes are wide enough for the word");
         assert_eq!(
             graph.rect[2],
@@ -5127,7 +5150,7 @@ mod tests {
         );
         let description = labels
             .iter()
-            .find(|label| label.text == GRAPH_HEADING_DESCRIPTION)
+            .find(|label| label.text == graph_heading_description())
             .expect("headed");
         assert_eq!(
             description.rect[0],
@@ -5665,7 +5688,7 @@ mod tests {
         let root = frame(&root, Some("c19"), WIDE);
         let root = story_of(&root).expect("open");
         assert!(root.parents.is_empty());
-        assert!(!root.meta.contains(GRAPH_META_PARENTS));
+        assert!(!root.meta.contains(graph_meta_parents()));
     }
 
     /// D2 — "committed by" appears exactly when the committer is somebody else.
@@ -5682,7 +5705,7 @@ mod tests {
             !story_of(&same)
                 .expect("open")
                 .meta
-                .contains(GRAPH_META_COMMITTED_BY)
+                .contains(graph_meta_committed_by())
         );
 
         let mut commits = told("");
@@ -5707,7 +5730,7 @@ mod tests {
             story_of(&addressed)
                 .expect("open")
                 .meta
-                .contains(GRAPH_META_COMMITTED_BY)
+                .contains(graph_meta_committed_by())
         );
     }
 
@@ -6330,7 +6353,7 @@ mod tests {
         let mut filter = GraphFilter::default();
         assert!(filter.all_branches());
         assert_eq!(filter.log_refs(), vec!["--all".to_owned()]);
-        assert_eq!(filter.label(), GRAPH_FILTER_ALL);
+        assert_eq!(filter.label(), graph_filter_all());
 
         filter.tags = false;
         assert_eq!(
@@ -6379,7 +6402,7 @@ mod tests {
         filter.toggle_branch("main");
         filter.toggle_branch("side");
         assert!(filter.all_branches());
-        assert_eq!(filter.label(), GRAPH_FILTER_ALL);
+        assert_eq!(filter.label(), graph_filter_all());
     }
 
     /// T1 — the toolbar is a fixed strip above the column header, and the rows'
@@ -6487,11 +6510,11 @@ mod tests {
         assert!(text.contains(&"repo"), "{text:?}");
         assert!(text.contains(&"main"), "{text:?}");
         assert!(
-            text.contains(&GRAPH_FILTER_ALL),
+            text.contains(&graph_filter_all()),
             "the filter says what the graph is of: {text:?}"
         );
         assert!(
-            text.contains(&GRAPH_SEARCH_PLACEHOLDER),
+            text.contains(&graph_search_placeholder()),
             "and the field says what it is for: {text:?}"
         );
         // Left to right: the repository, then the branch, then the tools.
@@ -6503,7 +6526,7 @@ mod tests {
                 .expect("drawn")
         };
         assert!(at("repo") < at("main"));
-        assert!(at("main") < at(GRAPH_FILTER_ALL));
+        assert!(at("main") < at(graph_filter_all()));
     }
 
     /// T5 — the branch goes quiet while a question is in flight and comes back
@@ -6599,7 +6622,7 @@ mod tests {
         // A query git answered with nothing says so, rather than `0 of 0`.
         assert_eq!(
             searched(None, &[]).toolbar.expect("a toolbar").search_count,
-            GRAPH_SEARCH_NONE
+            graph_search_none()
         );
     }
 

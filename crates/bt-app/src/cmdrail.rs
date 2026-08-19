@@ -232,7 +232,10 @@ pub const PEEK_RISE_LOGICAL_PX: f32 = 8.0;
 /// the card's whole contract is "this is the command", and a card that said
 /// nothing at all would read as a bug in the card rather than as an honest gap in
 /// the ledger.
-pub const PEEK_EMPTY_TEXT: &str = "command";
+#[must_use]
+pub fn peek_empty_text() -> &'static str {
+    crate::i18n::Text::RailPeekEmptyCommand.text()
+}
 /// How many times [`resolve`] may lay the rail out again before it answers.
 ///
 /// The mock-up's own `depth < 2` (8443, 8449), kept as a number because the
@@ -1510,10 +1513,13 @@ pub fn peek_host(rail: &Rail, index: usize) -> Option<[f32; 4]> {
 /// What the glance card says about a **match** tick whose line no longer has any
 /// text to quote.
 ///
-/// The mirror of [`PEEK_EMPTY_TEXT`], and it exists for the same reason: a hit on
+/// The mirror of [`peek_empty_text`], and it exists for the same reason: a hit on
 /// a line the transcript has since evicted is a real state, and a blank card would
 /// read as the card being broken rather than as the line being gone.
-pub const PEEK_EMPTY_LINE_TEXT: &str = "line";
+#[must_use]
+pub fn peek_empty_line_text() -> &'static str {
+    crate::i18n::Text::RailPeekEmptyLine.text()
+}
 
 /// A command's run time, in the coarsest form that is still true.
 ///
@@ -1562,7 +1568,7 @@ pub fn peek_duration(elapsed: Duration) -> Option<String> {
 ///   no status to report and no duration either: [`bt_term::CommandMark::duration`]
 ///   deliberately refuses to answer with the clock, and a card whose number moved
 ///   while it was being read would be churn rather than information.
-/// * [`PEEK_EMPTY_TEXT`] in the muted ink when the ledger never got the text —
+/// * [`peek_empty_text`] in the muted ink when the ledger never got the text —
 ///   which since the adapter began pausing at shell-integration markers means only
 ///   a command typed past the top of its own grid (`session.rs`'s
 ///   `absorb_command_text`). The *facts* still ride along: a card that withheld
@@ -1633,7 +1639,7 @@ pub fn peek_text(
         Target::Match(_) => {
             let text = line_text.unwrap_or("").trim();
             if text.is_empty() {
-                (PEEK_EMPTY_LINE_TEXT.to_owned(), true)
+                (peek_empty_line_text().to_owned(), true)
             } else {
                 (text.to_owned(), false)
             }
@@ -1641,7 +1647,7 @@ pub fn peek_text(
         Target::Command(_) => {
             let text = mark.map_or("", |mark| mark.command_text.trim());
             if text.is_empty() {
-                (PEEK_EMPTY_TEXT.to_owned(), true)
+                (peek_empty_text().to_owned(), true)
             } else {
                 (text.replace('\n', " "), false)
             }
@@ -1656,24 +1662,17 @@ pub fn peek_text(
         }
         if let Some(code) = mark.exit_code.filter(|code| *code != 0) {
             body.push_str(NAME_PLACE_SEPARATOR);
-            body.push_str(&format!("exit {code}"));
+            body.push_str(&crate::i18n::rail_exit_code(code));
         }
     }
     if tick.members > 1 {
-        let count = match (tick.matched, tick.commanded) {
-            (0, commanded) => format!("{commanded} commands"),
-            (matched, 0) => format!("{matched} lines"),
-            (matched, commanded) => format!("{matched} lines, {commanded} commands"),
-        };
-        return (
-            format!("{count}{NAME_PLACE_SEPARATOR}latest: {body}"),
-            muted,
-        );
+        let count = crate::i18n::rail_glance_count(tick.matched, tick.commanded);
+        return (crate::i18n::rail_glance_latest(&count, &body), muted);
     }
     // *"running · {cmd}"* — a command with no `D` yet. Only ever a command: a
     // matched line has no lifetime of its own to report.
     if mark.is_some_and(CommandMark::is_running) {
-        return (format!("running{NAME_PLACE_SEPARATOR}{body}"), muted);
+        return (crate::i18n::rail_glance_running(&body), muted);
     }
     // The quoted error, on its own line. Only for a command the shell called
     // failed, and only when there is a line to quote.
