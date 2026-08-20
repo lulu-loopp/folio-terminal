@@ -8853,6 +8853,11 @@ struct TabRename {
     subject: RenameSubject,
     text: String,
     /// The caret, as a byte offset into `text`.
+    ///
+    /// **WHEN THERE IS A SELECTION, THIS IS ITS FAR END** — see [`seed`] for
+    /// why that is an invariant of this struct and not a habit of one door.
+    ///
+    /// [`seed`]: TabRename::seed
     caret: usize,
     /// **How much of the draft is selected, from its start** — the one selection
     /// this editor has (`input.select()`, mock-up 5870), as the offset the
@@ -8878,22 +8883,59 @@ struct TabRename {
 }
 
 impl TabRename {
+    /// **The one door every editor opens through, and the invariant it exists to
+    /// hold: WHEN THERE IS A SELECTION, THE CARET IS ITS FAR END.**
+    ///
+    /// `input.focus(); input.select()` (mock-up 5869-5870) and
+    /// `input.setSelectionRange(0, dot)` (12690) are both *forward* selections,
+    /// which is the browser's way of saying the same thing: the anchor is at the
+    /// draft's start and the focus — the thing drawn as a caret — is at the
+    /// prefix's end. Every verb this editor has already assumes it
+    /// ([`move_right`] collapses to `selected`, [`insert`] and [`backspace`]
+    /// replace the prefix and put the caret at `0`), so the caret was the only
+    /// part that could ever be out of step with the selection — and being drawn
+    /// is exactly what makes that visible.
+    ///
+    /// It was out of step, on the file door, from the day that door was built:
+    /// `Cargo.toml` opened with `Cargo` washed and the hairline after `.toml`
+    /// (user report with a screenshot, 2026-08-20). Nothing *behaved* wrongly,
+    /// which is why it survived a test suite — the drawn caret and the IME's
+    /// candidate anchor were the two readers of `caret`, and both of them were
+    /// pointing at a place typing would never happen. Two doors that each seed
+    /// their own pair of fields are two chances to disagree; one seed and one
+    /// `debug_assert` are none.
+    ///
+    /// [`move_right`]: TabRename::move_right
+    /// [`insert`]: TabRename::insert
+    /// [`backspace`]: TabRename::backspace
+    fn seed(subject: RenameSubject, text: String, selected: usize) -> Self {
+        debug_assert!(
+            text.is_char_boundary(selected),
+            "a selection ends on a character boundary"
+        );
+        Self {
+            subject,
+            caret: selected,
+            selected,
+            first_visible: 0,
+            text,
+        }
+    }
+
     /// Open on a tab, seeded from its manual name.
     ///
     /// "初值 = 现有 `name`（只放你的名字）" — the auto name is never put in the
     /// box, it is put *behind* it as the placeholder, which is what tells you
     /// what clearing the box will get you.
+    ///
+    /// The whole draft is selected, so by [`seed`]'s invariant the caret is at
+    /// the end of the text — here the two coincide, and on a file they do not.
+    ///
+    /// [`seed`]: TabRename::seed
     fn open(tab: TabId, manual_name: Option<&str>) -> Self {
         let text = manual_name.unwrap_or_default().to_owned();
-        Self {
-            subject: RenameSubject::Tab(tab),
-            // `input.focus(); input.select()` (5869-5870): the caret sits at the
-            // end of the selection, which is the end of the text.
-            caret: text.len(),
-            selected: text.len(),
-            first_visible: 0,
-            text,
-        }
+        let whole = text.len();
+        Self::seed(RenameSubject::Tab(tab), text, whole)
     }
 
     /// **Open on the file a preview head names** (user ruling 2026-08-19).
@@ -8905,17 +8947,22 @@ impl TabRename {
     /// selection is the STEM: `lastIndexOf('.')`, and only when it is not the
     /// first character, because `.gitignore` is a name and not an empty stem
     /// with a suffix. Typing replaces `notes` and leaves `.md`; the suffix is one
-    /// `Ctrl+A`-shaped gesture away for the times it does not.
+    /// `Ctrl+A` away for the times it does not ([`select_all`] — a gesture this
+    /// sentence promised for a day before it existed, added by the ruling of
+    /// 2026-08-20 that kept the stem selection and paid the debt beside it).
+    ///
+    /// [`select_all`]: TabRename::select_all
+    ///
+    /// **THE CARET GOES WHERE THE STEM ENDS**, not where the name does — this is
+    /// the door that used to break [`seed`]'s invariant, and `.gitignore` is the
+    /// one name for which obeying it still puts the caret at the end of the text,
+    /// because there the stem *is* the name.
+    ///
+    /// [`seed`]: TabRename::seed
     fn open_file(surface: PreviewSurface, source: preview::PreviewSource, name: &str) -> Self {
         let text = name.to_owned();
         let dot = text.rfind('.').filter(|at| *at > 0).unwrap_or(text.len());
-        Self {
-            subject: RenameSubject::PreviewName { surface, source },
-            caret: text.len(),
-            selected: dot,
-            first_visible: 0,
-            text,
-        }
+        Self::seed(RenameSubject::PreviewName { surface, source }, text, dot)
     }
 
     /// The tab this is renaming, or `None` when it is renaming a file.
@@ -9019,6 +9066,25 @@ impl TabRename {
         self.caret = self.text.len();
     }
 
+    /// **`Ctrl+A` — select the whole draft** (user ruling 2026-08-20).
+    ///
+    /// The way back to the suffix a file's box deliberately leaves out of its
+    /// opening selection (ruling five). It is the same verb on both subjects and
+    /// is not branched on one: a tab opens whole-selected, so pressing it there
+    /// lands on the fixed point it is already standing on.
+    ///
+    /// The whole draft is a prefix that runs to the end, which is why `selected`
+    /// can stay the offset it has always been, and the caret follows it to that
+    /// end because [`seed`]'s invariant is a property of the editor and not of
+    /// the moment it opened.
+    ///
+    /// [`seed`]: TabRename::seed
+    fn select_all(&mut self) {
+        self.selected = self.text.len();
+        self.caret = self.text.len();
+        self.clamp_scroll();
+    }
+
     /// Keep the drawn window from starting after the caret, which is the one
     /// way an edit alone (rather than a measurement) can invalidate it.
     fn clamp_scroll(&mut self) {
@@ -9048,14 +9114,32 @@ impl TabRename {
 /// `docs/DESIGN.md` §7.1.5's `InputOwner = Rename`). A key it has no verb for is
 /// swallowed rather than passed down, because the thing underneath is a terminal
 /// and the alternative is typing your tab's name into a shell.
+///
+/// **`Ctrl+A` is the one chord it keeps** (user ruling 2026-08-20), and it is
+/// **not a row of `shortcuts::BINDINGS`** — the same ownership [`graph_key_of`]
+/// writes down and `preview_edit::command`'s own `"a" => SelectAll` already
+/// follows. That table is the registry of chords this window *claims from a
+/// shell*, editable one day from a panel; while this editor holds the keyboard
+/// there is no shell to claim anything from, and a select-all inside a text
+/// field is a property of the field. Putting it in the table would also be
+/// claiming `Ctrl+A` globally, which is a `readline` beginning-of-line the
+/// terminal must keep.
 fn rename_key(editor: &mut TabRename, key: &Key, modifiers: ModifiersState) -> RenameVerdict {
     // A chord is not text. Ctrl/Alt-modified keys are swallowed unhandled: this
     // editor has no clipboard and no word verbs, and letting the chord through
     // to the terminal is exactly what §7.1.5 forbids.
     let chorded = modifiers.control_key() || modifiers.alt_key() || modifiers.super_key();
+    // AltGr arrives as Ctrl+Alt and is *typing*, so it is not the select-all
+    // chord — `preview_edit::command` makes the same exemption on the one other
+    // surface that takes characters. (It still falls into the swallow arm below,
+    // as it always has; this only keeps the door from opening on it.)
+    let select_all = modifiers.control_key() && !modifiers.alt_key() && !modifiers.super_key();
     match key {
         Key::Named(NamedKey::Enter) => return RenameVerdict::Commit,
         Key::Named(NamedKey::Escape) => return RenameVerdict::Cancel,
+        Key::Character(text) if select_all && text.eq_ignore_ascii_case("a") => {
+            editor.select_all();
+        }
         _ if chorded => {}
         Key::Named(NamedKey::Backspace) => editor.backspace(),
         Key::Named(NamedKey::Delete) => editor.delete(),
@@ -57409,16 +57493,33 @@ mod tests {
     /// `rfind('.')`: it is a name, not an empty stem with a suffix, so the whole
     /// of it is selected.
     ///
+    /// **AND THE CARET IS THE SELECTION'S OWN END** (user report on a real
+    /// window, 2026-08-20, screenshot `[Cargo].toml|`). The box opened with
+    /// `Cargo` washed and the hairline standing after `.toml`, which is one
+    /// editor saying two different things about where typing will land — and the
+    /// verbs were never in any doubt, because every one of them reads `selected`
+    /// and not `caret`. Only the drawn caret and the IME's candidate anchor lied.
+    /// This is the invariant [`TabRename`] is built on written as an assertion:
+    /// **when there is a selection, the caret IS its far end.** `.gitignore`
+    /// selects the whole draft, so for that name the far end is the end of the
+    /// text — the same rule, not an exception to it.
+    ///
     /// Red gate: select the whole draft and the first assertion goes red three
-    /// out; drop the `> 0` filter and `.gitignore` selects nothing at all.
+    /// out; drop the `> 0` filter and `.gitignore` selects nothing at all; seed
+    /// `caret: text.len()` again and the two `caret == selected` assertions go
+    /// red on every name that has a suffix.
     #[test]
     fn a_files_box_opens_with_its_stem_selected() {
         let surface = PreviewSurface::Seat(SeatId(7));
         let source = preview::PreviewSource::file(r"C:\notes\notes.md");
         let editor = TabRename::open_file(surface, source.clone(), "notes.md");
         assert_eq!(editor.text, "notes.md", "the whole name is in the box");
-        assert_eq!(editor.caret, 8, "the caret sits at the end of the draft");
-        assert_eq!(editor.selected, 5, "and the selection stops before the dot");
+        assert_eq!(editor.selected, 5, "the selection stops before the dot");
+        assert_eq!(
+            editor.caret, editor.selected,
+            "and the caret stands at the end of the selection, not at the end of \
+             the draft"
+        );
         assert_eq!(editor.tab(), None, "a file is not a tab");
 
         let dotfile = TabRename::open_file(surface, source.clone(), ".gitignore");
@@ -57426,6 +57527,17 @@ mod tests {
             dotfile.selected,
             ".gitignore".len(),
             "a leading dot is part of the name, not the start of a suffix"
+        );
+        assert_eq!(
+            dotfile.caret, dotfile.selected,
+            "and its caret is at that selection's end, which for a whole-draft \
+             selection is the end of the text"
+        );
+        assert_eq!(
+            dotfile.caret,
+            ".gitignore".len(),
+            "— so this one, and only this one, opens with its caret at the end \
+             of the name"
         );
 
         // Typing replaces the stem and leaves the suffix, which is the whole
@@ -57759,6 +57871,98 @@ mod tests {
         assert_eq!(
             rename_key(&mut editor, &Key::Named(NamedKey::Escape), none),
             RenameVerdict::Cancel
+        );
+    }
+
+    /// PIN (user ruling 2026-08-20) — **`Ctrl+A` selects the whole draft, and it
+    /// is the one chord this editor keeps.**
+    ///
+    /// The stem selection stays (ruling five), so the suffix needs a way back —
+    /// and until today the sentence promising one ("the suffix is one `Ctrl+A`
+    /// gesture away") described a gesture that did not exist: every Ctrl chord
+    /// was swallowed unhandled.
+    ///
+    /// **One editor, not two**: the same chord answers on a tab, where the draft
+    /// is already whole-selected and pressing it is therefore idempotent. A
+    /// select-all that only worked on one of the two subjects would be two
+    /// editors wearing one type.
+    ///
+    /// It stays out of `shortcuts::BINDINGS` for [`graph_key_of`]'s stated
+    /// reason, which `preview_edit::command`'s own `"a" => SelectAll` already
+    /// follows: that table is the registry of chords this window *claims from a
+    /// shell*, and while the editor holds the keyboard there is no shell
+    /// listening. It is a key inside a text field, like the six the graph
+    /// answers and the arrows the files column answers.
+    ///
+    /// Red gate: take the `Ctrl+A` arm out of `rename_key` and the chord falls
+    /// back into the swallow-every-chord arm, so the file's selection stays at
+    /// the stem and the typing assertion writes `todo.md` instead of `todo`.
+    #[test]
+    fn ctrl_a_selects_the_whole_draft() {
+        let ctrl = ModifiersState::CONTROL;
+        let a = || Key::Character("a".into());
+
+        let mut file = TabRename::open_file(
+            PreviewSurface::Seat(SeatId(7)),
+            preview::PreviewSource::file(r"C:\notes\notes.md"),
+            "notes.md",
+        );
+        assert_eq!(file.selected, 5, "it opens on the stem");
+        assert_eq!(
+            rename_key(&mut file, &a(), ctrl),
+            RenameVerdict::Held,
+            "the chord is the editor's own and never leaves it"
+        );
+        assert_eq!(file.selected, 8, "and now the whole name is selected");
+        assert_eq!(
+            file.caret, file.selected,
+            "the caret is still the selection's far end"
+        );
+        file.insert("todo");
+        assert_eq!(
+            file.text, "todo",
+            "so typing replaces the suffix too, which is the point of the chord"
+        );
+
+        // The tab's draft opens whole-selected, so the chord is idempotent
+        // there — the same verb, arriving at a fixed point.
+        let mut tab = TabRename::open(A, Some("build"));
+        assert_eq!((tab.selected, tab.caret), (5, 5));
+        assert_eq!(rename_key(&mut tab, &a(), ctrl), RenameVerdict::Held);
+        assert_eq!(
+            (tab.selected, tab.caret),
+            (5, 5),
+            "pressing it on a whole selection changes nothing"
+        );
+
+        // After the selection has been collapsed by a verb, the chord brings it
+        // back over everything the draft holds now, not over what it held then.
+        let mut typed = TabRename::open(A, None);
+        typed.insert("release");
+        assert_eq!((typed.selected, typed.caret), (0, 7), "nothing selected");
+        assert_eq!(rename_key(&mut typed, &a(), ctrl), RenameVerdict::Held);
+        assert_eq!((typed.selected, typed.caret), (7, 7));
+
+        // **AltGr is typing, not a chord** — it arrives as Ctrl+Alt, and the
+        // door opened here must not swallow the `a` a Polish or German layout
+        // is spelling with it. This editor swallows Ctrl+Alt as it always has;
+        // what matters is that the select-all arm is not what does it.
+        let mut altgr = TabRename::open_file(
+            PreviewSurface::Seat(SeatId(7)),
+            preview::PreviewSource::file(r"C:\notes\notes.md"),
+            "notes.md",
+        );
+        assert_eq!(
+            rename_key(
+                &mut altgr,
+                &a(),
+                ModifiersState::CONTROL | ModifiersState::ALT
+            ),
+            RenameVerdict::Held
+        );
+        assert_eq!(
+            altgr.selected, 5,
+            "Ctrl+Alt is not the select-all chord and left the stem selection alone"
         );
     }
 
