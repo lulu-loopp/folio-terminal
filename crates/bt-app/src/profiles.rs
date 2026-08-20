@@ -6976,7 +6976,9 @@ impl PaneMenuLayout {
     #[allow(dead_code)]
     #[must_use]
     pub fn submenu_rows(&self) -> Option<&[[f32; 4]]> {
-        self.submenu.as_ref().map(|submenu| submenu.items.as_slice())
+        self.submenu
+            .as_ref()
+            .map(|submenu| submenu.items.as_slice())
     }
 
     /// Whether this point is on either surface. Two rectangles, because a menu
@@ -11720,9 +11722,7 @@ mod tests {
                 &mut fake_measure,
             );
             let parent = layout.frame;
-            let child = layout
-                .submenu_frame()
-                .expect("an open submenu has a frame");
+            let child = layout.submenu_frame().expect("an open submenu has a frame");
             let shared = child[0].max(parent[0]).min(child[2].min(parent[2]));
             let overlap = (child[2].min(parent[2]) - child[0].max(parent[0])).max(0.0);
             assert!(
@@ -11848,10 +11848,7 @@ mod tests {
 
         // A point under both boxes' feet but inside the fan aimed at the child's
         // near edge. Off the parent, off the child, and still the menu's.
-        let aimed = [
-            (parent[2] + child[0]) / 2.0,
-            child[3].max(parent[3]) - 1.0,
-        ];
+        let aimed = [(parent[2] + child[0]) / 2.0, child[3].max(parent[3]) - 1.0];
         if !layout.contains(aimed[0], aimed[1]) {
             assert!(
                 layout.holds(Some(from), aimed),

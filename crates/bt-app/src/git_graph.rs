@@ -6682,10 +6682,7 @@ mod tests {
         // moves down at all.
         let (sentence, band, chips) = lines_of(900.0);
         assert_eq!(chips.len(), 2, "the fixture is a two-parent merge");
-        assert_eq!(
-            chips[0].0, chips[1].0,
-            "both hashes on one line: {chips:?}"
-        );
+        assert_eq!(chips[0].0, chips[1].0, "both hashes on one line: {chips:?}");
         assert_eq!(
             chips[0].0,
             sentence - 1,
@@ -6702,8 +6699,7 @@ mod tests {
             "the run moved down together rather than splitting: {chips:?}"
         );
         assert_eq!(
-            chips[0].0,
-            sentence,
+            chips[0].0, sentence,
             "onto the line after the sentence: {chips:?}"
         );
         assert_eq!(chips[0].1, 0.0, "starting at the band's left edge");

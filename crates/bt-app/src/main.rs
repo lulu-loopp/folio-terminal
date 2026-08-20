@@ -22142,9 +22142,9 @@ impl Runtime<'_> {
                     // not by an exception: a peek never takes the keyboard
                     // (§7.1.2), so a menu a key raised is never about one.
                     if let Some(id) = self.window.float.peek_id() {
-                        let on_it = self.window.pointer_position.is_some_and(|at| {
-                            matches!(self.float_hit_at(at), Some((hit, _)) if hit == id)
-                        });
+                        let on_it = self.window.pointer_position.is_some_and(
+                            |at| matches!(self.float_hit_at(at), Some((hit, _)) if hit == id),
+                        );
                         if !on_it {
                             self.window.float.dismiss(id, Instant::now());
                             went = true;
@@ -36668,10 +36668,7 @@ impl Runtime<'_> {
         // it. The heading keeps its place beside it: a hand back on the row the
         // child hangs from has not left the child either.
         let hovering_child = layout.on_submenu(to[0], to[1])
-            || hit
-                == Some(profiles::PaneMenuHit::Row(
-                    profiles::PaneMenuRow::SplitWith,
-                ));
+            || hit == Some(profiles::PaneMenuHit::Row(profiles::PaneMenuRow::SplitWith));
         let was_open = menu.submenu_open;
         let mut held = false;
         if let Some(submenu) = submenu
