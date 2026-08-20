@@ -5175,7 +5175,8 @@ static NO_FILES_VIEWS: BTreeMap<SeatId, FilesViewContent> = BTreeMap::new();
 #[cfg(test)]
 static NO_GIT_PAGES: BTreeMap<SeatId, crate::git_panel::GitPanelContent> = BTreeMap::new();
 #[cfg(test)]
-static NO_GIT_GRAPHS: BTreeMap<SeatId, crate::git_graph::GraphContent> = BTreeMap::new();
+static NO_GIT_GRAPHS: BTreeMap<crate::PreviewSurface, crate::git_graph::GraphContent> =
+    BTreeMap::new();
 
 /// Every Terminal seat of `seats` running a PowerShell — the map a real tab of
 /// one profile hands in.
@@ -5622,7 +5623,14 @@ pub struct ChromeContent<'a> {
     /// three channels the panel's mini graph is drawn by, into the preview seat's
     /// own body, and the document's body is left empty because this *is* the
     /// document.
-    pub git_graphs: &'a BTreeMap<SeatId, crate::git_graph::GraphContent>,
+    ///
+    /// **Keyed by surface and not by seat**, because a graph is a document and a
+    /// document can be torn off into a window: one map answers for the seats
+    /// this pass draws and for the floats the overlay pass draws, and the two
+    /// hosts therefore cannot be looking at two different builds of one
+    /// repository. This pass reads the [`crate::PreviewSurface::Seat`] entries
+    /// and steps over the rest.
+    pub git_graphs: &'a BTreeMap<crate::PreviewSurface, crate::git_graph::GraphContent>,
     /// What each preview pane's body says while it has no body yet — "Loading
     /// …", a decode failure, the invitation an empty pane wears — **by seat**.
     ///
@@ -6450,7 +6458,7 @@ pub fn build_chrome_for_tabs(
                 // [`ChromeInputs::git_graphs`] for why a picture goes through
                 // the chrome and not through `PreviewBody`.
                 if placement.kind == SeatKind::Preview
-                    && let Some(graph) = git_graphs.get(&placement.id)
+                    && let Some(graph) = git_graphs.get(&crate::PreviewSurface::Seat(placement.id))
                     && let Some(geometry) = files_pane
                 {
                     crate::git_graph::push_graph(
@@ -10932,81 +10940,43 @@ pub fn hit_git_panel(
 ///
 /// The twin of [`hit_git_panel`], and it asks the same body the paint drew into:
 /// a preview seat's, less its head and its foot.
+///
+/// **The docked half of one hit test.** Which of the toolbar, the detail block
+/// and the row a press lands on — and in what order — is
+/// [`crate::git_graph::graph_hit`]'s, so that the floating host asks the same
+/// question and can only disagree with this one about *naming* the answer.
+/// The seats are given as pairs rather than as the surface-keyed map they are
+/// kept in, because a float has no seat rectangle for this walk to look up and
+/// stepping over one silently would be this function pretending to have
+/// answered for it.
 #[must_use]
-pub fn hit_git_graph(
+pub fn hit_git_graph<'a>(
     seats: &Seats,
     layout: &SeatLayout,
-    graphs: &BTreeMap<SeatId, crate::git_graph::GraphContent>,
+    graphs: impl IntoIterator<Item = (SeatId, &'a crate::git_graph::GraphContent)>,
     scale: f32,
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
     let (x, y) = (x as f32, y as f32);
     for (seat, content) in graphs {
-        let Some(body) = preview_seat_body_rect(seats, layout, *seat, scale) else {
+        let Some(body) = preview_seat_body_rect(seats, layout, seat, scale) else {
             continue;
         };
-        let geometry = crate::git_graph::graph_geometry(body, content, scale);
-        // **The toolbar answers first** (T1), because it is not in the list: it
-        // is a fixed strip above the rows' own box, so a press on it is not a
-        // press the row arithmetic could ever have claimed — and asking it after
-        // the rows would be asking a question whose answer is already known.
-        if let (Some(strip), Some(toolbar)) = (geometry.head, content.toolbar.as_ref()) {
-            let rects = crate::git_graph::graph_toolbar_rects(strip, toolbar, scale);
-            // Innermost first: the `\u{d7}` lives inside the field it clears, so
-            // a field that answered first would be a button nothing can reach.
-            for (rect, tool) in [
-                (
-                    rects.search_clear,
-                    Some(crate::git_graph::GraphTool::SearchClear),
-                ),
-                (rects.search, Some(crate::git_graph::GraphTool::Search)),
-                (
-                    Some(rects.filter),
-                    Some(crate::git_graph::GraphTool::Filter),
-                ),
-                (
-                    Some(rects.refresh),
-                    Some(crate::git_graph::GraphTool::Refresh),
-                ),
-                (
-                    rects.leave_detached,
-                    Some(crate::git_graph::GraphTool::LeaveDetached),
-                ),
-            ] {
-                let (Some(rect), Some(tool)) = (rect, tool) else {
-                    continue;
-                };
-                if x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3] {
-                    return Some(ChromeTarget::GitGraphTool { seat: *seat, tool });
-                }
+        match crate::git_graph::graph_hit(body, content, scale, x, y) {
+            Some(crate::git_graph::GraphHit::Tool(tool)) => {
+                return Some(ChromeTarget::GitGraphTool { seat, tool });
             }
-        }
-        let Some(index) = geometry.row_at(x, y, content.total_rows) else {
-            continue;
-        };
-        // The detail block is several rows and its parts are inside them, so a
-        // press lands on the block first and on one of its parts second — the
-        // same two-step `hit_git_panel` takes through a row and its verbs.
-        if let Some(detail) = content.rows.iter().find_map(|row| match row {
-            crate::git_graph::GraphViewRow::Detail(detail)
-                if index >= detail.index && index < detail.index + detail.rows =>
-            {
-                Some(detail)
+            Some(crate::git_graph::GraphHit::Detail { index, part }) => {
+                return Some(ChromeTarget::GitGraphDetail { seat, index, part });
             }
-            _ => None,
-        }) {
-            let first = geometry.row_rect(detail.index);
-            let last = geometry.row_rect(detail.index + detail.rows - 1);
-            let rect = [first[0], first[1], first[2], last[3]];
-            let part = crate::git_graph::detail_part_at(rect, detail, content.columns, scale, x, y);
-            return part.map(|part| ChromeTarget::GitGraphDetail {
-                seat: *seat,
-                index: detail.index,
-                part,
-            });
+            Some(crate::git_graph::GraphHit::Row(index)) => {
+                return Some(ChromeTarget::GitGraphRow { seat, index });
+            }
+            // Not on this graph's rows at all — the next seat may still answer,
+            // which is what the loop is for.
+            None => continue,
         }
-        return Some(ChromeTarget::GitGraphRow { seat: *seat, index });
     }
     None
 }

@@ -827,6 +827,24 @@ pub enum FloatPart {
         index: usize,
         act: crate::git_panel::GitAct,
     },
+    /// **A row of a floating commit graph**, by index (user report, 2026-08-20).
+    ///
+    /// Its own variant and not [`Self::Row`] for [`crate::seats::ChromeTarget`]'s
+    /// own reason, one host along: the two lists are two lists — a tree's rows
+    /// and a graph's — and a press that could not say which would open the wrong
+    /// row of whichever happened to be longer. The three that follow are the
+    /// graph's parts that are *smaller* than a row, or outside the list
+    /// altogether, and they are named here for [`Self::GitAct`]'s reason: what
+    /// the pointer is on has to be decided by the hit test that decides which
+    /// row, or the row swallows the button.
+    GraphRow(usize),
+    /// One of the graph toolbar's controls (T1) — outside the list, above it.
+    GraphTool(crate::git_graph::GraphTool),
+    /// One pressable part of the open commit's detail block (v2 ②).
+    GraphDetail {
+        index: usize,
+        part: crate::git_graph::GraphDetailPart,
+    },
     /// The body, but not on a row.
     Body,
     /// The foot, which reveals the folder in the OS file manager.
@@ -1594,6 +1612,11 @@ impl FloatHost {
 // ── drawing ─────────────────────────────────────────────────────────────────
 
 /// The tenant's own contribution: whatever it draws inside [`FloatGeometry::body`].
+///
+/// `Default` is "nothing here", which is a real answer and not an absence: a
+/// window holding a **picture** draws its body on the layer's image channel and
+/// contributes no marks at all.
+#[derive(Default)]
 pub struct FloatBody {
     pub quads: Vec<OverlayQuad>,
     pub labels: Vec<ChromeLabel>,
@@ -2469,6 +2492,118 @@ mod tests {
                 geometry.body
             );
         }
+    }
+
+    /// PIN (user report, 2026-08-20) — **a window showing the commit graph is
+    /// not a blank window.**
+    ///
+    /// The twin of the Git page's pin above, and it is owed for a defect that
+    /// was invisible for exactly the reason a graph is drawn the way it is: a
+    /// graph's `PreviewDocument` is empty *on purpose*, because the picture is
+    /// chrome pushed into the body rectangle. So a host that knew about the
+    /// document pipeline and the picture channel and nothing else drew a head, a
+    /// foot, and no third thing — and had nothing to report, because every
+    /// machine it did know about had done its job.
+    ///
+    /// Red gate: hand the window's body to the document pipeline (which is what
+    /// it did) and this rectangle carries nothing at all.
+    #[test]
+    fn a_window_showing_a_commit_graph_fills_its_body_with_the_repositorys_own_rows() {
+        let geometry = float_geometry(
+            frame(100.0, 100.0, 520.0, 520.0),
+            FloatMode::Pinned,
+            SCALE,
+            30.0,
+            FloatHeadTools::default(),
+        );
+        let content = crate::git_graph::sample_graph_for_tests(geometry.body, SCALE);
+        assert!(
+            content.total_rows > 0,
+            "the fixture repository answered with a history"
+        );
+        let (mut quads, mut labels, mut sprites) = (Vec::new(), Vec::new(), Vec::new());
+        crate::git_graph::push_graph(
+            geometry.body,
+            &content,
+            crate::git_graph::GraphHover::default(),
+            SCALE,
+            &bt_render::chrome_palette(),
+            (&mut quads, &mut labels, &mut sprites),
+        );
+        assert!(
+            !labels.is_empty() && !sprites.is_empty(),
+            "a floating commit graph is not a blank window: {} labels, {} sprites",
+            labels.len(),
+            sprites.len()
+        );
+        // The masthead, the column header and the commit rows are all words, so
+        // the subject of a commit the fixture wrote is on the glass.
+        assert!(
+            labels.iter().any(|label| label.text.contains("commit c3")),
+            "the newest commit's subject is drawn: {:?}",
+            labels.iter().map(|label| &label.text).collect::<Vec<_>>()
+        );
+        // And every mark of it is inside the body the chassis gave it — a window
+        // is not entitled to paint over its own head or its own foot.
+        for rect in labels
+            .iter()
+            .map(|label| label.rect)
+            .chain(sprites.iter().map(|sprite| sprite.rect))
+        {
+            assert!(
+                rect[0] >= geometry.body[0] - 0.5 && rect[2] <= geometry.body[2] + 0.5,
+                "drawn inside the body: {rect:?} in {:?}",
+                geometry.body
+            );
+        }
+    }
+
+    /// PIN (user report, 2026-08-20) — **the window asks the graph's own hit
+    /// test, and gets the graph's own three answers.**
+    ///
+    /// What this pins is that the chassis has a vocabulary for them at all. The
+    /// float's body used to answer `Row` or nothing, which is a tree's and a Git
+    /// page's whole vocabulary; a graph has a toolbar above its list and
+    /// pressable parts inside one of its rows, and a host with no word for those
+    /// would have sent both to `press_graph_row` as if they were rows.
+    #[test]
+    fn a_window_names_the_graphs_toolbar_and_its_rows_apart() {
+        let geometry = float_geometry(
+            frame(100.0, 100.0, 520.0, 520.0),
+            FloatMode::Pinned,
+            SCALE,
+            30.0,
+            FloatHeadTools::default(),
+        );
+        let content = crate::git_graph::sample_graph_for_tests(geometry.body, SCALE);
+        let toolbar = content
+            .toolbar
+            .as_ref()
+            .expect("a graph with a history draws its toolbar");
+        let head = crate::git_graph::graph_geometry(geometry.body, &content, SCALE)
+            .head
+            .expect("the toolbar has a strip of its own above the list");
+        let rects = crate::git_graph::graph_toolbar_rects(head, toolbar, SCALE);
+        let refresh = [
+            (rects.refresh[0] + rects.refresh[2]) / 2.0,
+            (rects.refresh[1] + rects.refresh[3]) / 2.0,
+        ];
+        assert_eq!(
+            float_hit(&geometry, refresh[0], refresh[1], |x, y| {
+                let (x, y) = (x + geometry.body[0], y + geometry.body[1]);
+                crate::git_graph::graph_hit(geometry.body, &content, SCALE, x, y).map(|hit| {
+                    match hit {
+                        crate::git_graph::GraphHit::Tool(tool) => FloatPart::GraphTool(tool),
+                        crate::git_graph::GraphHit::Detail { index, part } => {
+                            FloatPart::GraphDetail { index, part }
+                        }
+                        crate::git_graph::GraphHit::Row(index) => FloatPart::GraphRow(index),
+                    }
+                })
+            }),
+            Some(FloatPart::GraphTool(crate::git_graph::GraphTool::Refresh)),
+            "the toolbar answers before the list, exactly as it does on a pane"
+        );
     }
 
     #[test]

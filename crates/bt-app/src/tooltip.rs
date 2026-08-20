@@ -366,7 +366,12 @@ pub enum TooltipAnchorId {
     /// Three of the four are marks with no words beside them, which is exactly
     /// the case a tip exists for: a chevron, a cross and a circular arrow are
     /// idioms, and an idiom is a guess until something says what it does.
-    GitGraphTool(bt_layout::SeatId, crate::git_graph::GraphTool),
+    ///
+    /// Addressed by **surface** and not by seat, because the graph it belongs to
+    /// is a document and a document can be torn off into a window — the tools
+    /// are the same three marks there, and an idiom does not stop being one
+    /// because it is in a float.
+    GitGraphTool(crate::PreviewSurface, crate::git_graph::GraphTool),
     /// A pane head's `⌄` — the one control in a pane head with no word beside
     /// it and more than one thing behind it (user ruling, 2026-08-16).
     ///
