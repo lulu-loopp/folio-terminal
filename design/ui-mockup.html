@@ -2794,13 +2794,19 @@
   /* A TAB CARD'S BODY IS THE WHOLE TAB — the split tree drawn small, every seat
      showing its own live projection, which is what "整 tab 活缩略图" means and
      what makes a card=tab column legible when two tabs share a name.
-     IT IS SLICE F2, NOT F1. v1 ships the head alone — name plus the tab's
-     aggregated dot — because that much is free (the strip already computes it)
-     and a live thumbnail per tab is a projection budget somebody has to size.
-     The picture is drawn here anyway so its shape can be judged now, and it
-     carries an `F2` tag so nobody reads the mock-up as v1's promise. */
+     SHIPPED 2026-08-20 (slice F2, `crates/bt-app/src/focus_thumb.rs`). The body
+     stood here first with an `F2` tag on it so its shape could be judged a slice
+     early; the tag came off the day the native build grew the picture, because a
+     mark saying "not yet" on a thing that is now in the product is the one lie a
+     drawing of the product must not tell.
+     THE NUMBERS BELOW ARE THE NATIVE ONES, and that is not a coincidence: the
+     build reads them out of `bt-render`'s theme (`FOCUS_MINI_HEIGHT` 92,
+     `..._TERM_FONT` 7.5 / `..._TERM_LINE_HEIGHT` 1.45 / `..._TERM_ROWS` 6,
+     `..._FILES_FONT` 8 / `..._FILES_LINE_HEIGHT` 1.5 / `..._FILES_ROWS` 4 /
+     `..._FILES_ICON` 8, `..._GAP` 3, row padding 3/4/4), which were taken from
+     these rules. Change one here and the other one is now wrong. */
   .fc-tab-mini {
-    position: relative; height: 92px; padding: 5px; display: flex;
+    height: 92px; padding: 5px; display: flex;
     background: var(--termbg); overflow: hidden;
   }
   .fc-tab-mini > .mini-split, .fc-tab-mini > .fc-cell { flex: 1; min-width: 0; min-height: 0; }
@@ -2819,14 +2825,38 @@
   .fc-tab-mini .fc-mini.fc-files { font-size: 8px; line-height: 1.5; }
   .fc-tab-mini .fc-mini .fcm-row { gap: 3px; }
   .fc-tab-mini .fc-mini .fico { width: 8px; height: 8px; }
-  .fc-f2 {
-    position: absolute; right: 5px; bottom: 5px; z-index: 2; pointer-events: none;
-    font-size: 8px; font-weight: 700; letter-spacing: .06em;
-    padding: 1px 4px; border-radius: 3px;
-    background: color-mix(in srgb, var(--accent) 20%, var(--termbg));
-    color: var(--accent);
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  /* A THUMBNAIL'S TAIL IS TEXT — the rich blocks that a monitor card scales in
+     place are not drawn here, and the reason is the native model rather than a
+     size judgement: `MiniSeatContent::Transcript` is the grid's own ROWS, and the
+     rows an inline picture is painted over hold no characters. So the tail on a
+     card is what the shell WROTE, and the picture is absent exactly as it is
+     absent from the grid's text. The 72px monitor box keeps its little chart
+     (§7.1.6b ③, ruled 2026-07-18) — it is a box you look through and has the
+     height to be one; a seat inside a 92px thumbnail is a quarter of that, where
+     the same chart is a smudge. Restated AFTER `.fc-mini`'s two `zoom` rules,
+     which would otherwise still be in force here. */
+  .fc-tab-mini .fc-mini .math, .fc-tab-mini .fc-mini .timg { display: none; }
+  /* A FACE, NOT A SHRUNK PAGE (§7.1.6b′ F2, native `MiniSeatContent::Face`).
+     A preview seat — a document, an image, or the commit graph — and a
+     placeholder draw two centred lines here instead of their contents: what they
+     are showing, and what kind of thing that is. 7.5px of prose is a grey smear,
+     and a smear says less about a tab than two words do. It is set in the app
+     font at the FILES size and not the transcript's, for the reason the native
+     comment gives: this is the window talking about a pane, not a document
+     quoted out of one. The monitor cards are untouched — a pane card is a box
+     you look THROUGH (§7.1.6b ③), and it has the height to be one. */
+  .fc-face {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: auto; flex: 1; min-height: 0; overflow: hidden;
+    padding: 3px 4px 4px; text-align: center;
+    font-family: inherit; font-size: 8px; line-height: 1.5;
+    background: var(--termbg); pointer-events: none;
   }
+  .fc-face > div { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fc-face .fcf-name { color: var(--ink2); }
+  /* the kind word wears the same ink the focused seat's hairline does, which is
+     what `palette.focus_mini_edge_focused` is on the native side of this rule */
+  .fc-face .fcf-kind { color: var(--ink3); }
   .fc-badge {
     font-size: 9px; color: #fff; background: #d9822b; border-radius: 4px;
     padding: 0 5px; flex: none;
@@ -4860,6 +4890,70 @@
           </div>
         </div>
 
+        <!-- MINIMUM CONTRAST (§2.6, native 2026-08-19 —
+             `crates/bt-render/src/contrast.rs`, `settings.json` v16).
+
+             THE ROW THAT EXISTS BECAUSE A LINE OF TEXT WAS NOT DRAWN AT ALL.
+             `solarized-dark` names the same 24 bits for `black` and for
+             `background`, so every character a program prints with ANSI 0 is the
+             paper's own colour on the paper: 1.00:1, an empty line. `brightBlack`
+             is 1.16:1, the same thing with a rounding error. Prompt path
+             segments, `git status`' quiet half, a diff's context, argument
+             lists — everything that reaches for those two indices to draw "the
+             calm part of a line" comes out invisible.
+
+             LAST IN THE GROUP, on purpose: it is a repair applied ON TOP of a
+             scheme, so it is read after the row where a scheme is picked and not
+             before it. In Appearance because it changes how the grid looks, and
+             behind Advanced because it is the only row in this dialog that
+             overrides a colour a program named — nobody who did not come looking
+             for it should meet it.
+
+             FOUR RUNGS, AND NO UPSTREAM HAS THESE FOUR. The filing note claimed
+             Windows Terminal has the same setting; it does not — its
+             `adjustIndistinguishableColors` is an Oklab ΔEOK nudge with the
+             threshold hard-coded, and its four values say WHEN to adjust, not HOW
+             FAR. The same name and the same meaning belong to VS Code /
+             xterm.js's `terminal.integrated.minimumContrastRatio`, which is WCAG
+             arithmetic and a free `number`. So the division here is: the ratio is
+             VS Code's arithmetic, the colour space is WT's Oklab, and the ladder
+             is this product's own — `Off` first (the default, and every previous
+             build's behaviour), then 2:1 "merely visible", 3:1 (WCAG AA large),
+             4.5:1 (WCAG AA body).
+
+             THE LADDER STOPS AT 4.5 FOR AN ARITHMETIC REASON, not a taste one.
+             Pushing the ink to white buys `1.05/(Y+0.05)`; pushing it to black
+             buys `(Y+0.05)/0.05`; the two multiply to 21 for EVERY `Y`. So a
+             target above √21 ≈ 4.58 is one both directions can miss, and WCAG
+             AAA's 7:1 would mean "as much as this ground can give" on some
+             schemes and a true 7:1 on others — one rung with two meanings.
+
+             INK ONLY, NEVER PAPER, NEVER THE HOUSE. The floor is applied at the
+             single place a cell's two colours are resolved, after `DIM` and after
+             `INVERSE`, and it moves the foreground alone: paper is a fact the
+             program declared, and lifting it would tear one shared ground into
+             patches and change what a selection covers. Selection, both search
+             grounds and the cursor never enter it at all — they are opaque marks
+             drawn OVER the grid, not cell colours. Nothing outside the grid is
+             touched: the chrome's colours were each struck against a contrast
+             floor by `ChromePalette::derive` long ago, and the picture behind the
+             window is a picture. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Minimum contrast</div>
+            <div class="desc">Lightens or darkens terminal text until it meets this ratio against the cell behind it. Backgrounds are never changed, and neither is anything outside the grid. Above Off, colours a program asked for are overridden</div>
+          </div>
+          <div class="combo" data-combo="mincontrast">
+            <button aria-haspopup="listbox"><span class="value">Off</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="off" role="option"><span class="tick">✓</span>Off</div>
+              <div class="combo-item" data-v="2" role="option"><span class="tick">✓</span>2:1</div>
+              <div class="combo-item" data-v="3" role="option"><span class="tick">✓</span>3:1</div>
+              <div class="combo-item" data-v="45" role="option"><span class="tick">✓</span>4.5:1</div>
+            </div>
+          </div>
+        </div>
+
         <!-- IT RESETS THIS PAGE'S ADVANCED ROWS ONLY, HOT, and says which page in
              an Ok toast — `Appearance ▸ Advanced is back to its defaults`. Only
              the group's rows, because the group is what the button closes: a
@@ -5442,6 +5536,43 @@
             <div class="desc" id="wrap-desc">Long lines fold at the pane's edge; a formula too wide to fit scrolls inside its own block</div>
           </div>
           <div class="combo" data-combo="wrap">
+            <button aria-haspopup="listbox"><span class="value">On</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="on" role="option"><span class="tick">✓</span>On</div>
+              <div class="combo-item" data-v="off" role="option"><span class="tick">✓</span>Off</div>
+            </div>
+          </div>
+        </div>
+        <!-- DESKTOP NOTIFICATIONS (§7.6, Windows landing slice 3, 2026-08-20 —
+             native, `terminal_notifications` in settings.json v16).
+
+             LAST ON THIS PAGE, and that is the judgement `Explorer context menu`
+             is filed under in General: the rows above say what a pane keeps, what
+             one shell is patched with and how a long line folds — all of them
+             about this window — and this is the only row here whose answer shows
+             up OUTSIDE it. A `OSC 9` / `OSC 777;notify` from the shell becomes a
+             Windows toast; pressing the toast brings this window forward, that
+             tab on stage and that pane's keyboard back.
+
+             DEFAULT ON, against the two terminals that ship it off (Windows
+             Terminal's `allowOSC777`, iTerm2's escape-sequence alerts) and with
+             the three that ship it on (foot, WezTerm, Ghostty). The thing the
+             cautious two are defending against — `cat` a hostile file and get a
+             toast in the face while you are watching — cannot happen here,
+             because nothing is sent while the pane is on screen in a focused
+             window. And a feature you must first find in a dialog is a feature
+             most readers never learn they have.
+
+             THE SENTENCE STATES THE TWO FACTS A READER CANNOT DEDUCE: a program
+             has to ask for this (it is not the bell, and not every shell sends
+             one), and nothing arrives while you are already looking. It is the
+             native string verbatim — the row is one text, not two that drift. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Notifications</div>
+            <div class="desc">Programs that ask can put a message on the desktop. Nothing arrives while the pane is on screen in a focused window</div>
+          </div>
+          <div class="combo" data-combo="notifications">
             <button aria-haspopup="listbox"><span class="value">On</span><span class="chev">▼</span></button>
             <div class="combo-menu" role="listbox">
               <div class="combo-item selected" data-v="on" role="option"><span class="tick">✓</span>On</div>
@@ -6526,6 +6657,18 @@
       return pv.content.split("\n").slice(0, 4).map(t => `<div>${esc(t)}</div>`).join("");
     return `<div>No preview</div>`;
   }
+  /* WHAT KIND OF THING THIS IS, in one word — the second line of a focus card's
+     face, and the native `PreviewBuffer::kind_word` exactly: the commit graph
+     says `Graph`, a file says its extension in capitals, and anything with no
+     extension to say (a dotfile's leading dot is not one) says what the seat is
+     called. */
+  const pvKindWord = (pv) => {
+    if (pv.path.startsWith("gitgraph:")) return "Graph";
+    const dot = pv.name.lastIndexOf(".");
+    return dot > 0 ? pv.name.slice(dot + 1).toUpperCase() : "Preview";
+  };
+  const pvFaceMini = (pv) =>
+    `<div class="fcf-name">${esc(pv.name)}</div><div class="fcf-kind">${esc(pvKindWord(pv))}</div>`;
   function pvCardHtml(pv, attrs, cls) {
     /* no height override: every card body shares .fc-mini's default — a column
        of uniform cards reads as one instrument (user ruling 2026-07-18) */
@@ -6571,6 +6714,12 @@
          the terminal cards (user report: "聚焦模式下预览没有窗口") */
       card: (l, w, cls) => pvCardHtml(l.preview, cardAttrs(l, w), cls),
       mini: (l) => pvCardMini(l.preview),
+      /* THE ONE KIND WHOSE TWO PICTURES DIFFER. A monitor box is 72px of card
+         all to itself and shows the document; a seat inside a focus card's
+         thumbnail is a fraction of 92px and shows a face instead (§7.1.6b′ F2).
+         Two verbs and not a flag on one, because they are two different
+         drawings — see `.fc-face`. */
+      thumb: (l) => pvFaceMini(l.preview),
     },
   };
   const contentOf = (l) => CONTENT[(l && l.kind) || "term"];
@@ -7302,8 +7451,40 @@
   /* a Recent entry is a terminal seed OR a files place — both are "somewhere I
      was", and skipping files leaves made a files-only tab unrecoverable by
      Ctrl+Shift+T while shut→restore brought it back fine (two doors, one broken) */
-  const recentKey = (r) => r.files ? "files @ " + r.files.root
-                                   : r.seed.title + " @ " + r.seed.cwd;
+  /* THE FOURTH SHAPE IS A WHOLE WINDOW (§2.7, multiwindow slice D, native
+     2026-08-20). Close a window while other windows are still open and it does
+     not go into the session file — it LEAVES the file and waits here, as one
+     row: `RecentSeedV1::Window { seeds }`, which holds its tabs' seeds and
+     nothing else. No rectangle, no rail, no tree — Recent restores the places you
+     were, not a layout, which is the same sentence that makes a closed files tab
+     forget its column width.
+     A WINDOW CAN NEVER COLLIDE WITH A TAB, and that is what this key is for: the
+     window's key opens a fourth slot and is built by joining its children's keys
+     with a NEWLINE, a character no Windows path can contain, so the join needs
+     no escape and no tab's key can ever be spelled the same way. */
+  const recentKey = (r) => r.window ? "window @ " + r.window.seeds.map(recentKey).join("\n")
+                                    : r.files ? "files @ " + r.files.root
+                                              : r.seed.title + " @ " + r.seed.cwd;
+  /* A WINDOW WEARS A WINDOW. It is the one row in this list whose mark is not
+     its content's: captioned `folio-site` with a PowerShell mark it would read
+     as "that shell", and the whole difference is that pressing it brings back a
+     WINDOW that had `folio-site` in it. `#i-max` is the drawing this product
+     already uses for a window — the caption button's own — so the two cannot
+     drift apart. */
+  const recentMarkHtml = (r) =>
+    r.window ? `<span class="ticon"><svg class="pmark" style="color:var(--accent)"><use href="#i-max"/></svg></span>`
+    : r.files ? `<span class="ticon"><svg class="pmark" style="color:var(--accent)"><use href="#i-folder"/></svg></span>`
+    : `<span class="ticon">${r.seed.icon}</span>`;
+  /* A window is captioned by THE TAB IT OPENED WITH — the way a reader would name
+     it ("the window I had `folio-site` in"). The word "window" is not in the
+     label because a label is one measured line; it is in the tip, beside the
+     count, where this list has always put its detail. */
+  const recentLabel = (r) => r.window ? (r.window.seeds[0] ? recentLabel(r.window.seeds[0]) : "")
+                                      : r.files ? cwdLeaf({ cwd: r.files.root })
+                                                : (r.seed.name || cwdLeaf(r.seed));
+  const recentTip = (r) =>
+    r.window ? `Window · ${r.window.seeds.length} ${r.window.seeds.length === 1 ? "tab" : "tabs"}`
+    : r.files ? r.files.root : r.seed.cwd;
   function recordRecent(w) {
     leavesOf(w.tree).forEach(l => {
       const entry = isFilesLeaf(l)
@@ -8943,19 +9124,26 @@
     leavesOf(w.tree).map(l => `${l.id}.${l.kind}.${l.kind === "term" ? l.uid : ""}`).join(",")
   ).join("|");
 
-  /* THE F2 PICTURE (§7.1.6b′ ④): the tab's own split tree drawn small, every
-     seat showing its own live projection through the SAME `mini` verb the
-     monitor cards use — a files column stays a files column, a preview stays the
-     document, a terminal stays its transcript's tail. The geometry is
-     `miniNode`'s (`.mini-split` / `.mini-slot`, ratios and all), which is why
-     those four rules were unscoped from `.peek-grid`: one drawing of "what shape
-     is this tab", two places that need it.
-     v1 SHIPS THE HEAD ALONE. This body is the slice after, and says so on its
-     face — see the `F2` tag in `focusTabCardHtml`. */
+  /* THE F2 PICTURE (§7.1.6b′ ④, native since 2026-08-20): the tab's own split
+     tree drawn small, every seat showing what its own kind can honestly show at
+     this size. The geometry is `miniNode`'s (`.mini-split` / `.mini-slot`, ratios
+     and all), which is why those four rules were unscoped from `.peek-grid`: one
+     drawing of "what shape is this tab", two places that need it. The native
+     build cuts the same tree out of `FocusCardGeometry::mini` with
+     `seats::focus_mini_seats`, at the tree's OWN ratios and not through the
+     layout solver — 203px is under every minimum `bt-layout` knows, so asking it
+     would answer a column of collapsed bars.
+     THREE ANSWERS, ONE PER KIND, and they are the native's three: a terminal
+     shows the transcript's last six lines in the grid's own monospaced face, a
+     files column shows the four rows it is showing now with its own two marks,
+     and a preview — a document, an image, or the commit graph — shows a FACE.
+     See `.fc-face` for why the third one is not a shrunk page. */
+  const thumbClass = (l) =>
+    isPreviewLeaf(l) ? "fc-face" : isFilesLeaf(l) ? "fc-mini fc-files" : "fc-mini";
   function focusTabMiniHtml(node, w) {
     if (node.type === "leaf") {
       return `<div class="fc-cell ${node.id === w.focus ? "focused" : ""}">
-        <div class="fc-mini ${isFilesLeaf(node) ? "fc-files" : ""}" data-leaf="${node.id}"></div>
+        <div class="${thumbClass(node)}" data-leaf="${node.id}"></div>
       </div>`;
     }
     return `<div class="mini-split mini-${node.dir}">
@@ -8975,7 +9163,7 @@
       <div class="fc-head">${tabIcon(w)}<span class="name">${esc(tabLabel(w))}</span>
         ${paneBadge(w)}${w.pinned ? pinnedSvg : ""}
         <span class="fc-close" title="Close tab">${closeSvg}</span></div>
-      <div class="fc-tab-mini">${focusTabMiniHtml(w.tree, w)}<span class="fc-f2" title="Slice F2 — v1 ships the card head alone">F2</span></div>
+      <div class="fc-tab-mini">${focusTabMiniHtml(w.tree, w)}</div>
     </div>`;
   }
 
@@ -9069,12 +9257,16 @@
     if (ic) ic.classList.toggle("working", tabBusy(w));
     const dot = head && head.querySelector(".unreaddot");
     if (dot) { dot.className = "unreaddot " + tabDotClass(w); dot.title = tabDotTitle(w); }
-    /* one body per seat — the F2 thumbnail is a tab, and a tab is a tree */
-    el.querySelectorAll(".fc-tab-mini .fc-mini").forEach(body => {
+    /* one body per seat — the thumbnail is a tab, and a tab is a tree. `thumb`
+       where a kind has one and `mini` where it does not: the two verbs differ
+       for exactly one kind, and the table is where that difference is written
+       down rather than re-decided here. */
+    el.querySelectorAll(".fc-tab-mini [data-leaf]").forEach(body => {
       const l = findLeafIn(w, +body.dataset.leaf);
       if (!l) return;
       if (!on) { if (body.innerHTML !== "") body.innerHTML = ""; return; }
-      body.innerHTML = contentOf(l).mini(l);
+      const c = contentOf(l);
+      body.innerHTML = (c.thumb || c.mini)(l);
     });
   }
 
@@ -10834,14 +11026,14 @@
            <span class="ticon"><svg class="pmark" style="color:var(--accent)"><use href="#i-folder"/></svg></span>Files pane
            <span class="default-hint">this tab</span>
          </div>`
+      /* ONE ROW SHAPE, FOUR CONTENTS. A shell, a folder, a file and a whole
+         closed window are all "somewhere I was", so they are all one line with a
+         mark, a name and how long ago — the three verbs above answer for each
+         kind, and the row itself does not know how many kinds there are. */
       + (state.recent.length ? `<div class="menu-sep"></div>
-      <div class="menu-label">Recently opened</div>` + state.recent.map((r, i) => r.files ? `
-      <div class="profile-item recent-item" data-r="${i}" title="${r.files.root}">
-        <span class="ticon"><svg class="pmark" style="color:var(--accent)"><use href="#i-folder"/></svg></span>${cwdLeaf({ cwd: r.files.root })}
-        <span class="default-hint">${agoLabel(r.at)}</span>
-      </div>` : `
-      <div class="profile-item recent-item" data-r="${i}" title="${r.seed.cwd}">
-        <span class="ticon">${r.seed.icon}</span>${r.seed.name || cwdLeaf(r.seed)}
+      <div class="menu-label">Recently opened</div>` + state.recent.map((r, i) => `
+      <div class="profile-item recent-item" data-r="${i}" title="${escAttr(recentTip(r))}">
+        ${recentMarkHtml(r)}${esc(recentLabel(r))}
         <span class="default-hint">${agoLabel(r.at)}</span>
       </div>`).join("") : "");
     menu.querySelectorAll(".profile-item").forEach(el =>
@@ -10878,6 +11070,23 @@
     const r = state.recent[i];
     if (!r) return;
     let w;
+    /* A WINDOW COMES BACK AS A WINDOW — natively. `NewWindowPlan::revived` hands
+       the tab seeds to `revive_plan`, the one function a pinned tab at launch, a
+       Restore card, a Recent row and Ctrl+Shift+T all already go through, and the
+       window opens beside this one.
+       A STATED DEVIATION: this prototype draws ONE window, so the seeds land as
+       tabs here. What the row is in the file to show is the row — its mark, its
+       caption and its tip — not a second window this drawing has never had. */
+    if (r.window) {
+      const revived = r.window.seeds.map(child => child.files
+        ? { id: wsSeq++, tree: mkFilesLeaf(child.files.root), focus: null, pinned: false }
+        : mkWs(reviveSeed(child.seed)));
+      revived.forEach(t => { t.focus = t.focus || leavesOf(t.tree)[0].id; state.tabs.push(t); });
+      state.active = revived[revived.length - 1].id;
+      state.recent.splice(i, 1);
+      render();
+      return;
+    }
     if (r.files) {
       /* a files place comes back as a files tab, expansion and width intact */
       const leaf = mkFilesLeaf(r.files.root);
@@ -11284,6 +11493,13 @@
            innerHTML, because a custom scheme's row also holds two marks and a
            picker's face is not the place to draw them. */
         if (kind === "darkscheme" || kind === "lightscheme" || kind === "termfont") {
+          combo.querySelector(".value").textContent = itemWords(item);
+        }
+        /* THE CONTRAST RUNGS PRINT THEIR OWN WORDS, for `splitdir`'s reason once
+           more: `4.5:1` capitalised is `45`, and the ratio IS the name of the
+           rung. The native row is the same pair — one word out of the string
+           table for `Off`, the three ratios out of a parallel array beside it. */
+        if (kind === "mincontrast") {
           combo.querySelector(".value").textContent = itemWords(item);
         }
         if (kind === "layout") { state.layoutMode = item.dataset.v; render(); }
@@ -13056,6 +13272,47 @@
     const py = mkSession("PowerShell", mark("pwsh"), powershell(), false,
                          "C:\\Users\\Weiyi\\Developer", powershell);
     state.tabs.push(mkWs(py));
+
+    /* ── THE TWO TABS WITH NO SHELL IN THEM (§7.1.6h, native 2026-08-19) ──
+       A folder is a tab and a file is a tab. The assumption they cost was one
+       sentence — "a tab holds at least one terminal session" — and it was a WALL
+       and never a ruling, so knocking it down added no layout rule: a seat is a
+       seat, and what is inside one has nothing to do with the tree it hangs in.
+       They are seeded here because the strip is where they have to be LOOKED at:
+         · the name and the mark are the PANE's own, through the pane's own verbs
+           (`tabLabel` / `tabIcon` fall through to the leaf, as `TabState::
+           display_title` → `seats::seat_caption` and `tab_mark` →
+           `seats::pane_mark` do natively — one function, not one rule twice), so
+           a folder tab and the column head under it can never say two words for
+           one thing;
+         · and the state dot's cell is EMPTY. Not a rule either: the aggregation
+           is a fold over the tab's fleet, and an empty fleet folds to `Silent`.
+           A folder has no ledger, so it says nothing — in the strip, in the rail,
+           and on its focus card alike.
+       Neither can be renamed by hand (`Seed::can_be_named` answers `false` for
+       both): the identity is a path on the disk, not a word somebody chose. */
+    state.tabs.push(wsFromLeaf(mkFilesLeaf("C:\\Users\\Weiyi\\Developer\\folio-site")));
+    const paperBuf = mkPreviewState("C:\\Users\\Weiyi\\Developer\\bt-corpus\\reflow.md", "reflow.md");
+    const paper = wsFromLeaf(mkPreviewLeaf(paperBuf));
+    paper.pvPool = [paperBuf];   /* §7.1.3's per-tab pool: this tab IS the singleton */
+    state.tabs.push(paper);
+
+    /* ── ONE CLOSED WINDOW, WAITING IN RECENT (§2.7, multiwindow slice D) ──
+       Seeded rather than produced, and it has to be: `recordRecent` runs when a
+       TAB closes, and this prototype has one window to close, so nothing in it
+       can ever mint this shape. Every other row in the list is earned by closing
+       something; this one is placed so the shape can be read (open the ⌄ beside
+       `New tab`, or `Ctrl+Shift+T`). Natively it is minted by
+       `Runtime::close_window(false)` — a window closed while others are still
+       open leaves the session file and lands here in one line. */
+    state.recent.unshift({
+      window: { seeds: [
+        { seed: seedOf(node) },
+        { files: { root: "C:\\Users\\Weiyi\\Developer\\folio-site" } },
+        { seed: seedOf(agent) },
+      ] },
+      at: Date.now() - 41 * 60000,
+    });
   })();
 
   applyTheme();
