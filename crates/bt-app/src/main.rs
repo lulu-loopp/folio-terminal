@@ -10704,6 +10704,32 @@ fn seen_revision(previous_seen: u64, output: u64, leaf_was_painted: bool) -> u64
     }
 }
 
+/// Whether this one shell is something for the mark to breathe about.
+///
+/// **The verdict is UI-UX §8's and is not touched**: 运行中 = OSC 133 `C` 来了、
+/// `D` 还没来. What this adds is the one exemption §7.1.5c already writes for
+/// every other reader of the alternate screen — `alt-screen 一律不记` — arriving
+/// at the busy channel: a full-screen TUI is *one command* by that reading for
+/// its entire life, so while it holds the grid the sentence "a command started
+/// and has not ended" is true and carries no information. A `claude` session
+/// started from a pwsh prompt breathed for a whole day and asked the event loop
+/// for a frame the whole time (user report, 2026-08-20).
+///
+/// **Only the breath.** The ring (OSC 9;4) and the dot (BEL, unread) are
+/// channels a program on the alternate screen reaches on purpose — a full-screen
+/// installer reporting progress, an agent ringing for an answer — and neither
+/// passes through here. That asymmetry is the point: the breath is the only one
+/// of the three whose *whole content* is the command boundary the alternate
+/// screen invalidates.
+///
+/// One function rather than the same `&&` written at each site, because the tab
+/// strip's mark and the peek schematic's per-pane marks are two faces of one
+/// reading, and a build where a schematic row breathes beside a tab that does
+/// not is a build that says two things about one shell.
+fn session_is_breathing(status: SessionStatus) -> bool {
+    status.working && !status.alternate_screen
+}
+
 /// How opaque a tab's mark is drawn.
 ///
 /// The breath is on the mark and nothing else, and it is *only* a breath while
@@ -14675,10 +14701,16 @@ impl TabState {
     /// from the focused leaf alone, as it used to be through the deref, the
     /// breath would stop the moment the pane you are looking at went quiet —
     /// announcing that the tab had finished while a sibling was still mid build.
+    ///
+    /// Each pane is read through [`session_is_breathing`] rather than off
+    /// `status.working` directly, so the alternate-screen exemption is part of
+    /// what the union is taken *over*: a tab holding a `claude` beside a `cargo
+    /// build` breathes for the build alone, and stops when the build ends even
+    /// though the TUI's command is still nominally open.
     fn fleet_working(&self) -> bool {
         self.sessions
             .values()
-            .any(|leaf| leaf.session.status().working)
+            .any(|leaf| session_is_breathing(leaf.session.status()))
     }
 
     /// The progress reading the ring shows: the first one reported, in seat
@@ -22448,7 +22480,13 @@ impl Runtime<'_> {
                     },
                     focused: seat.id == focus,
                     mark_opacity: mark_opacity(
-                        status.is_some_and(|status| status.working),
+                        // Through the same predicate the tab's own breath is
+                        // taken over, so a schematic row cannot breathe beside a
+                        // tab mark that has stood down — the schematic exists to
+                        // say *which* pane is making the tab's claim, and a row
+                        // making a claim the tab does not is the one thing it
+                        // must never do.
+                        status.is_some_and(session_is_breathing),
                         // Was hard-coded `false` while a peek leaf had no ring
                         // to be replaced by. Now that it can have one, the
                         // breath has to stand down for it exactly as the tab's
@@ -60076,6 +60114,7 @@ mod tests {
             bell_latched: false,
             failure_exit_code: None,
             working: false,
+            alternate_screen: false,
             published_revision: u64::MAX,
         }
     }
@@ -60411,6 +60450,160 @@ mod tests {
             // above would pass on a build that had simply deleted the breath.
             assert!(breathing(motion).opacity < 1.0, "{motion:?}: it breathes");
         }
+    }
+
+    /// PIN (user report, 2026-08-20) — **a full-screen program that holds the
+    /// grid all day does not make the tab breathe all day.**
+    ///
+    /// §7.1.5c's `alt-screen 一律不记` reaching the busy channel (the ruling that
+    /// takes it there is the present-tense paragraph at the end of §7.1.5b). The breath's
+    /// verdict is unchanged and stays the one UI-UX §8 wrote down — "运行中 =
+    /// OSC 133 C 来了、D 还没来" — but a long-lived TUI is one command by that
+    /// reading for its entire life, so on the alternate screen the sentence is
+    /// true and carries nothing. The report: `claude` started from a pwsh
+    /// prompt breathed for a whole day and asked the event loop for a frame the
+    /// whole time.
+    ///
+    /// The exemption is the *breath's* alone. The ring (OSC 9;4) and the dot
+    /// (BEL, unread) are channels a program on the alternate screen still
+    /// reaches on purpose — a full-screen installer reporting progress, an agent
+    /// ringing for an answer — and this must not close them, so they are asked
+    /// for here beside it.
+    ///
+    /// Red gate: leave [`TabState::fleet_working`] reading `working` alone and
+    /// the tab breathes with the TUI on screen, and
+    /// [`TabState::mark_is_animating`] goes on owing a frame every 16ms for a
+    /// picture that never changes.
+    #[test]
+    fn the_breath_stands_down_on_the_alternate_screen() {
+        let mut tab = cross_tab(1, &["SHELL"]);
+        let seat = tab.seats.terminals()[0];
+        let mid_breath =
+            tab.animation_epoch + Duration::from_millis(WINDOW_TAB_BREATHE_PERIOD_MS).mul_f32(0.5);
+        let palette = bt_render::chrome_palette();
+
+        let feed = |tab: &mut TabState, bytes: &[u8]| {
+            tab.sessions
+                .get_mut(&seat)
+                .expect("the tab's one shell")
+                .session
+                .feed(bytes)
+                .expect("the fixture's bytes parse");
+        };
+
+        // The shell says a command started, on the primary screen, where it did.
+        feed(
+            &mut tab,
+            b"\x1b]133;A\x07PS> \x1b]133;B\x07claude\x1b]133;C\x07",
+        );
+        assert!(tab.fleet_working(), "a command is running");
+        assert!(tab.mark_is_animating(mid_breath, Motion::Full));
+        assert!(
+            tab.mark_state(true, mid_breath, Motion::Full, &palette)
+                .opacity
+                < 1.0,
+            "and the mark is drawn breathing"
+        );
+
+        // That command is a full-screen program, and it takes the grid.
+        feed(&mut tab, b"\x1b[?1049h");
+        assert!(
+            !tab.fleet_working(),
+            "a TUI holding the screen is not a shell with work in flight"
+        );
+        assert!(
+            !tab.mark_is_animating(mid_breath, Motion::Full),
+            "and nothing in the slot is moving, so no frame is owed for it"
+        );
+        assert_eq!(
+            tab.mark_state(true, mid_breath, Motion::Full, &palette)
+                .opacity,
+            1.0,
+            "the mark is simply itself"
+        );
+
+        // The two channels that stay open across the exemption, on purpose.
+        feed(&mut tab, b"\x1b]9;4;3\x07");
+        assert!(
+            tab.mark_is_animating(mid_breath, Motion::Full),
+            "an indeterminate ring reported from the alternate screen still spins"
+        );
+        assert_eq!(
+            tab.fleet_progress(),
+            Some(ProgressState::Indeterminate),
+            "the ring is a separate channel and the exemption does not touch it"
+        );
+        feed(&mut tab, b"\x1b]9;4;0\x07\x07");
+        assert!(
+            tab.sessions[&seat].session.status().bell_latched,
+            "and a bell rung from the alternate screen is still a bell"
+        );
+
+        // The program exits and hands the grid back. The shell's command never
+        // ended, so the breath comes back with it.
+        feed(&mut tab, b"\x1b[?1049l");
+        assert!(
+            tab.fleet_working(),
+            "back on the primary screen the shell's own C is authoritative again"
+        );
+        assert!(tab.mark_is_animating(mid_breath, Motion::Full));
+
+        feed(&mut tab, b"\x1b]133;D;0\x07");
+        assert!(!tab.fleet_working(), "and the shell's D ends it");
+    }
+
+    /// The dual of the pin above: nothing changes for a command that spends its
+    /// whole life on the primary screen, which is every ordinary build.
+    ///
+    /// Written out because the exemption is a new term in a predicate that had
+    /// none, and a term that answered `false` too often would stop the breath on
+    /// `cargo build` — the one thing it exists for.
+    #[test]
+    fn a_command_on_the_primary_screen_breathes_from_c_to_d() {
+        let mut tab = cross_tab(2, &["SHELL"]);
+        let seat = tab.seats.terminals()[0];
+        let mid_breath =
+            tab.animation_epoch + Duration::from_millis(WINDOW_TAB_BREATHE_PERIOD_MS).mul_f32(0.5);
+        let palette = bt_render::chrome_palette();
+
+        tab.sessions
+            .get_mut(&seat)
+            .expect("the tab's one shell")
+            .session
+            .feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07cargo build\x1b]133;C\x07")
+            .expect("the fixture's bytes parse");
+        assert!(tab.fleet_working());
+        assert!(!tab.sessions[&seat].session.status().alternate_screen);
+
+        // Output for a while — the breath is the command's, not the bytes'.
+        for _ in 0..8 {
+            tab.sessions
+                .get_mut(&seat)
+                .expect("the tab's one shell")
+                .session
+                .feed(b"   Compiling bt-app v0.0.0\r\n")
+                .expect("the fixture's bytes parse");
+            assert!(tab.fleet_working(), "still between C and D");
+            assert!(tab.mark_is_animating(mid_breath, Motion::Full));
+            assert!(
+                tab.mark_state(true, mid_breath, Motion::Full, &palette)
+                    .opacity
+                    < 1.0
+            );
+        }
+
+        tab.sessions
+            .get_mut(&seat)
+            .expect("the tab's one shell")
+            .session
+            .feed(b"\x1b]133;D;0\x07")
+            .expect("the fixture's bytes parse");
+        assert!(!tab.fleet_working(), "D ends it, as it always did");
+        assert_eq!(
+            tab.mark_state(true, mid_breath, Motion::Full, &palette)
+                .opacity,
+            1.0
+        );
     }
 
     /// PIN (T2, real-machine bug): the frame on which motion *stops* is owed a

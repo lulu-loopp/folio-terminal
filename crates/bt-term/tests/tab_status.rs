@@ -154,3 +154,71 @@ fn published_revision_strictly_increases_for_every_published_frame() {
     session.record_published_frame(&frame, Instant::now());
     assert_eq!(session.published_revision(), first + 1);
 }
+
+/// **§7.1.5b/c — `alt-screen 一律不记`, applied to the busy channel.**
+///
+/// The command-mark ledger has always refused to record the `A/B/C/D` a full-screen program emits
+/// on the alternate screen: those markers describe *its* canvas, not this session's command
+/// history. `working` was the one field in the taxonomy that still listened to them, so a TUI that
+/// says `C` on its own screen could set the whole session running, and one that says `D` there
+/// could declare the shell's real, still-unfinished command over.
+///
+/// The corner this pins deliberately: **`D` counts only on the primary screen.** A command started
+/// at the shell's prompt and then handed to a full-screen program stays `working` for as long as
+/// the program holds the screen — including across a `D` the program itself emits — and is retired
+/// by the shell's own `D`, back on the primary screen, where the command really ends. The
+/// alternative (letting an alt-screen `D` clear it) would have any TUI that speaks shell
+/// integration silently close a command it did not open.
+#[test]
+fn working_is_not_flipped_from_the_alternate_screen() {
+    let mut session = session();
+    assert!(!session.status().alternate_screen);
+
+    // A full-screen program takes the grid and runs its own command cycle on it.
+    session.feed(b"\x1b[?1049h").unwrap();
+    assert!(
+        session.status().alternate_screen,
+        "the mode bit is read off the vendor terminal, not remembered here"
+    );
+    session
+        .feed(b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07")
+        .unwrap();
+    assert!(
+        !session.status().working,
+        "a `C` on the alternate screen describes the TUI's canvas, not this session's command"
+    );
+    session.feed(b"\x1b]133;D;0\x07").unwrap();
+    assert!(!session.status().working);
+
+    // Back on the primary screen the shell's own markers are authoritative again.
+    session.feed(b"\x1b[?1049l").unwrap();
+    assert!(!session.status().alternate_screen);
+    session
+        .feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07claude\x1b]133;C\x07")
+        .unwrap();
+    assert!(
+        session.status().working,
+        "the shell said this command started"
+    );
+
+    // The command it started is a full-screen program. It holds the screen for its whole life,
+    // and nothing it does there ends the command the shell is still running.
+    session.feed(b"\x1b[?1049h").unwrap();
+    assert!(session.status().working);
+    assert!(session.status().alternate_screen);
+    session.feed(b"\x1b]133;C\x07\x1b]133;D;0\x07").unwrap();
+    assert!(
+        session.status().working,
+        "`D` is only accepted on the primary screen, so a TUI cannot close the shell's command"
+    );
+
+    // It exits, and the shell — on the primary screen, where the command really ends — retires it.
+    session.feed(b"\x1b[?1049l").unwrap();
+    assert!(session.status().working);
+    assert!(!session.status().alternate_screen);
+    session.feed(b"\x1b]133;D;0\x07").unwrap();
+    assert!(
+        !session.status().working,
+        "the primary screen's `D` still clears a command that spent its life on the alternate one"
+    );
+}
