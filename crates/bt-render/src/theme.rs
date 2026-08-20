@@ -1350,6 +1350,28 @@ pub struct ChromePalette {
     pub focus_exit_hover: [u8; 3],
     /// `.focus-exit:hover { color: var(--ink) }` over [`Self::focus_exit_hover`].
     pub focus_exit_text_hover: [u8; 3],
+    /// `.fc-mini { color: var(--ink2) }` over [`Self::seat_body`] — the ink a
+    /// card's mini rows are set in, terminal tail and files row alike.
+    ///
+    /// Composited over `--termbg` and not over the card's head, because the body
+    /// is `background: var(--termbg)`: a mini seat is a little terminal, and it
+    /// stands on the same ground the big one does. On a window running a colour
+    /// scheme that ground is the scheme's, so this moves with it.
+    pub focus_mini_text: [u8; 3],
+    /// `.fc-cell { border: 1px solid var(--border-soft) }` over
+    /// [`Self::seat_body`] — a mini seat's own edge.
+    ///
+    /// `--border-soft` and not `--border`: the card already has one hairline at
+    /// full strength around it, and a second at the same weight three pixels
+    /// inside reads as a double rule rather than as a division.
+    pub focus_mini_edge: [u8; 3],
+    /// `.fc-cell.focused { border-color: var(--ink3) }` — the seat that holds
+    /// **that tab's** keyboard, on every card and not only the staged one.
+    ///
+    /// Which is the honest reading of what a card is: the tab entire, including
+    /// where its cursor is standing. A card that marked no seat would be a
+    /// picture of a tab with the one fact you look for taken out.
+    pub focus_mini_edge_focused: [u8; 3],
 }
 
 /// Chrome over a dark canvas — `design/ui-mockup.html` `body.dark`, with its
@@ -1628,6 +1650,16 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     focus_exit_text: ink_over(WIN_DARK, DARK_INK_SOURCE, 550),
     focus_exit_hover: FOCUS_EXIT_HOVER_DARK,
     focus_exit_text_hover: ink_over(FOCUS_EXIT_HOVER_DARK, DARK_INK_SOURCE, 870),
+    // The card's body stands on `--termbg`, so all three of these are composited
+    // over it. Each is numerically equal to a field that already exists — a
+    // files row's ink and muted ink, and the preview grid's line — and, as with
+    // [`ChromePalette::focus_card_edge`] and `rail_seam`, that is not a
+    // coincidence to be exploited by sharing the field: it is the same `--ink2`,
+    // `--ink3` and `--border-soft` on the same `--termbg`, written where the
+    // reader of a card looks for it.
+    focus_mini_text: ink_over(TERMBG_DARK, DARK_INK_SOURCE, 550),
+    focus_mini_edge: ink_over(TERMBG_DARK, DARK_SHADE_SOURCE, 60),
+    focus_mini_edge_focused: ink_over(TERMBG_DARK, DARK_INK_SOURCE, 380),
 };
 
 /// Chrome over a light canvas — the mock-up's `:root` defaults, composited the
@@ -1885,6 +1917,10 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     focus_exit_text: ink_over(WIN_LIGHT, LIGHT_INK_SOURCE, 650),
     focus_exit_hover: FOCUS_EXIT_HOVER_LIGHT,
     focus_exit_text_hover: ink_over(FOCUS_EXIT_HOVER_LIGHT, LIGHT_INK_SOURCE, 1000),
+    // The dark canvas's three, on paper — see the note there.
+    focus_mini_text: ink_over(TERMBG_LIGHT, LIGHT_INK_SOURCE, 650),
+    focus_mini_edge: ink_over(TERMBG_LIGHT, LIGHT_SHADE_SOURCE, 55),
+    focus_mini_edge_focused: ink_over(TERMBG_LIGHT, LIGHT_INK_SOURCE, 450),
 };
 
 /// The palette in force, decided by the same background-luma threshold that
@@ -2449,6 +2485,74 @@ pub const FOCUS_EXIT_GAP_LOGICAL_PX: f32 = 5.0;
 pub const FOCUS_EXIT_GLYPH_LOGICAL_PX: f32 = 10.0;
 /// `.focus-exit { font-size: 11px }` — the word `Exit`.
 pub const FOCUS_EXIT_FONT_LOGICAL_PX: f32 = 11.0;
+
+// ---------------------------------------------------------------------------
+// §7.1.6b′ F2 — the card's body: the whole tab's split tree in miniature.
+//
+// **The head's numbers above are unchanged and this block is added under them**,
+// which is what the note on [`FOCUS_CARD_GAP_LOGICAL_PX`]'s neighbours promised:
+// "when that slice lands it adds to this number rather than changing it". A card
+// is now its border, its head and this body, and nothing about the head moved.
+//
+// The mini tree is not a second layout engine. It is the tab's own
+// [`LayoutNode`](bt_layout::LayoutNode) walked with the same ratios the stage is
+// solved with, into rectangles two hundred pixels wide — which is the whole of
+// why a card can say "this tab is split three ways with the files column on the
+// left" without anything downstream being told a thumbnail exists.
+// ---------------------------------------------------------------------------
+
+/// `.fc-tab-mini { height: 92px }` — the body under a card's head.
+pub const FOCUS_MINI_HEIGHT_LOGICAL_PX: f32 = 92.0;
+/// `.fc-tab-mini { padding: 5px }` — the inset between the card's edge and the
+/// mini tree's outermost seat.
+pub const FOCUS_MINI_PADDING_LOGICAL_PX: f32 = 5.0;
+/// `.mini-split { gap: 3px }` — the divider's width in miniature.
+///
+/// A gap and not a drawn line, exactly as on the stage at this size: three
+/// physical pixels of the card's own ground between two seats reads as a
+/// division, and a hairline inside three pixels reads as dirt.
+pub const FOCUS_MINI_GAP_LOGICAL_PX: f32 = 3.0;
+/// `.fc-cell { border: 1px solid var(--border-soft) }`.
+pub const FOCUS_MINI_BORDER_LOGICAL_PX: f32 = 1.0;
+/// `.fc-cell { border-radius: 3px }`.
+pub const FOCUS_MINI_RADIUS_LOGICAL_PX: f32 = 3.0;
+/// `.fc-tab-mini .fc-mini { padding: 3px 4px 4px }` — inside a mini seat's own
+/// border, where its rows are set.
+pub const FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX: f32 = 4.0;
+pub const FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX: f32 = 3.0;
+pub const FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX: f32 = 4.0;
+/// `.fc-tab-mini .fc-mini { font-size: 7.5px; line-height: 1.45 }` — a terminal
+/// seat's tail, set in the **terminal's** face ([`ChromeLabel::mono`]).
+///
+/// [`ChromeLabel::mono`]: crate::ChromeLabel::mono
+pub const FOCUS_MINI_TERM_FONT_LOGICAL_PX: f32 = 7.5;
+pub const FOCUS_MINI_TERM_LINE_HEIGHT: f32 = 1.45;
+/// `.fc-tab-mini .fc-mini.fc-files { font-size: 8px; line-height: 1.5 }` — a
+/// files column's rows, set in the app's face like the column they came from.
+pub const FOCUS_MINI_FILES_FONT_LOGICAL_PX: f32 = 8.0;
+pub const FOCUS_MINI_FILES_LINE_HEIGHT: f32 = 1.5;
+/// `.fc-tab-mini .fc-mini .fico { width: 8px; height: 8px }` — a mini row's
+/// folder or file mark.
+pub const FOCUS_MINI_FILES_ICON_LOGICAL_PX: f32 = 8.0;
+/// `.fc-tab-mini .fc-mini .fcm-row { gap: 3px }` — between that mark and the
+/// name.
+pub const FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX: f32 = 3.0;
+/// `style="padding-left: ${r.depth * 10}px"` — a mini row's indent per level.
+///
+/// The mock-up writes this inline rather than in a rule, so it is **not** scaled
+/// down with the font the way the two sizes above are: a tree that loses its
+/// indent stops being a tree, and ten pixels is what says "inside".
+pub const FOCUS_MINI_FILES_INDENT_LOGICAL_PX: f32 = 10.0;
+/// `termCardMini` — how many rows of a terminal seat's tail a card carries.
+///
+/// Six, and the number is a **budget** as much as a design value (§7.1.6b′ F2):
+/// it is multiplied by every visible card's every terminal seat on every
+/// projection, so it is written here beside the two font sizes it is legible at
+/// rather than chosen at the call site.
+pub const FOCUS_MINI_TERM_ROWS: usize = 6;
+/// `filesVisibleRows(l.files).slice(0, 4)` — how many rows of a files column a
+/// card carries, from the top of what that column is currently showing.
+pub const FOCUS_MINI_FILES_ROWS: usize = 4;
 
 /// A seat title's font size (`.panehead { font-size: 11.5px }`).
 pub const SEAT_TITLE_FONT_LOGICAL_PX: f32 = 11.5;

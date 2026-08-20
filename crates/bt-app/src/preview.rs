@@ -1919,6 +1919,33 @@ impl PreviewBuffer {
         }
     }
 
+    /// **The word a focus card's face says under this buffer's name**
+    /// (`docs/DESIGN.md` §7.1.6b′ F2).
+    ///
+    /// A card's mini preview seat does not shrink the document — a page of prose
+    /// at 7.5px is a grey smear, and v1 says so outright — so what the seat shows
+    /// instead is the two facts that identify it: what it is showing, and what
+    /// kind of thing that is. This is the second of those.
+    ///
+    /// **The source is asked before the name**, exactly as [`Self::view`] asks
+    /// it and for that method's own recorded reason: a commit graph is a graph
+    /// because of what it is. Everything else answers with its own extension in
+    /// capitals — which is the honest type of a file and needs no table of words
+    /// to keep translated — and a name with no extension at all falls through to
+    /// the kind's own noun, the same one an empty preview head prints.
+    #[must_use]
+    pub fn kind_word(&self) -> String {
+        if matches!(self.source, PreviewSource::GitGraph { .. }) {
+            return crate::i18n::Text::GraphHeadingGraph.text().to_owned();
+        }
+        std::path::Path::new(&self.name)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .filter(|extension| !extension.is_empty())
+            .map(str::to_uppercase)
+            .unwrap_or_else(|| crate::seats::seat_title(bt_layout::SeatKind::Preview).to_owned())
+    }
+
     /// Why there is no body to show, when there is none.
     ///
     /// **The card's question**, and [`PreviewLoad::Unavailable`] is deliberately

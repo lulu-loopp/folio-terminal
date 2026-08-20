@@ -552,6 +552,13 @@ impl ChromePalette {
             focus_exit_text: ink2(win),
             focus_exit_hover: focus_exit_hover_ground,
             focus_exit_text_hover: ink(focus_exit_hover_ground),
+            // The card's body is `--termbg`, so the scheme's own background is
+            // what a mini seat's ink and edges are composited over — which is
+            // what makes a thumbnail of a Solarized shell look like the Solarized
+            // shell it is a thumbnail of.
+            focus_mini_text: ink2(termbg),
+            focus_mini_edge: border_soft(termbg),
+            focus_mini_edge_focused: ink3(termbg),
         }
     }
 }

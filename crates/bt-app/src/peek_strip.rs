@@ -738,6 +738,7 @@ pub fn build(
     let leaf_border = px(LEAF_BORDER_LOGICAL_PX);
 
     let label = |text: &str, rect: [f32; 4], font_size_px: f32, color: [u8; 3]| ChromeLabel {
+        mono: false,
         text: text.to_owned(),
         rect,
         font_size_px,

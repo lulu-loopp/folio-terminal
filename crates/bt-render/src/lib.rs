@@ -72,18 +72,24 @@ pub use theme::{
     FOCUS_CARD_HEAD_PADDING_Y_LOGICAL_PX, FOCUS_CARD_PIN_BOX_LOGICAL_PX,
     FOCUS_CARD_RADIUS_LOGICAL_PX, FOCUS_EXIT_FONT_LOGICAL_PX, FOCUS_EXIT_GAP_LOGICAL_PX,
     FOCUS_EXIT_GLYPH_LOGICAL_PX, FOCUS_EXIT_HEIGHT_LOGICAL_PX, FOCUS_EXIT_PADDING_X_LOGICAL_PX,
-    FOCUS_EXIT_RADIUS_LOGICAL_PX, GRAPH_LANE_COUNT, LIGHT_BACKGROUND_RGB, LIGHT_CHROME,
-    PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
-    PANE_HEAD_PROFILE_MARK_LOGICAL_PX, PREVIEW_BODY_INSET_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX,
-    RAIL_GAP_LOGICAL_PX, RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX,
-    RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX, RAIL_LABEL_PADDING_TOP_LOGICAL_PX,
-    RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM, RAIL_NEW_CHEVRON_BOX_LOGICAL_PX,
-    RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX, RAIL_NEW_MARGIN_TOP_LOGICAL_PX,
-    RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX, RAIL_PADDING_BOTTOM_LOGICAL_PX,
-    RAIL_PADDING_TOP_LOGICAL_PX, RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX,
-    RAIL_SEAM_INSET_X_LOGICAL_PX, RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX,
-    RAIL_SHADE_WIDTH_LOGICAL_PX, RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX,
-    RAIL_TAB_HEIGHT_LOGICAL_PX, RAIL_TAB_PADDING_LEFT_LOGICAL_PX,
+    FOCUS_EXIT_RADIUS_LOGICAL_PX, FOCUS_MINI_BORDER_LOGICAL_PX, FOCUS_MINI_FILES_FONT_LOGICAL_PX,
+    FOCUS_MINI_FILES_ICON_LOGICAL_PX, FOCUS_MINI_FILES_INDENT_LOGICAL_PX,
+    FOCUS_MINI_FILES_LINE_HEIGHT, FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX, FOCUS_MINI_FILES_ROWS,
+    FOCUS_MINI_GAP_LOGICAL_PX, FOCUS_MINI_HEIGHT_LOGICAL_PX, FOCUS_MINI_PADDING_LOGICAL_PX,
+    FOCUS_MINI_RADIUS_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX,
+    FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX,
+    FOCUS_MINI_TERM_FONT_LOGICAL_PX, FOCUS_MINI_TERM_LINE_HEIGHT, FOCUS_MINI_TERM_ROWS,
+    GRAPH_LANE_COUNT, LIGHT_BACKGROUND_RGB, LIGHT_CHROME, PANE_HEAD_FILE_MARK_LOGICAL_PX,
+    PANE_HEAD_FOLDER_MARK_LOGICAL_PX, PANE_HEAD_PROFILE_MARK_LOGICAL_PX,
+    PREVIEW_BODY_INSET_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX, RAIL_GAP_LOGICAL_PX,
+    RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX, RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX,
+    RAIL_LABEL_PADDING_TOP_LOGICAL_PX, RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM,
+    RAIL_NEW_CHEVRON_BOX_LOGICAL_PX, RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX,
+    RAIL_NEW_MARGIN_TOP_LOGICAL_PX, RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX,
+    RAIL_PADDING_BOTTOM_LOGICAL_PX, RAIL_PADDING_TOP_LOGICAL_PX, RAIL_PADDING_X_LOGICAL_PX,
+    RAIL_PARK_LOGICAL_PX, RAIL_SEAM_INSET_X_LOGICAL_PX, RAIL_SEAM_MARGIN_Y_LOGICAL_PX,
+    RAIL_SEAM_THICKNESS_LOGICAL_PX, RAIL_SHADE_WIDTH_LOGICAL_PX, RAIL_TAB_FONT_LOGICAL_PX,
+    RAIL_TAB_GAP_LOGICAL_PX, RAIL_TAB_HEIGHT_LOGICAL_PX, RAIL_TAB_PADDING_LEFT_LOGICAL_PX,
     RAIL_TAB_PADDING_RIGHT_LOGICAL_PX, RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX,
     RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_TEXT_FADE_MS, RAIL_TEXT_FADE_OPEN_DELAY_MS,
     RAIL_TRANSITION_MS, RAIL_WIDTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX,
@@ -2845,6 +2851,25 @@ pub struct ChromeLabel {
     /// badge (mock-up line 302) is the one such label today: it is a number,
     /// centred in a box, that counts up while the box stays put.
     pub tabular_numerals: bool,
+    /// Set this line in the **terminal's** face rather than the chrome's.
+    ///
+    /// The distinction [`preview_run_attrs`] already draws, arriving in the
+    /// chrome for the first time with §7.1.6b′'s F2 thumbnails: chrome is the
+    /// window talking about itself and is set in the sans face, while a line
+    /// lifted out of a running shell is a *document*, and that document's bytes
+    /// were written in a grid. `Family::Monospace` resolves to the same family
+    /// the terminal grid is set in (see [`monospace_family_name`]), so six rows
+    /// of a session's tail shrunk onto a card keep the column alignment that is
+    /// the whole reason a table, a progress bar or a `ls` listing is legible at
+    /// all — set proportionally they are the same characters and a different
+    /// picture.
+    ///
+    /// `false` everywhere else, and deliberately a field rather than a second
+    /// label type: everything else about a mini transcript row — its box, its
+    /// clip, its size, its ink — is what every other chrome label has, and a
+    /// parallel struct would be a second shaping path to keep in step with this
+    /// one.
+    pub mono: bool,
 }
 
 /// `font-variant-numeric: tabular-nums` — the `tnum` `OpenType` feature.
@@ -4488,6 +4513,33 @@ impl WindowRenderer {
         )
     }
 
+    /// How wide `text` will be when drawn as a [`ChromeLabel`] with
+    /// [`ChromeLabel::mono`] set, in physical pixels.
+    ///
+    /// **What it is for is a column count, not a box** (§7.1.6b′ F2). A mini
+    /// transcript row is clipped by the card, so nothing about the card's
+    /// geometry needs this; what needs it is the *cut* — how many characters of
+    /// a running session's line are worth carrying into the frame at all. Asking
+    /// the face for one character's advance answers that exactly rather than by
+    /// a guessed ratio, and it is exact precisely because the face is
+    /// monospaced: every character in it has that same advance.
+    pub fn measure_chrome_mono_text(
+        &mut self,
+        gpu: &mut GpuContext,
+        text: &str,
+        font_size_px: f32,
+    ) -> f32 {
+        measure_chrome_label(
+            &mut gpu.font_system,
+            text,
+            font_size_px,
+            ChromeLabelWeight::Regular,
+            0.0,
+            false,
+            true,
+        )
+    }
+
     /// How wide `text` will be when drawn as a [`ChromeLabel`] carrying `weight`,
     /// `letter_spacing_em` and `tabular_numerals`.
     ///
@@ -4514,6 +4566,7 @@ impl WindowRenderer {
             weight,
             letter_spacing_em,
             tabular_numerals,
+            false,
         )
     }
 
@@ -7233,9 +7286,14 @@ fn chrome_label_attrs(
     weight: ChromeLabelWeight,
     letter_spacing_em: f32,
     tabular_numerals: bool,
+    mono: bool,
 ) -> Attrs<'static> {
     let mut attrs = Attrs::new()
-        .family(Family::SansSerif)
+        .family(if mono {
+            Family::Monospace
+        } else {
+            Family::SansSerif
+        })
         .weight(weight.shaping_weight());
     if tabular_numerals {
         let mut features = FontFeatures::new();
@@ -7265,6 +7323,7 @@ fn measure_chrome_label(
     weight: ChromeLabelWeight,
     letter_spacing_em: f32,
     tabular_numerals: bool,
+    mono: bool,
 ) -> f32 {
     if text.is_empty() {
         return 0.0;
@@ -7287,7 +7346,7 @@ fn measure_chrome_label(
         // has its `left` clamped to that box's left edge by `shape_chrome_labels`
         // and runs off the right of it, where the clip cuts the last glyph in
         // half. That is what the Git page's meta column was doing at every width.
-        &chrome_label_attrs(weight, letter_spacing_em, tabular_numerals),
+        &chrome_label_attrs(weight, letter_spacing_em, tabular_numerals, mono),
         Shaping::Advanced,
         None,
     );
@@ -7328,6 +7387,7 @@ fn shape_chrome_labels(
                 label.weight,
                 label.letter_spacing_em,
                 label.tabular_numerals,
+                label.mono,
             );
             buffer.set_text(&label.text, &attrs, Shaping::Advanced, None);
             buffer.shape_until_scroll(font_system, false);
@@ -13962,9 +14022,17 @@ mod tests {
                 true,
             ),
         ] {
-            let measured =
-                measure_chrome_label(&mut font_system, text, size, weight, tracking, tabular);
+            let measured = measure_chrome_label(
+                &mut font_system,
+                text,
+                size,
+                weight,
+                tracking,
+                tabular,
+                false,
+            );
             let label = ChromeLabel {
+                mono: false,
                 text: text.to_owned(),
                 // Laid out in a box far wider than the text wants, so the run
                 // that comes back is the text's own width and not the box's.
@@ -14078,6 +14146,7 @@ mod tests {
         tabular_numerals: bool,
     ) -> Vec<f32> {
         let label = ChromeLabel {
+            mono: false,
             text: text.to_owned(),
             rect: [0.0, 0.0, 400.0, 15.0],
             font_size_px,
@@ -14264,6 +14333,7 @@ mod tests {
     fn chrome_labels_shape_in_a_ui_sans_and_still_reach_the_emoji_face() {
         let mut font_system = terminal_font_system();
         let label = ChromeLabel {
+            mono: false,
             text: "✳ PowerShell".to_owned(),
             rect: [0.0, 0.0, 400.0, 34.0],
             font_size_px: WINDOW_TAB_FONT_LOGICAL_PX,
@@ -14345,6 +14415,7 @@ mod tests {
         const CHINESE: &str = "设置语言外观常规重启以切换";
         let mut font_system = terminal_font_system();
         let label = ChromeLabel {
+            mono: false,
             text: CHINESE.to_owned(),
             rect: [0.0, 0.0, 600.0, 34.0],
             font_size_px: WINDOW_TAB_FONT_LOGICAL_PX,
@@ -14449,6 +14520,7 @@ mod tests {
             let tab_height = (WINDOW_TAB_HEIGHT_LOGICAL_PX * scale).round();
             let tab_top = title - tab_height;
             let label = ChromeLabel {
+                mono: false,
                 text: "PowerShell".to_owned(),
                 rect: [64.0, tab_top, 400.0, title],
                 font_size_px: WINDOW_TAB_FONT_LOGICAL_PX * scale,
@@ -14486,6 +14558,7 @@ mod tests {
             let bar = (SEAT_TITLE_BAR_LOGICAL_PX * scale).round()
                 - (SEAT_TITLE_EDGE_LOGICAL_PX * scale).max(1.0);
             let label = ChromeLabel {
+                mono: false,
                 text: "Terminal".to_owned(),
                 rect: [48.0, 0.0, 400.0, bar],
                 font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
@@ -14524,6 +14597,7 @@ mod tests {
             ("the tick", "\u{2713}", 11.0),
         ] {
             let label = ChromeLabel {
+                mono: false,
                 text: text.to_owned(),
                 rect: [0.0, 0.0, 40.0, 28.0],
                 font_size_px: size,
@@ -14567,6 +14641,7 @@ mod tests {
         let text = "APPEARANCE";
         let width_of = |spacing: f32, size: f32, font_system: &mut FontSystem| {
             let label = ChromeLabel {
+                mono: false,
                 text: text.to_owned(),
                 rect: [0.0, 0.0, 4000.0, 20.0],
                 font_size_px: size,
@@ -14884,6 +14959,7 @@ mod tests {
     fn a_layers_opacity_reaches_its_letters() {
         let mut font_system = terminal_font_system();
         let label = ChromeLabel {
+            mono: false,
             text: "Settings".to_owned(),
             rect: [0.0, 0.0, 400.0, 20.0],
             font_size_px: 11.0,

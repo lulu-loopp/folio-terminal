@@ -405,6 +405,23 @@ pub enum ChromeMark {
     /// pill over the surface it lands on, because this pipeline blends in linear
     /// light and the design's does not — see `ChromePalette::tab_close_pill_on_content`.
     ControlPill { radius_px: u32 },
+    /// [`Self::ControlPill`] rounded on its **bottom two** corners only — the
+    /// foot of a card, where a body meets the silhouette above it.
+    ///
+    /// §7.1.6b′ F2's `.fc-tab-mini` inside `.fcard { border-radius: 10px;
+    /// overflow: hidden }`. The body has a different ground from the head above
+    /// it (`--termbg` against `--hover`), so it is its own fill; and because it
+    /// reaches the card's foot, that fill has to wear the card's own round or the
+    /// two bottom corners square off underneath a silhouette that is curved.
+    ///
+    /// **Its own variant rather than the card's corners repainted in the panel's
+    /// colour.** The panel under a card is a *ground* and carries the window's
+    /// alpha, while every mark here is ink and is opaque — so painting the two
+    /// corners back in `--panel` would put two opaque chips on a translucent
+    /// window, visible against the desktop on exactly the windows that show it.
+    /// A shape that is actually the shape is the same amount of code and cannot
+    /// be wrong at 30% opacity.
+    ControlPillFoot { radius_px: u32 },
     /// [`Self::ControlPill`] as a ring drawn *inside* its own edge — what
     /// [`Self::TabBodyRing`] is to [`Self::TabBody`], on the shape that is round
     /// on all four corners.
@@ -678,6 +695,7 @@ impl ChromeMark {
             Self::TabBody { .. } => "tab-body",
             Self::TabBodyRing { .. } => "tab-body-ring",
             Self::ControlPill { .. } => "control-pill",
+            Self::ControlPillFoot { .. } => "control-pill-foot",
             Self::ControlPillRing { .. } => "control-pill-ring",
             // One id for four orientations, like the chevron's one id for every
             // angle: `mark_key` adds the corner, so the four rasters are four
@@ -1071,7 +1089,9 @@ fn mark_key(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> String {
     if let ChromeMark::ActiveTab { radius_px } | ChromeMark::TabBody { radius_px } = sprite.mark {
         let _ = write!(key, ":r{radius_px}");
     }
-    if let ChromeMark::ControlPill { radius_px } = sprite.mark {
+    if let ChromeMark::ControlPill { radius_px } | ChromeMark::ControlPillFoot { radius_px } =
+        sprite.mark
+    {
         let _ = write!(key, ":r{radius_px}");
     }
     // The colour is the only thing that tells one chassis from another — one
@@ -1212,6 +1232,13 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
         }
         ChromeMark::ControlPill { radius_px } => {
             let path = control_pill_path(width_px, height_px, radius_px)?;
+            (
+                format!("0 0 {width_px} {height_px}"),
+                format!(r#"<path fill="currentColor" d="{path}"/>"#),
+            )
+        }
+        ChromeMark::ControlPillFoot { radius_px } => {
+            let path = control_pill_foot_path(width_px, height_px, radius_px)?;
             (
                 format!("0 0 {width_px} {height_px}"),
                 format!(r#"<path fill="currentColor" d="{path}"/>"#),
@@ -1555,6 +1582,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::TabBody { .. } => 8,
         ChromeMark::TabBodyRing { .. } => 8,
         ChromeMark::ControlPill { .. } => 8,
+        ChromeMark::ControlPillFoot { .. } => 8,
         ChromeMark::ControlPillRing { .. } => 8,
         ChromeMark::CardCorner { .. } => 8,
         ChromeMark::Fill => 8,
@@ -1966,6 +1994,27 @@ fn control_pill_path(width: u32, height: u32, radius: u32) -> Option<String> {
          L{w},{bottom} A{r},{r} 0 0 1 {right},{h} \
          L{r},{h} A{r},{r} 0 0 1 0,{bottom} \
          L0,{r} A{r},{r} 0 0 1 {r},0 Z",
+        right = w - r,
+        bottom = h - r,
+    ))
+}
+
+/// [`control_pill_path`] with its top two corners left square — the foot of a
+/// card (§7.1.6b′ F2, [`ChromeMark::ControlPillFoot`]).
+///
+/// A **square** top and not a smaller round: the head above it is a flat band
+/// across the card's full width, so the body's top edge is an interior line and
+/// has no corner to turn. Rounding it would draw two notches of the head's
+/// colour into the body a third of the way down the card.
+fn control_pill_foot_path(width: u32, height: u32, radius: u32) -> Option<String> {
+    let (w, h) = (width as i64, height as i64);
+    let r = (radius as i64).min(w / 2).min(h);
+    if r < 1 || w < 2 || h < 1 {
+        return None;
+    }
+    Some(format!(
+        "M0,0 L{w},0 L{w},{bottom} A{r},{r} 0 0 1 {right},{h} \
+         L{r},{h} A{r},{r} 0 0 1 0,{bottom} Z",
         right = w - r,
         bottom = h - r,
     ))

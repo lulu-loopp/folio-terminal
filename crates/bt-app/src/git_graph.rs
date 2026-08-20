@@ -3793,6 +3793,7 @@ pub fn push_graph(
 
     if let Some(sentence) = content.empty.as_ref() {
         labels.push(ChromeLabel {
+            mono: false,
             text: sentence.clone(),
             rect: geometry.viewport,
             font_size_px: crate::git_panel::GIT_EMPTY_FONT_LOGICAL_PX * scale,
@@ -4029,6 +4030,7 @@ fn push_toolbar(
     ];
     if !toolbar.repo.is_empty() {
         labels.push(ChromeLabel {
+            mono: false,
             text: toolbar.repo.clone(),
             rect: repo_rect,
             font_size_px: GRAPH_REPO_FONT_LOGICAL_PX * scale,
@@ -4117,6 +4119,7 @@ fn push_toolbar(
             box_[3],
         ];
         labels.push(ChromeLabel {
+            mono: false,
             text: door.text.clone(),
             rect: label_rect,
             font_size_px: font,
@@ -4140,6 +4143,7 @@ fn push_toolbar(
             rects.filter[3],
         ];
         labels.push(ChromeLabel {
+            mono: false,
             text: toolbar.filter.clone(),
             rect: label_rect,
             font_size_px: font,
@@ -4168,6 +4172,7 @@ fn push_toolbar(
         tool_ground(sprites, field, GraphTool::Search, toolbar.search_focused);
         if let Some(count_rect) = inside.count {
             labels.push(ChromeLabel {
+                mono: false,
                 text: toolbar.search_count.clone(),
                 rect: count_rect,
                 font_size_px: font,
@@ -4182,6 +4187,7 @@ fn push_toolbar(
         }
         let text_rect = inside.text;
         labels.push(ChromeLabel {
+            mono: false,
             text: toolbar.search.clone(),
             rect: text_rect,
             font_size_px: font,
@@ -4286,6 +4292,7 @@ fn push_column_header(
     let mut word = |text: &str, box_: [f32; 4], align_right: bool| {
         let box_ = text_box(box_);
         labels.push(ChromeLabel {
+            mono: false,
             text: text.to_owned(),
             rect: box_,
             font_size_px: crate::git_panel::GIT_LABEL_FONT_LOGICAL_PX * scale,
@@ -4388,6 +4395,7 @@ fn push_file_row(
                 bt_render::ink_over(under, ink, crate::git_panel::GIT_BADGE_GROUND_ALPHA),
             ));
             labels.push(ChromeLabel {
+                mono: false,
                 text: mark.letter.to_string(),
                 rect: box_,
                 font_size_px: crate::git_panel::GIT_BADGE_FONT_LOGICAL_PX * scale,
@@ -4418,6 +4426,7 @@ fn push_file_row(
         let mut number = |text: String, box_: Option<[f32; 4]>, ink: [u8; 3]| {
             let Some(box_) = box_ else { return };
             labels.push(ChromeLabel {
+                mono: false,
                 text,
                 rect: box_,
                 font_size_px: stat_font,
@@ -4454,6 +4463,7 @@ fn push_file_row(
         rect[3],
     ];
     labels.push(ChromeLabel {
+        mono: false,
         text: file.path.clone(),
         rect: box_,
         font_size_px: crate::git_panel::GIT_TIME_FONT_LOGICAL_PX * scale,
@@ -4485,6 +4495,7 @@ fn push_detail(
     let layout = detail_layout(rect, row, columns, scale);
     let mut line = |text: String, box_: [f32; 4], font: f32, ink: [u8; 3]| {
         labels.push(ChromeLabel {
+            mono: false,
             text,
             rect: box_,
             font_size_px: font,
@@ -4516,6 +4527,7 @@ fn push_detail(
             // everywhere else in this window.
             for (chip, box_) in commit.parents.iter().zip(&layout.parents) {
                 labels.push(ChromeLabel {
+                    mono: false,
                     text: chip.short.clone(),
                     rect: *box_,
                     font_size_px: meta_font,
@@ -4800,6 +4812,7 @@ fn push_commit_row(
             return;
         }
         labels.push(ChromeLabel {
+            mono: false,
             text: text.to_owned(),
             rect: box_,
             font_size_px: font,
@@ -4911,6 +4924,7 @@ fn push_commit_row(
             box_
         };
         labels.push(ChromeLabel {
+            mono: false,
             text: pill.name.clone(),
             rect: text_box,
             font_size_px: GRAPH_REF_FONT_LOGICAL_PX * scale,
@@ -4932,6 +4946,7 @@ fn push_commit_row(
         rect[3],
     ];
     labels.push(ChromeLabel {
+        mono: false,
         text: commit.subject.clone(),
         rect: subject_rect,
         font_size_px: crate::git_panel::GIT_ROW_FONT_LOGICAL_PX * scale,
@@ -4982,6 +4997,7 @@ fn push_uncommitted_row(
     let mut column_label = |text: String, box_: Option<[f32; 4]>, font: f32, tabular: bool| {
         let Some(box_) = box_ else { return };
         labels.push(ChromeLabel {
+            mono: false,
             text,
             rect: box_,
             font_size_px: font,
@@ -5013,6 +5029,7 @@ fn push_uncommitted_row(
         rect[3],
     ];
     labels.push(ChromeLabel {
+        mono: false,
         text: format!("{} ({})", graph_uncommitted(), head.count),
         rect: text_rect,
         font_size_px: crate::git_panel::GIT_ROW_FONT_LOGICAL_PX * scale,

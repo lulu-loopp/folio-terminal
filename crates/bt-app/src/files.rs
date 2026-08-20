@@ -239,16 +239,57 @@ pub struct DirCache {
     /// scroll offset into a tree whose directories have not been read yet is an
     /// offset into nothing.
     pub scroll_px: f32,
+    /// How many times [`Self::dirs`] has been written — this cache's **damage
+    /// counter** (`docs/DESIGN.md` §7.1.6b′ F2).
+    ///
+    /// A reader that wants to know whether re-deriving something from this tree
+    /// could possibly give a different answer compares one integer instead of
+    /// walking it. The focus column's thumbnails are that reader: a card showing
+    /// four rows of a files column has to re-walk the tree to find them, and
+    /// re-walking a hundred thousand cached names to discover that nothing moved
+    /// is the cost the whole budget exists to refuse.
+    ///
+    /// **Content, not clock.** It counts writes to the directory table and
+    /// nothing else — not the scroll, not a triangle's angle, not the selection,
+    /// because none of those change which rows exist. A reader that cares about
+    /// one of those compares that one, and [`FilesLeafState`] carries the rest.
+    ///
+    /// [`FilesLeafState`]: crate::seats::FilesLeafState
+    revision: u64,
 }
+
+/// A column that has read nothing — "no cache yet", as something a reader can
+/// borrow.
+///
+/// The `NO_FILES_TREES` idiom one module over, and a `static` rather than an
+/// associated `const` for the reason the compiler gives: a `const` is a value
+/// materialised at each use, so borrowing one produces a temporary that cannot
+/// outlive the expression. Named, so that a reader saying "this column has read
+/// nothing" is visibly saying it rather than looking like one that forgot to pass
+/// a cache.
+pub static EMPTY_DIR_CACHE: DirCache = DirCache {
+    dirs: BTreeMap::new(),
+    turns: BTreeMap::new(),
+    scroll_px: 0.0,
+    revision: 0,
+};
 
 impl DirCache {
     pub fn get(&self, key: &str) -> Option<&DirNode> {
         self.dirs.get(key)
     }
 
+    /// How many times the directory table has been written — see
+    /// [`Self::revision`].
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// Record that a directory has been asked about.
     pub fn mark_pending(&mut self, key: &str) {
         self.dirs.insert(key.to_owned(), DirNode::Pending);
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Take an answer from the worker.
@@ -258,6 +299,7 @@ impl DirCache {
             DirOutcome::Failed(fault) => DirNode::Failed(fault),
         };
         self.dirs.insert(key.to_owned(), node);
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Start a row's triangle turning towards `open`.

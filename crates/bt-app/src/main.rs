@@ -33,6 +33,7 @@ mod dir_news;
 mod file_peek;
 mod files;
 mod float;
+mod focus_thumb;
 mod git;
 mod git_graph;
 mod git_panel;
@@ -71,8 +72,8 @@ mod wsl;
 use anyhow::{Context, Result, anyhow, ensure};
 use bt_doc::{Bias, LayoutKey};
 use bt_layout::{
-    Axis, LayoutNode, LogicalRect, MIN_PANE_H, MIN_PANE_W, SeatId, SeatLayout, SeatMetrics,
-    SizePolicy, SplitId, WorkAreaHint,
+    Axis, LayoutNode, LogicalRect, MIN_PANE_H, MIN_PANE_W, SeatId, SeatKind, SeatLayout,
+    SeatMetrics, SizePolicy, SplitId, WorkAreaHint,
 };
 use bt_math::{MathEngine, MathRaster, MathRenderError};
 use bt_persist::{
@@ -4712,6 +4713,24 @@ struct WindowRuntime {
     /// change and across a language change without either needing to know it
     /// exists.
     focus_exit_width: f32,
+    /// How wide one character of the mini transcript's face is drawn, in physical
+    /// pixels (§7.1.6b′ F2).
+    ///
+    /// Measured beside [`Self::focus_exit_width`] and for exactly its reason —
+    /// only the font knows how wide a character is, and measuring needs `&mut`
+    /// all the way to the glyph cache — but what it buys is a *cut* rather than
+    /// a box: it turns a mini seat's rectangle into the number of characters that
+    /// fit across it, which is what a session's tail is shortened to before it is
+    /// ever shaped. Exact rather than a ratio because the face is monospaced:
+    /// every character in it has this advance.
+    focus_mini_advance: f32,
+    /// This window's card thumbnails, and the budget that fills them
+    /// (§7.1.6b′ F2, `focus_thumb`).
+    ///
+    /// **Per window, which is the whole of the multi-window rule**: a window only
+    /// ever projects its own tabs, so a second window costs the first nothing and
+    /// closing one takes its projections with it.
+    focus_thumbs: focus_thumb::FocusThumbnails,
     /// When "Open in default app" was last pressed, if it still has something to
     /// say about it.
     preview_opened_at: Option<Instant>,
@@ -6724,6 +6743,60 @@ impl TabState {
                 .preview_pool
                 .get(pane.buffer.as_ref()?)
                 .map(|buffer| buffer.name.clone()),
+        }
+    }
+
+    /// **Where one seat's thumbnail content comes from** (§7.1.6b′ F2) — handed
+    /// to the budget *unevaluated*, so that the walk it stands for happens only
+    /// past the gates.
+    ///
+    /// It is the same three answers `seat_caption` gives, one layer down: a
+    /// terminal seat is its session, a files column is its state and its cache,
+    /// and everything else is a face with a name and a kind word on it. That the
+    /// name comes from [`Self::preview_head_name`] — the very function the pane
+    /// head prints from — is the point: §7.1.6b′ is explicit that a card must not
+    /// invent a second vocabulary for the thing it is a picture of, and a card is
+    /// a whole tab, so the rule reaches the seats inside it too.
+    ///
+    /// `None` for a seat whose content this tab has no table entry for, which is
+    /// the one frame between a seat being minted and its content being created.
+    fn mini_source(&self, seat: SeatId, kind: SeatKind) -> Option<focus_thumb::SeatSource<'_>> {
+        match kind {
+            SeatKind::Terminal => Some(focus_thumb::SeatSource::Terminal(
+                &self.sessions.get(&seat)?.session,
+            )),
+            SeatKind::Files => Some(focus_thumb::SeatSource::Files {
+                state: self.files.get(&seat)?,
+                // A column nobody has looked into yet has no cache, and
+                // `tree_view` over an empty one answers "loading" — which is the
+                // truthful picture and not a fallback: the walk has not happened.
+                cache: self
+                    .file_trees
+                    .get(&seat)
+                    .unwrap_or(&files::EMPTY_DIR_CACHE),
+            }),
+            SeatKind::Preview => {
+                let pane = self.preview_panes.get(PreviewSurface::Seat(seat));
+                let buffer = pane
+                    .and_then(|pane| pane.buffer.as_ref())
+                    .and_then(|buffer| self.preview_pool.get(buffer));
+                Some(focus_thumb::SeatSource::Face {
+                    name: self
+                        .preview_head_name(seat)
+                        .unwrap_or_else(|| seats::seat_title(kind).to_owned()),
+                    kind: buffer.map_or_else(
+                        || seats::seat_title(kind).to_owned(),
+                        preview::PreviewBuffer::kind_word,
+                    ),
+                })
+            }
+            // A kind this build has no code for still gets a face, and it says
+            // the same thing the pane itself says (T227): naming the cause is the
+            // only actionable thing about it.
+            SeatKind::Placeholder => Some(focus_thumb::SeatSource::Face {
+                name: seats::seat_title(kind).to_owned(),
+                kind: seats::placeholder_seat_notice().to_owned(),
+            }),
         }
     }
 
@@ -12845,6 +12918,36 @@ fn dump_chrome_frame(chrome: &seats::ChromeGroup) {
     }
 }
 
+/// **The F2 budget's own probe** — see [`dump_chrome_frame`], which it copies
+/// down to the environment variable's shape.
+///
+/// It prints the four counters and the number of cards that were visible, once
+/// per frame that spent the budget. That is what makes the ruling's three claims
+/// checkable *on a real machine* rather than only in a test: scroll a card out of
+/// the column and `visible` drops while `dropped` ticks; leave the window alone
+/// and `projections` stops moving while `unchanged` climbs; press `Exit` and the
+/// line stops being written at all, because there is no budget left to spend.
+fn dump_focus_thumb_frame(visible: usize, stats: focus_thumb::ThumbStats) {
+    let Some(path) = std::env::var_os("BT_FOCUS_THUMB_DUMP") else {
+        return;
+    };
+    let line = format!(
+        "focus-thumb visible={visible} projections={} unchanged={} throttled={} dropped={}\n",
+        stats.projections,
+        stats.skipped_unchanged,
+        stats.skipped_throttled,
+        stats.dropped_offscreen,
+    );
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write as _;
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
 /// The same probe, for the overlay stack — see [`dump_chrome_frame`].
 ///
 /// Both channels, because "which pass painted this" is half of any answer the
@@ -17115,6 +17218,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         // (settings.focus_mode, §7.1.6b′ ①) sets the bit right after assembly.
         focus_mode: false,
         focus_exit_width: 0.0,
+        focus_mini_advance: 0.0,
+        focus_thumbs: focus_thumb::FocusThumbnails::default(),
         table_paints: HashMap::new(),
         preview_button_width: 0.0,
         preview_opened_at: None,
@@ -19227,6 +19332,21 @@ impl Runtime<'_> {
             )
         };
         self.window.focus_exit_width = focus_exit_width;
+        // One character of the mini transcript's face, on the same beat and for
+        // the same reason — see [`WindowRuntime::focus_mini_advance`].
+        let focus_mini_advance = {
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            renderer.measure_chrome_mono_text(
+                gpu,
+                // A digit rather than a letter: in a monospaced face every
+                // character has the same advance, and a digit is the one that is
+                // present in every face that could ever answer `Monospace`.
+                "0",
+                bt_render::FOCUS_MINI_TERM_FONT_LOGICAL_PX * scale,
+            )
+        };
+        self.window.focus_mini_advance = focus_mini_advance;
+        self.refresh_focus_thumbnails(now, scale);
         let badge_font_px = bt_render::WINDOW_TAB_BADGE_FONT_LOGICAL_PX * scale;
         let mut tabs = tabs
             .into_iter()
@@ -19522,6 +19642,22 @@ impl Runtime<'_> {
             .iter()
             .map(|(seat, title)| (*seat, title.as_str()))
             .collect();
+        // One slot per tab, in the strip's order, borrowed off the budget that
+        // just ran (§7.1.6b′ F2). A tab with no entry is a card the budget did
+        // not project — off screen, or in a window where the mode is off — and
+        // its slot is `None`.
+        let focus_thumbnails: Vec<Option<seats::FocusThumbnail<'_>>> = self
+            .window
+            .tabs
+            .iter()
+            .map(|tab| {
+                Some(seats::FocusThumbnail {
+                    tree: tab.seats.tree(),
+                    focused: tab.focused_leaf,
+                    seats: self.window.focus_thumbs.seats(tab.id)?,
+                })
+            })
+            .collect();
         let chrome = seats::build_chrome_for_tabs(
             &self.seats,
             &self.seat_layout,
@@ -19546,6 +19682,7 @@ impl Runtime<'_> {
                 rail: self.sampled_rail(now),
                 rail_scroll: self.window.rail_scroll,
                 exit_caption_width: self.window.focus_exit_width,
+                focus_thumbnails: &focus_thumbnails,
                 preview_titles: &preview_titles,
                 float_shown: &float_shown,
                 terminal_names: &terminal_names,
@@ -41830,6 +41967,7 @@ impl Runtime<'_> {
                     .preview_buffer_on(surface)
                     .and_then(preview::PreviewBuffer::body_notice)
                     .map(|words| bt_render::ChromeLabel {
+                        mono: false,
                         text: words.to_owned(),
                         rect: geometry.body,
                         font_size_px: bt_render::SEAT_TITLE_FONT_LOGICAL_PX * scale,
@@ -49297,6 +49435,63 @@ impl Runtime<'_> {
             self.window.rail_scroll,
             self.sampled_rail(now),
         )
+    }
+
+    /// **Spend this window's thumbnail budget for this frame** (§7.1.6b′ F2).
+    ///
+    /// The four gates live in `focus_thumb`; this is where the first two are
+    /// *applied*, because they are the two that need the picture:
+    ///
+    /// * **The mode** — no focus column, no thumbnails, and the cache is emptied
+    ///   rather than left to rot. That is what makes the frame after `Exit` cost
+    ///   exactly what a frame cost before F2 existed, and the counter dump says so
+    ///   out loud.
+    /// * **Visibility** — the cards are filtered on `FocusRailGeometry::viewport`,
+    ///   the very rectangle `focus_rail_chrome` clips its drawing to. One number,
+    ///   not two agreeing rules: a card that is drawn is a card that is projected,
+    ///   and there is no third state where one is true and the other is not.
+    ///
+    /// Everything past that is handed down unevaluated — a `SeatDemand` per seat
+    /// carrying a *reference* to the session or the cache — so the walks that
+    /// actually cost something happen on the far side of the damage check and the
+    /// throttle, where a gate can still refuse them.
+    fn refresh_focus_thumbnails(&mut self, now: Instant, scale: f32) {
+        let Some(geometry) = self.focus_rail_geometry_now(now) else {
+            self.window.focus_thumbs.clear();
+            return;
+        };
+        let [list_top, list_bottom] = geometry.viewport;
+        let advance = self.window.focus_mini_advance;
+        let mut visible = BTreeSet::new();
+        for (index, card) in geometry.cards.iter().enumerate() {
+            if card.body[3] <= list_top || card.body[1] >= list_bottom {
+                continue;
+            }
+            let Some(tab) = self.window.tabs.get(index) else {
+                continue;
+            };
+            visible.insert(tab.id);
+            // The mini boxes are solved here rather than inside the budget
+            // because they are *geometry*, and geometry is `seats`'s: what comes
+            // back is each seat's own rectangle, and each seat's own rectangle is
+            // what its column count is cut from — which is §3.3's "the same
+            // session at another width" in the only form a 92px card has room
+            // for.
+            let demands: Vec<focus_thumb::SeatDemand<'_>> =
+                seats::focus_mini_seats(tab.seats.tree(), card.mini, scale)
+                    .into_iter()
+                    .filter_map(|seat| {
+                        Some(focus_thumb::SeatDemand {
+                            id: seat.id,
+                            columns: focus_thumb::mini_columns(seat.rect, advance, scale),
+                            source: tab.mini_source(seat.id, seat.kind)?,
+                        })
+                    })
+                    .collect();
+            self.window.focus_thumbs.project(tab.id, &demands, now);
+        }
+        self.window.focus_thumbs.retain_visible(&visible);
+        dump_focus_thumb_frame(visible.len(), self.window.focus_thumbs.stats());
     }
 
     /// **The one door behind every door** (§7.1.6b′: "one bit, one face").

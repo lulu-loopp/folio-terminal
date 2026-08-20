@@ -740,6 +740,8 @@ pub struct DualPlaneSession {
     layout_key: LayoutKey,
     view_generation: ViewGeneration,
     grid_generation: GridGeneration,
+    /// See [`Self::screen_revision`].
+    screen_revision: u64,
     stale_results: usize,
     /// Frozen candidates whose in-flight scan was dropped (`block_is_current == false`) while the
     /// record was still the exact attempt we scheduled (`Frozen + Pending`, versions unchanged).
@@ -1140,6 +1142,7 @@ impl DualPlaneSession {
             },
             view_generation: ViewGeneration(1),
             grid_generation: GridGeneration(1),
+            screen_revision: 0,
             stale_results: 0,
             stranded_pending: BTreeMap::new(),
             primary_parked: false,
@@ -1326,6 +1329,33 @@ impl DualPlaneSession {
             .collect()
     }
 
+    /// One row of the live grid, by index — [`Self::live_rows`] asked one row at
+    /// a time.
+    ///
+    /// It exists for a reader that wants the *end* of the screen rather than all
+    /// of it: the focus column's thumbnails (`docs/DESIGN.md` §7.1.6b′ F2) walk
+    /// up from the last row until they have six with something on them, and
+    /// asking for the whole grid to keep six rows of it would clone every cell of
+    /// every visible card's every session on every projection.
+    ///
+    /// Memoized exactly as `live_rows` is, because it is the same call: a caller
+    /// that asks the same row twice pays one fingerprint hash the second time.
+    /// `None` for a row past the bottom of the grid, which is the same answer
+    /// `visible_row` gives and the same one an out-of-range index deserves.
+    pub fn live_row(&self, row: u32) -> Option<CapturedRow> {
+        self.terminal.visible_row(row)
+    }
+
+    /// How many rows and columns the live grid currently has.
+    ///
+    /// Published beside [`Self::live_row`] because the two are one question — a
+    /// caller walking up from the bottom of the screen has to know where the
+    /// bottom is, and reading it off a grid size the *app* remembers separately
+    /// is how a reader ends up asking for a row that resized away.
+    pub fn live_dimensions(&self) -> (NonZeroU32, NonZeroU32) {
+        self.terminal.dimensions()
+    }
+
     pub fn decoration(&self, id: TranscriptId) -> Option<&DecorationRecord> {
         self.decorations.get(&id)
     }
@@ -1344,6 +1374,34 @@ impl DualPlaneSession {
 
     pub fn grid_generation(&self) -> GridGeneration {
         self.grid_generation
+    }
+
+    /// **Monotonic count of the moments something could have changed what stands
+    /// on the live screen** — the child's own output, and the reflows a resize
+    /// performs.
+    ///
+    /// It exists for a reader that wants to *not* re-read the grid
+    /// (`docs/DESIGN.md` §7.1.6b′ F2's damage gate): comparing one integer
+    /// against the one it saw last time answers "could this look different now?"
+    /// without touching a cell, which is what lets a window full of quiet shells
+    /// cost nothing per frame.
+    ///
+    /// **Not [`Self::grid_generation`]**, and the difference is worth stating
+    /// because the names are close: that one counts *reflow boundaries* and is
+    /// what content anchors are keyed to, so it moves on a resize and stands
+    /// still through a gigabyte of output — precisely backwards for this
+    /// question. It is folded in here rather than compared separately, so a
+    /// caller has one number to keep instead of two.
+    ///
+    /// **Conservative in the safe direction.** Bytes that turn out to change
+    /// nothing visible — a device-status query, an OSC nobody acts on — still
+    /// move it, so a reader can be told "something happened" when nothing did.
+    /// The opposite mistake is the one that matters: a screen that changed
+    /// without this moving would be a card frozen on an old picture, and there is
+    /// no path to that, because the grid cannot be written except through
+    /// [`Self::feed_at`] or a resize.
+    pub fn screen_revision(&self) -> u64 {
+        self.screen_revision
     }
 
     pub fn layout_key(&self) -> LayoutKey {
@@ -2018,6 +2076,14 @@ impl DualPlaneSession {
     /// Deterministic replay entry point. Production callers normally use `feed`; integration tests
     /// can supply a monotonic timestamp without sleeping through the resize silence window.
     pub fn feed_at(&mut self, bytes: &[u8], observed_at: Instant) -> Result<(), SessionError> {
+        // The screen's damage counter, before anything else — see
+        // [`Self::screen_revision`]. Bytes from the child are the only thing that
+        // writes the live grid outside a resize, so this is where "something
+        // happened in here" is recorded, once, for every reader that wants to
+        // know whether re-reading the grid could give a different answer.
+        if !bytes.is_empty() {
+            self.screen_revision = self.screen_revision.wrapping_add(1);
+        }
         let cursor_memory_reprint_boundary = contains_clear_home_snapshot_boundary(bytes);
         if cursor_memory_reprint_boundary {
             self.cursor_logical_line_memory = None;
@@ -2172,6 +2238,10 @@ impl DualPlaneSession {
             }
             self.resize_epoch.changed(observed_at);
             self.grid_generation.0 += 1;
+            // A reflow rewrites the live grid without a byte arriving, so the
+            // screen's damage counter has to move with it — see
+            // [`Self::screen_revision`].
+            self.screen_revision = self.screen_revision.wrapping_add(1);
             self.trace_resize_event(
                 observed_at,
                 ResizeTraceKind::LocalResizeRequest {
@@ -2357,6 +2427,10 @@ impl DualPlaneSession {
             self.terminal.reconcile_resize_transaction_to_viewport();
         if reconciled {
             self.grid_generation.0 += 1;
+            // A reflow rewrites the live grid without a byte arriving, so the
+            // screen's damage counter has to move with it — see
+            // [`Self::screen_revision`].
+            self.screen_revision = self.screen_revision.wrapping_add(1);
             self.document
                 .capture_rows_transaction(&[], self.grid_generation);
             // ConPTY reconciliation is the second deterministic reflow boundary. Re-seat both
@@ -7541,6 +7615,10 @@ impl DualPlaneSession {
                     }
                     self.primary_parked = false;
                     self.grid_generation.0 += 1;
+                    // A reflow rewrites the live grid without a byte arriving, so the
+                    // screen's damage counter has to move with it — see
+                    // [`Self::screen_revision`].
+                    self.screen_revision = self.screen_revision.wrapping_add(1);
                     self.document
                         .capture_rows_transaction(&[], self.grid_generation);
                     self.bump_view_generation();

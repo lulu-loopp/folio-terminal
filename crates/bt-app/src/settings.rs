@@ -6494,6 +6494,7 @@ fn clip_content(
         // content box ever sees it, and a clip that widened here would let a long
         // value escape the control it names.
         clipped(label.clip.unwrap_or(label.rect), clip).map(|window| ChromeLabel {
+            mono: false,
             clip: Some(window),
             ..label
         })
@@ -8504,6 +8505,7 @@ pub fn build(
     );
 
     labels.push(ChromeLabel {
+        mono: false,
         text: Text::Settings.text().to_owned(),
         rect: [
             layout.header_content[0],
@@ -8584,6 +8586,7 @@ pub fn build(
             quads.extend(focus_ring(item.band, scale, palette.accent));
         }
         labels.push(ChromeLabel {
+            mono: false,
             text: item.category.nav_label().to_owned(),
             rect: item.label,
             font_size_px: px(NAV_ITEM_FONT_LOGICAL_PX),
@@ -8631,6 +8634,7 @@ pub fn build(
         let available = placed.row.available(values);
         let title_font = px(ROW_TITLE_FONT_LOGICAL_PX);
         content_stack.labels.push(ChromeLabel {
+            mono: false,
             // The title shares the sentence's column and therefore its rule.
             // No title in this build reaches the cut, and that is exactly why
             // it is stated here rather than left to be discovered by the first
@@ -8679,6 +8683,7 @@ pub fn build(
             })
             .unwrap_or_else(|| placed.row.description(values));
         content_stack.labels.push(ChromeLabel {
+            mono: false,
             text: ellipsized(
                 description,
                 placed.desc[2] - placed.desc[0],
@@ -8898,6 +8903,7 @@ pub fn build(
                 let mark_left = item[0] + px(ITEM_PADDING_X_LOGICAL_PX);
                 let mark_right = mark_left + px(TICK_WIDTH_LOGICAL_PX);
                 menu_stack.labels.push(ChromeLabel {
+                    mono: false,
                     text: MENU_ACTION_MARK.to_owned(),
                     rect: [mark_left, item[1], mark_right, item[3]],
                     font_size_px: px(MENU_ACTION_MARK_FONT_LOGICAL_PX),
@@ -8914,6 +8920,7 @@ pub fn build(
                     clip: None,
                 });
                 menu_stack.labels.push(ChromeLabel {
+                    mono: false,
                     text: action.to_owned(),
                     rect: [
                         mark_right + px(ITEM_GAP_LOGICAL_PX),
@@ -8964,6 +8971,7 @@ pub fn build(
             let tick_right = tick_left + px(TICK_WIDTH_LOGICAL_PX);
             if is_selected {
                 menu_stack.labels.push(ChromeLabel {
+                    mono: false,
                     text: TICK.to_owned(),
                     rect: [tick_left, item[1], tick_right, item[3]],
                     font_size_px: px(TICK_FONT_LOGICAL_PX),
@@ -8995,6 +9003,7 @@ pub fn build(
                 menu_stack.sprites.push(sprite);
             }
             menu_stack.labels.push(ChromeLabel {
+                mono: false,
                 text: label.to_owned(),
                 rect: [
                     text_left,
@@ -9140,6 +9149,7 @@ pub fn build(
             let font = px(COMBO_FONT_LOGICAL_PX);
             let inset = px(ITEM_PADDING_X_LOGICAL_PX);
             popup.labels.push(ChromeLabel {
+                mono: false,
                 text: item.label.to_owned(),
                 rect: [box_[0] + inset, box_[1], box_[2] - inset, box_[3]],
                 font_size_px: font,
@@ -9164,6 +9174,7 @@ pub fn build(
             // else on a menu item to put a second sentence.
             if let Some(reason) = item.refusal {
                 popup.labels.push(ChromeLabel {
+                    mono: false,
                     text: ellipsized(
                         reason,
                         (box_[2] - inset) - (box_[0] + inset + measure(item.label, font) + inset),
@@ -9255,6 +9266,7 @@ fn push_group_label(
     color: [u8; 3],
 ) {
     labels.push(ChromeLabel {
+        mono: false,
         text,
         rect,
         font_size_px: GROUP_LABEL_FONT_LOGICAL_PX * scale,
@@ -9402,6 +9414,7 @@ fn push_profile_page(
         }
         stack.sprites.push(sprite);
         stack.labels.push(ChromeLabel {
+            mono: false,
             text: line.title.to_owned(),
             rect: placed.title,
             font_size_px: px(ROW_TITLE_FONT_LOGICAL_PX),
@@ -9426,6 +9439,7 @@ fn push_profile_page(
                 1.0,
             ));
             stack.labels.push(ChromeLabel {
+                mono: false,
                 text: text.to_owned(),
                 rect: box_,
                 font_size_px: px(PROFILE_BADGE_FONT_LOGICAL_PX),
@@ -9440,6 +9454,7 @@ fn push_profile_page(
         }
         let desc_font = px(ROW_DESC_FONT_LOGICAL_PX);
         stack.labels.push(ChromeLabel {
+            mono: false,
             text: ellipsized(
                 &line.command,
                 placed.desc[2] - placed.desc[0],
@@ -9466,6 +9481,7 @@ fn push_profile_page(
                     continue;
                 }
                 stack.labels.push(ChromeLabel {
+                    mono: false,
                     text: part,
                     rect: *box_,
                     font_size_px: desc_font,
@@ -9675,6 +9691,7 @@ fn push_editor_page(
             ),
         ] {
             stack.labels.push(ChromeLabel {
+                mono: false,
                 text: ellipsized(&text, rect[2] - rect[0], font, measure),
                 rect,
                 font_size_px: font,
@@ -9950,6 +9967,7 @@ fn push_field(
     }
     let empty = text.is_empty();
     stack.labels.push(ChromeLabel {
+        mono: false,
         text: if empty {
             placeholder.unwrap_or_default().to_owned()
         } else {
@@ -10042,6 +10060,7 @@ fn push_glyph_verb(
         ));
     }
     stack.labels.push(ChromeLabel {
+        mono: false,
         text: text.to_owned(),
         rect,
         font_size_px: px(PROFILE_ACT_FONT_LOGICAL_PX),
@@ -10096,6 +10115,7 @@ fn push_shortcut_page(
             palette.dialog_title_text
         };
         stack.labels.push(ChromeLabel {
+            mono: false,
             text: line.title.to_owned(),
             rect: placed.title,
             font_size_px: px(ROW_TITLE_FONT_LOGICAL_PX),
@@ -10131,6 +10151,7 @@ fn push_shortcut_page(
             // and the recorder writes a whole sentence into what is left.
             let width = placed.desc[2] - placed.desc[0];
             stack.labels.push(ChromeLabel {
+                mono: false,
                 text: ellipsized(&note, width, px(ROW_DESC_FONT_LOGICAL_PX), measure),
                 rect: placed.desc,
                 font_size_px: px(ROW_DESC_FONT_LOGICAL_PX),
@@ -10250,6 +10271,7 @@ fn push_caps(
             return;
         }
         stack.labels.push(ChromeLabel {
+            mono: false,
             text: crate::shortcuts::unbound_cap().to_owned(),
             rect: [box_[0], box_[1], box_[2], box_[3]],
             font_size_px: px(ROW_DESC_FONT_LOGICAL_PX),
@@ -10300,6 +10322,7 @@ fn push_caps(
             1.0,
         ));
         stack.labels.push(ChromeLabel {
+            mono: false,
             text: cap.clone(),
             rect,
             font_size_px,
@@ -10358,6 +10381,7 @@ fn push_button(
     ));
     let font_size_px = px(BUTTON_FONT_LOGICAL_PX);
     labels.push(ChromeLabel {
+        mono: false,
         text: ellipsized(text, rect[2] - rect[0], font_size_px, measure),
         rect,
         font_size_px,
@@ -10391,6 +10415,7 @@ fn push_restore_verb(
         ));
     }
     stack.labels.push(ChromeLabel {
+        mono: false,
         text: RESTORE_GLYPH.to_owned(),
         rect,
         font_size_px: px(BUTTON_FONT_LOGICAL_PX),
@@ -10491,6 +10516,7 @@ fn push_combo(
     ];
     let font_size_px = px(COMBO_FONT_LOGICAL_PX);
     labels.push(ChromeLabel {
+        mono: false,
         text: ellipsized(value, value_box[2] - value_box[0], font_size_px, measure),
         rect: value_box,
         font_size_px,
@@ -10507,6 +10533,7 @@ fn push_combo(
         clip: None,
     });
     labels.push(ChromeLabel {
+        mono: false,
         text: COMBO_CHEVRON.to_owned(),
         rect: [
             rect[0],
@@ -10589,6 +10616,7 @@ fn push_slider(
         1.0,
     ));
     labels.push(ChromeLabel {
+        mono: false,
         text: format!("{value}%"),
         rect: geometry.value,
         font_size_px: px(SLIDER_VALUE_FONT_LOGICAL_PX),

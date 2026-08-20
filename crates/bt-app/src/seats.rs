@@ -35,21 +35,28 @@ use bt_render::{
     FOCUS_CARD_HEAD_PADDING_X_LOGICAL_PX, FOCUS_CARD_HEAD_PADDING_Y_LOGICAL_PX,
     FOCUS_CARD_PIN_BOX_LOGICAL_PX, FOCUS_CARD_RADIUS_LOGICAL_PX, FOCUS_EXIT_FONT_LOGICAL_PX,
     FOCUS_EXIT_GAP_LOGICAL_PX, FOCUS_EXIT_GLYPH_LOGICAL_PX, FOCUS_EXIT_HEIGHT_LOGICAL_PX,
-    FOCUS_EXIT_PADDING_X_LOGICAL_PX, FOCUS_EXIT_RADIUS_LOGICAL_PX, OverlayQuad,
-    PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
-    PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX, RAIL_GAP_LOGICAL_PX,
-    RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX, RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX,
-    RAIL_LABEL_PADDING_TOP_LOGICAL_PX, RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM,
-    RAIL_NEW_CHEVRON_BOX_LOGICAL_PX, RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX,
-    RAIL_NEW_MARGIN_TOP_LOGICAL_PX, RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX,
-    RAIL_PADDING_TOP_LOGICAL_PX, RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX,
-    RAIL_SEAM_INSET_X_LOGICAL_PX, RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX,
-    RAIL_SHADE_WIDTH_LOGICAL_PX, RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX,
-    RAIL_TAB_HEIGHT_LOGICAL_PX, RAIL_TAB_PADDING_LEFT_LOGICAL_PX,
-    RAIL_TAB_PADDING_RIGHT_LOGICAL_PX, RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX,
-    RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_WIDTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX,
-    SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX, SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX,
-    SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_PANE_CLOSE_BOX_LOGICAL_PX, SEAT_PANE_CLOSE_GLYPH_LOGICAL_PX,
+    FOCUS_EXIT_PADDING_X_LOGICAL_PX, FOCUS_EXIT_RADIUS_LOGICAL_PX, FOCUS_MINI_BORDER_LOGICAL_PX,
+    FOCUS_MINI_FILES_FONT_LOGICAL_PX, FOCUS_MINI_FILES_ICON_LOGICAL_PX,
+    FOCUS_MINI_FILES_INDENT_LOGICAL_PX, FOCUS_MINI_FILES_LINE_HEIGHT,
+    FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX, FOCUS_MINI_GAP_LOGICAL_PX, FOCUS_MINI_HEIGHT_LOGICAL_PX,
+    FOCUS_MINI_PADDING_LOGICAL_PX, FOCUS_MINI_RADIUS_LOGICAL_PX,
+    FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX,
+    FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX, FOCUS_MINI_TERM_FONT_LOGICAL_PX,
+    FOCUS_MINI_TERM_LINE_HEIGHT, OverlayQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX,
+    PANE_HEAD_FOLDER_MARK_LOGICAL_PX, PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX,
+    RAIL_GAP_LOGICAL_PX, RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX,
+    RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX, RAIL_LABEL_PADDING_TOP_LOGICAL_PX,
+    RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM, RAIL_NEW_CHEVRON_BOX_LOGICAL_PX,
+    RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX, RAIL_NEW_MARGIN_TOP_LOGICAL_PX,
+    RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX, RAIL_PADDING_TOP_LOGICAL_PX,
+    RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX, RAIL_SEAM_INSET_X_LOGICAL_PX,
+    RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX, RAIL_SHADE_WIDTH_LOGICAL_PX,
+    RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX, RAIL_TAB_HEIGHT_LOGICAL_PX,
+    RAIL_TAB_PADDING_LEFT_LOGICAL_PX, RAIL_TAB_PADDING_RIGHT_LOGICAL_PX,
+    RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX, RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_WIDTH_LOGICAL_PX,
+    SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX,
+    SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX,
+    SEAT_PANE_CLOSE_BOX_LOGICAL_PX, SEAT_PANE_CLOSE_GLYPH_LOGICAL_PX,
     SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX, SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX,
     SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX, SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX,
     SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
@@ -3778,6 +3785,24 @@ pub struct FocusCardGeometry {
     /// [`RailTabGeometry::title`]'s reason: the card's height is fixed and the
     /// name is centred in it.
     pub title: [f32; 2],
+    /// The head's own box — `.fc-head`, the card inside its border and above its
+    /// body.
+    ///
+    /// **Every box above is measured against this and not against
+    /// [`Self::body`]** (§7.1.6b′ F2), which is what makes the head byte-identical
+    /// to the one F1 shipped: a 120px card's head is the top 28px of it, and
+    /// centring a 16px `×` in that band puts it exactly where centring it in a
+    /// 28px card did. The pin test spelling that out is
+    /// `a_cards_head_is_where_it_was_before_the_body_grew_under_it`.
+    pub head: [f32; 4],
+    /// `.fc-tab-mini` — the body under the head, where the tab's tree is drawn in
+    /// miniature.
+    ///
+    /// The card's whole remaining height inside its border, padding included:
+    /// [`focus_mini_seats`] is what cuts the tree out of it, and this rectangle
+    /// is also the ground the F2 body paints, so an unprojected card is this
+    /// rectangle in `--termbg` and nothing else.
+    pub mini: [f32; 4],
 }
 
 /// The focus column, solved.
@@ -3827,17 +3852,31 @@ impl FocusRailGeometry {
     }
 }
 
-/// How tall one card is, in physical pixels.
+/// How tall a card's **head** is, in physical pixels — its border plus
+/// `.fc-head`, whose own height is the tallest thing in it, the 16px `×`.
 ///
-/// **F1 ships the head alone**, so a card is its border plus its head, and the
-/// head is as tall as the tallest thing in it — the 16px `×`. The mock-up draws
-/// a 92px body under this and tags it `F2` on its own face; when that slice
-/// lands it adds to this number rather than changing it.
-fn focus_card_height(scale: f32) -> f32 {
+/// This was `focus_card_height` entire while F1 shipped the head alone. F2 added
+/// the body under it exactly as the note here promised — "it adds to this number
+/// rather than changing it" — so the function kept its arithmetic and lost only
+/// its name, and every box in the head is still measured against this band.
+fn focus_card_head_height(scale: f32) -> f32 {
     ((2.0 * (FOCUS_CARD_BORDER_LOGICAL_PX + FOCUS_CARD_HEAD_PADDING_Y_LOGICAL_PX)
         + FOCUS_CARD_CLOSE_BOX_LOGICAL_PX)
         * scale)
         .round()
+}
+
+/// How tall one card is, in physical pixels: its head, and the 92px body under
+/// it (§7.1.6b′ F2).
+///
+/// **Unconditional, and that is the ruling and not a simplification.** The body
+/// is not a thing a card grows when it has something to show — it is what a card
+/// *is*, so a tab whose every seat is still blank draws a mini tree of empty
+/// seats rather than a short card. Making the height depend on the content would
+/// make the column's own geometry depend on the projection budget, and a list
+/// whose rows change height as sessions wake up is a list you cannot click into.
+fn focus_card_height(scale: f32) -> f32 {
+    focus_card_head_height(scale) + (FOCUS_MINI_HEIGHT_LOGICAL_PX * scale).round()
 }
 
 /// How wide the `Exit` button is, given the measured width of the word on it.
@@ -3925,6 +3964,7 @@ pub fn focus_rail_geometry(
     let mark = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
     let close_box = (FOCUS_CARD_CLOSE_BOX_LOGICAL_PX * scale).round();
 
+    let head_height = focus_card_head_height(scale);
     let mut card_top = list_top - scroll;
     let mut cards = Vec::with_capacity(tab_count);
     for _ in 0..tab_count {
@@ -3934,12 +3974,17 @@ pub fn focus_rail_geometry(
             content_right,
             card_top + card_height,
         ];
+        let head = [body[0], body[1], body[2], body[1] + head_height];
         // Inside the border and inside the head's padding: the flex line the
         // mock-up writes is `mark · name (flex: 1) · badge · pin · ×`, and every
         // box below is one item of it measured from whichever end owns it.
         let inner_left = body[0] + card_border + head_pad_x;
         let inner_right = (body[2] - card_border - head_pad_x).max(inner_left);
-        let centre = |size: f32| (body[1] + (card_height - size) / 2.0).round();
+        // Against the **head** and not against the card: see
+        // [`FocusCardGeometry::head`]. The two were the same rectangle while F1
+        // shipped, and this is the line that keeps their answers the same now
+        // that they are not.
+        let centre = |size: f32| (head[1] + (head_height - size) / 2.0).round();
         let mark_top = centre(mark);
         let mark_rect = [inner_left, mark_top, inner_left + mark, mark_top + mark];
         let close_top = centre(close_box);
@@ -3962,6 +4007,17 @@ pub fn focus_rail_geometry(
             mark: mark_rect,
             close,
             title: [title_left, title_right],
+            head,
+            // `.fc-tab-mini` fills what the head leaves, inside the card's own
+            // hairline on the three sides it touches. Its padding is *not* taken
+            // out here: this rectangle is the body's ground, and the inset only
+            // applies to the tree drawn on it (`focus_mini_seats`).
+            mini: [
+                body[0] + card_border,
+                head[3],
+                (body[2] - card_border).max(body[0] + card_border),
+                (body[3] - card_border).max(head[3]),
+            ],
         });
         card_top += card_height + card_gap;
     }
@@ -4030,7 +4086,7 @@ pub fn focus_card_pin_rect(card: &FocusCardGeometry, pinned: bool, scale: f32) -
     pinned.then(|| {
         let pin_box = (FOCUS_CARD_PIN_BOX_LOGICAL_PX * scale).round();
         let right = card.close[0] - FOCUS_CARD_HEAD_GAP_LOGICAL_PX * scale;
-        let top = ((card.body[1] + card.body[3] - pin_box) / 2.0).round();
+        let top = ((card.head[1] + card.head[3] - pin_box) / 2.0).round();
         [right - pin_box, top, right, top + pin_box]
     })
 }
@@ -4052,7 +4108,10 @@ pub fn focus_card_badge_rect(
     (pane_count > 1).then(|| {
         let trailing = focus_card_pin_rect(card, pinned, scale).map_or(card.close[0], |pin| pin[0])
             - FOCUS_CARD_HEAD_GAP_LOGICAL_PX * scale;
-        badge_rect_of(card.body, trailing, badge_text_width, scale)
+        // The **head**, for [`FocusCardGeometry::head`]'s reason: `badge_rect_of`
+        // centres in the box it is handed, and a badge centred in the whole card
+        // would sit halfway down the thumbnail.
+        badge_rect_of(card.head, trailing, badge_text_width, scale)
     })
 }
 
@@ -4076,6 +4135,162 @@ pub fn focus_card_title_right(
         .or_else(|| focus_card_pin_rect(card, pinned, scale).map(|pin| pin[0]))
         .unwrap_or(card.close[0]);
     (trailing - gap).max(card.title[0])
+}
+
+// ── the card's body: one tab's tree, two hundred pixels wide (§7.1.6b′ F2) ──
+
+/// One seat of a card's mini tree, placed.
+///
+/// The identity is carried beside the rectangle because the *content* is looked
+/// up by it: red line L1 keeps a session out of the layout tree, so the tree
+/// answers "there is a Terminal seat here, this big" and
+/// [`FocusThumbnail::seats`] answers what that terminal currently says.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MiniSeatBox {
+    pub id: SeatId,
+    pub kind: SeatKind,
+    /// The seat's box inside the card's body, its own hairline included.
+    pub rect: [f32; 4],
+}
+
+impl MiniSeatBox {
+    /// Whether this box has room for anything at all.
+    ///
+    /// A card body is 92px tall and 203 wide, and a tab split five ways runs out
+    /// of both: rather than let a seat be drawn inside out, the walk clamps and
+    /// the painter asks this. **Nothing is dropped from the tree** — a seat too
+    /// small to draw is still a seat, and a mini tree that quietly forgot its
+    /// fifth pane would be a picture that disagrees with the badge above it.
+    #[must_use]
+    pub fn drawable(&self) -> bool {
+        self.rect[2] > self.rect[0] && self.rect[3] > self.rect[1]
+    }
+}
+
+/// The tab's own tree, walked into the card's body.
+///
+/// **The same ratios the stage is solved with, and no solver.** `bt-layout`'s
+/// allocator is where minimum sizes, fixed columns and the collapse ladder live,
+/// and every one of those is a statement about a pane somebody has to work in —
+/// asking it for a 203-pixel window would get back a column of collapsed bars,
+/// which is a true answer to the wrong question. A thumbnail is a *picture of the
+/// structure*: two children of a split get the split's ratio, always, however
+/// small the result. That is also why nothing here consults [`SeatMetrics`] —
+/// the mock-up's `miniNode` walks the same way, and for the same reason.
+///
+/// In-order, which is [`LayoutNode::seats_in_order`]'s order and therefore D2's:
+/// what is drawn first is a fact about the tree and never about an iteration.
+#[must_use]
+pub fn focus_mini_seats(
+    tree: &bt_layout::LayoutNode,
+    mini: [f32; 4],
+    scale: f32,
+) -> Vec<MiniSeatBox> {
+    let pad = (FOCUS_MINI_PADDING_LOGICAL_PX * scale).round();
+    let field = [
+        mini[0] + pad,
+        mini[1] + pad,
+        (mini[2] - pad).max(mini[0] + pad),
+        (mini[3] - pad).max(mini[1] + pad),
+    ];
+    let mut out = Vec::with_capacity(tree.seat_count());
+    walk_mini(
+        tree,
+        field,
+        (FOCUS_MINI_GAP_LOGICAL_PX * scale).round(),
+        &mut out,
+    );
+    out
+}
+
+fn walk_mini(node: &bt_layout::LayoutNode, rect: [f32; 4], gap: f32, out: &mut Vec<MiniSeatBox>) {
+    match node {
+        bt_layout::LayoutNode::Seat(seat) => out.push(MiniSeatBox {
+            id: seat.id,
+            kind: seat.kind,
+            rect,
+        }),
+        bt_layout::LayoutNode::Split {
+            dir, ratio, a, b, ..
+        } => {
+            let (start, end) = match dir {
+                bt_layout::Axis::Row => (rect[0], rect[2]),
+                bt_layout::Axis::Col => (rect[1], rect[3]),
+            };
+            // The gap comes out of the run before the ratio is applied, exactly
+            // as a divider does on the stage: two halves of a split field are
+            // equal, and a gap taken afterwards would make the first child wider
+            // than the second by the width of the divider.
+            let span = (end - start - gap).max(0.0);
+            let cut = (start + (span * ratio_fraction(*ratio)).round()).min(end);
+            let second = (cut + gap).min(end);
+            let (first_rect, second_rect) = match dir {
+                bt_layout::Axis::Row => (
+                    [rect[0], rect[1], cut, rect[3]],
+                    [second, rect[1], rect[2], rect[3]],
+                ),
+                bt_layout::Axis::Col => (
+                    [rect[0], rect[1], rect[2], cut],
+                    [rect[0], second, rect[2], rect[3]],
+                ),
+            };
+            walk_mini(a, first_rect, gap, out);
+            walk_mini(b, second_rect, gap, out);
+        }
+    }
+}
+
+/// A split's share as a fraction, from the parts-per-million the tree stores.
+fn ratio_fraction(ratio: bt_layout::Ratio) -> f32 {
+    ratio.ppm() as f32 / bt_layout::RATIO_DENOM_PPM as f32
+}
+
+/// One row of a files column, shrunk onto a card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MiniFilesRow {
+    pub name: String,
+    /// How deep in the tree it sits — the indent, in levels.
+    pub depth: u16,
+    pub directory: bool,
+}
+
+/// What one seat of a card's mini tree is showing.
+///
+/// **Content, already resolved** — red line L1 again, and the same shape
+/// [`ChromeContent::terminal_names`] arrives in. `seats` does not know what a
+/// session is, so it is handed the six lines rather than a place to go and read
+/// them; what that buys is that the *budget* — which cards project, how often,
+/// and whether anything changed — lives entirely in `bt-app`, in one module, and
+/// this file cannot spend a millisecond it was not handed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MiniSeatContent {
+    /// A terminal seat: the tail of what stands on its screen, oldest first, cut
+    /// to the card's own column count and set in the terminal's face.
+    Transcript(Vec<String>),
+    /// A files column: the top of the rows it is currently showing.
+    Files(Vec<MiniFilesRow>),
+    /// **A face, for everything with no grid and no tree to shrink** — a preview
+    /// pane, a commit-graph document, a placeholder for a kind this build does
+    /// not know.
+    ///
+    /// v1 does not shrink a document's own picture (§7.1.6b′ F2): a page of prose
+    /// at 7.5px is a grey smear, and the two facts that actually tell you which
+    /// pane this is are its name and what kind of thing it is. Those are what a
+    /// face says.
+    Face { name: String, kind: String },
+}
+
+/// One card's thumbnail: the tab's tree, and what each of its seats is showing.
+///
+/// Borrowed rather than owned, because the tree belongs to the tab and the
+/// content belongs to the projection cache, and a card that copied either every
+/// frame would be paying the budget twice.
+#[derive(Clone, Copy, Debug)]
+pub struct FocusThumbnail<'a> {
+    pub tree: &'a bt_layout::LayoutNode,
+    /// Which seat of **this tab** holds its keyboard — `.fc-cell.focused`.
+    pub focused: SeatId,
+    pub seats: &'a BTreeMap<SeatId, MiniSeatContent>,
 }
 
 /// Which part of the focus column is under this point.
@@ -5271,6 +5486,7 @@ pub fn build_chrome_with_preview(
             rail: RailState::default(),
             rail_scroll: 0.0,
             exit_caption_width: 0.0,
+            focus_thumbnails: &[],
             preview_titles: &preview_titles,
             terminal_names: &NO_TERMINAL_NAMES,
             leaf_marks: &all_powershell(seats),
@@ -5514,6 +5730,23 @@ pub struct ChromeContent<'a> {
     /// carried and ignored, which is cheaper than making the field optional and
     /// then having to answer what `None` means to a solver.
     pub exit_caption_width: f32,
+    /// **What each card's body has to show, this frame** (§7.1.6b′ F2) — one
+    /// entry per tab, in [`Self::tabs`]'s order.
+    ///
+    /// `None` in a slot means "this tab's thumbnail was not projected", and the
+    /// card's body draws its ground and nothing on it. That is not an error case
+    /// and it is the normal one for most of this list: the projection budget only
+    /// ever fills the entries whose cards are inside the column's clip box, so a
+    /// window with forty tabs and six visible cards hands down thirty-four
+    /// `None`s. A **short** list — the empty slice — means the same for every
+    /// tab, which is what every caller that has no thumbnails to give passes, and
+    /// what the very first frame of the mode looks like.
+    ///
+    /// The budget itself lives one crate up in `focus_thumb`, and deliberately
+    /// nowhere near this file: which cards are worth projecting, how often, and
+    /// whether anything has changed since last time are questions about sessions
+    /// and clocks, and this module has neither.
+    pub focus_thumbnails: &'a [Option<FocusThumbnail<'a>>],
     /// What each preview seat's caption says — the file it is showing, **by
     /// seat**.
     ///
@@ -5860,6 +6093,7 @@ pub fn build_chrome_for_tabs(
         rail,
         rail_scroll,
         exit_caption_width,
+        focus_thumbnails,
         preview_titles,
         float_shown,
         terminal_names,
@@ -6222,6 +6456,7 @@ pub fn build_chrome_for_tabs(
                 }
                 if preview_head.is_none() {
                     pane_labels.push(ChromeLabel {
+                        mono: false,
                         text: seat_caption(
                             placement.kind,
                             preview_title(placement.id),
@@ -6624,6 +6859,7 @@ pub fn build_chrome_for_tabs(
                             .with_opacity(0.5),
                     );
                     pane_labels.push(ChromeLabel {
+                        mono: false,
                         text: card.notice.to_owned(),
                         rect: geometry.notice,
                         font_size_px: geometry.notice_font,
@@ -6656,6 +6892,7 @@ pub fn build_chrome_for_tabs(
                         palette.divider,
                     ));
                     pane_labels.push(ChromeLabel {
+                        mono: false,
                         text: card.button.to_owned(),
                         rect: geometry.button,
                         font_size_px: geometry.button_font,
@@ -6702,6 +6939,7 @@ pub fn build_chrome_for_tabs(
                     // body, so an empty pane reads as an invitation and a
                     // failure reads as a note rather than a wall of alarm.
                     pane_labels.push(ChromeLabel {
+                        mono: false,
                         text: message.to_owned(),
                         rect: [
                             head_box[0] + pad,
@@ -6746,6 +6984,7 @@ pub fn build_chrome_for_tabs(
         quads.push(ChromeQuad::ground(row, palette.collapse_bar));
         let pad = SEAT_TITLE_PADDING_LOGICAL_PX * scale;
         labels.push(ChromeLabel {
+            mono: false,
             text: overflow_notice(overflow.hidden),
             rect: [row[0] + pad, row[1], row[2] - pad, row[3]],
             font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
@@ -6871,6 +7110,7 @@ pub fn build_chrome_for_tabs(
             FocusRail {
                 tabs,
                 active_tab,
+                thumbnails: focus_thumbnails,
                 scroll: rail_scroll,
                 exit_caption_width,
                 state: rail,
@@ -6996,6 +7236,7 @@ fn clip_pane_chrome(
         // (seen on the real window, files tree, 2026-08-11).
         let window = label.clip.unwrap_or(label.rect);
         box_intersection(window, clip).map(|clip| ChromeLabel {
+            mono: false,
             clip: Some(clip),
             ..label
         })
@@ -7319,6 +7560,7 @@ fn window_chrome(
             }
             let left = app_title_left_px(scale, rail);
             labels.push(ChromeLabel {
+                mono: false,
                 text: crate::APP_NAME.to_owned(),
                 // Out to the caption run, so a narrow window crops the name
                 // rather than running it under the buttons. Vertically centred
@@ -7756,6 +7998,7 @@ fn window_tab_strip(
                         );
                     }
                     labels.push(ChromeLabel {
+                        mono: false,
                         text,
                         rect: title_box,
                         font_size_px: WINDOW_TAB_FONT_LOGICAL_PX * scale,
@@ -7806,6 +8049,7 @@ fn window_tab_strip(
                     },
                 ));
                 labels.push(ChromeLabel {
+                    mono: false,
                     text: content.pane_count.to_string(),
                     // `justify-content: center` — the number is centred in its pill,
                     // which is what makes `min-width` a floor and not an indent.
@@ -8373,6 +8617,7 @@ fn rail_chrome(
     if let Some(label) = geometry.label {
         let pad_x = RAIL_LABEL_PADDING_X_LOGICAL_PX * scale;
         labels.push(ChromeLabel {
+            mono: false,
             rect: [label[0] + pad_x, label[1], label[2] - pad_x, label[3]],
             text: crate::i18n::Text::RailTabs.text().to_owned(),
             font_size_px: RAIL_LABEL_FONT_LOGICAL_PX * scale,
@@ -8621,6 +8866,7 @@ fn rail_chrome(
                     },
                 ));
                 labels.push(ChromeLabel {
+                    mono: false,
                     text: content.pane_count.to_string(),
                     rect: badge,
                     clip: Some(clip_to_list(badge)),
@@ -8736,6 +8982,7 @@ fn rail_chrome(
                     }
                 }
                 labels.push(ChromeLabel {
+                    mono: false,
                     text: drawn,
                     rect: [row.title[0], row.body[1], title_right, row.body[3]],
                     clip: Some(clip_to_list([
@@ -9026,6 +9273,7 @@ fn rail_chrome(
     let words_left = plus_slot_left + mark_size + RAIL_TAB_GAP_LOGICAL_PX * scale;
     if text > 0.0 && words_left < geometry.new_tab[2] {
         labels.push(ChromeLabel {
+            mono: false,
             text: crate::i18n::Text::RailNewTab.text().to_owned(),
             rect: [
                 words_left,
@@ -9156,6 +9404,9 @@ fn rail_chrome(
 struct FocusRail<'a> {
     tabs: &'a [TabContent],
     active_tab: usize,
+    /// One entry per tab, parallel to [`Self::tabs`] — see
+    /// [`ChromeContent::focus_thumbnails`].
+    thumbnails: &'a [Option<FocusThumbnail<'a>>],
     /// How far the column is scrolled, in physical pixels.
     scroll: f32,
     /// The measured width of the word `Exit`, at [`FOCUS_EXIT_FONT_LOGICAL_PX`].
@@ -9194,6 +9445,7 @@ fn focus_rail_chrome(
     let FocusRail {
         tabs,
         active_tab,
+        thumbnails,
         scroll,
         exit_caption_width,
         state,
@@ -9226,6 +9478,7 @@ fn focus_rail_chrome(
 
     // ── the bar: the column's heading, and the way out ──
     labels.push(ChromeLabel {
+        mono: false,
         rect: [
             geometry.label[0],
             geometry.bar[1],
@@ -9295,6 +9548,7 @@ fn focus_rail_chrome(
         exit_ink,
     ));
     labels.push(ChromeLabel {
+        mono: false,
         rect: [
             exit_glyph_left + exit_glyph + FOCUS_EXIT_GAP_LOGICAL_PX * scale,
             geometry.exit[1],
@@ -9359,6 +9613,22 @@ fn focus_rail_chrome(
                 palette.focus_card_edge
             },
         ));
+
+        // ── the body: this tab's own tree, in miniature (§7.1.6b′ F2) ──
+        //
+        // Under the head and over the card's fill, and drawn from a thumbnail
+        // the window handed down. A card with no thumbnail in its slot draws its
+        // ground and stops — which is what a card scrolled in from off screen
+        // looks like for the one frame before the budget reaches it, and what
+        // every caller with no projections at all sees on every card.
+        focus_card_mini_chrome(
+            card,
+            thumbnails.get(index).copied().flatten(),
+            scale,
+            palette,
+            [list_top, list_bottom],
+            (quads, labels, sprites),
+        );
 
         // ── the mark slot: the strip's machinery, unchanged ──
         let mark_rect = clip_to_list(card.mark);
@@ -9441,6 +9711,7 @@ fn focus_rail_chrome(
                 },
             ));
             labels.push(ChromeLabel {
+                mono: false,
                 text: content.pane_count.to_string(),
                 rect: badge,
                 clip: Some(clip_to_list(badge)),
@@ -9482,8 +9753,14 @@ fn focus_rail_chrome(
             scale,
         );
         if title_right > card.title[0] {
-            let title_box = [card.title[0], card.body[1], title_right, card.body[3]];
+            // **The head, not the card** — a chrome label is centred vertically
+            // in the box it is handed, so a name given the whole card lands
+            // halfway down the thumbnail with the tail printing through it. That
+            // is exactly what the first run of F2 photographed, and it is the
+            // third of the four boxes [`FocusCardGeometry::head`] exists for.
+            let title_box = [card.title[0], card.head[1], title_right, card.head[3]];
             labels.push(ChromeLabel {
+                mono: false,
                 text: content.title.clone(),
                 rect: title_box,
                 clip: Some(clip_to_list(title_box)),
@@ -9583,6 +9860,7 @@ fn focus_rail_chrome(
     let words_left = plus_slot_left + mark_size + RAIL_TAB_GAP_LOGICAL_PX * scale;
     if words_left < geometry.new_tab[2] {
         labels.push(ChromeLabel {
+            mono: false,
             text: crate::i18n::Text::RailNewTab.text().to_owned(),
             rect: [
                 words_left,
@@ -9628,6 +9906,262 @@ fn focus_rail_chrome(
             palette.title_text_muted
         },
     ));
+}
+
+/// Paint one card's body: the tab's tree in miniature, and what each of its
+/// seats is showing (§7.1.6b′ F2).
+///
+/// **Nothing here decides anything about cost.** Every string it draws was
+/// handed to it in `thumbnail`; `None` means the window did not project this
+/// card on this frame, and the body is its ground alone. That split is what lets
+/// the budget be stated and tested in one place (`focus_thumb`) instead of being
+/// an emergent property of a painter.
+///
+/// **Nor does it add a hit target.** The column's hit test answers `Tab(i)` over
+/// the whole card and `TabClose(i)` over the `×` — §7.1.6b′'s "clicking a card is
+/// clicking that tab" — and a thumbnail is a picture inside that one target, not
+/// a second surface laid on it. A mini seat is not clickable, and deliberately:
+/// "click a card, get that tab" is one sentence, and "click *this part* of a
+/// card, get that pane" would be the mode inventing a verb the tab strip does
+/// not have.
+fn focus_card_mini_chrome(
+    card: &FocusCardGeometry,
+    thumbnail: Option<FocusThumbnail<'_>>,
+    scale: f32,
+    palette: ChromePalette,
+    viewport: [f32; 2],
+    output: (
+        &mut Vec<ChromeQuad>,
+        &mut Vec<ChromeLabel>,
+        &mut Vec<ChromeSprite>,
+    ),
+) {
+    let (_quads, labels, sprites) = output;
+    let [list_top, list_bottom] = viewport;
+    let in_list = |rect: [f32; 4]| rect[3] > list_top && rect[1] < list_bottom;
+    let clip_to_list = |rect: [f32; 4]| {
+        [
+            rect[0],
+            rect[1].max(list_top),
+            rect[2],
+            rect[3].min(list_bottom),
+        ]
+    };
+    if !in_list(card.mini) {
+        return;
+    }
+    // `.fc-tab-mini { background: var(--termbg) }`, wearing the card's own foot —
+    // see [`ChromeMark::ControlPillFoot`].
+    sprites.push(ChromeSprite::new(
+        ChromeMark::ControlPillFoot {
+            radius_px: (FOCUS_CARD_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32,
+        },
+        clip_to_list(card.mini),
+        palette.seat_body,
+    ));
+    let Some(thumbnail) = thumbnail else {
+        return;
+    };
+
+    let seat_radius = (FOCUS_MINI_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
+    let seat_stroke = (FOCUS_MINI_BORDER_LOGICAL_PX * scale).round().max(1.0);
+    let pad_x = (FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX * scale).round();
+    let pad_top = (FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX * scale).round();
+    let pad_bottom = (FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX * scale).round();
+    for seat in focus_mini_seats(thumbnail.tree, card.mini, scale) {
+        if !seat.drawable() || !in_list(seat.rect) {
+            continue;
+        }
+        // `.fc-cell` — a hairline and no fill, because the fill it asks for is
+        // `var(--termbg)` and the body it stands on is already that colour. A
+        // second quad of the same ink over the same pixels is a draw call that
+        // changes nothing.
+        sprites.push(ChromeSprite::new(
+            ChromeMark::ControlPillRing {
+                radius_px: seat_radius,
+                stroke_px: seat_stroke as u32,
+            },
+            clip_to_list(seat.rect),
+            if seat.id == thumbnail.focused {
+                palette.focus_mini_edge_focused
+            } else {
+                palette.focus_mini_edge
+            },
+        ));
+        // Inside that hairline and inside `.fc-mini`'s own padding.
+        let inner = [
+            seat.rect[0] + seat_stroke + pad_x,
+            seat.rect[1] + seat_stroke + pad_top,
+            seat.rect[2] - seat_stroke - pad_x,
+            seat.rect[3] - seat_stroke - pad_bottom,
+        ];
+        if inner[2] <= inner[0] || inner[3] <= inner[1] {
+            continue;
+        }
+        match thumbnail.seats.get(&seat.id) {
+            Some(MiniSeatContent::Transcript(lines)) => {
+                // `.fc-mini { justify-content: flex-end }` — a shell's tail is
+                // read from the bottom, so the last line sits on the seat's floor
+                // and the ones before it stack upwards out of the box. A tail
+                // laid from the top would put the newest line in a different
+                // place on every card, which is the one thing that stops a column
+                // of thumbnails being scannable.
+                let line =
+                    (FOCUS_MINI_TERM_FONT_LOGICAL_PX * FOCUS_MINI_TERM_LINE_HEIGHT * scale).round();
+                for (offset, text) in lines.iter().rev().enumerate() {
+                    let bottom = inner[3] - offset as f32 * line;
+                    let row = [inner[0], bottom - line, inner[2], bottom];
+                    if row[3] <= inner[1] {
+                        break;
+                    }
+                    mini_row_label(
+                        labels,
+                        text.clone(),
+                        row,
+                        clip_to_list([row[0], row[1].max(inner[1]), row[2], row[3]]),
+                        FOCUS_MINI_TERM_FONT_LOGICAL_PX * scale,
+                        palette.focus_mini_text,
+                        true,
+                    );
+                }
+            }
+            Some(MiniSeatContent::Files(rows)) => {
+                // `.fc-mini.fc-files { justify-content: flex-start }` — a tree is
+                // read from its root down, which is the opposite end from a
+                // shell's tail and the same end the column itself shows.
+                let line =
+                    (FOCUS_MINI_FILES_FONT_LOGICAL_PX * FOCUS_MINI_FILES_LINE_HEIGHT * scale)
+                        .round();
+                let icon = (FOCUS_MINI_FILES_ICON_LOGICAL_PX * scale).round();
+                let gap = (FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX * scale).round();
+                let indent = FOCUS_MINI_FILES_INDENT_LOGICAL_PX * scale;
+                for (offset, entry) in rows.iter().enumerate() {
+                    let top = inner[1] + offset as f32 * line;
+                    let row = [inner[0], top, inner[2], top + line];
+                    if row[1] >= inner[3] {
+                        break;
+                    }
+                    let left = (row[0] + f32::from(entry.depth) * indent).round();
+                    let icon_top = ((row[1] + row[3] - icon) / 2.0).round();
+                    let icon_rect = [left, icon_top, left + icon, icon_top + icon];
+                    if icon_rect[2] < row[2] && in_list(icon_rect) {
+                        sprites.push(ChromeSprite::new(
+                            // The column's own two marks, at the column's own
+                            // meaning: `#i-folder` for a directory and `#i-file`
+                            // for a leaf, which is what `pane_mark` and every
+                            // files row already draw. A third glyph invented for
+                            // the card would be the card speaking a dialect.
+                            if entry.directory {
+                                ChromeMark::Folder
+                            } else {
+                                ChromeMark::File
+                            },
+                            clip_to_list(icon_rect),
+                            palette.focus_mini_text,
+                        ));
+                    }
+                    let text_box = [(icon_rect[2] + gap).min(row[2]), row[1], row[2], row[3]];
+                    if text_box[2] > text_box[0] {
+                        mini_row_label(
+                            labels,
+                            entry.name.clone(),
+                            text_box,
+                            clip_to_list([
+                                text_box[0],
+                                text_box[1],
+                                text_box[2],
+                                text_box[3].min(inner[3]),
+                            ]),
+                            FOCUS_MINI_FILES_FONT_LOGICAL_PX * scale,
+                            palette.focus_mini_text,
+                            false,
+                        );
+                    }
+                }
+            }
+            Some(MiniSeatContent::Face { name, kind }) => {
+                // Two lines centred on the seat: what it is showing, and what
+                // kind of thing that is. Sized on the files row's 8px rather than
+                // the transcript's 7.5 — this is the window talking about a pane,
+                // not a document quoted out of one, so it is set in the chrome's
+                // own face at the chrome's own smallest size.
+                let line =
+                    (FOCUS_MINI_FILES_FONT_LOGICAL_PX * FOCUS_MINI_FILES_LINE_HEIGHT * scale)
+                        .round();
+                let top = ((inner[1] + inner[3]) / 2.0 - line).round();
+                for (offset, (text, ink)) in [
+                    (name, palette.focus_mini_text),
+                    (kind, palette.focus_mini_edge_focused),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let row = [
+                        inner[0],
+                        top + offset as f32 * line,
+                        inner[2],
+                        top + (offset + 1) as f32 * line,
+                    ];
+                    if row[1] < inner[1] || row[3] > inner[3] {
+                        continue;
+                    }
+                    labels.push(ChromeLabel {
+                        text: text.clone(),
+                        rect: row,
+                        clip: Some(clip_to_list(row)),
+                        font_size_px: FOCUS_MINI_FILES_FONT_LOGICAL_PX * scale,
+                        color: ink,
+                        align_right: false,
+                        align_center: true,
+                        letter_spacing_em: 0.0,
+                        weight: ChromeLabelWeight::Regular,
+                        tabular_numerals: false,
+                        mono: false,
+                    });
+                }
+            }
+            // A seat the projection has nothing for: its hairline is drawn and
+            // its inside is left empty, which is the honest picture of a pane
+            // that has said nothing yet.
+            None => {}
+        }
+    }
+}
+
+/// One row of a mini seat — the same label, twice over, so that a transcript row
+/// and a files row cannot drift apart in everything except the two things that
+/// actually differ between them (the face, and the size).
+fn mini_row_label(
+    labels: &mut Vec<ChromeLabel>,
+    text: String,
+    rect: [f32; 4],
+    clip: [f32; 4],
+    font_size_px: f32,
+    color: [u8; 3],
+    mono: bool,
+) {
+    if text.is_empty() || rect[2] <= rect[0] || clip[3] <= clip[1] {
+        return;
+    }
+    labels.push(ChromeLabel {
+        text,
+        rect,
+        // `white-space: nowrap; overflow: hidden` — a row is one line and what
+        // does not fit is cut at the seat's edge. **This is also the whole of the
+        // "reproject at the card's width" the design asks for**: a line is cut to
+        // the card's column count before it ever reaches this list (see
+        // `focus_thumb`), and this clip is what makes the last character on a row
+        // end at a hard edge rather than half-drawn past one.
+        clip: Some(clip),
+        font_size_px,
+        color,
+        align_right: false,
+        align_center: false,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
+        mono,
+    });
 }
 
 /// A collapsed seat's bar carries its name and its state icon (§2.6.3) — except
@@ -9709,6 +10243,7 @@ fn collapse_bar_contents(
         return;
     }
     labels.push(ChromeLabel {
+        mono: false,
         text: title.to_owned(),
         rect: [title_left, rect[1], title_right, rect[3]],
         font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
@@ -11022,6 +11557,7 @@ pub fn push_files_seg(
         }
         let on = each == view;
         labels.push(ChromeLabel {
+            mono: false,
             text: text.to_owned(),
             rect: box_,
             font_size_px: FILES_SEG_FONT_LOGICAL_PX * scale,
@@ -11325,6 +11861,7 @@ pub(crate) fn push_files_tree(
                     let right = name_right - cell * place as f32;
                     let cell_rect = [right - cell, rect[1], right, rect[3]];
                     labels.push(ChromeLabel {
+                        mono: false,
                         text: badge.letter.to_string(),
                         rect: cell_rect,
                         font_size_px: badge_font,
@@ -11376,6 +11913,7 @@ pub(crate) fn push_files_tree(
                 // for a file called "Loading…".
                 let notice_rect = [name_left, rect[1], name_right, rect[3]];
                 labels.push(ChromeLabel {
+                    mono: false,
                     text: row.name.clone(),
                     rect: notice_rect,
                     font_size_px: font,
@@ -11458,6 +11996,7 @@ pub(crate) fn push_files_tree(
         }
         let name_rect = [name_left, rect[1], name_right.max(name_left), rect[3]];
         labels.push(ChromeLabel {
+            mono: false,
             text: row.name.clone(),
             rect: name_rect,
             font_size_px: font,
@@ -11568,6 +12107,7 @@ fn push_preview_head(
         );
     }
     labels.push(ChromeLabel {
+        mono: false,
         // **The same label with a different string.** The editor takes the
         // name's own box and its metrics and changes only what is written in it,
         // so the head cannot jump when the editor opens or closes.
@@ -11623,6 +12163,7 @@ fn push_preview_head(
             palette.pane_close_pill,
         ));
         labels.push(ChromeLabel {
+            mono: false,
             text: content.count.to_owned(),
             rect: count,
             font_size_px: PREVIEW_COUNT_FONT_LOGICAL_PX * scale,
@@ -11646,6 +12187,7 @@ fn push_preview_head(
     // ── the dot, in the slot that was reserved whether or not it is there ────
     if content.dirty {
         labels.push(ChromeLabel {
+            mono: false,
             text: PREVIEW_DIRTY_DOT.to_owned(),
             rect: geometry.dirty,
             font_size_px: PREVIEW_DIRTY_FONT_LOGICAL_PX * scale,
@@ -11943,6 +12485,7 @@ fn push_files_foot(
         FILES_FOOT_NOTICE_GAP_LOGICAL_PX * scale,
     );
     labels.push(ChromeLabel {
+        mono: false,
         text: path.to_owned(),
         rect: path_box,
         font_size_px: font,
@@ -11959,6 +12502,7 @@ fn push_files_foot(
         .filter(|notice| !notice.is_empty())
     {
         labels.push(ChromeLabel {
+            mono: false,
             text: notice.to_owned(),
             rect: notice_box,
             font_size_px: font,
@@ -12674,6 +13218,7 @@ pub(crate) fn build_drag_ghost(
     crate::marks::OverlayLayer {
         quads,
         labels: vec![ChromeLabel {
+            mono: false,
             text: text.to_owned(),
             rect: layout.label,
             font_size_px: bt_render::DRAG_GHOST_FONT_LOGICAL_PX * scale,
@@ -12920,6 +13465,7 @@ pub(crate) fn build_dock_overlay(
         Vec::new()
     } else {
         vec![ChromeLabel {
+            mono: false,
             text: overlay.caption.to_owned(),
             rect: overlay.preview,
             font_size_px: bt_render::DOCK_PREVIEW_FONT_LOGICAL_PX * scale,
@@ -13057,7 +13603,7 @@ fn clipped(quad: OverlayQuad, clip: [f32; 4]) -> Option<OverlayQuad> {
     (rect[0] < rect[2] && rect[1] < rect[3]).then_some(OverlayQuad { rect, ..quad })
 }
 
-fn seat_title(kind: SeatKind) -> &'static str {
+pub(crate) fn seat_title(kind: SeatKind) -> &'static str {
     match kind {
         SeatKind::Terminal => crate::i18n::Text::SeatTerminal.text(),
         SeatKind::Files => crate::i18n::Text::SeatFiles.text(),
@@ -14509,6 +15055,7 @@ mod tests {
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                focus_thumbnails: &[],
                 preview_titles: &titles,
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &marks,
@@ -14578,6 +15125,7 @@ mod tests {
                     rail: RailState::default(),
                     rail_scroll: 0.0,
                     exit_caption_width: 0.0,
+                    focus_thumbnails: &[],
                     preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &marks,
@@ -16626,6 +17174,7 @@ mod tests {",
                     rail: RailState::default(),
                     rail_scroll: 0.0,
                     exit_caption_width: 0.0,
+                    focus_thumbnails: &[],
                     preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &NO_LEAF_MARKS,
@@ -16842,6 +17391,7 @@ mod tests {",
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
@@ -16944,6 +17494,7 @@ mod tests {",
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
@@ -20769,6 +21320,7 @@ mod tests {",
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
@@ -20967,6 +21519,7 @@ mod tests {",
                     rail: RailState::default(),
                     rail_scroll: 0.0,
                     exit_caption_width: 0.0,
+                    focus_thumbnails: &[],
                     preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &NO_LEAF_MARKS,
@@ -21074,6 +21627,7 @@ mod tests {",
                     rail: RailState::default(),
                     rail_scroll: 0.0,
                     exit_caption_width: 0.0,
+                    focus_thumbnails: &[],
                     preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &NO_LEAF_MARKS,
@@ -21285,6 +21839,7 @@ mod tests {",
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &all_powershell(seats),
@@ -23324,6 +23879,7 @@ mod tests {",
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names,
                 leaf_marks: &NO_LEAF_MARKS,
@@ -23385,6 +23941,7 @@ mod tests {",
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
@@ -24176,6 +24733,7 @@ mod tests {",
                 rail: state,
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
@@ -24425,6 +24983,7 @@ mod tests {",
                 rail: state,
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
@@ -24678,6 +25237,7 @@ mod tests {",
                 rail: expanded_rail(),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
@@ -24836,6 +25396,7 @@ mod tests {",
                 rail: expanded_rail(),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
@@ -25833,6 +26394,19 @@ mod tests {",
         rail: RailState,
         hover: Option<ChromeTarget>,
     ) -> WindowChrome {
+        window_chrome_with_thumbnails(tabs, active_tab, rail, hover, &[])
+    }
+
+    /// [`window_chrome_with_rail`] with the F2 thumbnails named — the shape the
+    /// card-body tests drive, and the one that keeps the default above honest:
+    /// "no thumbnails" is a value a test passes, not a state the helper hides.
+    fn window_chrome_with_thumbnails(
+        tabs: &[TabContent],
+        active_tab: usize,
+        rail: RailState,
+        hover: Option<ChromeTarget>,
+        focus_thumbnails: &[Option<FocusThumbnail<'_>>],
+    ) -> WindowChrome {
         let metrics = seat_metrics(1_000);
         // **A split tree, so the stage has something in it.** A lone terminal
         // draws no chrome at all below the title bar, and a comparison of two
@@ -25862,6 +26436,7 @@ mod tests {",
                 rail,
                 rail_scroll: 0.0,
                 exit_caption_width: EXIT_CAPTION,
+                focus_thumbnails,
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
@@ -26526,6 +27101,491 @@ mod tests {",
         }
     }
 
+    // ── §7.1.6b′ F2: the card's body ──
+
+    /// A tree of one seat, so a card body has one mini rectangle in it.
+    fn lone_seat_tree(kind: SeatKind) -> bt_layout::LayoutNode {
+        bt_layout::LayoutNode::seat(bt_layout::Seat::new(SeatId(1), kind))
+    }
+
+    /// Two seats side by side at the given share, which is what a card body has
+    /// to be able to say about a split tab.
+    fn split_tree(kind_a: SeatKind, kind_b: SeatKind, ratio: u32) -> bt_layout::LayoutNode {
+        bt_layout::LayoutNode::split_at(
+            bt_layout::SplitId(1),
+            Axis::Row,
+            bt_layout::Ratio::clamped_from_ppm(ratio),
+            bt_layout::LayoutNode::seat(bt_layout::Seat::new(SeatId(1), kind_a)),
+            bt_layout::LayoutNode::seat(bt_layout::Seat::new(SeatId(2), kind_b)),
+        )
+    }
+
+    /// **The head did not move when the body grew under it** (§7.1.6b′ F2).
+    ///
+    /// F1's card was its head and nothing else, and the arithmetic that placed
+    /// every box in it centred them in *the card*. F2 put a 92px body under that
+    /// head, so "the card" and "the head" stopped being the same rectangle — and
+    /// the one thing that must not happen is the mark, the name, the badge, the
+    /// pin and the `×` sliding down to the middle of the thumbnail.
+    ///
+    /// Said the way it can be checked without a screenshot: a card's head is
+    /// exactly as tall as the whole card used to be, every box in the head is
+    /// inside it, and the body starts where the head ends and runs to the card's
+    /// own foot.
+    ///
+    /// Red gate: centre any head box on `card.body` again and the containment
+    /// assertions go red on the first card in the column.
+    #[test]
+    fn a_cards_head_is_where_it_was_before_the_body_grew_under_it() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let state = focus_rail(TabLayoutMode::Vertical);
+            let geometry = focus_rail_geometry(618.0, scale, 3, EXIT_CAPTION * scale, 0.0, state)
+                .expect("focus mode puts a column on screen");
+            for card in &geometry.cards {
+                assert_eq!(
+                    card.head[3] - card.head[1],
+                    focus_card_head_height(scale),
+                    "the head is F1's whole card, to the pixel"
+                );
+                assert_eq!(
+                    card.head[1], card.body[1],
+                    "and it starts where the card does"
+                );
+                for box_in_head in [card.mark, card.close] {
+                    assert!(
+                        box_in_head[1] >= card.head[1] && box_in_head[3] <= card.head[3],
+                        "{box_in_head:?} is in the head and not adrift in the body"
+                    );
+                }
+                let border = (FOCUS_CARD_BORDER_LOGICAL_PX * scale).round().max(1.0);
+                assert_eq!(
+                    card.mini[1], card.head[3],
+                    "the body starts where the head ends"
+                );
+                assert_eq!(
+                    card.mini[3],
+                    card.body[3] - border,
+                    "and runs to the card's own foot, inside its hairline"
+                );
+                assert_eq!(
+                    (card.mini[3] - card.mini[1]).round(),
+                    ((FOCUS_MINI_HEIGHT_LOGICAL_PX * scale).round() - border).round(),
+                    "which is the mock-up's 92px less the foot's own hairline"
+                );
+            }
+        }
+    }
+
+    /// The mini tree is the tab's tree at the tab's own ratios — not a solve, and
+    /// not a guess.
+    ///
+    /// A 70/30 split of a card body 203 wide comes out 70/30 of the run left
+    /// after the padding and the 3px gap, in that order, because that is what the
+    /// stage does with the same numbers.
+    ///
+    /// Red gate: send the mini walk through `bt_layout`'s allocator and this goes
+    /// red at once — a 203px window is below every minimum it knows, so what
+    /// comes back is a column of collapsed bars rather than a picture.
+    #[test]
+    fn a_cards_body_carries_the_tabs_own_split_at_the_tabs_own_ratio() {
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let geometry = focus_of(state, 1);
+        let card = &geometry.cards[0];
+        let tree = split_tree(SeatKind::Terminal, SeatKind::Files, 700_000);
+        let seats = focus_mini_seats(&tree, card.mini, 1.0);
+        assert_eq!(seats.len(), 2, "both seats of the tab are in the picture");
+        assert_eq!(seats[0].id, SeatId(1), "in the tree's own in-order");
+        assert_eq!(seats[1].kind, SeatKind::Files);
+
+        let pad = FOCUS_MINI_PADDING_LOGICAL_PX;
+        let gap = FOCUS_MINI_GAP_LOGICAL_PX;
+        let field = (card.mini[2] - pad) - (card.mini[0] + pad);
+        assert_eq!(
+            seats[0].rect[2] - seats[0].rect[0],
+            ((field - gap) * 0.7).round(),
+            "the first child takes seven tenths of what the divider left"
+        );
+        assert_eq!(
+            seats[1].rect[0] - seats[0].rect[2],
+            gap,
+            "and the divider between them is the mock-up's three pixels"
+        );
+        assert_eq!(
+            seats[1].rect[2],
+            card.mini[2] - pad,
+            "the second child reaches the body's own inset edge"
+        );
+    }
+
+    /// **A tab with no shell in it still has a body, and each kind of seat says
+    /// its own thing** (§7.1.6b′ F2, and §7.1.6h's sessionless tabs).
+    ///
+    /// The three faces, on one card each: a terminal's tail in the terminal's own
+    /// face, a files column's rows with the column's own two marks, and a
+    /// preview's name over the word for what it is.
+    ///
+    /// Red gate: draw the transcript in the chrome's face and the `mono`
+    /// assertion goes red; draw a files row without its mark and the sprite
+    /// assertion does.
+    #[test]
+    fn each_kind_of_seat_wears_its_own_face_in_a_cards_body() {
+        let palette = chrome_palette();
+        let tabs = vec![
+            card_tab("shell", 1, TabMarkState::default(), false),
+            card_tab("folio", 1, TabMarkState::default(), false),
+            // Deliberately **not** the preview's own file name below: the head
+            // and the face would then print the same string, and the head's
+            // assertion could be satisfied by finding the face.
+            card_tab("docs", 1, TabMarkState::default(), false),
+        ];
+        let terminal = lone_seat_tree(SeatKind::Terminal);
+        let files = lone_seat_tree(SeatKind::Files);
+        let preview = lone_seat_tree(SeatKind::Preview);
+        let tail = BTreeMap::from([(
+            SeatId(1),
+            MiniSeatContent::Transcript(vec!["> cargo build".to_owned(), "  Compiling".to_owned()]),
+        )]);
+        let rows = BTreeMap::from([(
+            SeatId(1),
+            MiniSeatContent::Files(vec![
+                MiniFilesRow {
+                    name: "crates".to_owned(),
+                    depth: 0,
+                    directory: true,
+                },
+                MiniFilesRow {
+                    name: "Cargo.toml".to_owned(),
+                    depth: 1,
+                    directory: false,
+                },
+            ]),
+        )]);
+        let face = BTreeMap::from([(
+            SeatId(1),
+            MiniSeatContent::Face {
+                name: "DESIGN.md".to_owned(),
+                kind: "MD".to_owned(),
+            },
+        )]);
+        let thumbnails = vec![
+            Some(FocusThumbnail {
+                tree: &terminal,
+                focused: SeatId(1),
+                seats: &tail,
+            }),
+            Some(FocusThumbnail {
+                tree: &files,
+                focused: SeatId(1),
+                seats: &rows,
+            }),
+            Some(FocusThumbnail {
+                tree: &preview,
+                focused: SeatId(1),
+                seats: &face,
+            }),
+        ];
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let column = window_chrome_with_thumbnails(&tabs, 0, state, None, &thumbnails).rail;
+        let geometry = focus_of(state, tabs.len());
+        let in_body = |index: usize| {
+            let card = &geometry.cards[index];
+            column
+                .labels
+                .iter()
+                .filter(|label| label.rect[1] >= card.mini[1] && label.rect[3] <= card.mini[3])
+                .collect::<Vec<_>>()
+        };
+
+        let shell = in_body(0);
+        assert_eq!(
+            shell
+                .iter()
+                .map(|label| label.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["  Compiling", "> cargo build"],
+            "a terminal seat carries its tail, laid up from the floor"
+        );
+        assert!(
+            shell.iter().all(|label| label.mono),
+            "and it is set in the terminal's face, not the window's"
+        );
+        assert!(
+            shell
+                .iter()
+                .all(|label| label.color == palette.focus_mini_text),
+            "in the ink `--ink2` over `--termbg` composites to"
+        );
+
+        let column_rows = in_body(1);
+        assert_eq!(
+            column_rows
+                .iter()
+                .map(|label| label.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["crates", "Cargo.toml"],
+            "a files seat carries the top of its tree, in reading order"
+        );
+        assert!(
+            column_rows.iter().all(|label| !label.mono),
+            "in the app's own face, exactly as the column it came from"
+        );
+        assert!(
+            column_rows[1].rect[0] > column_rows[0].rect[0],
+            "and a row one level in is indented past its parent"
+        );
+        let card = &geometry.cards[1];
+        let marks = column
+            .sprites
+            .iter()
+            .filter(|sprite| sprite.rect[1] >= card.mini[1] && sprite.rect[3] <= card.mini[3])
+            .map(|sprite| sprite.mark)
+            .collect::<Vec<_>>();
+        assert!(
+            marks.contains(&ChromeMark::Folder) && marks.contains(&ChromeMark::File),
+            "wearing the column's own two marks and no third glyph: {marks:?}"
+        );
+
+        assert_eq!(
+            in_body(2)
+                .iter()
+                .map(|label| label.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["DESIGN.md", "MD"],
+            "a preview seat says what it is showing and what kind of thing that is"
+        );
+
+        // **And the tab's own name is in the head, where it was** — the bug the
+        // first run of F2 photographed. A chrome label is centred vertically in
+        // the box it is handed, so a name still given `card.body` after a body
+        // grew under it is a name printed across the middle of the thumbnail,
+        // over the transcript. Checking that the body holds no such label is not
+        // enough to catch it: the label's *box* began at the card's top and only
+        // its ink landed low.
+        for (index, tab) in tabs.iter().enumerate() {
+            let card = &geometry.cards[index];
+            let name = column
+                .labels
+                .iter()
+                .find(|label| label.text == tab.title)
+                .expect("every card prints its tab's name");
+            assert_eq!(
+                [name.rect[1], name.rect[3]],
+                [card.head[1], card.head[3]],
+                "card {index}'s name is laid out in the head and nowhere else"
+            );
+        }
+    }
+
+    /// A card the budget did not reach draws its ground and stops — no rows, no
+    /// hairlines, no stale picture.
+    ///
+    /// Which is what an off-screen card looks like the frame it scrolls back in,
+    /// and what every card looks like on the first frame of the mode.
+    #[test]
+    fn an_unprojected_card_draws_its_body_and_nothing_in_it() {
+        let palette = chrome_palette();
+        let tabs = three_cards();
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let column = window_chrome_with_rail(&tabs, 0, state, None).rail;
+        let geometry = focus_of(state, tabs.len());
+        let card = &geometry.cards[0];
+        let in_body = |rect: [f32; 4]| rect[1] >= card.mini[1] && rect[3] <= card.mini[3];
+        assert!(
+            column.labels.iter().all(|label| !in_body(label.rect)),
+            "nothing is written in a body nobody projected"
+        );
+        let grounds = column
+            .sprites
+            .iter()
+            .filter(|sprite| in_body(sprite.rect))
+            .collect::<Vec<_>>();
+        assert_eq!(grounds.len(), 1, "one sprite in the body: the body itself");
+        assert_eq!(
+            grounds[0].color, palette.seat_body,
+            "`--termbg`, the ground a terminal stands on"
+        );
+        assert!(
+            matches!(grounds[0].mark, ChromeMark::ControlPillFoot { .. }),
+            "wearing the card's own foot so the two bottom corners keep their round"
+        );
+    }
+
+    /// **The body adds no hit target** (§7.1.6b′: "clicking a card is clicking
+    /// that tab").
+    ///
+    /// Every point down the middle of a card — head and thumbnail alike — answers
+    /// `Tab(i)`, and the `×` still answers `TabClose(i)`. A thumbnail is a picture
+    /// inside one target, not a second surface laid on it.
+    ///
+    /// Red gate: give a mini seat a target of its own and the sweep goes red on
+    /// the first row of the body.
+    #[test]
+    fn the_thumbnail_adds_no_target_and_the_card_is_still_the_tab() {
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let tabs = [
+            TabTrailer::default(),
+            TabTrailer::default(),
+            TabTrailer::default(),
+        ];
+        let geometry = focus_of(state, tabs.len());
+        for (index, card) in geometry.cards.iter().enumerate() {
+            let middle = (card.body[0] + card.body[2]) / 2.0;
+            let mut y = card.body[1] + 1.0;
+            while y < card.body[3] {
+                assert_eq!(
+                    hit_focus_rail(
+                        618.0,
+                        1.0,
+                        &tabs,
+                        EXIT_CAPTION,
+                        0.0,
+                        state,
+                        f64::from(middle),
+                        f64::from(y),
+                    ),
+                    Some(ChromeTarget::Tab(index)),
+                    "card {index} at y={y} is the tab, all the way down"
+                );
+                y += 1.0;
+            }
+            let close = (
+                f64::from((card.close[0] + card.close[2]) / 2.0),
+                f64::from((card.close[1] + card.close[3]) / 2.0),
+            );
+            assert_eq!(
+                hit_focus_rail(
+                    618.0,
+                    1.0,
+                    &tabs,
+                    EXIT_CAPTION,
+                    0.0,
+                    state,
+                    close.0,
+                    close.1
+                ),
+                Some(ChromeTarget::TabClose(index)),
+                "and its `×` still closes it"
+            );
+        }
+    }
+
+    /// **The aggregation is untouched** (§7.1.6b′: a card can never say less than
+    /// its row).
+    ///
+    /// F2 put a body under the head; the head's marks — the dot, the ring, the
+    /// badge, the pin — come out of the same [`TabContent`] they always did. Said
+    /// as a comparison: the sprites and labels a card's *head* carries are the
+    /// same with a thumbnail under it as without one.
+    ///
+    /// Red gate: compute anything about a tab's state from its thumbnail and this
+    /// goes red, because the two runs are given the same tabs and different
+    /// bodies.
+    #[test]
+    fn a_thumbnail_changes_nothing_a_card_says_about_its_tab() {
+        let tabs = vec![
+            card_tab(
+                "waiting",
+                2,
+                TabMarkState {
+                    dot: Some(chrome_palette().status_warn),
+                    ..TabMarkState::default()
+                },
+                true,
+            ),
+            card_tab("quiet", 1, TabMarkState::default(), false),
+        ];
+        let tree = lone_seat_tree(SeatKind::Terminal);
+        let content = BTreeMap::from([(
+            SeatId(1),
+            MiniSeatContent::Transcript(vec!["something".to_owned()]),
+        )]);
+        let thumbnails = vec![
+            Some(FocusThumbnail {
+                tree: &tree,
+                focused: SeatId(1),
+                seats: &content,
+            }),
+            None,
+        ];
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let bare = window_chrome_with_rail(&tabs, 0, state, None).rail;
+        let dressed = window_chrome_with_thumbnails(&tabs, 0, state, None, &thumbnails).rail;
+        let geometry = focus_of(state, tabs.len());
+        let heads = |chrome: &ChromeGroup| {
+            let in_head = |rect: [f32; 4]| {
+                geometry
+                    .cards
+                    .iter()
+                    .any(|card| rect[1] >= card.head[1] && rect[3] <= card.head[3])
+            };
+            (
+                chrome
+                    .sprites
+                    .iter()
+                    .filter(|sprite| in_head(sprite.rect))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                chrome
+                    .labels
+                    .iter()
+                    .filter(|label| in_head(label.rect))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            heads(&bare),
+            heads(&dressed),
+            "the head says exactly what it said before there was a body under it"
+        );
+    }
+
+    /// The seat holding a tab's keyboard is marked on **every** card, not only on
+    /// the staged one — a card is the whole tab, cursor included.
+    #[test]
+    fn the_focused_seat_of_a_background_tab_is_marked_on_its_own_card() {
+        let palette = chrome_palette();
+        let tabs = vec![
+            card_tab("front", 2, TabMarkState::default(), false),
+            card_tab("back", 2, TabMarkState::default(), false),
+        ];
+        let tree = split_tree(SeatKind::Terminal, SeatKind::Terminal, 500_000);
+        let content = BTreeMap::new();
+        // The *second* seat holds the keyboard, in a tab that is not on stage.
+        let thumbnails = vec![
+            None,
+            Some(FocusThumbnail {
+                tree: &tree,
+                focused: SeatId(2),
+                seats: &content,
+            }),
+        ];
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let column = window_chrome_with_thumbnails(&tabs, 0, state, None, &thumbnails).rail;
+        let geometry = focus_of(state, tabs.len());
+        let card = &geometry.cards[1];
+        let boxes = focus_mini_seats(&tree, card.mini, 1.0);
+        let ring_at = |rect: [f32; 4]| {
+            column
+                .sprites
+                .iter()
+                .find(|sprite| {
+                    matches!(sprite.mark, ChromeMark::ControlPillRing { .. }) && sprite.rect == rect
+                })
+                .map(|sprite| sprite.color)
+        };
+        assert_eq!(
+            ring_at(boxes[0].rect),
+            Some(palette.focus_mini_edge),
+            "the seat without the keyboard wears the soft hairline"
+        );
+        assert_eq!(
+            ring_at(boxes[1].rect),
+            Some(palette.focus_mini_edge_focused),
+            "and the one with it is stated, on a card that is not on stage"
+        );
+    }
+
     /// Q171/Q172: the rail's own box and the column inside it, against the
     /// mock-up as measured — 220px wide, an 8px inset either side, and a
     /// content run of 203px because the border is *inside* the width.
@@ -26868,6 +27928,7 @@ mod tests {",
                 rail: icon_rail(1.0),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &names,
                 leaf_marks: &NO_LEAF_MARKS,

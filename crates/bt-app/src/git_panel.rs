@@ -2386,6 +2386,7 @@ pub fn push_git_panel(
 
     if let Some(sentence) = content.empty.as_ref() {
         labels.push(ChromeLabel {
+            mono: false,
             text: sentence.clone(),
             rect: geometry.viewport,
             font_size_px: GIT_EMPTY_FONT_LOGICAL_PX * scale,
@@ -2531,6 +2532,7 @@ pub fn push_git_panel(
             }
             GitRow::LoadMore => {
                 labels.push(ChromeLabel {
+                    mono: false,
                     text: git_load_more().to_owned(),
                     rect,
                     font_size_px: GIT_ROW_FONT_LOGICAL_PX * scale,
@@ -2549,6 +2551,7 @@ pub fn push_git_panel(
             }
             GitRow::Notice(words) => {
                 labels.push(ChromeLabel {
+                    mono: false,
                     text: words.clone(),
                     rect: inset(rect, (GIT_ROW_PADDING_X_LOGICAL_PX * scale).round()),
                     font_size_px: GIT_TIME_FONT_LOGICAL_PX * scale,
@@ -2642,6 +2645,7 @@ pub fn push_git_masthead(
         rect[3],
     ];
     labels.push(ChromeLabel {
+        mono: false,
         text: head.branch.clone(),
         rect: name_rect,
         font_size_px: font,
@@ -2707,6 +2711,7 @@ pub fn push_git_masthead(
             palette.git_pill_border,
         ));
         labels.push(ChromeLabel {
+            mono: false,
             text: pill.text.clone(),
             rect: box_,
             font_size_px: GIT_PILL_FONT_LOGICAL_PX * scale,
@@ -2788,6 +2793,7 @@ fn push_branch(
     let time_left = (rect[2] - pad - branch.time_width).max(rect[0]);
     let time_rect = [time_left, rect[1], rect[2] - pad, rect[3]];
     labels.push(ChromeLabel {
+        mono: false,
         text: branch.time.clone(),
         rect: time_rect,
         font_size_px: GIT_TIME_FONT_LOGICAL_PX * scale,
@@ -2829,6 +2835,7 @@ fn push_branch(
             .with_opacity(opacity),
         );
         labels.push(ChromeLabel {
+            mono: false,
             text: pill.text.clone(),
             rect: box_,
             font_size_px: GIT_PILL_FONT_LOGICAL_PX * scale,
@@ -2851,6 +2858,7 @@ fn push_branch(
         rect[3],
     ];
     labels.push(ChromeLabel {
+        mono: false,
         text: branch.name.clone(),
         rect: name_rect,
         font_size_px: GIT_ROW_FONT_LOGICAL_PX * scale,
@@ -2903,6 +2911,7 @@ fn push_heading(
         rect[3] - bottom_pad,
     ];
     labels.push(ChromeLabel {
+        mono: false,
         text: format!("{label} ({count})"),
         rect: text_rect,
         font_size_px: GIT_LABEL_FONT_LOGICAL_PX * scale,
@@ -2954,6 +2963,7 @@ fn push_remotes_heading(
         rect[3] - bottom_pad,
     ];
     labels.push(ChromeLabel {
+        mono: false,
         text: format!("{} ({count})", git_remotes_heading()),
         rect: text_rect,
         font_size_px: GIT_LABEL_FONT_LOGICAL_PX * scale,
@@ -3019,6 +3029,7 @@ fn push_change(
             .with_opacity(fade),
         );
         labels.push(ChromeLabel {
+            mono: false,
             text: mark.letter.to_string(),
             rect: box_,
             font_size_px: GIT_BADGE_FONT_LOGICAL_PX * scale,
@@ -3056,6 +3067,7 @@ fn push_change(
         palette.git_row_text
     };
     labels.push(ChromeLabel {
+        mono: false,
         text: change.path.clone(),
         rect: name_rect,
         font_size_px: GIT_ROW_FONT_LOGICAL_PX * scale,
@@ -3111,6 +3123,7 @@ fn push_commit_file(
         bt_render::ink_over(ground, ink, GIT_BADGE_GROUND_ALPHA),
     ));
     labels.push(ChromeLabel {
+        mono: false,
         text: file.badge.letter.to_string(),
         rect: box_,
         font_size_px: GIT_BADGE_FONT_LOGICAL_PX * scale,
@@ -3129,6 +3142,7 @@ fn push_commit_file(
         rect[3],
     ];
     labels.push(ChromeLabel {
+        mono: false,
         text: file.path.clone(),
         rect: name_rect,
         font_size_px: GIT_ROW_FONT_LOGICAL_PX * scale,
@@ -3320,6 +3334,7 @@ fn push_commit(
         rect[3],
     ];
     labels.push(ChromeLabel {
+        mono: false,
         text: commit.short.clone(),
         rect: hash_rect,
         font_size_px: GIT_HASH_FONT_LOGICAL_PX * scale,
@@ -3340,6 +3355,7 @@ fn push_commit(
         rect[3],
     ];
     labels.push(ChromeLabel {
+        mono: false,
         text: commit.time.clone(),
         rect: time_rect,
         font_size_px: GIT_TIME_FONT_LOGICAL_PX * scale,
@@ -3408,6 +3424,7 @@ fn push_commit(
             }),
         );
         labels.push(ChromeLabel {
+            mono: false,
             text: pill.name.clone(),
             rect: box_,
             font_size_px: crate::git_graph::GRAPH_REF_FONT_LOGICAL_PX * scale,
@@ -3424,6 +3441,7 @@ fn push_commit(
 
     let subject_rect = [cursor, rect[1], (time_rect[0] - gap).max(cursor), rect[3]];
     labels.push(ChromeLabel {
+        mono: false,
         text: commit.subject.clone(),
         rect: subject_rect,
         font_size_px: GIT_ROW_FONT_LOGICAL_PX * scale,
