@@ -21,12 +21,12 @@
 //!    projects it fresh rather than flashing whatever it said a minute ago.
 //! 3. **Damage.** A seat re-projects only when the thing it is a picture *of*
 //!    has changed: a terminal's `screen_revision`, a files column's
-//!    [`DirCache::revision`] together with the state that decides which rows are
-//!    open, a face's own two words. **This is the gate that makes an idle window
-//!    free** — twenty seats with nothing happening in them answer twenty integer
-//!    comparisons, produce no allocation, and hand back the same strings, so the
-//!    label list the renderer is given is byte-identical and `set_chrome` uploads
-//!    nothing.
+//!    [`DirCache::revision`] together with the state that decides which page it
+//!    is on and which of that page's rows are open, a face's own two words.
+//!    **This is the gate that makes an idle window free** — twenty seats with
+//!    nothing happening in them answer twenty integer comparisons, produce no
+//!    allocation, and hand back the same strings, so the label list the renderer
+//!    is given is byte-identical and `set_chrome` uploads nothing.
 //! 4. **The clock.** A seat that *is* changing re-projects at most once every
 //!    [`MIN_INTERVAL`]. A shell writing at 10 000 lines a second and a shell
 //!    writing at ten cost the same, because a card 92 pixels tall cannot show the
@@ -40,7 +40,9 @@
 //! # What one projection is
 //!
 //! One seat's content, rebuilt: six rows of a terminal's tail cut to that seat's
-//! own column count, four rows of a files column's tree, or a face's two words.
+//! own column count, four rows of a files column's tree — or, when that column is
+//! standing on its Git page instead, [`git_face`]'s two words — or a face's two
+//! words.
 //! [`ThumbStats::projections`] counts exactly those, which is what the F2 tests
 //! assert on — a counter, not a stopwatch, so the gates are checked for what they
 //! are rather than for how fast the machine that ran them was.
@@ -60,13 +62,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bt_layout::SeatId;
+use bt_layout::{SeatId, SeatKind};
 use bt_term::DualPlaneSession;
 
 use crate::{
     TabId,
     files::{self, DirCache, RowKind},
-    seats::{FilesLeafState, MiniFilesRow, MiniSeatContent},
+    seats::{FilesLeafState, FilesView, MiniFilesRow, MiniSeatContent, seat_title},
 };
 
 /// **The rate ceiling: one projection per seat per 100 ms — 10 Hz.**
@@ -124,12 +126,27 @@ enum Damage {
     /// to it never updates at all. See `DualPlaneSession::screen_revision`.
     Grid { revision: u64, columns: usize },
     /// A files column: the cache's write counter, and the state that decides
-    /// which of its rows are visible.
+    /// **which page it is on** and which of that page's rows are visible.
     ///
-    /// The state is carried whole rather than hashed. It is a root, an open set
-    /// and a selection — small, `Eq`, and already cloned by every other reader of
-    /// it — while a hash would be a second answer to "did this change" that can
-    /// be wrong in the direction that matters.
+    /// The state is carried whole rather than hashed. It is a root, a page, an
+    /// open set and a selection — small, `Eq`, and already cloned by every other
+    /// reader of it — while a hash would be a second answer to "did this change"
+    /// that can be wrong in the direction that matters.
+    ///
+    /// **Carrying it whole is also what makes turning the column over repaint
+    /// its card.** `view` is one of its fields, so the page a column is standing
+    /// on is part of what its card was built from without this gate having to
+    /// learn a second fact — which is exactly the property a narrower key would
+    /// have thrown away, and the bug this shape prevented from having a second
+    /// life when the projection learned about the Git page.
+    ///
+    /// It is deliberately a **superset** of what the content depends on: a
+    /// column on its Git page draws nothing out of the directory cache, so a
+    /// `read_dir` landing under it re-projects a face that cannot have changed.
+    /// That costs one rebuild of two short strings and hands back the same
+    /// bytes, so the label list is still byte-identical and `set_chrome` still
+    /// uploads nothing. A key that was a *subset* would be a card that lies,
+    /// which is the asymmetry this errs on the safe side of.
     Files {
         revision: u64,
         state: FilesLeafState,
@@ -325,7 +342,13 @@ impl SeatDemand<'_> {
             SeatSource::Terminal(session) => {
                 MiniSeatContent::Transcript(transcript_tail(session, self.columns))
             }
-            SeatSource::Files { state, cache } => MiniSeatContent::Files(files_head(state, cache)),
+            // **The page the column is on, and not the one it has** (§7.1.3g's
+            // ruling, one surface further out): a Files seat is a column with
+            // two pages and `view` says which of them is on screen right now.
+            SeatSource::Files { state, cache } => match state.view {
+                FilesView::Files => MiniSeatContent::Files(files_head(state, cache)),
+                FilesView::Git => git_face(state),
+            },
             SeatSource::Face { name, kind } => MiniSeatContent::Face {
                 name: name.clone(),
                 kind: kind.clone(),
@@ -425,7 +448,66 @@ fn cut_to(text: &str, columns: usize) -> String {
     }
 }
 
-/// The first [`FOCUS_MINI_FILES_ROWS`] rows a files column is showing.
+/// **What a column standing on its Git page says**: the place, and the page
+/// (`docs/DESIGN.md` §7.1.6b′ F2, 2026-08-20).
+///
+/// # Why a face and not that page's own first rows
+///
+/// F2's rule is that anything with rows to count gets drawn as rows, and the
+/// face is for documents that shrink to a grey smear. The Git page looks like it
+/// has rows. It gets a face anyway, and for three reasons that are about this
+/// product rather than about typography:
+///
+/// 1. **Its rows are not in memory for the cards that would draw them.** R31 is
+///    that a repository is read *for a surface that is looking at it*: the walk
+///    that asks git anything only ever visits the active tab's on-screen columns
+///    (`columns_wanting_git`). Every card in the focus column except one is a
+///    **background** tab, whose [`crate::git::GitCache`] is therefore empty, and
+///    `git_panel::build` over an empty cache answers one sentence — *Reading the
+///    repository…* — forever. A column of cards all saying that would be a
+///    picture of nothing; the only way to make it a picture of something is to
+///    start a subprocess per card, which is the one thing
+///    [`files_head`] is written not to do and which no gate in this module could
+///    refuse afterwards.
+/// 2. **The mini row is the *tree's* row.** [`MiniFilesRow`] carries a depth to
+///    indent by and a folder-or-file mark, because that is what a tree row is.
+///    The Git page's rows are, in its own words, six kinds with no identity in
+///    common — a masthead, headings, changes, branches, commits — none of which
+///    has a depth and none of which is a file or a folder. Pushing them through
+///    this row would put `#i-file` beside the word *BRANCHES*, which is the card
+///    speaking a dialect: the thing §7.1.6b′ forbids in the same breath as it
+///    forbids a second vocabulary.
+/// 3. **The house already draws this surface as a face.** The commit-graph
+///    document's seat is a face reading *Graph* today, and a Git page is that
+///    same repository seen from the same place — [`FilesView`]'s own note is
+///    that a files pane is a *place's* view and the repository is the same place
+///    seen another way. One answer for both is this product's grammar, not a new
+///    one.
+///
+/// Both words come from functions the pane itself prints from, which is the rest
+/// of §7.1.6b′'s rule: the place is the column's root through
+/// [`crate::profiles::cwd_leaf`] — the leaf rule a pane head, a tab title and a
+/// Recent row all wear, and which that function's own note already binds to
+/// `main.rs`'s spelling of it — and the page is [`FilesView::label`], the very
+/// word on the switch the reader pressed, translated with it.
+///
+/// A column with nowhere to stand falls through to its kind's own word for the
+/// reason a rootless head does, and on the same predicate the tree uses for its
+/// *unrooted* notice ([`files::root_is_addressable`]), so the card and the pane
+/// cannot disagree about whether this column is anywhere.
+fn git_face(state: &FilesLeafState) -> MiniSeatContent {
+    MiniSeatContent::Face {
+        name: if files::root_is_addressable(&state.root) {
+            crate::profiles::cwd_leaf(&state.root).to_owned()
+        } else {
+            seat_title(SeatKind::Files).to_owned()
+        },
+        kind: FilesView::Git.label().to_owned(),
+    }
+}
+
+/// The first [`FOCUS_MINI_FILES_ROWS`] rows a files column is showing **on its
+/// tree page** — see [`git_face`] for the other one.
 ///
 /// The column's **own** walk (`files::tree_view`), so a card can never show a
 /// tree the pane under it disagrees with — and it asks for nothing: `tree_view`
@@ -471,6 +553,177 @@ mod tests {
                 kind: "TXT".to_owned(),
             },
         }
+    }
+
+    /// A files column rooted somewhere real, with its root directory already
+    /// read — a tree with something in it to draw.
+    fn files_column(view: FilesView) -> (FilesLeafState, DirCache) {
+        let mut cache = DirCache::default();
+        cache.accept(
+            "",
+            files::DirOutcome::Listed(files::DirListing {
+                entries: vec![
+                    files::DirEntry {
+                        name: "src".to_owned(),
+                        is_dir: true,
+                        is_symlink: false,
+                    },
+                    files::DirEntry {
+                        name: "Cargo.toml".to_owned(),
+                        is_dir: false,
+                        is_symlink: false,
+                    },
+                ],
+                omitted: 0,
+                canonical: None,
+            }),
+        );
+        (
+            FilesLeafState {
+                root: r"D:\Developer\folio".to_owned(),
+                view,
+                ..FilesLeafState::default()
+            },
+            cache,
+        )
+    }
+
+    fn files_demand<'a>(state: &'a FilesLeafState, cache: &'a DirCache) -> SeatDemand<'a> {
+        SeatDemand {
+            id: seat(1),
+            columns: 24,
+            source: SeatSource::Files { state, cache },
+        }
+    }
+
+    fn shown(thumbs: &FocusThumbnails) -> Option<&MiniSeatContent> {
+        thumbs.seats(tab(1)).and_then(|seats| seats.get(&seat(1)))
+    }
+
+    /// What a column on its Git page says: the place, and the page it is on.
+    ///
+    /// Spelled out here rather than called from [`git_face`], so that the tests
+    /// assert against a written-down expectation and not against the code that
+    /// produced it.
+    fn git_face_saying(place: &str) -> MiniSeatContent {
+        MiniSeatContent::Face {
+            name: place.to_owned(),
+            kind: FilesView::Git.label().to_owned(),
+        }
+    }
+
+    /// **A column standing on its Git page draws the Git page** (§7.1.6b′ F2,
+    /// 2026-08-20) — not the tree it would draw on its other page.
+    ///
+    /// A card is a small picture of a tab *as it is now*, and `FilesLeafState`'s
+    /// `view` is what decides which of a column's two pages that is — the same
+    /// bit §7.1.3g made the keyboard follow. A card that answers with the tree
+    /// whatever the column is showing is a card saying something the seat is not.
+    #[test]
+    fn a_column_on_its_git_page_does_not_draw_the_tree_it_is_not_showing() {
+        let (state, cache) = files_column(FilesView::Git);
+        let mut thumbs = FocusThumbnails::default();
+        thumbs.project(tab(1), &[files_demand(&state, &cache)], Instant::now());
+        assert_eq!(shown(&thumbs), Some(&git_face_saying("folio")));
+    }
+
+    /// And the other page still draws the tree, which is the half that was never
+    /// wrong.
+    #[test]
+    fn a_column_on_its_tree_still_draws_the_tree() {
+        let (state, cache) = files_column(FilesView::Files);
+        let mut thumbs = FocusThumbnails::default();
+        thumbs.project(tab(1), &[files_demand(&state, &cache)], Instant::now());
+        assert_eq!(
+            shown(&thumbs),
+            Some(&MiniSeatContent::Files(vec![
+                MiniFilesRow {
+                    name: "src".to_owned(),
+                    depth: 0,
+                    directory: true,
+                },
+                MiniFilesRow {
+                    name: "Cargo.toml".to_owned(),
+                    depth: 0,
+                    directory: false,
+                },
+            ]))
+        );
+    }
+
+    /// **Gate 3 has to carry the page too.** Turning a column over repaints its
+    /// card — otherwise the picture is right the first time and a lie ever after,
+    /// which is the same bug wearing the throttle's clothes.
+    ///
+    /// The two assertions are both needed: the counter says the gate let the work
+    /// through, and the content says the work drew the other page. A key that
+    /// changed and a projection that did not would pass the first alone.
+    #[test]
+    fn turning_a_column_to_its_git_page_and_back_repaints_its_card() {
+        let (tree, cache) = files_column(FilesView::Files);
+        let (git, _) = files_column(FilesView::Git);
+        let mut thumbs = FocusThumbnails::default();
+        let start = Instant::now();
+        thumbs.project(tab(1), &[files_demand(&tree, &cache)], start);
+        assert_eq!(thumbs.stats().projections, 1);
+        assert!(matches!(shown(&thumbs), Some(MiniSeatContent::Files(_))));
+
+        thumbs.project(tab(1), &[files_demand(&git, &cache)], start + MIN_INTERVAL);
+        assert_eq!(
+            thumbs.stats().projections,
+            2,
+            "the page the column is on is part of what its card is built from"
+        );
+        assert_eq!(shown(&thumbs), Some(&git_face_saying("folio")));
+
+        thumbs.project(
+            tab(1),
+            &[files_demand(&tree, &cache)],
+            start + MIN_INTERVAL * 2,
+        );
+        assert_eq!(thumbs.stats().projections, 3);
+        assert!(matches!(shown(&thumbs), Some(MiniSeatContent::Files(_))));
+    }
+
+    /// A column with nowhere to stand is named the way its own head names it —
+    /// the kind's word — rather than with an empty line where a place should be.
+    #[test]
+    fn a_rootless_column_on_its_git_page_wears_its_kinds_own_word() {
+        let mut thumbs = FocusThumbnails::default();
+        let state = FilesLeafState {
+            view: FilesView::Git,
+            ..FilesLeafState::default()
+        };
+        thumbs.project(
+            tab(1),
+            &[files_demand(&state, &files::EMPTY_DIR_CACHE)],
+            Instant::now(),
+        );
+        assert_eq!(
+            shown(&thumbs),
+            Some(&git_face_saying(seat_title(SeatKind::Files)))
+        );
+    }
+
+    /// **The idle claim survives the page** — a column nobody is touching is
+    /// still refused on one comparison, on whichever of its two pages it is
+    /// standing.
+    #[test]
+    fn an_idle_column_on_its_git_page_projects_once_and_then_never_again() {
+        let (state, cache) = files_column(FilesView::Git);
+        let mut thumbs = FocusThumbnails::default();
+        let start = Instant::now();
+        for frame in 0..=50 {
+            thumbs.project(
+                tab(1),
+                &[files_demand(&state, &cache)],
+                start + MIN_INTERVAL * frame,
+            );
+        }
+        let stats = thumbs.stats();
+        assert_eq!(stats.projections, 1);
+        assert_eq!(stats.skipped_unchanged, 50);
+        assert_eq!(stats.skipped_throttled, 0);
     }
 
     /// A shell 40 columns wide and 10 rows tall, with nothing on it yet.
