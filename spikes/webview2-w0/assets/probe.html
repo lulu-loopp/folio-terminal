@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>W0 probe page</title>
+<style>
+  /* The page is a ruler. A flat known background so a capture can be counted,
+     a 3px inset ring so a scan line can find the page's first pixel, and four
+     corner marks so a screenshot shows at a glance whether the rectangle is
+     where the layout put it. */
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: #1b6ef3;
+    color: #ffffff;
+    font: 13px/1.5 "Segoe UI", system-ui, sans-serif;
+    box-shadow: inset 0 0 0 3px #b7ff2e;
+    overflow: hidden;
+  }
+  .corner { position: fixed; width: 12px; height: 12px; background: #ff2e6e; }
+  .tl { left: 0; top: 0; } .tr { right: 0; top: 0; }
+  .bl { left: 0; bottom: 0; } .br { right: 0; bottom: 0; }
+  main { padding: 22px 26px; }
+  h1 { font-size: 15px; margin: 0 0 10px; font-weight: 600; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0 0 14px; }
+  dt { opacity: .75; }
+  dd { margin: 0; font-variant-numeric: tabular-nums; }
+  #log { height: 150px; overflow: auto; background: rgba(0,0,0,.28); padding: 6px 8px; font-family: Consolas, monospace; font-size: 11px; }
+  form { margin: 12px 0; display: flex; gap: 8px; align-items: center; }
+  input, button, textarea { font: inherit; padding: 4px 8px; }
+  #ime { width: 260px; }
+  .cursors { display: flex; gap: 8px; margin: 10px 0; }
+  .cursors div { padding: 6px 10px; background: rgba(255,255,255,.16); }
+  #pointer-cursor { cursor: pointer; }
+  #text-cursor { cursor: text; }
+  #move-cursor { cursor: move; }
+  #tall { height: 3000px; width: 3000px; }
+  #scroller { height: 90px; overflow: auto; background: rgba(0,0,0,.2); }
+</style>
+</head>
+<body>
+<div class="corner tl"></div><div class="corner tr"></div>
+<div class="corner bl"></div><div class="corner br"></div>
+<main>
+  <h1 id="heading">W0 probe page</h1>
+  <dl>
+    <dt>frame</dt><dd id="frame">0</dd>
+    <dt>devicePixelRatio</dt><dd id="dpr">–</dd>
+    <dt>viewport (css)</dt><dd id="css">–</dd>
+    <dt>viewport (device)</dt><dd id="device">–</dd>
+    <dt>focus</dt><dd id="focus">–</dd>
+  </dl>
+  <form onsubmit="return false">
+    <label for="ime">form field</label>
+    <input id="ime" name="ime" placeholder="type here" aria-label="probe text field">
+    <button id="button-one" type="button">one</button>
+    <button id="button-two" type="button">two</button>
+  </form>
+  <div class="cursors">
+    <div id="pointer-cursor">pointer</div>
+    <div id="text-cursor">text</div>
+    <div id="move-cursor">move</div>
+  </div>
+  <div id="scroller"><div id="tall">scrollable</div></div>
+  <div id="log" role="log"></div>
+</main>
+<script>
+  const post = (payload) => window.chrome?.webview?.postMessage(payload);
+  const logElement = document.getElementById('log');
+  const log = (text) => {
+    const line = document.createElement('div');
+    line.textContent = text;
+    logElement.appendChild(line);
+    logElement.scrollTop = logElement.scrollHeight;
+  };
+
+  let frame = 0;
+  const tick = () => {
+    frame += 1;
+    document.getElementById('frame').textContent = frame;
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+
+  const report = () => {
+    const dpr = window.devicePixelRatio;
+    document.getElementById('dpr').textContent = dpr.toFixed(4);
+    document.getElementById('css').textContent = `${innerWidth}x${innerHeight}`;
+    document.getElementById('device').textContent =
+      `${Math.round(innerWidth * dpr)}x${Math.round(innerHeight * dpr)}`;
+    post({ kind: 'geometry', dpr, cssWidth: innerWidth, cssHeight: innerHeight,
+           deviceWidth: Math.round(innerWidth * dpr), deviceHeight: Math.round(innerHeight * dpr) });
+  };
+  addEventListener('resize', report);
+  report();
+
+  // ── mouse ────────────────────────────────────────────────────────────────
+  const mouse = (event) => {
+    post({ kind: 'mouse', type: event.type, button: event.button, buttons: event.buttons,
+           clientX: event.clientX, clientY: event.clientY, detail: event.detail,
+           target: event.target.id || event.target.tagName });
+    log(`${event.type} b=${event.button} (${event.clientX},${event.clientY})`);
+  };
+  for (const type of ['mousedown','mouseup','dblclick','contextmenu','auxclick','mouseover','mouseout','mouseleave','mouseenter']) {
+    addEventListener(type, mouse, true);
+  }
+  addEventListener('mousemove', (event) => {
+    post({ kind: 'mousemove', clientX: event.clientX, clientY: event.clientY, buttons: event.buttons });
+  }, true);
+  addEventListener('wheel', (event) => {
+    post({ kind: 'wheel', deltaX: event.deltaX, deltaY: event.deltaY, deltaMode: event.deltaMode,
+           ctrl: event.ctrlKey });
+    log(`wheel dx=${event.deltaX} dy=${event.deltaY}`);
+  }, { capture: true, passive: true });
+  addEventListener('selectstart', () => post({ kind: 'selectstart' }), true);
+  document.addEventListener('selectionchange', () => {
+    const text = String(document.getSelection());
+    if (text) post({ kind: 'selection', length: text.length, text: text.slice(0, 40) });
+  });
+
+  // ── pointer / touch / pen ────────────────────────────────────────────────
+  for (const type of ['pointerdown','pointerup','pointermove','pointercancel','pointerenter','pointerleave']) {
+    addEventListener(type, (event) => {
+      post({ kind: 'pointer', type: event.type, pointerType: event.pointerType,
+             pointerId: event.pointerId, pressure: event.pressure,
+             clientX: event.clientX, clientY: event.clientY, isPrimary: event.isPrimary });
+      log(`${event.type} ${event.pointerType} p=${event.pressure.toFixed(2)}`);
+    }, true);
+  }
+  for (const type of ['touchstart','touchmove','touchend','touchcancel']) {
+    addEventListener(type, (event) => {
+      post({ kind: 'touch', type: event.type, touches: event.touches.length });
+    }, { capture: true, passive: true });
+  }
+  for (const type of ['dragenter','dragover','dragleave','drop']) {
+    addEventListener(type, (event) => {
+      event.preventDefault();
+      // preventDefault alone is not acceptance. Without an explicit dropEffect
+      // the engine answers DROPEFFECT_NONE, and what the host sees is a
+      // dragleave where it expected a drop — which reads as the drop path being
+      // broken when it is the page declining.
+      if (event.dataTransfer && (event.type === 'dragenter' || event.type === 'dragover')) {
+        event.dataTransfer.dropEffect = 'copy';
+      }
+      const items = event.dataTransfer ? Array.from(event.dataTransfer.types) : [];
+      post({ kind: 'drag', type: event.type, types: items,
+             files: event.dataTransfer ? event.dataTransfer.files.length : 0 });
+      log(`${event.type} [${items.join(',')}]`);
+    }, true);
+  }
+
+  // ── keyboard ─────────────────────────────────────────────────────────────
+  const key = (event) => {
+    post({ kind: 'key', type: event.type, key: event.key, code: event.code,
+           keyCode: event.keyCode, ctrl: event.ctrlKey, shift: event.shiftKey,
+           alt: event.altKey, repeat: event.repeat, isComposing: event.isComposing });
+    log(`${event.type} ${event.key} ctrl=${event.ctrlKey} shift=${event.shiftKey} alt=${event.altKey}${event.repeat ? ' repeat' : ''}`);
+  };
+  addEventListener('keydown', key, true);
+  addEventListener('keyup', key, true);
+
+  for (const type of ['compositionstart','compositionupdate','compositionend']) {
+    addEventListener(type, (event) => {
+      post({ kind: 'composition', type: event.type, data: event.data });
+      log(`${event.type} "${event.data ?? ''}"`);
+    }, true);
+  }
+  document.getElementById('ime').addEventListener('input', (event) => {
+    post({ kind: 'input', value: event.target.value });
+  });
+
+  addEventListener('focus', () => {
+    document.getElementById('focus').textContent = 'page has focus';
+    post({ kind: 'focus', state: 'focus' });
+  });
+  addEventListener('blur', () => {
+    document.getElementById('focus').textContent = 'page lost focus';
+    post({ kind: 'focus', state: 'blur' });
+  });
+  document.addEventListener('focusin', (event) => {
+    post({ kind: 'focusin', target: event.target.id || event.target.tagName });
+    log(`focusin ${event.target.id || event.target.tagName}`);
+  });
+
+  // ── things the host asks the page to do ──────────────────────────────────
+  window.chrome?.webview?.addEventListener('message', (event) => {
+    const command = event.data;
+    if (command === 'focus-field') { document.getElementById('ime').focus(); }
+    if (command === 'clear') { logElement.textContent = ''; }
+    if (command === 'caret-rect') {
+      const rect = document.getElementById('ime').getBoundingClientRect();
+      post({ kind: 'caret-rect', x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+    }
+  });
+
+  post({ kind: 'ready', title: document.title, url: location.href });
+</script>
+</body>
+</html>

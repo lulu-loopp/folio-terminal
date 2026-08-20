@@ -11,6 +11,7 @@
 !docs/spikes/artifacts/03-visual/comparison.png
 !docs/spikes/artifacts/multiwindow/*.png
 !docs/spikes/artifacts/webview2/*.png
+!docs/spikes/artifacts/webview2-w0/*.png
 dist/
 .tmp-repaint-capture/
 .claude/worktrees/
