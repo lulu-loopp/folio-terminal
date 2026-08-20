@@ -343,6 +343,14 @@ impl RestoreRow {
                 crate::cwd_leaf(Path::new(root)).unwrap_or_else(|| root.clone()),
                 root.clone(),
             ),
+            // The same two lines a folder gets, off the same rule (§7.1.6h): the
+            // file's own name on the first, and the whole path under it — which
+            // for a file is the one line that says *which* `README.md` this is.
+            Seed::Preview { path } => (
+                ChromeMark::File,
+                crate::cwd_leaf(Path::new(path)).unwrap_or_else(|| path.clone()),
+                path.clone(),
+            ),
         };
         Self {
             mark,

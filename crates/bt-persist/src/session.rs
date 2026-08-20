@@ -9,8 +9,10 @@ use crate::layout::LayoutNodeV1;
 /// v6 is the first bump that changes an existing field's *meaning* rather than adding one:
 /// `profile_id` becomes a stable profile slug. See [`crate::migrate`]'s `migrate_session_v5_to_v6`
 /// for the ruling and the one-time mapping. v7 adds `view` to a `files` leaf — which of the
-/// column's two pages it was showing (R1).
-pub const SESSION_SCHEMA_VERSION: u32 = 7;
+/// column's two pages it was showing (R1). v8 adds a third shape to [`RecentSeedV1`] — a closed
+/// tab that was one preview pane, identified by the file it was on — which is the one thing the
+/// sessionless-tab slice (`docs/DESIGN.md` §7.1.6h) could not already write.
+pub const SESSION_SCHEMA_VERSION: u32 = 8;
 
 /// Persisted theme mode restored with the session. `System` is resolved by the app against winit's
 /// OS theme; `BT_BG` remains a process diagnostic override and is never persisted as a mode.
@@ -345,7 +347,22 @@ pub struct RecentEntryV1 {
 /// to `DESIGN.md`'s own description of what a term seed and a files locus each
 /// contain: `term 叶 seed{profile_id,cwd,手动名}` and `files 叶{root,...}`).
 /// Tagged the same way as [`crate::layout::LeafNodeV1`] for the same reason:
-/// it mirrors the two content kinds a Recent entry can come from.
+/// it mirrors the content kinds a Recent entry can come from.
+///
+/// **The third shape arrived with schema v8** and it arrived because the tab it
+/// names now exists: `docs/DESIGN.md` §7.1.6h makes a lone preview pane a tab of
+/// its own, identified by the file it is on. Without a seed for it, closing such
+/// a tab would put nothing in the vault — and the `seed` module's own header
+/// records exactly what that costs: "a files-only tab that could be restored by
+/// the shutdown prompt but not by Ctrl+Shift+T would be two doors onto one store
+/// with one of them broken."
+///
+/// The **version** is bumped rather than the variant merely added, because this
+/// enum has no `#[serde(other)]` arm: a v7 reader handed `"kind": "preview"`
+/// would fail the whole document, and the version is what makes it refuse for
+/// the right reason (§5.4's future-version refusal) rather than report a corrupt
+/// file. Nothing in an existing document changes, so the step itself carries no
+/// field work — see [`crate::migrate`]'s `migrate_session_v7_to_v8`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RecentSeedV1 {
@@ -356,6 +373,14 @@ pub enum RecentSeedV1 {
     },
     Files {
         root: String,
+    },
+    /// The file a lone preview pane was showing (§7.1.6h).
+    ///
+    /// A path and nothing else, on [`TabPreviewV1`]'s own ruling: a restored
+    /// preview shows the file as it is on disk, so there is no view, no scroll
+    /// and no dirty bit here to be a promise nobody can keep.
+    Preview {
+        path: String,
     },
 }
 

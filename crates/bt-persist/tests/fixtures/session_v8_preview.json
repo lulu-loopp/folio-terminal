@@ -1,0 +1,98 @@
+{
+  "schema_version": 8,
+  "theme": "light",
+  "cursor_style": "block",
+  "tab_layout": "vertical",
+  "sidebar_mode": "icons",
+  "window": {
+    "bounds": {
+      "x": 24,
+      "y": 16,
+      "width": 1600,
+      "height": 900
+    },
+    "dpi": 120,
+    "maximized": false,
+    "monitor_id": "\\\\.\\DISPLAY1"
+  },
+  "tabs": [
+    {
+      "root": {
+        "dir": "row",
+        "ratio": 400000,
+        "children": [
+          {
+            "kind": "term",
+            "profile_id": "pwsh",
+            "cwd": "C:\\Users\\dev\\project",
+            "manual_name": "build"
+          },
+          {
+            "dir": "col",
+            "ratio": 550000,
+            "children": [
+              {
+                "kind": "preview",
+                "pinned": true
+              },
+              {
+                "kind": "preview",
+                "pinned": false
+              }
+            ]
+          }
+        ]
+      },
+      "pinned": true,
+      "focused_leaf": "leaf-1",
+      "preview": {
+        "panes": [
+          {
+            "leaf": "leaf-1",
+            "cur": "C:\\Users\\dev\\project\\README.md"
+          },
+          {
+            "leaf": "leaf-2",
+            "cur": null
+          }
+        ],
+        "pool": [
+          {
+            "path": "C:\\Users\\dev\\project\\README.md",
+            "name": "README.md"
+          },
+          {
+            "path": "C:\\Users\\dev\\project\\src\\main.rs",
+            "name": "main.rs"
+          }
+        ]
+      }
+    },
+    {
+      "root": {
+        "kind": "term",
+        "profile_id": "winps",
+        "cwd": "C:\\Users\\dev",
+        "manual_name": null
+      },
+      "pinned": false,
+      "focused_leaf": "leaf-0"
+    }
+  ],
+  "active_tab": 0,
+  "recent": [
+    {
+      "key": "pwsh|C:\\Users\\dev\\notes|",
+      "seed": {
+        "kind": "term",
+        "profile_id": "pwsh",
+        "cwd": "C:\\Users\\dev\\notes",
+        "manual_name": null
+      },
+      "timestamp": "2026-08-12T18:05:00Z",
+      "previews": [
+        "C:\\Users\\dev\\notes\\todo.md"
+      ]
+    }
+  ]
+}
