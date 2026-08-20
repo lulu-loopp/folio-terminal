@@ -83,32 +83,55 @@ const ITEM_FONT_LOGICAL_PX: f32 = 13.0;
 /// the strip's own 15px `.pmark`, centred, exactly as the flex box centres it.
 const ITEM_ICON_COLUMN_LOGICAL_PX: f32 = 14.0;
 const ITEM_MARK_LOGICAL_PX: f32 = 15.0;
-/// The box a `×` gets in that same column — **ten, not fifteen** (user ruling,
-/// 2026-08-16), and a deliberate deviation from the mock-up.
+/// The box the **window-control family** gets in that same column — **ten, not
+/// fifteen** (user rulings, 2026-08-16 and 2026-08-19), and a deliberate
+/// deviation from the mock-up.
 ///
-/// `#i-close`'s artwork runs edge to edge of its own `viewBox`: it is a bare
-/// cross with no margin, drawn that way because every other place it appears is
-/// a *button* whose padding supplies the air. A menu row has no button around
-/// it, so struck at the column's full fifteen the cross came out visibly heavier
-/// than the folder and the copy glyph beside it — two marks whose artwork is a
-/// shape inside a box with its own breathing room. Ten in a fifteen-pixel column
-/// gives it the same optical weight as its neighbours, which is what "the same
-/// size" actually means for glyphs that are not drawn to the same margins.
+/// These marks' artwork runs **edge to edge of its own `viewBox`**: they are the
+/// four ten-unit symbols the title bar wears (`#i-min`, `#i-max`, `#i-close`,
+/// `#i-plus`), drawn with no margin because every other place they appear is a
+/// *button* whose padding supplies the air. Every other mark a menu row can wear
+/// comes out of the house's sixteen-unit box with a unit and a half of margin
+/// built into the drawing. Struck at the same fifteen, the two families are not
+/// the same size on screen at all — which is measured, not guessed:
 ///
-/// It applies to all three spellings of the cross ([`ChromeMark::WindowClose`],
-/// [`ChromeMark::TabClose`], [`ChromeMark::PaneClose`]) rather than to the one a
-/// menu happens to use today: they are one drawing under three names, and a rule
-/// that named one of them would be a rule the next menu escapes by picking a
-/// different alias. Every other mark keeps [`ITEM_MARK_LOGICAL_PX`], the
-/// split glyphs included.
-const ITEM_MARK_CLOSE_LOGICAL_PX: f32 = 10.0;
+/// | mark        | `viewBox` | ink across  | at a 15px box | stroke at 15px |
+/// |-------------|-----------|-------------|---------------|----------------|
+/// | `#i-max`    | 10        | 0.0 – 10.0  | **15.0px**    | **1.50px**     |
+/// | `#i-close`  | 10        | 0.0 – 10.0  | **15.0px**    | **1.50px**     |
+/// | `#i-folder` | 16        | 1.6 – 14.4  | 12.0px        | filled         |
+/// | `#i-copy`   | 16        | 1.75 – 14.25| 11.7px        | 1.22px         |
+/// | `#i-float`  | 16        | 2.6 – 13.8  | 10.5px        | 1.13px         |
+///
+/// A ten-unit mark in a ten-pixel box draws 10.0px of ink with a 1.0px stroke,
+/// which stands beside that 10.5–12.0 band instead of a quarter to a half above
+/// it — and, more to the point, it is **the same box `Close pane` already
+/// takes**, so the two ends of the same menu match each other exactly. So the
+/// rule is one rule: **the ten-unit marks take a ten-pixel box, everything else
+/// takes [`ITEM_MARK_LOGICAL_PX`]**, split glyphs included.
+///
+/// It is stated over the *family* rather than over the mark some menu happens to
+/// use today, and both user reports are what that buys. The first (2026-08-16)
+/// was the `×`, and the rule was written for all three of its spellings
+/// ([`ChromeMark::WindowClose`], [`ChromeMark::TabClose`],
+/// [`ChromeMark::PaneClose`]) because they are one drawing under three names.
+/// The second (2026-08-19) was `Enter focus mode`, whose `#i-max` is the *same
+/// artwork discipline under a different glyph* — it read "a size bigger than the
+/// other rows" because at 15px it was a quarter to a half wider than every mark
+/// beside it and its outline a third of a pixel heavier. A rule that had named
+/// the cross rather than the family would have had to be discovered again on
+/// every mark the title bar lends a menu.
+const ITEM_MARK_EDGE_TO_EDGE_LOGICAL_PX: f32 = 10.0;
 
 /// How big this mark is drawn inside a menu row's icon column.
 fn item_mark_logical_px(mark: ChromeMark) -> f32 {
     match mark {
-        ChromeMark::WindowClose | ChromeMark::TabClose | ChromeMark::PaneClose => {
-            ITEM_MARK_CLOSE_LOGICAL_PX
-        }
+        ChromeMark::WindowClose
+        | ChromeMark::TabClose
+        | ChromeMark::PaneClose
+        | ChromeMark::WindowMinimize
+        | ChromeMark::WindowMaximize
+        | ChromeMark::Plus => ITEM_MARK_EDGE_TO_EDGE_LOGICAL_PX,
         _ => ITEM_MARK_LOGICAL_PX,
     }
 }
@@ -4032,7 +4055,7 @@ fn push_row(
     // does with a child one pixel wider than the box it is in — or the 10px box
     // a `×` gets instead, centred in exactly the same column so that a row with
     // a cross and a row with a folder still line their names up. See
-    // [`ITEM_MARK_CLOSE_LOGICAL_PX`].
+    // [`ITEM_MARK_EDGE_TO_EDGE_LOGICAL_PX`].
     let column_left = item[0] + px(ITEM_PADDING_X_LOGICAL_PX);
     let column_right = column_left + px(ITEM_ICON_COLUMN_LOGICAL_PX);
     if let Some(glyph) = row.mark {
@@ -6945,9 +6968,28 @@ impl PaneMenuLayout {
         self.submenu.as_ref().map(|submenu| submenu.frame)
     }
 
+    /// The child's row boxes, when one is up — [`Self::item`]'s opposite number
+    /// for the second surface, and read for its reason: a pin about the strip
+    /// *between* the frame and the first row has to know where both of them are,
+    /// and deriving the second from the padding constants would be a pin that
+    /// agreed with the layout by arithmetic rather than by reading it.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn submenu_rows(&self) -> Option<&[[f32; 4]]> {
+        self.submenu.as_ref().map(|submenu| submenu.items.as_slice())
+    }
+
     /// Whether this point is on either surface. Two rectangles, because a menu
     /// with a submenu open is two windows and a pointer on the second one has
     /// not left the first.
+    ///
+    /// **And the union of them is continuous**, which is a fact about
+    /// [`pane_submenu_layout`]'s seam rather than about this function: the child
+    /// stands on the parent's own border, so every column between the two
+    /// belongs to one of them and there is no x at which a hand crossing from
+    /// parent to child is reported as having left the menu. It read as a
+    /// four-pixel gap for one afternoon, and that is the whole of the second
+    /// user report of 2026-08-19.
     #[must_use]
     pub fn contains(&self, x: f32, y: f32) -> bool {
         contains(self.frame, x, y)
@@ -6955,6 +6997,64 @@ impl PaneMenuLayout {
                 .submenu
                 .as_ref()
                 .is_some_and(|submenu| contains(submenu.frame, x, y))
+    }
+
+    /// **Whether this point is on the child at all** — its rows, its padding,
+    /// its border (user report, 2026-08-19, second cause).
+    ///
+    /// [`pane_menu_hit`] answers `Surface` for a point on the child that is not
+    /// on one of its *rows*, and `Surface` is the same word it uses for a point
+    /// on the parent's padding — so a caller that has to tell "on the child"
+    /// from "not on the child" cannot get it from the hit alone. That caller is
+    /// the safety triangle, and reading `Surface` as "not on the child" is what
+    /// made the child close **under the pointer that had just landed on it**:
+    /// the child's own left border and padding are five logical pixels wide, the
+    /// hand crosses them on the way in, and the triangle's base is the child's
+    /// left edge — which by then is *behind* the pointer, so the aim test says
+    /// "not travelling toward it" and the child goes. Measured on the machine:
+    /// a hop that lands anywhere in the child's leading 5px shut it every time,
+    /// which is the whole of what the report called 断 hover.
+    ///
+    /// It is a question about the frame and not about the rows, so it is asked
+    /// of the frame.
+    #[must_use]
+    pub fn on_submenu(&self, x: f32, y: f32) -> bool {
+        self.submenu
+            .as_ref()
+            .is_some_and(|submenu| contains(submenu.frame, x, y))
+    }
+
+    /// **Whether the menu still has this hand** — the two surfaces, the seam
+    /// between them, and the aim across them, as one region.
+    ///
+    /// [`Self::contains`] answers where the pointer *is*; this answers whether
+    /// the pointer is still dealing with this menu, which is not the same
+    /// question on either of the two edges it differs on:
+    ///
+    /// * A hand that has crossed onto the child is on the menu, and `contains`
+    ///   already says so.
+    /// * A hand cutting **diagonally** from the heading to a child row that
+    ///   hangs below the parent's own bottom edge is over neither rectangle for
+    ///   part of the trip. It has plainly not left — it is aiming at a surface
+    ///   this menu put on the screen — and [`safe_triangle_holds`] is the
+    ///   industry's own answer to exactly that trip, already used one level down
+    ///   to keep the *child* open. This is the same verdict read one level up,
+    ///   so that the leave grace on the *parent* cannot fire against a hand the
+    ///   child is already holding.
+    ///
+    /// `from` is where the pointer was on the previous move, which is what makes
+    /// the triangle a statement about direction; `None` (the first move after
+    /// the menu opened) has no direction to read and falls back to the
+    /// rectangles.
+    #[must_use]
+    pub fn holds(&self, from: Option<[f32; 2]>, to: [f32; 2]) -> bool {
+        if self.contains(to[0], to[1]) {
+            return true;
+        }
+        let (Some(submenu), Some(from)) = (self.submenu_frame(), from) else {
+            return false;
+        };
+        safe_triangle_holds(from, to, submenu)
     }
 }
 
@@ -7168,27 +7268,53 @@ pub fn pane_menu_layout(
 
 /// Where the `Split with` submenu hangs.
 ///
-/// **Outside the parent's right edge, level with the heading's own top padding,
-/// and flipped to outside its left edge when the window's right edge is too
+/// **Against the parent's right edge, level with the heading's own top padding,
+/// and flipped against its left edge when the window's right edge is too
 /// close** — the two rules every submenu in every product follows, and the
 /// second is not optional: a menu opened on a pane head near the right edge is a
 /// menu whose child has nowhere to go on that side, and a child clamped instead
 /// of flipped would sit *on top of* the parent it hangs from.
 ///
-/// **Outside, and never over** (user report 2026-08-19). This used to seat the
-/// child `border + padding` *inside* the parent's edge, on the argument that two
-/// surfaces sharing a seam read as one object with a fold in it. On screen they
-/// do not: the child covered the right-hand column of every row it stood beside,
-/// including the `▸` on the very heading it hangs from, so the parent looked
-/// truncated rather than folded. The child now stands clear by
-/// [`MENU_OFFSET_LOGICAL_PX`], which is the same 4px every other popup in this
-/// file keeps from the control that opened it, and the two read as parent and
-/// child because that is what they are.
+/// # The seam is one border wide, and it is an overlap (user reports 2026-08-19)
 ///
-/// The corridor the safety triangle has to cover grows by exactly that gap,
-/// which costs it nothing: `safe_triangle_holds` aims at the child's near
-/// vertical edge wherever it is, and four pixels of travel is well inside the
-/// slop a hand already has.
+/// This edge has now been wrong in both directions on the same day, and the two
+/// reports together are what fixes it.
+///
+/// The first version seated the child `border + padding` *inside* the parent's
+/// edge, so the child covered the right-hand column of every row it stood
+/// beside — including the `▸` on the very heading it hangs from — and the parent
+/// read as truncated. The fix pushed the child *clear* by
+/// [`MENU_OFFSET_LOGICAL_PX`], and the second report is what that bought: four
+/// pixels of window between the two surfaces that belong to **neither** of them,
+/// so a hand crossing from parent to child passes through a column where
+/// [`PaneMenuLayout::contains`] answers "not on this menu" — and the pane
+/// chevron's leave grace ([`CHEVRON_LEAVE_GRACE`]) starts running against a hand
+/// that has not left anything. Slowly enough, the whole menu shuts in the gap it
+/// was drawn across. It is `UI-UX.md` §十 principle 1 exactly: *展开后的范围必须
+/// 完整包含触发它的范围*, and a gap is the one shape that cannot.
+///
+/// **So the child overlaps by exactly `border`**, and that number is not a taste:
+///
+/// * Qt states it as a metric of its own — `QStyle::PM_SubMenuOverlap`, "the
+///   horizontal overlap between a submenu and its parent" — i.e. the toolkit's
+///   named quantity here is an *overlap*, and the common style derives it from
+///   the menu frame's own panel width, so the two frames' borders land on each
+///   other and the seam is not a gap but a shared hairline.
+/// * GTK spells the same thing as `GtkMenu`'s negative `horizontal-offset`.
+/// * Radix (and, through it, most of the web) hangs `SubContent` flush against
+///   its trigger with no side offset at all, and then pushes the grace polygon's
+///   apex **back into** the trigger by five pixels (`const bleed = rightSide ?
+///   -5 : +5`) precisely so that no un-owned column can exist between them.
+///
+/// One border is the smallest overlap that makes the union continuous, and it
+/// covers only the parent's own hairline — never a row's text, which is what the
+/// first report was about. Both claims are pinned by
+/// `the_submenu_meets_the_parent_on_its_own_border_with_no_column_between_them`.
+///
+/// The safety triangle is untouched by this and stays what it was: the seam is
+/// what a *straight* crossing needs, and the triangle is what a *diagonal* one
+/// needs — a hand cutting across the parent's other rows toward a child row is
+/// outside both rectangles no matter how they are seated.
 ///
 /// **When neither side fits**, the child takes whichever has more room and is
 /// cropped by the window rather than moved over the parent. That is a window
@@ -7227,9 +7353,13 @@ fn pane_submenu_layout(
 
     let (surface_width, surface_height) = surface;
     let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
-    let gap = px(MENU_OFFSET_LOGICAL_PX);
-    let right_of = parent[2] + gap;
-    let left_of = parent[0] - gap - width;
+    // The shared hairline: the child's near edge stands **on** the parent's
+    // border rather than beside it, so the two rectangles share a column and the
+    // union of them has no hole. See this function's own header for why the
+    // number is the border and not a gap.
+    let seam = border;
+    let right_of = parent[2] - seam;
+    let left_of = parent[0] + seam - width;
     let left = if right_of + width + edge <= surface_width {
         right_of
     } else if left_of >= edge {
@@ -11463,34 +11593,62 @@ mod tests {
 
     // ── the submenu and the safety triangle (queue item #53) ────────────────
 
-    /// PIN (user report 2026-08-19) — **the submenu stands outside the parent,
-    /// on whichever side has room, and never over it.**
+    /// PIN (user reports 2026-08-19, both of them) — **the child meets the
+    /// parent on the parent's own border: never over its rows, and never with a
+    /// column of window between them.**
     ///
-    /// The report was a screenshot: the child's left edge fell *inside* the
-    /// parent and covered its right-hand column, including the `▸` on the very
-    /// heading it hangs from. The cause was a deliberate `border + padding`
-    /// overlap, written so the two surfaces would read as one object with a fold
-    /// in it; on screen they read as a parent that had been truncated.
+    /// Two screenshots on one day, from opposite sides of the same edge. The
+    /// first: the child seated `border + padding` inside the parent covered the
+    /// right-hand column of every row it stood beside, `▸` included, and the
+    /// parent read as truncated. The second, after that was fixed by pushing the
+    /// child *clear* by [`MENU_OFFSET_LOGICAL_PX`]: a hand crossing those four
+    /// pixels was, for the width of them, on neither surface — so the pane
+    /// chevron's leave grace ran against a hand that had left nothing, and a slow
+    /// crossing shut the menu in the gap it was drawn across.
     ///
-    /// Three claims, because three things can go wrong separately. With room on
-    /// the right the child stands to the right, clear by the same 4px every
-    /// other popup here keeps. With no room on the right it flips to the left,
-    /// clear by the same gap — and not clamped, because clamping is what put it
-    /// back on top. And in neither case do the two rectangles intersect, which
-    /// is the claim the report was actually about and the one that would still
-    /// be false if a future gap were made negative again.
+    /// So the seam is one border wide and it is an **overlap** — Qt's
+    /// `PM_SubMenuOverlap` ("the horizontal overlap between a submenu and its
+    /// parent", derived from the menu frame's own panel width), GTK's negative
+    /// `horizontal-offset`, Radix's flush `SubContent`. Four claims here, because
+    /// four things can go wrong separately:
     ///
-    /// Red gate: restore `let overlap = border + padding` and both the gap
-    /// assertions and the intersection assertion go red on the right-hand case;
-    /// restore `left_of.max(edge)` and the flipped case overlaps in a window
-    /// this narrow.
+    /// 1. With room on the right the child's near edge lands exactly on the
+    ///    parent's border, so the two share a column and nothing else.
+    /// 2. It covers the border and **not** the row content behind it — the first
+    ///    report's claim, still owed.
+    /// 3. Walking a pointer across the join finds no x where the menu says it
+    ///    has been left — the second report's claim, and the one the geometry
+    ///    exists for.
+    /// 4. With no room on the right it flips, and both claims hold on that side
+    ///    too — and it flips rather than clamping, because clamping is what put
+    ///    it back on top of the parent in the first place.
+    ///
+    /// Red gate: restore `let seam = -px(MENU_OFFSET_LOGICAL_PX)` (the four-pixel
+    /// gap) and claims 1 and 3 go red on both sides; restore `border + padding`
+    /// and claim 2 goes red; restore `left_of.max(edge)` and the flipped case
+    /// overlaps in a window this narrow.
     #[test]
-    fn the_submenu_stands_clear_of_the_parent_on_whichever_side_has_room() {
-        let gap = MENU_OFFSET_LOGICAL_PX;
-        let disjoint =
-            |parent: [f32; 4], child: [f32; 4]| child[2] <= parent[0] || child[0] >= parent[2];
+    fn the_submenu_meets_the_parent_on_its_own_border_with_no_column_between_them() {
+        let border = FLOAT_WINDOW_BORDER_LOGICAL_PX.max(1.0);
+        let padding = MENU_PADDING_LOGICAL_PX;
 
-        // Room on the right: the child hangs off the parent's right edge.
+        // Every column between the two rectangles belongs to one of them: no x
+        // anywhere across the join answers "this pointer is not on the menu".
+        let unbroken = |layout: &PaneMenuLayout, from: f32, to: f32, y: f32| {
+            let mut at = from;
+            while at <= to {
+                assert!(
+                    layout.contains(at, y),
+                    "a hand at x={at} (y={y}) is on neither surface: parent {:?}, child {:?}",
+                    layout.frame,
+                    layout.submenu_frame()
+                );
+                at += 0.5;
+            }
+        };
+
+        // Room on the right: the child hangs off the parent's right edge, one
+        // border of it standing on the parent's own.
         let roomy = pane_menu_layout(
             [300.0, 120.0],
             (1600.0, 900.0),
@@ -11502,16 +11660,21 @@ mod tests {
         let child = roomy.submenu_frame().expect("an open submenu has a frame");
         assert_eq!(
             child[0],
-            parent[2] + gap,
-            "the child stands clear of the parent's right edge by the house's own 4px"
+            parent[2] - border,
+            "the child's near edge stands on the parent's border and nowhere else"
         );
         assert!(
-            disjoint(parent, child),
-            "and the two rectangles do not intersect: {parent:?} against {child:?}"
+            child[0] >= parent[2] - border && child[2] > parent[2],
+            "it covers the hairline and not the column behind it — the old \
+             `border + padding` seat would put it {padding} further in: \
+             {parent:?} against {child:?}"
         );
+        let heading = roomy.item(PaneMenuRow::SplitWith);
+        let y = (heading[1] + heading[3]) / 2.0;
+        unbroken(&roomy, parent[2] - 8.0, child[0] + 8.0, y);
 
         // The same menu opened hard against the window's right edge: no room on
-        // that side, so it flips — and stands clear on the other one.
+        // that side, so it flips — and meets the parent the same way over there.
         let cramped = pane_menu_layout(
             [1500.0, 120.0],
             (1600.0, 900.0),
@@ -11524,18 +11687,191 @@ mod tests {
             .submenu_frame()
             .expect("an open submenu has a frame");
         assert!(
-            child[2] <= parent[0],
-            "with no room on the right the child flips to the left of the parent:              {parent:?} against {child:?}"
+            child[0] < parent[0],
+            "with no room on the right the child flips to the left of the parent: \
+             {parent:?} against {child:?}"
         );
         assert_eq!(
             child[2],
-            parent[0] - gap,
-            "clear by the same gap on that side"
+            parent[0] + border,
+            "and stands on the parent's border on that side too"
         );
+        let heading = cramped.item(PaneMenuRow::SplitWith);
+        let y = (heading[1] + heading[3]) / 2.0;
+        unbroken(&cramped, child[2] - 8.0, parent[0] + 8.0, y);
+    }
+
+    /// PIN — **the join survives every scale**, which is where a seam expressed
+    /// in logical pixels and then rounded would quietly re-open.
+    ///
+    /// The overlap is one *physical* border, and rounding either frame is free to
+    /// move an edge half a pixel. The claim is therefore the one that matters
+    /// rather than the arithmetic: on whichever side the child took, the two
+    /// rectangles share at least one whole physical column, so the union stays
+    /// continuous at 100%, 125%, 150% and 200%.
+    #[test]
+    fn the_join_holds_at_every_scale() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let layout = pane_menu_layout(
+                [300.0 * scale, 120.0 * scale],
+                (1600.0 * scale, 900.0 * scale),
+                scale,
+                true,
+                &mut fake_measure,
+            );
+            let parent = layout.frame;
+            let child = layout
+                .submenu_frame()
+                .expect("an open submenu has a frame");
+            let shared = child[0].max(parent[0]).min(child[2].min(parent[2]));
+            let overlap = (child[2].min(parent[2]) - child[0].max(parent[0])).max(0.0);
+            assert!(
+                overlap >= 1.0,
+                "scale {scale}: the two frames share {overlap}px at x={shared} — \
+                 anything under one physical pixel is a column that belongs to \
+                 neither: {parent:?} against {child:?}"
+            );
+            let heading = layout.item(PaneMenuRow::SplitWith);
+            let y = (heading[1] + heading[3]) / 2.0;
+            let mut at = parent[2] - 4.0 * scale;
+            while at <= child[0] + 4.0 * scale {
+                assert!(
+                    layout.contains(at, y),
+                    "scale {scale}: x={at} is on neither surface"
+                );
+                at += 0.25;
+            }
+        }
+    }
+
+    /// PIN (user report 2026-08-19, second cause) — **the child's own border and
+    /// padding belong to the child**, even though the hit test calls them
+    /// `Surface` exactly as it calls the parent's.
+    ///
+    /// Measured on the machine before the fix: a pointer that hopped from the
+    /// `Split with` row and landed anywhere in the child's leading five logical
+    /// pixels shut the child *on arrival*. The chain is short and each link is
+    /// reasonable on its own — `pane_menu_hit` answers `Surface` for a point on
+    /// the child that is not on a row; the caller read `Surface` as "not on the
+    /// child"; so it asked the safety triangle, whose base is the child's own
+    /// left edge; and a pointer already inside the child is *past* that base,
+    /// which is the one thing the triangle reads as "aiming somewhere else".
+    ///
+    /// So the question "is this the child's pixel" is asked of the child's
+    /// frame, and this pins the gap between the two answers: every point in the
+    /// leading strip is `on_submenu` while `pane_menu_hit` still says `Surface`.
+    ///
+    /// Red gate: make `on_submenu` delegate to `pane_menu_hit`'s `Submenu` arm
+    /// and the leading-strip case goes red — which is the machine's failure,
+    /// restored.
+    #[test]
+    fn the_submenus_own_border_and_padding_are_the_submenus() {
+        let layout = pane_menu_layout(
+            [300.0, 120.0],
+            (1600.0, 900.0),
+            1.0,
+            true,
+            &mut fake_measure,
+        );
+        let child = layout.submenu_frame().expect("an open submenu has a frame");
+        let rows = layout
+            .submenu_rows()
+            .expect("an open submenu has rows to press");
+        let inside_y = (rows[0][1] + rows[0][3]) / 2.0;
+
+        // The leading strip: from the child's own edge up to where its first
+        // column of content begins. Every pixel of it is the child's.
+        let mut at = child[0];
+        let mut saw_surface = false;
+        while at < rows[0][0] {
+            assert!(
+                layout.on_submenu(at, inside_y),
+                "x={at} is inside the child's frame {child:?} and must be the child's"
+            );
+            if matches!(
+                pane_menu_hit(&layout, f64::from(at), f64::from(inside_y)),
+                Some(PaneMenuHit::Surface)
+            ) {
+                saw_surface = true;
+            }
+            at += 0.5;
+        }
         assert!(
-            disjoint(parent, child),
-            "and still no intersection: {parent:?} against {child:?}"
+            saw_surface,
+            "the strip this pin is about is exactly the one the hit test calls \
+             `Surface`; if that stopped being true the pin has lost its subject"
         );
+
+        // And the claim has a floor: a point outside the frame is not the
+        // child's, however close it stands.
+        assert!(!layout.on_submenu(child[0] - 1.0, inside_y));
+        assert!(!layout.on_submenu(child[2] + 1.0, inside_y));
+        assert!(!layout.on_submenu(child[0] + 4.0, child[1] - 1.0));
+        // A menu with no child open has no pixels that are the child's.
+        let alone = pane_menu_layout(
+            [300.0, 120.0],
+            (1600.0, 900.0),
+            1.0,
+            false,
+            &mut fake_measure,
+        );
+        assert!(!alone.on_submenu(child[0] + 4.0, inside_y));
+    }
+
+    /// PIN — **the diagonal is held one level up too**: a hand cutting across the
+    /// parent's other rows toward the child is still *this menu's* hand, even
+    /// where it is over neither rectangle.
+    ///
+    /// The seam fixes the straight crossing; this is the other half. The pane
+    /// chevron's leave grace is driven by [`PaneMenuLayout::holds`] rather than
+    /// by [`PaneMenuLayout::contains`] for exactly this trip — a child row below
+    /// the parent's own bottom edge is reached by leaving both boxes — and
+    /// without it the 150ms would start against a hand the submenu is already
+    /// holding open.
+    ///
+    /// Red gate: make `holds` delegate to `contains` and the aimed case goes red
+    /// while the abandoning case stays green, which is the pair that says the
+    /// rule is about direction and not about slack.
+    #[test]
+    fn the_menu_keeps_a_hand_that_is_still_aiming_at_its_child() {
+        let layout = pane_menu_layout(
+            [300.0, 120.0],
+            (1600.0, 900.0),
+            1.0,
+            true,
+            &mut fake_measure,
+        );
+        let parent = layout.frame;
+        let child = layout.submenu_frame().expect("an open submenu has a frame");
+        let heading = layout.item(PaneMenuRow::SplitWith);
+        let from = [heading[2] - 1.0, (heading[1] + heading[3]) / 2.0];
+
+        // A point under both boxes' feet but inside the fan aimed at the child's
+        // near edge. Off the parent, off the child, and still the menu's.
+        let aimed = [
+            (parent[2] + child[0]) / 2.0,
+            child[3].max(parent[3]) - 1.0,
+        ];
+        if !layout.contains(aimed[0], aimed[1]) {
+            assert!(
+                layout.holds(Some(from), aimed),
+                "a hand between the two surfaces, aimed at the child, has not left \
+                 the menu: from {from:?} to {aimed:?}, parent {parent:?}, child {child:?}"
+            );
+        }
+
+        // And the same point reached from the *other* side — a hand travelling
+        // away from the child rather than toward it — is a hand that has gone.
+        let leaving = [child[2] + 40.0, child[3] + 40.0];
+        assert!(
+            !layout.holds(Some(from), leaving),
+            "and a hand that has walked off the far corner has left it: {leaving:?}"
+        );
+
+        // With no previous position there is no direction to read, and the
+        // rectangles answer alone.
+        assert!(!layout.holds(None, leaving));
+        assert!(layout.holds(None, [child[0] + 4.0, child[1] + 4.0]));
     }
 
     /// PIN — **the submenu is the profile list, hung beside its heading, and the
@@ -11691,28 +12027,38 @@ mod tests {
         assert_eq!(SUBMENU_SAFE_HOLD, Duration::from_millis(300));
     }
 
-    // ── the `×` in a menu row (user ruling, 2026-08-16) ─────────────────────
+    // ── the window-control marks in a menu row (rulings 2026-08-16, -19) ────
 
-    /// PIN — **every `×` in a menu row is struck in a 10px box, and every other
-    /// mark keeps its 15**, in whichever menu it appears.
+    /// PIN — **every ten-unit mark in a menu row is struck in a 10px box, and
+    /// every other mark keeps its 15**, in whichever menu it appears.
     ///
-    /// A deliberate deviation from the mock-up, whose `#i-close` runs edge to
-    /// edge of its own `viewBox`: struck at the column's full fifteen the cross
-    /// out-weighs the folder and the copy glyph beside it, which are shapes
-    /// drawn inside a box with margins of their own.
+    /// A deliberate deviation from the mock-up, whose title-bar symbols run edge
+    /// to edge of their own `viewBox`: struck at the column's full fifteen they
+    /// out-weigh the folder and the copy glyph beside them, which are shapes
+    /// drawn inside a box with a unit and a half of margin of their own. See
+    /// [`ITEM_MARK_EDGE_TO_EDGE_LOGICAL_PX`] for the measured table.
     ///
     /// Red gate: apply the rule to `TabClose` alone and a menu that reaches for
     /// `PaneClose` — the same drawing under another name — gets the heavy cross
-    /// back with nothing to say so.
+    /// back with nothing to say so. Apply it to the crosses alone and
+    /// `Enter focus mode`'s `#i-max` comes back a third bigger than the rows
+    /// around it, which is the 2026-08-19 report.
     #[test]
-    fn a_menu_rows_close_glyph_is_struck_ten_wide_and_every_other_mark_fifteen() {
-        assert_eq!(ITEM_MARK_CLOSE_LOGICAL_PX, 10.0);
-        for close in [
+    fn a_menu_rows_window_control_marks_are_struck_ten_wide_and_every_other_fifteen() {
+        assert_eq!(ITEM_MARK_EDGE_TO_EDGE_LOGICAL_PX, 10.0);
+        for edge_to_edge in [
             ChromeMark::WindowClose,
             ChromeMark::TabClose,
             ChromeMark::PaneClose,
+            ChromeMark::WindowMinimize,
+            ChromeMark::WindowMaximize,
+            ChromeMark::Plus,
         ] {
-            assert_eq!(item_mark_logical_px(close), ITEM_MARK_CLOSE_LOGICAL_PX);
+            assert_eq!(
+                item_mark_logical_px(edge_to_edge),
+                ITEM_MARK_EDGE_TO_EDGE_LOGICAL_PX,
+                "{edge_to_edge:?} is drawn to the edges of a ten-unit box"
+            );
         }
         for other in [
             ChromeMark::Folder,
@@ -11729,9 +12075,10 @@ mod tests {
             );
         }
 
-        // And it is true of the drawing, not merely of the table: the `×` in the
-        // pane menu measures ten and stays centred in the same column the
-        // fifteen-pixel marks are centred in.
+        // And it is true of the drawing, not merely of the table: read the whole
+        // menu's icon column back and every row is in the box its family gets.
+        // `Enter focus mode`'s `#i-max` is the 2026-08-19 report and is checked
+        // here beside the `×` it now matches.
         let layout = pane_menu(false);
         let layer = one_layer(pane_menu_build(
             &layout,
@@ -11741,18 +12088,32 @@ mod tests {
             false,
             &mut fake_measure,
         ));
-        let cross = layer
-            .sprites
-            .iter()
-            .find(|sprite| sprite.mark == ChromeMark::TabClose)
-            .expect("`Close pane` wears a cross");
-        let folder = layer
-            .sprites
-            .iter()
-            .find(|sprite| sprite.mark == ChromeMark::Folder)
-            .expect("`New terminal in folder…` wears a folder");
-        assert_eq!(cross.rect[2] - cross.rect[0], 10.0);
-        assert_eq!(folder.rect[2] - folder.rect[0], 15.0);
+        let sprite_of = |glyph: ChromeMark| {
+            let sprite = layer
+                .sprites
+                .iter()
+                .find(|sprite| sprite.mark == glyph)
+                .unwrap_or_else(|| panic!("{glyph:?} is one of this menu's rows"));
+            sprite.rect
+        };
+        let cross = sprite_of(ChromeMark::TabClose);
+        let folder = sprite_of(ChromeMark::Folder);
+        assert_eq!(cross[2] - cross[0], 10.0);
+        assert_eq!(folder[2] - folder[0], 15.0);
+        for (glyph, wanted) in [
+            (ChromeMark::WindowMaximize, 10.0),
+            (ChromeMark::Split, 15.0),
+            (ChromeMark::Copy, 15.0),
+            (ChromeMark::Float, 15.0),
+        ] {
+            let rect = sprite_of(glyph);
+            assert_eq!(
+                rect[2] - rect[0],
+                wanted,
+                "{glyph:?} is struck in its family's box"
+            );
+            assert_eq!(rect[3] - rect[1], wanted, "{glyph:?} is square");
+        }
         // Within half a pixel of each other, which is as centred as two boxes of
         // different parity can be: both are snapped to whole device pixels — a
         // mark on a subpixel is a resampled mark — and 10 and 15 cannot both
@@ -11760,10 +12121,10 @@ mod tests {
         // not a drift.
         let centre = |rect: [f32; 4]| (rect[0] + rect[2]) / 2.0;
         assert!(
-            (centre(cross.rect) - centre(folder.rect)).abs() <= 0.5,
+            (centre(cross) - centre(folder)).abs() <= 0.5,
             "both are centred in the one 14px column, so the names line up:              {} against {}",
-            centre(cross.rect),
-            centre(folder.rect),
+            centre(cross),
+            centre(folder),
         );
     }
 

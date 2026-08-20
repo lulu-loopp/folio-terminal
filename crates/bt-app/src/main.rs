@@ -14455,6 +14455,80 @@ impl Popup {
     }
 }
 
+/// **Every panel this window raises by *hovering*** — [`Popup`]'s twin, one
+/// register down, and the same sentence: at most one of these is on the glass at
+/// a time (user report, 2026-08-19).
+///
+/// The report was a screenshot with a pane head's `⌄` menu and a files flyout
+/// standing on top of each other, each half-covering the other. Neither was
+/// wrong on its own, and that is the point: the flyout keeps a
+/// [`float::FLY_CLOSE_LEFT`] grace (420ms) after the hand leaves it, the chevron
+/// opens its menu on a [`profiles::CHEVRON_HOVER_OPEN`] rest (250ms), and 250 is
+/// inside 420 — so a hand that walks off a flyout onto the `⌄` beside it holds
+/// two hover panels open **by arithmetic**. Every pair on this list has that
+/// shape, because every pair is two independent clocks neither of which has ever
+/// been told the other one is running. Widening a rectangle or shortening a
+/// grace would fix one pair and leave the rule un-stated; this list states it.
+///
+/// **A press outranks all of them.** The whole of [`Popup`] is one entry here
+/// rather than eight: which menu is up is a fact `Popup` already owns, and what
+/// this list needs to know is only that a menu *is* — no hover clock may start
+/// underneath one, and opening one takes the hover panels down. That is the
+/// ruling's 点击开启的菜单优先级高于 hover 浮层 written as an ordering instead of
+/// as a special case repeated at each opener.
+///
+/// **The tip is deliberately not on it.** It is the one hover surface that is not
+/// a panel: a label, never pressable, always directly under the pointer, and
+/// therefore never in a position to half-cover something the hand is reaching
+/// for. The one pair it *can* overlap — the layout peek — has had its own
+/// one-directional exclusion since `peek_strip` was written (§6 there), and
+/// folding it in here would replace a rule that is due-ordered with one that is
+/// first-come, which is a different answer to a question already settled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HoverFloat {
+    /// Any [`Popup`] — a menu, however it was opened.
+    Menu,
+    /// The files flyout while it is a [`float::FloatMode::Peek`]. A **pinned**
+    /// float is not on this list for §7.1.2's reason: it was torn off, it is a
+    /// place rather than a popup, and nothing about a hover may close it.
+    Flyout,
+    /// The glance card over a file row (P143-P150), once its 350ms has matured.
+    Glance,
+    /// The layout peek over a tab (L131-L135).
+    LayoutPeek,
+}
+
+impl HoverFloat {
+    /// Precedence order, highest first — and it is arrival order made explicit
+    /// rather than a ranking of importance: whoever is already up holds the
+    /// glass, and `Menu` leads only because a press can raise one over anything.
+    const ALL: [Self; 4] = [Self::Menu, Self::Flyout, Self::Glance, Self::LayoutPeek];
+
+    /// What one arrival has to put away: every other panel, always —
+    /// [`Popup::others`]'s sentence, for the same reason it is written once.
+    fn others(self) -> impl Iterator<Item = Self> {
+        Self::ALL.into_iter().filter(move |other| *other != self)
+    }
+
+    /// **Which panel holds the glass**, given a reading of which ones are up.
+    ///
+    /// A free function of a predicate rather than a method on the window, so the
+    /// rule itself can be driven through every combination without a renderer,
+    /// a pointer or a clock — [`profiles::ChevronGate`]'s own discipline, and
+    /// for its reason: the thing that went wrong was a *policy*, and a policy
+    /// that can only be exercised through a live window is a policy nobody
+    /// exercises.
+    fn holding(up: impl Fn(Self) -> bool) -> Option<Self> {
+        Self::ALL.into_iter().find(|who| up(*who))
+    }
+
+    /// Whether this panel's clock may run: the glass is free, or it is already
+    /// this panel's.
+    fn free(self, up: impl Fn(Self) -> bool) -> bool {
+        Self::holding(up).is_none_or(|held| held == self)
+    }
+}
+
 /// **The setting, resolved against the pane's own measurement** (user ruling,
 /// 2026-08-16).
 ///
@@ -21980,6 +22054,146 @@ impl Runtime<'_> {
             }
         }
         self.window.chevrons.clear();
+        // **And every hover panel with them** (user report, 2026-08-19). A menu
+        // is [`HoverFloat::Menu`], and the list's one ordering says a menu
+        // outranks anything a hover raised: the press has just answered the
+        // question the flyout or the glance was still asking. Nothing here can
+        // put a menu away — that is this function's own loop, above — so a hover
+        // surface can never take one down, which is the other half of the
+        // ordering and the reason `keep` is not a parameter.
+        self.close_hover_floats_except(HoverFloat::Menu);
+    }
+
+    // ── the hover panels' one-at-a-time rule (user report, 2026-08-19) ───────
+
+    /// **Which hover panel holds the glass**, if one does — [`HoverFloat`]'s
+    /// declaration order, highest first.
+    ///
+    /// Read off the live state rather than remembered: "is a menu up" and "is
+    /// the flyout still inside its closing grace" are facts those hosts already
+    /// own, and a second copy of them is a copy that goes stale on whichever
+    /// path forgets to write it.
+    fn hover_float_up(&self) -> Option<HoverFloat> {
+        HoverFloat::holding(|who| self.hover_float_is_up(who))
+    }
+
+    /// Whether one named panel is on the glass. The window's half of
+    /// [`HoverFloat::holding`] — this is where the facts live, and the rule
+    /// itself lives beside the enum where it can be tested.
+    fn hover_float_is_up(&self, who: HoverFloat) -> bool {
+        match who {
+            HoverFloat::Menu => {
+                self.window.profile_menu.is_open()
+                    || self.window.root_menu.seat().is_some()
+                    || self.window.preview_menu.seat().is_some()
+                    || self.window.file_menu.is_some()
+                    || self.window.pane_menu.is_some()
+                    || self.window.git_menu.is_some()
+                    || self.window.term_menu.is_some()
+                    || self.window.graph_filter_menu.is_some()
+            }
+            // The **peek** only. A pinned float is a place (§7.1.2) and is on
+            // nobody's exclusion list.
+            HoverFloat::Flyout => self.window.float.peek_id().is_some(),
+            // A card with a `due` is an intent, not a panel: nothing is on the
+            // glass for those 350ms, so nothing is being covered.
+            HoverFloat::Glance => self
+                .window
+                .file_peek
+                .as_ref()
+                .is_some_and(|peek| peek.due.is_none()),
+            HoverFloat::LayoutPeek => self.window.layout_peek.active().is_some(),
+        }
+    }
+
+    /// Whether `who`'s clock may run right now: the glass is free, or it is
+    /// already `who`'s.
+    fn hover_float_free(&self, who: HoverFloat) -> bool {
+        who.free(|other| self.hover_float_is_up(other))
+    }
+
+    /// Take down every hover panel but `keep`, and report whether anything went.
+    ///
+    /// The intents go with the panels. A flyout dismissed while its own
+    /// `settling` was still maturing would re-open itself 180ms later under a
+    /// pointer that had not moved — G87's bug, and it is exactly as true when
+    /// the dismissal comes from this list as when it comes from Esc.
+    fn close_hover_floats_except(&mut self, keep: HoverFloat) -> bool {
+        let mut went = false;
+        for who in keep.others() {
+            match who {
+                // Menus are [`Popup`]'s list and are closed through it. Nothing
+                // a hover raises may take one down — see `close_popups_except`,
+                // which is the only caller that passes `Menu` and the only door
+                // this arm would ever be reached through.
+                HoverFloat::Menu => {}
+                HoverFloat::Flyout => {
+                    self.window.float.disarm();
+                    // **A press *inside* the window is not a press against it.**
+                    // §7.1.2 and [`Self::open_file_menu`]'s own note: a float is
+                    // a place rather than a popup, and the menus raised on one
+                    // are very often about a row inside it — dismissing it here
+                    // would answer the question by deleting its subject. So the
+                    // peek goes on a menu raised somewhere *else*, which is the
+                    // ordinary "a press away puts a transient surface away", and
+                    // stays under a menu raised on itself.
+                    //
+                    // A keyboard-raised menu is covered by the same reading and
+                    // not by an exception: a peek never takes the keyboard
+                    // (§7.1.2), so a menu a key raised is never about one.
+                    if let Some(id) = self.window.float.peek_id() {
+                        let on_it = self.window.pointer_position.is_some_and(|at| {
+                            matches!(self.float_hit_at(at), Some((hit, _)) if hit == id)
+                        });
+                        if !on_it {
+                            self.window.float.dismiss(id, Instant::now());
+                            went = true;
+                        }
+                    }
+                }
+                HoverFloat::Glance => went |= self.hide_file_peek(),
+                HoverFloat::LayoutPeek => went |= self.window.layout_peek.hide(),
+            }
+        }
+        went
+    }
+
+    /// **Ask every hover intent again, with the hand where it already is.**
+    ///
+    /// The exclusion above is a rule about *arming*, and a rule about arming has
+    /// a debt: the arming happens on `pointermove`, and the thing that was
+    /// blocking it goes away on a *clock*. A flyout's 420ms grace runs out under
+    /// a pointer resting on the `⌄` beside it, and without this the menu refused
+    /// at 0ms would never be offered again — the hand would have to twitch to
+    /// buy a second opinion. `UI-UX.md` §十 1b names that failure and its fix in
+    /// one line: **判定要在「答案可能变了」的时候做，不是只在「指针动了」的时候
+    /// 做**, using the pointer's remembered position.
+    ///
+    /// Called once, from the tail of the tick, and only on the pass where the
+    /// glass actually came free — so a window with nothing hovering pays
+    /// nothing.
+    fn rearm_hover_intents(&mut self, now: Instant) -> Result<()> {
+        let Some(position) = self.window.pointer_position else {
+            return Ok(());
+        };
+        self.observe_chevrons(position, now);
+        let trigger = self
+            .hover_float_free(HoverFloat::Flyout)
+            .then(|| self.float_trigger_at(position))
+            .flatten();
+        self.window.float.observe(trigger, now);
+        let row = self
+            .hover_float_free(HoverFloat::Glance)
+            .then(|| self.row_under(position))
+            .flatten();
+        if self.observe_file_peek(row, now) && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        let tab = self
+            .hover_float_free(HoverFloat::LayoutPeek)
+            .then(|| self.layout_peek_target_at(position))
+            .flatten();
+        self.note_layout_peek(tab)
     }
 
     /// Put the picker away and repaint if it was up. Every press that is not the
@@ -36444,11 +36658,20 @@ impl Runtime<'_> {
         let Some(menu) = self.window.pane_menu.as_mut() else {
             return Ok(false);
         };
-        let hovering_child = matches!(
-            hit,
-            Some(profiles::PaneMenuHit::Submenu(_))
-                | Some(profiles::PaneMenuHit::Row(profiles::PaneMenuRow::SplitWith))
-        );
+        // **On the child at all**, which is a question about its frame and not
+        // about its rows — see [`profiles::PaneMenuLayout::on_submenu`]. Reading
+        // it off `hit` alone was the second cause of the 2026-08-19 report: the
+        // hit says `Surface` both for the parent's padding and for the child's,
+        // so a hand landing in the child's own leading border-and-padding read
+        // as "not on the child", the triangle was asked about a pointer already
+        // past its base, and the child shut under the hand that had just reached
+        // it. The heading keeps its place beside it: a hand back on the row the
+        // child hangs from has not left the child either.
+        let hovering_child = layout.on_submenu(to[0], to[1])
+            || hit
+                == Some(profiles::PaneMenuHit::Row(
+                    profiles::PaneMenuRow::SplitWith,
+                ));
         let was_open = menu.submenu_open;
         let mut held = false;
         if let Some(submenu) = submenu
@@ -36555,6 +36778,27 @@ impl Runtime<'_> {
         self.window.pane_menu.as_ref()?.submenu_hold_until
     }
 
+    /// Which files flyout — if any — this point would raise.
+    ///
+    /// Its own function because two callers ask it now: the pointer's own move,
+    /// and [`Self::rearm_hover_intents`] asking again once the glass came free.
+    /// A second copy of the match would be a second opinion about which chrome
+    /// targets are triggers.
+    fn float_trigger_at(&self, position: PhysicalPosition<f64>) -> Option<float::FloatTrigger> {
+        match self.chrome_target_at(position) {
+            Some(seats::ChromeTarget::TabFiles(index)) => self
+                .window
+                .tabs
+                .get(index)
+                .map(|tab| float::FloatTrigger::Tab(tab.id)),
+            Some(seats::ChromeTarget::PaneFiles(seat)) => Some(float::FloatTrigger::Pane(LeafId {
+                tab: self.window.tabs[self.window.active_tab].id,
+                seat,
+            })),
+            _ => None,
+        }
+    }
+
     /// **Both `⌄` clocks, told where the pointer is** (user ruling, 2026-08-16).
     ///
     /// Called from the one place every pointer move passes through, above the
@@ -36574,6 +36818,22 @@ impl Runtime<'_> {
         // carried across the window would be a menu nobody asked for, standing
         // in the way of the drop.
         if self.window.drag.is_some() || self.window.float_drag.is_some() {
+            self.window.chevrons.clear();
+            return;
+        }
+        // **And no rest is accumulated underneath another hover panel** (user
+        // report, 2026-08-19). The flyout's closing grace is 420ms leftward and
+        // this rest is 250, so a hand walking off a flyout onto the `⌄` beside
+        // it used to open a menu *over* a window that had not finished leaving —
+        // two hover panels on the glass at once, which is the screenshot. The
+        // clock is not merely refused a maturity here, it never starts: an
+        // intent that ran invisibly and fired the instant the other panel went
+        // would be the same overlap one frame later. It is offered again by
+        // [`Self::rearm_hover_intents`] the moment the glass is free.
+        //
+        // A menu already up is not "another panel" — this gate is what keeps it
+        // open — so the whole of [`Popup`] is excluded from the question.
+        if !self.hover_float_free(HoverFloat::Menu) {
             self.window.chevrons.clear();
             return;
         }
@@ -36602,10 +36862,29 @@ impl Runtime<'_> {
         } else {
             profiles::ChevronPointer::Away
         };
+        // **The menu's whole region, not its two rectangles** — see
+        // [`profiles::PaneMenuLayout::holds`]. `contains` answers where the
+        // pointer *is*; the grace needs to know whether the menu still has this
+        // hand, and a hand cutting diagonally toward a child row that hangs
+        // below the parent's own bottom edge is over neither box while it is
+        // plainly still dealing with the menu.
+        //
+        // `pointer_was` is last move's position, which is what makes the
+        // triangle a statement about direction — and it is still last move's
+        // here because this runs at the head of `pointer_moved`, above
+        // `drive_pane_menu_hover`, which is where it is re-seated. Asking after
+        // that would hand the triangle `from == to`, and a degenerate triangle
+        // answers "yes" to everything.
+        let pane_was = self
+            .window
+            .pane_menu
+            .as_ref()
+            .and_then(|menu| menu.pointer_was);
+        let pane_at = [position.x as f32, position.y as f32];
         let pane_on_surface = pane_open
             && self
                 .pane_menu_layout()
-                .is_some_and(|layout| layout.contains(position.x as f32, position.y as f32));
+                .is_some_and(|layout| layout.holds(pane_was, pane_at));
         let (pane_where, pane_owner_open) = match (on_pane_button, pane_on_surface) {
             (Some(seat), _) => (
                 profiles::ChevronPointer::Button,
@@ -42591,18 +42870,17 @@ impl Runtime<'_> {
         // A drag in flight arms nothing (`armFlyOpen`'s first line, mock-up
         // 3926): every path that owns the pointer has returned above, so the only
         // way to reach here is with a free hand.
-        let trigger = match self.chrome_target_at(position) {
-            Some(seats::ChromeTarget::TabFiles(index)) => self
-                .window
-                .tabs
-                .get(index)
-                .map(|tab| float::FloatTrigger::Tab(tab.id)),
-            Some(seats::ChromeTarget::PaneFiles(seat)) => Some(float::FloatTrigger::Pane(LeafId {
-                tab: self.window.tabs[self.window.active_tab].id,
-                seat,
-            })),
-            _ => None,
-        };
+        //
+        // **And not while another hover panel is on the glass** — one at a time
+        // (user report, 2026-08-19), see [`HoverFloat`]. Filtering the *subject*
+        // rather than skipping the call is deliberate: `observe(None)` is how
+        // this host is told the pointer has left a trigger, and a call skipped
+        // instead would leave an intent armed at whatever the hand was over
+        // before the menu came up.
+        let trigger = self
+            .hover_float_free(HoverFloat::Flyout)
+            .then(|| self.float_trigger_at(position))
+            .flatten();
         self.window.float.observe(trigger, Instant::now());
         self.drive_float_hover(position)?;
         // P146/P150 — the glance's intent, armed by the row under the pointer
@@ -42611,7 +42889,10 @@ impl Runtime<'_> {
         // say which row — if any — is under the pointer, and the answer has to
         // be this frame's. Every path that owns the pointer has returned above,
         // so a drag, a divider and a float carry cannot arm one.
-        let row = self.row_under(position);
+        let row = self
+            .hover_float_free(HoverFloat::Glance)
+            .then(|| self.row_under(position))
+            .flatten();
         // The card is taken down **here**, on the move that left the row, and the
         // frame it owes is paid here too: the chrome hover above has already
         // presented by the time this runs, so a card retired without its own
@@ -42628,7 +42909,11 @@ impl Runtime<'_> {
         // anchors of their own now.
         // The peek first, and the tip only where the peek is not already
         // answering (§6). A tab that qualifies for neither is untouched by both.
-        self.note_layout_peek(self.layout_peek_target_at(position))?;
+        let peeked = self
+            .hover_float_free(HoverFloat::LayoutPeek)
+            .then(|| self.layout_peek_target_at(position))
+            .flatten();
+        self.note_layout_peek(peeked)?;
         // **The rail is a surface standing on the pane's own right edge**, so it
         // takes the pointer before anything the pane itself would answer with: a
         // hyperlink underlined beneath a tick is a link the tick is standing on,
@@ -48492,6 +48777,10 @@ impl Runtime<'_> {
         self.advance_live_math_if_due(now)?;
         self.activate_hyperlink_hover_if_due(now)?;
         self.activate_peek_if_due(now)?;
+        // Who holds the glass **before** this pass's clocks run, so that the
+        // tail below can tell "nothing was hovering" from "something was and its
+        // grace just ran out". See [`Self::rearm_hover_intents`].
+        let glass_was = self.hover_float_up();
         // Both `⌄` clocks, and the pane menu's own two. Above the tip's, on the
         // layout peek's precedent and for its reason: a menu that has matured is
         // already on screen when the tip asks whether it has anything to explain.
@@ -48527,6 +48816,14 @@ impl Runtime<'_> {
         // explain, and the frame both are due on should show that in the order
         // they will actually be drawn.
         self.advance_float(now)?;
+        // **The glass came free while the hand stood still.** Below every clock
+        // that can retire a hover panel and above nothing that arms one, because
+        // that is exactly the instant the refusals handed out on the last
+        // pointer move stopped being true. Costs nothing on a pass where nobody
+        // was hovering, which is almost every pass.
+        if glass_was.is_some() && self.hover_float_up().is_none() {
+            self.rearm_hover_intents(now)?;
+        }
         // And the foot's own 1300ms, whichever strip is wearing it. Its own step
         // because the two feet are drawn into two different surfaces — see
         // `advance_foot_reveal`.
@@ -70609,6 +70906,97 @@ mod tests {
         // over, and therefore the one that could otherwise have come up
         // underneath an open menu rather than on top of it.
         assert!(Popup::ALL.contains(&Popup::TermMenu));
+    }
+
+    /// PIN (user report, 2026-08-19) — **one hover panel at a time: while any of
+    /// them is on the glass, no other one's clock runs.**
+    ///
+    /// The report was a screenshot with a pane head's `⌄` menu and a files
+    /// flyout overlapping. Neither had a bug in it — the flyout's leftward
+    /// closing grace is 420ms, the chevron's rest is 250, and 250 is inside 420,
+    /// so a hand walking off one onto the other holds both open by arithmetic.
+    /// [`Popup`]'s own list is the precedent and this is the same shape one
+    /// register down.
+    ///
+    /// Driven over **every ordered pair**, because "at most one" is a claim
+    /// about all of them and a rule that happened to be right for the pair in
+    /// the screenshot is not the rule. And the three claims are separate:
+    ///
+    /// 1. Nothing up means every clock may run — a window with a free hand pays
+    ///    nothing for this rule.
+    /// 2. Something up means only *that* one's clock may run. The panel already
+    ///    on the glass is never blocked by itself, which is what lets the same
+    ///    gate be asked on every pointer move without shutting the thing it is
+    ///    protecting.
+    /// 3. `Menu` wins whenever it is up, because a press outranks a hover — the
+    ///    ruling's 点击开启的菜单优先级高于 hover 浮层.
+    ///
+    /// Red gate: return `true` unconditionally from `free` and claim 2 names the
+    /// pair that got through; sort `ALL` with `Menu` anywhere but first and
+    /// claim 3 goes red on the pairs a press is supposed to win.
+    #[test]
+    fn only_one_hover_panel_may_be_on_the_glass_at_a_time() {
+        assert_eq!(
+            HoverFloat::ALL.len(),
+            4,
+            "four hover panels, and this list is the rule"
+        );
+        assert_eq!(
+            HoverFloat::ALL[0],
+            HoverFloat::Menu,
+            "a menu is a press's answer and outranks every hover panel"
+        );
+        for keep in HoverFloat::ALL {
+            let closed: Vec<HoverFloat> = keep.others().collect();
+            assert_eq!(closed.len(), HoverFloat::ALL.len() - 1);
+            assert!(!closed.contains(&keep));
+        }
+
+        // Nothing up: every clock is free to run.
+        assert_eq!(HoverFloat::holding(|_| false), None);
+        for who in HoverFloat::ALL {
+            assert!(who.free(|_| false), "{who:?} has nothing to wait for");
+        }
+
+        // One up: that one, and only that one, may go on running.
+        for held in HoverFloat::ALL {
+            assert_eq!(
+                HoverFloat::holding(|who| who == held),
+                Some(held),
+                "{held:?} holds the glass on its own"
+            );
+            for who in HoverFloat::ALL {
+                assert_eq!(
+                    who.free(|other| other == held),
+                    who == held,
+                    "{held:?} is up, so {who:?} must {} arm",
+                    if who == held { "still" } else { "not" }
+                );
+            }
+        }
+
+        // Two up at once — which is the state this rule exists to make
+        // unreachable, and which a frame in the middle of a hand-off can still
+        // pass through. Whoever leads the list is the one holding it, so the
+        // answer is never "both may continue".
+        for a in HoverFloat::ALL {
+            for b in HoverFloat::ALL {
+                if a == b {
+                    continue;
+                }
+                let held = HoverFloat::holding(|who| who == a || who == b)
+                    .expect("with two up, one of them holds it");
+                assert!(held == a || held == b, "{a:?} and {b:?}: {held:?}");
+                let free: Vec<HoverFloat> = HoverFloat::ALL
+                    .into_iter()
+                    .filter(|who| who.free(|other| other == a || other == b))
+                    .collect();
+                assert_eq!(free, vec![held], "{a:?} against {b:?}");
+                if a == HoverFloat::Menu || b == HoverFloat::Menu {
+                    assert_eq!(held, HoverFloat::Menu, "a press wins: {a:?} against {b:?}");
+                }
+            }
+        }
     }
 
     /// PIN — **the `Split direction` setting decides every split that has no
