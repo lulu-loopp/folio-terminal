@@ -2993,13 +2993,22 @@
      mark saying "not yet" on a thing that is now in the product is the one lie a
      drawing of the product must not tell.
      THE NUMBERS BELOW ARE THE NATIVE ONES, and that is not a coincidence: the
-     build reads them out of `bt-render`'s theme (`FOCUS_MINI_HEIGHT` 92,
-     `..._TERM_FONT` 7.5 / `..._TERM_LINE_HEIGHT` 1.45 / `..._TERM_ROWS` 6,
-     `..._FILES_FONT` 8 / `..._FILES_LINE_HEIGHT` 1.5 / `..._FILES_ROWS` 4 /
-     `..._FILES_ICON` 8, `..._GAP` 3, row padding 3/4/4), which were taken from
-     these rules. Change one here and the other one is now wrong. */
+     build reads them out of `bt-render`'s theme (`FOCUS_MINI_HEIGHT` 160,
+     `..._TERM_FONT` 7.5 / `..._TERM_LINE_HEIGHT` 1.45,
+     `..._FILES_FONT` 8 / `..._FILES_LINE_HEIGHT` 1.5 / `..._FILES_ICON` 8,
+     `..._GAP` 3, row padding 3/4/4), which were taken from these rules. Change
+     one here and the other one is now wrong.
+     TWO OF THOSE NUMBERS ARE GONE, and their absence is the 2026-08-20 ruling:
+     `..._TERM_ROWS = 6` and `..._FILES_ROWS = 4` were `slice(-6)` and
+     `slice(0, 4)` written down as constants, and a constant is a second,
+     disagreeing answer to a question the geometry already answers. HOW MANY ROWS
+     A SEAT SHOWS IS HOW MANY IT HOLDS — see `miniRowsIn` below, which is
+     `focus_thumb::mini_rows` in this drawing's own units. The height went 92 →
+     160 in the same breath: the type size is a floor (7.5px is as small as a
+     line can be read) and the width is a constraint (a card is 203 wide, about
+     45 columns), so the only knob left that buys legibility is height. */
   .fc-tab-mini {
-    height: 92px; padding: 5px; display: flex;
+    height: 160px; padding: 5px; display: flex;
     background: var(--termbg); overflow: hidden;
   }
   .fc-tab-mini > .mini-split, .fc-tab-mini > .fc-cell { flex: 1; min-width: 0; min-height: 0; }
@@ -3029,15 +3038,21 @@
      the same chart is a smudge. Restated AFTER `.fc-mini`'s two `zoom` rules,
      which would otherwise still be in force here. */
   .fc-tab-mini .fc-mini .math, .fc-tab-mini .fc-mini .timg { display: none; }
-  /* A FACE, NOT A SHRUNK PAGE (§7.1.6b′ F2, native `MiniSeatContent::Face`).
-     A preview seat — a document, an image, or the commit graph — and a
-     placeholder draw two centred lines here instead of their contents: what they
-     are showing, and what kind of thing that is. 7.5px of prose is a grey smear,
-     and a smear says less about a tab than two words do. It is set in the app
-     font at the FILES size and not the transcript's, for the reason the native
-     comment gives: this is the window talking about a pane, not a document
-     quoted out of one. The monitor cards are untouched — a pane card is a box
-     you look THROUGH (§7.1.6b ③), and it has the height to be one. */
+  /* A FACE, FOR WHAT HAS NO LINES TO QUOTE (§7.1.6b′ F2, native
+     `MiniSeatContent::Face`). Two centred lines — what this seat is showing, and
+     what kind of thing that is — set in the app font at the FILES size and not
+     the transcript's, for the reason the native comment gives: this is the
+     window talking about a pane, not a document quoted out of one.
+     WHO GETS ONE CHANGED ON 2026-08-20. It used to be every preview seat, on the
+     argument that "7.5px of prose is a grey smear". The user reopened that: the
+     same sentence would condemn the transcript tail beside it, which nobody has
+     ever wanted removed, and a document's first lines say which tab this is far
+     better than its extension in capitals does. So a preview whose body is
+     already in memory now QUOTES IT (`pvThumbMini`), and the face is left to the
+     three things with no lines to quote — the commit graph and a picture (not
+     text), a page (`CapturePreview` will not answer while hidden, see
+     `pvCardMini`), and a buffer whose body has not arrived. The monitor cards are
+     untouched — a pane card is a box you look THROUGH (§7.1.6b ③). */
   .fc-face {
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     height: auto; flex: 1; min-height: 0; overflow: hidden;
@@ -6938,7 +6953,7 @@
   const pvMarkId = (pv) => (isWebBuf(pv) ? "#i-globe" : "#i-file");
   /* one drawing for every preview card, wherever it appears — a monitor box, a
      focus card's F2 thumbnail, whatever comes next — called with its own attrs */
-  function pvCardMini(pv) {
+  function pvCardMini(pv, rows) {
     if (pv.ftype === "image") {
       return `<svg width="120" height="52" viewBox="0 0 120 52">
         <rect width="120" height="52" rx="4" fill="#20262d"/>
@@ -6960,7 +6975,7 @@
            + `<div class="fcf-kind">${esc(w.state === "ok" ? w.host : WEB_FAIL[w.state].mini)}</div>`;
     }
     if (pv.content != null)
-      return pv.content.split("\n").slice(0, 4).map(t => `<div>${esc(t)}</div>`).join("");
+      return pv.content.split("\n").slice(0, rows).map(t => `<div>${esc(t)}</div>`).join("");
     return `<div>No preview</div>`;
   }
   /* WHAT KIND OF THING THIS IS, in one word — the second line of a focus card's
@@ -6979,6 +6994,27 @@
   };
   const pvFaceMini = (pv) =>
     `<div class="fcf-name">${esc(pv.name)}</div><div class="fcf-kind">${esc(pvKindWord(pv))}</div>`;
+  /* WHICH FACE A PREVIEW SEAT QUOTES ITS DOCUMENT IN, or null for "there are no
+     lines to quote; draw a face" — native `Runtime::mini_document_face`. The
+     question is asked of the VIEW and not of the file's name, because the view is
+     what the pane under the card is drawing: a markdown file flipped to its
+     source is a text surface there and is monospaced here for the same reason.
+     Code, data and patches keep the grid's face — the columns in them mean
+     something. Rendered markdown is prose and goes in the window's. */
+  const pvThumbMono = (pv) => {
+    if (pv.content == null || isWebBuf(pv)) return null;
+    if (pv.path.startsWith("gitgraph:") || pv.ftype === "image") return null;
+    return !(pv.ftype === "markdown" && !pv.mdSource);
+  };
+  /* A PREVIEW SEAT'S PICTURE INSIDE A FOCUS CARD (user ruling 2026-08-20): the
+     head of the body it is already holding, as many lines as the box holds. It
+     asks NOTHING — `pv.content` is the head this window read when the file was
+     opened, and the native red line "a thumbnail must not put a question to the
+     disk" is what decides that a buffer with no body stays a face. */
+  const pvThumbMini = (pv, rows) =>
+    pvThumbMono(pv) === null
+      ? pvFaceMini(pv)
+      : pv.content.split("\n").slice(0, rows).map(t => `<div>${esc(t)}</div>`).join("");
   function pvCardHtml(pv, attrs, cls) {
     /* no height override: every card body shares .fc-mini's default — a column
        of uniform cards reads as one instrument (user ruling 2026-07-18) */
@@ -6998,7 +7034,7 @@
       status: (l) => { const s = leafSession(l); return s ? stateIcon(s, s.busy, s.unread) : `<span class="ticon"></span>`; },
       title: (l) => { const s = leafSession(l); return s ? cwdLeaf(s) : "…"; },
       card: (l, w, cls) => { const s = session(l.uid); return s ? termCardHtml(s, cardAttrs(l, w), cls) : ""; },
-      mini: (l) => { const s = session(l.uid); return s ? termCardMini(s) : ""; },
+      mini: (l, rows) => { const s = session(l.uid); return s ? termCardMini(s, rows) : ""; },
     },
     files: {
       mark: folderMark,
@@ -7011,7 +7047,7 @@
           <span class="name">${cwdLeaf({ cwd: l.files.root })}</span>
           <span class="fc-close" title="Close">${closeSvg}</span></div>
           <div class="fc-mini fc-files"></div></div>`,
-      mini: (l) => filesVisibleRows(l.files).slice(0, 4).map(r =>
+      mini: (l, rows) => filesVisibleRows(l.files).slice(0, rows).map(r =>
         `<div class="fcm-row" style="padding-left:${r.depth * 10}px">
            <svg class="fico ${r.node.dir ? "folder" : "file"}"><use href="#${r.node.dir ? "i-folder" : "i-file"}"/></svg>
            <span>${esc(r.node.name)}</span></div>`).join(""),
@@ -7029,13 +7065,14 @@
       /* a preview card has a BODY too — mini real content, same philosophy as
          the terminal cards (user report: "聚焦模式下预览没有窗口") */
       card: (l, w, cls) => pvCardHtml(l.preview, cardAttrs(l, w), cls),
-      mini: (l) => pvCardMini(l.preview),
+      mini: (l, rows) => pvCardMini(l.preview, rows),
       /* THE ONE KIND WHOSE TWO PICTURES DIFFER. A monitor box is 72px of card
-         all to itself and shows the document; a seat inside a focus card's
-         thumbnail is a fraction of 92px and shows a face instead (§7.1.6b′ F2).
-         Two verbs and not a flag on one, because they are two different
-         drawings — see `.fc-face`. */
-      thumb: (l) => pvFaceMini(l.preview),
+         all to itself and draws a picture for an image; a seat inside a focus
+         card's thumbnail quotes the document's head and falls back to a face
+         only when there is nothing to quote (§7.1.6b′ F2, user ruling
+         2026-08-20). Two verbs and not a flag on one, because they are two
+         different drawings — see `.fc-face`. */
+      thumb: (l, rows) => pvThumbMini(l.preview, rows),
     },
   };
   const contentOf = (l) => CONTENT[(l && l.kind) || "term"];
@@ -9724,7 +9761,8 @@
   /* the prototype stand-in for the native read-only mini projection (§3.3): the
      transcript's tail, re-projected at card width. Real content on the terminal's
      own dark ground, rich blocks scaled down in place. */
-  const termCardMini = (s) => s.lines.slice(-6).map(l => `<div>${l}</div>`).join("");
+  const termCardMini = (s, rows) =>
+    (rows > 0 ? s.lines.slice(-rows) : []).map(l => `<div>${l}</div>`).join("");
 
   /* ── the column, painted ──
      Structure, selection and content are three passes with three costs. The
@@ -9751,10 +9789,18 @@
      THREE ANSWERS, ONE PER KIND, and they are the native's three: a terminal
      shows the transcript's last six lines in the grid's own monospaced face, a
      files column shows the four rows it is showing now with its own two marks,
-     and a preview — a document, an image, or the commit graph — shows a FACE.
-     See `.fc-face` for why the third one is not a shrunk page. */
-  const thumbClass = (l) =>
-    isPreviewLeaf(l) ? "fc-face" : isFilesLeaf(l) ? "fc-mini fc-files" : "fc-mini";
+     and a preview shows the head of the document it is holding — a picture, a
+     page, a commit graph or a body that has not arrived shows a FACE instead.
+     HOW MANY lines each of them shows is `miniRowsIn`'s answer and never a
+     constant (user ruling 2026-08-20). See `.fc-face` for who still gets one. */
+  const thumbClass = (l) => {
+    if (isFilesLeaf(l)) return "fc-mini fc-files";
+    if (!isPreviewLeaf(l)) return "fc-mini";
+    /* the box a preview seat gets is the box its CONTENT needs: rows in the
+       grid's face, rows in the window's, or the centred two-line face */
+    const mono = pvThumbMono(l.preview);
+    return mono === null ? "fc-face" : mono ? "fc-mini" : "fc-mini fc-files";
+  };
   function focusTabMiniHtml(node, w) {
     if (node.type === "leaf") {
       return `<div class="fc-cell ${node.id === w.focus ? "focused" : ""}">
@@ -9827,6 +9873,20 @@
      focus column). They share the chrome, the visibility rule and this pass —
      they differ only in whose ledger the head carries and how many bodies hang
      underneath. */
+  /* HOW MANY ROWS A SEAT SHOWS IS HOW MANY IT HOLDS (user ruling 2026-08-20;
+     native `focus_thumb::mini_rows`). The box's own inner height divided by the
+     line height set on it, FLOORED — a row straddling the top edge would be a
+     band of half-glyphs, where a character straddling the RIGHT edge reads as a
+     line running off the side of a terminal, which is why the horizontal cut
+     takes the extra unit and this one does not. A tab split four ways gives each
+     seat a quarter of the body and each of them works its quarter out for
+     itself, which is the thing `slice(-6)` could never do. */
+  const MINI_ROW_PX = { term: 7.5 * 1.45, face: 8 * 1.5 };
+  const MINI_ROW_PAD = 7;                /* `.fc-mini { padding: 3px 4px 4px }` */
+  const miniRowsIn = (el) => Math.max(0, Math.floor(
+    (el.clientHeight - MINI_ROW_PAD) /
+    MINI_ROW_PX[el.classList.contains("fc-files") ? "face" : "term"]));
+
   const CARD_DRAW_MARGIN = 240;
   function paintCards(rail) {
     const cards = rail.querySelectorAll(".fcard");
@@ -9857,7 +9917,7 @@
       const body = el.querySelector(".fc-mini");
       if (!body) return;
       if (!on) { if (body.innerHTML !== "") body.innerHTML = ""; return; }
-      body.innerHTML = contentOf(l).mini(l);
+      body.innerHTML = contentOf(l).mini(l, miniRowsIn(body));
     });
     typeset(rail);
   }
@@ -9884,7 +9944,7 @@
       if (!l) return;
       if (!on) { if (body.innerHTML !== "") body.innerHTML = ""; return; }
       const c = contentOf(l);
-      body.innerHTML = (c.thumb || c.mini)(l);
+      body.innerHTML = (c.thumb || c.mini)(l, miniRowsIn(body));
     });
   }
 

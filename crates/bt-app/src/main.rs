@@ -4747,6 +4747,21 @@ struct WindowRuntime {
     /// ever shaped. Exact rather than a ratio because the face is monospaced:
     /// every character in it has this advance.
     focus_mini_advance: f32,
+    /// The same, for the **window's** face at the mini files size — what a files
+    /// row, a face and a page of prose are set in (user ruling, 2026-08-20).
+    ///
+    /// A second number rather than a reuse of the one above, because the two are
+    /// two different faces at two different sizes, and cutting a line of prose to
+    /// a count derived from the terminal's advance would cut it in a place that
+    /// has nothing to do with where it is drawn. It is an **approximation and
+    /// says so**: the app's face is proportional, so there is no such thing as
+    /// "one character's advance" in it, and this is a digit's — which is a shade
+    /// wider than the average lowercase letter, so a prose line is cut a shade
+    /// early rather than a shade late. Early is the safe side: the seat's right
+    /// edge is a clip, and text stopping a few pixels short of a clip reads as
+    /// the line ending, while text running past one reads the same as it always
+    /// did.
+    focus_mini_face_advance: f32,
     /// This window's card thumbnails, and the budget that fills them
     /// (§7.1.6b′ F2, `focus_thumb`).
     ///
@@ -6798,6 +6813,40 @@ impl TabState {
         }
     }
 
+    /// **Which face a preview seat's card quotes its document in — or whether it
+    /// quotes it at all** (user ruling, 2026-08-20).
+    ///
+    /// `Some(true)` monospaced, `Some(false)` in the window's face, `None` for
+    /// "this is not text; draw a face". The three answers come off
+    /// [`preview::PreviewView`] rather than off the file's name, because the view
+    /// is what the *pane* is drawing and a card must not disagree with the pane
+    /// it is a picture of: a markdown file flipped to its source is a text
+    /// surface in the pane and is monospaced here for the same reason.
+    ///
+    /// The two `None`s are the two things with no lines to quote: a commit graph
+    /// is a picture drawn as chrome, and `None` is the pane's own "there is
+    /// nothing to show here". Both were faces before this ruling and both stay
+    /// faces after it — the ruling was about **prose**, and its argument (that a
+    /// document's first lines identify a tab better than its extension does) says
+    /// nothing about a document with no first lines.
+    ///
+    /// A picture ([`preview::PreviewView::Image`]) is the third: pixels are not
+    /// rows, and this module already refuses to shrink them.
+    fn mini_document_face(view: preview::PreviewView) -> Option<bool> {
+        match view {
+            // Code, data and patches: the grid's own face, because the columns
+            // in them mean something.
+            preview::PreviewView::Text
+            | preview::PreviewView::Table
+            | preview::PreviewView::Diff => Some(true),
+            // A rendered page: prose, in the window's face, at the files size.
+            preview::PreviewView::Markdown => Some(false),
+            preview::PreviewView::Image
+            | preview::PreviewView::Graph
+            | preview::PreviewView::None => None,
+        }
+    }
+
     /// **Where one seat's thumbnail content comes from** (§7.1.6b′ F2) — handed
     /// to the budget *unevaluated*, so that the walk it stands for happens only
     /// past the gates.
@@ -6832,6 +6881,19 @@ impl TabState {
                 let buffer = pane
                     .and_then(|pane| pane.buffer.as_ref())
                     .and_then(|buffer| self.preview_pool.get(buffer));
+                // **A document with a body in memory is quoted; everything else
+                // is a face** (user ruling, 2026-08-20 — see
+                // `focus_thumb::SeatSource::Document`). The three questions in
+                // that order are the whole rule, and the first of them is the
+                // red line: is there text here already, without asking a disk.
+                if let Some(buffer) = buffer
+                    && buffer.content.is_some()
+                    && let Some(mono) = Self::mini_document_face(
+                        buffer.view(pane.is_some_and(|pane| pane.md_source)),
+                    )
+                {
+                    return Some(focus_thumb::SeatSource::Document { buffer, mono });
+                }
                 Some(focus_thumb::SeatSource::Face {
                     name: self
                         .preview_head_name(seat)
@@ -17751,6 +17813,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         attention_next_ticket: 0,
         focus_exit_width: 0.0,
         focus_mini_advance: 0.0,
+        focus_mini_face_advance: 0.0,
         focus_thumbs: focus_thumb::FocusThumbnails::default(),
         table_paints: HashMap::new(),
         preview_button_width: 0.0,
@@ -19886,6 +19949,18 @@ impl Runtime<'_> {
             )
         };
         self.window.focus_mini_advance = focus_mini_advance;
+        // And one of the window's own face at the files size — see
+        // [`WindowRuntime::focus_mini_face_advance`] for why this is a second
+        // number and why a digit is the honest stand-in for a proportional face.
+        let focus_mini_face_advance = {
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            renderer.measure_chrome_text(
+                gpu,
+                "0",
+                bt_render::FOCUS_MINI_FILES_FONT_LOGICAL_PX * scale,
+            )
+        };
+        self.window.focus_mini_face_advance = focus_mini_face_advance;
         self.refresh_focus_thumbnails(now, scale);
         let badge_font_px = bt_render::WINDOW_TAB_BADGE_FONT_LOGICAL_PX * scale;
         let mut tabs = tabs
@@ -50395,7 +50470,8 @@ impl Runtime<'_> {
             return;
         };
         let [list_top, list_bottom] = geometry.viewport;
-        let advance = self.window.focus_mini_advance;
+        let mono_advance = self.window.focus_mini_advance;
+        let face_advance = self.window.focus_mini_face_advance;
         let mut visible = BTreeSet::new();
         for (index, card) in geometry.cards.iter().enumerate() {
             if card.body[3] <= list_top || card.body[1] >= list_bottom {
@@ -50409,16 +50485,31 @@ impl Runtime<'_> {
             // because they are *geometry*, and geometry is `seats`'s: what comes
             // back is each seat's own rectangle, and each seat's own rectangle is
             // what its column count is cut from — which is §3.3's "the same
-            // session at another width" in the only form a 92px card has room
-            // for.
+            // session at another width" in the only form a 203px-wide card has
+            // room for — and, since 2026-08-20, its vertical twin: how many rows
+            // that rectangle holds is how many rows it is handed.
             let demands: Vec<focus_thumb::SeatDemand<'_>> =
                 seats::focus_mini_seats(tab.seats.tree(), card.mini, scale)
                     .into_iter()
                     .filter_map(|seat| {
+                        let source = tab.mini_source(seat.id, seat.kind)?;
+                        // **The seat's own face decides both counts.** A row's
+                        // height and a column's width are two readings of the
+                        // same face, so they are taken from one table
+                        // (`focus_thumb::MiniMetrics`) rather than chosen here —
+                        // which is what stops a seat being measured for thirteen
+                        // rows of one size and drawn in another.
+                        let metrics = source.metrics();
+                        let advance = if metrics.mono {
+                            mono_advance
+                        } else {
+                            face_advance
+                        };
                         Some(focus_thumb::SeatDemand {
                             id: seat.id,
                             columns: focus_thumb::mini_columns(seat.rect, advance, scale),
-                            source: tab.mini_source(seat.id, seat.kind)?,
+                            rows: focus_thumb::mini_rows(seat.rect, metrics.line_px(scale), scale),
+                            source,
                         })
                     })
                     .collect();
