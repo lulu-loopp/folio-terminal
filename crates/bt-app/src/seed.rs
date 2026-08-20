@@ -46,6 +46,20 @@ pub enum Seed {
     Files { root: String },
     /// The file a lone preview pane was on (§7.1.6h).
     Preview { path: String },
+    /// **A whole window that was closed** (multiwindow slice D, ruling ②).
+    ///
+    /// Closing a tab has always filled this vault, and closing a window closes
+    /// every tab in it — so without this shape the one gesture that throws away
+    /// six tabs at once would be the only one with no way back, which is the
+    /// asymmetry this module's header says it exists to prevent. One row rather
+    /// than six, because what was lost was a window.
+    ///
+    /// The seeds of its tabs and nothing else: no rectangle, no rail, no tree.
+    /// That is this module's standing sentence — "Recent restores the places you
+    /// were, not a layout" — said about a bigger object, and it is already why a
+    /// closed folder tab forgets its column width. A window drawn back out opens
+    /// where a new window opens, holding the places its tabs stood in.
+    Window { seeds: Vec<Seed> },
 }
 
 impl Seed {
@@ -78,6 +92,27 @@ impl Seed {
             // different tabs and a key that collapsed them would let opening a
             // folder evict the file you had open in it.
             Self::Preview { path } => format!("||{path}"),
+            // **A fourth slot, which no tab shape can reach.** The three above
+            // are `a|b|c`; this one is `|||…`, so a window can never collide
+            // with a tab however its children are spelled. Inside it, the
+            // children's own keys joined by a newline — a character no Windows
+            // path may contain, so the join is unambiguous without inventing an
+            // escape.
+            //
+            // A window is therefore deduped **by what was in it**, on the same
+            // rule every other shape follows: closing two windows holding the
+            // same places twice is one row, exactly as closing the same folder
+            // twice is.
+            Self::Window { seeds } => {
+                let mut key = String::from("|||");
+                for (index, seed) in seeds.iter().enumerate() {
+                    if index > 0 {
+                        key.push('\n');
+                    }
+                    key.push_str(&seed.recent_key());
+                }
+                key
+            }
         }
     }
 
@@ -104,7 +139,37 @@ impl Seed {
     pub fn can_be_named(&self) -> bool {
         match self {
             Self::Term { .. } => true,
-            Self::Files { .. } | Self::Preview { .. } => false,
+            // A window is turned away on the two above's own footing and one of
+            // its own: it is not a tab at all, so there is no tab head for an
+            // editor to open on.
+            Self::Files { .. } | Self::Preview { .. } | Self::Window { .. } => false,
+        }
+    }
+
+    /// How many tabs a window seed stands for — the one number the row's tooltip
+    /// says out loud, and `None` for every shape that is a tab rather than a
+    /// window full of them.
+    #[must_use]
+    pub fn window_tabs(&self) -> Option<usize> {
+        match self {
+            Self::Window { seeds } => Some(seeds.len()),
+            Self::Term { .. } | Self::Files { .. } | Self::Preview { .. } => None,
+        }
+    }
+
+    /// The tab a window row is *recognised* by — its first — and `None` for
+    /// every shape that is a tab already.
+    ///
+    /// A window row wears the name of the tab it opened with, which is what a
+    /// reader would name it by ("the window I had `alpha` in"). The word
+    /// "window" is not in the label because a label is measured and a row is one
+    /// line; it is in the tooltip, beside the count, where this list already
+    /// puts its detail.
+    #[must_use]
+    pub fn first_tab(&self) -> Option<&Self> {
+        match self {
+            Self::Window { seeds } => seeds.first(),
+            Self::Term { .. } | Self::Files { .. } | Self::Preview { .. } => None,
         }
     }
 }
@@ -123,6 +188,9 @@ impl From<&Seed> for RecentSeedV1 {
             },
             Seed::Files { root } => Self::Files { root: root.clone() },
             Seed::Preview { path } => Self::Preview { path: path.clone() },
+            Seed::Window { seeds } => Self::Window {
+                seeds: seeds.iter().map(Self::from).collect(),
+            },
         }
     }
 }
@@ -141,6 +209,9 @@ impl From<&RecentSeedV1> for Seed {
             },
             RecentSeedV1::Files { root } => Self::Files { root: root.clone() },
             RecentSeedV1::Preview { path } => Self::Preview { path: path.clone() },
+            RecentSeedV1::Window { seeds } => Self::Window {
+                seeds: seeds.iter().map(Self::from).collect(),
+            },
         }
     }
 }
@@ -501,6 +572,93 @@ mod tests {
             .recent_key(),
             "|C:\\docs|"
         );
+    }
+
+    /// PIN (multiwindow slice D) — **a window's key is a fourth slot, so no
+    /// window can ever collide with a tab.**
+    ///
+    /// The three tab shapes fill three pipe-separated slots; a window opens a
+    /// fourth and puts its children's own keys inside it, joined by a newline —
+    /// a character no Windows path may contain, so the join needs no escape and
+    /// cannot be forged by a folder name.
+    ///
+    /// Red gate: key a window on its first tab and closing a window would evict
+    /// the Recent row for the tab that was in it, so undo-close after closing a
+    /// window would offer you the window instead of the tab.
+    #[test]
+    fn a_closed_window_can_never_take_a_tabs_row() {
+        let window = Seed::Window {
+            seeds: vec![
+                term("C:\\repo", None),
+                Seed::Files {
+                    root: "C:\\docs".to_owned(),
+                },
+            ],
+        };
+        assert_eq!(window.recent_key(), "|||pwsh|C:\\repo|\n|C:\\docs|");
+        assert_ne!(window.recent_key(), term("C:\\repo", None).recent_key());
+        assert!(
+            !window.can_be_named(),
+            "a window has no tab head to type into"
+        );
+        assert_eq!(window.window_tabs(), Some(2));
+        assert_eq!(window.first_tab(), Some(&term("C:\\repo", None)));
+
+        // And two windows holding different places are two rows, on the same
+        // dedup rule every other shape follows.
+        let mut vault = SeedVault::default();
+        vault.record(window.clone(), Vec::new(), at(0));
+        vault.record(
+            Seed::Window {
+                seeds: vec![term("C:\\other", None)],
+            },
+            Vec::new(),
+            at(60),
+        );
+        assert_eq!(vault.len(), 2);
+        vault.record(window, Vec::new(), at(120));
+        assert_eq!(vault.len(), 2, "the same window closed twice is one row");
+    }
+
+    /// PIN (multiwindow slice D) — **a closed window survives the disk, tabs and
+    /// all.**
+    ///
+    /// The vault is written into `session.json`, so a shape the wire cannot carry
+    /// is a row that disappears at the next restart — which for this shape means
+    /// the one gesture that throws away six tabs at once quietly loses its way
+    /// back overnight.
+    #[test]
+    fn a_window_row_round_trips_through_the_wire() {
+        let mut vault = SeedVault::default();
+        vault.record(
+            Seed::Window {
+                seeds: vec![
+                    term("C:\\repo", Some("build")),
+                    Seed::Preview {
+                        path: "C:\\repo\\README.md".to_owned(),
+                    },
+                ],
+            },
+            Vec::new(),
+            at(0),
+        );
+        let persisted = vault.to_persisted();
+        assert_eq!(
+            persisted[0].seed,
+            RecentSeedV1::Window {
+                seeds: vec![
+                    RecentSeedV1::Term {
+                        profile_id: "pwsh".to_owned(),
+                        cwd: "C:\\repo".to_owned(),
+                        manual_name: Some("build".to_owned()),
+                    },
+                    RecentSeedV1::Preview {
+                        path: "C:\\repo\\README.md".to_owned(),
+                    },
+                ],
+            }
+        );
+        assert_eq!(SeedVault::from_persisted(&persisted), vault);
     }
 
     /// §7.1.4: "同位置不同名的 agent 保持独立条目". This is the clause that

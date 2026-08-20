@@ -388,6 +388,7 @@ pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (5, migrate_session_v5_to_v6),
     (6, migrate_session_v6_to_v7),
     (7, migrate_session_v7_to_v8),
+    (8, migrate_session_v8_to_v9),
 ];
 
 fn migrate_session_v1_to_v2(mut value: Value) -> Value {
@@ -525,6 +526,57 @@ fn migrate_session_v6_to_v7(mut value: Value) -> Value {
 fn migrate_session_v7_to_v8(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(8));
+    }
+    value
+}
+
+/// **v8 → v9 — `window` becomes `windows[]`, and the old document is window
+/// zero.**
+///
+/// The step `docs/M2-persistence-schema-v1.md` §3.1 wrote down in v1 and left
+/// unpaid for seven versions: "多窗口落地时用 schema_version bump 把 `window`
+/// 升格为 `windows[]`". Multiwindow slice D is that day.
+///
+/// **Four keys move and nothing else happens.** `window`, `tab_layout`,
+/// `sidebar_mode`, `tabs` and `active_tab` were all sentences about the one
+/// window a v8 document could describe, so they go inside the one entry a v8
+/// document becomes; `theme`, `cursor_style` and `recent` stay where they are,
+/// because they were never about a window at all — they are the process's
+/// (`docs/DESIGN.md` §2.4's own question, asked of a file). No value is
+/// invented, reinterpreted or dropped: a reader who upgrades and looks at their
+/// window sees the window they left, in the place they left it, wearing the rail
+/// they left it wearing.
+///
+/// **The wrap is unconditional**, even for a document whose `tabs` is empty.
+/// Deciding here that an empty tab list "means no window" would be this step
+/// answering a product question (rule 3: 迁移函数只做结构升级,不做语义修复) —
+/// the reader already has that rule and applies it to every entry, old and new
+/// alike, rather than only to the one that came through here.
+///
+/// A key that is somehow missing is left missing rather than defaulted, for the
+/// same reason: [`SessionWindowV1`](crate::SessionWindowV1) carries `#[serde(default)]`
+/// on exactly the fields whose absence has a right answer, and a migration that
+/// wrote those defaults in would be making a claim the reader is better placed
+/// to make.
+fn migrate_session_v8_to_v9(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(9));
+        let mut window = serde_json::Map::new();
+        for (was, becomes) in [
+            ("window", "placement"),
+            ("tab_layout", "tab_layout"),
+            ("sidebar_mode", "sidebar_mode"),
+            ("tabs", "tabs"),
+            ("active_tab", "active_tab"),
+        ] {
+            if let Some(moved) = object.remove(was) {
+                window.insert(becomes.to_owned(), moved);
+            }
+        }
+        object.insert(
+            "windows".to_owned(),
+            Value::Array(vec![Value::Object(window)]),
+        );
     }
     value
 }

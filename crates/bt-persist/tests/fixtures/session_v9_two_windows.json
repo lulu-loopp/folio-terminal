@@ -1,0 +1,97 @@
+{
+  "schema_version": 9,
+  "theme": "light",
+  "cursor_style": "underline",
+  "windows": [
+    {
+      "placement": {
+        "bounds": {
+          "x": 12,
+          "y": 34,
+          "width": 1280,
+          "height": 800
+        },
+        "dpi": 96,
+        "maximized": false,
+        "monitor_id": "\\\\.\\DISPLAY1"
+      },
+      "tab_layout": "horizontal",
+      "sidebar_mode": "expanded",
+      "tabs": [
+        {
+          "root": {
+            "kind": "term",
+            "profile_id": "pwsh",
+            "cwd": "D:\\work\\alpha",
+            "manual_name": "alpha"
+          },
+          "pinned": true,
+          "focused_leaf": "leaf-0"
+        },
+        {
+          "root": {
+            "kind": "term",
+            "profile_id": "winps",
+            "cwd": "D:\\work\\beta",
+            "manual_name": null
+          },
+          "pinned": false,
+          "focused_leaf": "leaf-0"
+        }
+      ],
+      "active_tab": 1
+    },
+    {
+      "placement": {
+        "bounds": {
+          "x": 1400,
+          "y": 120,
+          "width": 900,
+          "height": 1200
+        },
+        "dpi": 144,
+        "maximized": true,
+        "monitor_id": "\\\\.\\DISPLAY2"
+      },
+      "tab_layout": "vertical",
+      "sidebar_mode": "icons",
+      "tabs": [
+        {
+          "root": {
+            "kind": "files",
+            "root": "D:\\work\\gamma",
+            "open": [],
+            "sel": null,
+            "width": 300,
+            "view": "git",
+            "remotes_open": true
+          },
+          "pinned": true,
+          "focused_leaf": "leaf-0"
+        }
+      ],
+      "active_tab": 0
+    }
+  ],
+  "recent": [
+    {
+      "key": "|||pwsh|D:\\work\\delta|\n||D:\\work\\delta\\notes.md",
+      "seed": {
+        "kind": "window",
+        "seeds": [
+          {
+            "kind": "term",
+            "profile_id": "pwsh",
+            "cwd": "D:\\work\\delta",
+            "manual_name": null
+          },
+          {
+            "kind": "preview",
+            "path": "D:\\work\\delta\\notes.md"
+          }
+        ]
+      },
+      "timestamp": "2026-08-19T22:03:00Z"
+    }
+  ]
+}

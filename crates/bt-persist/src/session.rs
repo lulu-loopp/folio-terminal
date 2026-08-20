@@ -11,8 +11,12 @@ use crate::layout::LayoutNodeV1;
 /// for the ruling and the one-time mapping. v7 adds `view` to a `files` leaf — which of the
 /// column's two pages it was showing (R1). v8 adds a third shape to [`RecentSeedV1`] — a closed
 /// tab that was one preview pane, identified by the file it was on — which is the one thing the
-/// sessionless-tab slice (`docs/DESIGN.md` §7.1.6h) could not already write.
-pub const SESSION_SCHEMA_VERSION: u32 = 8;
+/// sessionless-tab slice (`docs/DESIGN.md` §7.1.6h) could not already write. **v9 is the one
+/// `docs/M2-persistence-schema-v1.md` §3.1 has been promising since v1**: `window` becomes
+/// `windows[]`, and the four keys that were about "the window" — its placement, its tab strip's
+/// layout, its sidebar's width and its tabs — move inside a [`SessionWindowV1`] so a document can
+/// hold more than one of them (`docs/DESIGN.md` §2.4 D 段).
+pub const SESSION_SCHEMA_VERSION: u32 = 9;
 
 /// Persisted theme mode restored with the session. `System` is resolved by the app against winit's
 /// OS theme; `BT_BG` remains a process diagnostic override and is never persisted as a mode.
@@ -54,6 +58,13 @@ pub enum SessionSidebarModeV1 {
 }
 
 /// `session.json` v1 top-level structure — docs/M2-persistence-schema-v1.md §3.5.
+///
+/// **Everything left at this level is a fact about the *process*** (`docs/DESIGN.md` §2.4's own
+/// question, asked of a file instead of a struct): the theme and the cursor shape are
+/// `bt-render` statics that one process owns one of, and the vault is `App::recent` — the one
+/// store pin, Recent and undo-close all read. Everything that is a fact about *a window* is in
+/// [`SessionWindowV1`], once per window, because a document that kept them here could only ever
+/// describe the last window to write it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionV1 {
     pub schema_version: u32,
@@ -65,17 +76,11 @@ pub struct SessionV1 {
     /// Added in schema v3; missing values degrade to the historical bar cursor.
     #[serde(default)]
     pub cursor_style: SessionCursorStyleV1,
-    /// Added in schema v5; missing values degrade to the horizontal strip, which is the only
-    /// arrangement that existed before this field.
-    #[serde(default)]
-    pub tab_layout: SessionTabLayoutV1,
-    /// Added in schema v5; missing values degrade to the expanded sidebar, matching every session
-    /// written before the icon rail existed.
-    #[serde(default)]
-    pub sidebar_mode: SessionSidebarModeV1,
-    pub window: WindowStateV1,
-    pub tabs: Vec<TabV1>,
-    pub active_tab: u32,
+    /// **Every window this process had open, in the order they opened** (schema v9).
+    ///
+    /// Empty is a first run, and it is the only spelling of one: a window with no tabs is not a
+    /// window, so nothing that is open writes an empty entry here.
+    pub windows: Vec<SessionWindowV1>,
     pub recent: Vec<RecentEntryV1>,
 }
 
@@ -85,14 +90,40 @@ impl Default for SessionV1 {
             schema_version: SESSION_SCHEMA_VERSION,
             theme: SessionThemeV1::Dark,
             cursor_style: SessionCursorStyleV1::Bar,
-            tab_layout: SessionTabLayoutV1::Horizontal,
-            sidebar_mode: SessionSidebarModeV1::Expanded,
-            window: WindowStateV1::default(),
-            tabs: Vec::new(),
-            active_tab: 0,
+            windows: Vec::new(),
             recent: Vec::new(),
         }
     }
+}
+
+/// **One window** — schema v9's whole reason for existing.
+///
+/// The four keys that used to sit at the top level of the document, moved inside the thing they
+/// were always about. `docs/M2-persistence-schema-v1.md` §3.1 wrote the promissory note in v1
+/// ("多窗口落地时用 schema_version bump 把 window 升格为 windows[]") and named this as its
+/// price; [`crate::migrate`]'s `migrate_session_v8_to_v9` is the one-time payment.
+///
+/// **What is here and what is not** is decided by one question asked of `WindowRuntime`'s 157
+/// fields (`docs/DESIGN.md` §2.4): is this durable, and is it the window's? Placement, the tab
+/// tree, which tab was on top, and the two halves of the rail's resting shape all answer yes to
+/// both. A hover, a gesture, a menu and every cache answer no to the first. The theme and the
+/// cursor answer no to the second — they are process statics, and they stay at the top level.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SessionWindowV1 {
+    /// Where the window was and how big — see [`WindowStateV1`].
+    #[serde(default)]
+    pub placement: WindowStateV1,
+    /// Where this window's tab strip rested. Per window from v9: two windows can stand with two
+    /// different strips, and a document that recorded one of them recorded the other's as a lie.
+    /// Missing values degrade to the horizontal strip, which is the only arrangement that existed
+    /// before schema v5.
+    #[serde(default)]
+    pub tab_layout: SessionTabLayoutV1,
+    /// And how wide this window's sidebar rested, on exactly the same terms.
+    #[serde(default)]
+    pub sidebar_mode: SessionSidebarModeV1,
+    pub tabs: Vec<TabV1>,
+    pub active_tab: u32,
 }
 
 impl SessionV1 {
@@ -108,8 +139,10 @@ impl SessionV1 {
     /// degradation banner (§5.3: "显式告警,绝不假装成功").
     pub fn degrade_in_place(&mut self) -> DegradationReport {
         let mut report = DegradationReport::default();
-        for tab in &mut self.tabs {
-            tab.root.degrade_in_place(&mut report);
+        for window in &mut self.windows {
+            for tab in &mut window.tabs {
+                tab.root.degrade_in_place(&mut report);
+            }
         }
         report
     }
@@ -131,9 +164,13 @@ impl DegradationReport {
     }
 }
 
-/// `window` — docs/M2-persistence-schema-v1.md §3.1. v1 is single-window
-/// (the field is named `window`, singular, deliberately not `windows: []` —
-/// see §3.1's "多窗口落地时用 schema_version bump 把 window 升格为 windows[]").
+/// **Where one window was** — docs/M2-persistence-schema-v1.md §3.1.
+///
+/// From v1 to v8 this was the document's one `window` key, singular and deliberately so; §3.1
+/// said what would end that ("多窗口落地时用 schema_version bump 把 window 升格为 windows[]")
+/// and v9 is it. The type did not have to change to make the step — a rectangle, a DPI, a
+/// posture and a monitor were always facts about *a* window rather than about *the* window —
+/// so it is the same four fields, now reached as [`SessionWindowV1::placement`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WindowStateV1 {
     pub bounds: WindowBoundsV1,
@@ -363,6 +400,12 @@ pub struct RecentEntryV1 {
 /// the right reason (§5.4's future-version refusal) rather than report a corrupt
 /// file. Nothing in an existing document changes, so the step itself carries no
 /// field work — see [`crate::migrate`]'s `migrate_session_v7_to_v8`.
+///
+/// **The fourth shape arrived with schema v9**, by the same sentence a third
+/// time: multiwindow slice D made *a window* a thing that can be closed, so the
+/// vault owes it a row for the reason it owes one to every other shape a close
+/// can take. It rides the version step `windows[]` was already paying for, and
+/// the future-version refusal above is why it may.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RecentSeedV1 {
@@ -382,6 +425,30 @@ pub enum RecentSeedV1 {
     Preview {
         path: String,
     },
+    /// **A whole window that was closed** (multiwindow slice D, 2026-08-19 ruling
+    /// ②: 关一扇非最后的窗不弹提示,该窗的种子进 Recent).
+    ///
+    /// Closing a tab has always filled the vault, and closing a window closes
+    /// every tab in it — so without this shape the one gesture that can throw
+    /// away six tabs at once would be the only one with no way back, which is
+    /// the asymmetry this whole store exists to prevent. One row rather than
+    /// six, because what the reader lost was a window and "重开丢的窗从 Recent
+    /// 一步找回" is one step.
+    ///
+    /// **The seeds of its tabs, and nothing else** — not the tree, not the
+    /// rectangle, not the rail. That is [`RecentEntryV1`]'s own standing rule
+    /// said about a bigger object: "Recent is a *launcher*: it restores the
+    /// places you were, not a layout", which is already why a closed files tab
+    /// forgets its column width. A window taken back out of the vault opens
+    /// where a new window opens, holding the places its tabs stood in.
+    ///
+    /// Recursive rather than a flat list of three-field rows, so that the shapes
+    /// a window's tabs can be are *by construction* the shapes a tab can be:
+    /// a fourth kind of tab would otherwise have to be added here a second time,
+    /// and the copy that drifts is the one nothing draws.
+    Window {
+        seeds: Vec<RecentSeedV1>,
+    },
 }
 
 #[cfg(test)]
@@ -394,27 +461,93 @@ mod tests {
         assert_eq!(defaults.schema_version, SESSION_SCHEMA_VERSION);
         assert_eq!(defaults.theme, SessionThemeV1::Dark);
         assert_eq!(defaults.cursor_style, SessionCursorStyleV1::Bar);
-        assert_eq!(defaults.tab_layout, SessionTabLayoutV1::Horizontal);
-        assert_eq!(defaults.sidebar_mode, SessionSidebarModeV1::Expanded);
-        assert!(defaults.tabs.is_empty());
+        assert!(
+            defaults.windows.is_empty(),
+            "no windows at all is how a first run spells itself (schema v9)"
+        );
         assert!(defaults.recent.is_empty());
-        assert_eq!(defaults.active_tab, 0);
+    }
+
+    /// The window record's own defaults, which are what a hand-authored document
+    /// with only `tabs` in it degrades to.
+    #[test]
+    fn a_window_record_defaults_to_the_arrangement_that_predates_the_fields() {
+        let window = SessionWindowV1::default();
+        assert_eq!(window.tab_layout, SessionTabLayoutV1::Horizontal);
+        assert_eq!(window.sidebar_mode, SessionSidebarModeV1::Expanded);
+        assert_eq!(window.placement, WindowStateV1::default());
+        assert_eq!(window.active_tab, 0);
+        assert!(window.tabs.is_empty());
     }
 
     #[test]
     fn degrade_in_place_reports_clean_when_nothing_wrong() {
         let mut session = SessionV1::default();
-        session.tabs.push(TabV1 {
-            root: LayoutNodeV1::Leaf(crate::layout::LeafNodeV1::Term(crate::layout::TermLeafV1 {
-                profile_id: "pwsh.exe".to_string(),
-                cwd: "C:\\".to_string(),
-                manual_name: None,
-            })),
-            pinned: false,
-            focused_leaf: "leaf-0".to_string(),
-            preview: None,
+        session.windows.push(SessionWindowV1 {
+            tabs: vec![TabV1 {
+                root: LayoutNodeV1::Leaf(crate::layout::LeafNodeV1::Term(
+                    crate::layout::TermLeafV1 {
+                        profile_id: "pwsh.exe".to_string(),
+                        cwd: "C:\\".to_string(),
+                        manual_name: None,
+                    },
+                )),
+                pinned: false,
+                focused_leaf: "leaf-0".to_string(),
+                preview: None,
+            }],
+            ..SessionWindowV1::default()
         });
         let report = session.degrade_in_place();
         assert!(report.is_clean());
+    }
+
+    /// PIN (multiwindow slice D) — **the second window's tree is degraded too.**
+    ///
+    /// The walk gained a level when the document did, and a walk that stopped at
+    /// the first window would leave every later one's out-of-range ratio on the
+    /// disk it came from — silently, because a clamp that does not happen looks
+    /// exactly like a document that never needed one.
+    ///
+    /// Red gate: iterate `self.windows.first_mut()` instead of `&mut
+    /// self.windows` and the count below is 1.
+    #[test]
+    fn every_window_is_degraded_and_not_only_the_first() {
+        let leaf = || {
+            Box::new(LayoutNodeV1::Leaf(crate::layout::LeafNodeV1::Files(
+                crate::layout::FilesLeafV1 {
+                    root: "D:\\".to_string(),
+                    open: Vec::new(),
+                    sel: None,
+                    width: 260,
+                    view: crate::layout::FilesViewV1::Files,
+                    remotes_open: false,
+                },
+            )))
+        };
+        let split = |ratio: u32| {
+            LayoutNodeV1::Split(crate::layout::SplitNodeV1 {
+                dir: crate::layout::SplitDirV1::Row,
+                ratio,
+                children: [leaf(), leaf()],
+            })
+        };
+        let mut session = SessionV1::default();
+        for ratio in [u32::MAX, 4_000_000] {
+            session.windows.push(SessionWindowV1 {
+                tabs: vec![TabV1 {
+                    root: split(ratio),
+                    pinned: false,
+                    focused_leaf: "leaf-0".to_string(),
+                    preview: None,
+                }],
+                ..SessionWindowV1::default()
+            });
+        }
+        let report = session.degrade_in_place();
+        assert_eq!(
+            report.clamped_ratios, 2,
+            "one clamp per window, not one clamp for the first one"
+        );
     }
 }

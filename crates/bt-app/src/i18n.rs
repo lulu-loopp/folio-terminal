@@ -3885,6 +3885,29 @@ fn rail_glance_count_in(lang: Lang, matched: usize, commanded: usize) -> String 
     }
 }
 
+/// `Window · 3 tabs` — what a Recent row that stands for a whole closed window
+/// says when the pointer rests on it (multiwindow slice D, ruling ②).
+///
+/// A function and not a [`Text`] row because it carries a number, on the same
+/// footing as every other counted sentence in this file. The word is in the tip
+/// rather than in the row's label because the label is one measured line and
+/// already says which tab the window opened with — see `seed::Seed::first_tab`.
+///
+/// Singular is spelled out in English because "1 tabs" is the kind of sentence a
+/// product says when nobody was reading it; Chinese needs no such branch.
+#[must_use]
+pub fn recent_window_tip(tabs: usize) -> String {
+    recent_window_tip_in(current(), tabs)
+}
+
+fn recent_window_tip_in(lang: Lang, tabs: usize) -> String {
+    match (lang, tabs) {
+        (Lang::English, 1) => "Window · 1 tab".to_owned(),
+        (Lang::English, tabs) => format!("Window · {tabs} tabs"),
+        (Lang::Chinese, tabs) => format!("窗口 · {tabs} 个标签页"),
+    }
+}
+
 /// `12 lines · latest: cargo test` — the count, and the newest member's own
 /// line after it.
 #[must_use]

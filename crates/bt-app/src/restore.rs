@@ -351,6 +351,23 @@ impl RestoreRow {
                 crate::cwd_leaf(Path::new(path)).unwrap_or_else(|| path.clone()),
                 path.clone(),
             ),
+            // **A window row cannot arrive here**, and it is worth saying which
+            // structure makes that true rather than trusting it: the prompt's
+            // rows are built by `restore_row_seed` out of a saved *tree*, and a
+            // tree has no window node in it. The vault is the only place a window
+            // seed lives, and the vault is not what this list is drawn from. It
+            // is written as the row its first tab would be, so a shape that ever
+            // did reach here is legible rather than blank.
+            Seed::Window { .. } => {
+                let (mark, label, cwd) = seed
+                    .first_tab()
+                    .map(|first| {
+                        let row = Self::from_seed(first, pane_count);
+                        (row.mark, row.label, row.cwd)
+                    })
+                    .unwrap_or((ChromeMark::WindowMaximize, String::new(), String::new()));
+                (mark, label, cwd)
+            }
         };
         Self {
             mark,
