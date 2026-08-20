@@ -1720,6 +1720,81 @@ pub fn graph_toolbar_rects(
     }
 }
 
+/// Where the head's two names stand inside the room the tools left it.
+///
+/// **`None` is a name this width does not draw**, on [`GraphToolbarRects`]'s own
+/// rule one level down.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GraphHeadRects {
+    /// The repository's own name — `None` when this toolbar has no repository to
+    /// name, or no room at all in which to name it.
+    pub repo: Option<[f32; 4]>,
+    /// The room the `⑂ name` segment is laid out in by
+    /// [`crate::git_panel::masthead_rects`] — `None` when the segment has
+    /// yielded whole.
+    pub branch: Option<[f32; 4]>,
+}
+
+/// Split the head between the repository's name and the branch's (T1).
+///
+/// **The yielding order** (user report, 2026-08-20). The tools on the right keep
+/// their whole boxes at every width — that is [`graph_toolbar_rects`], and it is
+/// what `head` already is: the room left over. What this decides is how the two
+/// names share that room, and the order is fixed:
+///
+/// 1. the repository's name truncates first, down to
+///    [`crate::git_panel::GIT_HEAD_NAME_MIN_LOGICAL_PX`] — it is the *outer*
+///    fact, and a reader who can still see the branch knows where they are
+///    standing even when they have to guess which clone of it they are in;
+/// 2. then the branch's own name truncates, in the room the segment is handed;
+/// 3. then the whole `⑂ name` segment yields and the repository takes the strip.
+///
+/// The repository's name used to take everything it wanted and hand the branch
+/// whatever was left — which at the user's width was nothing at all, and a
+/// segment handed nothing drew its mark anyway, inside the filter button beside
+/// it. Nothing here can do that again: the segment is either given room it fits
+/// in or not given a rectangle.
+#[must_use]
+pub fn graph_head_rects(
+    head: [f32; 4],
+    toolbar: &GraphToolbar,
+    branch: &crate::git_panel::GitHead,
+    scale: f32,
+) -> GraphHeadRects {
+    let gap = (GRAPH_REPO_GAP_LOGICAL_PX * scale).round();
+    let room = (head[2] - head[0]).max(0.0);
+    let wants = crate::git_panel::masthead_branch_width(branch, scale);
+    let least = crate::git_panel::masthead_branch_min(branch, scale);
+    let segment = |left: f32| [left, head[1], head[2].max(left), head[3]];
+    let repo_box = |width: f32| (width > 0.0).then(|| [head[0], head[1], head[0] + width, head[3]]);
+
+    if toolbar.repo.is_empty() {
+        return GraphHeadRects {
+            repo: None,
+            branch: (room >= least).then(|| segment(head[0])),
+        };
+    }
+    let full = toolbar.repo_width;
+    // A repository whose name is already shorter than the floor is not padded
+    // out to it — the floor is a limit on truncation, not a reservation.
+    let floor = full.min((crate::git_panel::GIT_HEAD_NAME_MIN_LOGICAL_PX * scale).round());
+    let repo = if room >= full + gap + wants {
+        full
+    } else {
+        (room - gap - wants).clamp(floor, full)
+    };
+    if room - repo - gap < least {
+        return GraphHeadRects {
+            repo: repo_box(full.min(room)),
+            branch: None,
+        };
+    }
+    GraphHeadRects {
+        repo: repo_box(repo),
+        branch: Some(segment(head[0] + repo + gap)),
+    }
+}
+
 /// What stands **inside** the toolbar's search field once the count and the `×`
 /// have taken their ends.
 ///
@@ -4001,7 +4076,6 @@ fn push_toolbar(
 ) {
     let (quads, labels, sprites) = out;
     let rects = graph_toolbar_rects(rect, toolbar, scale);
-    let gap = (GRAPH_REPO_GAP_LOGICAL_PX * scale).round();
     let radius = (GRAPH_TOOL_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
     let pad = (GRAPH_TOOL_PADDING_X_LOGICAL_PX * scale).round();
     let mark = (GRAPH_TOOL_MARK_LOGICAL_PX * scale).round().max(1.0);
@@ -4022,13 +4096,12 @@ fn push_toolbar(
     // repository, then where in it you are standing. It is drawn a step quieter
     // than the branch beside it for the same reason, so the pair reads as one
     // sentence rather than as two titles competing.
-    let repo_rect = [
-        rects.head[0],
-        rects.head[1],
-        (rects.head[0] + toolbar.repo_width).min(rects.head[2]),
-        rects.head[3],
-    ];
-    if !toolbar.repo.is_empty() {
+    //
+    // How the two share a narrow head is [`graph_head_rects`]'s ruling and not
+    // this painter's: the arithmetic used to be here, and a painter that decides
+    // where things go is a painter that can put one on top of another.
+    let names = graph_head_rects(rects.head, toolbar, head, scale);
+    if let Some(repo_rect) = names.repo {
         labels.push(ChromeLabel {
             mono: false,
             text: toolbar.repo.clone(),
@@ -4043,25 +4116,19 @@ fn push_toolbar(
             clip: Some(clip(repo_rect)),
         });
     }
-    let branch_left = if toolbar.repo.is_empty() {
-        rects.head[0]
-    } else {
-        repo_rect[2] + gap
-    };
-    let branch_rect = [
-        branch_left,
-        rects.head[1],
-        rects.head[2].max(branch_left),
-        rects.head[3],
-    ];
-    crate::git_panel::push_git_masthead(
-        head,
-        branch_rect,
-        scale,
-        palette,
-        (labels, sprites),
-        &clip,
-    );
+    if let Some(branch_rect) = names.branch {
+        // `false`: the strip's own refresh stands outside this rectangle, so the
+        // segment has no buttons of its own to stop short of.
+        crate::git_panel::push_git_masthead(
+            head,
+            branch_rect,
+            scale,
+            false,
+            palette,
+            (labels, sprites),
+            &clip,
+        );
+    }
 
     // ── the tools ──
     // `.pv-tool`'s own ladder, one surface along: a tool at rest carries its
@@ -7842,6 +7909,177 @@ mod tests {
         };
         assert!(at("repo") < at("main"));
         assert!(at("main") < at(graph_filter_all()));
+    }
+
+    /// **Nothing on this strip is drawn over anything else on it** (user report,
+    /// 2026-08-20).
+    ///
+    /// What the reader saw was a `⑂` inside the word `All`: the repository's name
+    /// had taken the whole head, the branch had been handed a rectangle of zero
+    /// width past the head's own right edge, and the mark was drawn at that
+    /// rectangle's left corner regardless — on top of the filter button.
+    ///
+    /// The invariant is stated as a sweep rather than as one width, because the
+    /// bug was not *at* a width: it was a painter placing a box from arithmetic
+    /// nothing else on the strip had seen.
+    #[test]
+    fn a_narrow_head_yields_in_one_order_and_never_overlaps_the_tools() {
+        let state = state_with_status(straight(3), CLEAN);
+        let content = frame(&state, None, WIDE);
+        let head = content.head.clone().expect("a head");
+        let mut toolbar = content.toolbar.clone().expect("a toolbar");
+        // The user's own repository: a name long enough to want the whole strip.
+        toolbar.repo = "Koopman_MPC_Summer_Review-main".to_owned();
+        toolbar.repo_width = toolbar.repo.chars().count() as f32 * 6.0;
+        let width_of = |text: &str| text.chars().count() as f32 * 6.0;
+
+        let overlap =
+            |a: [f32; 4], b: [f32; 4]| a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+        let height = (GRAPH_TOOL_HEIGHT_LOGICAL_PX).round();
+        let mut yielded = 0;
+        let mut over: Vec<String> = Vec::new();
+        for detached in [false, true] {
+            let mut head = head.clone();
+            head.detached = detached;
+            head.pills = vec![crate::git_panel::GitPill {
+                text: "↑ 2".to_owned(),
+                text_width: width_of("↑ 2"),
+                tooltip: String::new(),
+            }];
+            if detached {
+                head.branch = crate::git_panel::git_detached().to_owned();
+                head.branch_width = width_of(&head.branch);
+                toolbar.leave_detached = Some(GraphLeaveDetached {
+                    branch: "main".to_owned(),
+                    text: format!("{}main", graph_leave_detached()),
+                    width: width_of(&format!("{}main", graph_leave_detached())),
+                });
+            } else {
+                toolbar.leave_detached = None;
+            }
+
+            for width in [150.0, 200.0, 280.0, 360.0, 500.0, 900.0] {
+                let strip = [0.0, 0.0, width, 36.0];
+                let rects = graph_toolbar_rects(strip, &toolbar, 1.0);
+                let names = graph_head_rects(rects.head, &toolbar, &head, 1.0);
+                let segment = names
+                    .branch
+                    .map(|room| crate::git_panel::masthead_rects(&head, room, 1.0, false));
+                let where_ = format!("{width} wide, detached {detached}");
+
+                // ① The controls keep whole boxes and hold the trailing edge.
+                assert_eq!(
+                    [rects.refresh[2] - rects.refresh[0], rects.refresh[2]],
+                    [height, strip[2]],
+                    "the refresh is square and pinned to the edge at {where_}"
+                );
+                assert_eq!(
+                    rects.filter[2] - rects.filter[0],
+                    if rects.filter_short {
+                        (GRAPH_TOOL_PADDING_X_LOGICAL_PX * 2.0 + GRAPH_TOOL_MARK_LOGICAL_PX).round()
+                    } else {
+                        (GRAPH_TOOL_PADDING_X_LOGICAL_PX * 2.0
+                            + toolbar.filter_width
+                            + GRAPH_TOOL_GAP_LOGICAL_PX
+                            + GRAPH_TOOL_MARK_LOGICAL_PX)
+                            .round()
+                    },
+                    "the filter is whole or short, never squeezed, at {where_}"
+                );
+
+                // ② The mark is never left standing on its own.
+                if let Some(segment) = segment.as_ref() {
+                    assert_eq!(
+                        segment.mark.is_some(),
+                        segment.name.is_some(),
+                        "the ⑂ and its name are one object at {where_}"
+                    );
+                    assert!(
+                        segment.badge.is_some() == detached,
+                        "the badge says the state exactly while there is one at {where_}"
+                    );
+                } else {
+                    yielded += 1;
+                }
+
+                // ③ No two boxes this width draws intersect.
+                let mut drawn: Vec<(&str, [f32; 4])> = vec![("filter", rects.filter)];
+                drawn.push(("refresh", rects.refresh));
+                for (name, box_) in [
+                    ("repo", names.repo),
+                    ("search", rects.search),
+                    ("door", rects.leave_detached),
+                    ("mark", segment.as_ref().and_then(|s| s.mark)),
+                    ("name", segment.as_ref().and_then(|s| s.name)),
+                    ("badge", segment.as_ref().and_then(|s| s.badge)),
+                ] {
+                    if let Some(box_) = box_ {
+                        drawn.push((name, box_));
+                    }
+                }
+                if let Some(segment) = segment.as_ref() {
+                    for box_ in &segment.pills {
+                        drawn.push(("pill", *box_));
+                    }
+                }
+                for (index, (name, box_)) in drawn.iter().enumerate() {
+                    for (other, box_other) in drawn.iter().skip(index + 1) {
+                        // The badge is the ring *around* the name, and the name
+                        // is the one thing it is allowed to be over.
+                        if [name, other].contains(&&"badge") && [name, other].contains(&&"name") {
+                            continue;
+                        }
+                        if overlap(*box_, *box_other) {
+                            // Collected rather than asserted one at a time: the
+                            // ladder is the evidence, and a sweep that stops at
+                            // its first rung says a width was wrong where what
+                            // is wrong is the arithmetic.
+                            over.push(format!(
+                                "{name} {box_:?} is drawn over {other} {box_other:?} at {where_}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(over.is_empty(), "{}", over.join("\n"));
+        assert!(
+            yielded > 0,
+            "the ladder reaches the width at which the segment yields whole"
+        );
+    }
+
+    /// T1 — a strip with room for everything lays it out exactly where it always
+    /// did: the yielding order is a narrow-width ruling and nothing else.
+    #[test]
+    fn a_wide_head_is_laid_out_where_it_always_was() {
+        let state = state_with_status(straight(3), CLEAN);
+        let content = frame(&state, None, WIDE);
+        let head = content.head.clone().expect("a head");
+        let toolbar = content.toolbar.clone().expect("a toolbar");
+        let strip = [0.0, 0.0, 900.0, 36.0];
+        let rects = graph_toolbar_rects(strip, &toolbar, 1.0);
+        let names = graph_head_rects(rects.head, &toolbar, &head, 1.0);
+        assert_eq!(
+            names.repo,
+            Some([
+                rects.head[0],
+                rects.head[1],
+                rects.head[0] + toolbar.repo_width,
+                rects.head[3]
+            ]),
+            "the repository's name in full, from the head's own left edge"
+        );
+        assert_eq!(
+            names.branch,
+            Some([
+                rects.head[0] + toolbar.repo_width + GRAPH_REPO_GAP_LOGICAL_PX,
+                rects.head[1],
+                rects.head[2],
+                rects.head[3]
+            ]),
+            "and the branch one gap along, with the rest of the head"
+        );
     }
 
     /// T5 — the branch goes quiet while a question is in flight and comes back

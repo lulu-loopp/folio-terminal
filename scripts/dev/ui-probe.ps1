@@ -25,7 +25,10 @@
 #                                                                around the run, which is the only
 #                                                                way to reach a horizontal scroller
 #                                                                from a mouse with no tilt wheel
-#   .\ui-probe.ps1 click -Pid <pid> -X 100 -Y 20               → left click at window+(X,Y) physical px
+#   .\ui-probe.ps1 click -Pid <pid> -X 100 -Y 20 [-Mods c]     → left click at window+(X,Y) physical px;
+#                                                                -Mods holds ctrl/shift/alt down around
+#                                                                the press, which is how Ctrl+click —
+#                                                                the terminal's link activation — is sent
 #   .\ui-probe.ps1 dblclick -Pid <pid> -X 100 -Y 20 [-GapMs 90] → two presses inside the multi-click
 #                                                                interval, from one process — two separate
 #                                                                `click` runs are never a double click
@@ -353,6 +356,41 @@ public class Probe {
     ClickNoSettle(x, y);
     System.Threading.Thread.Sleep(120);
   }
+  /* The same press with modifiers held down around it, which is how a link is
+     opened on this desktop: Ctrl+click is the terminal's own activation gesture
+     (DESIGN §7.1.5g) and a probe that can only send a bare press cannot test it.
+     Same shape as `WheelWithMods` and for the same reason — the modifiers are
+     pressed and released around the *whole* press/release pair rather than
+     around each half, because an app that reads the modifier state at button-up
+     would otherwise see it flicker in the middle of one gesture. */
+  public static void ClickWithMods(int x, int y, bool ctrl, bool shift, bool alt) {
+    var hold = new System.Collections.Generic.List<INPUT>();
+    var drop = new System.Collections.Generic.List<INPUT>();
+    if (ctrl)  { var d = new INPUT { type = 1 }; d.u.ki = new KEYBDINPUT { wVk = 0x11, wScan = 0x1D, dwFlags = 0 }; hold.Add(d);
+                 var u = new INPUT { type = 1 }; u.u.ki = new KEYBDINPUT { wVk = 0x11, wScan = 0x1D, dwFlags = KEYEVENTF_KEYUP }; drop.Add(u); }
+    if (shift) { var d = new INPUT { type = 1 }; d.u.ki = new KEYBDINPUT { wVk = 0x10, wScan = 0x2A, dwFlags = 0 }; hold.Add(d);
+                 var u = new INPUT { type = 1 }; u.u.ki = new KEYBDINPUT { wVk = 0x10, wScan = 0x2A, dwFlags = KEYEVENTF_KEYUP }; drop.Add(u); }
+    if (alt)   { var d = new INPUT { type = 1 }; d.u.ki = new KEYBDINPUT { wVk = 0x12, wScan = 0x38, dwFlags = 0 }; hold.Add(d);
+                 var u = new INPUT { type = 1 }; u.u.ki = new KEYBDINPUT { wVk = 0x12, wScan = 0x38, dwFlags = KEYEVENTF_KEYUP }; drop.Add(u); }
+    // The pointer is parked *before* the modifiers go down, so the app's own
+    // hover state settles on the target cell while nothing is held.
+    SetCursorPos(x, y);
+    System.Threading.Thread.Sleep(120);
+    if (hold.Count > 0) {
+      uint sent = SendInput((uint)hold.Count, hold.ToArray(), Marshal.SizeOf(typeof(INPUT)));
+      if (sent == 0) throw new Exception("SendInput accepted 0 modifier events - nothing was held");
+      System.Threading.Thread.Sleep(60);
+    }
+    mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);   // LEFTDOWN
+    System.Threading.Thread.Sleep(40);
+    mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);   // LEFTUP
+    if (drop.Count > 0) {
+      System.Threading.Thread.Sleep(60);
+      drop.Reverse();
+      SendInput((uint)drop.Count, drop.ToArray(), Marshal.SizeOf(typeof(INPUT)));
+    }
+    System.Threading.Thread.Sleep(120);
+  }
   /* The same press with the settling sleep left off, for the one caller that
      must not have it: a burst photographing a transition. The 120ms `Click`
      waits out so the *next* command sees a finished window is longer than the
@@ -580,8 +618,15 @@ switch ($Cmd) {
     $px = if ($X -lt 0) { $r.R + $X } else { $r.L + $X }
     $py = if ($Y -lt 0) { $r.B + $Y } else { $r.T + $Y }
     if (-not [Probe]::PointBelongsTo($px, $py, $ProcId)) { throw "REFUSED: ($px, $py) is not over pid=$ProcId — not clicking blind" }
-    [Probe]::Click($px, $py)
-    "clicked ($px, $py) = window+($X, $Y) on pid=$ProcId (pixel ownership verified)"
+    # -Mods holds ctrl/shift/alt down around the press, which is the only way to
+    # reach a Ctrl+click — the terminal's own link activation (§7.1.5g) and the
+    # one gesture a bare press deliberately does not perform.
+    if ($Mods) {
+      [Probe]::ClickWithMods($px, $py, ($Mods -match "c"), ($Mods -match "s"), ($Mods -match "a"))
+    } else {
+      [Probe]::Click($px, $py)
+    }
+    "clicked ($px, $py) = window+($X, $Y) mods=$Mods on pid=$ProcId (pixel ownership verified)"
   }
   "rightclick" {
     $h = Get-AppWindow $ProcId

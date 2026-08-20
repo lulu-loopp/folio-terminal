@@ -176,6 +176,147 @@ pub fn reveal_arguments(path: &std::path::Path, is_directory: bool) -> std::ffi:
     arguments
 }
 
+/// The Windows path one `file:` URI names, or nothing when it names none.
+///
+/// # Why this is here and why it is pure
+///
+/// A `file:` URI arriving out of an OSC 8 hyperlink is a *string a program
+/// printed*, and every door this crate opens onto the shell takes a `Path`. One
+/// of the two has to become the other, and the translation is the only place the
+/// whole thing can go wrong: a `%20` left undecoded opens nothing, a `%2e%2e`
+/// decoded twice opens the wrong thing, and a lenient reading of a stray `%`
+/// would be exactly the guessing `CONVENTIONS.md` §1 forbids. So it is written
+/// once, next to [`reveal_arguments`] and for its reason — the one thing that can
+/// be wrong here is the string — and it is a pure function with its own tests
+/// rather than a step inside a bridge that can only be exercised by launching
+/// something.
+///
+/// It answers only what this machine could actually name. Nothing here checks
+/// that the path *exists*, and nothing here decides what to do with it: the
+/// caller's own policy — preview, Explorer, refuse — is a separate question and
+/// stays where the rest of that policy lives.
+///
+/// # The reading
+///
+/// * The scheme is matched case-insensitively; anything but `file` is not ours.
+/// * A fragment (`#…`) and a query (`?…`) are cut. They are URI syntax, not part
+///   of any filename.
+/// * `file://<host>/…` with an empty host or `localhost` is this machine;
+///   any other host is the UNC share `\\<host>\…` it plainly means (RFC 8089
+///   §2). `file:/C:/…` and `file:C:/…`, which emitters do produce, are read as
+///   the same local path with no authority at all.
+/// * Percent-escapes decode to bytes and the bytes must be UTF-8 — which is what
+///   `%E4%B8%AD` being a Chinese character rather than three broken ones depends
+///   on. A `%` that is not followed by two hex digits makes the whole URI
+///   unreadable rather than a literal percent: a filename holding a real `%` is
+///   `%25` in a URI, and treating the malformed case as text is how a decoder
+///   starts opening files nobody named.
+/// * Forward slashes become backslashes, and the leading slash in front of a
+///   drive letter goes away, so `file:///C:/a%20b.md` is `C:\a b.md`.
+/// * The result must be drive-rooted or UNC. A POSIX URI such as
+///   `file:///etc/passwd` names nothing on this machine and is refused rather
+///   than turned into a relative path that would resolve against whatever the
+///   process's current directory happens to be.
+/// * A NUL or an ASCII control character anywhere — before decoding or after —
+///   is a refusal. Raw non-ASCII is kept as itself, which is the IRI a browser
+///   would accept.
+#[must_use]
+pub fn file_uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
+    let (scheme, rest) = uri.split_once(':')?;
+    if !scheme.eq_ignore_ascii_case("file") {
+        return None;
+    }
+    // Fragment before query: `?` inside a fragment is fragment text, and cutting
+    // the other way round would leave it behind.
+    let rest = rest.split_once('#').map_or(rest, |(head, _)| head);
+    let rest = rest.split_once('?').map_or(rest, |(head, _)| head);
+    if rest
+        .chars()
+        .any(|character| character <= ' ' || character == '\u{7f}')
+    {
+        return None;
+    }
+    let (host, path) = match rest.strip_prefix("//") {
+        // The authority runs to the next separator; without one there is a host
+        // and no path, which names a machine rather than a file on it.
+        Some(authority) => match authority.find(['/', '\\']) {
+            Some(cut) => (&authority[..cut], &authority[cut..]),
+            None => return None,
+        },
+        None => ("", rest),
+    };
+    let host = percent_decode_utf8(host)?;
+    let path = percent_decode_utf8(path)?;
+    if path.is_empty() {
+        return None;
+    }
+    let local = host.is_empty() || host.eq_ignore_ascii_case("localhost");
+    let mut text = if local {
+        // `/C:/x` → `C:/x`. Only in front of a drive letter: a lone leading
+        // slash anywhere else is a POSIX path, which the root check below
+        // refuses on purpose.
+        let bytes = path.as_bytes();
+        if bytes.len() >= 3
+            && matches!(bytes[0], b'/' | b'\\')
+            && bytes[1].is_ascii_alphabetic()
+            && bytes[2] == b':'
+        {
+            path[1..].to_owned()
+        } else {
+            path
+        }
+    } else {
+        // `path` still carries the separator that ended the authority, so this
+        // is `\\host` + `\share\…` and never `\\hostshare`.
+        format!(r"\\{host}{path}")
+    };
+    text = text.replace('/', "\\");
+    if text.contains('\0') || text.chars().any(|character| character.is_control()) {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let drive_rooted =
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\';
+    // The same shape `validate_openable_path` asks of every path this crate will
+    // hand to the shell, asked one step earlier so a URI can never become a
+    // relative path in the first place.
+    let unc = text.starts_with(r"\\") && text.len() > 2;
+    (drive_rooted || unc).then(|| std::path::PathBuf::from(text))
+}
+
+/// Percent-escapes to bytes to UTF-8, strictly: a `%` without two hex digits
+/// after it, or a byte sequence that is not UTF-8, makes the whole string
+/// unreadable rather than partly guessed.
+fn percent_decode_utf8(text: &str) -> Option<String> {
+    if !text.contains('%') {
+        return Some(text.to_owned());
+    }
+    let source = text.as_bytes();
+    let mut decoded = Vec::with_capacity(source.len());
+    let mut at = 0;
+    while at < source.len() {
+        if source[at] == b'%' {
+            let high = hex_digit(*source.get(at + 1)?)?;
+            let low = hex_digit(*source.get(at + 2)?)?;
+            decoded.push(high << 4 | low);
+            at += 3;
+        } else {
+            decoded.push(source[at]);
+            at += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 // ── Explorer's context menu (Windows landing block, slice 2) ───────────────
 //
 // The three values one classic shell verb is made of, the trees it is written
@@ -5266,6 +5407,157 @@ mod reveal_tests {
         assert_eq!(
             reveal_arguments(spaced, false).to_string_lossy(),
             "/select,\"C:\\My Documents\\a file.md\""
+        );
+    }
+}
+
+#[cfg(test)]
+mod file_uri_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn decoded(uri: &str) -> Option<String> {
+        file_uri_to_path(uri).map(|path| path.to_string_lossy().into_owned())
+    }
+
+    /// PIN — **the URI a program printed becomes the path this machine names**,
+    /// escape for escape.
+    ///
+    /// Every line here is a shape Claude Code or a shell actually emits. The
+    /// space is the common one (`%20`, and every `[file]` line naming a document
+    /// with a space in it goes through it); the Chinese name is the one that
+    /// separates decoding *bytes* from decoding *characters*, because
+    /// `%E4%B8%AD` is one character made of three escapes and a decoder that
+    /// works escape-by-escape into a `String` produces three broken ones.
+    ///
+    /// MUTATIONS:
+    /// ① decode without the UTF-8 join — push each byte as a `char` — and the
+    ///    Chinese assertion goes red while every ASCII one stays green, which is
+    ///    exactly the bug that would ship;
+    /// ② drop the drive-letter slash strip and the first assertion becomes
+    ///    `\C:\…`, a path with no root;
+    /// ③ leave `/` alone instead of turning it into `\` and the last one goes
+    ///    red — `C:/a/b` opens by luck through Win32 and by luck only, and it is
+    ///    not what anything else in this crate hands the shell.
+    #[test]
+    fn a_file_uri_decodes_to_the_windows_path_it_names() {
+        assert_eq!(
+            decoded("file:///C:/Users/me/phd-application-timeline.html").as_deref(),
+            Some(r"C:\Users\me\phd-application-timeline.html")
+        );
+        assert_eq!(
+            decoded("file:///C:/My%20Documents/a%20file.md").as_deref(),
+            Some(r"C:\My Documents\a file.md")
+        );
+        assert_eq!(
+            decoded("file:///D:/%E4%B8%AD%E6%96%87/%E7%AC%94%E8%AE%B0.md").as_deref(),
+            Some(r"D:\中文\笔记.md"),
+            "three escapes are one character, not three"
+        );
+        // A drive letter is a drive letter in either case, and the case is kept
+        // rather than normalised: Windows does not care and rewriting it would
+        // make the path this window shows differ from the one that was printed.
+        assert_eq!(
+            decoded("file:///c:/tmp/x.md").as_deref(),
+            Some(r"c:\tmp\x.md")
+        );
+        assert_eq!(
+            decoded("FILE:///C:/tmp/x.md").as_deref(),
+            Some(r"C:\tmp\x.md")
+        );
+        // Both separators arrive in the wild, including as an escape.
+        assert_eq!(
+            decoded(r"file:///C:\tmp\x.md").as_deref(),
+            Some(r"C:\tmp\x.md")
+        );
+        assert_eq!(
+            decoded("file:///C:%5Ctmp%5Cx.md").as_deref(),
+            Some(r"C:\tmp\x.md")
+        );
+    }
+
+    /// PIN — **the three authority readings**, which is the whole of what the
+    /// `//` in `file://` is for.
+    ///
+    /// MUTATION: treat every authority as a host and `file:///C:/x` becomes
+    /// `\\\C:\x`; treat every authority as empty and a real share silently
+    /// becomes a local path, which is the more dangerous of the two.
+    #[test]
+    fn an_empty_host_and_localhost_are_this_machine_and_anything_else_is_a_share() {
+        assert_eq!(
+            decoded("file:///C:/tmp/x.md").as_deref(),
+            Some(r"C:\tmp\x.md")
+        );
+        assert_eq!(
+            decoded("file://localhost/C:/tmp/x.md").as_deref(),
+            Some(r"C:\tmp\x.md")
+        );
+        assert_eq!(
+            decoded("file://LocalHost/C:/tmp/x.md").as_deref(),
+            Some(r"C:\tmp\x.md")
+        );
+        assert_eq!(
+            decoded("file://server/share/notes.md").as_deref(),
+            Some(r"\\server\share\notes.md")
+        );
+        // The authority-less spellings emitters produce, read as the same path.
+        assert_eq!(
+            decoded("file:/C:/tmp/x.md").as_deref(),
+            Some(r"C:\tmp\x.md")
+        );
+        assert_eq!(decoded("file:C:/tmp/x.md").as_deref(), Some(r"C:\tmp\x.md"));
+    }
+
+    /// PIN — **what names nothing on this machine is refused**, rather than
+    /// turned into something that would resolve against the process's current
+    /// directory.
+    ///
+    /// MUTATION: drop the `drive_rooted || unc` gate and `file:///etc/passwd`
+    /// becomes the relative path `etc\passwd`, which every door in this crate
+    /// would then join to whatever directory the process is sitting in.
+    #[test]
+    fn a_uri_that_names_no_windows_path_is_refused_rather_than_guessed() {
+        assert_eq!(
+            decoded("file:///etc/passwd"),
+            None,
+            "a POSIX path is not one"
+        );
+        assert_eq!(decoded("file:///"), None, "a root with no name");
+        assert_eq!(
+            decoded("file://server"),
+            None,
+            "a machine, not a file on it"
+        );
+        assert_eq!(decoded("https://example.test/x"), None, "not our scheme");
+        assert_eq!(decoded("C:/tmp/x.md"), None, "not a URI at all");
+        // A stray `%` is a malformed URI, not a literal percent: a filename with
+        // a real one in it is `%25`, and reading the broken case as text is how
+        // a decoder starts naming files nobody wrote down.
+        assert_eq!(decoded("file:///C:/100%/x.md"), None);
+        assert_eq!(decoded("file:///C:/%zz/x.md"), None);
+        assert_eq!(decoded("file:///C:/%E4%B8/x.md"), None, "not UTF-8");
+        // Control characters and NUL, before decoding and after.
+        assert_eq!(decoded("file:///C:/a\nb.md"), None);
+        assert_eq!(decoded("file:///C:/a%00b.md"), None);
+        assert_eq!(decoded("file:///C:/a%0Ab.md"), None);
+    }
+
+    /// PIN — a fragment and a query are URI syntax and never part of a filename,
+    /// and a trailing separator is kept because it is the emitter saying
+    /// "directory".
+    #[test]
+    fn a_fragment_and_a_query_are_cut_and_a_trailing_separator_is_kept() {
+        assert_eq!(
+            decoded("file:///C:/docs/notes.md#heading").as_deref(),
+            Some(r"C:\docs\notes.md")
+        );
+        assert_eq!(
+            decoded("file:///C:/docs/notes.md?v=2").as_deref(),
+            Some(r"C:\docs\notes.md")
+        );
+        assert_eq!(
+            file_uri_to_path("file:///C:/docs/"),
+            Some(PathBuf::from(r"C:\docs\"))
         );
     }
 }
