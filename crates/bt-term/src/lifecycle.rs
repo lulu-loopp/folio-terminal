@@ -147,6 +147,8 @@ pub enum LifecycleDirective {
     ResetWindowTitle,
     Bell,
     Progress(Option<crate::session::ProgressState>),
+    /// One desktop notification a program asked for (`OSC 9`, `OSC 777;notify`).
+    Notification(crate::session::TerminalNotification),
     GridWrites {
         screen: RemovalScreen,
         rows: Vec<u32>,
@@ -211,6 +213,7 @@ pub fn classify(event: AdapterEvent) -> LifecycleDirective {
         AdapterEvent::ResetTitle => LifecycleDirective::ResetWindowTitle,
         AdapterEvent::Bell => LifecycleDirective::Bell,
         AdapterEvent::Progress(progress) => LifecycleDirective::Progress(progress),
+        AdapterEvent::Notification(notification) => LifecycleDirective::Notification(notification),
         AdapterEvent::GridWrites { screen, rows } => {
             LifecycleDirective::GridWrites { screen, rows }
         }

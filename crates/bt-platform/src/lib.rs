@@ -269,6 +269,97 @@ pub fn context_menu_shape(exe: &std::path::Path, label: &str) -> ContextMenuShap
     }
 }
 
+// ── Desktop notifications (Windows landing block, slice 3) ────────────────
+//
+// The identity Windows files a notification under, and the one document a toast
+// is. Everything in this section is **pure**, on the Explorer verb's own
+// division: the strings are decided here and `windows_impl::Notifier` does
+// nothing but carry them across. What can go wrong in a toast is an unescaped
+// ampersand in a shell's error message, and that is settled before any COM
+// object exists.
+
+/// The AppUserModelID every Folio notification is sent under.
+///
+/// **This string is an identity and must never change.** Windows files the
+/// user's own per-app notification preferences — banners on or off, sounds,
+/// priority in Focus Assist — under this exact text, at
+/// `HKCU\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\<AUMID>`.
+/// Renaming it would not rename those settings; it would abandon them and start
+/// a second app beside the first in the reader's Settings list.
+///
+/// Reverse-DNS-ish and without spaces, which is the convention the platform's
+/// own entries follow.
+pub const NOTIFICATION_AUMID: &str = "Folio.Terminal";
+
+/// Where that identity is declared, as a path below `HKEY_CURRENT_USER`.
+///
+/// **`HKCU` for [`CONTEXT_MENU_CLASSES`]'s reason** and one of its own: this is
+/// per-user state by construction — it is the sender name shown to *this*
+/// account, beside the notification settings *this* account chose.
+#[must_use]
+pub fn notification_aumid_key() -> String {
+    format!(r"Software\Classes\AppUserModelId\{NOTIFICATION_AUMID}")
+}
+
+/// The name shown on the toast and in Windows' own notification settings.
+///
+/// The product name and not the window title: what this names is the *sender*,
+/// and the sender is Folio however many windows it has open.
+pub const NOTIFICATION_DISPLAY_NAME: &str = "Folio";
+
+/// One toast, as the XML the notification platform parses.
+///
+/// `ToastGeneric` with one or two text lines — the template every unpackaged
+/// desktop app gets, and the only one that needs no image assets. The second
+/// line is omitted rather than left empty when there is no body, because an
+/// empty `<text>` is a blank line the platform still lays out.
+///
+/// `launch` is handed back verbatim as the activation argument when the toast is
+/// clicked; it is this product's only channel for saying *which pane* a
+/// notification came from. `activationType="foreground"` is what makes the click
+/// an activation at all rather than a dismissal.
+///
+/// **Every one of the three is escaped**, and that is the whole reason this is a
+/// function and not a `format!` at the call site: a body is arbitrary text from
+/// the far end of a pipe, `make: *** [all] Error 2 && exit` is an ordinary thing
+/// for a shell to print, and an unescaped `&` is a document the platform refuses
+/// to parse — which would turn one hostile line of output into a terminal that
+/// silently stops notifying.
+#[must_use]
+pub fn toast_xml(title: &str, body: &str, launch: &str) -> String {
+    let mut xml = format!(
+        "<toast launch=\"{launch}\" activationType=\"foreground\">\
+<visual><binding template=\"ToastGeneric\"><text>{title}</text>",
+        launch = xml_escape(launch),
+        title = xml_escape(title),
+    );
+    if !body.is_empty() {
+        xml.push_str(&format!("<text>{}</text>", xml_escape(body)));
+    }
+    xml.push_str("</binding></visual></toast>");
+    xml
+}
+
+/// XML's five predefined entities, and nothing else.
+///
+/// `'` and `"` are escaped even though only one of the three call sites is an
+/// attribute: a function that escaped by position would have to be told which
+/// position, and the entity is legal in element content as well.
+fn xml_escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
 /// What the machine's registry says about this verb, against what this build
 /// would write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -456,7 +547,18 @@ mod windows_impl {
             atomic::{AtomicI32, Ordering},
         },
     };
-    use windows::core::{HRESULT, IUnknown, Interface, PCWSTR, PWSTR};
+    use windows::core::{HRESULT, HSTRING, IUnknown, Interface, PCWSTR, PWSTR};
+
+    // The notification centre's own three namespaces: the document a toast is,
+    // the event a click arrives on, and the objects that carry both. See
+    // `Notifier`.
+    use windows::{
+        Data::Xml::Dom::XmlDocument,
+        Foundation::TypedEventHandler,
+        UI::Notifications::{
+            ToastActivatedEventArgs, ToastNotification, ToastNotificationManager, ToastNotifier,
+        },
+    };
 
     use windows::Win32::{
         Foundation::{
@@ -1257,6 +1359,192 @@ mod windows_impl {
         // broadcast every other subclass in the chain is entitled to see.
         // SAFETY: forwarding untouched messages is the required subclass contract.
         unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+    }
+
+    /// How many shown toasts are kept alive so their clicks can still be heard.
+    ///
+    /// A click comes back through the `Activated` handler registered on the
+    /// **object** that was shown, so the object is what has to be held. Thirty-two
+    /// is the depth of "notifications a person might still scroll back to in the
+    /// notification centre"; past that the object is released and clicking it
+    /// does nothing, which is also what clicking any of them does once Folio has
+    /// exited (see [`Notifier`]).
+    const NOTIFICATION_HISTORY: usize = 32;
+
+    /// What the activation callback and the event loop share.
+    ///
+    /// Two mutexes and not one, because they are locked by different threads for
+    /// different reasons and holding either while the other is wanted is the
+    /// shape a deadlock has.
+    struct NotifierShared {
+        /// Launch strings from toasts that have been clicked and not yet routed.
+        activations: Mutex<Vec<String>>,
+        /// How the owning loop is told there is something in the queue.
+        wake: Mutex<Box<dyn Fn() + Send>>,
+    }
+
+    /// This process's voice in the Windows notification centre (Windows landing
+    /// block slice 3).
+    ///
+    /// # What it registers, and what it deliberately does not
+    ///
+    /// **One string in one key**, `DisplayName` under
+    /// `HKCU\Software\Classes\AppUserModelId\Folio.Terminal`. That is the whole
+    /// registry footprint, and it was measured rather than assumed — see
+    /// `docs/DESIGN.md` §7.6 for the probe. In particular there is **no
+    /// `CustomActivator`, no `CLSID` tree, no `LocalServer32`, no start-menu
+    /// shortcut and no call to `SetCurrentProcessExplicitAppUserModelID`**: with
+    /// only that one value written, `Show` displays the toast and clicking it
+    /// delivers `ToastNotification::Activated` **into this running process**,
+    /// which is the only case a terminal has. Microsoft's own (archived) Win32
+    /// toast guide still says a shortcut is mandatory; on Windows 11 26200 it is
+    /// not.
+    ///
+    /// The one thing that footprint gives up is *cold* activation: a toast still
+    /// sitting in the notification centre after Folio has exited does nothing
+    /// when clicked, because there is no COM server to launch. That is the
+    /// honest outcome rather than a gap — the pane it named is gone with the
+    /// process, so there is nothing for the click to land on.
+    ///
+    /// **Registration is not removed when notifications are switched off.** The
+    /// key is the name the user's own choices about Folio's notifications are
+    /// filed under; deleting it would throw those away and re-registering would
+    /// look like a different app. Off means no toast is raised, which is the
+    /// whole of what off can honestly promise.
+    ///
+    /// **If a toast is ever attributed to `Folio.Terminal` rather than `Folio`,
+    /// the machine has a stale name cached and the code is fine.** The
+    /// notification platform remembers a display name per AUMID and does not
+    /// re-read this value once it has one; a machine that met this identity
+    /// before it had a `DisplayName` — a developer's, running an earlier probe —
+    /// keeps answering with the raw id. `ToastNotificationManager.History.Clear`
+    /// for the AUMID clears it, and so does restarting Explorer. Measured both
+    /// ways; see `docs/DESIGN.md` §7.6.
+    pub struct Notifier {
+        notifier: ToastNotifier,
+        shared: Arc<NotifierShared>,
+        /// The toasts still able to route a click, newest last.
+        live: std::collections::VecDeque<ToastNotification>,
+        /// Whether this object's own `CoInitializeEx` counted — `Taskbar`'s
+        /// balance rule, and for the same reason.
+        com_balance: bool,
+    }
+
+    impl Notifier {
+        /// Claim the identity and open the channel, or say why not.
+        ///
+        /// `wake` is called from whatever thread the platform delivers a click
+        /// on. It must do nothing but nudge the event loop — the launch string
+        /// is already in the queue by then, and [`Self::take_activations`] is
+        /// where it is read, on the loop's own thread.
+        pub fn new(wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
+            write_registry_string(
+                &super::notification_aumid_key(),
+                "DisplayName",
+                super::NOTIFICATION_DISPLAY_NAME,
+            )?;
+            // SAFETY: called on the event-loop thread, which is the apartment
+            // the notifier and every toast object below live in. The balance is
+            // returned in `Drop`, after the interface is released.
+            let apartment =
+                unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
+            if apartment == RPC_E_CHANGED_MODE {
+                return Err("the event-loop thread is not a single-threaded apartment".to_owned());
+            }
+            let com_balance = apartment.is_ok();
+            let notifier = match ToastNotificationManager::CreateToastNotifierWithId(
+                &HSTRING::from(super::NOTIFICATION_AUMID),
+            ) {
+                Ok(notifier) => notifier,
+                Err(error) => {
+                    if com_balance {
+                        // SAFETY: balancing the call made immediately above.
+                        unsafe { CoUninitialize() };
+                    }
+                    return Err(format!("CreateToastNotifierWithId: {error}"));
+                }
+            };
+            // `notifier.Setting()` is deliberately **not** consulted. On the very
+            // first notification of a fresh identity it answers
+            // `0x80070490 "Element not found"` — the platform has not made its
+            // own settings entry yet — and `Show` succeeds regardless. Reading it
+            // as "notifications are off" would silence the first toast on every
+            // machine, once, and only on machines where nothing was wrong.
+            Ok(Self {
+                notifier,
+                shared: Arc::new(NotifierShared {
+                    activations: Mutex::new(Vec::new()),
+                    wake: Mutex::new(wake),
+                }),
+                live: std::collections::VecDeque::new(),
+                com_balance,
+            })
+        }
+
+        /// Raise one toast. `launch` comes back verbatim if it is clicked.
+        pub fn show(&mut self, title: &str, body: &str, launch: &str) -> Result<(), String> {
+            let document = XmlDocument::new().map_err(|error| format!("XmlDocument: {error}"))?;
+            document
+                .LoadXml(&HSTRING::from(super::toast_xml(title, body, launch)))
+                .map_err(|error| format!("XmlDocument::LoadXml: {error}"))?;
+            let toast = ToastNotification::CreateToastNotification(&document)
+                .map_err(|error| format!("CreateToastNotification: {error}"))?;
+            let shared = Arc::clone(&self.shared);
+            toast
+                .Activated(&TypedEventHandler::<
+                    ToastNotification,
+                    windows::core::IInspectable,
+                >::new(move |_sender, arguments| {
+                    let launched = arguments
+                        .as_ref()
+                        .and_then(|arguments| arguments.cast::<ToastActivatedEventArgs>().ok())
+                        .and_then(|arguments| arguments.Arguments().ok())
+                        .map(|arguments| arguments.to_string_lossy())
+                        .unwrap_or_default();
+                    // Poisoned locks are ignored rather than unwrapped: a panic
+                    // in the loop must not turn every later click into a second
+                    // panic on a platform thread, where there is nobody to catch
+                    // it.
+                    if let Ok(mut queue) = shared.activations.lock() {
+                        queue.push(launched);
+                    }
+                    if let Ok(wake) = shared.wake.lock() {
+                        wake();
+                    }
+                    Ok(())
+                }))
+                .map_err(|error| format!("ToastNotification::Activated: {error}"))?;
+            self.notifier
+                .Show(&toast)
+                .map_err(|error| format!("ToastNotifier::Show: {error}"))?;
+            self.live.push_back(toast);
+            while self.live.len() > NOTIFICATION_HISTORY {
+                self.live.pop_front();
+            }
+            Ok(())
+        }
+
+        /// Every clicked toast's launch string since the last call, oldest first.
+        pub fn take_activations(&self) -> Vec<String> {
+            self.shared
+                .activations
+                .lock()
+                .map(|mut queue| std::mem::take(&mut *queue))
+                .unwrap_or_default()
+        }
+    }
+
+    impl Drop for Notifier {
+        fn drop(&mut self) {
+            // SAFETY: dropped on the thread that initialised the apartment. The
+            // toasts and the notifier are released before the apartment they
+            // live in is let go, which is `Taskbar::drop`'s order and the only
+            // one that is defined.
+            self.live.clear();
+            if self.com_balance {
+                unsafe { CoUninitialize() };
+            }
+        }
     }
 
     fn low_word_signed(value: isize) -> i32 {
@@ -4415,7 +4703,7 @@ impl TaskbarProgress {
 #[cfg(windows)]
 pub use windows_impl::{
     Compositor, CustomWindowFrame, DirWatch, FilePickKind, FolderPicker, ImagePicker,
-    ImeSystemCaret, MathContextMenu, PROGRAM_REFUSED, Taskbar, adopt_parent_console,
+    ImeSystemCaret, MathContextMenu, Notifier, PROGRAM_REFUSED, Taskbar, adopt_parent_console,
     client_area_animation_enabled, clipboard_text, current_thread_priority, documents_directory,
     file_product_version, get_dpi_for_window, get_window_rect, get_work_area, install_context_menu,
     install_window_class_background, is_window_minimized, message_box, monospace_font_families,
@@ -4852,6 +5140,71 @@ mod composition_offset_tests {
             assert_eq!(x as i32, pixel, "x survived the round trip");
             assert_eq!(y as i32, pixel, "y survived the round trip");
         }
+    }
+}
+
+#[cfg(test)]
+mod toast_tests {
+    use super::{NOTIFICATION_AUMID, notification_aumid_key, toast_xml};
+
+    /// PIN (Windows landing slice 3) — **a toast survives whatever a shell
+    /// prints.**
+    ///
+    /// The body is arbitrary text from the far end of a pipe and a build log is
+    /// full of `&`, `<` and `"`. The platform parses this string as XML, so one
+    /// unescaped ampersand is not a mangled word — it is a document that fails to
+    /// load, and a terminal that quietly stops notifying from then on.
+    ///
+    /// MUTATIONS: drop any one entity from `xml_escape` and the matching case
+    /// below goes red; escape the body but not the `launch` attribute and the
+    /// routing case goes red, which is the failure that would have shipped
+    /// because a launch string is *ours* and looks safe until a tab id is put in
+    /// a query string beside an `&`.
+    #[test]
+    fn every_field_of_a_toast_is_xml_escaped() {
+        let xml = toast_xml(
+            "make & co",
+            r#"*** [all] Error 2 <see "log"> & stop"#,
+            "n=1&t=2",
+        );
+        assert!(xml.contains("<text>make &amp; co</text>"), "{xml}");
+        assert!(
+            xml.contains("<text>*** [all] Error 2 &lt;see &quot;log&quot;&gt; &amp; stop</text>"),
+            "{xml}"
+        );
+        assert!(xml.contains("launch=\"n=1&amp;t=2\""), "{xml}");
+        assert!(
+            xml.contains("activationType=\"foreground\""),
+            "a click that is not an activation routes nothing: {xml}"
+        );
+    }
+
+    /// PIN — **no body means no second line, not an empty one.**
+    ///
+    /// `OSC 777;notify;<title>` with nothing after it is a real shape, and an
+    /// empty `<text/>` is a blank row the platform still lays out under the
+    /// title.
+    #[test]
+    fn a_toast_with_no_body_carries_one_line() {
+        let xml = toast_xml("built", "", "n=7");
+        assert_eq!(xml.matches("<text>").count(), 1, "{xml}");
+        assert!(xml.contains("<text>built</text>"), "{xml}");
+    }
+
+    /// PIN — **the identity is one string in one place.**
+    ///
+    /// The key path is derived from [`NOTIFICATION_AUMID`] rather than written
+    /// out beside it, because the two disagreeing is the failure that registers
+    /// one name and sends under another — and the symptom of that is `Show`
+    /// succeeding while nothing appears, which is exactly what an unregistered
+    /// AUMID does.
+    #[test]
+    fn the_registry_path_is_derived_from_the_aumid() {
+        assert_eq!(
+            notification_aumid_key(),
+            r"Software\Classes\AppUserModelId\Folio.Terminal"
+        );
+        assert!(notification_aumid_key().ends_with(NOTIFICATION_AUMID));
     }
 }
 

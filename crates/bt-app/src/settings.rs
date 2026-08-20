@@ -2196,6 +2196,20 @@ pub enum SettingsRow {
     /// `Runtime::apply_scrollback_lines` for why the deletion is immediate and
     /// why waiting would not have spared a line.
     Scrollback,
+    /// **Whether a program may put a message on the desktop** — the Terminal
+    /// page's third row (§7.6, Windows landing slice 3, 2026-08-20).
+    ///
+    /// On this page for [`Self::Scrollback`]'s reason read one step further out:
+    /// the page is how ONE pane behaves once something is running, and this is
+    /// what a pane is allowed to do when the person who started it has looked
+    /// away. It is emphatically not an Appearance row — nothing about it is
+    /// drawn in this window at all.
+    ///
+    /// **Last on the page**, on the same judgement `Explorer context menu` was
+    /// filed under in General: the two rows above it say what a pane keeps and
+    /// what one shell is patched with, and this is the only row here whose
+    /// answer is visible **outside this window**.
+    Notifications,
 
     // ── the profile editor's own rows (§7.1.6c-6b) ─────────────────────────
     //
@@ -2289,7 +2303,9 @@ impl SettingsRow {
             // about the machine: what a terminal keeps of what it has already
             // shown is the plainest reading of "how ONE pane behaves once
             // something is running" this dialog has.
-            Self::PsReadLine | Self::Scrollback => SettingsCategory::Terminal,
+            Self::PsReadLine | Self::Scrollback | Self::Notifications => {
+                SettingsCategory::Terminal
+            }
             // The mock-up files what typesetting does to a block under "Rendered
             // blocks" (2570), beside that page's own Maximum height row.
             Self::Formulas | Self::InlineFormulas | Self::Tables | Self::BlockMaxHeight => {
@@ -2351,6 +2367,7 @@ impl SettingsRow {
             Self::Tables => Text::RowTables.text(),
             Self::BlockMaxHeight => Text::RowBlockMaxHeight.text(),
             Self::Scrollback => Text::RowScrollback.text(),
+            Self::Notifications => Text::RowNotifications.text(),
             Self::GitPanel => Text::RowGitPanel.text(),
             Self::ContextMenu => Text::RowContextMenu.text(),
             // Mock-up 2360.
@@ -2444,6 +2461,7 @@ impl SettingsRow {
             // what the numerals cannot — that the number is spent once per pane,
             // and that a smaller one is paid for out of the oldest lines.
             Self::Scrollback => Text::DescScrollback.text(),
+            Self::Notifications => Text::DescNotifications.text(),
             // Says what Off *does* rather than what it hides, because what it
             // does is the reason to reach for it: no page, no chord, and no `git`
             // process started on your behalf.
@@ -2643,6 +2661,7 @@ impl SettingsRow {
             | Self::ContextMenu
             | Self::PsReadLine
             | Self::Scrollback
+            | Self::Notifications
             // The everyday half of the editor, in the order somebody decides a
             // profile: what it is called, what it runs, where it starts, what
             // colour names it.
@@ -2733,7 +2752,8 @@ impl SettingsRow {
             | Self::Tables
             | Self::GitPanel
             | Self::ContextMenu
-            | Self::PsReadLine => FORMULA_OPTIONS.len(),
+            | Self::PsReadLine
+            | Self::Notifications => FORMULA_OPTIONS.len(),
             Self::BlockMaxHeight => BLOCK_MAX_HEIGHT_OPTIONS.len(),
             Self::Scrollback => SCROLLBACK_OPTIONS.len(),
             Self::TerminalFont => monospace_families().len(),
@@ -2792,7 +2812,8 @@ impl SettingsRow {
             | Self::Tables
             | Self::GitPanel
             | Self::ContextMenu
-            | Self::PsReadLine => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
+            | Self::PsReadLine
+            | Self::Notifications => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
             // The one item that is a word goes through the i18n table and the
             // three that are quantities do not — the table's own header lists
             // quantities among the things that stay put in both languages. The
@@ -3083,6 +3104,9 @@ impl SettingsRow {
             Self::GitPanel => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.git_panel),
+            Self::Notifications => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.terminal_notifications),
             // The *state of the machine*, like `PsReadLine` below and for the
             // same reason: what is ticked is whether Explorer's menu carries the
             // verb, which is a question only the registry can answer.
@@ -3258,6 +3282,11 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // mock-up's second row is `Line wrapping` rather than this one, and that row
     // still has no setting behind it — see §7.1.6g for why it is not this slice.
     rows.push(SettingsRow::Scrollback);
+    // **Last on its page**, the judgement `Explorer context menu` is filed under
+    // in General: the two rows above say what a pane keeps and what one shell is
+    // patched with, and this is the only row here whose answer shows up outside
+    // this window.
+    rows.push(SettingsRow::Notifications);
     rows
 }
 
@@ -3499,6 +3528,8 @@ pub struct SettingsValues {
     /// reason: the picker declines to tick a capacity this build does not offer
     /// rather than pretend the file named one that it does.
     pub scrollback_lines: u32,
+    /// Whether a program may put a message on the desktop (§7.6).
+    pub terminal_notifications: bool,
     /// Whether the Files column offers its Git page at all.
     pub git_panel: bool,
     /// Whether Explorer's right-click menu carries Folio's verb — **read off the
@@ -3642,6 +3673,7 @@ impl SettingsValues {
             tables: true,
             block_max_height: bt_persist::DEFAULT_BLOCK_MAX_HEIGHT,
             scrollback_lines: bt_persist::DEFAULT_SCROLLBACK_LINES,
+            terminal_notifications: true,
             git_panel: true,
             // A machine that never installed the verb, which is what a fresh
             // one is.
@@ -6312,6 +6344,17 @@ pub fn acrylic_requested(target: SettingsTarget) -> Option<bool> {
 pub fn always_on_top_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::AlwaysOnTop, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// Whether a program may put a message on the desktop, as a press on its picker.
+#[must_use]
+pub fn terminal_notifications_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::Notifications, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
@@ -15772,8 +15815,12 @@ mod tests {
                 .into_iter()
                 .filter(|row| row.category() == SettingsCategory::Terminal)
                 .collect::<Vec<_>>(),
-            vec![SettingsRow::PsReadLine, SettingsRow::Scrollback],
-            "the mock-up's order for this page: the row that reports a fact about              the machine first, the row that changes what a pane does under it"
+            vec![
+                SettingsRow::PsReadLine,
+                SettingsRow::Scrollback,
+                SettingsRow::Notifications
+            ],
+            "the mock-up's order for this page: the row that reports a fact about              the machine first, the row that changes what a pane does under it, and              last the only row on this page whose answer shows up outside this              window"
         );
     }
 
@@ -16677,7 +16724,8 @@ mod tests {
                 SettingsRow::DefaultProfile,
                 SettingsRow::ContextMenu,
                 SettingsRow::PsReadLine,
-                SettingsRow::Scrollback
+                SettingsRow::Scrollback,
+                SettingsRow::Notifications
             ]
         );
         assert_eq!(
@@ -16709,7 +16757,8 @@ mod tests {
                 SettingsRow::DefaultProfile,
                 SettingsRow::ContextMenu,
                 SettingsRow::PsReadLine,
-                SettingsRow::Scrollback
+                SettingsRow::Scrollback,
+                SettingsRow::Notifications
             ],
             "Sidebar stands directly under `Tab layout`; the two font rows stay \
              next to each other because they are one decision in two halves, the \

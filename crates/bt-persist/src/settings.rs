@@ -85,7 +85,15 @@ use serde::{Deserialize, Serialize};
 /// from a migration having been answered `4.5:1` on the reader's behalf. A terminal that
 /// silently re-inked yesterday's output on the day it learned how would be the one thing this
 /// feature exists to prevent, pointed the other way.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 16;
+///
+/// **v17 carries `terminal_notifications`**, the Terminal page's own `Notifications` row
+/// (DESIGN §7.6), and it is the same shape a seventh time: one key, its own day. It differs from
+/// the six before it in what the migration writes — `true`, the product's default for a feature
+/// shipping new, rather than the answer earlier builds gave. Those builds gave no answer at all:
+/// no build before this one could raise a desktop notification, so there is no behaviour to carry
+/// forward and `false` would freeze an absence rather than preserve a status quo. That is
+/// `migrate_settings_v2_to_v3`'s distinction, drawn a second time.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 17;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -230,7 +238,8 @@ pub const DEFAULT_SCROLLBACK_LINES: u32 = 100_000;
 ///   "advanced_open": ["appearance", …],
 ///   "scrollback_lines": 25000 | 50000 | 100000 | 200000,
 ///   "focus_mode": true | false,
-///   "minimum_contrast": "Off" | "Ratio2" | "Ratio3" | "Ratio45"
+///   "minimum_contrast": "Off" | "Ratio2" | "Ratio3" | "Ratio45",
+///   "terminal_notifications": true | false
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -563,6 +572,25 @@ pub struct SettingsV1 {
     /// duty, so the floor is offered rather than assumed.
     #[serde(default)]
     pub minimum_contrast: MinimumContrastV1,
+
+    /// **Whether a program may put a message on the desktop** — the Terminal page's
+    /// `Notifications` row, and the switch behind `OSC 9` / `OSC 777;notify` (DESIGN §7.6).
+    ///
+    /// Off is silence and not concealment: no toast is raised, and the pane's own unread dot goes
+    /// on saying what it always said. It does not un-write the AppUserModelID — that key is where
+    /// Windows keeps the *user's* choices about Folio's notifications, and taking it away would
+    /// throw those away rather than honour them (see `bt_platform::Notifier`).
+    ///
+    /// `true` is the default, and it is a ruling with the terminals split down the middle behind
+    /// it: foot, WezTerm and Ghostty ship these sequences enabled, Windows Terminal ships
+    /// `compatibility.allowOSC777` off and iTerm2 ships its escape-generated alerts off. What
+    /// decides it here is that Folio's own gate is the strict one — nothing is raised while the
+    /// pane is on screen in a focused window — so the case the conservative terminals are
+    /// guarding against, a `cat` of a hostile file interrupting the person watching it, cannot
+    /// happen. A feature that has to be found in Settings before it works once is a feature most
+    /// of its users never learn they have.
+    #[serde(default = "default_terminal_notifications")]
+    pub terminal_notifications: bool,
 }
 
 /// `serde`'s door for a v14 key that is missing from a file this build is reading.
@@ -572,6 +600,16 @@ pub struct SettingsV1 {
 /// come back as a pane that keeps nothing.
 fn default_scrollback_lines() -> u32 {
     DEFAULT_SCROLLBACK_LINES
+}
+
+/// `serde`'s door for a v15 key missing from a file this build is reading.
+///
+/// A function rather than `#[serde(default)]` for [`default_scrollback_lines`]'s reason turned
+/// round: a `bool`'s own default is `false`, and this key's default is `true`. A file that lost
+/// the key would otherwise come back silent, which is the one answer its owner cannot be assumed
+/// to have given.
+fn default_terminal_notifications() -> bool {
+    true
 }
 
 impl Default for SettingsV1 {
@@ -607,6 +645,8 @@ impl Default for SettingsV1 {
             focus_mode: false,
             // Every colour a program asks for, drawn as it was asked for.
             minimum_contrast: MinimumContrastV1::Off,
+
+            terminal_notifications: true,
         }
     }
 }

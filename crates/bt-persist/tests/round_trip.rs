@@ -678,7 +678,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 16,
+        SETTINGS_SCHEMA_VERSION, 17,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -697,7 +697,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          blocks page's own Maximum height the v12-to-v13, and the Terminal page's \
          own Scrollback the v13-to-v14, and the Appearance page's own Focus mode \
          the v14-to-v15, and the Appearance page's own Minimum contrast the \
-         v15-to-v16 — one key on one day, six times running"
+         v15-to-v16, and the Terminal page's own Notifications the v16-to-v17 —          one key on one day, seven times running"
     );
     assert_eq!(
         defaults.minimum_contrast,
@@ -712,6 +712,14 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
         "no build before v15 had a focus mode to open in, and a migration that \
          switched a layout mode on for a reader who has never met the row would \
          be this crate redecorating somebody's window on upgrade"
+    );
+    assert!(
+        defaults.terminal_notifications,
+        "the two rulings look alike and land opposite ways. Focus mode is off \
+         because it replaces the window somebody opens every morning; this is on \
+         because it changes nothing anybody can see until a program asks for it, \
+         and a switch that has to be found before it works once is a feature most \
+         of its users never learn they have"
     );
     assert_eq!(
         defaults.scrollback_lines, 100_000,
@@ -1426,6 +1434,59 @@ fn settings_v15_migrates_with_the_contrast_floor_off_and_v16_keeps_the_rung_it_w
     let (round_tripped, report) = read_settings(&path);
     assert_eq!(report, ReadReport::Loaded);
     assert_eq!(round_tripped, chosen);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// PIN (§7.6, 2026-08-20) — a v16 settings file migrates to v17 with notifications **on**, and a
+/// v17 file that says no gets that answer back through a write and a read.
+///
+/// The first half is this step's judgement, and it is the opposite of the step before it for a
+/// reason worth having in the suite rather than only in a comment: `v14→v15` writes `false`
+/// because focus mode replaces the window somebody opens every morning, and this one writes
+/// `true` because nothing here changes until a program asks. Two migrations that look identical
+/// in shape and land opposite ways are exactly what a copy-paste gets wrong.
+///
+/// The second half is the switch being a switch. A `false` that did not survive the file would
+/// be a row that promises silence and delivers it until the next launch — the worst way for a
+/// notification setting to fail, because the reader finds out by being interrupted.
+#[test]
+fn settings_v16_migrates_with_notifications_on_and_v17_keeps_the_silence_it_was_asked_for() {
+    let (migrated, report) = read_settings(&fixture_path("settings_v16_minimum_contrast.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(migrated.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(
+        migrated.terminal_notifications,
+        "a v16 build could raise no notification at all, so `false` would freeze an absence          rather than preserve a choice — the feature takes the product's default"
+    );
+    assert_eq!(
+        migrated.minimum_contrast,
+        MinimumContrastV1::Ratio45,
+        "one key crosses; every sibling crosses untouched"
+    );
+
+    let (silent, report) = read_settings(&fixture_path("settings_v17_notifications_off.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(silent.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(
+        !silent.terminal_notifications,
+        "a reader who asked for silence is heard"
+    );
+
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-settings-v17-notifications-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    write_settings_atomic(&path, &silent).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains(r#""terminal_notifications": false"#),
+        "the answer is written as its own key: {on_disk}"
+    );
+    let (round_tripped, report) = read_settings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, silent);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

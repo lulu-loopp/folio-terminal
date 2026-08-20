@@ -26,6 +26,15 @@ const MAX_OSC_1337_FILE_HEADER_BYTES: usize = 4 * 1024;
 /// than truncated into a different directory.
 const MAX_OSC_7_URI_BYTES: usize = 4 * 1024;
 
+/// How much text one `OSC 9` / `OSC 777;notify` payload may carry.
+///
+/// A kilobyte, and it is a bound on a *message a person reads*: Windows renders a toast in two
+/// lines and clips the rest, so anything past this could not be read even if it were kept. The
+/// number matters because these two sequences are the first ones whose payload is arbitrary text
+/// from the far end of a pipe — everything else this scanner holds is a URI, a marker letter or a
+/// pair of integers.
+const MAX_OSC_NOTIFICATION_BYTES: usize = 1024;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InlineImageTask {
     pub occurrence_id: u64,
@@ -1303,6 +1312,8 @@ pub(crate) enum InlineImageStreamAction {
     Image(Vec<u8>),
     ShellIntegration(ShellIntegrationMarker),
     Progress(Option<crate::session::ProgressState>),
+    /// One desktop notification a program asked for, over `OSC 9` or `OSC 777;notify`.
+    Notification(crate::session::TerminalNotification),
     /// One OSC 7 report: the `file://` URI bytes the shell named its working directory with. An
     /// empty payload is the report "I no longer have one to give", which is a fact of its own and
     /// therefore still an action.
@@ -1321,20 +1332,71 @@ pub enum ShellIntegrationMarker {
     CommandFinished { exit_code: Option<i32> },
 }
 
+/// The OSC sequences whose payload this scanner keeps whole and reads at the terminator.
+///
+/// Four sequences and one state, because all four are the same *machine*: hold the bytes between
+/// the prefix and the terminator, drop the C0 controls that can never be part of a payload, stop
+/// retaining past a limit, and hand what survives to one function at the end. Only that limit and
+/// that function differ, so both hang off this enum rather than off four copies of the state —
+/// a fifth text OSC is a variant and two match arms, not another pair of states.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TextOsc {
+    /// `OSC 133;` — FinalTerm's command-status markers.
+    ShellIntegration,
+    /// `OSC 7;` — the working directory the shell reports.
+    WorkingDirectory,
+    /// `OSC 9;` — ConEmu's numbered subcommand slot (of which this terminal implements `4`,
+    /// progress) and, for a body that is not a number, iTerm2's desktop notification.
+    Osc9,
+    /// `OSC 777;` — urxvt's `notify` extension, the only verb of that sequence anybody sends.
+    Osc777,
+}
+
+impl TextOsc {
+    /// How many payload bytes are kept before the sequence is abandoned.
+    ///
+    /// Two answers rather than one: a URI is a path and paths are long, while a marker, a
+    /// progress report and a notification are all things a person reads. The limit is not a
+    /// truncation — a payload that reaches it is dropped whole, because half a URI names a
+    /// different directory and half a message is a message nobody wrote.
+    fn payload_limit(self) -> usize {
+        match self {
+            Self::WorkingDirectory => MAX_OSC_7_URI_BYTES,
+            Self::ShellIntegration => 128,
+            Self::Osc9 | Self::Osc777 => MAX_OSC_NOTIFICATION_BYTES,
+        }
+    }
+
+    fn finish(self, actions: &mut Vec<InlineImageStreamAction>, payload: Vec<u8>, oversized: bool) {
+        match self {
+            Self::ShellIntegration => finish_shell_integration(actions, &payload, oversized),
+            Self::WorkingDirectory => finish_working_directory(actions, payload, oversized),
+            Self::Osc9 => finish_osc_9(actions, &payload, oversized),
+            Self::Osc777 => finish_osc_777(actions, &payload, oversized),
+        }
+    }
+}
+
 #[derive(Debug)]
 enum StreamState {
     Ground,
     Escape,
-    OscPrefix { held: Vec<u8> },
+    OscPrefix {
+        held: Vec<u8>,
+    },
     OscPass,
     InlineFile(InlineFileCapture),
     AfterInlineEscape,
-    ShellIntegration { payload: Vec<u8>, oversized: bool },
-    AfterShellIntegrationEscape { payload: Vec<u8>, oversized: bool },
-    WorkingDirectory { payload: Vec<u8>, oversized: bool },
-    AfterWorkingDirectoryEscape { payload: Vec<u8>, oversized: bool },
-    Progress { payload: Vec<u8>, oversized: bool },
-    AfterProgressEscape { payload: Vec<u8>, oversized: bool },
+    Text {
+        kind: TextOsc,
+        payload: Vec<u8>,
+        oversized: bool,
+    },
+    AfterTextEscape {
+        kind: TextOsc,
+        payload: Vec<u8>,
+        oversized: bool,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -1393,15 +1455,19 @@ fn parse_inline_file_header(header: &[u8]) -> Option<bool> {
 /// Streaming OSC prefilter at the existing adapter parser seam.
 ///
 /// The OSC sequences Folio gives meaning to — `1337;File=` (inline image), `133;` (shell
-/// integration), `9;4;` (progress), and `7;` (working directory) — are swallowed by
-/// `vte::ansi::Performer` before they
+/// integration), `9;` (ConEmu progress and iTerm2 notifications), `777;` (urxvt notifications)
+/// and `7;` (working directory) — are swallowed by `vte::ansi::Performer` before they
 /// reach `alacritty_terminal::Term`, so they are recognized here instead. This is the whole of the
-/// vendor face for all four: nothing upstream is patched.
+/// vendor face for all five: nothing upstream is patched.
 ///
 /// Recognition is by exact prefix, and every byte of every other sequence stays on its unchanged
-/// path — a prefix that turns out not to match (`OSC 777`) is emitted whole the moment it is ruled
-/// out. Unlike a second unbounded `vte::Parser`, this can also stop retaining an oversized payload
+/// path — a prefix that turns out not to match is emitted whole the moment it is ruled out.
+/// Unlike a second unbounded `vte::Parser`, this can also stop retaining an oversized payload
 /// before its terminator arrives.
+///
+/// **`7;` and `777;` share their first byte and do not collide**, because the decision is made on
+/// the whole prefix and not on a leading character: `7` alone is still a candidate for both, `7;`
+/// is exactly one of them, and `77` has already ruled the shorter one out.
 #[derive(Debug)]
 pub(crate) struct Osc1337Scanner {
     state: StreamState,
@@ -1451,30 +1517,27 @@ impl Osc1337Scanner {
                     let body = &held[2..];
                     if b"1337;".starts_with(body)
                         || b"133;".starts_with(body)
-                        || b"9;4;".starts_with(body)
+                        || b"9;".starts_with(body)
+                        || b"777;".starts_with(body)
                         || b"7;".starts_with(body)
                     {
-                        if body == b"1337;" {
+                        let text = match body {
+                            b"133;" => Some(TextOsc::ShellIntegration),
+                            b"7;" => Some(TextOsc::WorkingDirectory),
+                            b"9;" => Some(TextOsc::Osc9),
+                            b"777;" => Some(TextOsc::Osc777),
+                            _ => None,
+                        };
+                        if let Some(kind) = text {
+                            flush_bytes(&mut actions, &mut ordinary);
+                            StreamState::Text {
+                                kind,
+                                payload: Vec::new(),
+                                oversized: false,
+                            }
+                        } else if body == b"1337;" {
                             flush_bytes(&mut actions, &mut ordinary);
                             StreamState::InlineFile(InlineFileCapture::default())
-                        } else if body == b"133;" {
-                            flush_bytes(&mut actions, &mut ordinary);
-                            StreamState::ShellIntegration {
-                                payload: Vec::new(),
-                                oversized: false,
-                            }
-                        } else if body == b"7;" {
-                            flush_bytes(&mut actions, &mut ordinary);
-                            StreamState::WorkingDirectory {
-                                payload: Vec::new(),
-                                oversized: false,
-                            }
-                        } else if body == b"9;4;" {
-                            flush_bytes(&mut actions, &mut ordinary);
-                            StreamState::Progress {
-                                payload: Vec::new(),
-                                oversized: false,
-                            }
                         } else {
                             StreamState::OscPrefix { held }
                         }
@@ -1540,112 +1603,59 @@ impl Osc1337Scanner {
                         StreamState::Ground
                     }
                 }
-                StreamState::ShellIntegration {
+                StreamState::Text {
+                    kind,
                     mut payload,
                     mut oversized,
                 } => match byte {
                     0x07 => {
-                        finish_shell_integration(&mut actions, &payload, oversized);
+                        kind.finish(&mut actions, payload, oversized);
                         StreamState::Ground
                     }
-                    0x1b => StreamState::AfterShellIntegrationEscape { payload, oversized },
+                    0x1b => StreamState::AfterTextEscape {
+                        kind,
+                        payload,
+                        oversized,
+                    },
                     0x18 | 0x1a => StreamState::Ground,
-                    0x00..=0x06 | 0x08..=0x17 | 0x19 | 0x1c..=0x1f => {
-                        StreamState::ShellIntegration { payload, oversized }
-                    }
+                    0x00..=0x06 | 0x08..=0x17 | 0x19 | 0x1c..=0x1f => StreamState::Text {
+                        kind,
+                        payload,
+                        oversized,
+                    },
                     _ => {
-                        if payload.len() < 128 {
+                        if payload.len() < kind.payload_limit() {
                             payload.push(byte);
                         } else {
                             oversized = true;
                         }
-                        StreamState::ShellIntegration { payload, oversized }
+                        StreamState::Text {
+                            kind,
+                            payload,
+                            oversized,
+                        }
                     }
                 },
-                StreamState::AfterShellIntegrationEscape { payload, oversized } => {
+                StreamState::AfterTextEscape {
+                    kind,
+                    payload,
+                    oversized,
+                } => {
                     if byte == b'\\' {
-                        finish_shell_integration(&mut actions, &payload, oversized);
+                        kind.finish(&mut actions, payload, oversized);
                         StreamState::Ground
                     } else if byte == b']' {
-                        // A nested OSC terminates the malformed outer marker and begins a fresh
-                        // sequence. This bounds recovery without manufacturing a semantic event.
+                        // A nested OSC terminates the malformed outer sequence and begins a fresh
+                        // one. This bounds recovery without manufacturing a semantic event.
                         StreamState::OscPrefix {
                             held: vec![0x1b, b']'],
                         }
                     } else if byte == 0x1b {
-                        StreamState::AfterShellIntegrationEscape { payload, oversized }
-                    } else {
-                        StreamState::Ground
-                    }
-                }
-                StreamState::WorkingDirectory {
-                    mut payload,
-                    mut oversized,
-                } => match byte {
-                    0x07 => {
-                        finish_working_directory(&mut actions, payload, oversized);
-                        StreamState::Ground
-                    }
-                    0x1b => StreamState::AfterWorkingDirectoryEscape { payload, oversized },
-                    0x18 | 0x1a => StreamState::Ground,
-                    0x00..=0x06 | 0x08..=0x17 | 0x19 | 0x1c..=0x1f => {
-                        StreamState::WorkingDirectory { payload, oversized }
-                    }
-                    _ => {
-                        if payload.len() < MAX_OSC_7_URI_BYTES {
-                            payload.push(byte);
-                        } else {
-                            oversized = true;
+                        StreamState::AfterTextEscape {
+                            kind,
+                            payload,
+                            oversized,
                         }
-                        StreamState::WorkingDirectory { payload, oversized }
-                    }
-                },
-                StreamState::AfterWorkingDirectoryEscape { payload, oversized } => {
-                    if byte == b'\\' {
-                        finish_working_directory(&mut actions, payload, oversized);
-                        StreamState::Ground
-                    } else if byte == b']' {
-                        StreamState::OscPrefix {
-                            held: vec![0x1b, b']'],
-                        }
-                    } else if byte == 0x1b {
-                        StreamState::AfterWorkingDirectoryEscape { payload, oversized }
-                    } else {
-                        StreamState::Ground
-                    }
-                }
-                StreamState::Progress {
-                    mut payload,
-                    mut oversized,
-                } => match byte {
-                    0x07 => {
-                        finish_progress(&mut actions, &payload, oversized);
-                        StreamState::Ground
-                    }
-                    0x1b => StreamState::AfterProgressEscape { payload, oversized },
-                    0x18 | 0x1a => StreamState::Ground,
-                    0x00..=0x06 | 0x08..=0x17 | 0x19 | 0x1c..=0x1f => {
-                        StreamState::Progress { payload, oversized }
-                    }
-                    _ => {
-                        if payload.len() < 128 {
-                            payload.push(byte);
-                        } else {
-                            oversized = true;
-                        }
-                        StreamState::Progress { payload, oversized }
-                    }
-                },
-                StreamState::AfterProgressEscape { payload, oversized } => {
-                    if byte == b'\\' {
-                        finish_progress(&mut actions, &payload, oversized);
-                        StreamState::Ground
-                    } else if byte == b']' {
-                        StreamState::OscPrefix {
-                            held: vec![0x1b, b']'],
-                        }
-                    } else if byte == 0x1b {
-                        StreamState::AfterProgressEscape { payload, oversized }
                     } else {
                         StreamState::Ground
                     }
@@ -1705,13 +1715,112 @@ fn finish_shell_integration(
     actions.push(InlineImageStreamAction::ShellIntegration(marker));
 }
 
-fn finish_progress(actions: &mut Vec<InlineImageStreamAction>, payload: &[u8], oversized: bool) {
+/// Split `payload` at its **first** separator, or report that it has none.
+///
+/// The first and not every one, and that is load-bearing in both places this is used: a
+/// notification body is allowed to contain semicolons and an `OSC 777` title is not allowed to
+/// swallow them (foot's rule, and the only one anybody implements — "Folio will split title from
+/// body at the first ';', with any remaining ';' characters treated as part of body").
+fn split_once(payload: &[u8], separator: u8) -> (&[u8], Option<&[u8]>) {
+    match payload.iter().position(|byte| *byte == separator) {
+        Some(index) => (&payload[..index], Some(&payload[index + 1..])),
+        None => (payload, None),
+    }
+}
+
+/// Read one terminated `OSC 9`, which is two protocols sharing a number.
+///
+/// ConEmu gave `OSC 9` a **numbered subcommand slot** — `1` sleep, `2` message box, `3` tab title,
+/// `4` progress, and eight more — while iTerm2 gave the same sequence a single free-text field
+/// that is a desktop notification. Windows Terminal implements only the progress arm; Ghostty is
+/// the terminal that implements both, and its rule is the one written here because it is the only
+/// one that can be stated in a sentence: **a body whose first field is entirely digits is
+/// ConEmu's, and every other body is iTerm2's.**
+///
+/// Of ConEmu's numbers this terminal implements exactly one. The rest are *dropped rather than
+/// notified about*: `OSC 9;9;C:\src` is a shell saying where it is, and raising a toast reading
+/// "9;C:\src" would be this terminal inventing a message no program wrote. That is the whole cost
+/// of the rule, and its price is stated in Ghostty's docs as well — a notification whose text
+/// really does begin `12;` cannot be sent over `OSC 9`, and `OSC 777` is where it belongs.
+fn finish_osc_9(actions: &mut Vec<InlineImageStreamAction>, payload: &[u8], oversized: bool) {
     if oversized {
         return;
     }
-    if let Some(progress) = parse_progress(payload) {
-        actions.push(InlineImageStreamAction::Progress(progress));
+    let (head, rest) = split_once(payload, b';');
+    if !head.is_empty() && head.iter().all(u8::is_ascii_digit) {
+        if head == b"4"
+            && let Some(progress) = parse_progress(rest.unwrap_or_default())
+        {
+            actions.push(InlineImageStreamAction::Progress(progress));
+        }
+        return;
     }
+    push_notification(actions, None, payload);
+}
+
+/// Read one terminated `OSC 777`.
+///
+/// The sequence has a verb slot and exactly one verb anybody sends; WezTerm says so outright
+/// ("only the notify extension is supported") and so does this. An unknown verb is dropped whole
+/// rather than read as a title, because `OSC 777;foo;bar` is somebody else's extension and its
+/// second field is not a name for anything.
+///
+/// `OSC 777;notify;<title>` with no body is a notification: a title is a message. `OSC 777;notify`
+/// with neither is not — there is nothing in it to show.
+fn finish_osc_777(actions: &mut Vec<InlineImageStreamAction>, payload: &[u8], oversized: bool) {
+    if oversized {
+        return;
+    }
+    let (verb, rest) = split_once(payload, b';');
+    if verb != b"notify" {
+        return;
+    }
+    let Some(rest) = rest else {
+        return;
+    };
+    let (title, body) = split_once(rest, b';');
+    push_notification(actions, Some(title), body.unwrap_or_default());
+}
+
+/// File one notification, if what arrived is one.
+///
+/// Two refusals, and neither is a policy about notifications — they are both "this is not a
+/// message":
+///
+/// * **bytes that are not UTF-8.** Every other payload this scanner reads has a fallback that
+///   means something (an unreadable URI is "no directory"), but there is no such thing as a
+///   half-decoded sentence to show a person, and lossy decoding would put replacement characters
+///   into a toast.
+/// * **nothing to say.** A sequence carrying neither a title nor a body is a notification with no
+///   content; the application would raise a toast that is a blank rectangle.
+///
+/// An empty title with a body is not that case — it is `OSC 9`'s ordinary shape said in `OSC 777`,
+/// and the title falls back to the pane's own name exactly as `OSC 9`'s absent one does.
+fn push_notification(
+    actions: &mut Vec<InlineImageStreamAction>,
+    title: Option<&[u8]>,
+    body: &[u8],
+) {
+    let title = match title {
+        Some(bytes) => match std::str::from_utf8(bytes) {
+            Ok(text) => Some(text),
+            Err(_) => return,
+        },
+        None => None,
+    };
+    let Ok(body) = std::str::from_utf8(body) else {
+        return;
+    };
+    let title = title.filter(|text| !text.is_empty());
+    if title.is_none() && body.is_empty() {
+        return;
+    }
+    actions.push(InlineImageStreamAction::Notification(
+        crate::session::TerminalNotification {
+            title: title.map(str::to_owned),
+            body: body.to_owned(),
+        },
+    ));
 }
 
 fn parse_progress(payload: &[u8]) -> Option<Option<crate::session::ProgressState>> {
@@ -2164,13 +2273,20 @@ mod tests {
             vec![InlineImageStreamAction::WorkingDirectory(Vec::new())]
         );
 
-        // OSC 777 shares OSC 7's first byte and must still pass through untouched.
+        // OSC 777 shares OSC 7's first byte and is a sequence of its own. Until §7.6 it was the
+        // worked example of a prefix ruled out and emitted whole; now it is a notification, and
+        // what this pins is that neither has taken the other's bytes — the `7;` above still
+        // reports a directory and the `777;` here reports a message, in one scanner.
         let mut scanner = Osc1337Scanner::default();
         assert_eq!(
-            scanner.scan(b"\x1b]777;notify;hi\x07x"),
-            vec![InlineImageStreamAction::Bytes(
-                b"\x1b]777;notify;hi\x07x".to_vec()
-            )]
+            scanner.scan(b"\x1b]777;notify;hi;there\x07x"),
+            vec![
+                InlineImageStreamAction::Notification(crate::session::TerminalNotification {
+                    title: Some("hi".to_owned()),
+                    body: "there".to_owned(),
+                }),
+                InlineImageStreamAction::Bytes(b"x".to_vec()),
+            ]
         );
     }
 
@@ -2838,6 +2954,7 @@ mod tests {
                         InlineImageStreamAction::WorkingDirectory(uri) => directories.push(uri),
                         InlineImageStreamAction::Image(_)
                         | InlineImageStreamAction::Progress(_)
+                        | InlineImageStreamAction::Notification(_)
                         | InlineImageStreamAction::TooLarge => {
                             panic!("fixture contains no image")
                         }

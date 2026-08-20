@@ -1323,6 +1323,21 @@ pub enum Text {
     /// the fact a reader has to know before they turn it on — that this is the
     /// one row in the dialog that overrides a colour a program asked for.
     DescMinimumContrast,
+
+    // ── desktop notifications (§7.6, Windows landing slice 3, 2026-08-20) ──
+    //
+    // One contiguous block at the end, per this table's standing rule. **Two
+    // entries**, the row and its sentence, because the notification's own words
+    // are never this table's: a title is the tab's name and a body is what the
+    // program printed, and a string table with a spare notification sentence in
+    // it is a table waiting for someone to use it as a default.
+    /// `Terminal ▸ Notifications` — the row.
+    RowNotifications,
+    /// Its sentence. Says the two things a reader cannot infer from the word:
+    /// **a program has to ask** (this is not a bell, and not every shell speaks
+    /// the sequence), and **nothing arrives while you are looking at the pane** —
+    /// which is the answer to "will this interrupt me while I work".
+    DescNotifications,
 }
 
 impl Text {
@@ -2376,6 +2391,20 @@ impl Text {
                 "Lightens or darkens terminal text until it meets this ratio against the cell behind it. Backgrounds are never changed, and neither is anything outside the grid. Above Off, colours a program asked for are overridden",
                 "把终端文字提亮或压暗,直到与它所在格子的底色达到这个对比度。底色一律不动,网格以外的一切也不动。Off 以上的档位会覆盖程序指定的颜色",
             ),
+            // 「通知」and not 「桌面通知」: Windows itself calls the surface
+            // 「通知」in its own Settings, and the row's sentence says where it
+            // lands. English keeps the plural for the same reason — the row is
+            // about a kind of thing, not one of them.
+            Self::RowNotifications => pick(lang, "Notifications", "通知"),
+            // It states facts and names nothing the reader has to act on. The
+            // second clause is the one that earns its place: without it the row
+            // reads as "may this program interrupt me", and the answer to that
+            // question is no while the pane is in front of you.
+            Self::DescNotifications => pick(
+                lang,
+                "Programs that ask can put a message on the desktop. Nothing arrives while the pane is on screen in a focused window",
+                "程序主动要求时,可以在桌面上放一条消息。窗格正在这扇窗里显示、而这扇窗又是聚焦的,就什么都不弹",
+            ),
         }
     }
 
@@ -2391,7 +2420,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 417] = [
+    pub const ALL: [Self; 419] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -2809,6 +2838,8 @@ impl Text {
         Self::FocusExit,
         Self::RowMinimumContrast,
         Self::DescMinimumContrast,
+        Self::RowNotifications,
+        Self::DescNotifications,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
