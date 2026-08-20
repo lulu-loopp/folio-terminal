@@ -785,6 +785,10 @@ impl ViewportFrame {
     /// nothing but blank cells stands between them. `row_map[..].continues` is the terminal's
     /// own answer to the first half; the blank test is the second, and it is what keeps a
     /// wrapped line that names the same URL twice from being read as one link.
+    ///
+    /// The one break `continues` cannot answer for — the one the application made itself — is
+    /// [`Self::rejoined_across_break`], which is decided on the label and never on the id, for
+    /// the reason above.
     fn link_group_run(
         &self,
         index: usize,
@@ -931,9 +935,15 @@ impl ViewportFrame {
         self.link_group_run(seed, self.cells[seed].hyperlink.as_ref()?)
     }
 
-    /// Add the ordinary terminal underline flag to the active link in this frame only. Source
-    /// cells and transcript styles remain unchanged.
-    pub fn underline_hyperlink(&mut self, hyperlink: &HyperlinkHit) -> bool {
+    /// This frame's cells for one hit's segment, as flat cell indices in reading order — exactly
+    /// the set [`Self::underline_hyperlink`] marks, and empty when the hit does not describe this
+    /// frame.
+    ///
+    /// **One segment is not one rectangle.** It can cover the tail of one row and the head of the
+    /// next, so a consumer placing something over "the lit cells" gets a row's worth at a time and
+    /// must union or choose; deriving that from the underline flags instead would read a
+    /// neighbouring link's marks as part of this one.
+    pub fn hyperlink_cells(&self, hyperlink: &HyperlinkHit) -> Vec<u32> {
         // **The hit names which segment**, through the anchor it was taken at: a target with three
         // segments on screen has three hits, and the one being hovered is the one whose first cell
         // carries this anchor.
@@ -942,23 +952,34 @@ impl ViewportFrame {
                 && self.cell_anchors[index].start == hyperlink.start)
                 .then_some(index)
         }) else {
-            return false;
+            return Vec::new();
         };
         let Some((first, last)) = self.link_span(hit) else {
-            return false;
+            return Vec::new();
         };
         // The hit must describe this frame's segment, not a stale frame's.
         if self.cell_anchors[first].start != hyperlink.start
             || self.cell_anchors[last].end != hyperlink.end
         {
+            return Vec::new();
+        }
+        (first..=last)
+            .filter(|index| cell_targets(&self.cells[*index], &hyperlink.uri))
+            .map(|index| index as u32)
+            .collect()
+    }
+
+    /// Add the ordinary terminal underline flag to the active link in this frame only. Source
+    /// cells and transcript styles remain unchanged.
+    pub fn underline_hyperlink(&mut self, hyperlink: &HyperlinkHit) -> bool {
+        let cells = self.hyperlink_cells(hyperlink);
+        if cells.is_empty() {
             return false;
         }
-        for index in first..=last {
-            if cell_targets(&self.cells[index], &hyperlink.uri) {
-                let flags = &mut self.cells[index].style.flags;
-                flags.remove(CellFlags::DOTTED_UNDERLINE);
-                flags.insert(CellFlags::UNDERLINE);
-            }
+        for index in cells {
+            let flags = &mut self.cells[index as usize].style.flags;
+            flags.remove(CellFlags::DOTTED_UNDERLINE);
+            flags.insert(CellFlags::UNDERLINE);
         }
         true
     }
