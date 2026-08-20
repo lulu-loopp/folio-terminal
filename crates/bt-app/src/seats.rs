@@ -3764,6 +3764,11 @@ pub fn hit_rail_chrome(
 /// would be the mode growing a vocabulary of its own — which is exactly the
 /// thing the ruling forbids. A pinned tab's card states that it is pinned, and
 /// that is all.
+///
+/// Reordering by card, which landed on 2026-08-20, is the same rule kept rather
+/// than an exception to it: the column offers no gesture of its own, it joins
+/// the strip's ([`focus_rail_run`]), and the box that gets carried is
+/// [`Self::body`] — the one this surface already answered a press over.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FocusCardGeometry {
     /// The card's own box, hairline included — `[left, top, right, bottom]`.
@@ -3805,6 +3810,39 @@ pub struct FocusCardGeometry {
     pub mini: [f32; 4],
 }
 
+impl FocusCardGeometry {
+    /// The same card drawn `dy` physical pixels down the column —
+    /// [`RailTabGeometry::shifted`] on the third surface, and for its reason
+    /// exactly.
+    ///
+    /// A drag moves a card *visually* and never in layout: the slot this
+    /// geometry describes stays where the card's index puts it, and only the
+    /// paint is displaced. Shifting the whole card once, rather than the head
+    /// and the mark and the `×` and the mini each at its own call site, is what
+    /// keeps a translated card internally consistent by construction — and it is
+    /// what lets the badge and the pin travel too without being named here at
+    /// all, since [`focus_card_badge_rect`] and [`focus_card_pin_rect`] are
+    /// measured off the card they are handed.
+    ///
+    /// `title` is untouched, and it is the one box here that must be: it is a
+    /// `[left, right]` run rather than a rectangle, so it holds nothing that
+    /// moves on this axis. Its vertical box is taken from [`Self::head`] at the
+    /// call site, which is exactly what makes the name travel with the card
+    /// anyway.
+    #[must_use]
+    pub fn shifted(&self, dy: f32) -> Self {
+        let slide = |rect: [f32; 4]| [rect[0], rect[1] + dy, rect[2], rect[3] + dy];
+        Self {
+            body: slide(self.body),
+            mark: slide(self.mark),
+            close: slide(self.close),
+            head: slide(self.head),
+            mini: slide(self.mini),
+            ..*self
+        }
+    }
+}
+
 /// The focus column, solved.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FocusRailGeometry {
@@ -3823,10 +3861,12 @@ pub struct FocusRailGeometry {
     pub label: [f32; 2],
     /// The `Exit` button's own box.
     pub exit: [f32; 4],
-    /// One card per tab, in tab order — **the only order there is**. v1 ships no
-    /// card dragging (§7.1.6b′ ④), so there is no second sequence to store and
-    /// no `cardSeq` to reconcile: rearranging tabs rearranges cards because they
-    /// are the same list.
+    /// One card per tab, in tab order — **the only order there is**. Cards may
+    /// be dragged into a new order since 2026-08-20 (§7.1.6b′ ④), and that
+    /// changed nothing here: a card reorder moves `window.tabs`, so there is
+    /// still no second sequence to store and no `cardSeq` to reconcile.
+    /// Rearranging tabs rearranges cards, from either end, because they are the
+    /// same list.
     pub cards: Vec<FocusCardGeometry>,
     /// The `+` row, at `min(flow, stuck)` — the rail's own sticky arithmetic,
     /// because the column keeps the rail's `+` (`paintFocusRail` writes
@@ -5178,6 +5218,22 @@ pub struct TabRun {
     /// over the caption buttons is the strip's own `overflow-x`, and what stops
     /// a row being carried out past the rail's foot is the list's `overflow-y`.
     pub band: [f32; 4],
+    /// **Whether this list will mint a *new* tab out of a pane torn from the
+    /// layout** (K124), which is a different offer from [`Self::slots`] and has
+    /// to be sayable separately.
+    ///
+    /// `slots` answers "where may something already in this list come to rest";
+    /// this answers "may something that is not in the list yet join it". The
+    /// strip and the rail are a whole window's tab list and say yes to both. The
+    /// focus column says yes to the first and no to the second, because
+    /// §7.1.6b′ ② rules that focus mode does not split a tab: *"pane 拖到卡列不得
+    /// 撕成新 tab"*.
+    ///
+    /// It lives on the run so that the refusal stays R3's kind of fact — a
+    /// property of the surface, read off the same object the mids and the band
+    /// come off — rather than a second place where the drag engine learns which
+    /// mode the window is in.
+    pub hosts_tear_out: bool,
 }
 
 impl TabRun {
@@ -5261,6 +5317,7 @@ pub fn strip_run(geometry: &TabStripGeometry, scale: f32) -> TabRun {
         slots: geometry.tabs.iter().map(|tab| tab.body).collect(),
         band: strip_band(geometry, scale),
         viewport: geometry.viewport,
+        hosts_tear_out: true,
     }
 }
 
@@ -5277,6 +5334,7 @@ pub fn rail_run(geometry: &RailGeometry) -> TabRun {
         slots: geometry.tabs.iter().map(|tab| tab.body).collect(),
         band: geometry.body,
         viewport: geometry.viewport,
+        hosts_tear_out: true,
     }
 }
 
@@ -5284,24 +5342,44 @@ pub fn rail_run(geometry: &RailGeometry) -> TabRun {
 ///
 /// It claims the same band the rail's run claims, and it exists so that the
 /// column is a *surface a drag has to be answered by* rather than a hole the
-/// layout's rim shows through. What the answer is, is the caller's: §7.1.6b′ ③
-/// rules that the column refuses file drops — "a list of tabs has no non-arbitrary
-/// tab to catch a file with" — and ④ leaves card dragging out of v1, so in this
-/// slice every source is refused. The refusal is the strip's own: no insertion
-/// caret is drawn, the ghost stays under the pointer saying what is in the hand,
-/// and letting go sends it home.
+/// layout's rim shows through. What the answer is, is §7.1.6b′'s, and it is a
+/// different word for each of the three things a drag can be carrying.
 ///
-/// `slots` is therefore deliberately **empty**. A slot list is the offer of a
-/// place to land, and this surface makes none; filling it with the cards'
-/// rectangles would let a reorder be computed against a column that cannot
-/// perform one.
+/// **④, a card being reordered: yes, since 2026-08-20.** The ruling shipped v1
+/// without it and the reason it gave was a condition rather than a refusal:
+/// *"按住卡片重排 tab 是 tab 条自己的手势,它该带着 tab 条的语义到来,而不是长出
+/// 第二套"*. R3 met that condition — the drag engine reads a
+/// [`TabRun`] and cannot tell which surface handed it one — so a card list joins
+/// by filling `slots` with the boxes it has already solved and inheriting the
+/// grip, the clamp, the half-a-card threshold, the pinned partition and the FLIP
+/// entire. Nothing here is a second gesture; it is the strip's gesture on the
+/// column's rectangles.
+///
+/// The other two refusals stand, and they are said in two different places
+/// because they are two different offers:
+///
+/// * **②, tearing a tab in half:** [`TabRun::hosts_tear_out`], `false` here. A
+///   pane dragged out of the stage may not become a new tab by landing on the
+///   card list.
+/// * **③, file drops:** `DragSource::Row(_) => None` in
+///   `Runtime::survey_strip`, which is global to every tab surface, so a card
+///   has nothing to opt into. The refusal is the strip's own: no insertion caret
+///   is drawn, the ghost stays under the pointer saying what is in the hand, and
+///   letting go sends it home.
+///
+/// The slot is the card's whole outer box, hairline included — the very
+/// rectangle [`ChromeTarget::Tab`] is answered over, so the thing you took hold
+/// of and the thing being carried are one shape and "half of the neighbour"
+/// means what it looks like it means. Cards are of one height, so the pitch is
+/// even and [`reorder_step`]'s hysteresis has its widest margin.
 #[must_use]
 pub fn focus_rail_run(geometry: &FocusRailGeometry) -> TabRun {
     TabRun {
         axis: Axis::Col,
-        slots: Vec::new(),
+        slots: geometry.cards.iter().map(|card| card.body).collect(),
         band: geometry.body,
         viewport: geometry.viewport,
+        hosts_tear_out: false,
     }
 }
 
@@ -7149,6 +7227,7 @@ pub fn build_chrome_for_tabs(
             FocusRail {
                 tabs,
                 active_tab,
+                grabbed,
                 thumbnails: focus_thumbnails,
                 scroll: rail_scroll,
                 exit_caption_width,
@@ -9437,13 +9516,18 @@ fn rail_chrome(
 /// What the focus column is drawn from — [`Rail`]'s opposite number, and shorter
 /// than it by everything the mode does not have.
 ///
-/// No `grabbed` and no `preview`: v1 ships no card dragging (§7.1.6b′ ④), so no
-/// card ever rides the pointer and no slot is ever held open for one. No `shown`:
-/// the folder flyout is summoned from a tab row's own trigger, and a card carries
-/// no trigger to summon it with.
+/// It carries [`Rail::grabbed`] since 2026-08-20 and for that field's one
+/// reason: paint order. No `preview`, and that is ②'s shape rather than an
+/// omission — K124's stand-in is the slot a *torn-out pane* would take, and
+/// [`focus_rail_run`] hosts no tear-out, so no slot is ever held open for one.
+/// No `shown` either: the folder flyout is summoned from a tab row's own
+/// trigger, and a card carries no trigger to summon it with.
 struct FocusRail<'a> {
     tabs: &'a [TabContent],
     active_tab: usize,
+    /// The card currently riding the pointer — [`Rail::grabbed`], buying the
+    /// same one thing on the third surface.
+    grabbed: Option<usize>,
     /// One entry per tab, parallel to [`Self::tabs`] — see
     /// [`ChromeContent::focus_thumbnails`].
     thumbnails: &'a [Option<FocusThumbnail<'a>>],
@@ -9457,6 +9541,27 @@ struct FocusRail<'a> {
     /// How far into its entrance the column is, `0.0..=1.0` — see
     /// [`ChromeContent::focus_reveal`].
     reveal: f32,
+}
+
+/// **The order the cards are laid down in: everyone else first, the card in hand
+/// last** — `.fcard.grabbed { z-index: 20 }` said the only way a
+/// painter's-algorithm list can say it.
+///
+/// [`rail_chrome`] writes the same thing as two passes over one loop; this is
+/// those two passes named, and named because the card loop is long enough that
+/// wrapping it would move four hundred lines sideways to state one fact. It is
+/// two passes and not the strip's three for the rail's own reason: cards are
+/// separated boxes in a column and do not overhang each other, so a staged card
+/// has nothing to be raised above.
+///
+/// A `grabbed` index past the end is dropped rather than trusted, because the
+/// caller's index is into the tab list and this is a walk over the cards — one
+/// list, but the arithmetic is worth not assuming.
+fn focus_card_paint_order(count: usize, grabbed: Option<usize>) -> impl Iterator<Item = usize> {
+    let grabbed = grabbed.filter(|index| *index < count);
+    (0..count)
+        .filter(move |index| Some(*index) != grabbed)
+        .chain(grabbed)
 }
 
 /// Paint the focus column: its ground, its bar, its cards and the way out.
@@ -9488,6 +9593,7 @@ fn focus_rail_chrome(
     let FocusRail {
         tabs,
         active_tab,
+        grabbed,
         thumbnails,
         scroll,
         exit_caption_width,
@@ -9619,7 +9725,22 @@ fn focus_rail_chrome(
     let card_radius = (FOCUS_CARD_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
     let card_border = (FOCUS_CARD_BORDER_LOGICAL_PX * scale).round().max(1.0) as u32;
     let mark_size = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
-    for (index, (card, content)) in geometry.cards.iter().zip(tabs).enumerate() {
+    for index in focus_card_paint_order(geometry.cards.len(), grabbed) {
+        let content = &tabs[index];
+        // Everything below draws the card where the drag has *put* it, while
+        // every rectangle the column reasons about stays in the slot the index
+        // gives it. One shift, at the top, so no box inside the card can be left
+        // behind by it — the badge and the pin included, since both are measured
+        // off whichever card they are handed — and `in_list` is asked of the
+        // shifted body, because what the scroller crops is what is on screen.
+        let shifted;
+        let card = &geometry.cards[index];
+        let card = if content.offset == 0.0 {
+            card
+        } else {
+            shifted = card.shifted(content.offset);
+            &shifted
+        };
         if !in_list(card.body) {
             continue;
         }
@@ -27559,39 +27680,144 @@ mod tests {",
         );
     }
 
-    /// PIN (§7.1.6b′ ③ and ④) — **the card column offers a drag nowhere to
-    /// land, and is still the surface that answers it.**
+    /// PIN (§7.1.6b′ ②, ③ and ④) — **the card column takes a tab reorder, and
+    /// still refuses the other two things a drag can be.**
     ///
-    /// Two halves, and the second is the one that is easy to get wrong. The
-    /// column refuses file drops — *"一份 tab 清单没有一个非任意的 tab 可以接住
-    /// 一个文件"* — and v1 has no card reordering, so it has no slots. But a
-    /// surface with no slots must not become a *hole*: the band still covers the
-    /// column, so a drop over it is refused rather than handed to the pane the
-    /// panel is standing in front of.
+    /// ④ used to read *"v1 不做卡片拖动排序"*, and it was a stated blank rather
+    /// than an oversight: reordering by card had to arrive carrying the tab
+    /// strip's own semantics instead of growing a second set. R3 is what made
+    /// that arrival free — the drag engine reads a [`TabRun`] and cannot tell
+    /// which surface handed it one — so the whole of card reordering is this
+    /// column filling `slots` with boxes it had already solved (2026-08-20).
     ///
-    /// Red gate: answer `None` for the run in focus mode and the second
-    /// assertion goes red; fill `slots` with the cards' boxes and the first does,
-    /// and a drag would compute a reorder the column cannot perform.
+    /// The other two refusals are untouched, and this is where they are held:
+    ///
+    /// * **② a card list does not tear a tab in half.** A pane dragged out of
+    ///   the stage may not become a new tab by being dropped on the column, so
+    ///   this run hosts no extraction — while both surfaces that *are* a whole
+    ///   window's tab list do.
+    /// * **③ it refuses file drops** — *"一份 tab 清单没有一个非任意的 tab 可以
+    ///   接住一个文件"*. That one is `DragSource::Row(_) => None` in
+    ///   `Runtime::survey_strip`, global to every tab surface, so there is
+    ///   nothing here for a card to opt into.
+    ///
+    /// And the older half of this pin stands unchanged: a surface must not
+    /// become a *hole*. The band covers the column, so whatever the run refuses
+    /// is refused **by the column** rather than handed to the pane the panel is
+    /// standing in front of.
+    ///
+    /// Red gate: leave `slots` empty — which is what this file shipped until
+    /// 2026-08-20 — and the first assertion goes red; answer `None` for the run
+    /// in focus mode and the band's does; let the column host a tear-out and ②
+    /// does.
     #[test]
-    fn the_card_column_refuses_every_drag_without_becoming_a_hole() {
+    fn the_card_column_takes_a_tab_reorder_and_refuses_the_other_two_drags() {
         let state = focus_rail(TabLayoutMode::Vertical);
         let column = focus_of(state, 4);
         let run = focus_rail_run(&column);
-        assert!(
-            run.slots.is_empty(),
-            "no slot is an offer to land, and the column makes none"
+        assert_eq!(
+            run.slots,
+            column
+                .cards
+                .iter()
+                .map(|card| card.body)
+                .collect::<Vec<_>>(),
+            "④: one slot per card, and it is the card's own box — the run \
+             borrows the solved geometry rather than measuring a second one"
         );
-        assert_eq!(run.band, column.body, "but it claims its own rectangle");
+        assert_eq!(
+            run.axis,
+            Axis::Col,
+            "a column is reordered down its own axis"
+        );
+        assert!(
+            !run.hosts_tear_out,
+            "②: a pane torn out of the stage has no new tab to become here"
+        );
+        assert_eq!(run.band, column.body, "and it claims its own rectangle");
         for card in &column.cards {
             assert!(
                 run.contains(
                     f64::from((card.body[0] + card.body[2]) / 2.0),
                     f64::from((card.body[1] + card.body[3]) / 2.0),
                 ),
-                "so a drop over a card is refused by the column rather than \
+                "so a drop over a card is answered by the column rather than \
                  falling through to the pane behind it"
             );
         }
+    }
+
+    /// The focus column exactly as [`rail_paint_of`] draws it — [`painted_rail`]'s
+    /// opposite number, at the same surface height its 960x600 window works out
+    /// to and at the same measured `Exit`, so a rectangle asserted against this
+    /// geometry is the rectangle the paint had in front of it.
+    fn painted_focus_column(tabs: usize) -> FocusRailGeometry {
+        focus_rail_geometry(
+            600.0,
+            1.0,
+            tabs,
+            0.0,
+            0.0,
+            focus_rail(TabLayoutMode::Vertical),
+        )
+        .expect("focus mode puts a column on screen")
+    }
+
+    /// **A card in hand is drawn where the drag put it, and over what it passes**
+    /// (§7.1.6b′ ④, 2026-08-20).
+    ///
+    /// `a_row_carried_down_the_rail_is_drawn_where_the_hand_holds_it_and_over_its_neighbours`
+    /// on the third surface, and deliberately its two assertions word for word:
+    /// the column is the rail's own panel holding a different list, so "the thing
+    /// in hand travels whole and is laid down last" is one rule rather than a
+    /// card-shaped copy of one.
+    ///
+    /// The carry is a third of the column's own pitch rather than a number:
+    /// F2 grew the card once already and the projection line is growing it
+    /// again, so a test that named a distance would be measuring the constant
+    /// instead of the mechanism.
+    ///
+    /// Red gate: leave `focus_rail_chrome` drawing every card in its solved slot
+    /// and the fill comes back where the hand is not; keep the single-pass loop
+    /// and the card in hand is painted *under* the neighbours it crosses.
+    #[test]
+    fn a_card_carried_down_the_column_is_drawn_where_the_hand_holds_it_and_over_its_neighbours() {
+        // The head card is the one in hand and the last is the staged one, which
+        // is what makes the z-order assertion say anything: in plain list order
+        // the grabbed card is painted first of the three.
+        const GRABBED: usize = 0;
+        const STAGED: usize = 2;
+        let column = painted_focus_column(3);
+        let carry = (column.cards[1].body[1] - column.cards[0].body[1]) / 3.0;
+        let (_, _, sprites) = rail_paint_of(
+            1.0,
+            &dragging_rows(GRABBED, carry, 0.0),
+            STAGED,
+            Some(GRABBED),
+            None,
+            focus_rail(TabLayoutMode::Vertical),
+            None,
+        );
+        let body_at = |rect: [f32; 4]| {
+            sprites.iter().position(|sprite| {
+                sprite.rect == rect && matches!(sprite.mark, ChromeMark::ControlPill { .. })
+            })
+        };
+        let carried = column.cards[GRABBED].shifted(carry);
+        let drawn = body_at(carried.body).expect("the grabbed card draws a body of its own");
+        assert!(
+            body_at(column.cards[GRABBED].body).is_none(),
+            "and draws nothing in the slot it has left"
+        );
+        let staged = body_at(column.cards[STAGED].body).expect("`.fcard.staged` fills its card");
+        assert!(
+            drawn > staged,
+            "the card in hand is laid down last, so it covers what it passes over"
+        );
+        assert!(
+            sprites.iter().any(|sprite| sprite.rect == carried.mark),
+            "and everything inside the card travels with it — one shift, at the top"
+        );
     }
 
     /// PIN (§7.1.6b′) — **the mode is orthogonal to `Tab layout` and `Sidebar`:
