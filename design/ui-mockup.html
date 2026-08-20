@@ -7735,11 +7735,14 @@
     leavesOf(tabById(wsId).tree).forEach(l => { const s = session(l.uid); if (s) s.unread = false; });
     render();
   }
-  function newTab(profile) {
+  function newTab(profile, place) {
     /* a new shell opens where the one you are looking at is standing — which is
-       also what makes the strip readable: a tab with no place has no name */
+       also what makes the strip readable: a tab with no place has no name.
+       `place` is the one thing that overrides that: `New terminal in folder…`
+       names a folder out loud, and a folder somebody chose must not be talked
+       out of it by whichever pane happened to be under the menu. */
     const s = mkSession(profile.title.split(" ·")[0], profile.icon, profile.make(),
-                        false, focusedSession()?.cwd || HOME, profile.make);
+                        false, place || focusedSession()?.cwd || HOME, profile.make);
     const w = mkWs(s);
     state.tabs.push(w);
     state.active = w.id;
@@ -11716,12 +11719,21 @@
         <span class="ticon">${p.icon}</span>${p.title}
         ${i === state.defaultProfile ? `<span class="default-hint">default</span>` : ""}
       </div>`).join("")
-      /* the profiles make new TABS; "Files pane" adds a tree PANE to THIS tab,
-         beside the terminal — the mouse entry for the pane (Ctrl+B is the key). */
+      /* the profiles make new TABS; the second section is the two rows that are
+         about a FOLDER. "Files pane" adds a tree PANE to THIS tab, beside the
+         terminal — the mouse entry for the pane (Ctrl+B is the key). "New
+         terminal in folder…" is the door the Recent list cannot be: Recent is a
+         vault of tabs you CLOSED, so a folder you are still standing in is not
+         in it, and this is how you open another terminal there. It takes the
+         default profile — the four rows above are where you choose a shell, and
+         this row is where you choose a place. */
       + `<div class="menu-sep"></div>
          <div class="profile-item" data-files="1">
            <span class="ticon"><svg class="pmark" style="color:var(--accent)"><use href="#i-folder"/></svg></span>Files pane
            <span class="default-hint">this tab</span>
+         </div>
+         <div class="profile-item" data-newfolder="1">
+           <span class="ticon"><svg class="pmark" style="color:var(--accent)"><use href="#i-folder"/></svg></span>New terminal in folder…
          </div>`
       /* ONE ROW SHAPE, FOUR CONTENTS. A shell, a folder, a file and a whole
          closed window are all "somewhere I was", so they are all one line with a
@@ -11739,6 +11751,15 @@
         menu.classList.remove("show");
         closeProfileMenu();
         if (el.dataset.files) { addFilesPane(); return; }
+        if (el.dataset.newfolder) {
+          /* prototype: a real folder picker goes here — the same stand-in the
+             pane menu's own `New terminal in folder…` uses. The menu is closed
+             before the modal goes up, which is not a nicety: a popup behind a
+             system modal takes no input and cannot be dismissed. */
+          const picked = window.prompt("New terminal in folder:", focusedSession()?.cwd || HOME);
+          if (picked && picked.trim()) newTab(defaultProfile(), picked.trim());
+          return;
+        }
         if (el.dataset.r !== undefined) { reopenRecent(+el.dataset.r); return; }
         newTab(PROFILES[+el.dataset.p]);
       }));
