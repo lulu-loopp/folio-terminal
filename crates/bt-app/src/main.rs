@@ -3016,8 +3016,9 @@ impl RowActivation {
 /// The commit graph's branch filter while it is up (T2, v2 ③).
 #[derive(Clone, Debug)]
 struct GraphFilterMenuState {
-    /// The graph seat whose toolbar button opened it.
-    seat: SeatId,
+    /// The graph surface whose toolbar button opened it — a preview pane, or
+    /// the window one was torn off into.
+    surface: PreviewSurface,
     hover: Option<profiles::GitFilterRow>,
 }
 
@@ -3566,6 +3567,37 @@ fn float_git_hover(part: Option<float::FloatPart>) -> git_panel::GitHover {
     }
 }
 
+/// The same translation for a floating **commit graph** (user report,
+/// 2026-08-20).
+///
+/// The chassis speaks [`float::FloatPart`] and the picture speaks
+/// [`git_graph::GraphHover`], and the seat's own translation is the three
+/// `match`es in `seats::push_seat_chrome` over `ChromeTarget`. This is those
+/// three, once, for the host that has no chrome targets.
+fn float_graph_hover(part: Option<float::FloatPart>) -> git_graph::GraphHover {
+    match part {
+        Some(float::FloatPart::GraphTool(tool)) => git_graph::GraphHover {
+            tool: Some(tool),
+            row: None,
+            part: None,
+        },
+        Some(float::FloatPart::GraphRow(index)) => git_graph::GraphHover {
+            tool: None,
+            row: Some(index),
+            part: None,
+        },
+        // The block lights as a whole *and* the part inside it lights, which is
+        // what the docked reading does: `GitGraphDetail` answers both the `row`
+        // arm and the `part` arm there.
+        Some(float::FloatPart::GraphDetail { index, part }) => git_graph::GraphHover {
+            tool: None,
+            row: Some(index),
+            part: Some(part),
+        },
+        _ => git_graph::GraphHover::default(),
+    }
+}
+
 /// How the keyboard arrived at a files column.
 ///
 /// **This is the whole of `:focus-visible`.** The mock-up rings the selected row
@@ -3953,9 +3985,18 @@ struct TabState {
     /// own history — a reader walking back a thousand commits in the graph does
     /// not make the panel beside it a thousand commits long.
     git_graphs: BTreeMap<std::path::PathBuf, git_graph::GraphState>,
-    /// How far each preview seat's graph is scrolled, and how wide its lane
+    /// How far each preview surface's graph is scrolled, and how wide its lane
     /// column is being held (R18). Both are view state and neither is persisted.
-    git_graph_view: BTreeMap<SeatId, GraphView>,
+    ///
+    /// **Keyed by [`PreviewSurface`] and not by seat** (user report,
+    /// 2026-08-20). A graph is a document, and §7.1.3 lets a document be torn
+    /// off into a window whose whole view lives in this tab's content plane
+    /// under `PreviewSurface::Float(id)` — which is exactly what
+    /// [`float::FloatPreview`] says the preview tenant is. A seat-keyed map
+    /// therefore had no room in it for a floating graph at all: the window
+    /// opened with a head, a foot and an empty rectangle, because nothing this
+    /// side could even name the thing it was showing.
+    git_graph_view: BTreeMap<PreviewSurface, GraphView>,
     /// Which leaf has the keyboard. Typing, pasting and IME all land here.
     ///
     /// **Always a Terminal seat in this build**, which is what lets `sessions`
@@ -5349,9 +5390,16 @@ struct WindowRuntime {
     /// wheel, the hit test and the watcher all read it, exactly as their docked
     /// twins read `git_pages_shown`.
     float_git_pages_shown: BTreeMap<float::FloatId, git_panel::GitPanelContent>,
-    /// The graph each preview seat drew this frame — [`Self::git_pages_shown`]'s
-    /// twin, kept for the same `&self` hit test.
-    git_graphs_shown: BTreeMap<SeatId, git_graph::GraphContent>,
+    /// The graph each preview **surface** drew this frame —
+    /// [`Self::git_pages_shown`]'s twin, kept for the same `&self` hit test.
+    ///
+    /// One map for both hosts rather than the seat/float pair the Git *page*
+    /// needs above, and the difference is the difference between the two
+    /// surfaces: a Git page is a column's second view and a column is only a
+    /// column inside a tab, while a graph is a document and a document's home is
+    /// [`PreviewSurface`] whichever host is showing it. The wheel, the keyboard
+    /// and the hit test read this map by surface and no longer care which.
+    git_graphs_shown: BTreeMap<PreviewSurface, git_graph::GraphContent>,
     /// How wide each column's `Files | Git` switch is drawn, for the hit test.
     ///
     /// The third field of this family, and it exists for the reason the two above
@@ -6167,7 +6215,7 @@ impl TabState {
                 // the bytes they used to.
                 graph: self
                     .git_graph_view
-                    .get(&seat.id)
+                    .get(&PreviewSurface::Seat(seat.id))
                     .map(|view| &view.filter)
                     .filter(|filter| **filter != git_graph::GraphFilter::default())
                     .map(|filter| bt_persist::GraphFilterV1 {
@@ -15340,10 +15388,12 @@ fn create_tab_state(
     // one the pane will be re-pointed at only when it has one. Until then the
     // entry holds a filter and an empty root, which is exactly what an unopened
     // graph seat's view has always been.
-    let mut graph_views: BTreeMap<SeatId, GraphView> = BTreeMap::new();
+    // Seats and only seats: a float is not in `session.json` at all, so a
+    // restore has no window to key one of these against.
+    let mut graph_views: BTreeMap<PreviewSurface, GraphView> = BTreeMap::new();
     for (seat, filter) in &preview.filters {
         graph_views.insert(
-            *seat,
+            PreviewSurface::Seat(*seat),
             GraphView {
                 filter: filter.clone(),
                 ..GraphView::default()
@@ -15397,10 +15447,11 @@ fn assemble_tab_state(
     files: BTreeMap<SeatId, seats::FilesLeafState>,
     preview_pool: preview::PreviewPool,
     preview_panes: PreviewPanes,
-    // What each graph seat was filtered to (T2/T3, v2 (3)) — the one thing on a
-    // `GraphView` that crosses the disk, and therefore the one thing a tab can be
-    // born already holding.
-    git_graph_view: BTreeMap<SeatId, GraphView>,
+    // What each graph surface was filtered to (T2/T3, v2 (3)) — the one thing on
+    // a `GraphView` that crosses the disk, and therefore the one thing a tab can
+    // be born already holding. Only seats are ever restored into it: a float is
+    // not in `session.json` at all.
+    git_graph_view: BTreeMap<PreviewSurface, GraphView>,
     focused_leaf: SeatId,
     seed: TabSeed,
     seats: seats::Seats,
@@ -18336,7 +18387,19 @@ impl Runtime<'_> {
         self.window.git_pages_shown = git_pages.clone();
         let git_graphs = self.git_graphs(scale);
         // Kept for the hit test, for `git_pages_shown`'s reason exactly.
-        self.window.git_graphs_shown = git_graphs.clone();
+        //
+        // **The seats' half of the map, written without touching the other.** A
+        // floating graph is built and recorded a pass later, in `float_layer`,
+        // and an assignment here would take the window's entry away between the
+        // two passes — a press landing on a row the window is still drawing.
+        self.window
+            .git_graphs_shown
+            .retain(|surface, _| !matches!(surface, PreviewSurface::Seat(_)));
+        self.window.git_graphs_shown.extend(
+            git_graphs
+                .iter()
+                .map(|(surface, content)| (*surface, content.clone())),
+        );
         self.window.files_view_widths = files_views
             .iter()
             .map(|(seat, content)| (*seat, content.widths))
@@ -18822,9 +18885,10 @@ impl Runtime<'_> {
         // The commit graph's toolbar (T1). Only the toolbar: the rows below it
         // carry a tooltip of their own and have never registered one, because a
         // list whose every row explains itself is a list that flickers.
-        let graph_seats: Vec<SeatId> = self.window.git_graphs_shown.keys().copied().collect();
-        for seat in graph_seats {
-            let Some(rects) = self.graph_toolbar_rects(seat) else {
+        let graph_surfaces: Vec<PreviewSurface> =
+            self.window.git_graphs_shown.keys().copied().collect();
+        for surface in graph_surfaces {
+            let Some(rects) = self.graph_toolbar_rects(surface) else {
                 continue;
             };
             for (rect, tool) in [
@@ -18835,7 +18899,7 @@ impl Runtime<'_> {
             ] {
                 let Some(rect) = rect else { continue };
                 anchors.push(
-                    tooltip::TooltipAnchorId::GitGraphTool(seat, tool),
+                    tooltip::TooltipAnchorId::GitGraphTool(surface, tool),
                     rect,
                     tool.tooltip(),
                 );
@@ -21658,17 +21722,21 @@ impl Runtime<'_> {
             // The fifth arm of the same chain, and in it for E61's reason: one
             // popup is up at a time, and a chain cannot draw two however the
             // flags are set.
-            let seat = self.window.graph_filter_menu.as_ref().map(|menu| menu.seat);
+            let surface = self
+                .window
+                .graph_filter_menu
+                .as_ref()
+                .map(|menu| menu.surface);
             let hover = self
                 .window
                 .graph_filter_menu
                 .as_ref()
                 .and_then(|m| m.hover.clone());
-            let filter = seat
-                .and_then(|seat| {
-                    self.window.tabs[self.window.active_tab]
+            let filter = surface
+                .and_then(|surface| {
+                    self.window.tabs[self.preview_tab_index(surface)]
                         .git_graph_view
-                        .get(&seat)
+                        .get(&surface)
                 })
                 .map(|view| view.filter.clone())
                 .unwrap_or_default();
@@ -26863,6 +26931,29 @@ impl Runtime<'_> {
             .is_some_and(|pane| pane.md_source)
     }
 
+    /// **What paints this surface's body**, asked once, for every host.
+    ///
+    /// The picture is asked first and off the *pane* rather than off a buffer,
+    /// because a picture is not one: it arrives down the decode lane and lives
+    /// on [`PreviewPane::image`], and a surface holding one has no buffer to ask
+    /// [`preview::PreviewBuffer::view`] of. Everything else is the buffer's own
+    /// answer put through [`preview::PreviewView::chrome`], and an empty surface
+    /// falls to the document pipeline, which is where the "no preview" card is
+    /// drawn.
+    fn preview_chrome_on(&self, surface: PreviewSurface) -> preview::PreviewChrome {
+        if self
+            .preview_pane(surface)
+            .is_some_and(|pane| pane.image.is_some())
+        {
+            return preview::PreviewChrome::Picture;
+        }
+        let md_source = self.preview_md_source(surface);
+        self.preview_buffer_on(surface)
+            .map_or(preview::PreviewChrome::Document, |buffer| {
+                buffer.view(md_source).chrome()
+            })
+    }
+
     /// Whether **this surface** has anything to type into.
     ///
     /// The buffer's own judgement asked with this surface's face, because that
@@ -28931,10 +29022,9 @@ impl Runtime<'_> {
             files_tree: self.files_keyboard_seat().is_some(),
             // The graph's search field, when it is the focused preview's and it
             // holds the keyboard.
-            graph_search: matches!(
-                self.preview_keyboard_surface(),
-                Some(PreviewSurface::Seat(seat)) if self.graph_search_focused(seat)
-            ),
+            graph_search: self
+                .preview_keyboard_surface()
+                .is_some_and(|surface| self.graph_search_focused(surface)),
             // `PreviewEdit` — and the preview's read-only browsing, which is the
             // same owner wearing its other state: the arrows scroll the document,
             // so they are not the shell's either.
@@ -29049,10 +29139,17 @@ impl Runtime<'_> {
         let Some(surface) = self.preview_keyboard_surface() else {
             return Ok(false);
         };
-        // **A graph is a list, not a document** (V14). The seat that holds it is
-        // an ordinary preview seat and got the keyboard the ordinary way — a
-        // press into it focused it — but what its arrows mean is "the row above"
-        // and not "twenty pixels up", so it is asked before the scroll below.
+        // **A graph is a list, not a document** (V14). The surface that holds it
+        // is an ordinary preview surface and got the keyboard the ordinary way —
+        // a press into it focused it — but what its arrows mean is "the row
+        // above" and not "twenty pixels up", so it is asked before the scroll
+        // below.
+        //
+        // **Asked of a window as well as a pane** (user report, 2026-08-20).
+        // This used to narrow to `PreviewSurface::Seat` before asking either
+        // question, which was the keyboard half of the same defect the paint
+        // had: a graph torn off into a window answered its arrows by scrolling
+        // an empty document twenty pixels at a time.
         //
         // It is asked and not *told*: a key it does not claim (`Esc` with nothing
         // to fold) falls through to the scroll, which swallows it as every
@@ -29063,16 +29160,12 @@ impl Runtime<'_> {
         // keyboard** (T4). It takes *every* key it is given — a field that let an
         // unrecognised character fall through to the list under it would be a
         // field you could type `j` into and watch the graph scroll.
-        if let PreviewSurface::Seat(seat) = surface
-            && self.graph_search_focused(seat)
-            && self.graph_search_key(seat, event)?
-        {
+        if self.graph_search_focused(surface) && self.graph_search_key(surface, event)? {
             return Ok(true);
         }
-        if let PreviewSurface::Seat(seat) = surface
-            && self.window.git_graphs_shown.contains_key(&seat)
+        if self.window.git_graphs_shown.contains_key(&surface)
             && let Some(key) = graph_key_of(&event.logical_key, self.window.modifiers)
-            && self.graph_key(seat, key)?
+            && self.graph_key(surface, key)?
         {
             return Ok(true);
         }
@@ -29220,11 +29313,14 @@ impl Runtime<'_> {
         let line = match owner {
             ImeOwner::Rename => self.window.rename_caret_line?,
             ImeOwner::GraphSearch => {
-                let PreviewSurface::Seat(seat) = self.preview_keyboard_surface()? else {
-                    return None;
-                };
-                let rects = self.graph_toolbar_rects(seat)?;
-                let toolbar = self.window.git_graphs_shown.get(&seat)?.toolbar.as_ref()?;
+                let surface = self.preview_keyboard_surface()?;
+                let rects = self.graph_toolbar_rects(surface)?;
+                let toolbar = self
+                    .window
+                    .git_graphs_shown
+                    .get(&surface)?
+                    .toolbar
+                    .as_ref()?;
                 git_graph::graph_search_field(rects, toolbar, scale)?.caret
             }
             ImeOwner::GitPrompt => self.git_menu_layout()?.prompt_rects()?.caret_line(scale),
@@ -32548,42 +32644,48 @@ impl Runtime<'_> {
     /// [`Self::ask_git_for_column`]'s twin, and idempotent for its reason: the
     /// plan is derived from the cache rather than remembered, so a slot already
     /// in flight asks for nothing however often this is called.
-    fn ask_git_for_graphs(&mut self) {
-        let active = self.window.active_tab;
-        let tab_id = self.window.tabs[active].id;
-        let roots: Vec<std::path::PathBuf> = self.window.tabs[active]
-            .git_graphs
-            .keys()
-            .cloned()
-            .collect();
-        for root in roots {
-            let Some(state) = self.window.tabs[active].git_graphs.get_mut(&root) else {
-                continue;
-            };
-            let questions = state.cache.pending_questions();
-            for question in &questions {
-                state.cache.mark_pending(question);
-            }
-            for question in questions {
-                if !self.app.git_worker.request(git::GitRequest {
-                    host: git::GitHost::Graph {
-                        tab: tab_id,
-                        root: root.clone(),
-                    },
-                    question,
-                }) {
-                    self.disable_git_worker();
-                    return;
+    /// **Asked of the tabs that are actually showing a graph**, and not of the
+    /// tab on screen. A document torn off into a window keeps reading the plane
+    /// of the tab it was opened in (§7.1.3, [`float::FloatPreview`]), so a
+    /// floating graph whose reader has since switched tabs would otherwise sit
+    /// on a cache nobody ever asked a question for — "Reading the repository…"
+    /// for as long as you stayed away.
+    fn ask_git_for_graphs(&mut self, tabs: &[usize]) {
+        for index in tabs.iter().copied() {
+            let tab_id = self.window.tabs[index].id;
+            let roots: Vec<std::path::PathBuf> =
+                self.window.tabs[index].git_graphs.keys().cloned().collect();
+            for root in roots {
+                let Some(state) = self.window.tabs[index].git_graphs.get_mut(&root) else {
+                    continue;
+                };
+                let questions = state.cache.pending_questions();
+                for question in &questions {
+                    state.cache.mark_pending(question);
+                }
+                for question in questions {
+                    if !self.app.git_worker.request(git::GitRequest {
+                        host: git::GitHost::Graph {
+                            tab: tab_id,
+                            root: root.clone(),
+                        },
+                        question,
+                    }) {
+                        self.disable_git_worker();
+                        return;
+                    }
                 }
             }
         }
     }
 
     /// One more page of history for a graph (R23's auto-paging).
-    fn extend_graph(&mut self, root: &Path) {
-        let active = self.window.active_tab;
-        let tab_id = self.window.tabs[active].id;
-        let Some(state) = self.window.tabs[active].git_graphs.get(root) else {
+    ///
+    /// `index` is the tab whose plane holds the document, for
+    /// [`Self::ask_git_for_graphs`]'s reason exactly.
+    fn extend_graph(&mut self, index: usize, root: &Path) {
+        let tab_id = self.window.tabs[index].id;
+        let Some(state) = self.window.tabs[index].git_graphs.get(root) else {
             return;
         };
         let Some(question) = state.cache.more_commits() else {
@@ -32611,10 +32713,9 @@ impl Runtime<'_> {
     /// Idempotent, and the guard is the cache's rather than a flag here: this is
     /// reached from a derivation that runs every frame, so "have I asked this
     /// already" has to be answerable by the thing holding the answer.
-    fn ask_graph_compare(&mut self, root: &Path, a: &str, b: Option<&str>) {
-        let active = self.window.active_tab;
-        let tab_id = self.window.tabs[active].id;
-        let Some(state) = self.window.tabs[active].git_graphs.get_mut(root) else {
+    fn ask_graph_compare(&mut self, index: usize, root: &Path, a: &str, b: Option<&str>) {
+        let tab_id = self.window.tabs[index].id;
+        let Some(state) = self.window.tabs[index].git_graphs.get_mut(root) else {
             return;
         };
         let Some(question) = state.cache.begin_compare_files(a, b) else {
@@ -32641,23 +32742,32 @@ impl Runtime<'_> {
     ///
     /// Answers whether anything moved, so the caller can decide about a frame.
     fn step_graph_seeks(&mut self) -> Result<bool> {
-        let active = self.window.active_tab;
-        let seats: Vec<SeatId> = self.window.tabs[active]
-            .git_graph_view
+        // Every tab's seeks and not the tab on screen's, for
+        // [`Self::ask_git_for_graphs`]'s reason: a floating graph reads the plane
+        // of the tab it was opened in, and a walk that stopped when you switched
+        // tabs would be a gesture the reader started and the app quietly dropped.
+        let running: Vec<(usize, PreviewSurface)> = self
+            .window
+            .tabs
             .iter()
-            .filter(|(_, view)| view.seek.is_some())
-            .map(|(seat, _)| *seat)
+            .enumerate()
+            .flat_map(|(index, tab)| {
+                tab.git_graph_view
+                    .iter()
+                    .filter(|(_, view)| view.seek.is_some())
+                    .map(move |(surface, _)| (index, *surface))
+            })
             .collect();
         let mut moved = false;
-        for seat in seats {
-            let Some((root, seek)) = self.window.tabs[active]
+        for (index, surface) in running {
+            let Some((root, seek)) = self.window.tabs[index]
                 .git_graph_view
-                .get(&seat)
+                .get(&surface)
                 .and_then(|view| Some((view.root.clone(), view.seek.clone()?)))
             else {
                 continue;
             };
-            let Some(state) = self.window.tabs[active].git_graphs.get(&root) else {
+            let Some(state) = self.window.tabs[index].git_graphs.get(&root) else {
                 continue;
             };
             match git_graph::graph_seek_step(state, &seek) {
@@ -32665,34 +32775,35 @@ impl Runtime<'_> {
                     let row = self
                         .window
                         .git_graphs_shown
-                        .get(&seat)
+                        .get(&surface)
                         .map(|content| content.commit_row(at));
-                    if let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) {
+                    if let Some(view) = self.window.tabs[index].git_graph_view.get_mut(&surface) {
                         view.seek = None;
                     }
                     if let Some(row) = row {
-                        self.select_graph_row(seat, row);
-                        self.reveal_graph_row(seat, row);
+                        self.select_graph_row(surface, row);
+                        self.reveal_graph_row(surface, row);
                     }
                     moved = true;
                 }
                 git_graph::GraphSeekStep::NeedPage => {
-                    if let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) {
+                    if let Some(view) = self.window.tabs[index].git_graph_view.get_mut(&surface) {
                         view.seek = Some(git_graph::GraphSeek {
                             pages: seek.pages + 1,
                             ..seek
                         });
                     }
-                    self.extend_graph(&root);
+                    self.extend_graph(index, &root);
                 }
                 git_graph::GraphSeekStep::Waiting => {}
                 git_graph::GraphSeekStep::GaveUp => {
-                    if let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) {
+                    if let Some(view) = self.window.tabs[index].git_graph_view.get_mut(&surface) {
                         view.seek = None;
                     }
+                    let anchor = self.graph_toast_anchor(surface);
                     self.toast(
                         toast::ToastKind::Info,
-                        toast::ToastAnchor::PreviewSeat(seat),
+                        anchor,
                         None,
                         git_graph::graph_seek_gave_up(&seek.hash),
                     )?;
@@ -32703,51 +32814,126 @@ impl Runtime<'_> {
         Ok(moved)
     }
 
-    /// Which graph each preview seat is drawing, and how far down it is.
-    fn git_graphs(&mut self, scale: f32) -> BTreeMap<SeatId, git_graph::GraphContent> {
+    /// Where a graph's own toast hangs.
+    ///
+    /// A docked graph anchors on the pane that is showing it, exactly as it
+    /// always has. A floating one anchors on the window as a whole — the same
+    /// answer [`Self::git_toast_anchor`] already gives a floating Git page, and
+    /// for that answer's reason: a pinned window is in no tab and no seat, so
+    /// there is no pane rectangle for a card to point at.
+    fn graph_toast_anchor(&self, surface: PreviewSurface) -> toast::ToastAnchor {
+        match surface {
+            PreviewSurface::Seat(seat) => toast::ToastAnchor::PreviewSeat(seat),
+            PreviewSurface::Float(_) | PreviewSurface::Peek => toast::ToastAnchor::Window,
+        }
+    }
+
+    /// Which graph each preview **surface** is drawing, and how far down it is.
+    ///
+    /// **Asked of [`Self::preview_surfaces`] and not of the seat tree** (user
+    /// report, 2026-08-20). `preview_seats()` is the docked half of that list,
+    /// and asking it here was the whole of the defect: a graph torn off into a
+    /// window was a graph nobody built, so the window drew its head, its foot
+    /// and an empty rectangle — the picture is chrome ([`git_graph::push_graph`])
+    /// and the document's body is empty by construction, so there was nothing
+    /// else on the surface to give it away.
+    fn git_graphs(&mut self, scale: f32) -> BTreeMap<PreviewSurface, git_graph::GraphContent> {
         let active = self.window.active_tab;
-        let showing: Vec<(SeatId, std::path::PathBuf)> = self
-            .seats
-            .preview_seats()
+        let showing: Vec<(PreviewSurface, std::path::PathBuf)> = self
+            .preview_surfaces()
             .into_iter()
-            .filter_map(|seat| {
-                let source = self
-                    .preview_buffer_on(PreviewSurface::Seat(seat))?
-                    .source
-                    .clone();
+            .filter_map(|surface| {
+                let source = self.preview_buffer_on(surface)?.source.clone();
                 match source {
-                    preview::PreviewSource::GitGraph { root } => Some((seat, root)),
+                    preview::PreviewSource::GitGraph { root } => Some((surface, root)),
                     _ => None,
                 }
             })
             .collect();
-        // A seat that has stopped showing a graph keeps no scroll and no open
+        // A surface that has stopped showing a graph keeps no scroll and no open
         // commit: it is not looking at that list any more.
-        self.window.tabs[active]
-            .git_graph_view
-            .retain(|seat, _| showing.iter().any(|(shown, _)| shown == seat));
+        //
+        // **Only the surfaces this pass had standing to judge**, which is
+        // [`Self::sweep_preview_panes`]'s own split: a seat lives in its own
+        // tab's map and only the tab on screen has its seats in the list above,
+        // so a seat entry in any other tab is not stale — it is an entry this
+        // frame was never shown. A window is in the list wherever it was born,
+        // so its entry answers everywhere.
+        for (index, tab) in self.window.tabs.iter_mut().enumerate() {
+            tab.git_graph_view.retain(|surface, _| {
+                let judged = match surface {
+                    PreviewSurface::Seat(_) => index == active,
+                    PreviewSurface::Float(_) => true,
+                    // Never a key here: the glance card is not in
+                    // `preview_surfaces` and has no graph to hold.
+                    PreviewSurface::Peek => false,
+                };
+                !judged || showing.iter().any(|(shown, _)| shown == surface)
+            });
+        }
         if showing.is_empty() {
             return BTreeMap::new();
         }
         let mut pages = BTreeMap::new();
-        let mut extend: Vec<std::path::PathBuf> = Vec::new();
-        let mut compares: Vec<(std::path::PathBuf, String, Option<String>)> = Vec::new();
-        for (seat, root) in showing {
-            let Some(body) =
-                seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)
-            else {
+        for (surface, root) in showing {
+            // **The docked ones only.** A window's graph is built in the overlay
+            // pass instead ([`Self::preview_float_layer`]), through the very same
+            // [`Self::build_git_graph`] — because a float's body moves under a
+            // drag that never runs this pass at all, and a picture built against
+            // last frame's rectangle would be a list drawn outside its own window.
+            // It is the arrangement the float's document already had: "a float's
+            // document is built into its layer".
+            let PreviewSurface::Seat(_) = surface else {
                 continue;
             };
+            let Some(body) = self.preview_surface_body_rect(surface, scale) else {
+                continue;
+            };
+            if let Some(content) = self.build_git_graph(surface, &root, body, scale) {
+                pages.insert(surface, content);
+            }
+        }
+        pages
+    }
+
+    /// **Build one surface's graph, heal it, and raise what it asks git for.**
+    ///
+    /// The one derivation both hosts run. A preview pane reaches it through
+    /// [`Self::git_graphs`] in the chrome pass and a floating window through
+    /// [`Self::preview_float_layer`] in the overlay pass, and what they hand in
+    /// is the same two facts — which surface, and the rectangle it is drawing
+    /// into. Everything a graph is made of is on the far side of this call, so
+    /// the two hosts cannot be showing two different readings of one repository.
+    fn build_git_graph(
+        &mut self,
+        surface: PreviewSurface,
+        root: &Path,
+        body: [f32; 4],
+        scale: f32,
+    ) -> Option<git_graph::GraphContent> {
+        let mut extend: Vec<(usize, std::path::PathBuf)> = Vec::new();
+        let mut compares: Vec<(usize, std::path::PathBuf, String, Option<String>)> = Vec::new();
+        let root = root.to_path_buf();
+        // The three questions a build can raise are collected here and asked at
+        // the end, which is why this is a block and not a straight run: every one
+        // of them wants `&mut self`, and the build in the middle of it is holding
+        // the renderer.
+        let (asking, built) = {
+            // **The tab whose plane holds this document**, which for a seat is
+            // the tab on screen and for a window is the tab it was opened in
+            // (§7.1.3). Reading `active` here would have a floating graph change
+            // repositories under the reader the moment they switched tabs.
+            let index = self.preview_tab_index(surface);
             // The state may not exist yet on the very first frame after a
             // restore put a graph buffer back on a seat; making it here is the
             // same "vivify and ask" the columns do.
-            self.window.tabs[active]
+            self.window.tabs[index]
                 .git_graphs
                 .entry(root.clone())
                 .or_insert_with_key(|root| git_graph::GraphState::new(root.clone()));
-            let view = self.window.tabs[active]
+            let view = self.window.tabs[index]
                 .git_graph_view
-                .entry(seat)
+                .entry(surface)
                 .or_default();
             if view.root != root {
                 *view = GraphView {
@@ -32769,10 +32955,7 @@ impl Runtime<'_> {
             let search_focused = view.search_focused;
             let search_at = view.search_at;
             let asked = view.search_asked.clone();
-            let Some(state) = self.window.tabs[active].git_graphs.get(&root) else {
-                continue;
-            };
-            let state = state.clone();
+            let state = self.window.tabs[index].git_graphs.get(&root)?.clone();
             // What git said about the query that was actually *asked*, which is
             // not necessarily what is in the field: a reader typing on past a
             // result keeps seeing the result they pressed Enter for until they
@@ -32827,11 +33010,11 @@ impl Runtime<'_> {
             let selected = selected.filter(|row| *row < content.total_rows);
             content.selected = selected;
             if content.wants_more {
-                extend.push(root.clone());
+                extend.push((index, root.clone()));
             }
-            let view = self.window.tabs[active]
+            let view = self.window.tabs[index]
                 .git_graph_view
-                .entry(seat)
+                .entry(surface)
                 .or_default();
             view.scroll_px = healed;
             view.selected = selected;
@@ -32846,26 +33029,30 @@ impl Runtime<'_> {
             // pair is `GitCache::begin_compare_files`'s own guard, which is
             // where "have I asked this already" belongs — beside the answer.
             if let Some((a, b)) = content.compare_pair.clone() {
-                compares.push((root.clone(), a, b));
+                compares.push((index, root.clone(), a, b));
             }
-            pages.insert(seat, content);
+            (index, content)
+        };
+        for (index, root) in extend {
+            self.extend_graph(index, &root);
         }
-        for root in extend {
-            self.extend_graph(&root);
+        for (index, root, a, b) in compares {
+            self.ask_graph_compare(index, &root, &a, b.as_deref());
         }
-        for (root, a, b) in compares {
-            self.ask_graph_compare(&root, &a, b.as_deref());
-        }
-        self.ask_git_for_graphs();
-        pages
+        self.ask_git_for_graphs(&[asking]);
+        Some(built)
     }
 
     /// A graph row's body, pressed — one click.
-    fn press_graph_row(&mut self, seat: SeatId, index: usize) -> Result<()> {
-        let active = self.window.active_tab;
-        let Some(root) = self.window.tabs[active]
+    ///
+    /// **On whichever surface is showing the graph.** A pane and a torn-off
+    /// window are one document in two hosts (§7.1.3), so the verbs are one set
+    /// of verbs addressed by [`PreviewSurface`] rather than two written twice.
+    fn press_graph_row(&mut self, surface: PreviewSurface, index: usize) -> Result<()> {
+        let tab = self.preview_tab_index(surface);
+        let Some(root) = self.window.tabs[tab]
             .git_graph_view
-            .get(&seat)
+            .get(&surface)
             .map(|view| view.root.clone())
         else {
             return Ok(());
@@ -32873,7 +33060,7 @@ impl Runtime<'_> {
         let Some(row) = self
             .window
             .git_graphs_shown
-            .get(&seat)
+            .get(&surface)
             .and_then(|page| page.rows.iter().find(|row| row.index() == index))
             .cloned()
         else {
@@ -32895,9 +33082,9 @@ impl Runtime<'_> {
                 git_graph::GraphViewRow::File(_) | git_graph::GraphViewRow::Detail(_) => None,
             };
             if let Some(hash) = hash
-                && self.set_graph_compare(seat, &hash)
+                && self.set_graph_compare(surface, &hash)
             {
-                self.select_graph_row(seat, index);
+                self.select_graph_row(surface, index);
                 if self.refresh_chrome() {
                     self.present_chrome_change()?;
                 }
@@ -32914,11 +33101,11 @@ impl Runtime<'_> {
         // said "these two"; an unmodified click says "this one", and a page that
         // went on holding two rows lit after that would be remembering a question
         // the reader has stopped asking.
-        self.clear_graph_compare(seat);
+        self.clear_graph_compare(surface);
         // **A press is a selection** (V8), whatever the press then goes on to do:
         // the keyboard walks from where the pointer last was, which is what makes
         // clicking a row and then pressing `↓` mean the row under it.
-        self.select_graph_row(seat, index);
+        self.select_graph_row(surface, index);
         let Some(open) = git_graph::row_open(&row, &root) else {
             return Ok(());
         };
@@ -32927,8 +33114,10 @@ impl Runtime<'_> {
                 source,
                 name,
                 renamed_from,
-            } => self.open_git_document_for_graph(&root, source, name, renamed_from),
-            git_panel::GitRowOpen::Expand { hash } => self.expand_graph_commit(seat, &root, &hash),
+            } => self.open_git_document_for_graph(surface, &root, source, name, renamed_from),
+            git_panel::GitRowOpen::Expand { hash } => {
+                self.expand_graph_commit(surface, &root, &hash)
+            }
             // No row of a graph answers a press with a checkout — the branch
             // rows that do live on the docked page, and this arm is here because
             // the two surfaces share one `GitRowOpen`.
@@ -32951,9 +33140,9 @@ impl Runtime<'_> {
     /// **stop comparing**, keeping the row open. Which is also what a second
     /// `Ctrl`+click on the row already at the far end means, for the reason every
     /// toggle in this window works that way.
-    fn set_graph_compare(&mut self, seat: SeatId, hash: &str) -> bool {
-        let active = self.window.active_tab;
-        let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) else {
+    fn set_graph_compare(&mut self, surface: PreviewSurface, hash: &str) -> bool {
+        let tab = self.preview_tab_index(surface);
+        let Some(view) = self.window.tabs[tab].git_graph_view.get_mut(&surface) else {
             return false;
         };
         let Some(expanded) = view.expanded.clone() else {
@@ -32968,22 +33157,31 @@ impl Runtime<'_> {
     }
 
     /// Stop comparing, keeping the open row open.
-    fn clear_graph_compare(&mut self, seat: SeatId) -> bool {
-        let active = self.window.active_tab;
-        self.window.tabs[active]
+    fn clear_graph_compare(&mut self, surface: PreviewSurface) -> bool {
+        let tab = self.preview_tab_index(surface);
+        self.window.tabs[tab]
             .git_graph_view
-            .get_mut(&seat)
+            .get_mut(&surface)
             .is_some_and(|view| view.compare.take().is_some())
     }
 
     /// One of the detail block's own parts, pressed (D2/D6/D7).
-    fn press_graph_detail(&mut self, seat: SeatId, part: git_graph::GraphDetailPart) -> Result<()> {
-        let Some(detail) = self.window.git_graphs_shown.get(&seat).and_then(|content| {
-            content.rows.iter().find_map(|row| match row {
-                git_graph::GraphViewRow::Detail(detail) => Some(detail.clone()),
-                _ => None,
+    fn press_graph_detail(
+        &mut self,
+        surface: PreviewSurface,
+        part: git_graph::GraphDetailPart,
+    ) -> Result<()> {
+        let Some(detail) = self
+            .window
+            .git_graphs_shown
+            .get(&surface)
+            .and_then(|content| {
+                content.rows.iter().find_map(|row| match row {
+                    git_graph::GraphViewRow::Detail(detail) => Some(detail.clone()),
+                    _ => None,
+                })
             })
-        }) else {
+        else {
             return Ok(());
         };
         match (part, &detail.detail) {
@@ -32994,16 +33192,16 @@ impl Runtime<'_> {
                 let Some(parent) = commit.parents.get(at) else {
                     return Ok(());
                 };
-                self.seek_graph_commit(seat, parent.hash.clone())?;
+                self.seek_graph_commit(surface, parent.hash.clone())?;
             }
             (git_graph::GraphDetailPart::CopyHash, git_graph::GraphDetail::Commit(commit)) => {
-                self.copy_from_graph(seat, &commit.hash, &commit.short)?;
+                self.copy_from_graph(surface, &commit.hash, &commit.short)?;
             }
             (git_graph::GraphDetailPart::CopySubject, git_graph::GraphDetail::Commit(commit)) => {
-                self.copy_from_graph(seat, &commit.subject, &commit.subject)?;
+                self.copy_from_graph(surface, &commit.subject, &commit.subject)?;
             }
             (git_graph::GraphDetailPart::LeaveCompare, _) => {
-                if self.clear_graph_compare(seat) && self.refresh_chrome() {
+                if self.clear_graph_compare(surface) && self.refresh_chrome() {
                     self.present_chrome_change()?;
                 }
             }
@@ -33020,7 +33218,7 @@ impl Runtime<'_> {
     /// failures would be a failure host — and this is the call site it was
     /// waiting for: a copy is invisible, and a verb whose whole effect is
     /// somewhere the reader cannot see has to say that it happened.
-    fn copy_from_graph(&mut self, seat: SeatId, text: &str, said: &str) -> Result<()> {
+    fn copy_from_graph(&mut self, surface: PreviewSurface, text: &str, said: &str) -> Result<()> {
         let result = window_hwnd(&self.window.window).and_then(|hwnd| {
             bt_platform::set_clipboard_text(hwnd, text)
                 .map_err(|error| anyhow!(error))
@@ -33029,18 +33227,19 @@ impl Runtime<'_> {
         if !recoverable_clipboard_write(result, "commit copy") {
             return Ok(());
         }
+        let anchor = self.graph_toast_anchor(surface);
         self.toast(
             toast::ToastKind::Ok,
-            toast::ToastAnchor::PreviewSeat(seat),
+            anchor,
             None,
             git_graph::graph_copied(said),
         )
     }
 
     /// Go to a commit, paging until it turns up if it has to (D2).
-    fn seek_graph_commit(&mut self, seat: SeatId, hash: String) -> Result<()> {
-        let active = self.window.active_tab;
-        if let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) {
+    fn seek_graph_commit(&mut self, surface: PreviewSurface, hash: String) -> Result<()> {
+        let tab = self.preview_tab_index(surface);
+        if let Some(view) = self.window.tabs[tab].git_graph_view.get_mut(&surface) {
             view.seek = Some(git_graph::GraphSeek { hash, pages: 0 });
         }
         if self.step_graph_seeks()? && self.refresh_chrome() {
@@ -33053,24 +33252,29 @@ impl Runtime<'_> {
     ///
     /// Written whether or not it moved: the caller is a gesture that *means* this
     /// row, and a press on the row already selected is still that.
-    fn select_graph_row(&mut self, seat: SeatId, index: usize) {
-        let active = self.window.active_tab;
-        let view = self.window.tabs[active]
+    fn select_graph_row(&mut self, surface: PreviewSurface, index: usize) {
+        let tab = self.preview_tab_index(surface);
+        let view = self.window.tabs[tab]
             .git_graph_view
-            .entry(seat)
+            .entry(surface)
             .or_default();
         view.selected = Some(index);
     }
 
     /// Turn one commit's file list over, in the graph (R15) — or the working
     /// tree's (V5).
-    fn expand_graph_commit(&mut self, seat: SeatId, root: &Path, hash: &str) -> Result<()> {
-        let active = self.window.active_tab;
-        let tab_id = self.window.tabs[active].id;
+    fn expand_graph_commit(
+        &mut self,
+        surface: PreviewSurface,
+        root: &Path,
+        hash: &str,
+    ) -> Result<()> {
+        let tab = self.preview_tab_index(surface);
+        let tab_id = self.window.tabs[tab].id;
         let opened = {
-            let view = self.window.tabs[active]
+            let view = self.window.tabs[tab]
                 .git_graph_view
-                .entry(seat)
+                .entry(surface)
                 .or_default();
             let opened = git_graph::toggled_expansion(view.expanded.as_deref(), hash);
             view.expanded.clone_from(&opened);
@@ -33086,7 +33290,7 @@ impl Runtime<'_> {
         // what let the row exist at all under R31's two-condition gate.
         if let Some(hash) = opened
             && hash != git_graph::GRAPH_UNCOMMITTED_HASH
-            && let Some(state) = self.window.tabs[active].git_graphs.get_mut(root)
+            && let Some(state) = self.window.tabs[tab].git_graphs.get_mut(root)
             && let Some(question) = state.cache.begin_commit_files(&hash)
             && !self.app.git_worker.request(git::GitRequest {
                 host: git::GitHost::Graph {
@@ -33111,13 +33315,14 @@ impl Runtime<'_> {
     /// key is not one of the six, so the surface under this one may have it",
     /// which for `Esc` with nothing open is the whole point: the float dismissal
     /// and, under that, `vim` are entitled to an `Esc` this page has no use for.
-    fn graph_key(&mut self, seat: SeatId, key: git_graph::GraphKey) -> Result<bool> {
-        let Some(content) = self.window.git_graphs_shown.get(&seat).cloned() else {
+    fn graph_key(&mut self, surface: PreviewSurface, key: git_graph::GraphKey) -> Result<bool> {
+        let Some(content) = self.window.git_graphs_shown.get(&surface).cloned() else {
             return Ok(false);
         };
-        let Some(root) = self.window.tabs[self.window.active_tab]
+        let tab = self.preview_tab_index(surface);
+        let Some(root) = self.window.tabs[tab]
             .git_graph_view
-            .get(&seat)
+            .get(&surface)
             .map(|view| view.root.clone())
         else {
             return Ok(false);
@@ -33143,23 +33348,29 @@ impl Runtime<'_> {
                     // — and R23 only builds what is on screen. Rather than act on
                     // a row nobody can see, bring it back and let the next press
                     // mean what it says.
-                    self.select_graph_row(seat, row);
-                    self.reveal_graph_row(seat, row);
+                    self.select_graph_row(surface, row);
+                    self.reveal_graph_row(surface, row);
                     if self.refresh_chrome() {
                         self.present_chrome_change()?;
                     }
                     return Ok(true);
                 };
-                self.select_graph_row(seat, drawn.index());
+                self.select_graph_row(surface, drawn.index());
                 if let Some(open) = git_graph::row_open(&drawn, &root) {
                     match open {
                         git_panel::GitRowOpen::Document {
                             source,
                             name,
                             renamed_from,
-                        } => self.open_git_document_for_graph(&root, source, name, renamed_from)?,
+                        } => self.open_git_document_for_graph(
+                            surface,
+                            &root,
+                            source,
+                            name,
+                            renamed_from,
+                        )?,
                         git_panel::GitRowOpen::Expand { hash } => {
-                            self.expand_graph_commit(seat, &root, &hash)?;
+                            self.expand_graph_commit(surface, &root, &hash)?;
                         }
                         git_panel::GitRowOpen::Checkout { .. } => {}
                     }
@@ -33179,24 +33390,24 @@ impl Runtime<'_> {
                     _ => None,
                 });
                 if let Some(hash) = hash {
-                    self.set_graph_compare(seat, &hash);
+                    self.set_graph_compare(surface, &hash);
                 }
                 row
             }
             git_graph::GraphKeyAction::LeaveCompare => {
-                self.clear_graph_compare(seat);
+                self.clear_graph_compare(surface);
                 if self.refresh_chrome() {
                     self.present_chrome_change()?;
                 }
                 return Ok(true);
             }
             git_graph::GraphKeyAction::Collapse(row) => {
-                let hash = self.window.tabs[self.window.active_tab]
+                let hash = self.window.tabs[tab]
                     .git_graph_view
-                    .get(&seat)
+                    .get(&surface)
                     .and_then(|view| view.expanded.clone());
                 if let Some(hash) = hash {
-                    self.expand_graph_commit(seat, &root, &hash)?;
+                    self.expand_graph_commit(surface, &root, &hash)?;
                 }
                 // Standing on what was just folded shut, and not on wherever the
                 // selection had wandered to inside it: the rows it was in have
@@ -33204,8 +33415,8 @@ impl Runtime<'_> {
                 row
             }
         };
-        self.select_graph_row(seat, selected);
-        self.reveal_graph_row(seat, selected);
+        self.select_graph_row(surface, selected);
+        self.reveal_graph_row(surface, selected);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -33213,18 +33424,17 @@ impl Runtime<'_> {
     }
 
     /// Scroll a graph until one of its rows is whole on screen (V14).
-    fn reveal_graph_row(&mut self, seat: SeatId, index: usize) {
+    fn reveal_graph_row(&mut self, surface: PreviewSurface, index: usize) {
         let scale = self.window.renderer.metrics().scale_factor as f32;
-        let Some(content) = self.window.git_graphs_shown.get(&seat) else {
+        let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             return;
         };
-        let Some(body) = seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)
-        else {
+        let Some(content) = self.window.git_graphs_shown.get(&surface) else {
             return;
         };
         let wanted = git_graph::graph_geometry(body, content, scale).reveal(index);
-        let active = self.window.active_tab;
-        if let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) {
+        let tab = self.preview_tab_index(surface);
+        if let Some(view) = self.window.tabs[tab].git_graph_view.get_mut(&surface) {
             view.scroll_px = wanted;
         }
     }
@@ -33234,17 +33444,25 @@ impl Runtime<'_> {
     /// The same two steps [`Self::open_git_document`] takes; what differs is
     /// only which cache the question is addressed to, because the answer has to
     /// come home to the graph's host.
+    ///
+    /// `from` is the surface the row was pressed on, and it is here for one
+    /// fact: which tab's graph cache the answer must come home to. A pane's is
+    /// the tab on screen; a torn-off window's is the tab it was opened in
+    /// (§7.1.3), and addressing the question to whichever tab happened to be in
+    /// front would file a floating graph's diff in a cache the window never
+    /// reads.
     fn open_git_document_for_graph(
         &mut self,
+        from: PreviewSurface,
         root: &Path,
         source: preview::PreviewSource,
         name: String,
         renamed_from: Option<String>,
     ) -> Result<()> {
-        let Some(surface) = self.preview_landing_surface() else {
+        let Some(landing) = self.preview_landing_surface() else {
             return Ok(());
         };
-        self.open_preview_source_on(surface, source.clone(), name)?;
+        self.open_preview_source_on(landing, source.clone(), name)?;
         let unread = self
             .preview_pool
             .get(&source)
@@ -33255,8 +33473,7 @@ impl Runtime<'_> {
         let Some(question) = git_document_question(&source, renamed_from) else {
             return Ok(());
         };
-        let active = self.window.active_tab;
-        let tab_id = self.window.tabs[active].id;
+        let tab_id = self.window.tabs[self.preview_tab_index(from)].id;
         if !self.app.git_worker.request(git::GitRequest {
             host: git::GitHost::Graph {
                 tab: tab_id,
@@ -33365,26 +33582,26 @@ impl Runtime<'_> {
     /// A notch over a graph (R23's virtual list scrolls like every other list).
     fn scroll_git_graph(
         &mut self,
-        seat: SeatId,
+        surface: PreviewSurface,
         body: [f32; 4],
         delta: MouseScrollDelta,
     ) -> Result<()> {
-        let active = self.window.active_tab;
-        let Some(content) = self.window.git_graphs_shown.get(&seat) else {
+        let tab = self.preview_tab_index(surface);
+        let Some(content) = self.window.git_graphs_shown.get(&surface) else {
             return Ok(());
         };
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let extent = (content.total_rows.max(1)) as f32;
         let travel = self.vertical_wheel_travel(delta, extent);
-        let stored = self.window.tabs[active]
+        let stored = self.window.tabs[tab]
             .git_graph_view
-            .get(&seat)
+            .get(&surface)
             .map_or(0.0, |view| view.scroll_px);
         let wanted = git_graph::clamp_graph_scroll(body, content, stored - travel, scale);
         if (wanted - stored).abs() < f32::EPSILON {
             return Ok(());
         }
-        if let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) {
+        if let Some(view) = self.window.tabs[tab].git_graph_view.get_mut(&surface) {
             view.scroll_px = wanted;
         }
         if self.refresh_chrome() {
@@ -35964,23 +36181,24 @@ impl Runtime<'_> {
                 Some((GitOrigin::Column(seat), root, target, None))
             }
             seats::ChromeTarget::GitGraphRow { seat, index } => {
+                let surface = PreviewSurface::Seat(seat);
                 let root = self.window.tabs[active]
                     .git_graph_view
-                    .get(&seat)?
+                    .get(&surface)?
                     .root
                     .clone();
                 let expanded = self.window.tabs[active]
                     .git_graph_view
-                    .get(&seat)
+                    .get(&surface)
                     .and_then(|view| view.expanded.clone());
-                let content = self.window.git_graphs_shown.get(&seat)?;
+                let content = self.window.git_graphs_shown.get(&surface)?;
                 let row = content.rows.iter().find(|row| row.index() == index)?;
                 let target = match row {
                     git_graph::GraphViewRow::Commit(commit) => {
                         // **A pill is more specific than the row it is on.** The
                         // rectangles come from the same run the painter draws
                         // from, so a pill you can see is a pill you can press.
-                        let pill = self.graph_row_rect(seat, index).and_then(|rect| {
+                        let pill = self.graph_row_rect(surface, index).and_then(|rect| {
                             git_graph::graph_ref_pill_at(
                                 commit,
                                 rect,
@@ -36040,10 +36258,10 @@ impl Runtime<'_> {
     }
 
     /// Where one row of a graph is drawn, this frame.
-    fn graph_row_rect(&self, seat: SeatId, index: usize) -> Option<[f32; 4]> {
+    fn graph_row_rect(&self, surface: PreviewSurface, index: usize) -> Option<[f32; 4]> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
-        let content = self.window.git_graphs_shown.get(&seat)?;
-        let body = seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)?;
+        let content = self.window.git_graphs_shown.get(&surface)?;
+        let body = self.preview_surface_body_rect(surface, scale)?;
         Some(git_graph::graph_geometry(body, content, scale).row_rect(index))
     }
 
@@ -36393,12 +36611,12 @@ impl Runtime<'_> {
                 let GitOrigin::Graph(_) = origin else {
                     return Ok(());
                 };
-                let (Some(seat), hash) = (self.graph_seat_for(&root), hash.clone()) else {
+                let (Some(surface), hash) = (self.graph_surface_for(&root), hash.clone()) else {
                     return Ok(());
                 };
-                if self.set_graph_compare(seat, &hash) {
+                if self.set_graph_compare(surface, &hash) {
                     if let Some(index) = graph_row {
-                        self.select_graph_row(seat, index);
+                        self.select_graph_row(surface, index);
                     }
                     if self.refresh_chrome() {
                         self.present_chrome_change()?;
@@ -36410,12 +36628,12 @@ impl Runtime<'_> {
                 profiles::GitMenuRow::CompareWithSelected,
                 profiles::GitMenuTarget::Uncommitted { .. },
             ) => {
-                let Some(seat) = self.graph_seat_for(&root) else {
+                let Some(surface) = self.graph_surface_for(&root) else {
                     return Ok(());
                 };
-                if self.set_graph_compare(seat, git_graph::GRAPH_UNCOMMITTED_HASH) {
+                if self.set_graph_compare(surface, git_graph::GRAPH_UNCOMMITTED_HASH) {
                     if let Some(index) = graph_row {
-                        self.select_graph_row(seat, index);
+                        self.select_graph_row(surface, index);
                     }
                     if self.refresh_chrome() {
                         self.present_chrome_change()?;
@@ -36427,11 +36645,11 @@ impl Runtime<'_> {
                 profiles::GitMenuRow::CompareWithWorkingTree,
                 profiles::GitMenuTarget::Commit { hash, .. },
             ) => {
-                let Some(seat) = self.graph_seat_for(&root) else {
+                let Some(surface) = self.graph_surface_for(&root) else {
                     return Ok(());
                 };
                 let hash = hash.clone();
-                self.compare_graph_with_working_tree(seat, &root, &hash)
+                self.compare_graph_with_working_tree(surface, &root, &hash)
             }
             // Every other pair is a row that is not on this target's menu, which
             // the hit test cannot produce and the keyboard walk cannot reach.
@@ -36449,22 +36667,19 @@ impl Runtime<'_> {
     /// working tree's own row spells it.
     fn compare_graph_with_working_tree(
         &mut self,
-        seat: SeatId,
+        surface: PreviewSurface,
         root: &Path,
         hash: &str,
     ) -> Result<()> {
-        let active = self.window.active_tab;
-        let open = self.window.tabs[active]
+        let tab = self.preview_tab_index(surface);
+        let open = self.window.tabs[tab]
             .git_graph_view
-            .get(&seat)
+            .get(&surface)
             .and_then(|view| view.expanded.clone());
         if open.as_deref() != Some(hash) {
-            self.expand_graph_commit(seat, root, hash)?;
+            self.expand_graph_commit(surface, root, hash)?;
         }
-        if let Some(view) = self.window.tabs[self.window.active_tab]
-            .git_graph_view
-            .get_mut(&seat)
-        {
+        if let Some(view) = self.window.tabs[tab].git_graph_view.get_mut(&surface) {
             view.compare = Some(git_graph::GRAPH_UNCOMMITTED_HASH.to_owned());
         }
         if self.refresh_chrome() {
@@ -36473,15 +36688,39 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// Which preview seat is showing this repository's graph, if one is.
-    fn graph_seat_for(&self, root: &Path) -> Option<SeatId> {
-        self.window.tabs[self.window.active_tab]
-            .git_graph_view
+    /// Which preview surface is showing this repository's graph, if one is.
+    ///
+    /// **Every tab's map**, because a window torn off in one tab goes on drawing
+    /// while you read another (§7.1.2) and is still the surface this verb is
+    /// about. The `git_graphs_shown` test is what keeps the answer to a graph
+    /// that is on the glass, exactly as it always did.
+    fn graph_surface_for(&self, root: &Path) -> Option<PreviewSurface> {
+        self.window
+            .tabs
             .iter()
-            .find(|(seat, view)| {
-                view.root == root && self.window.git_graphs_shown.contains_key(seat)
+            .flat_map(|tab| tab.git_graph_view.iter())
+            .find(|(surface, view)| {
+                view.root == root && self.window.git_graphs_shown.contains_key(surface)
             })
-            .map(|(seat, _)| *seat)
+            .map(|(surface, _)| *surface)
+    }
+
+    /// Which tab's plane holds the graph state of this repository.
+    ///
+    /// The tab on screen when it has one, so an ordinary docked graph is
+    /// addressed exactly as it was; otherwise the tab that does, which is the
+    /// one a floating graph is reading out of. An answer filed against any other
+    /// tab is an answer the response gate drops on arrival.
+    fn graph_tab_index(&self, root: &Path) -> usize {
+        let active = self.window.active_tab;
+        if self.window.tabs[active].git_graphs.contains_key(root) {
+            return active;
+        }
+        self.window
+            .tabs
+            .iter()
+            .position(|tab| tab.git_graphs.contains_key(root))
+            .unwrap_or(active)
     }
 
     /// The cache one origin reads from.
@@ -36489,7 +36728,7 @@ impl Runtime<'_> {
         let active = self.window.active_tab;
         match origin {
             GitOrigin::Column(seat) => self.window.tabs[active].git_trees.get(seat),
-            GitOrigin::Graph(root) => self.window.tabs[active]
+            GitOrigin::Graph(root) => self.window.tabs[self.graph_tab_index(root)]
                 .git_graphs
                 .get(root)
                 .map(|state| &state.cache),
@@ -36507,8 +36746,13 @@ impl Runtime<'_> {
         let tab = self.window.tabs[self.window.active_tab].id;
         match origin {
             GitOrigin::Column(seat) => git::GitHost::Column(LeafId { tab, seat: *seat }),
+            // **The tab whose plane holds the graph**, which is the tab on screen
+            // for a docked one and the tab it was opened in for a torn-off one.
+            // Naming the active tab unconditionally filed a floating graph's
+            // reread against a cache that tab does not have, and the response
+            // gate then dropped the answer — a refresh that did nothing.
             GitOrigin::Graph(root) => git::GitHost::Graph {
-                tab,
+                tab: self.window.tabs[self.graph_tab_index(root)].id,
                 root: root.clone(),
             },
             // The tab travels with it for the pool a *document* answer would
@@ -37708,16 +37952,16 @@ impl Runtime<'_> {
 
     // ── the commit graph's toolbar (T1/T2/T3/T4/T5, v2 ③) ──────────────────
 
-    /// Where the graph toolbar's controls are, for one seat.
+    /// Where the graph toolbar's controls are, for one surface.
     ///
-    /// Re-derived from the frame the seat last drew rather than remembered,
+    /// Re-derived from the frame that surface last drew rather than remembered,
     /// which is the same `&self`-hit-test discipline `git_pages_shown` exists
     /// for: the rectangle a control can be pressed in has to be the rectangle it
     /// was drawn in, by one derivation and not by two that agree today.
-    fn graph_toolbar_rects(&self, seat: SeatId) -> Option<git_graph::GraphToolbarRects> {
+    fn graph_toolbar_rects(&self, surface: PreviewSurface) -> Option<git_graph::GraphToolbarRects> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
-        let content = self.window.git_graphs_shown.get(&seat)?;
-        let body = seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)?;
+        let content = self.window.git_graphs_shown.get(&surface)?;
+        let body = self.preview_surface_body_rect(surface, scale)?;
         let geometry = git_graph::graph_geometry(body, content, scale);
         let toolbar = content.toolbar.as_ref()?;
         Some(git_graph::graph_toolbar_rects(
@@ -37728,13 +37972,17 @@ impl Runtime<'_> {
     }
 
     /// One of the toolbar's four controls, pressed.
-    fn press_graph_tool(&mut self, seat: SeatId, tool: git_graph::GraphTool) -> Result<()> {
+    fn press_graph_tool(
+        &mut self,
+        surface: PreviewSurface,
+        tool: git_graph::GraphTool,
+    ) -> Result<()> {
         match tool {
-            git_graph::GraphTool::Filter => self.toggle_graph_filter_menu(seat)?,
-            git_graph::GraphTool::Search => self.focus_graph_search(seat)?,
-            git_graph::GraphTool::SearchClear => self.clear_graph_search(seat)?,
-            git_graph::GraphTool::Refresh => self.refresh_graph(seat)?,
-            git_graph::GraphTool::LeaveDetached => self.leave_detached_head(seat)?,
+            git_graph::GraphTool::Filter => self.toggle_graph_filter_menu(surface)?,
+            git_graph::GraphTool::Search => self.focus_graph_search(surface)?,
+            git_graph::GraphTool::SearchClear => self.clear_graph_search(surface)?,
+            git_graph::GraphTool::Refresh => self.refresh_graph(surface)?,
+            git_graph::GraphTool::LeaveDetached => self.leave_detached_head(surface)?,
         }
         Ok(())
     }
@@ -37747,16 +37995,16 @@ impl Runtime<'_> {
     /// between the paint and the press the repository may have been read again.
     /// A door whose branch has gone in the meantime does nothing rather than
     /// checking out a name that is not there.
-    fn leave_detached_head(&mut self, seat: SeatId) -> Result<()> {
-        let active = self.window.active_tab;
-        let Some(root) = self.window.tabs[active]
+    fn leave_detached_head(&mut self, surface: PreviewSurface) -> Result<()> {
+        let tab = self.preview_tab_index(surface);
+        let Some(root) = self.window.tabs[tab]
             .git_graph_view
-            .get(&seat)
+            .get(&surface)
             .map(|view| view.root.clone())
         else {
             return Ok(());
         };
-        let Some(branch) = self.window.tabs[active]
+        let Some(branch) = self.window.tabs[tab]
             .git_graphs
             .get(&root)
             .and_then(|state| git_graph::leave_detached_branch(&state.cache))
@@ -37770,9 +38018,9 @@ impl Runtime<'_> {
 
     /// Where the filter menu hangs, or nothing when it is not up.
     fn graph_filter_menu_layout(&mut self) -> Option<profiles::GitFilterMenuLayout> {
-        let seat = self.window.graph_filter_menu.as_ref()?.seat;
-        let anchor = self.graph_toolbar_rects(seat)?.filter;
-        let rows = profiles::git_filter_rows(&self.graph_filter_branches(seat));
+        let surface = self.window.graph_filter_menu.as_ref()?.surface;
+        let anchor = self.graph_toolbar_rects(surface)?.filter;
+        let rows = profiles::git_filter_rows(&self.graph_filter_branches(surface));
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
@@ -37786,23 +38034,23 @@ impl Runtime<'_> {
         ))
     }
 
-    /// Every local branch of the repository this seat's graph is of.
+    /// Every local branch of the repository this surface's graph is of.
     ///
     /// Off the graph's own cache, so the menu lists what the *graph* was told
     /// rather than what some column beside it happens to know: two surfaces
     /// looking at one repository can be at two different points in their reading,
     /// and a menu that borrowed the other one's answer would offer a branch this
     /// graph cannot walk.
-    fn graph_filter_branches(&self, seat: SeatId) -> Vec<String> {
-        let active = self.window.active_tab;
-        let Some(root) = self.window.tabs[active]
+    fn graph_filter_branches(&self, surface: PreviewSurface) -> Vec<String> {
+        let tab = self.preview_tab_index(surface);
+        let Some(root) = self.window.tabs[tab]
             .git_graph_view
-            .get(&seat)
+            .get(&surface)
             .map(|view| view.root.clone())
         else {
             return Vec::new();
         };
-        self.window.tabs[active]
+        self.window.tabs[tab]
             .git_graphs
             .get(&root)
             .and_then(|state| state.cache.refs().ready())
@@ -37814,11 +38062,11 @@ impl Runtime<'_> {
             .unwrap_or_default()
     }
 
-    /// Whether this seat's search field holds the keyboard (T4).
-    fn graph_search_focused(&self, seat: SeatId) -> bool {
-        self.window.tabs[self.window.active_tab]
+    /// Whether this surface's search field holds the keyboard (T4).
+    fn graph_search_focused(&self, surface: PreviewSurface) -> bool {
+        self.window.tabs[self.preview_tab_index(surface)]
             .git_graph_view
-            .get(&seat)
+            .get(&surface)
             .is_some_and(|view| view.search_focused)
     }
 
@@ -37829,11 +38077,11 @@ impl Runtime<'_> {
     /// in the list underneath as a travel command. What "the field's" means for a
     /// key it has no use for is *nothing*, said by returning `true` — which is
     /// the answer the files column and the read-only preview both already give.
-    fn graph_search_key(&mut self, seat: SeatId, event: &KeyEvent) -> Result<bool> {
+    fn graph_search_key(&mut self, surface: PreviewSurface, event: &KeyEvent) -> Result<bool> {
         use text_field::TextMove;
         let control = self.window.modifiers.control_key();
         let shift = self.window.modifiers.shift_key();
-        let active = self.window.active_tab;
+        let tab = self.preview_tab_index(surface);
         enum Then {
             /// Nothing but a repaint.
             Draw,
@@ -37844,7 +38092,7 @@ impl Runtime<'_> {
             /// Give the keyboard back to the graph and forget the search.
             Clear,
         }
-        let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) else {
+        let Some(view) = self.window.tabs[tab].git_graph_view.get_mut(&surface) else {
             return Ok(false);
         };
         let then = match &event.logical_key {
@@ -37916,10 +38164,10 @@ impl Runtime<'_> {
         };
         match then {
             Then::Draw => {}
-            Then::Ask => self.ask_graph_search(seat)?,
-            Then::Step(forwards) => self.step_graph_search(seat, forwards)?,
+            Then::Ask => self.ask_graph_search(surface)?,
+            Then::Step(forwards) => self.step_graph_search(surface, forwards)?,
             Then::Clear => {
-                self.clear_graph_search(seat)?;
+                self.clear_graph_search(surface)?;
                 return Ok(true);
             }
         }
@@ -37931,11 +38179,11 @@ impl Runtime<'_> {
 
     /// A composition, with the search field holding the keyboard (T4).
     fn graph_search_ime(&mut self, event: &Ime) -> Result<()> {
-        let active = self.window.active_tab;
-        let Some(PreviewSurface::Seat(seat)) = self.preview_keyboard_surface() else {
+        let Some(surface) = self.preview_keyboard_surface() else {
             return Ok(());
         };
-        let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) else {
+        let tab = self.preview_tab_index(surface);
+        let Some(view) = self.window.tabs[tab].git_graph_view.get_mut(&surface) else {
             return Ok(());
         };
         match event {
@@ -37982,10 +38230,10 @@ impl Runtime<'_> {
     }
 
     /// Put what is in the field to git (T4).
-    fn ask_graph_search(&mut self, seat: SeatId) -> Result<()> {
-        let active = self.window.active_tab;
-        let tab_id = self.window.tabs[active].id;
-        let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) else {
+    fn ask_graph_search(&mut self, surface: PreviewSurface) -> Result<()> {
+        let tab = self.preview_tab_index(surface);
+        let tab_id = self.window.tabs[tab].id;
+        let Some(view) = self.window.tabs[tab].git_graph_view.get_mut(&surface) else {
             return Ok(());
         };
         let query = view.search.text().to_owned();
@@ -37996,14 +38244,14 @@ impl Runtime<'_> {
         if view.search.is_empty() {
             view.search_asked = None;
             view.search_at = None;
-            if let Some(state) = self.window.tabs[active].git_graphs.get_mut(&root) {
+            if let Some(state) = self.window.tabs[tab].git_graphs.get_mut(&root) {
                 state.cache.clear_search();
             }
             return Ok(());
         }
         view.search_asked = Some(query.clone());
         view.search_at = None;
-        let Some(state) = self.window.tabs[active].git_graphs.get_mut(&root) else {
+        let Some(state) = self.window.tabs[tab].git_graphs.get_mut(&root) else {
             return Ok(());
         };
         let Some(question) = state.cache.begin_search(&query) else {
@@ -38024,16 +38272,16 @@ impl Runtime<'_> {
     /// pages: `git rev-list --all` sees the whole history and the graph has read
     /// fifty commits of it, so a match nine hundred rows down is a hash the page
     /// does not contain — which is exactly the case the seek was written for.
-    fn step_graph_search(&mut self, seat: SeatId, forwards: bool) -> Result<()> {
-        let active = self.window.active_tab;
-        let Some(view) = self.window.tabs[active].git_graph_view.get(&seat) else {
+    fn step_graph_search(&mut self, surface: PreviewSurface, forwards: bool) -> Result<()> {
+        let tab = self.preview_tab_index(surface);
+        let Some(view) = self.window.tabs[tab].git_graph_view.get(&surface) else {
             return Ok(());
         };
         let root = view.root.clone();
         let Some(query) = view.search_asked.clone() else {
             return Ok(());
         };
-        let Some(matches) = self.window.tabs[active]
+        let Some(matches) = self.window.tabs[tab]
             .git_graphs
             .get(&root)
             .and_then(|state| state.cache.search(&query))
@@ -38048,16 +38296,16 @@ impl Runtime<'_> {
         // The ring is [`git_graph::search_step`]'s — see there for why stepping
         // off the end starts again rather than stopping.
         let Some(at) = git_graph::search_step(
-            self.window.tabs[active]
+            self.window.tabs[tab]
                 .git_graph_view
-                .get(&seat)
+                .get(&surface)
                 .and_then(|view| view.search_at),
             matches.len(),
             forwards,
         ) else {
             return Ok(());
         };
-        if let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) {
+        if let Some(view) = self.window.tabs[tab].git_graph_view.get_mut(&surface) {
             view.search_at = Some(at);
             view.seek = Some(git_graph::GraphSeek {
                 hash: matches[at].clone(),
@@ -38070,15 +38318,17 @@ impl Runtime<'_> {
 
     /// **E61: the opener closes the others**, stated here as it is at every other
     /// opener in this window.
-    fn toggle_graph_filter_menu(&mut self, seat: SeatId) -> Result<()> {
+    fn toggle_graph_filter_menu(&mut self, surface: PreviewSurface) -> Result<()> {
         let already = self
             .window
             .graph_filter_menu
             .as_ref()
-            .is_some_and(|menu| menu.seat == seat);
+            .is_some_and(|menu| menu.surface == surface);
         self.close_popups_except(Popup::GraphFilter);
-        self.window.graph_filter_menu =
-            (!already).then_some(GraphFilterMenuState { seat, hover: None });
+        self.window.graph_filter_menu = (!already).then_some(GraphFilterMenuState {
+            surface,
+            hover: None,
+        });
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -38104,11 +38354,16 @@ impl Runtime<'_> {
     /// picking two branches means picking one and then the other; a menu that
     /// shut on the first would make the second gesture a second opening.
     fn run_graph_filter_row(&mut self, row: &profiles::GitFilterRow) -> Result<()> {
-        let Some(seat) = self.window.graph_filter_menu.as_ref().map(|menu| menu.seat) else {
+        let Some(surface) = self
+            .window
+            .graph_filter_menu
+            .as_ref()
+            .map(|menu| menu.surface)
+        else {
             return Ok(());
         };
-        let active = self.window.active_tab;
-        let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) else {
+        let tab = self.preview_tab_index(surface);
+        let Some(view) = self.window.tabs[tab].git_graph_view.get_mut(&surface) else {
             return Ok(());
         };
         match row {
@@ -38122,11 +38377,11 @@ impl Runtime<'_> {
         // and asked again — see `GitCache::set_log_refs`. A branch that was not
         // walked has no commits on hand to reveal, so there is nothing here that
         // could have been done by filtering what is already loaded.
-        if let Some(state) = self.window.tabs[active].git_graphs.get_mut(&root)
+        if let Some(state) = self.window.tabs[tab].git_graphs.get_mut(&root)
             && state.cache.set_log_refs(refs)
         {
             state.invalidate();
-            self.ask_git_for_graphs();
+            self.ask_git_for_graphs(&[tab]);
         }
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -38135,9 +38390,9 @@ impl Runtime<'_> {
     }
 
     /// The search field takes the keyboard (T4).
-    fn focus_graph_search(&mut self, seat: SeatId) -> Result<()> {
-        let active = self.window.active_tab;
-        if let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) {
+    fn focus_graph_search(&mut self, surface: PreviewSurface) -> Result<()> {
+        let tab = self.preview_tab_index(surface);
+        if let Some(view) = self.window.tabs[tab].git_graph_view.get_mut(&surface) {
             view.search_focused = true;
         }
         // A press in the field is a press on a control, so it closes the popups
@@ -38151,9 +38406,9 @@ impl Runtime<'_> {
 
     /// The `×`, or `Esc` in the field: forget the search and give the keyboard
     /// back to the graph (T4).
-    fn clear_graph_search(&mut self, seat: SeatId) -> Result<()> {
-        let active = self.window.active_tab;
-        let Some(view) = self.window.tabs[active].git_graph_view.get_mut(&seat) else {
+    fn clear_graph_search(&mut self, surface: PreviewSurface) -> Result<()> {
+        let tab = self.preview_tab_index(surface);
+        let Some(view) = self.window.tabs[tab].git_graph_view.get_mut(&surface) else {
             return Ok(());
         };
         view.search.clear();
@@ -38161,7 +38416,7 @@ impl Runtime<'_> {
         view.search_at = None;
         view.search_focused = false;
         let root = view.root.clone();
-        if let Some(state) = self.window.tabs[active].git_graphs.get_mut(&root) {
+        if let Some(state) = self.window.tabs[tab].git_graphs.get_mut(&root) {
             state.cache.clear_search();
         }
         if self.refresh_chrome() {
@@ -38180,10 +38435,10 @@ impl Runtime<'_> {
     /// The picture is invalidated with them: a history that has been rewritten
     /// under the lane walker is not a history it can resume, and a refresh is
     /// exactly the moment that may have happened.
-    fn refresh_graph(&mut self, seat: SeatId) -> Result<()> {
-        let Some(root) = self.window.tabs[self.window.active_tab]
+    fn refresh_graph(&mut self, surface: PreviewSurface) -> Result<()> {
+        let Some(root) = self.window.tabs[self.preview_tab_index(surface)]
             .git_graph_view
-            .get(&seat)
+            .get(&surface)
             .map(|view| view.root.clone())
         else {
             return Ok(());
@@ -38706,12 +38961,12 @@ impl Runtime<'_> {
                 dock_label,
                 tools,
             );
-            // **Whichever list this window is showing.** A buffer's own body is
+            // **Whichever list this window is showing.** A buffer's own *text* is
             // asked by the preview's pointer path, which resolves its surface for
-            // itself; a tree and a Git page are both lists in this rectangle, and
-            // which of them answers is the one question the paint has already
-            // decided (`float_git_pages_shown` holds the page it drew, or does
-            // not hold one).
+            // itself; a tree, a Git page and a commit graph are all lists in this
+            // rectangle, and which of them answers is the one question the paint
+            // has already decided — each of the three records what it drew, or
+            // records nothing.
             let page = self.window.float_git_pages_shown.get(&id).cloned();
             let tree = win.files().filter(|_| page.is_none()).map(|files| {
                 let rows = files::tree_view(&files.files, &files.cache).rows.len();
@@ -38723,8 +38978,30 @@ impl Runtime<'_> {
                     page,
                 )
             });
+            // The graph this window drew, if it drew one. Asked of the same map
+            // the docked graphs are recorded in, so "the row you can press is
+            // the row you can see" is one derivation on both hosts.
+            let graph = self
+                .window
+                .git_graphs_shown
+                .get(&PreviewSurface::Float(id))
+                .cloned();
             if let Some(part) = float::float_hit(&geometry, x, y, |x, y| {
                 let (x, y) = (x + geometry.body[0], y + geometry.body[1]);
+                if let Some(graph) = graph.as_ref() {
+                    // The order — toolbar, then the open block's parts, then the
+                    // row — is `git_graph::graph_hit`'s and not this host's, so
+                    // the window and the pane cannot part company about it.
+                    return git_graph::graph_hit(geometry.body, graph, scale, x, y).map(|hit| {
+                        match hit {
+                            git_graph::GraphHit::Tool(tool) => float::FloatPart::GraphTool(tool),
+                            git_graph::GraphHit::Detail { index, part } => {
+                                float::FloatPart::GraphDetail { index, part }
+                            }
+                            git_graph::GraphHit::Row(index) => float::FloatPart::GraphRow(index),
+                        }
+                    });
+                }
                 if let Some((geometry, page)) = git.as_ref() {
                     let index = geometry.row_at(x, y)?;
                     let row = page.rows.get(index)?;
@@ -39028,6 +39305,27 @@ impl Runtime<'_> {
                 self.window.tab_clicks.interrupt();
                 self.window.files_row_clicks.interrupt();
                 self.press_float_git_act(id, index, act)?;
+            }
+            // **The graph's three, through the docked graph's own three doors.**
+            // A press on a window's commit graph is a press on that graph — the
+            // surface it names is this window's, and nothing below the door
+            // knows or needs to know which host it came from. Each breaks a
+            // click chain for `.files-foot`'s reason: a chain of clicks on a
+            // list or a button is not the beginning of a gesture elsewhere.
+            float::FloatPart::GraphRow(index) => {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                self.press_graph_row(PreviewSurface::Float(id), index)?;
+            }
+            float::FloatPart::GraphTool(tool) => {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                self.press_graph_tool(PreviewSurface::Float(id), tool)?;
+            }
+            float::FloatPart::GraphDetail { part, .. } => {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                self.press_graph_detail(PreviewSurface::Float(id), part)?;
             }
             float::FloatPart::Row(index) => {
                 // The float's rows are drag sources on the same terms the
@@ -39943,6 +40241,12 @@ impl Runtime<'_> {
         // it is a record of what this frame drew, and a stale entry in it is a
         // press landing on a row that is not there.
         self.window.float_git_pages_shown.clear();
+        // **The floating graphs, on the same terms** — and only the floating
+        // half of that map, because the seats' entries were written by the
+        // chrome pass and are not this pass's to throw away.
+        self.window
+            .git_graphs_shown
+            .retain(|surface, _| !matches!(surface, PreviewSurface::Float(_)));
         let mut layers = Vec::new();
         for id in ids {
             let Some(window) = self.float_window(id, now) else {
@@ -40199,6 +40503,63 @@ impl Runtime<'_> {
             .is_some_and(|files| float_git_page_shown(self.git_panel_on(), files.files.view))
     }
 
+    /// Build one floating commit graph, draw it, and record what it drew.
+    ///
+    /// [`Self::push_float_git_page`]'s twin one tenant along, down to the record
+    /// it keeps and why: the hit test, the wheel and the keyboard all read the
+    /// picture that was *drawn* rather than rebuilding one under the pointer, so
+    /// a press lands on the row it landed on. The record is the floating half of
+    /// `git_graphs_shown`, which is the same map the docked graphs are in —
+    /// because a graph is a document, and a document's address is its surface.
+    fn push_float_graph(
+        &mut self,
+        id: float::FloatId,
+        body: [f32; 4],
+        scale: f32,
+    ) -> float::FloatBody {
+        let surface = PreviewSurface::Float(id);
+        let Some(preview::PreviewSource::GitGraph { root }) = self
+            .preview_buffer_on(surface)
+            .map(|buffer| buffer.source.clone())
+        else {
+            return float::FloatBody::default();
+        };
+        let Some(content) = self.build_git_graph(surface, &root, body, scale) else {
+            return float::FloatBody::default();
+        };
+        let hover = self
+            .window
+            .float_hover
+            .filter(|(hovered, _)| *hovered == id)
+            .map(|(_, part)| part);
+        let palette = bt_render::chrome_palette();
+        let (mut quads, mut labels, mut sprites) = (Vec::new(), Vec::new(), Vec::new());
+        git_graph::push_graph(
+            body,
+            &content,
+            float_graph_hover(hover),
+            scale,
+            &palette,
+            (&mut quads, &mut labels, &mut sprites),
+        );
+        self.window.git_graphs_shown.insert(surface, content);
+        float::FloatBody {
+            // The same lift the tree tenant's body takes: chrome fills are opaque
+            // by construction, so alpha 1.0 and the layer's own opacity carries
+            // the fade for all three channels at once.
+            quads: quads
+                .into_iter()
+                .map(|quad: bt_render::ChromeQuad| bt_render::OverlayQuad {
+                    rect: quad.rect,
+                    color: quad.color,
+                    alpha: 1.0,
+                })
+                .collect(),
+            labels,
+            sprites,
+        }
+    }
+
     /// Build one floating Git page, draw it, and record what it drew.
     ///
     /// The record is [`WindowRuntime::float_git_pages_shown`] and it is owed for
@@ -40389,36 +40750,33 @@ impl Runtime<'_> {
             .filter(|(hovered, _)| *hovered == id)
             .map(|(_, part)| part);
         let palette = bt_render::chrome_palette();
-        let mut layer = float::build(
-            &geometry,
-            &float::FloatChrome {
-                mode,
-                // `#i-file` and a right-hand dock panel: this window holds a
-                // buffer, and P54's side-honesty puts the filled half where the
-                // pane will land.
-                mark: marks::ChromeMark::File,
-                title: &title,
-                path: &foot.lead,
-                notice: &foot.notice,
-                notice_width: foot.notice_width,
-                dock_label: float_dock_label(),
-                dock_mark: marks::ChromeMark::DockRight,
-                hover,
-                revealed: foot.flashing,
-                dirty,
-                flip_to_source,
-            },
-            float::FloatBody {
+        // **What fills the body, decided by what is in it** (user report,
+        // 2026-08-20).
+        //
+        // This used to be two `if`s and no question: the document pipeline below
+        // and the picture channel further down. A commit graph is neither — it
+        // is marks pushed straight into the body rectangle ([`git_graph::push_graph`])
+        // — so a graph torn off into a window arrived as a head, a foot and
+        // nothing between them, and there was nothing on the surface to say so
+        // because a graph's `PreviewDocument` is empty *on purpose*.
+        //
+        // An exhaustive `match` on [`preview::PreviewChrome`] and not a ladder,
+        // which is the ticket's other half: the next content kind that needs its
+        // own machine must be a compiler error here rather than a fourth blank
+        // window somebody finds by undocking one.
+        let body = match self.preview_chrome_on(surface) {
+            // The pipeline's own, on [`marks::OverlayLayer::body`] below — plus
+            // **the one line a composed document prints instead of a body**
+            // (G-3): a diff with nothing in it, or a repository that would not
+            // answer. It rides the tenant's own channel because a float has no
+            // seat placement for the docked pane's message lane to find, and
+            // without it a torn-off empty diff is a blank window.
+            //
+            // Quiet ink, centred, at the docked notice's size: it is the same
+            // sentence in the same voice, and a window is not a different kind
+            // of surface for it to be said on.
+            preview::PreviewChrome::Document => float::FloatBody {
                 quads: Vec::new(),
-                // **The one line a composed document prints instead of a body**
-                // (G-3) — a diff with nothing in it, or a repository that would
-                // not answer. It rides the tenant's own channel because a float
-                // has no seat placement for the docked pane's message lane to
-                // find, and without it a torn-off empty diff is a blank window.
-                //
-                // Quiet ink, centred, at the docked notice's size: it is the
-                // same sentence in the same voice, and a window is not a
-                // different kind of surface for it to be said on.
                 labels: self
                     .preview_buffer_on(surface)
                     .and_then(preview::PreviewBuffer::body_notice)
@@ -40438,6 +40796,34 @@ impl Runtime<'_> {
                     .collect(),
                 sprites: Vec::new(),
             },
+            // Pixels, on this layer's own image channel further down — see the
+            // note there for why a float cannot use the seat's texture lane.
+            preview::PreviewChrome::Picture => float::FloatBody::default(),
+            // The picture that is made of marks, in this window's body rectangle
+            // — the same three channels the docked pane's graph is drawn into,
+            // built by the same `build_git_graph`.
+            preview::PreviewChrome::Graph => self.push_float_graph(id, geometry.body, scale),
+        };
+        let mut layer = float::build(
+            &geometry,
+            &float::FloatChrome {
+                mode,
+                // `#i-file` and a right-hand dock panel: this window holds a
+                // buffer, and P54's side-honesty puts the filled half where the
+                // pane will land.
+                mark: marks::ChromeMark::File,
+                title: &title,
+                path: &foot.lead,
+                notice: &foot.notice,
+                notice_width: foot.notice_width,
+                dock_label: float_dock_label(),
+                dock_mark: marks::ChromeMark::DockRight,
+                hover,
+                revealed: foot.flashing,
+                dirty,
+                flip_to_source,
+            },
+            body,
             scale,
             &palette,
             fade,
@@ -41062,6 +41448,21 @@ impl Runtime<'_> {
             Instant::now(),
         );
         *self.preview_panes.entry(PreviewSurface::Float(id)) = pane;
+        // **And the graph's own view, the same way and for the same reason.** A
+        // `GraphView` is where the graph is scrolled to, which commit is folded
+        // open, which row wears the selected ground and what is typed in the
+        // search field — the document's equivalent of everything the sentence
+        // above says the `PreviewPane` carries. Left behind, a pop-out would land
+        // the reader at the top of a history they had walked a thousand commits
+        // into, which is the "re-open wearing a move's name" this whole function
+        // refuses. The repository's own cache is not moved and does not need to
+        // be: it is keyed by root on the tab, and the window reads that tab.
+        let active = self.window.active_tab;
+        if let Some(view) = self.window.tabs[active].git_graph_view.remove(&surface) {
+            self.window.tabs[active]
+                .git_graph_view
+                .insert(PreviewSurface::Float(id), view);
+        }
         self.forget_dead_float_gestures();
         self.apply_pointer_cursor();
         self.settle_seat_set_change()?;
@@ -41118,6 +41519,33 @@ impl Runtime<'_> {
             self.window.tabs[active].preview_pool.merge_buffer(incoming);
         }
         *self.preview_pane_mut(landing) = pane;
+        // **And the graph's own view, home with it** — `pop_out_preview`'s move
+        // run backwards, so a window docked mid-history lands scrolled where it
+        // stood with its open commit still open. It travels out of the tab that
+        // was holding the window and into the tab the pane is landing in, which
+        // is the same journey the `PreviewPane` above has just made.
+        let landing_tab = self.preview_tab_index(landing);
+        if let Some(view) = self.window.tabs[from].git_graph_view.remove(&surface) {
+            // **And what it had already read, when the two tabs differ.** A
+            // window floats across tabs by ruling (§7.1.2) and docks into the
+            // one you are looking at, so this is the ordinary case and not an
+            // edge: the `GraphState` is keyed by root on the tab, and a pane
+            // landing beside a tab that has never heard of this repository would
+            // blink back through "Reading the repository…" for a history it is
+            // already holding. Cloned rather than moved, because another surface
+            // in the old tab may still be reading the same graph.
+            if landing_tab != from
+                && let Some(state) = self.window.tabs[from].git_graphs.get(&view.root).cloned()
+            {
+                self.window.tabs[landing_tab]
+                    .git_graphs
+                    .entry(view.root.clone())
+                    .or_insert(state);
+            }
+            self.window.tabs[landing_tab]
+                .git_graph_view
+                .insert(landing, view);
+        }
         // **The texture lane, taken back** (user report, 2026-08-17).
         // `pop_out_preview` hands it in because a float paints its own picture
         // and has no use for the slot; docking is that move run backwards and
@@ -44758,7 +45186,14 @@ impl Runtime<'_> {
             seats::hit_git_graph(
                 &self.seats,
                 &self.seat_layout,
-                &self.window.git_graphs_shown,
+                // The docked ones. A window's graph is answered by the float
+                // host's own hit test, which runs before this whole chain.
+                self.window.git_graphs_shown.iter().filter_map(
+                    |(surface, content)| match surface {
+                        PreviewSurface::Seat(seat) => Some((*seat, content)),
+                        PreviewSurface::Float(_) | PreviewSurface::Peek => None,
+                    },
+                ),
                 scale,
                 position.x,
                 position.y,
@@ -46589,7 +47024,7 @@ impl Runtime<'_> {
             seats::ChromeTarget::GitGraphRow { seat, index } => {
                 self.window.tab_clicks.interrupt();
                 self.window.files_row_clicks.interrupt();
-                self.press_graph_row(seat, index)?;
+                self.press_graph_row(PreviewSurface::Seat(seat), index)?;
             }
             // The toolbar's four controls (T1). A click chain is broken for
             // `.files-foot`'s reason: a chain of clicks on a button is a chain of
@@ -46597,7 +47032,7 @@ impl Runtime<'_> {
             seats::ChromeTarget::GitGraphTool { seat, tool } => {
                 self.window.tab_clicks.interrupt();
                 self.window.files_row_clicks.interrupt();
-                self.press_graph_tool(seat, tool)?;
+                self.press_graph_tool(PreviewSurface::Seat(seat), tool)?;
             }
             // A part of the open row's detail block (v2 ②). It breaks a click
             // chain for `.files-foot`'s reason — a chain of clicks on a button is
@@ -46606,7 +47041,7 @@ impl Runtime<'_> {
             seats::ChromeTarget::GitGraphDetail { seat, part, .. } => {
                 self.window.tab_clicks.interrupt();
                 self.window.files_row_clicks.interrupt();
-                self.press_graph_detail(seat, part)?;
+                self.press_graph_detail(PreviewSurface::Seat(seat), part)?;
             }
             seats::ChromeTarget::GitAct { seat, index, act } => {
                 self.window.tab_clicks.interrupt();
@@ -48321,12 +48756,16 @@ impl Runtime<'_> {
         // Asked before the preview body's own branch because that branch's guard
         // — "the buffer has content" — is false for a graph by construction:
         // there is no text in it to have been read.
+        //
+        // **On whichever surface the pointer is over.** This narrowed to a seat
+        // until 2026-08-20, which was the wheel's share of the blank-window
+        // report: a notch over a floating graph fell through to the document
+        // branch below and scrolled a body with nothing in it.
         if let Some(position) = self.window.pointer_position
             && let Some((surface, body)) = self.preview_surface_at(position)
-            && let PreviewSurface::Seat(seat) = surface
-            && self.window.git_graphs_shown.contains_key(&seat)
+            && self.window.git_graphs_shown.contains_key(&surface)
         {
-            return self.scroll_git_graph(seat, body, delta);
+            return self.scroll_git_graph(surface, body, delta);
         }
         // **A notch over a picture is a zoom** (user ruling 2026-08-16, ticket
         // #60). It is asked beside the document's branch and not inside it,
@@ -55631,7 +56070,7 @@ mod tests {
             let mut views = BTreeMap::new();
             if let Some(filter) = filter {
                 views.insert(
-                    seat,
+                    PreviewSurface::Seat(seat),
                     GraphView {
                         filter,
                         ..GraphView::default()

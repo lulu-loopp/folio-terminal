@@ -224,6 +224,55 @@ pub enum PreviewView {
     None,
 }
 
+impl PreviewView {
+    /// **Which machine draws this body**, asked once for every host.
+    ///
+    /// [`PreviewView`] says what a document *is*; this says who paints it, and
+    /// the two are not the same list — four of the seven views are one
+    /// pipeline's and the remaining three are three different arrangements.
+    /// The distinction earns its own type because a host that got it wrong drew
+    /// nothing at all: the preview float's body was two `if`s, one for the
+    /// document pipeline and one for the picture, so a commit graph torn off
+    /// into a window arrived as a head, a foot and an empty rectangle (user
+    /// report, 2026-08-20).
+    ///
+    /// **Exhaustive on purpose.** Both hosts `match` this rather than testing
+    /// for the kinds they happen to know about, so the next content kind — the
+    /// web block's page, when it comes — is a compiler error in every host on
+    /// the day it is added, and not a second blank window discovered by
+    /// somebody undocking one.
+    #[must_use]
+    pub fn chrome(self) -> PreviewChrome {
+        match self {
+            // Pixels, on the host's own image channel: a seat spends the
+            // renderer's one `set_preview_image` slot, a float and the glance
+            // card ride their layer.
+            Self::Image => PreviewChrome::Picture,
+            // Marks in the body rectangle, pushed by
+            // [`crate::git_graph::push_graph`] — see [`Self::Graph`] for why the
+            // picture is chrome and the document is empty.
+            Self::Graph => PreviewChrome::Graph,
+            // Paragraphs and quads through `PreviewBody`. [`Self::None`] is here
+            // because the card is that pipeline's own answer to "nothing", and
+            // not a fourth arrangement.
+            Self::Markdown | Self::Table | Self::Diff | Self::Text | Self::None => {
+                PreviewChrome::Document
+            }
+        }
+    }
+}
+
+/// **What paints a preview surface's body** — see [`PreviewView::chrome`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreviewChrome {
+    /// The document pipeline, and the "no preview" card it draws for nothing.
+    Document,
+    /// A decoded picture, on the host's image channel.
+    Picture,
+    /// One repository's commit graph, pushed into the body rectangle.
+    Graph,
+}
+
 /// Which body this name, type and flip state earn.
 pub fn preview_view(name: &str, ftype: PreviewFtype, md_source: bool) -> PreviewView {
     if ftype == PreviewFtype::Image {
@@ -3161,6 +3210,59 @@ mod tests {
                 .and_then(|buffer| buffer.source.file_path()),
             Some(Path::new(r"git:C:\w\repo:src/main.rs")),
             "a file that spells a pseudo-path is a file with a strange name"
+        );
+    }
+
+    /// PIN (user report, 2026-08-20) — **every view names the machine that
+    /// draws it, and a commit graph does not name the document pipeline.**
+    ///
+    /// The defect this closes is one a host could hold without noticing: a
+    /// graph's `PreviewDocument` is empty by design, because the picture is
+    /// chrome pushed into the body rectangle. So a surface that asked only "is
+    /// there a picture" and then fell through to the document pipeline drew
+    /// *nothing at all* and had no failure to report — which is exactly what
+    /// the preview float did until this date, and what its head, its foot and
+    /// its empty rectangle looked like.
+    ///
+    /// Red before the fix: the float's effective answer for
+    /// [`PreviewView::Graph`] was the document pipeline. The three machines are
+    /// asserted distinct because that is the claim the hosts' `match`es rest on
+    /// — an enum whose arms collapse is a ladder again, and a ladder is what
+    /// grew a missing rung.
+    #[test]
+    fn every_view_names_the_machine_that_draws_it() {
+        for (view, chrome) in [
+            (PreviewView::Image, PreviewChrome::Picture),
+            (PreviewView::Graph, PreviewChrome::Graph),
+            (PreviewView::Markdown, PreviewChrome::Document),
+            (PreviewView::Table, PreviewChrome::Document),
+            (PreviewView::Diff, PreviewChrome::Document),
+            (PreviewView::Text, PreviewChrome::Document),
+            // The "no preview" card is the document pipeline's own answer to
+            // nothing, and not a fourth arrangement.
+            (PreviewView::None, PreviewChrome::Document),
+        ] {
+            assert_eq!(view.chrome(), chrome, "{view:?} is drawn by {chrome:?}");
+        }
+        assert_ne!(
+            PreviewChrome::Graph,
+            PreviewChrome::Document,
+            "a graph is not drawn by the pipeline whose answer for it is an empty body"
+        );
+        assert_ne!(PreviewChrome::Graph, PreviewChrome::Picture);
+        // And the buffer a graph door opens answers with that view, so the two
+        // halves of this ladder meet.
+        let graph = PreviewBuffer::new(
+            PreviewSource::GitGraph {
+                root: PathBuf::from(r"C:\w\repo"),
+            },
+            "repo".to_owned(),
+        );
+        assert_eq!(graph.view(false).chrome(), PreviewChrome::Graph);
+        assert_eq!(
+            graph.view(true).chrome(),
+            PreviewChrome::Graph,
+            "and the markdown flip is not a question a graph has an answer to"
         );
     }
 

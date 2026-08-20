@@ -3584,6 +3584,160 @@ fn step_over_detail(content: &GraphContent, row: usize, downwards: bool) -> usiz
     }
 }
 
+/// One repository's graph, built and ready to draw, **for tests in other
+/// modules**.
+///
+/// It lives out here rather than in `mod tests` for
+/// [`crate::git_panel::sample_page_for_tests`]'s reason exactly, one surface
+/// along: the float's chassis has to be able to ask for one, because the whole
+/// of the 2026-08-20 report is that this is the same picture in a second host,
+/// and a fixture that could only be built inside this module would make the two
+/// hosts' tests two different pictures.
+#[cfg(test)]
+#[must_use]
+pub fn sample_graph_for_tests(body: [f32; 4], scale: f32) -> GraphContent {
+    use crate::git::{GitAnswer, GitLog};
+    use std::path::PathBuf;
+
+    let root = PathBuf::from(r"D:\repo");
+    let mut state = GraphState::new(root.clone());
+    state.cache.accept(GitAnswer::Repo {
+        dir: root.clone(),
+        outcome: Ok(root.clone()),
+    });
+    state.cache.accept(GitAnswer::Status {
+        root: root.clone(),
+        outcome: Ok(crate::git::parse_status(b"## main\0 M src/main.rs\0")),
+    });
+    let commits: Vec<GitCommit> = ["c3", "c2", "c1"]
+        .iter()
+        .enumerate()
+        .map(|(at, hash)| GitCommit {
+            hash: (*hash).to_owned(),
+            short: (*hash).to_owned(),
+            subject: format!("commit {hash}"),
+            author_name: "t".to_owned(),
+            author_email: "t@example.com".to_owned(),
+            committer_name: "t".to_owned(),
+            committer_email: "t@example.com".to_owned(),
+            body: String::new(),
+            committer_unix: 0,
+            committer_offset: 0,
+            time_relative: "now".to_owned(),
+            parents: ["c3", "c2", "c1"]
+                .get(at + 1)
+                .map(|parent| vec![(*parent).to_owned()])
+                .unwrap_or_default(),
+            refs: Vec::new(),
+        })
+        .collect();
+    state.cache.accept(GitAnswer::Log {
+        root,
+        skip: 0,
+        outcome: Ok(GitLog {
+            skip: 0,
+            commits,
+            has_more: false,
+        }),
+    });
+    state.sync();
+    build(
+        &state,
+        GraphLook::default(),
+        body,
+        0.0,
+        LaneWidthHold::default(),
+        scale,
+        &mut |text: &str, size: f32, _: crate::git_panel::MeasureFace| {
+            text.chars().count() as f32 * size * 0.5
+        },
+    )
+}
+
+// ── the hit test ────────────────────────────────────────────────────────────
+
+/// What the pointer is on inside a graph's body — **the host-free half**.
+///
+/// Two surfaces draw this picture and they name their answers differently: a
+/// preview seat turns this into a [`crate::seats::ChromeTarget`], a floating
+/// window into a [`crate::float::FloatPart`]. What neither may do is work out
+/// *which* of the toolbar, the detail block and the row a press landed on, and
+/// in what order — that order is a ruling (T1's "the toolbar answers first",
+/// v2 ②'s "a part before the rows it occupies"), and two hosts asking it
+/// separately is two hosts that will one day answer it differently. The float
+/// arrived after the seat and would have been the one to drift.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphHit {
+    /// One of the toolbar's controls (T1).
+    Tool(GraphTool),
+    /// One pressable part of the open commit's detail block (v2 ②), carrying
+    /// the block's first row so the paint can light the block it is in.
+    Detail { index: usize, part: GraphDetailPart },
+    /// A row of the list, by index.
+    Row(usize),
+}
+
+/// Resolve a pointer against one graph, in the body rectangle it was drawn in.
+///
+/// `x`/`y` are in the same space as `body` — the window's, not the body's — so
+/// that a caller holding a rectangle can ask without first subtracting it.
+#[must_use]
+pub fn graph_hit(
+    body: [f32; 4],
+    content: &GraphContent,
+    scale: f32,
+    x: f32,
+    y: f32,
+) -> Option<GraphHit> {
+    let geometry = graph_geometry(body, content, scale);
+    // **The toolbar answers first** (T1), because it is not in the list: it is a
+    // fixed strip above the rows' own box, so a press on it is not a press the
+    // row arithmetic could ever have claimed — and asking it after the rows
+    // would be asking a question whose answer is already known.
+    if let (Some(strip), Some(toolbar)) = (geometry.head, content.toolbar.as_ref()) {
+        let rects = graph_toolbar_rects(strip, toolbar, scale);
+        // Innermost first: the `\u{d7}` lives inside the field it clears, so a
+        // field that answered first would be a button nothing can reach.
+        for (rect, tool) in [
+            (rects.search_clear, GraphTool::SearchClear),
+            (rects.search, GraphTool::Search),
+            (Some(rects.filter), GraphTool::Filter),
+            (Some(rects.refresh), GraphTool::Refresh),
+            (rects.leave_detached, GraphTool::LeaveDetached),
+        ] {
+            let Some(rect) = rect else {
+                continue;
+            };
+            if x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3] {
+                return Some(GraphHit::Tool(tool));
+            }
+        }
+    }
+    let index = geometry.row_at(x, y, content.total_rows)?;
+    // The detail block is several rows and its parts are inside them, so a press
+    // lands on the block first and on one of its parts second — the same
+    // two-step a Git page's row and its verbs take.
+    if let Some(detail) = content.rows.iter().find_map(|row| match row {
+        GraphViewRow::Detail(detail)
+            if index >= detail.index && index < detail.index + detail.rows =>
+        {
+            Some(detail)
+        }
+        _ => None,
+    }) {
+        let first = geometry.row_rect(detail.index);
+        let last = geometry.row_rect(detail.index + detail.rows - 1);
+        let rect = [first[0], first[1], first[2], last[3]];
+        return detail_part_at(rect, detail, content.columns, scale, x, y).map(|part| {
+            GraphHit::Detail {
+                index: detail.index,
+                part,
+            }
+        });
+    }
+    Some(GraphHit::Row(index))
+}
+
 // ── the paint ──────────────────────────────────────────────────────────────
 
 /// What the pointer is on.
@@ -4906,6 +5060,50 @@ mod tests {
         let mut walker = LaneWalker::default();
         walker.extend(commits);
         walker.rows().to_vec()
+    }
+
+    /// PIN (user report, 2026-08-20) — **the order a press is resolved in is
+    /// this module's, and both hosts get it.**
+    ///
+    /// The rule was written twice until this date: once in `seats::hit_git_graph`
+    /// for the docked pane, and nowhere at all for a window, because a window
+    /// could not show a graph. Now that it can, the order — the toolbar before
+    /// the list, because the toolbar is not *in* the list — is stated once here
+    /// and merely named by each host. Two hosts each holding a copy is two hosts
+    /// that will one day disagree about which of them is right.
+    #[test]
+    fn the_toolbar_answers_before_the_list_and_a_row_answers_below_it() {
+        let body = [0.0, 0.0, 520.0, 460.0];
+        let content = sample_graph_for_tests(body, 1.0);
+        let toolbar = content
+            .toolbar
+            .as_ref()
+            .expect("a graph with a history draws its toolbar");
+        let geometry = graph_geometry(body, &content, 1.0);
+        let head = geometry.head.expect("the toolbar has its own strip");
+        let rects = graph_toolbar_rects(head, toolbar, 1.0);
+        let centre = |rect: [f32; 4]| ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0);
+        for (rect, tool) in [
+            (rects.refresh, GraphTool::Refresh),
+            (rects.filter, GraphTool::Filter),
+        ] {
+            let (x, y) = centre(rect);
+            assert_eq!(
+                graph_hit(body, &content, 1.0, x, y),
+                Some(GraphHit::Tool(tool)),
+                "{tool:?} answers its own box"
+            );
+        }
+        // And a point down in the list is a row and never a tool — the strip
+        // stands outside `GraphGeometry::viewport`, so no row arithmetic reaches
+        // it and no toolbar rectangle reaches a row.
+        let (x, y) = centre(geometry.row_rect(0));
+        assert!(
+            matches!(graph_hit(body, &content, 1.0, x, y), Some(GraphHit::Row(0))),
+            "the first row of the list answers as a row"
+        );
+        // Above the body entirely is nobody's.
+        assert_eq!(graph_hit(body, &content, 1.0, -20.0, -20.0), None);
     }
 
     #[test]
