@@ -11977,8 +11977,9 @@ mod tests {
 
         // And it is true of the drawing, not merely of the table: read the whole
         // menu's icon column back and every row is in the box its family gets.
-        // `Enter focus mode`'s `#i-max` is the 2026-08-19 report and is checked
-        // here beside the `×` it now matches.
+        // (`Enter focus mode` — the 2026-08-19 report's subject — was removed
+        // from this menu the same day by the doors ruling; the ten-wide family
+        // law it prompted survives it, checked on the `×` and the table above.)
         let layout = pane_menu(false);
         let layer = one_layer(pane_menu_build(
             &layout,
@@ -12000,7 +12001,6 @@ mod tests {
         assert_eq!(cross[2] - cross[0], 10.0);
         assert_eq!(folder[2] - folder[0], 15.0);
         for (glyph, wanted) in [
-            (ChromeMark::WindowMaximize, 10.0),
             (ChromeMark::Split, 15.0),
             (ChromeMark::Copy, 15.0),
             (ChromeMark::Float, 15.0),
