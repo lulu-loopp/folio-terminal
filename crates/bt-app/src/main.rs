@@ -8042,7 +8042,13 @@ struct SelectionDrag {
     origin_column: u32,
     origin: ViewSelection,
     hyperlink: Option<HyperlinkHit>,
-    open_hyperlink_on_release: bool,
+    /// The modifier **as it was when the button went down**, which is what
+    /// decides where the link goes (§7.1.5g). Recorded rather than read again at
+    /// release for the reason the picture's whole [`LocalImageActivation`] is
+    /// recorded at press: a `Ctrl` let go of during the click, or pressed during
+    /// it, would otherwise change the destination underneath a gesture already
+    /// begun.
+    hyperlink_control: bool,
     local_image_activation: LocalImageActivation,
 }
 
@@ -10133,13 +10139,44 @@ impl FrameImageReferences {
     }
 }
 
-/// What a `Ctrl`+click on a hyperlink run spends (§7.1.5g).
+/// Which side of this window a click on a printed reference is asking for
+/// (§7.1.5g, user ruling 2026-08-20).
+///
+/// **This is the terminal's one clicking rule, and it is older than this slice.**
+/// [`local_image_activation`] has always spelled it for inline image references —
+/// a plain click puts the picture on the preview seat, `Ctrl` hands it to the
+/// system's viewer — while OSC 8 hyperlinks had been written the other way round:
+/// nothing at all without `Ctrl`, and `Ctrl` meaning *leave*. One terminal with
+/// two clickable kinds of reference and two rules for them is this product
+/// disagreeing with itself, so the modifier is read into an intent **here**,
+/// once, and both kinds ask this one function what a press means.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClickIntent {
+    /// A plain click asks for whatever happens **in this window** — and asks for
+    /// nothing at all where this window has no answer of its own.
+    Here,
+    /// `Ctrl` asks for the same reference to be **handed to the system**.
+    System,
+}
+
+impl ClickIntent {
+    fn of(control: bool) -> Self {
+        if control { Self::System } else { Self::Here }
+    }
+}
+
+/// What a click on a hyperlink run spends (§7.1.5g).
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum HyperlinkActivation {
-    /// Nothing was asked for: no `Ctrl`, or the gesture turned out to be a drag.
+    /// Nothing was asked for: the gesture was a drag, or it was a plain click on
+    /// a target whose only destination is outside this window.
     None,
     /// A web address, handed to whatever this desk browses with.
     Browser,
+    /// A local file, handed to whatever the system has registered for it — the
+    /// files column's own way out ([`Runtime::open_local_path`]), which opens a
+    /// document and refuses a program.
+    External(PathBuf),
     /// A local file, opened the way this window opens every other file — the
     /// preview seat's own door.
     Preview(PathBuf),
@@ -10150,7 +10187,24 @@ enum HyperlinkActivation {
     Blocked,
 }
 
-/// Which door a `Ctrl`+click on a hyperlink goes through (§7.1.5g).
+/// Which door a click on a hyperlink goes through (§7.1.5g).
+///
+/// # The two halves of the table
+///
+/// [`ClickIntent`] splits every row: a plain click asks for this window's own
+/// answer, `Ctrl` asks for the system's. So a `file:` link to a readable file
+/// opens the preview seat plainly and the system's handler under `Ctrl`, which is
+/// letter for letter what [`local_image_activation`] has always done with an
+/// inline picture.
+///
+/// **Where the plain half is empty, a plain click does nothing** — a web address,
+/// a folder, and (until W2) a local `.html` page have no destination inside this
+/// window, and their `Ctrl` half starts a *program*: a browser, Explorer, or
+/// whatever is registered. A plain click must never start one. That is not
+/// caution, it is the same judgement the picture arm was written with: a click is
+/// what a hand does while reading, and a misplaced one that opens a browser
+/// window is a much larger interruption than one that opens a pane in the window
+/// already in front of you. `Ctrl` is the user saying *leave*.
 ///
 /// # Why the directory question is a parameter
 ///
@@ -10160,6 +10214,10 @@ enum HyperlinkActivation {
 /// the reason [`bt_platform::reveal_arguments`] takes the same one — so the
 /// routing table stays a pure function with a case per arm, and so the one
 /// caller that must touch a disk is the one place that does.
+///
+/// It is asked **before** the page question, and that order is the ruling's:
+/// a folder may be named `site.html`, and Explorer's arm was settled a slice
+/// before the page arm existed.
 ///
 /// It is deliberately **not** asked of a share. `preview::is_network_path` is
 /// answered from the path's own prefix, and the answer for a share is settled
@@ -10173,11 +10231,18 @@ fn hyperlink_activation(
     uri: &str,
     is_directory: &dyn Fn(&Path) -> bool,
 ) -> HyperlinkActivation {
-    if !control || !click_no_drag {
+    if !click_no_drag {
         return HyperlinkActivation::None;
     }
+    let intent = ClickIntent::of(control);
+    // A refusal is an answer to a request, so it is spoken only when one was
+    // made: a plain click on a `mailto:` is the selection's and says nothing.
+    let refused = match intent {
+        ClickIntent::Here => HyperlinkActivation::None,
+        ClickIntent::System => HyperlinkActivation::Blocked,
+    };
     let Some((scheme, remainder)) = uri.split_once(':') else {
-        return HyperlinkActivation::Blocked;
+        return refused;
     };
     if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
         let allowed = remainder.starts_with("//")
@@ -10185,10 +10250,12 @@ fn hyperlink_activation(
             && !uri
                 .chars()
                 .any(|character| character.is_control() || character.is_whitespace());
-        return if allowed {
-            HyperlinkActivation::Browser
-        } else {
-            HyperlinkActivation::Blocked
+        return match intent {
+            // Nothing in this window renders a web page yet; W2 is where this
+            // half of the row stops being empty.
+            ClickIntent::Here => HyperlinkActivation::None,
+            ClickIntent::System if allowed => HyperlinkActivation::Browser,
+            ClickIntent::System => HyperlinkActivation::Blocked,
         };
     }
     if scheme.eq_ignore_ascii_case("file") {
@@ -10196,14 +10263,59 @@ fn hyperlink_activation(
         // pass on to the shell instead — the shell would parse it a second way,
         // and a second parser is a second answer.
         let Some(path) = bt_platform::file_uri_to_path(uri) else {
-            return HyperlinkActivation::Blocked;
+            return refused;
         };
-        if !preview::is_network_path(&path) && is_directory(&path) {
-            return HyperlinkActivation::Reveal(path);
+        // A share is one answer under either modifier, and it is the card §7.1.3
+        // already has. `Ctrl` does not buy a way past it: `ShellExecuteW` is
+        // synchronous on this thread, so handing a cold `\\server` to the shell
+        // would stall the window for exactly the network round trip the arm above
+        // refuses to make.
+        if preview::is_network_path(&path) {
+            return HyperlinkActivation::Preview(path);
         }
-        return HyperlinkActivation::Preview(path);
+        // The folder question first: a directory may be named `site.html`, and
+        // Explorer's arm was settled before the page arm existed.
+        if is_directory(&path) {
+            return match intent {
+                ClickIntent::Here => HyperlinkActivation::None,
+                ClickIntent::System => HyperlinkActivation::Reveal(path),
+            };
+        }
+        return match intent {
+            // The page arm, and the whole of what is special about a page: this
+            // window can only show its *source*, and a link to a page is a
+            // reference to the page. So the plain half stays empty until W2 fills
+            // it, rather than answering with the one thing that was not asked for.
+            ClickIntent::Here if names_an_html_page(&path) => HyperlinkActivation::None,
+            ClickIntent::Here => HyperlinkActivation::Preview(path),
+            ClickIntent::System => HyperlinkActivation::External(path),
+        };
     }
-    HyperlinkActivation::Blocked
+    refused
+}
+
+/// Whether a local path names an HTML page (§7.1.5g, user ruling 2026-08-20).
+///
+/// What it decides is **whether this window has an answer of its own**: for every
+/// other readable file the plain half of the table is the preview seat, and for a
+/// page the seat could only offer the source of something the link was pointing
+/// *past*. When W2 gives the seat a renderer this predicate keeps its name and
+/// changes jobs — from "there is nothing here to open" to "which content lane".
+///
+/// The *real* extension and never a substring of the name: `index.htmlx` is a
+/// template dialect this window has no browser story for, and `report.html.txt`
+/// is a text file that merely spells `.html` in the middle of itself. Both are
+/// the preview seat's, and a `contains`/`ends_with` reading would take one of
+/// them out of it.
+///
+/// `htm` sits beside `html` because the shortened spelling is the same object —
+/// Windows registers both against the same handler — and the comparison ignores
+/// case because a file system that does not distinguish `TIMELINE.HTM` from
+/// `timeline.htm` would leave this window doing two things with one file.
+fn names_an_html_page(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("html") || extension.eq_ignore_ascii_case("htm")
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -10222,6 +10334,12 @@ impl LocalImageActivation {
     }
 }
 
+/// Which door a click on a verified inline image reference goes through.
+///
+/// The modifier is read through [`ClickIntent`] rather than by an `if control`
+/// of its own, because this arm and [`hyperlink_activation`]'s are the same rule
+/// stated about two kinds of reference (§7.1.5g, user ruling 2026-08-20) — and a
+/// rule written down twice is a rule that can come to be two.
 fn local_image_activation(
     control: bool,
     click_no_drag: bool,
@@ -10230,10 +10348,9 @@ fn local_image_activation(
     let Some(path) = worker_verified_path.filter(|_| click_no_drag) else {
         return LocalImageActivation::None;
     };
-    if control {
-        LocalImageActivation::External(path.to_path_buf())
-    } else {
-        LocalImageActivation::Preview(path.to_path_buf())
+    match ClickIntent::of(control) {
+        ClickIntent::Here => LocalImageActivation::Preview(path.to_path_buf()),
+        ClickIntent::System => LocalImageActivation::External(path.to_path_buf()),
     }
 }
 
@@ -13353,16 +13470,29 @@ fn pointer_cursor(
 /// **The underline and the hand are two different sentences.** The dotted rest
 /// and its solid hover already say "there is a link here", and they say it to a
 /// hand that is not holding anything down, because that is a fact about the
-/// output and not about the gesture. The pointing finger is the narrower thing
-/// `Ctrl` adds — "and *this* press is the one that goes there" — which is why the
-/// modifier is in it. Windows Terminal and VS Code both spell it this way, and
-/// the whole point of the convention is that a plain press stays the selection's.
+/// output and not about the gesture. The pointing finger is the narrower one:
+/// "and *this* press, with the keys held the way they are held right now, is one
+/// that goes somewhere".
 ///
-/// Its own function rather than an `&&` inside `apply_pointer_cursor`, so that
-/// the bit the hand is drawn from and the bit
-/// [`hyperlink_activation`] refuses without can be asserted to be the same one.
-fn terminal_link_answers_a_press(control: bool, over_hyperlink: bool) -> bool {
-    control && over_hyperlink
+/// **So it is not a fact about `Ctrl`; it is the routing table asked** (user
+/// ruling 2026-08-20). A plain hover over a link to a readable file wears the
+/// hand, because a plain press opens it. A plain hover over a web address, a
+/// folder or a page does not, because a plain press on those does nothing — and
+/// holding `Ctrl` lights exactly them up, which is how a reader discovers that
+/// the modifier is what those rows want.
+///
+/// One expression rather than two agreeing ones, for the reason 7.1.5f wrote
+/// down: a pointer that promises a press the release then declines is this window
+/// lying about what it can do. `is_directory` travels for the same reason it
+/// travels into the table, and reaches a disk on the same terms — never a share.
+fn terminal_link_answers_a_press(
+    control: bool,
+    uri: Option<&str>,
+    is_directory: &dyn Fn(&Path) -> bool,
+) -> bool {
+    uri.is_some_and(|uri| {
+        hyperlink_activation(control, true, uri, is_directory) != HyperlinkActivation::None
+    })
 }
 
 /// What is in the hand (J111).
@@ -43169,6 +43299,18 @@ impl Runtime<'_> {
     /// click, Enter, the menu row, a click on an inline image — asks this one
     /// question, so the two lanes cannot come to disagree about what a `.png`
     /// is depending on how it was reached.
+    ///
+    /// **That sentence is about the two lanes below this door, not about which
+    /// doors exist.** A `.html` reached from the files column arrives here and is
+    /// shown as text, while a plain click on a printed `file:` link to one does
+    /// not reach this function at all — it does nothing, and `Ctrl` sends the
+    /// page to the browser (§7.1.5g, user ruling 2026-08-20). That is a ruling
+    /// and not an oversight: a URI in the output is somebody else's *reference to
+    /// a page*, and the page — not its source — is what the press was for; a row
+    /// in this window's own tree is a file the user picked out of a tree they
+    /// rooted, and looking inside it is the whole of what that door is for. When
+    /// W2 gives the preview seat something that renders a page, the exception
+    /// ends and both doors come back together.
     fn open_preview(&mut self, path: PathBuf) -> Result<()> {
         if path_is_previewable_image(&path) {
             self.open_preview_image(path)
@@ -45572,15 +45714,16 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// Spend a `Ctrl`+click on the hyperlink run it landed on (§7.1.5g).
+    /// Spend a click on the hyperlink run it landed on (§7.1.5g).
     ///
-    /// `true, true` because the gate is already behind us: the press recorded
-    /// that `Ctrl` was down and [`Self::finish_local_selection`] has already
+    /// `control` is the press's own modifier, carried here by the drag rather
+    /// than read from the keyboard again. `click_no_drag` is `true` because that
+    /// gate is already behind us: [`Self::finish_local_selection`] has
     /// established that the release came up on the cell the press went down on.
-    /// The two arguments stay in the signature so the table can be tested with
-    /// them false, which is what pins "no `Ctrl` never opens anything".
-    fn activate_hyperlink(&mut self, hyperlink: HyperlinkHit) -> Result<()> {
-        match hyperlink_activation(true, true, &hyperlink.uri, &|path| path.is_dir()) {
+    /// It stays in the signature so the table can be tested with it false, which
+    /// is what pins "a drag is only ever a selection".
+    fn activate_hyperlink(&mut self, hyperlink: HyperlinkHit, control: bool) -> Result<()> {
+        match hyperlink_activation(control, true, &hyperlink.uri, &|path| path.is_dir()) {
             HyperlinkActivation::None => {}
             HyperlinkActivation::Browser => {
                 let result = window_hwnd(&self.window.window).and_then(|hwnd| {
@@ -45591,6 +45734,15 @@ impl Runtime<'_> {
                 if let Err(error) = result {
                     eprintln!("recoverable hyperlink open failure: {error:#}");
                 }
+            }
+            // The one door out of this window that takes a *path* — the same one
+            // an unpreviewable file's card offers and a files row used to fall
+            // through to, and the same one that will not start a program. A page
+            // leaves through it too: the handler this machine has registered for
+            // `.html` is its browser, so the ruling's "system browser" and the
+            // table's "system handler" are one call and not two.
+            HyperlinkActivation::External(path) => {
+                self.open_local_path(&path);
             }
             // The files column's own road, entered at the same door
             // ([`Self::open_preview`]): a picture down the decode lane, everything
@@ -45938,7 +46090,7 @@ impl Runtime<'_> {
             return Ok(());
         };
         let hyperlink = frame.hyperlink_at(hit.row, hit.column);
-        let open_hyperlink_on_release = self.window.modifiers.control_key() && hyperlink.is_some();
+        let hyperlink_control = self.window.modifiers.control_key();
         let local_image_activation = local_image_activation(
             self.window.modifiers.control_key(),
             true,
@@ -45989,7 +46141,7 @@ impl Runtime<'_> {
             origin_column: hit.column,
             origin,
             hyperlink,
-            open_hyperlink_on_release,
+            hyperlink_control,
             local_image_activation,
         })));
         self.publish_interaction_frame()
@@ -46549,6 +46701,17 @@ impl Runtime<'_> {
             })
             .and_then(|hit| self.hyperlink_hit(hit));
         if self.window.hyperlink_hover.observe(hyperlink, now) {
+            // **The hand moved with the modifier; now it moves with the cell**
+            // (§7.1.5g, user ruling 2026-08-20). While the finger meant only
+            // "`Ctrl` is down over a link", `ModifiersChanged` was the whole of
+            // when it could change and applying the shape there was enough. It
+            // now means "a press here would answer", which is a fact about *this
+            // link* — a plain hover over a readable file wears it and a plain
+            // hover over a page does not — so the shape has to be recomputed
+            // whenever the link under the pointer changes. Inside `observe`'s own
+            // answer because that is exactly when it did: a move within one run,
+            // or across the body between two of them, changes nothing to apply.
+            self.apply_pointer_cursor();
             self.repaint_hovered_pane()?;
         }
         self.refresh_image_reference_underline()?;
@@ -47039,14 +47202,18 @@ impl Runtime<'_> {
         ));
     }
 
-    /// This window's two inputs to [`terminal_link_answers_a_press`], read from
-    /// the same [`HyperlinkHover::underline_target`] the underline is painted
-    /// from — so the shape and the mark cannot come to disagree about which cells
-    /// are a link.
+    /// This window's inputs to [`terminal_link_answers_a_press`], read from the
+    /// same [`HyperlinkHover::underline_target`] the underline is painted from —
+    /// so the shape and the mark cannot come to disagree about which cells are a
+    /// link, nor the shape and the verb about what that link would do.
     fn terminal_link_grasp(&self) -> bool {
         terminal_link_answers_a_press(
             self.window.modifiers.control_key(),
-            self.window.hyperlink_hover.underline_target().is_some(),
+            self.window
+                .hyperlink_hover
+                .underline_target()
+                .map(|hyperlink| hyperlink.uri.as_str()),
+            &|path| path.is_dir(),
         )
     }
 
@@ -49694,7 +49861,7 @@ impl Runtime<'_> {
         let SelectionDrag {
             mode,
             hyperlink,
-            open_hyperlink_on_release,
+            hyperlink_control,
             local_image_activation,
             origin_row,
             origin_column,
@@ -49707,10 +49874,7 @@ impl Runtime<'_> {
             {
                 (
                     true,
-                    open_hyperlink_on_release
-                        .then_some(hyperlink)
-                        .flatten()
-                        .filter(|pressed| release_hyperlink.as_ref() == Some(pressed)),
+                    hyperlink.filter(|pressed| release_hyperlink.as_ref() == Some(pressed)),
                     local_image_activation
                         .path()
                         .is_some_and(|pressed| release_local_image_path.as_deref() == Some(pressed))
@@ -49729,7 +49893,7 @@ impl Runtime<'_> {
             self.copy_selection_on_release(seat);
         }
         if let Some(hyperlink) = hyperlink_to_open {
-            self.activate_hyperlink(hyperlink)?;
+            self.activate_hyperlink(hyperlink, hyperlink_control)?;
         }
         if let Some(activation) = local_image_action {
             match activation {
@@ -61776,7 +61940,7 @@ mod tests {
                 end: hit.end,
             },
             hyperlink: None,
-            open_hyperlink_on_release: false,
+            hyperlink_control: false,
             local_image_activation: LocalImageActivation::None,
         }))
     }
@@ -61840,8 +62004,11 @@ mod tests {
         false
     }
 
+    /// PIN — **a drag is only ever a selection**, and the plain half of the table
+    /// is empty for everything whose destination is outside this window
+    /// (§7.1.5g, user rulings 2026-08-20).
     #[test]
-    fn hyperlink_activation_requires_ctrl_and_click_without_drag() {
+    fn hyperlink_activation_requires_a_click_without_drag() {
         assert_eq!(
             hyperlink_activation(true, true, "https://example.test/path", &no_directories),
             HyperlinkActivation::Browser
@@ -61850,51 +62017,134 @@ mod tests {
             hyperlink_activation(true, true, "HTTP://localhost:3000", &no_directories),
             HyperlinkActivation::Browser
         );
-        // **Ctrl's absence never activates anything**, whatever the scheme is —
-        // asked of every arm of the table rather than of the web one, because a
-        // plain click is the selection's and a second door that opened without
-        // the modifier would be the one nobody tested.
+        // **A drag never activates anything**, whatever the scheme and whatever
+        // the modifier — asked of every arm rather than of the web one, because
+        // wanting to select a printed path is the commonest thing done to one and
+        // a door that opened out of a drag would be the one nobody tested.
         for uri in [
             "https://example.test",
             "file:///C:/notes.md",
+            "file:///C:/page.html",
+            "file:///C:/some/folder",
+            "mailto:person@example.test",
+        ] {
+            for control in [false, true] {
+                assert_eq!(
+                    hyperlink_activation(control, false, uri, &|_| true),
+                    HyperlinkActivation::None,
+                    "a drag rather than a click: {uri:?}, Ctrl {control}"
+                );
+            }
+        }
+        // **A plain click starts no program.** Every row whose only destination is
+        // outside this window is silent without the modifier — which is the
+        // picture arm's own judgement (`local_image_activation` keeps `External`
+        // for `Ctrl`) applied to the rows that leave.
+        for uri in [
+            "https://example.test/path",
+            "file:///C:/page.html",
             "file:///C:/some/folder",
             "mailto:person@example.test",
         ] {
             assert_eq!(
-                hyperlink_activation(false, true, uri, &|_| true),
+                hyperlink_activation(false, true, uri, &|path| path
+                    == Path::new(r"C:\some\folder")),
                 HyperlinkActivation::None,
-                "no Ctrl: {uri:?}"
-            );
-            assert_eq!(
-                hyperlink_activation(true, false, uri, &|_| true),
-                HyperlinkActivation::None,
-                "a drag rather than a click: {uri:?}"
+                "a plain click on a target that leaves this window: {uri:?}"
             );
         }
     }
 
-    /// PIN — **the routing table, one assertion per arm** (§7.1.5g, user ruling
+    /// PIN — **one clicking rule, two kinds of reference** (§7.1.5g, user ruling
     /// 2026-08-20).
+    ///
+    /// The reported inconsistency: an inline image reference opened its preview
+    /// on a plain click while an OSC 8 hyperlink needed `Ctrl` and then *left* —
+    /// the same terminal answering the same gesture two ways. The fix is not two
+    /// corrected `if control`s but one [`ClickIntent`] both arms read, and this
+    /// test is what says so: the picture and the link are asked the same
+    /// question and their answers move together.
+    ///
+    /// MUTATION: give either arm its own `if control` back, invert it, and the
+    /// pairing below goes red while each arm on its own still looks sensible —
+    /// which is exactly how the two rules drifted apart the first time.
+    #[test]
+    fn a_plain_click_stays_in_this_window_and_ctrl_hands_it_to_the_system() {
+        let picture = Path::new(r"C:\shots\img0.jpg");
+        for (control, intent) in [(false, ClickIntent::Here), (true, ClickIntent::System)] {
+            assert_eq!(ClickIntent::of(control), intent);
+            let link = hyperlink_activation(control, true, "file:///C:/notes/plan.md", &|_| false);
+            let reference = local_image_activation(control, true, Some(picture));
+            let (link_stays, reference_stays) = (
+                matches!(link, HyperlinkActivation::Preview(_)),
+                matches!(reference, LocalImageActivation::Preview(_)),
+            );
+            let (link_leaves, reference_leaves) = (
+                matches!(link, HyperlinkActivation::External(_)),
+                matches!(reference, LocalImageActivation::External(_)),
+            );
+            assert_eq!(
+                (link_stays, link_leaves),
+                (reference_stays, reference_leaves),
+                "a link and a picture answer one rule: Ctrl {control}"
+            );
+            assert_eq!(
+                link_stays,
+                intent == ClickIntent::Here,
+                "and that rule is the intent: Ctrl {control}"
+            );
+        }
+        // The picture arm's two rows, unchanged by the link's arriving beside it.
+        assert_eq!(
+            local_image_activation(false, true, Some(picture)),
+            LocalImageActivation::Preview(picture.to_path_buf())
+        );
+        assert_eq!(
+            local_image_activation(true, true, Some(picture)),
+            LocalImageActivation::External(picture.to_path_buf())
+        );
+    }
+
+    /// PIN — **the routing table, both halves, one assertion per cell** (§7.1.5g,
+    /// user rulings 2026-08-20).
     ///
     /// The reported gap is the `file:` row: Claude Code prints `[file]` lines as
     /// OSC 8 `file://` links, this window drew the hover underline over them and
     /// then refused the click the underline had promised — 7.1.5f's own
-    /// complaint, one content type over.
+    /// complaint, one content type over. The second ruling of the same day split
+    /// every row: plainly, this window's own answer; under `Ctrl`, the system's.
     ///
     /// MUTATIONS:
-    /// ① send `file:` back to `Blocked` and the second assertion goes red, which
+    /// ① send `file:` back to `Blocked` and the readable-file cells go red, which
     ///    is the reported bug written down;
     /// ② drop the `is_directory` question and a folder opens as a "no preview"
     ///    card instead of in Explorer;
     /// ③ let the share be probed — swap `is_network_path` for `false` — and the
-    ///    UNC assertion goes red, which is the event loop being handed a cold
-    ///    network round trip.
+    ///    UNC cells go red, which is the event loop being handed a cold network
+    ///    round trip;
+    /// ④ let the plain half answer `Browser`/`Reveal`/`External` and a stray
+    ///    click on a printed line starts a program.
     #[test]
-    fn ctrl_click_routes_web_files_folders_shares_and_unknown_schemes() {
+    fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
         assert_eq!(
             hyperlink_activation(true, true, "https://example.test/path", &no_directories),
             HyperlinkActivation::Browser,
             "a web address is the browser's"
+        );
+        assert_eq!(
+            hyperlink_activation(false, true, "https://example.test/path", &no_directories),
+            HyperlinkActivation::None,
+            "and a plain click on one is still the selection's"
+        );
+        assert_eq!(
+            hyperlink_activation(
+                false,
+                true,
+                "file:///C:/Users/me/phd-application-timeline.html",
+                &no_directories
+            ),
+            HyperlinkActivation::None,
+            "a plain click on a page opens nothing: the seat could only show its source"
         );
         assert_eq!(
             hyperlink_activation(
@@ -61903,14 +62153,24 @@ mod tests {
                 "file:///C:/Users/me/phd-application-timeline.html",
                 &no_directories
             ),
-            HyperlinkActivation::Preview(PathBuf::from(
+            HyperlinkActivation::External(PathBuf::from(
                 r"C:\Users\me\phd-application-timeline.html"
             )),
-            "every local file goes down the files column's own road"
+            "and Ctrl sends the page to whatever this machine opens pages with"
+        );
+        assert_eq!(
+            hyperlink_activation(false, true, "file:///C:/Users/me/notes.md", &no_directories),
+            HyperlinkActivation::Preview(PathBuf::from(r"C:\Users\me\notes.md")),
+            "every other local file goes down the files column's own road"
+        );
+        assert_eq!(
+            hyperlink_activation(true, true, "file:///C:/Users/me/notes.md", &no_directories),
+            HyperlinkActivation::External(PathBuf::from(r"C:\Users\me\notes.md")),
+            "and Ctrl hands that same file to the system instead"
         );
         assert_eq!(
             hyperlink_activation(
-                true,
+                false,
                 true,
                 "file:///D:/%E4%B8%AD%E6%96%87/note.md",
                 &no_directories
@@ -61925,12 +62185,20 @@ mod tests {
             "a folder is Explorer's"
         );
         assert_eq!(
-            hyperlink_activation(true, true, "file://server/share/notes.md", &|_| {
-                panic!("a share must not be probed: §7.1.3 does not read one unasked")
-            }),
-            HyperlinkActivation::Preview(PathBuf::from(r"\\server\share\notes.md")),
-            "a share meets the preview seat's own network card, without a round trip"
+            hyperlink_activation(false, true, "file:///C:/repo/docs", &|path| path
+                == Path::new(r"C:\repo\docs")),
+            HyperlinkActivation::None,
+            "and a plain click does not open an Explorer window"
         );
+        for control in [false, true] {
+            assert_eq!(
+                hyperlink_activation(control, true, "file://server/share/notes.md", &|_| {
+                    panic!("a share must not be probed: §7.1.3 does not read one unasked")
+                }),
+                HyperlinkActivation::Preview(PathBuf::from(r"\\server\share\notes.md")),
+                "a share meets the network card under either modifier, without a round trip"
+            );
+        }
         for uri in [
             "mailto:person@example.test",
             "javascript:alert(1)",
@@ -61940,7 +62208,96 @@ mod tests {
             assert_eq!(
                 hyperlink_activation(true, true, uri, &no_directories),
                 HyperlinkActivation::Blocked,
-                "an unknown scheme is inert: {uri:?}"
+                "an unknown scheme is inert, and says so when asked: {uri:?}"
+            );
+            assert_eq!(
+                hyperlink_activation(false, true, uri, &no_directories),
+                HyperlinkActivation::None,
+                "and says nothing at all when it was not: {uri:?}"
+            );
+        }
+    }
+
+    /// PIN — **a printed `file:` link to a local page never opens its source**
+    /// (§7.1.5g, user ruling 2026-08-20).
+    ///
+    /// The reported gap: `html` is in `preview::TEXT_EXTENSIONS`, so the arm that
+    /// had just been opened for `file:` handed a `.html` to the preview seat and
+    /// the user — who had pressed a link *to a page* — got the page's source.
+    /// Until the Web block (W2) has a seat that renders one, this window has no
+    /// answer of its own for a page: the plain half is empty and `Ctrl` sends it
+    /// to the machine's own handler, which for a page is its browser.
+    ///
+    /// MUTATIONS:
+    /// ① compare the extension by `ends_with`/`contains` instead of by
+    ///    `Path::extension` and `report.html.txt` — a text file — stops being
+    ///    openable at all;
+    /// ② put the page test *before* the directory test and a folder named
+    ///    `site.html` stops opening in Explorer;
+    /// ③ let the page test see a share and a cold `\\server\…\index.html` is
+    ///    handed to a synchronous `ShellExecuteW` instead of meeting §7.1.3's
+    ///    network card — and, worse, does so having asked the network first.
+    #[test]
+    fn a_local_html_page_opens_as_a_page_and_nothing_that_merely_reads_like_one_does() {
+        for uri in [
+            "file:///C:/Users/me/timeline.html",
+            "file:///C:/Users/me/TIMELINE.HTM",
+            "file:///C:/Program%20Files/report.html",
+            "file:///D:/%E4%B8%AD%E6%96%87/%E9%A1%B5.html",
+        ] {
+            assert_eq!(
+                hyperlink_activation(false, true, uri, &no_directories),
+                HyperlinkActivation::None,
+                "a plain click never shows a page's source: {uri:?}"
+            );
+            assert!(
+                matches!(
+                    hyperlink_activation(true, true, uri, &no_directories),
+                    HyperlinkActivation::External(_)
+                ),
+                "and Ctrl opens the page itself: {uri:?}"
+            );
+        }
+        assert_eq!(
+            hyperlink_activation(
+                true,
+                true,
+                "file:///C:/Program%20Files/report.html",
+                &no_directories
+            ),
+            HyperlinkActivation::External(PathBuf::from(r"C:\Program Files\report.html")),
+            "and it is the decoded path that travels, not the URI"
+        );
+        // The real extension, never a substring of the name: one of these is a
+        // template dialect and the other is a text file that happens to spell
+        // `.html` in the middle of its name.
+        for (uri, path) in [
+            ("file:///C:/site/index.htmlx", r"C:\site\index.htmlx"),
+            (
+                "file:///C:/site/report.html.txt",
+                r"C:\site\report.html.txt",
+            ),
+            ("file:///C:/site/html", r"C:\site\html"),
+        ] {
+            assert_eq!(
+                hyperlink_activation(false, true, uri, &no_directories),
+                HyperlinkActivation::Preview(PathBuf::from(path)),
+                "not a page, so a plain click is still the preview seat's: {uri:?}"
+            );
+        }
+        assert_eq!(
+            hyperlink_activation(true, true, "file:///C:/sites/archive.html", &|path| path
+                == Path::new(r"C:\sites\archive.html")),
+            HyperlinkActivation::Reveal(PathBuf::from(r"C:\sites\archive.html")),
+            "a folder is Explorer's however it is named"
+        );
+        for control in [false, true] {
+            assert_eq!(
+                hyperlink_activation(control, true, "file://server/share/index.html", &|_| {
+                    panic!("a share must not be probed: §7.1.3 does not read one unasked")
+                }),
+                HyperlinkActivation::Preview(PathBuf::from(r"\\server\share\index.html")),
+                "a share meets the network card it always met, without a round trip"
             );
         }
     }
@@ -61972,12 +62329,15 @@ mod tests {
 
     /// PIN — **nothing but a web address is ever handed to the shell as a URI.**
     ///
-    /// The `file:` row left this list on 2026-08-20 and did not join the shell's:
-    /// it became a path this window opens *itself*, through the preview seat and
-    /// Explorer, which is why `bt_platform::shell_execute` still only ever sees
-    /// `http`/`https`. What stayed is everything the WebView ruling already
-    /// refuses (DESIGN.md §7.1.1's "external protocol 一律禁用"), plus the
-    /// malformed web addresses that would otherwise reach a second parser.
+    /// The `file:` row left this list on 2026-08-20 and did not join the shell's
+    /// *as a URI*: it became a path this window decides about itself — the
+    /// preview seat, Explorer, or the path bridge that refuses programs — so what
+    /// leaves is always the decoded path and never the URI text a program
+    /// printed. A URI reaching the shell would be parsed a second time by a
+    /// second parser; a path has already been read once, here. What stayed is
+    /// everything the WebView ruling already refuses (DESIGN.md §7.1.1's
+    /// "external protocol 一律禁用"), plus the malformed web addresses that would
+    /// otherwise reach that second parser.
     #[test]
     fn only_a_well_formed_web_address_is_ever_handed_to_the_shell() {
         for uri in [
@@ -62459,7 +62819,7 @@ mod tests {
         let opened = HyperlinkActivation::Preview(PathBuf::from(r"C:\notes\phd application.md"));
         for hit in [&head, &tail] {
             assert_eq!(
-                hyperlink_activation(true, true, &hit.uri, &|_| false),
+                hyperlink_activation(false, true, &hit.uri, &|_| false),
                 opened,
                 "either segment opens the one file the run names"
             );
@@ -69872,54 +70232,68 @@ mod tests {
         );
     }
 
-    /// PIN — **a terminal hyperlink wears the finger only while `Ctrl` is down**
-    /// (§7.1.5g, user ruling 2026-08-20).
+    /// PIN — **the finger appears exactly where a press would do something**
+    /// (§7.1.5g, user rulings 2026-08-20).
     ///
     /// The underline is a fact about the output and is already there without any
-    /// modifier; the hand is the sentence `Ctrl` adds, and it must be the *same*
-    /// bit the verb refuses without — a pointer promising a press the release
-    /// then declines is 7.1.5f's complaint wearing a different shape.
+    /// modifier; the hand is the narrower sentence, and after the plain-click
+    /// ruling it is no longer a fact about `Ctrl` at all. A link to a readable
+    /// file wears it plainly, because a plain press opens it. A web address, a
+    /// folder and a page do not, because a plain press on those does nothing —
+    /// and holding `Ctrl` lights exactly those up, which is how the rule is
+    /// discovered. It must be the *same* expression the verb is spent from: a
+    /// pointer promising a press the release then declines is 7.1.5f's complaint
+    /// wearing a different shape.
     ///
-    /// MUTATION: pass `true` for the hand regardless of the modifier and the
-    /// second half goes red, because the plain press is still the selection's.
+    /// MUTATION: make the hand `control && over_hyperlink` again — the shape it
+    /// had before the ruling — and the readable-file row goes red without `Ctrl`,
+    /// which is a window that opens a file it said it would not.
     #[test]
-    fn a_terminal_hyperlink_wears_the_finger_only_under_ctrl() {
+    fn a_terminal_hyperlink_wears_the_finger_where_a_press_would_answer() {
         use winit::window::CursorIcon;
-        assert!(terminal_link_answers_a_press(true, true));
-        assert!(!terminal_link_answers_a_press(false, true));
-        assert!(!terminal_link_answers_a_press(true, false));
-        assert_eq!(
-            pointer_cursor(
-                false,
-                None,
-                None,
-                terminal_link_answers_a_press(true, true),
-                false,
-                None
-            ),
-            CursorIcon::Pointer
-        );
-        assert_eq!(
-            pointer_cursor(
-                false,
-                None,
-                None,
-                terminal_link_answers_a_press(false, true),
-                false,
-                None
-            ),
-            CursorIcon::Default,
-            "without Ctrl the press is the selection's, and the shape says so"
-        );
-        // One bit, not two agreeing ones: the hand appears exactly when a press
-        // would be taken by this window rather than left to the selection.
+        let folder = Path::new(r"C:\repo\docs");
+        let is_directory: &dyn Fn(&Path) -> bool = &|path| path == folder;
+        // rows: the URI, then the hand plainly and the hand under Ctrl.
+        for (uri, plainly, under_control) in [
+            ("file:///C:/notes.md", true, true),
+            ("https://example.test/path", false, true),
+            ("file:///C:/repo/docs", false, true),
+            ("file:///C:/page.html", false, true),
+        ] {
+            for (control, expected) in [(false, plainly), (true, under_control)] {
+                assert_eq!(
+                    terminal_link_answers_a_press(control, Some(uri), is_directory),
+                    expected,
+                    "the hand over {uri:?} with Ctrl {control}"
+                );
+                // One expression, not two agreeing ones.
+                assert_eq!(
+                    terminal_link_answers_a_press(control, Some(uri), is_directory),
+                    hyperlink_activation(control, true, uri, is_directory)
+                        != HyperlinkActivation::None,
+                    "the shape and the verb are the same reading: {uri:?}, Ctrl {control}"
+                );
+                assert_eq!(
+                    pointer_cursor(
+                        false,
+                        None,
+                        None,
+                        terminal_link_answers_a_press(control, Some(uri), is_directory),
+                        false,
+                        None
+                    ),
+                    if expected {
+                        CursorIcon::Pointer
+                    } else {
+                        CursorIcon::Default
+                    },
+                    "and the shape the window sets says the same: {uri:?}, Ctrl {control}"
+                );
+            }
+        }
+        // No link under the pointer is no hand, whatever is held down.
         for control in [false, true] {
-            assert_eq!(
-                terminal_link_answers_a_press(control, true),
-                hyperlink_activation(control, true, "file:///C:/notes.md", &|_| false)
-                    != HyperlinkActivation::None,
-                "the shape and the verb read the same modifier"
-            );
+            assert!(!terminal_link_answers_a_press(control, None, is_directory));
         }
     }
 
