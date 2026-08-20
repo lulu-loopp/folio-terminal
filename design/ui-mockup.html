@@ -833,6 +833,54 @@
   .root-menu .rm-item.cur { color: var(--ink); }
   .root-menu .rm-item .tick { width: 12px; text-align: center; color: var(--accent); }
   .root-menu .rm-item svg { width: 14px; height: 14px; flex: none; color: var(--accent); }
+  /* The reason column. A hint's size and ink, right-aligned, and holding a width
+     that is the widest of the SEVEN badge combinations rather than the widest
+     one currently on screen — `rootNoteWidth()` sets it inline. Reserving what
+     could appear is what stops the menu from growing under the pointer the first
+     time a row earns two badges. */
+  .root-menu .rm-item .default-hint {
+    flex: none; font-size: 11px; color: var(--ink3); text-align: right;
+  }
+  /* ── the pin on a menu row (user ruling 2026-08-19: 收藏＝钉) ──
+     A 13px mark inside the row's own 10px inset, 10px clear of whatever the row
+     ends with — the product derives that rectangle ONCE (`row_pin_rect`) and
+     hands it to both the painter and the hit test, because a second derivation
+     is how a control ends up half a pixel from the thing it draws.
+     RESERVED ON EVERY PINNABLE ROW, drawn or not: the name must not shorten
+     under the pointer as a pin fades in. A row that cannot be pinned — `Browse…`
+     names a question, a diff is a document this window computed — has no pin
+     span at all and so reserves nothing.
+     THE STATE RIDES ON `filled`, not on a second glyph: outline is "you may pin
+     this", solid is "this is pinned". Unpinned appears with the row's hover
+     because it is an offer; pinned is always visible because it is a fact.
+     Three inks in one order of precedence, the same order the row label uses:
+     the pin under the pointer, then the pinned one, then the quietest ink in the
+     menu for an offer nobody is on yet. */
+  .root-menu .rm-item .row-pin, #pv-menu .tm-item .row-pin {
+    flex: none; width: 13px; height: 13px; margin-left: 2px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--ink3); visibility: hidden; opacity: 0; cursor: pointer;
+    /* the offer FADES IN with the row rather than snapping on — the box was
+       reserved all along, so nothing moves while it arrives. `visibility` is
+       what keeps an invisible pin from catching a press. */
+    transition: opacity .12s ease;
+  }
+  .root-menu .rm-item .row-pin svg, #pv-menu .tm-item .row-pin svg {
+    width: 13px; height: 13px; color: inherit; pointer-events: none;
+  }
+  .root-menu .rm-item:hover .row-pin, #pv-menu .tm-item:hover .row-pin,
+  .root-menu .rm-item .row-pin.on, #pv-menu .tm-item .row-pin.on { visibility: visible; opacity: 1; }
+  @media (prefers-reduced-motion: reduce) {
+    .root-menu .rm-item .row-pin, #pv-menu .tm-item .row-pin { transition: none; }
+  }
+  .root-menu .rm-item .row-pin.on, #pv-menu .tm-item .row-pin.on { color: var(--accent); }
+  .root-menu .rm-item .row-pin:hover, #pv-menu .tm-item .row-pin:hover { color: var(--ink); }
+  /* the switcher's own heading, in the root menu's type — one rule for two
+     menus would need a third selector neither of them owns */
+  #pv-menu .tm-label {
+    font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--ink3); padding: 5px 10px 3px;
+  }
 
   /* ── files peek flyout (P3-6, step 2) ──
      A terminal's folder tree, floated over the content instead of docked as a
@@ -2459,11 +2507,13 @@
     #focus-rail, .tab-cards { animation: none; transition: none !important; }
     .fcard.attn { animation: none; }
   }
-  /* DOOR 5: THE VISIBLE WAY OUT (user ruling 2026-08-19). Four of the five doors
-     are gestures — a setting you have to open a modal to reach, a chord, a
-     double-click, a menu item — and a mode you can only leave by remembering
-     something is a mode that traps people. So the column carries its own exit,
-     at the top, where the tab list's own heading stands the rest of the time.
+  /* THE VISIBLE WAY OUT (user ruling 2026-08-19). The other three ways out —
+     a setting you have to open a modal to reach, a chord, and Esc — are all
+     things you have to already know, and a mode you can only leave by
+     remembering something is a mode that traps people. So the column carries
+     its own exit, at the top, where the tab list's own heading stands the rest
+     of the time. It is the only one of the four that is visible, which is
+     exactly why the user insisted on it.
      It sticks like `.fgroup-head` used to, by the same `top: -6px` that cancels
      the rail's padding, so scrolling a long column never scrolls the way out
      off the screen. */
@@ -4048,6 +4098,47 @@
             <div class="combo-menu" role="listbox" id="profile-options"></div>
           </div>
         </div>
+
+        <!-- EXPLORER CONTEXT MENU (§7.2b, shipped 2026-08-19; the mock-up owed
+             this row and pays it here).
+
+             LAST ON THIS PAGE, because it is the only row on it that changes
+             something OUTSIDE this window: the rows above say how Folio behaves,
+             and this one says what another program's menu contains.
+
+             WHY A ROW AT ALL. Folio is a green exe with no installer, so the
+             only honest place for this switch is inside the program, and the
+             only honest hive is HKCU — it edits the menu of the account running
+             Folio, wants no administrator, and is invisible to anybody else.
+
+             THE COPY STATES TWO FACTS AND NOTHING ELSE: the sentence the menu
+             will gain, and where Windows 11 files it (under `Show more
+             options`, because the modern top-level menu is package identity and
+             a green exe has none). No persuasion, no "we think you'll want".
+
+             THE SWITCH READS THE MACHINE, IT DOES NOT REMEMBER. There is no
+             `settings.json` key behind this row and no schema bump: storing a
+             bool would be storing a copy that a hand-edited registry, a second
+             Folio uninstalled from another folder, or a restored backup all turn
+             into a silent lie. The tick comes from reading the two trees. And a
+             STALE entry — one that names a `folio.exe` which has since moved —
+             reads as On, because the user's menu does carry a verb; reading it
+             Off would be untrue AND would leave them no control that could
+             remove it. (Startup rewrites a stale entry to the running binary's
+             path; `Absent` is never touched.) -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Explorer context menu</div>
+            <div class="desc">Open Folio here, under Windows 11's Show more options</div>
+          </div>
+          <div class="combo" data-combo="ctxmenu">
+            <button aria-haspopup="listbox"><span class="value">Off</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item" data-v="on" role="option"><span class="tick">✓</span>On</div>
+              <div class="combo-item selected" data-v="off" role="option"><span class="tick">✓</span>Off</div>
+            </div>
+          </div>
+        </div>
         </section>
 
         <section class="settings-page" data-page="appearance">
@@ -4338,20 +4429,21 @@
              Settings row, over ONE bit. So: this row and the quick doors write
              the same `state.focusMode`, and the row is what makes it PERSIST — a
              window closed in focus mode reopens in focus mode (`settings.json`
-             v13 → v14). It stands beside `Tab layout` and `Sidebar` because the
+             v14 → v15). It stands beside `Tab layout` and `Sidebar` because the
              three answer one question between them: what shape is this window.
              Unlike those two it carries no condition — it works from either tab
              layout (see the `.window.focusmode` rules).
-             This is DOOR 1 of five (the other four: `Ctrl+Shift+Z`, a
-             double-click on a pane header, the pane ⌄ menu, and the visible exit
-             at the top of the card column).
+             This is DOOR 1 of two ways in; the other is `Ctrl+Shift+Z`. The two
+             doors that hung off a pane — a double-click on its header and a row
+             in its ⌄ menu — were withdrawn on 2026-08-19 (second round), so the
+             description below names the chord and nothing else.
              Preferences ABOUT the mode — live tab thumbnails vs names only, as a
              performance choice; a narrower column — are candidates for later
              rows, and are not this one. -->
         <div class="row">
           <div class="text">
             <div class="title">Focus mode</div>
-            <div class="desc">The tab strip becomes a column of live cards, one per tab; the tab you pick fills the window whole, splits and all. Ctrl+Shift+Z, a double-click on a pane's header and its ⌄ menu turn this same setting</div>
+            <div class="desc">The tab strip becomes a column of live cards, one per tab; the tab you pick fills the window whole, splits and all. Ctrl+Shift+Z turns this same setting</div>
           </div>
           <div class="combo" data-combo="focusmode">
             <button aria-haspopup="listbox"><span class="value">Off</span><span class="chev">▼</span></button>
@@ -6085,7 +6177,7 @@
        System Settings entry for one bit). Focus mode is a layout mode somebody
        may simply LIVE in, not only a verb they flick; so `Appearance ▸ Focus
        mode` writes this bit, the quick doors write the SAME bit, and a window
-       closed in focus mode reopens in it. `settings.json` v13 → v14 carries one
+       closed in focus mode reopens in it. `settings.json` v14 → v15 carries one
        new key; the doors are accelerators, never a second source of truth. */
     focusMode: false,
     defaultProfile: 0,       // index into PROFILES: new tabs, and startup
@@ -6101,7 +6193,47 @@
     autoSeq: 4,
     recent: [],              // [{seed, at}] — places, never output (P1-13)
     lastSession: [],         // every tab's plan at shutdown, pin flag and all
+    /* ── pins: ONE TABLE, THREE KINDS, TWO `PINNED` SECTIONS (user 2026-08-19) ──
+       "Favourites = pin". No bookmark manager arrives with this; the control is
+       the pin the tab strip has used all along (`ChromeMark::Pin`), and its
+       STATE RIDES ON `filled` rather than on a second glyph: outline = you may
+       pin this, solid = it is pinned. Unpinned fades in with the row's hover
+       because it is an OFFER; pinned is always drawn because it is a FACT about
+       that row.
+       In the product this is `bt-persist::pins`, schema v1, one `{kind, target}`
+       per line, written atomically. `folder` feeds the root menu, `file` feeds
+       the preview switcher, and `url` parses but draws nothing until W2 — which
+       is why the kind is carried as the file's own string rather than collapsed
+       into an enum: a table rewritten on every pin must not rename somebody
+       else's rows just because this build has not heard of them.
+       Here it is three arrays and the two menus read them. */
+    pins: [
+      /* a folder this window would have found anyway (a shell stands in it): it
+         is LIFTED into PINNED wearing every badge it earned, never copied — one
+         folder, one row */
+      { kind: "folder", target: "C:\\Users\\Weiyi\\Developer\\folio-site" },
+      /* and one this window has no other reason to name: the case the section
+         exists for */
+      { kind: "folder", target: "C:\\Users\\Weiyi\\Documents\\Folio notes" },
+      /* a pinned file with NO buffer behind it (`pool: None` in the product):
+         pressing it OPENS the file rather than switching to a buffer — which is
+         exactly the first frame after a restart, when the pool is empty and the
+         list is not */
+      { kind: "file", target: "C:\\Users\\Weiyi\\Developer\\BetterTerminal\\docs\\DESIGN.md" },
+    ],
   };
+  /* one index space, asked two ways */
+  const isPinned = (kind, target) => state.pins.some(p => p.kind === kind && p.target === target);
+  const pinsOf = (kind) => state.pins.filter(p => p.kind === kind).map(p => p.target);
+  /* PINNING DOES NOT CLOSE THE MENU. Every other press in these lists is an
+     ANSWER, and an answer puts the question away; a pin is an edit to the list
+     you are looking at, and the row that just moved to the top has to be seen
+     moving there. */
+  function togglePinTarget(kind, target) {
+    const i = state.pins.findIndex(p => p.kind === kind && p.target === target);
+    if (i >= 0) state.pins.splice(i, 1);
+    else state.pins.push({ kind, target });
+  }
   /* two claudes in two repos, and a shell in one of them: the case the strip has
      to survive, and the case a profile name alone cannot */
   state.tabs = [
@@ -7455,10 +7587,12 @@
   function renderNode(node, w) {
     if (node.type === "leaf") {
       const focused = node.id === w.focus;
-      /* the focus-mode stage always wears its header even when the tab holds a
-         single pane — the header carries the pane's identity and the dblclick
-         that leaves the mode (user bug report 2026-07-18) */
-      const multi = paneCount(w) > 1 || state.focusMode;
+      /* A lone pane wears no header, in focus mode exactly as outside it. The
+         `|| state.focusMode` that used to stand here existed so the withdrawn
+         double-click door had somewhere to land; with the door gone (§7.1.6b′,
+         2026-08-19 second round) the exception goes too, and this line is one
+         more place where the mode is not a branch. */
+      const multi = paneCount(w) > 1;
       /* A files leaf is a pane like any other — same .pane shell, same header,
          same close button — so it drags/docks/resizes through the identical code.
          Only the body differs: a tree instead of a terminal. */
@@ -8003,7 +8137,14 @@
     const pool = poolOf(w);
     const flippable = pv.ftype === "markdown";   /* markdown gets the view/source flip */
     const editable = pv.ftype === "text" || pv.ftype === "markdown";
-    const many = pool.length > 1;
+    /* THE CHEVRON FOLLOWS THE LIST, NOT THE POOL (found on the machine,
+       2026-08-19). It is the only door into this list, and it used to open on
+       `pool.length > 1` — so on the first frame after a restart, with one buffer
+       in the pool and a pinned file still in the list, the door did not exist
+       and that section could not be opened once. The COUNT BADGE beside it still
+       counts BUFFERS: its job is P19's honest inventory of hidden state, and a
+       shortcut to a file nobody has opened is not hidden state. */
+    const many = previewSwitcherRows(w).all.length > 1;
     const othersDirty = pool.some(b => b !== pv && b.dirty);
     /* keep the chevron flipped across re-renders while THIS pane's menu is open —
        open state lives on #pv-menu, so it re-derives every render (root menu's
@@ -8067,16 +8208,79 @@
      cwds of your open terminals (root to where a shell is standing), plus home and
      the current root's parent. In the product this is a real folder picker; here
      it is a menu of plausible places. */
+  /* ── ONE ROW, TWO IDENTITIES, TWO BADGES (2026-08-19) ──
+     The reason a row is offered used to be a single `note`, and de-duplicating
+     by path KEPT THE FIRST — which collapsed the commonest square on the board:
+     you cd into a project, root this column on a subfolder of it, and the parent
+     happens to be exactly where a shell is standing. That row entered the list
+     as "a terminal is here" and its `parent` badge was thrown away, so "the
+     folder above" was in the menu and unrecognisable — which is the same as not
+     being there.
+     So a row carries NOTES, not a note: three reasons, seven combinations,
+     rendered `home · a terminal is here · parent`. The interpunct is punctuation
+     rather than a sentence (the same character `Read-only · 64 KB` uses, and it
+     is the same in both languages, so it never enters the string table).
+     THE POSITION IS THE FIRST REASON'S. Moving a row down to where its later
+     reason would have put it means the menu reshuffles because a shell moved,
+     and the fixed most-permanent → most-local order exists precisely to stop
+     that. */
+  const ROOT_NOTES = ["home", "a terminal is here", "parent"];
   function rootChoices(files) {
     const cwds = [...new Set(state.sessions.map(s => s.cwd).filter(Boolean))];
     const parent = files.root.replace(/[\\/]+$/, "").replace(/[\\/][^\\/]+$/, "") || HOME;
     const list = [];
-    const add = (path, note) => { if (path && !list.some(x => x.path === path)) list.push({ path, note }); };
+    /* keep the position of the FIRST reason, and merge every later one's badge
+       into that row */
+    const add = (path, note) => {
+      if (!path) return;
+      const seat = list.find(x => x.path === path);
+      if (!seat) { list.push({ path, notes: note ? [note] : [] }); return; }
+      if (note && !seat.notes.includes(note)) seat.notes.push(note);
+    };
     add(HOME, "home");
     cwds.forEach(c => add(c, "a terminal is here"));
     if (parent !== files.root) add(parent, "parent");
+    /* a pinned folder is a row in the same list and the same index space — the
+       section it lands in is decided below, not here, so a folder that is BOTH
+       pinned and found by this window appears ONCE, wearing what it earned */
+    pinsOf("folder").forEach(p => add(p, null));
     return list;
   }
+  const rootNoteText = (c) => c.notes.join(" · ");
+  /* ── the note column reserves what COULD show, not what does ──
+     Measure all seven combinations of the three reasons and hold the widest. The
+     alternative — measuring the three reasons, or measuring this menu's own
+     rows — makes the menu change width under the pointer the first time two
+     badges land on one line. Measured once, lazily, in the menu's own type. */
+  let rootNoteWidthPx = null;
+  function rootNoteWidth() {
+    if (rootNoteWidthPx !== null) return rootNoteWidthPx;
+    const probe = document.createElement("span");
+    probe.className = "default-hint";
+    probe.style.cssText = "position:absolute;visibility:hidden;white-space:nowrap;left:-9999px";
+    const host = document.createElement("div");
+    host.className = "root-menu";
+    host.style.cssText = "position:absolute;visibility:hidden;left:-9999px;display:block";
+    const row = document.createElement("div");
+    row.className = "rm-item";
+    row.appendChild(probe); host.appendChild(row); document.body.appendChild(host);
+    let max = 0;
+    for (let mask = 1; mask < 8; mask++) {
+      probe.textContent = ROOT_NOTES.filter((_, i) => mask & (1 << i)).join(" · ");
+      max = Math.max(max, probe.getBoundingClientRect().width);
+    }
+    document.body.removeChild(host);
+    return (rootNoteWidthPx = Math.ceil(max));
+  }
+  /* One drawing of the pin, for both menus that carry one. `filled` is the whole
+     state — outline is the offer, solid is the fact — and the three inks are one
+     order of precedence, written in CSS so the hovered pin wins over the pinned
+     one: pointer → menu ink, pinned → accent, otherwise → the menu's quietest
+     ink. The box is reserved on every PINNABLE row whether or not it draws, so a
+     name never shortens under the pointer as a pin fades in. */
+  const rowPinHtml = (kind, target, title) =>
+    `<span class="row-pin ${isPinned(kind, target) ? "on" : ""}" data-pin-kind="${kind}"
+           data-pin-target="${esc(target)}" title="${title}"><svg><use href="#i-${isPinned(kind, target) ? "pinned" : "pin"}"/></svg></span>`;
   /* one close path so the chevron never gets stranded flipped: hide the menu AND
      drop the .rootopen marker from whichever root wore it */
   function closeRootMenu() {
@@ -8108,19 +8312,61 @@
     $("pv-menu").classList.remove("show");
     document.querySelectorAll(".pv-name.pvopen").forEach(el => el.classList.remove("pvopen"));
   }
+  /* ── the switcher's list, which is NOT the pool ──
+     One list, one index space, pinned rows lifted to the front — the root
+     menu's rule, instanced a second time. A pinned file that this tab also has
+     open is ONE row (lifted, never copied); a pinned file with no buffer behind
+     it is a row too, and pressing it OPENS the file rather than switching to
+     something. That last case is the whole reason the section is worth having:
+     the first frame after a restart has an empty pool and a list that is not
+     empty. */
+  function previewSwitcherRows(w) {
+    const rows = poolOf(w).map(b => ({ path: b.path, name: b.name, buf: b }));
+    pinsOf("file").forEach(p => {
+      if (!rows.some(r => r.path === p))
+        rows.push({ path: p, name: p.split(/[\\/]/).pop(), buf: null });
+    });
+    const pinned = rows.filter(r => isPinned("file", r.path));
+    const rest = rows.filter(r => !isPinned("file", r.path));
+    return { pinned, rest, all: pinned.concat(rest) };
+  }
+  /* `PINNED` on top, one hairline, and THE LOWER SECTION HAS NO HEADING OF ITS
+     OWN: this menu's whole subject is "the files this pane can show", so the
+     bottom half needs no word to say what it is — only the lifted half does.
+     An empty pinned section takes its heading and its rule away together, and
+     the rule is written as belonging to the section below it so the two can
+     never end up back to back. */
+  function pvMenuHtml(leaf, w) {
+    const { pinned, rest } = previewSwitcherRows(w);
+    const row = (r) => `
+      <div class="tm-item ${r.buf && r.buf === leaf.preview ? "cur" : ""}"
+           data-path="${esc(r.path)}" data-name="${esc(r.name)}" title="${esc(r.path)}">
+        <svg><use href="#i-file"/></svg><span>${esc(r.name)}</span>
+        <span class="pvm-dot ${r.buf && r.buf.dirty ? "on" : ""}">●</span>
+        ${rowPinHtml("file", r.path, isPinned("file", r.path) ? "Unpin this file" : "Pin this file")}
+      </div>`;
+    return (pinned.length ? `<div class="tm-label">Pinned</div>` + pinned.map(row).join("") : "")
+      + (rest.length ? (pinned.length ? `<div class="tm-sep"></div>` : "") + rest.map(row).join("") : "");
+  }
   function openPvMenu(leaf, anchorEl) {
     closeAllPopups();
     const menu = $("pv-menu");
-    const pool = poolOf(activeTab());
-    menu.innerHTML = pool.map((b, i) => `
-      <div class="tm-item ${b === leaf.preview ? "cur" : ""}" data-i="${i}">
-        <svg><use href="#i-file"/></svg><span>${esc(b.name)}</span>
-        <span class="pvm-dot ${b.dirty ? "on" : ""}">●</span>
-      </div>`).join("");
+    const w = activeTab();
+    menu.innerHTML = pvMenuHtml(leaf, w);
     menu.querySelectorAll(".tm-item").forEach(el => el.addEventListener("click", (e) => {
       e.stopPropagation();
+      /* pinning edits the list rather than answering it, so the menu stays up
+         and the row is seen moving to the top (the root menu's rule) */
+      const pin = e.target.closest(".row-pin");
+      if (pin) {
+        togglePinTarget(pin.dataset.pinKind, pin.dataset.pinTarget);
+        openPvMenu(leaf, anchorEl);
+        return;
+      }
       closePvMenu();
-      leaf.preview = pool[+el.dataset.i];
+      /* one verb for both halves: an open buffer is found, a pinned file with
+         none is made — which is what "pressing it opens the file" means */
+      leaf.preview = poolBuffer(w, el.dataset.path, el.dataset.name);
       render();
     }));
     const a = anchorEl.getBoundingClientRect();
@@ -8154,25 +8400,60 @@
     menu.style.top = (a.bottom + 4) + "px";
     menu.style.left = Math.max(6, Math.min(a.left, window.innerWidth - menu.offsetWidth - 8)) + "px";
   }
-  function openRootMenu(leaf, anchorEl) {
-    closeAllPopups();   /* also un-flips the PREVIOUS root's chevron when hopping pane→pane */
-    const menu = $("root-menu");
-    const files = leaf.files;
-    menu.innerHTML = `<div class="rm-label">Open folder</div>` + rootChoices(files).map(c => `
+  /* ── the root menu's two sections ──
+     `PINNED` above `OPEN FOLDER`, one hairline between them, and both of them
+     drawn out of ONE list with ONE index space: a pinned row is LIFTED, never
+     copied, so a folder that is both pinned and standing under one of your
+     shells is a single row wearing every badge it earned.
+     AN EMPTY SECTION LOSES ITS HEADING AND ITS RULE TOGETHER. Pin every place
+     this window found and `OPEN FOLDER` would stand over a hairline introducing
+     nothing; both a heading over an empty section and a rule under one are ways
+     of telling a reader that something follows when nothing does. Written as
+     "draw the separator with the section below it" rather than as a special
+     case, which is also what keeps the PINNED rule and `Browse…`'s rule from
+     ever landing back to back. */
+  function rootMenuHtml(files) {
+    const all = rootChoices(files);
+    const pinned = all.filter(c => isPinned("folder", c.path));
+    const rest = all.filter(c => !isPinned("folder", c.path));
+    const row = (c) => `
       <div class="rm-item ${c.path === files.root ? "cur" : ""}" data-path="${c.path}">
         <span class="tick">${c.path === files.root ? "✓" : ""}</span>
         <svg><use href="#i-folder"/></svg>
         <span style="flex:1;overflow:hidden;text-overflow:ellipsis">${cwdLeaf({ cwd: c.path })}</span>
-        <span class="default-hint">${c.note}</span>
-      </div>`).join("")
+        <span class="default-hint" style="min-width:${rootNoteWidth()}px">${rootNoteText(c)}</span>
+        ${rowPinHtml("folder", c.path, isPinned("folder", c.path) ? "Unpin this folder" : "Pin this folder")}
+      </div>`;
+    const section = (label, rows, rule) =>
+      !rows.length ? "" :
+      (rule ? `<div class="rm-sep"></div>` : "") +
+      (label ? `<div class="rm-label">${label}</div>` : "") + rows.map(row).join("");
+    /* `Browse…` NAMES A QUESTION, NOT A FOLDER — you cannot pin a prompt — so it
+       carries no pin and, alone in this menu, reserves no width for one. */
+    return section("Pinned", pinned, false)
+      + section("Open folder", rest, pinned.length > 0)
       /* the quick list covers the common places; Browse is the escape hatch for
          any folder (a real OS picker in the product; a mock prompt here) */
       + `<div class="rm-sep"></div>
          <div class="rm-item" data-browse="1">
            <span class="tick"></span><svg><use href="#i-folder-open"/></svg>
            <span style="flex:1">Browse…</span></div>`;
+  }
+  function openRootMenu(leaf, anchorEl) {
+    closeAllPopups();   /* also un-flips the PREVIOUS root's chevron when hopping pane→pane */
+    const menu = $("root-menu");
+    const files = leaf.files;
+    menu.innerHTML = rootMenuHtml(files);
     menu.querySelectorAll(".rm-item").forEach(el => el.addEventListener("click", (e) => {
       e.stopPropagation();
+      /* the pin is an edit to this list, not an answer to it: toggle, redraw in
+         place, leave the menu standing so the row is seen moving to the top */
+      const pin = e.target.closest(".row-pin");
+      if (pin) {
+        togglePinTarget(pin.dataset.pinKind, pin.dataset.pinTarget);
+        openRootMenu(leaf, anchorEl);
+        return;
+      }
       closeRootMenu();
       if (el.dataset.browse) {
         /* prototype: a real folder picker would go here. Mock it with a prompt so
@@ -8284,23 +8565,32 @@
           collapsed` governs the NORMAL rail only — the column is always card
           width, because cards are this mode's reason to exist.
 
-     THE FIVE DOORS (user ruling 2026-08-19). One bit, five ways to write it, one
-     face: whichever door was used, the Appearance row shows what is true.
-       1. `Appearance ▸ Focus mode` — the row, and the household registration:
-          it is what makes the bit PERSIST (`settings.json` v13 → v14), so a
-          window closed in focus mode reopens in it.
-       2. `Ctrl+Shift+Z` — the main shutter, one chord both ways.
-       3. DOUBLE-CLICK A PANE HEADER — enter (restated 2026-08-19: "step back
-          behind the wall and see the whole thing"); inside the mode, a
-          double-click on a stage pane's header leaves. Symmetric, one gesture.
-       4. THE PANE ⌄ MENU — the discoverable door, because nobody guesses a
-          double-click, and this menu already hangs off the thing the mode acts
-          on.
-       5. THE VISIBLE EXIT AT THE TOP OF THE COLUMN — the one the user insisted
-          on: a mode you can leave only by remembering a chord is a trap. It
-          sticks to the top of the rail so a long column cannot scroll it away.
-       Esc still leaves, from the bottom rung of the ladder under every float,
-       flyout and search capsule; the command palette carries the verb too.
+     TWO DOORS IN, FOUR WAYS OUT (user ruling 2026-08-19, second round; this
+     paragraph replaced "THE FIVE DOORS" of the same day). One bit, one face:
+     whichever door was used, the Appearance row shows what is true.
+       IN 1. `Appearance ▸ Focus mode` — the row, and the household
+             registration: it is what makes the bit PERSIST (`settings.json`
+             v14 → v15), so a window closed in focus mode reopens in it. It
+             stands beside `Tab layout` and `Sidebar` because the three answer
+             one question between them: what shape is this window.
+       IN 2. `Ctrl+Shift+Z` — the main shutter, one chord both ways. There is no
+             second "exit" chord, because one bit does not need a key for each
+             face of it. The chord is free here, means nothing to a shell, and
+             stays clear of Find (`Ctrl+Shift+F`) and of AltGr's Ctrl+Alt.
+       OUT  — the two above, thrown the other way, plus:
+          3. THE VISIBLE EXIT AT THE TOP OF THE COLUMN — the one the user
+             insisted on, and the only one of the four you can SEE: a mode you
+             can leave only by remembering a chord is a trap. It sticks to the
+             top of the rail so a long column cannot scroll it away.
+          4. Esc, from the bottom rung of the ladder under every float, flyout
+             and search capsule. The command palette carries the verb too.
+     THE TWO DOORS THAT HUNG OFF A PANE WERE WITHDRAWN the same day: the
+     double-click on a pane header (a gesture that means "blow this up"
+     everywhere else, while this mode makes the pane narrower — and it is left
+     empty for single-pane zoom, which is what it is really shaped for), and the
+     pane ⌄ menu row (every other row there acts on that pane; a verb about the
+     window's posture made one menu speak two languages). Nothing in the mode
+     is now reachable only from a pane, or only from a tab that has been split.
 
      DEAD WITH THE TWO EARLIER FORMS, so nobody goes looking. From form A: the
      standby pool (`w.standby`, `spawnStandby`, `#fcard-add`), the 4 / 4+1+1
@@ -8350,10 +8640,10 @@
     renderWithPaneFlip(before);
     syncFocusCombo();
   }
-  /* One bit, FIVE doors, one face: whichever door was used, the Appearance row
-     shows what is true. `syncCombo` moves the tick and the button's word; this is
-     the same contract every other two-state row keeps, it just has five ways in
-     instead of one. */
+  /* One bit, one face: whichever door was used, the Appearance row shows what is
+     true. `syncCombo` moves the tick and the button's word; this is the same
+     contract every other two-state row keeps, it just has two ways in and four
+     ways out instead of one apiece. */
   const syncFocusCombo = () => syncCombo("focusmode", state.focusMode ? "on" : "off");
   /* MONITOR CARDS ONLY, now that the focus column's card is a tab (§7.1.6b′ ③
      sends that click to `selectTab`). A monitor card pictures ONE PANE of one
@@ -8454,8 +8744,8 @@
 
   /* The column, in strip order — the order the user arranged, and the only order
      there is (v1 has no card dragging, so there is no second one to store).
-     DOOR 5 rides on top of it: the heading the tab list spends on the word "Tabs"
-     is spent here on the word plus the way out. */
+     THE VISIBLE WAY OUT rides on top of it: the heading the tab list spends on
+     the word "Tabs" is spent here on the word plus the way out. */
   const focusRailHtml = () =>
     `<div class="focus-bar">
        <span class="fb-label">Focus mode</span>
@@ -8849,33 +9139,23 @@
            could not see until you left. There is no lens now. */
         startDrag(e, { kind: "pane", leafId: +el.dataset.leaf });
       });
-      /* ── DOOR 3: DOUBLE-CLICK A PANE HEADER (ruling 2026-08-19) ──
-         The five doors are listed in full where the mode is defined; this is the
-         gesture one, and the ruling restated what it MEANS. It used to read
-         "blow this pane up"; now it reads "step back behind the wall and see the
-         whole thing" — you leave the tab you are working in for the list of
-         everything you are working on, and the tab itself is untouched either
-         way. Inside the mode the same gesture on a stage pane's header leaves,
-         so one gesture is both directions. (The stage keeps its header even in a
-         one-pane tab exactly so this exit exists — see `renderNode`'s `multi`.)
-         The earlier note here — "settings is NOT one of the doors, a mode is a
-         verb not a preference" — was overturned the same day by Stage Manager:
-         this is a layout somebody may LIVE in, so it has a row AND fast doors
-         over one bit, and the row is what makes it persist.
-         `w.focus = id` survives the rewrite for a smaller reason than it used to
-         carry: the stage is the whole tab now, so focusing the pane you
-         double-clicked does not choose what you see — it just leaves the caret
-         where your hand already was. */
-      el.addEventListener("dblclick", (e) => {
-        if (e.target.closest(".pane-close, .pane-files, .pane-split, .pv-tool")) return;
-        if (state.focusMode) { exitFocus(); return; }
-        const w = activeTab();
-        const id = +el.dataset.leaf;
-        w.focus = id;
-        const s = leafSession(findLeafIn(w, id));
-        if (s) s.unread = false;
-        enterFocus();
-      });
+      /* ── DOUBLE-CLICKING A PANE HEADER DOES NOTHING, ON PURPOSE ──
+         (user ruling 2026-08-19, second round.) It was focus mode's gesture door
+         for one day and was withdrawn: everywhere else in this OS a double-click
+         on a header reads "blow this thing up", and focus mode does the
+         opposite — it makes the pane NARROWER and parks a column of tab cards
+         beside it. A gesture that contradicts its own shape is worse than no
+         gesture, and nothing on screen ever said this one existed.
+         RESERVED FOR SINGLE-PANE ZOOM: that is the feature this gesture is
+         natively shaped for, and the layout primitive it will use is already
+         built and deliberately unused (`bt-layout`'s `LayoutMode::Focus` /
+         `solve_focused`). So there is no binding here — not a no-op handler,
+         just the absence of one — and the header keeps its other jobs: identity,
+         the drag handle above, rename, the ⌄ menu.
+         The contradiction this used to carry died with it: the stage no longer
+         needs a header on a lone pane so that an exit has somewhere to land, so
+         `renderNode`'s `multi` is back to counting panes and `render` still has
+         no focus-mode branch. */
     });
   }
 
@@ -9096,7 +9376,8 @@
       jumpAttention();
       return;
     }
-    /* Ctrl+Shift+Z — focus mode, door 2 of five (user ruling 2026-08-19). One
+    /* Ctrl+Shift+Z — focus mode, the second of the two doors in (user ruling
+       2026-08-19; the three that were pane gestures or pane menus are gone). One
        chord, both directions, because the mode is ONE BIT and the row in
        Appearance shows which way it is set — a separate "leave" key would be a
        second truth about the same bit. It is deliberately not `Ctrl+Shift+F`:
@@ -10757,9 +11038,9 @@
           render();
         }
         if (kind === "focusmode") {
-          /* the row and the doors are one bit: this goes through `enterFocus` /
+          /* the row and the chord are one bit: this goes through `enterFocus` /
              `exitFocus` rather than assigning the flag, so the dialog's path and
-             the double-click's path cannot drift apart (and the row inherits the
+             `Ctrl+Shift+Z`'s path cannot drift apart (and the row inherits the
              FLIP for free) */
           if (item.dataset.v === "on") enterFocus(); else exitFocus();
           combo.querySelector(".value").textContent = state.focusMode ? "On" : "Off";
@@ -11444,15 +11725,17 @@
   function openPaneMenu(leafId, x, y) {
     closeAllPopups();
     const menu = $("pane-menu");
-    /* DOOR 4: the ⌄ menu carries focus mode for DISCOVERABILITY (ruling
-       2026-08-19). A double-click is a gesture nobody guesses, and this is the
-       menu already hanging off the thing that gesture is aimed at. It reads the
-       verb it will perform, so the same row is the way out while the mode is
-       on — one bit, one word for it, wherever you meet it. */
-    const focusRow =
-      `<div class="tm-item" data-act="focus"><svg><use href="#i-max"/></svg><span>${state.focusMode ? "Exit focus mode" : "Enter focus mode"}</span></div>
-         <div class="tm-sep"></div>`;
-    menu.innerHTML = focusRow +
+    /* NO FOCUS-MODE ROW HERE — the door that used to stand at the top was
+       withdrawn the day after it shipped (user ruling 2026-08-19, second round;
+       §7.1.6b′ "two doors in, four ways out"). Every other row in this menu acts
+       on the pane it hangs off — split it either way, close it — and a verb
+       about the WINDOW's posture inside that list is one menu speaking two
+       languages. It retired together with the double-click, and the two strings
+       came out of the table with it; the menu is back to its original shape, so
+       the keyboard walk starts at the first split row again. Focus mode's doors
+       are the Appearance row, `Ctrl+Shift+Z`, the column's own exit button and
+       Esc — none of them hangs off a pane. */
+    menu.innerHTML =
       `<div class="tm-item" data-act="right"><svg><use href="#i-split-right"/></svg><span>Split right</span></div>
        <div class="tm-item" data-act="down"><svg><use href="#i-split-down"/></svg><span>Split down</span></div>
        <div class="tm-sep"></div>
@@ -11461,14 +11744,7 @@
       e.stopPropagation();
       menu.classList.remove("show");
       const act = el.dataset.act;
-      if (act === "focus") {
-        if (state.focusMode) exitFocus();
-        /* the whole tab takes the stage (§7.1.6b′ ②), so there is nothing to
-           choose here; focusing the menu's own pane only leaves the caret where
-           the hand already was */
-        else { activeTab().focus = leafId; enterFocus(); }
-      }
-      else if (act === "close") closePane(leafId);
+      if (act === "close") closePane(leafId);
       else splitPane(leafId, act === "right" ? "right" : "bottom");
     }));
     menu.classList.add("show");
@@ -11871,7 +12147,7 @@
      There is no pointerdown handler because there is no drag: card dragging is
      v1's stated left-out, and with it went the click-squelch that told a
      finished drag from a click.
-     DOOR 5 rides the same delegation — the exit button is a child of the rail,
+     THE VISIBLE EXIT rides the same delegation — the button is a child of the rail,
      and it is checked first because it sits above the cards, not inside one.
      Delegated, because the column rebuilds its DOM whenever its structure
      changes — per-element wiring would evaporate with it. */
@@ -12321,8 +12597,15 @@
     const t4 = mkWs(node);
     splitLeafIn(t4, leavesOf(t4.tree)[0].id, "bottom", mkLeaf(agent.uid));
     state.tabs.push(t4);
+    /* THIS SHELL STANDS IN THE PARENT OF THE FILES COLUMN'S ROOT, on purpose:
+       it is the square the composable `RootNotes` were written for. Tab 2's tree
+       is rooted on `…\Developer\BetterTerminal`, so `…\Developer` is at once
+       "a terminal is here" and "parent" — the row that used to enter the list
+       under the first of those and quietly lose the second. Open that column's
+       ⌄ and the row wears both badges, in the fixed most-permanent → most-local
+       order, at the position its FIRST reason gave it. */
     const py = mkSession("PowerShell", mark("pwsh"), powershell(), false,
-                         "C:\\Users\\Weiyi\\Developer\\bt-corpus\\tools", powershell);
+                         "C:\\Users\\Weiyi\\Developer", powershell);
     state.tabs.push(mkWs(py));
   })();
 
