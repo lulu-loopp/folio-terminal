@@ -2780,32 +2780,62 @@ fn commit_detail(
     let meta: Vec<String> = crate::tooltip::wrap(meta.trim_end(), band, |text| {
         measure(text, meta_font, crate::git_panel::MeasureFace::PLAIN)
     });
-    // Where the chips start: at the end of the last line of the sentence that
-    // names them, and on a fresh line each time the room runs out. One flow,
-    // decided here so that the block's height and the block's layout are two
-    // readings of one answer rather than two arithmetics that agree today.
+    // Where the chips go: after the sentence that names them if they fit there,
+    // and on a line of their own if they do not. One flow, decided here so that
+    // the block's height and the block's layout are two readings of one answer
+    // rather than two arithmetics that agree today.
+    //
+    // **The hashes are one run, and a run is broken only where it does not fit**
+    // (user report, 2026-08-19: a two-parent merge drew one hash per line on a
+    // band with room for both). Flowing them one at a time from the end of the
+    // sentence looks like the same greedy rule and is not: the sentence has just
+    // been wrapped *to this band*, so its last line ends near the right edge by
+    // construction, and whichever chip happens to squeeze into that tail pushes
+    // every chip after it onto a fresh line — the worst of the three available
+    // layouts, and the only one the old code could produce. Asking whether the
+    // whole run fits the tail first is what makes "装得下就同行，装不下才折" true
+    // of the run rather than of its first member.
     let chip_gap = (GRAPH_PARENT_GAP_LOGICAL_PX * scale).round();
     let mut line = meta.len().saturating_sub(1);
-    let mut x = meta
+    let tail = meta
         .last()
         .map(|last| measure(last, meta_font, crate::git_panel::MeasureFace::PLAIN))
         .unwrap_or(0.0);
-    let parents: Vec<GraphParentChip> = commit
+    let chips: Vec<(String, f32)> = commit
         .parents
         .iter()
         .map(|parent| {
             let short = short_hash(parent);
             let width = measure(&short, meta_font, crate::git_panel::MeasureFace::FIGURES);
-            let mut at = x + chip_gap;
-            // **A chip that does not fit moves down rather than out.** The one
-            // case it cannot help is a band too narrow for a single seven-
-            // character hash, and there the chip starts at the left edge of its
-            // own line and is cut by the block rather than by the pane.
-            if at + width > band && at > chip_gap {
+            (short, width)
+        })
+        .collect();
+    #[allow(clippy::cast_precision_loss)]
+    let run: f32 = chips.iter().map(|(_, width)| *width).sum::<f32>()
+        + chip_gap * chips.len().saturating_sub(1) as f32;
+    let mut cursor = if !chips.is_empty() && tail + chip_gap + run > band {
+        line += 1;
+        0.0
+    } else {
+        tail + chip_gap
+    };
+    let parents: Vec<GraphParentChip> = commit
+        .parents
+        .iter()
+        .zip(chips)
+        .map(|(parent, (short, width))| {
+            // **Inside the run, a chip that does not fit still moves down rather
+            // than out** — an octopus merge names more hashes than any band
+            // holds. The one case that cannot be helped is a band too narrow for
+            // a single seven-character hash, and there the chip starts at the
+            // left edge of its own line and is cut by the block rather than by
+            // the pane.
+            if cursor + width > band && cursor > 0.0 {
                 line += 1;
-                at = 0.0;
+                cursor = 0.0;
             }
-            x = at + width;
+            let at = cursor;
+            cursor = at + width + chip_gap;
             GraphParentChip {
                 width,
                 short,
@@ -6606,6 +6636,112 @@ mod tests {
         let root = story_of(&root).expect("open");
         assert!(root.parents.is_empty());
         assert!(!meta_text(root).contains(graph_meta_parents().trim_end()));
+    }
+
+    /// PIN (user report, 2026-08-19) — **the parent hashes are one run: they
+    /// share a line wherever a line can hold them, and break only where it
+    /// cannot.**
+    ///
+    /// The report was a screenshot of a two-parent merge with one hash per line
+    /// on a band with room for both. The cause was a flow that asked each chip on
+    /// its own whether it fitted the space left at the end of the sentence — and
+    /// that sentence has just been wrapped *to this band*, so its last line ends
+    /// near the right edge by construction. One chip squeezes into the tail, the
+    /// next has nowhere to go, and a merge is drawn as a column.
+    ///
+    /// Three widths, because the three answers are different and each has to be
+    /// the right one:
+    ///
+    /// * **Wide** — the tail holds the whole run, so the run stays on the
+    ///   sentence's own line and the block is no taller than the sentence.
+    /// * **Middling** — the tail holds one chip and not both. The old flow put
+    ///   one there and dropped the other; the run moves down **together** and
+    ///   they share the new line.
+    /// * **An octopus** — more hashes than one line holds, so the run wraps
+    ///   inside itself and every chip still starts inside the band.
+    ///
+    /// Red gate: restore the per-chip flow (`let mut at = x + chip_gap` inside
+    /// the map) and the middling case goes red on the shared line; delete the
+    /// in-run wrap and the octopus runs off the right-hand edge.
+    #[test]
+    fn both_parent_hashes_share_a_line_wherever_one_can_hold_them() {
+        let flow_of = |width: f32, commits: Vec<GitCommit>| {
+            let state = state_of(commits, false);
+            let content = frame(&state, Some("c0"), [0.0, 0.0, width, 600.0]);
+            let story = story_of(&content).expect("open");
+            let chips: Vec<(usize, f32)> = story
+                .parents
+                .iter()
+                .map(|chip| (chip.line, chip.x))
+                .collect();
+            (story.meta.len(), story.meta_lines, chips)
+        };
+        let lines_of = |width: f32| flow_of(width, told(""));
+
+        // Wide: the sentence's own last line has room for both, and nothing
+        // moves down at all.
+        let (sentence, band, chips) = lines_of(900.0);
+        assert_eq!(chips.len(), 2, "the fixture is a two-parent merge");
+        assert_eq!(
+            chips[0].0, chips[1].0,
+            "both hashes on one line: {chips:?}"
+        );
+        assert_eq!(
+            chips[0].0,
+            sentence - 1,
+            "and that line is the sentence's own: {chips:?}"
+        );
+        assert_eq!(band, sentence, "so the block is no taller than the words");
+
+        // Middling: the tail holds one chip and not two. The run moves down
+        // whole — which is the regression this pins — and the pair share the
+        // fresh line rather than being dealt one per row.
+        let (sentence, band, chips) = lines_of(620.0);
+        assert_eq!(
+            chips[0].0, chips[1].0,
+            "the run moved down together rather than splitting: {chips:?}"
+        );
+        assert_eq!(
+            chips[0].0,
+            sentence,
+            "onto the line after the sentence: {chips:?}"
+        );
+        assert_eq!(chips[0].1, 0.0, "starting at the band's left edge");
+        assert!(
+            chips[1].1 > chips[0].1,
+            "with the second beside the first: {chips:?}"
+        );
+        assert_eq!(band, sentence + 1, "one line taller, and only one");
+
+        // An octopus: more hashes than any one line of this band holds. The run
+        // wraps inside itself, every line after the first starts at the left
+        // edge, and no chip is laid out past the band it was measured against.
+        let mut octopus = told("");
+        octopus[0].parents = (1..=14).map(|n| format!("c{n}")).collect();
+        let (sentence, band, chips) = flow_of(620.0, octopus);
+        assert_eq!(chips.len(), 14);
+        assert!(
+            chips.last().expect("fourteen chips").0 > chips[0].0,
+            "fourteen hashes do not fit one line of this band: {chips:?}"
+        );
+        assert_eq!(
+            band,
+            chips.last().expect("fourteen chips").0 + 1,
+            "and the block is exactly as tall as the flow it holds"
+        );
+        for pair in chips.windows(2) {
+            let (before, after) = (pair[0], pair[1]);
+            if after.0 == before.0 {
+                assert!(after.1 > before.1, "left to right within a line: {chips:?}");
+            } else {
+                assert_eq!(after.0, before.0 + 1, "one line at a time: {chips:?}");
+                assert_eq!(after.1, 0.0, "and a wrapped chip starts at the edge");
+            }
+        }
+        assert!(
+            chips[0].0 >= sentence.saturating_sub(1),
+            "the run never climbs above the sentence that names it: {chips:?}"
+        );
     }
 
     /// D2 — "committed by" appears exactly when the committer is somebody else.
