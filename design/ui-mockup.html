@@ -2859,8 +2859,16 @@
        · `#fcard-add`, `.fc-cap` (the "4 / 4" whisper), `.fcard-ghost`,
          `.drop-hot`, `#focus-cards.drop-deny` and `.fcard.grabbed` died a form
          earlier with the capacity cap, the standby pool and card dragging.
-         Nothing brought them back: card dragging is still v1's stated left-out,
-         and the column still refuses file drops.
+         The column still refuses file drops (③) and still hosts no tear-out (②),
+         so `.drop-hot` / `#focus-cards.drop-deny` stay dead. `.fcard.grabbed` is
+         a different matter since 2026-08-20: the user reversed ④ and CARD
+         REORDERING SHIPPED NATIVELY that day — the native column fills its run's
+         slots and inherits the strip's grip, clamp, threshold, pinned partition
+         and FLIP whole (DESIGN §7.1.6b′ ④). THIS PROTOTYPE OWES THE GESTURE and
+         owes it as its own slice: the rail rebuilds `#focus-rail`'s innerHTML on
+         every structural change, so the element in hand would be destroyed
+         mid-drag, and that is a real piece of work rather than a selector.
+         Recorded as a debt here so nobody reads this list as a ruling.
        · The per-pane card chrome — `.fcard`, `.fc-head`, `.fc-mini` — SURVIVES,
          because the monitor expansion (§7.1.6b ③) is out-of-mode furniture and
          still unfolds one card per pane under a tab's row. Focus mode's own card
@@ -9775,7 +9783,10 @@
   }
 
   /* The column, in strip order — the order the user arranged, and the only order
-     there is (v1 has no card dragging, so there is no second one to store).
+     there is. Card dragging landed natively on 2026-08-20 and that sentence did
+     not change: a card reorder rewrites the tab list itself, so there is still
+     no second order to store. (The gesture itself is this prototype's debt —
+     see the `.fcard.grabbed` note in the stylesheet.)
      THE VISIBLE WAY OUT rides on top of it: the heading the tab list spends on
      the word "Tabs" is spent here on the word plus the way out. */
   const focusRailHtml = () =>
@@ -13727,9 +13738,14 @@
          the tab's ×, so it calls `closeTab`.
        · a PANE CARD (monitor box, `data-ws` + `data-leaf`) — explicit
          navigation to that pane of that tab, which is `stageCard`; it has no ×.
-     There is no pointerdown handler because there is no drag: card dragging is
-     v1's stated left-out, and with it went the click-squelch that told a
-     finished drag from a click.
+     There is no pointerdown handler here because THIS PROTOTYPE has no card
+     drag, and with it went the click-squelch that told a finished drag from a
+     click. That is a debt and no longer a ruling: ④ was reversed on 2026-08-20
+     and the native column reorders by card, on the tab strip's own engine (a
+     press, 6px, `begin_tab_drag`, and the same threshold, clamp, pinned
+     partition and FLIP the strip uses). Wiring it here means teaching
+     `paintFocusRail` not to rebuild the element in hand — see the
+     `.fcard.grabbed` note in the stylesheet.
      THE VISIBLE EXIT rides the same delegation — the button is a child of the rail,
      and it is checked first because it sits above the cards, not inside one.
      Delegated, because the column rebuilds its DOM whenever its structure

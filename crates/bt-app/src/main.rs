@@ -47463,14 +47463,13 @@ impl Runtime<'_> {
     /// the honest behaviour rather than a failure to handle. The horizontal strip
     /// has no such state: it is always drawn, even holding one tab.
     fn tab_run(&self, now: Instant) -> Option<seats::TabRun> {
-        // **§7.1.6b′ ③ and ④, both of them, in one answer.** In focus mode the
-        // panel holds a card column, and the column offers a dragged thing no
-        // place to land: it refuses file drops ("a list of tabs has no
-        // non-arbitrary tab to catch a file with") and v1 has no card reordering.
-        // The run it hands back is therefore a **band with no slots** — a surface
-        // that answers the drag and refuses it, rather than a hole the layout's
-        // rim shows through. That distinction is the whole of it: `None` here
-        // would hand every drop over the column to the pane behind it.
+        // **In focus mode the panel holds a card column, and the column is a
+        // tab run like the other two** (§7.1.6b′ ④, 2026-08-20). It offers a card
+        // every slot the list has, and what it refuses — a pane torn into a new
+        // tab (②), a file (③) — it refuses through the run rather than beside
+        // it, so this branch stays a choice of surface and never becomes a
+        // second set of drag rules. `None` here would be the one wrong answer:
+        // it would hand every drop over the column to the pane behind it.
         if self.window.focus_mode {
             return self
                 .focus_rail_geometry_now(now)
@@ -47554,13 +47553,17 @@ impl Runtime<'_> {
     /// button is not the bar" is true at the hit test, which is the only place it
     /// can be true once rather than everywhere.
     fn begin_pane_drag(&mut self, seat: SeatId, position: PhysicalPosition<f64>) -> Result<()> {
-        // Focus mode parks the tree and refuses every pane drag ("focus mode: the
-        // tree is parked, no pane drags", mock-up 5841). This build has no focus
-        // mode to be in — `LayoutMode::Focus` exists in the solver and nothing in
-        // `bt-app` ever constructs it — so there is no state to test and adding a
-        // condition that is always false would be inventing the guard rather than
-        // implementing it. It belongs with the Focus-Mode slice, which is where
-        // the state it reads is born.
+        // **No focus-mode guard, and that is a ruling rather than a gap.** The
+        // mock-up refuses every pane drag while the mode is on ("focus mode: the
+        // tree is parked, no pane drags", 5841) because its focus mode parks the
+        // tree behind a stage. Ours does not: §7.1.6b′ ① is that the mode
+        // replaces the *tab list* and nothing else — "`render` 里没有聚焦分支,
+        // 画的仍是 `renderNode(activeTab().tree)`" — so the stage in front of the
+        // column is the ordinary tree, its panes are the ordinary panes, and a
+        // drag among them is the ordinary gesture. What the mode does refuse is
+        // the tear-out, and that refusal lives where the surface being dropped
+        // on is described (`seats::TabRun::hosts_tear_out`, ②) rather than at
+        // the moment a pane leaves the ground.
         // K135 covers a pane already, and by identity rather than by geometry:
         // a pane held over its own rectangle has no landing however that
         // rectangle has moved since the press. A home rectangle here would be
@@ -47766,20 +47769,28 @@ impl Runtime<'_> {
             // N158 clamps the slot here rather than at the commit, so the caret
             // the user watches and the slot the release inserts at are one
             // number — see [`strip_insert_slot`].
-            DragSource::Pane(seat) => {
-                self.tear_out_is_hostable(*seat)
-                    .then(|| DropLanding::StripExtract {
-                        slot: strip_insert_slot(
-                            seats::insert_index_at(&slot_mids, run.pos(position.x, position.y)),
-                            &self
-                                .window
-                                .tabs
-                                .iter()
-                                .map(|tab| tab.pinned)
-                                .collect::<Vec<_>>(),
-                        ),
-                    })
-            }
+            // **`hosts_tear_out` is §7.1.6b′ ② and it is asked of the run**, so
+            // this arm goes on not knowing which surface it is judging. A card
+            // column is the tab list of *one window* drawn beside the tab it is
+            // showing, and the ruling is that focus mode does not split a tab:
+            // *"pane 拖到卡列不得撕成新 tab"*. The refusal has to be a fact about
+            // the surface rather than a second reading of `window.focus_mode`
+            // here — R3's whole shape is that `Runtime::tab_run` is the one place
+            // the surface is chosen and everything under it takes a
+            // [`seats::TabRun`] — and it has to be its own field rather than
+            // "has no slots", because since 2026-08-20 the column has slots.
+            DragSource::Pane(seat) => (run.hosts_tear_out && self.tear_out_is_hostable(*seat))
+                .then(|| DropLanding::StripExtract {
+                    slot: strip_insert_slot(
+                        seats::insert_index_at(&slot_mids, run.pos(position.x, position.y)),
+                        &self
+                            .window
+                            .tabs
+                            .iter()
+                            .map(|tab| tab.pinned)
+                            .collect::<Vec<_>>(),
+                    ),
+                }),
             // **P85/S3's tab-strip verbs are still held back, but the wall they
             // were held back by is gone** (recorded 2026-08-13, revised with
             // §7.1.6h).
@@ -68539,6 +68550,197 @@ mod tests {
             drawn(grabbed_offset(start, height, run.viewport, 5_000.0)),
             [foot - height, foot],
             "and carried down past the foot with its bottom edge on that one"
+        );
+    }
+
+    /// The focus column of a window holding `tabs` tabs, solved — the geometry
+    /// [`Runtime::tab_run`] hands the drag engine while the mode is on.
+    fn focus_column(tabs: usize) -> seats::FocusRailGeometry {
+        seats::focus_rail_geometry(
+            618.0,
+            1.0,
+            tabs,
+            // A plausible measured width for the word `Exit`. Nothing below is
+            // pinned to it: the bar is above the list and the cards are solved
+            // from the panel's own box.
+            22.0,
+            0.0,
+            seats::RailState {
+                layout: seats::TabLayoutMode::Vertical,
+                mode: seats::RailMode::Expanded,
+                collapsed: false,
+                open: 1.0,
+                text_opacity: 1.0,
+                fold: None,
+                focus: true,
+            },
+        )
+        .expect("focus mode puts a column on screen")
+    }
+
+    /// **§7.1.6b′ ④ is spent: a card is reordered by the tab strip's own engine,
+    /// and it moves the one list there is** (2026-08-20).
+    ///
+    /// The ruling used to read *"v1 不做卡片拖动排序"*, and the reason it gave was
+    /// a condition rather than a refusal: reordering by card had to arrive
+    /// carrying the tab strip's semantics instead of growing a second set. R3
+    /// delivered that condition — [`Runtime::tab_run`] is the one place the
+    /// surface is chosen and everything under it takes a [`seats::TabRun`] — so
+    /// what is asserted here is that the column *is* one of those surfaces and
+    /// nothing about the judgement changed when it became one.
+    ///
+    /// Every number below comes out of the run: the mids the swap is judged
+    /// against, the half-card of travel it costs, and the pitch. The card's
+    /// height is deliberately not named — F2 grew it once and the projection
+    /// slice is growing it again, and a test that named it would be pinning the
+    /// constant instead of the mechanism.
+    ///
+    /// The move itself is the two lines [`Runtime::move_tab_with_flip`] performs
+    /// on `window.tabs`, which is the whole of "the strip and the column cannot
+    /// disagree": there is no `cardSeq` to reconcile, so a reorder driven from a
+    /// card is a reorder of the list the strip reads and the session writes.
+    ///
+    /// Red gate: hand the column an empty `slots` list — which is what
+    /// `focus_rail_run` did until 2026-08-20 — and `mids` comes back empty, so
+    /// `half` is `None` and the drag computes nothing at all.
+    #[test]
+    fn a_card_dragged_past_its_neighbours_midline_reorders_the_one_tab_list() {
+        const COUNT: usize = 4;
+        let column = focus_column(COUNT);
+        let run = seats::focus_rail_run(&column);
+        assert_eq!(
+            run.slots.len(),
+            COUNT,
+            "one slot per card — the offer of a place to land"
+        );
+        let mids = run.mids();
+        let half = run
+            .half(0)
+            .expect("a card has a half-height to be judged by");
+        let unpinned = [false; COUNT];
+
+        // The third card carried to the head of the column: the same fling the
+        // strip answers by walking one slot at a time.
+        assert_eq!(
+            seats::reorder_target(&mids, &unpinned, 2, mids[0], half),
+            0,
+            "a card flung to the top of the column lands at the top"
+        );
+        // And one neighbour's worth of travel, which is where the threshold is:
+        // the leading edge has to cover half of the card below plus the margin.
+        let pitch = mids[1] - mids[0];
+        assert_eq!(
+            seats::reorder_target(&mids, &unpinned, 0, mids[0] + pitch, half),
+            1,
+            "a card dragged one slot down swaps with the card it covered"
+        );
+        assert_eq!(
+            seats::reorder_target(&mids, &unpinned, 0, mids[0], half),
+            0,
+            "and a card that has not moved does not"
+        );
+
+        // The list the move is performed on, exactly as `move_tab_with_flip`
+        // performs it.
+        let mut tabs = ["alpha", "beta", "gamma", "delta"];
+        let to = seats::reorder_target(&mids, &unpinned, 2, mids[0], half);
+        let moved = tabs[2];
+        tabs.copy_within(to..2, to + 1);
+        tabs[to] = moved;
+        assert_eq!(
+            tabs,
+            ["gamma", "alpha", "beta", "delta"],
+            "the reorder rewrites `window.tabs`, which is the list the strip \
+             draws and the session stores — there is no second sequence"
+        );
+    }
+
+    /// **F57 in the card column: pinned is a partition there too.**
+    ///
+    /// The guard lives inside [`seats::reorder_target`] and is index-based, so a
+    /// column inherits it by being a run — but the column is the one surface
+    /// that draws no `.pin-seam` (Q187 keeps that line in the rail alone), so
+    /// the rule holding here is the only thing that stops a card being dragged
+    /// across a boundary nothing on screen is drawing.
+    ///
+    /// Red gate: pass `&[false; 4]` for the pins and the first assertion walks
+    /// straight across the seam.
+    #[test]
+    fn a_card_reorder_stops_dead_at_the_pinned_seam() {
+        const COUNT: usize = 4;
+        let column = focus_column(COUNT);
+        let run = seats::focus_rail_run(&column);
+        let mids = run.mids();
+        let half = run
+            .half(0)
+            .expect("a card has a half-height to be judged by");
+        // Two pinned cards at the head, two loose ones under them — the
+        // screenshot's own arrangement.
+        let pinned = [true, true, false, false];
+        assert_eq!(
+            seats::reorder_target(&mids, &pinned, 3, mids[0], half),
+            2,
+            "a loose card flung at the top of the column stops under the pins"
+        );
+        assert_eq!(
+            seats::reorder_target(&mids, &pinned, 0, mids[3], half),
+            1,
+            "and a pinned card flung at the foot stops at the seam from above"
+        );
+        assert_eq!(
+            seats::reorder_target(&mids, &pinned, 0, mids[1], half),
+            1,
+            "while inside a partition it moves freely"
+        );
+    }
+
+    /// **K115 in the card column: a grabbed card is held inside the list's own
+    /// clip box**, the same clamp the rail's rows answer to.
+    ///
+    /// `grabbed_offset` has never known which surface it is on — it clamps a
+    /// leading edge against a `[start, end]` pair — so what is new is only what
+    /// the column hands it. The bounds are asserted strictly inside the window
+    /// because the heading with `Exit` in it is above the first and the `+` row
+    /// is below the second: a card that could reach either would be drawn over
+    /// the one way out of the mode.
+    ///
+    /// Red gate: hand the run the panel's box instead of the list's clip and the
+    /// card carried up covers the `Exit` button.
+    #[test]
+    fn a_grabbed_card_is_held_inside_the_columns_own_viewport() {
+        // Enough cards that the list actually overflows: a column with room to
+        // spare has a viewport its cards never reach, and a clamp nothing tests.
+        let column = focus_column(40);
+        assert!(
+            column.max_scroll > 0.0,
+            "the list overflows, so it has a foot"
+        );
+        let run = seats::focus_rail_run(&column);
+        let [top, foot] = run.viewport;
+        assert!(
+            top > column.bar[3] && foot < 618.0,
+            "the clip is the list's own box, under the bar: {:?}",
+            run.viewport
+        );
+        // A card partway down rather than the first: the head card's own top
+        // edge already sits on the viewport's, so clamping it up is a move that
+        // could be got right by doing nothing.
+        const CARD: usize = 3;
+        let start = run.start(CARD).expect("a card partway down the column");
+        let height = run.extent(CARD).expect("and its height");
+        let drawn = |offset: f32| {
+            let card = column.cards[CARD].shifted(offset);
+            [card.body[1], card.body[3]]
+        };
+        assert_eq!(
+            drawn(grabbed_offset(start, height, run.viewport, -5_000.0)),
+            [top, top + height],
+            "carried up past the heading it stops with its top edge on the list's"
+        );
+        assert_eq!(
+            drawn(grabbed_offset(start, height, run.viewport, 5_000.0)),
+            [foot - height, foot],
+            "and carried down past the `+` row with its bottom edge on that one"
         );
     }
 
