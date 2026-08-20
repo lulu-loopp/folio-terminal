@@ -33,7 +33,7 @@
 //! Nothing here is layout: the dialog is not a seat, takes no space from the
 //! solver, and is never persisted (a dialog does not survive a restart).
 
-use bt_persist::{BackgroundFitV1, LanguageV1, SplitDirectionV1, ThemeModeV1};
+use bt_persist::{BackgroundFitV1, LanguageV1, MinimumContrastV1, SplitDirectionV1, ThemeModeV1};
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, CursorStyle, FLOAT_WINDOW_BORDER_LOGICAL_PX,
     FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad,
@@ -909,6 +909,30 @@ pub const SPLIT_DIRECTION_OPTIONS: [SplitDirectionV1; 3] = [
     SplitDirectionV1::Right,
     SplitDirectionV1::Down,
 ];
+/// **The `Minimum contrast` row's four answers** (DESIGN §2.6).
+///
+/// `Off` first, because it is the default and the state every build before this row shipped in
+/// — [`BLOCK_MAX_HEIGHT_OPTIONS`]' order and for its reason, not [`FONT_SIZE_OPTIONS`]': a list
+/// with a privileged member leads with it rather than sorting around it. Then the ladder
+/// ascending, so that "further down the list" and "more repair" are the same direction.
+///
+/// Three rungs and not five: 2:1 is the "merely visible" bar, 3:1 is WCAG AA for large text and
+/// non-text objects, 4.5:1 is WCAG AA for body text. WCAG AAA's 7:1 is deliberately absent — it
+/// is unreachable from a mid-tone background in *either* direction (`bt_render`'s
+/// `ALWAYS_REACHABLE_RATIO_LIMIT`), so a rung offering it would be a rung that silently means
+/// "as much as this ground allows" on some schemes and 7:1 on others.
+pub const MINIMUM_CONTRAST_OPTIONS: [MinimumContrastV1; 4] = [
+    MinimumContrastV1::Off,
+    MinimumContrastV1::Ratio2,
+    MinimumContrastV1::Ratio3,
+    MinimumContrastV1::Ratio45,
+];
+/// The words those four wear.
+///
+/// [`BLOCK_MAX_HEIGHT_LABELS`]' shape exactly, and for its reason: the first is a word and goes
+/// through the i18n table ([`Text::OptionOff`]), the other three are quantities and do not.
+/// A contrast ratio is written `4.5:1` in every language this dialog speaks.
+const MINIMUM_CONTRAST_LABELS: [&str; MINIMUM_CONTRAST_OPTIONS.len()] = ["", "2:1", "3:1", "4.5:1"];
 
 /// What the profile editor's `Starting directory` picker offers (§7.1.6c-6b).
 ///
@@ -2081,6 +2105,18 @@ pub enum SettingsRow {
     /// argued, and `Runtime::settings_split_axis`, which is the one place it is
     /// read.
     SplitDirection,
+    /// **The floor a cell's ink is held to against its own paper** (DESIGN §2.6).
+    ///
+    /// Filed under `Appearance ▸ Advanced`, and both halves of that are decisions. On
+    /// `Appearance` because what it changes is what the grid looks like, next to the two rows
+    /// that choose the schemes it repairs. Under the disclosure because it is the one row in
+    /// this dialog that **overrides a colour a program asked for** — a reader who has not gone
+    /// looking for it should not meet it, and a reader who has is the one it is for.
+    ///
+    /// Last on the page rather than beside the scheme pair, for the reason the ground's six are
+    /// where they are: this is a repair applied *to* a scheme, so it reads after the row that
+    /// picks one, not before it.
+    MinimumContrast,
     /// Mock-up 2464-2474, the Startup group's only row — and the first picker in
     /// this dialog whose items carry a mark (7645-7648).
     ///
@@ -2232,6 +2268,7 @@ impl SettingsRow {
             | Self::FocusMode
             | Self::Sidebar
             | Self::SplitDirection
+            | Self::MinimumContrast
             | Self::TerminalFont
             | Self::FontSize
             // The window's ground and the window's postures (§7.1.6c-4b). All
@@ -2323,6 +2360,7 @@ impl SettingsRow {
             // Mock-up 2374.
             Self::Sidebar => Text::RowSidebar.text(),
             Self::SplitDirection => Text::RowSplitDirection.text(),
+            Self::MinimumContrast => Text::RowMinimumContrast.text(),
             // Mock-up 2467.
             Self::DefaultProfile => Text::RowDefaultProfile.text(),
             Self::Language => Text::RowLanguage.text(),
@@ -2427,6 +2465,7 @@ impl SettingsRow {
             // and a user who then found `Alt+Shift+-` still stacking panes would
             // conclude the switch was broken.
             Self::SplitDirection => Text::DescSplitDirection.text(),
+            Self::MinimumContrast => Text::DescMinimumContrast.text(),
             // Mock-up 2468, word for word. It is also the *scope* of the setting
             // and the reason `profiles::index_of_id` does not read it: a tab and
             // a launch are the two things it answers for, and a pane coming back
@@ -2569,7 +2608,9 @@ impl SettingsRow {
             | Self::Acrylic
             | Self::AlwaysOnTop
             // Which way an untold split cuts.
-            | Self::SplitDirection => true,
+            | Self::SplitDirection
+            // The one row that overrides a colour a program named.
+            | Self::MinimumContrast => true,
             Self::Theme
             | Self::LightScheme
             | Self::DarkScheme
@@ -2703,6 +2744,7 @@ impl SettingsRow {
             Self::FocusMode => FORMULA_OPTIONS.len(),
             Self::Sidebar => SIDEBAR_OPTIONS.len(),
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS.len(),
+            Self::MinimumContrast => MINIMUM_CONTRAST_OPTIONS.len(),
             Self::Language => LANGUAGE_OPTIONS.len(),
             // The picker is built from the same list the `˅` menu is built from
             // (mock-up 7645: "the default-profile picker is built from the same
@@ -2787,6 +2829,15 @@ impl SettingsRow {
                 .get(index)
                 .copied()
                 .map(split_direction_label),
+            // `BlockMaxHeight`'s shape: the word through the table, the three
+            // ratios out of the parallel array. See [`MINIMUM_CONTRAST_LABELS`].
+            Self::MinimumContrast => MINIMUM_CONTRAST_OPTIONS.get(index).map(|floor| {
+                if *floor == MinimumContrastV1::Off {
+                    Text::OptionOff.text()
+                } else {
+                    MINIMUM_CONTRAST_LABELS[index]
+                }
+            }),
             Self::Language => LANGUAGE_OPTIONS.get(index).copied().map(language_label),
             Self::DefaultProfile => (index < profiles::count()).then(|| profiles::title(index)),
             Self::BackgroundImage => IMAGE_SOURCE_OPTIONS
@@ -3053,6 +3104,9 @@ impl SettingsRow {
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS
                 .iter()
                 .position(|it| *it == values.split_direction),
+            Self::MinimumContrast => MINIMUM_CONTRAST_OPTIONS
+                .iter()
+                .position(|it| *it == values.minimum_contrast),
             Self::Language => LANGUAGE_OPTIONS
                 .iter()
                 .position(|it| *it == values.language),
@@ -3184,6 +3238,7 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     rows.push(SettingsRow::Acrylic);
     rows.push(SettingsRow::AlwaysOnTop);
     rows.push(SettingsRow::SplitDirection);
+    rows.push(SettingsRow::MinimumContrast);
     // ── the other three pages, none of which has an advanced row ──
     rows.push(SettingsRow::Formulas);
     rows.push(SettingsRow::InlineFormulas);
@@ -3456,6 +3511,8 @@ pub struct SettingsValues {
     pub context_menu: bool,
     /// Which way a split with no direction of its own cuts.
     pub split_direction: SplitDirectionV1,
+    /// The floor a cell's ink is held to against its own paper (DESIGN §2.6).
+    pub minimum_contrast: MinimumContrastV1,
     /// Which language the window writes in — **the stored mode**, not the
     /// resolved language.
     ///
@@ -3590,6 +3647,7 @@ impl SettingsValues {
             // one is.
             context_menu: false,
             split_direction: SplitDirectionV1::Auto,
+            minimum_contrast: MinimumContrastV1::Off,
             language: LanguageV1::System,
             default_profile: profiles::fallback_profile(),
             terminal_font: 0,
@@ -6127,6 +6185,17 @@ pub fn split_direction_requested(target: SettingsTarget) -> Option<SplitDirectio
     match target {
         SettingsTarget::Choice(SettingsRow::SplitDirection, index) => {
             SPLIT_DIRECTION_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// The contrast floor a press asks for, if it asks at all.
+#[must_use]
+pub fn minimum_contrast_requested(target: SettingsTarget) -> Option<MinimumContrastV1> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::MinimumContrast, index) => {
+            MINIMUM_CONTRAST_OPTIONS.get(index).copied()
         }
         _ => None,
     }
@@ -12147,9 +12216,14 @@ mod tests {
                 SettingsRow::BackgroundOpacity,
                 SettingsRow::Acrylic,
                 SettingsRow::AlwaysOnTop,
-                SettingsRow::SplitDirection
+                SettingsRow::SplitDirection,
+                // DESIGN §2.6, 2026-08-19. Last in the group, and the only row in
+                // the dialog that overrides a colour a program named — which is
+                // the argument for it being under a disclosure rather than beside
+                // the scheme pair it repairs.
+                SettingsRow::MinimumContrast
             ],
-            "the group the 2026-08-18 ruling leaves standing"
+            "the group the 2026-08-18 ruling leaves standing, plus the contrast floor"
         );
         // **`Sidebar` came back out** (user ruling 2026-08-18). It is an
         // everyday row again and it is back where it was born — directly under
@@ -15017,6 +15091,68 @@ mod tests {
         );
     }
 
+    /// PIN (DESIGN §2.6) — **the `Minimum contrast` row goes round**: every rung the picker
+    /// draws is a rung a press asks for, and a rung the file holds is the rung the tick lands
+    /// on.
+    ///
+    /// The two halves are the two directions a picker has to work in, and they are separate
+    /// functions that could disagree: `minimum_contrast_requested` turns an index into a value
+    /// on the way in, `selected_index` turns a value back into an index on the way out. A row
+    /// whose option list was reordered in one place and not the other would show the tick on
+    /// `3:1` and write `2:1`, and only a test that walks both directions on the same index
+    /// catches it.
+    ///
+    /// The label assertion is the third thing that can drift: `Off` comes out of the i18n table
+    /// and the three ratios out of a parallel array, so an index that fell out of step between
+    /// [`MINIMUM_CONTRAST_OPTIONS`] and [`MINIMUM_CONTRAST_LABELS`] would draw `2:1` on the
+    /// item that means `3:1`.
+    ///
+    /// Red gate: swap two entries of `MINIMUM_CONTRAST_OPTIONS` and the round trip still passes
+    /// while the labels go red; swap two of `MINIMUM_CONTRAST_LABELS` and only the labels do.
+    #[test]
+    fn the_minimum_contrast_row_goes_round() {
+        assert_eq!(
+            SettingsRow::MinimumContrast.option_count(),
+            MINIMUM_CONTRAST_OPTIONS.len()
+        );
+        assert_eq!(
+            SettingsRow::MinimumContrast
+                .option_labels()
+                .collect::<Vec<_>>(),
+            vec!["Off", "2:1", "3:1", "4.5:1"],
+        );
+        for (index, floor) in MINIMUM_CONTRAST_OPTIONS.iter().enumerate() {
+            assert_eq!(
+                minimum_contrast_requested(SettingsTarget::Choice(
+                    SettingsRow::MinimumContrast,
+                    index
+                )),
+                Some(*floor),
+                "item {index} does not ask for the value drawn on it"
+            );
+            let mut values = values();
+            values.minimum_contrast = *floor;
+            assert_eq!(
+                SettingsRow::MinimumContrast.selected_index(&values),
+                Some(index),
+                "a file holding {floor:?} does not tick item {index}"
+            );
+        }
+        // Off is the row's default and the first item, which is what makes a reader who has
+        // never touched it see the tick where the ladder starts.
+        assert_eq!(MINIMUM_CONTRAST_OPTIONS[0], MinimumContrastV1::Off);
+        assert_eq!(
+            SettingsRow::MinimumContrast.selected_index(&values()),
+            Some(0)
+        );
+        // A press on a *different* row must never be read as a contrast request — the router
+        // calls every `*_requested` in turn on the same target.
+        assert_eq!(
+            minimum_contrast_requested(SettingsTarget::Choice(SettingsRow::SplitDirection, 1)),
+            None
+        );
+    }
+
     /// PIN — the combo reads the app's state, and the app's state is the
     /// *resolved* default.
     ///
@@ -16531,6 +16667,7 @@ mod tests {
                 SettingsRow::Acrylic,
                 SettingsRow::AlwaysOnTop,
                 SettingsRow::SplitDirection,
+                SettingsRow::MinimumContrast,
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
                 SettingsRow::Tables,
@@ -16562,6 +16699,7 @@ mod tests {
                 SettingsRow::Acrylic,
                 SettingsRow::AlwaysOnTop,
                 SettingsRow::SplitDirection,
+                SettingsRow::MinimumContrast,
                 SettingsRow::Formulas,
                 SettingsRow::InlineFormulas,
                 SettingsRow::Tables,

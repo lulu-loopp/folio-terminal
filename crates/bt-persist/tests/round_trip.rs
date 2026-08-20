@@ -16,11 +16,11 @@ use std::path::PathBuf;
 
 use bt_persist::{
     BackgroundFitV1, DegradationReport, FilesViewV1, LanguageV1, LayoutNodeV1, LeafNodeV1,
-    PreviewLeafV1, PreviewPaneV1, PreviewPoolEntryV1, PsReadLineInviteV1, ReadReport, RecentSeedV1,
-    SESSION_SCHEMA_VERSION, SETTINGS_SCHEMA_VERSION, SessionCursorStyleV1, SessionSidebarModeV1,
-    SessionTabLayoutV1, SessionThemeV1, SessionV1, SettingsV1, SplitDirectionV1, TabPreviewV1,
-    TabV1, TermLeafV1, ThemeModeV1, read_session, read_settings, write_session_atomic,
-    write_settings_atomic,
+    MinimumContrastV1, PreviewLeafV1, PreviewPaneV1, PreviewPoolEntryV1, PsReadLineInviteV1,
+    ReadReport, RecentSeedV1, SESSION_SCHEMA_VERSION, SETTINGS_SCHEMA_VERSION,
+    SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1,
+    SettingsV1, SplitDirectionV1, TabPreviewV1, TabV1, TermLeafV1, ThemeModeV1, read_session,
+    read_settings, write_session_atomic, write_settings_atomic,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -560,7 +560,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 15,
+        SETTINGS_SCHEMA_VERSION, 16,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -578,7 +578,16 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          on its own day, the Tables switch the v11-to-v12, and the Rendered \
          blocks page's own Maximum height the v12-to-v13, and the Terminal page's \
          own Scrollback the v13-to-v14, and the Appearance page's own Focus mode \
-         the v14-to-v15 — one key on one day, five times running"
+         the v14-to-v15, and the Appearance page's own Minimum contrast the \
+         v15-to-v16 — one key on one day, six times running"
+    );
+    assert_eq!(
+        defaults.minimum_contrast,
+        MinimumContrastV1::Off,
+        "the one row in this document that overrides a colour a program asked \
+         for defaults to doing nothing, and its migration carries that forward: \
+         a build that repainted yesterday's output on the day it learned how \
+         would be this feature pointed backwards"
     );
     assert!(
         !defaults.focus_mode,
@@ -1236,6 +1245,65 @@ fn settings_v14_migrates_with_focus_mode_off_and_v15_keeps_the_shape_it_was_left
     assert!(
         on_disk.contains(r#""focus_mode": true"#),
         "the window's shape is written as its own key: {on_disk}"
+    );
+    let (round_tripped, report) = read_settings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, chosen);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// PIN (DESIGN §2.6, 2026-08-19) — a v15 settings file migrates to v16 with the contrast floor
+/// `Off`, and a v16 file that names a rung gets that rung back through a write and a read.
+///
+/// **The first half is the strongest case in this file for the rule every step here follows**,
+/// and it is worth having its own test rather than an entry in a table. `focus_mode`'s
+/// migration only had to avoid opening a different window; this one has to avoid **re-inking
+/// output the reader has already read**. Every rung above `Off` overrides colours a program
+/// asked for, in a scheme the reader deliberately chose, so a step that carried anything but
+/// `Off` forward would repaint a stranger's terminal on the strength of a row they have not
+/// seen. The sibling assertions are §1.3 rule 1 again: the fixture is non-default in its older
+/// fields, and a copy-pasted step that resets one while inserting its own is what this shape
+/// catches.
+///
+/// The second half is what the row is *for*: the floor has to survive the file, or the picker
+/// is a verb somebody re-presses every morning.
+#[test]
+fn settings_v15_migrates_with_the_contrast_floor_off_and_v16_keeps_the_rung_it_was_given() {
+    let (migrated, report) = read_settings(&fixture_path("settings_v15_focus_mode.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(migrated.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        migrated.minimum_contrast,
+        MinimumContrastV1::Off,
+        "a v15 build drew every colour as the program named it, and that is what it goes on doing"
+    );
+    assert!(
+        migrated.focus_mode,
+        "one key crosses; every sibling crosses untouched"
+    );
+    assert_eq!(migrated.scrollback_lines, 25_000);
+    assert_eq!(migrated.dark_scheme, "Nord");
+
+    let (chosen, report) = read_settings(&fixture_path("settings_v16_minimum_contrast.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(chosen.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        chosen.minimum_contrast,
+        MinimumContrastV1::Ratio45,
+        "a reader who asked for the WCAG AA bar is heard"
+    );
+
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-settings-v16-minimum-contrast-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    write_settings_atomic(&path, &chosen).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains(r#""minimum_contrast": "Ratio45""#),
+        "the floor is written as its own key, PascalCase like every other enum here: {on_disk}"
     );
     let (round_tripped, report) = read_settings(&path);
     assert_eq!(report, ReadReport::Loaded);

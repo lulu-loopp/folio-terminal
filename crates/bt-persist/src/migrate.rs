@@ -50,6 +50,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (12, migrate_settings_v12_to_v13),
     (13, migrate_settings_v13_to_v14),
     (14, migrate_settings_v14_to_v15),
+    (15, migrate_settings_v15_to_v16),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -333,6 +334,21 @@ fn migrate_settings_v14_to_v15(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(15));
         object.insert("focus_mode".to_owned(), Value::from(false));
+    }
+    value
+}
+
+/// One key, a sixth time, and this one is the strongest case in the table for the rule the
+/// five before it follow. Every build that wrote a v15 file drew each cell in exactly the
+/// colour the program named, so `"Off"` is the behaviour being carried forward — but unlike
+/// `focus_mode`, choosing otherwise here would not merely open a different window: it would
+/// **re-ink output the reader has already read**, on the strength of a row they have never
+/// seen, in a scheme they deliberately chose. The floor is a repair somebody asks for. See
+/// `SettingsV1::minimum_contrast`.
+fn migrate_settings_v15_to_v16(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(16));
+        object.insert("minimum_contrast".to_owned(), Value::from("Off"));
     }
     value
 }
