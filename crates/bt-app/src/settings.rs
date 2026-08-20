@@ -15091,6 +15091,68 @@ mod tests {
         );
     }
 
+    /// PIN (DESIGN §2.6) — **the `Minimum contrast` row goes round**: every rung the picker
+    /// draws is a rung a press asks for, and a rung the file holds is the rung the tick lands
+    /// on.
+    ///
+    /// The two halves are the two directions a picker has to work in, and they are separate
+    /// functions that could disagree: `minimum_contrast_requested` turns an index into a value
+    /// on the way in, `selected_index` turns a value back into an index on the way out. A row
+    /// whose option list was reordered in one place and not the other would show the tick on
+    /// `3:1` and write `2:1`, and only a test that walks both directions on the same index
+    /// catches it.
+    ///
+    /// The label assertion is the third thing that can drift: `Off` comes out of the i18n table
+    /// and the three ratios out of a parallel array, so an index that fell out of step between
+    /// [`MINIMUM_CONTRAST_OPTIONS`] and [`MINIMUM_CONTRAST_LABELS`] would draw `2:1` on the
+    /// item that means `3:1`.
+    ///
+    /// Red gate: swap two entries of `MINIMUM_CONTRAST_OPTIONS` and the round trip still passes
+    /// while the labels go red; swap two of `MINIMUM_CONTRAST_LABELS` and only the labels do.
+    #[test]
+    fn the_minimum_contrast_row_goes_round() {
+        assert_eq!(
+            SettingsRow::MinimumContrast.option_count(),
+            MINIMUM_CONTRAST_OPTIONS.len()
+        );
+        assert_eq!(
+            SettingsRow::MinimumContrast
+                .option_labels()
+                .collect::<Vec<_>>(),
+            vec!["Off", "2:1", "3:1", "4.5:1"],
+        );
+        for (index, floor) in MINIMUM_CONTRAST_OPTIONS.iter().enumerate() {
+            assert_eq!(
+                minimum_contrast_requested(SettingsTarget::Choice(
+                    SettingsRow::MinimumContrast,
+                    index
+                )),
+                Some(*floor),
+                "item {index} does not ask for the value drawn on it"
+            );
+            let mut values = values();
+            values.minimum_contrast = *floor;
+            assert_eq!(
+                SettingsRow::MinimumContrast.selected_index(&values),
+                Some(index),
+                "a file holding {floor:?} does not tick item {index}"
+            );
+        }
+        // Off is the row's default and the first item, which is what makes a reader who has
+        // never touched it see the tick where the ladder starts.
+        assert_eq!(MINIMUM_CONTRAST_OPTIONS[0], MinimumContrastV1::Off);
+        assert_eq!(
+            SettingsRow::MinimumContrast.selected_index(&values()),
+            Some(0)
+        );
+        // A press on a *different* row must never be read as a contrast request — the router
+        // calls every `*_requested` in turn on the same target.
+        assert_eq!(
+            minimum_contrast_requested(SettingsTarget::Choice(SettingsRow::SplitDirection, 1)),
+            None
+        );
+    }
+
     /// PIN — the combo reads the app's state, and the app's state is the
     /// *resolved* default.
     ///
