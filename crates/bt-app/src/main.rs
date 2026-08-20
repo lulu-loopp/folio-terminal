@@ -3023,13 +3023,18 @@ struct GraphFilterMenuState {
 /// asked is what lets one `run` function serve both without re-deriving a host
 /// from where the pointer has since wandered.
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum GitOrigin {
+pub(crate) enum GitOrigin {
     /// The Git page in one docked column.
     Column(SeatId),
     /// The commit graph of one repository. It carries the root because that
     /// *is* its address — [`git::GitHost::Graph`] is keyed by tab and root, and
     /// no seat owns it.
     Graph(PathBuf),
+    /// **The Git page in one floating window** (user ruling, 2026-08-19),
+    /// addressed by the epoch that minted its view for
+    /// [`git::GitHost::Float`]'s reason: a pinned window is in no tab, so no
+    /// tab's map can name it.
+    Float(float::FloatId),
 }
 
 /// **Whether a re-read may join one that is already out** (R31's third moment).
@@ -3441,6 +3446,86 @@ fn files_keyboard_seat_of(owner: Option<LeafId>, tab: &TabState) -> Option<SeatI
         && tab.files.contains_key(&owner.seat)
         && tab.seats.files().contains(&owner.seat))
     .then_some(owner.seat)
+}
+
+/// Which of a files column's two bodies a key belongs to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ColumnKeyboard {
+    Tree,
+    GitPage,
+}
+
+/// **Focus follows the visible view** (焦点跟随可见视图, 2026-08-19).
+///
+/// D47 lends the keyboard to a *column*, and until this ruling the router under
+/// it asked one question — is this seat a files column — and then handed every
+/// key to the **tree**. A column standing on its Git page therefore answered its
+/// arrows with a list nobody could see: the tree's selection and its scroll
+/// moved in the dark, and `Enter` opened a preview of a file the reader had
+/// never chosen and could not have pointed at. Nothing reached a shell, which is
+/// why it was silent; state changed under the user, which is why it was a bug.
+///
+/// **The page that is drawn, not the page the column is turned to.** The
+/// argument is `git_pages_shown` — the frame's own record of which columns put a
+/// Git page on the glass — and not `FilesLeafState::view`, which is the same
+/// distinction [`Runtime::git_surfaces_on_screen`] draws and the wheel router
+/// already relies on. A column whose `view` is `Git` while the master switch is
+/// off, or while it is collapsed or not laid out, is showing its tree; its keys
+/// are the tree's, and one fact answers for the paint, the wheel, the hit test
+/// and the keyboard alike.
+///
+/// It is deliberately **total**: there is no third answer, which is what stops
+/// the fix from replacing a silent wrong owner with a silent *absent* one — a
+/// column that took a press and then let the arrows fall through to a shell
+/// behind it would be the same report wearing different clothes.
+fn column_keyboard(
+    seat: SeatId,
+    drawn_git_pages: &BTreeMap<SeatId, git_panel::GitPanelContent>,
+) -> ColumnKeyboard {
+    if drawn_git_pages.contains_key(&seat) {
+        ColumnKeyboard::GitPage
+    } else {
+        ColumnKeyboard::Tree
+    }
+}
+
+/// Whether a floating window is showing its **Git page** — [`column_keyboard`]'s
+/// question, asked of the host that is not in a tab.
+///
+/// The two facts a column's `git_pages_shown` entry is made of, and for a float
+/// they are the whole of it: a window has no seat layout to be collapsed out of
+/// and no tab to be switched away from. The master switch decides whether the
+/// page is *reachable* at all; the view decides which page this window was left
+/// on — the split §7.1.6g ② draws, restated here because a window keeps its page
+/// while the switch is off and gets it back when the switch comes on, exactly as
+/// a column does.
+///
+/// One reader for the paint, the hit test, the wheel and — the day a float takes
+/// the keyboard — the keys. That arrangement *is* the fix: the docked bug was
+/// three surfaces agreeing on which page was drawn while a fourth, the keyboard,
+/// never asked.
+fn float_git_page_shown(git_panel_on: bool, view: seats::FilesView) -> bool {
+    git_panel_on && view == seats::FilesView::Git
+}
+
+/// What a floating Git page's painter needs to know about the pointer.
+///
+/// The chassis reports one part; the page wants the pair — which row, and which
+/// verb on it — because a verb is drawn *inside* the row it belongs to and both
+/// answers come from the same hit. A hand on a verb is still a hand on its row,
+/// which is what keeps the row lit under a pointer that has reached its buttons.
+fn float_git_hover(part: Option<float::FloatPart>) -> git_panel::GitHover {
+    match part {
+        Some(float::FloatPart::Row(row)) => git_panel::GitHover {
+            row: Some(row),
+            act: None,
+        },
+        Some(float::FloatPart::GitAct { index, act }) => git_panel::GitHover {
+            row: Some(index),
+            act: Some(act),
+        },
+        _ => git_panel::GitHover::default(),
+    }
 }
 
 /// How the keyboard arrived at a files column.
@@ -5196,6 +5281,18 @@ struct WindowRuntime {
     /// rather than by two functions agreeing. It is also what lets a press know
     /// *which* row it landed on without rebuilding the page under the pointer.
     git_pages_shown: BTreeMap<SeatId, git_panel::GitPanelContent>,
+    /// The same, for the **floating** Git pages (user ruling, 2026-08-19), by
+    /// the epoch that minted each window's view.
+    ///
+    /// Its own map rather than a share of the one above, because the two are
+    /// keyed by different things — a seat is only a seat inside a tab, and a
+    /// float is in none — and because the seat map is handed to `seats` for the
+    /// paint and the hit test, which knows about columns and nothing else.
+    ///
+    /// Its presence is also the float's "drawn, not merely turned to": the
+    /// wheel, the hit test and the watcher all read it, exactly as their docked
+    /// twins read `git_pages_shown`.
+    float_git_pages_shown: BTreeMap<float::FloatId, git_panel::GitPanelContent>,
     /// The graph each preview seat drew this frame — [`Self::git_pages_shown`]'s
     /// twin, kept for the same `&self` hit test.
     git_graphs_shown: BTreeMap<SeatId, git_graph::GraphContent>,
@@ -12155,12 +12252,28 @@ fn float_sizing_of(win: &float::FloatWin) -> float::FloatSizing {
 /// opens at its cap and settles down is the ordinary shape of `height: auto`
 /// arriving late; a window that opens as a strip and grows is a window that was
 /// never the size it said it was.
+/// **A window on its Git page opens at that cap too** (user ruling,
+/// 2026-08-19), which is why `git_page` is asked rather than derived from
+/// `state.view`: whether that page is *reachable* is the master switch's answer
+/// and this function is in no position to read a setting.
+///
+/// It is the same stand-in for a sharper version of the same reason. A tree that
+/// has not settled has no content height *yet*; a Git page has none this
+/// function could ever take — its rows are six different heights and the tallest
+/// of them is measured in a font held by the renderer — and a repository's page
+/// is longer than a window may be in every case anybody has looked at.
+/// [`Runtime::resize_floats_to_content`] would shrink it through this very door
+/// on the day that stops being true.
 fn files_float_content_height(
     state: &seats::FilesLeafState,
     cache: &files::DirCache,
+    git_page: bool,
     viewport: [f32; 4],
     scale: f32,
 ) -> f32 {
+    if git_page {
+        return float::float_height_cap(viewport, scale, float::FloatSizing::files());
+    }
     let view = files::tree_view(state, cache);
     if !view.settled() {
         return float::float_height_cap(viewport, scale, float::FloatSizing::files());
@@ -14117,6 +14230,9 @@ fn revive_plan(
                     // Nothing to restore: an expansion is a glance and does not
                     // cross the disk — see [`seats::FilesLeafState::git_expanded`].
                     git_expanded: None,
+                    // Nor does a row number, and for a sharper version of the
+                    // same reason — see [`seats::FilesLeafState::git_sel`].
+                    git_sel: None,
                     // The fifth fact, and durable like `view` above it (T9).
                     git_remotes_open: leaf.remotes_open,
                 },
@@ -16337,6 +16453,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         revealed_foot: None,
         files_name_widths: BTreeMap::new(),
         git_pages_shown: BTreeMap::new(),
+        float_git_pages_shown: BTreeMap::new(),
         git_graphs_shown: BTreeMap::new(),
         files_view_widths: BTreeMap::new(),
         files_notice: None,
@@ -25888,6 +26005,15 @@ impl Runtime<'_> {
             for tab in &mut self.window.tabs {
                 tab.git_trees.clear();
             }
+            // **And the floating pages**, on the same sentence (§7.1.6g ②): a
+            // switch that only stopped asking would still be holding what the
+            // user has just said they do not want it holding, and a window is
+            // not exempt from that for standing outside the tabs.
+            for win in self.window.float.live_windows_mut() {
+                if let Some(files) = win.files_mut() {
+                    files.git = git::GitCache::default();
+                }
+            }
         }
         // Chrome, for [`Self::set_files_view`]'s reason — and here the strip
         // itself is arriving or leaving, so the column's body changes height
@@ -31099,31 +31225,65 @@ impl Runtime<'_> {
             match self.app.git_worker.responses.try_recv() {
                 Ok(response) => {
                     let host = response.host;
-                    let Some(index) = self.window.tabs.iter().position(|tab| tab.id == host.tab())
-                    else {
-                        continue;
+                    // **The asker has to still be there.** A column that closed,
+                    // a graph that was shut and a window that was dismissed are
+                    // one cancellation arriving as a dropped answer — and each
+                    // says so in its own register, because each is addressed in
+                    // its own way.
+                    //
+                    // **The float is asked first, and without a tab.** That is
+                    // the whole of why its host carries an epoch (user ruling,
+                    // 2026-08-19): a pinned window floats *across* tabs by
+                    // ruling, so "is that tab still open" is not the question
+                    // here, and dropping a page's answer because the tab the
+                    // window was born in has since closed would strand it
+                    // mid-read with no second asking owed.
+                    let floating = match &host {
+                        git::GitHost::Float { id, .. } => {
+                            if self
+                                .window
+                                .float
+                                .live(*id)
+                                .and_then(float::FloatWin::files)
+                                .is_none()
+                            {
+                                continue;
+                            }
+                            Some(*id)
+                        }
+                        git::GitHost::Column(_) | git::GitHost::Graph { .. } => None,
                     };
-                    let tab = &mut self.window.tabs[index];
-                    // **The asker has to still be there.** A column that closed
-                    // and a graph that was shut are the same cancellation,
-                    // arriving as a dropped answer — and each says so in its own
-                    // map, because each is addressed in its own way.
-                    match &host {
-                        git::GitHost::Column(leaf) if !tab.files.contains_key(&leaf.seat) => {
+                    let tab_index = self.window.tabs.iter().position(|tab| tab.id == host.tab());
+                    if floating.is_none() {
+                        let Some(index) = tab_index else {
                             continue;
+                        };
+                        let tab = &self.window.tabs[index];
+                        match &host {
+                            git::GitHost::Column(leaf) if !tab.files.contains_key(&leaf.seat) => {
+                                continue;
+                            }
+                            git::GitHost::Graph { root, .. }
+                                if !tab.git_graphs.contains_key(root) =>
+                            {
+                                continue;
+                            }
+                            _ => {}
                         }
-                        git::GitHost::Graph { root, .. } if !tab.git_graphs.contains_key(root) => {
-                            continue;
-                        }
-                        _ => {}
                     }
                     // **The two answers that are documents go to the pool**
                     // (G-3), which is a tab's and not a column's: a diff opened
                     // from one column is the same buffer whichever pane shows
                     // it, and a column re-rooted since does not make the
-                    // document it opened wrong.
+                    // document it opened wrong. A float's diff lands in the pool
+                    // of the tab that was in front when the row was pressed,
+                    // which is the tab its host recorded for exactly this.
                     let answer = match git_document_answer(response.answer) {
                         Ok((source, outcome)) => {
+                            let Some(index) = tab_index else {
+                                continue;
+                            };
+                            let tab = &mut self.window.tabs[index];
                             // Evicted, or never opened — the cancellation,
                             // arriving as a dropped result.
                             let Some(buffer) = tab.preview_pool.get_mut(&source) else {
@@ -31252,40 +31412,77 @@ impl Runtime<'_> {
                         // `self` was borrowed mutably above; the tab has to be
                         // taken again for the filing below.
                     }
-                    let tab = &mut self.window.tabs[index];
-                    let filed = match &host {
-                        git::GitHost::Column(leaf) => tab
-                            .git_trees
-                            .get_mut(&leaf.seat)
-                            .is_some_and(|cache| cache.accept(answer)),
-                        git::GitHost::Graph { root, .. } => match tab.git_graphs.get_mut(root) {
-                            Some(state) => {
-                                let filed = state.cache.accept(answer);
-                                // The lanes are a reading of the log, so they are
-                                // brought level with it the moment it moves — a
-                                // page appended, or a checkout that replaced the
-                                // history altogether.
-                                if filed {
-                                    state.sync();
+                    let filed = if let Some(id) = floating {
+                        // The window's own cache, found by the epoch that minted
+                        // its view: with several floats on screen that is also
+                        // what *addresses* the answer, so two windows on one
+                        // repository never fill in with each other's readings.
+                        self.window
+                            .float
+                            .live_mut(id)
+                            .and_then(float::FloatWin::files_mut)
+                            .is_some_and(|files| files.git.accept(answer))
+                    } else {
+                        let Some(index) = tab_index else {
+                            continue;
+                        };
+                        let tab = &mut self.window.tabs[index];
+                        match &host {
+                            git::GitHost::Column(leaf) => tab
+                                .git_trees
+                                .get_mut(&leaf.seat)
+                                .is_some_and(|cache| cache.accept(answer)),
+                            git::GitHost::Graph { root, .. } => {
+                                match tab.git_graphs.get_mut(root) {
+                                    Some(state) => {
+                                        let filed = state.cache.accept(answer);
+                                        // The lanes are a reading of the log, so they
+                                        // are brought level with it the moment it
+                                        // moves — a page appended, or a checkout that
+                                        // replaced the history altogether.
+                                        if filed {
+                                            state.sync();
+                                        }
+                                        filed
+                                    }
+                                    None => false,
                                 }
-                                filed
                             }
-                            None => false,
-                        },
+                            // Answered above, by the branch that needed no tab.
+                            git::GitHost::Float { .. } => false,
+                        }
                     };
                     if let Some(root) = moved.filter(|_| filed) {
-                        for cache in tab.git_trees.values_mut() {
-                            if cache.root() == Some(root.as_path()) {
-                                cache.refresh();
+                        if let Some(index) = tab_index {
+                            let tab = &mut self.window.tabs[index];
+                            for cache in tab.git_trees.values_mut() {
+                                if cache.root() == Some(root.as_path()) {
+                                    cache.refresh();
+                                }
+                            }
+                            if let Some(state) = tab.git_graphs.get_mut(&root) {
+                                state.cache.refresh();
+                                // The lanes are a reading of the history that was.
+                                state.invalidate();
                             }
                         }
-                        if let Some(state) = tab.git_graphs.get_mut(&root) {
-                            state.cache.refresh();
-                            // The lanes are a reading of the history that was.
-                            state.invalidate();
+                        // **And every floating page on that repository** (user
+                        // ruling, 2026-08-19). A window standing on the branch
+                        // that was just left is the same disagreement a column
+                        // would be, and it is not in any tab to have been swept
+                        // with one.
+                        for win in self.window.float.live_windows_mut() {
+                            if let Some(files) = win.files_mut()
+                                && files.git.root() == Some(root.as_path())
+                            {
+                                files.git.refresh();
+                            }
                         }
                     }
-                    changed |= filed && index == self.window.active_tab;
+                    // A float is window-level chrome and is on screen whichever
+                    // tab is in front, so its answer is always owed a frame.
+                    changed |=
+                        filed && (floating.is_some() || tab_index == Some(self.window.active_tab));
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -31337,6 +31534,9 @@ impl Runtime<'_> {
                     )
                 })
                 .map_or(toast::ToastAnchor::Window, toast::ToastAnchor::PreviewSeat),
+            // A window is not a seat and has no pane for a card to stand over,
+            // which is exactly the case the window's own corner is for.
+            git::GitHost::Float { .. } => toast::ToastAnchor::Window,
         }
     }
 
@@ -31666,6 +31866,11 @@ impl Runtime<'_> {
     /// press is about and carries out the answer, exactly as
     /// [`Self::press_git_act`] carries out `press_outcome`'s.
     fn press_git_row(&mut self, seat: SeatId, index: usize) -> Result<()> {
+        // **The selection follows the hand**, before anything this press could
+        // also mean and whether or not the row has a verb — the graph's own
+        // first line (`press_graph_row`), and it is what makes `↑` after a click
+        // step from the row you clicked instead of from the top of the list.
+        self.select_git_row(seat, index);
         let active = self.window.active_tab;
         // The rows as they are **on screen**, and the root as the *cache* has
         // it: a document opened against a root the column has since left would
@@ -31810,6 +32015,150 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// Put this page's selection on one row (焦点跟随可见视图, 2026-08-19).
+    ///
+    /// The **column's** state and not the frame's, exactly as
+    /// [`Self::select_graph_row`] writes the graph's: the number outlives the
+    /// frame it was chosen on, and the frame clamps it to the list it has just
+    /// built ([`git_panel::GitPanelContent::selected`]).
+    ///
+    /// A seat with no state is a seat with no Git page to have selected anything
+    /// on, so nothing is vivified here — the map's keys are the tab's columns
+    /// (`files_match_files_seats`) and this is not a door that should add one.
+    fn select_git_row(&mut self, seat: SeatId, index: usize) {
+        let active = self.window.active_tab;
+        if let Some(state) = self.window.tabs[active].files.get_mut(&seat) {
+            state.git_sel = Some(index);
+        }
+    }
+
+    /// Scroll a Git page until one of its rows is whole on screen — the twin of
+    /// [`Self::reveal_graph_row`], one surface along.
+    ///
+    /// Measured against the page that was **drawn** (`git_pages_shown`) rather
+    /// than a rebuild, for `scroll_git_panel`'s stated reason: the row the
+    /// keyboard just moved to is a row in the list the reader is looking at.
+    fn reveal_git_row(&mut self, seat: SeatId, index: usize) {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let Some(page) = self.window.git_pages_shown.get(&seat) else {
+            return;
+        };
+        let Some(rect) = seats::files_pane_rect(&self.seat_layout, seat) else {
+            return;
+        };
+        let body = seats::files_pane_geometry(rect, scale, true).body;
+        let wanted = git_panel::git_panel_geometry(body, page, scale).reveal(index);
+        let active = self.window.active_tab;
+        self.window.tabs[active].git_scroll.insert(seat, wanted);
+    }
+
+    /// One key, with a files column holding the keyboard — **answered by the
+    /// page that column is showing** (焦点跟随可见视图, 2026-08-19).
+    ///
+    /// # The bug this exists to close
+    ///
+    /// D47 lends the keyboard to a *column*, and the router under it asked one
+    /// question — is this seat a files column — and then handed every key to the
+    /// **tree**. A column standing on its Git page therefore answered its arrows
+    /// with a list nobody could see: the tree's selection and its scroll moved
+    /// in the dark, and `Enter` opened a preview of a file the reader had never
+    /// chosen and could not have pointed at. Nothing reached a shell, which is
+    /// why it was silent; state changed under the user, which is why it was a
+    /// bug.
+    ///
+    /// The judgement is made **here**, once, at the routing decision — not as a
+    /// condition repeated on each key — and it is [`column_keyboard`]'s, which
+    /// is answerable without a window.
+    fn files_column_key(&mut self, seat: SeatId, event: &KeyEvent) -> Result<bool> {
+        match column_keyboard(seat, &self.window.git_pages_shown) {
+            ColumnKeyboard::GitPage => self.git_page_key(seat, event),
+            ColumnKeyboard::Tree => self.files_tree_key(seat, event),
+        }
+    }
+
+    /// One key, with a column holding the keyboard and its Git page showing.
+    ///
+    /// [`Self::files_tree_key`]'s opposite number, and it answers on the same
+    /// terms: **everything is consumed**, whether or not it moved anything,
+    /// because with a column focused there is nothing to type into and a letter
+    /// that fell through to the encoder would land in a shell the user is not
+    /// looking at (D49).
+    ///
+    /// What each key *means* is [`git_panel::panel_key`]'s, which speaks the
+    /// graph's vocabulary — so the two git surfaces answer the same six keys and
+    /// the rule about where `↓` lands is written once.
+    fn git_page_key(&mut self, seat: SeatId, event: &KeyEvent) -> Result<bool> {
+        let Some(key) = graph_key_of(&event.logical_key, self.window.modifiers) else {
+            // Still the column's key: it owns the keyboard, so nothing here
+            // reaches a shell. This page simply has nothing to do with this one.
+            return Ok(true);
+        };
+        // Holding Enter down on a commit would turn it over once per repeat.
+        // Travel repeats happily; opening is a verb you mean once — the tree's
+        // own line, one page along.
+        if event.repeat
+            && matches!(
+                key,
+                git_graph::GraphKey::Enter | git_graph::GraphKey::Compare
+            )
+        {
+            return Ok(true);
+        }
+        // The page as it is **on screen**: the row a key is about is a row the
+        // reader is looking at, which is `git_pages_shown` and never a rebuild.
+        let Some(page) = self.window.git_pages_shown.get(&seat).cloned() else {
+            return Ok(true);
+        };
+        let selected = match git_panel::panel_key(&page, key) {
+            git_graph::GraphKeyAction::None => return Ok(true),
+            // **`Esc`'s outermost rung is the column's own** (D47 / §7.1.5):
+            // with nothing folded open, giving the keyboard back is what this
+            // key means here, and it must never reach a child.
+            git_graph::GraphKeyAction::Pass => {
+                if self.set_files_keyboard(None, FilesFocusArrival::Keyboard)
+                    && self.refresh_chrome()
+                {
+                    self.present_chrome_change()?;
+                }
+                return Ok(true);
+            }
+            git_graph::GraphKeyAction::Select(row) => row,
+            // Enter is the row's own press, minus the pointer: whatever a click
+            // on it would have done, through the same door — so a changed file
+            // opens its diff and a commit turns over, and neither gesture had to
+            // be written twice. `press_git_row` moves the selection itself.
+            git_graph::GraphKeyAction::Toggle(row) => {
+                self.press_git_row(seat, row)?;
+                return Ok(true);
+            }
+            git_graph::GraphKeyAction::Collapse(row) => {
+                let hash = page.rows.get(row).and_then(|row| match row {
+                    git_panel::GitRow::Commit(commit) => Some(commit.hash.clone()),
+                    _ => None,
+                });
+                if let Some(hash) = hash {
+                    self.expand_commit(seat, &hash)?;
+                }
+                // Standing on what was just folded shut, and not on wherever the
+                // selection had wandered to inside it: the rows it was in have
+                // gone, and the row it came out of is the one still on screen.
+                row
+            }
+            // **The panel gives no comparison** — 「面板不给比较,是裁决不是缺口」
+            // (2026-08-16) — so `panel_key` never answers with one. The arms are
+            // here so that the day the ruling changes, this function is asked.
+            git_graph::GraphKeyAction::Compare(_) | git_graph::GraphKeyAction::LeaveCompare => {
+                return Ok(true);
+            }
+        };
+        self.select_git_row(seat, selected);
+        self.reveal_git_row(seat, selected);
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
     /// One of a Git row's verbs, pressed.
     ///
     /// **The gate is here and not in the worker** (R14): a discard is stopped
@@ -31873,7 +32222,7 @@ impl Runtime<'_> {
                     return Ok(());
                 };
                 self.raise_dirty_gate(restore::GateRequest::GitDiscard {
-                    seat,
+                    origin: GitOrigin::Column(seat),
                     path,
                     untracked,
                 })?;
@@ -32707,6 +33056,40 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// The same, from a floating Git page (user ruling, 2026-08-19) — the
+    /// column's own three steps, into the window's own cache and out under the
+    /// window's own host.
+    fn checkout_from_float(
+        &mut self,
+        id: float::FloatId,
+        target: String,
+        detach: bool,
+    ) -> Result<()> {
+        let tab = self.window.tabs[self.window.active_tab].id;
+        let Some(question) = self
+            .window
+            .float
+            .live_mut(id)
+            .and_then(float::FloatWin::files_mut)
+            .and_then(|files| files.git.begin_checkout(target, detach))
+        else {
+            return Ok(());
+        };
+        if !self.app.git_worker.request(git::GitRequest {
+            host: git::GitHost::Float { id, tab },
+            question,
+        }) {
+            self.disable_git_worker();
+            return Ok(());
+        }
+        // The rows dim now, so the frame that shows them dimmed is this one.
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        Ok(())
+    }
+
     /// The same, from the graph — which is a document keyed by root and belongs
     /// to no column, so it names the repository rather than a seat.
     ///
@@ -32883,6 +33266,16 @@ impl Runtime<'_> {
                 .get(&seat)
                 .copied()
                 .unwrap_or(0.0);
+            // **Where this page's keyboard is standing**, clamped to the list
+            // that was just built (焦点跟随可见视图). The column remembers a row
+            // number and the repository rebuilds the list under it every frame,
+            // so the clamp belongs here — beside the scroll's, which is owed for
+            // exactly the same reason.
+            content.selected = self.window.tabs[active]
+                .files
+                .get(&seat)
+                .and_then(|state| state.git_sel)
+                .filter(|row| *row < content.rows.len());
             pages.insert(seat, content);
         }
         // R2 乙案 again, one list along: the painter believes the stored scroll,
@@ -34698,7 +35091,7 @@ impl Runtime<'_> {
             // question is actually asked of the repository (R13's pessimism
             // starts one line later, when the row dims).
             restore::GateRequest::GitDiscard {
-                seat,
+                origin,
                 path,
                 untracked,
             } => {
@@ -34707,7 +35100,7 @@ impl Runtime<'_> {
                 } else {
                     git::GitWriteVerb::Discard
                 };
-                self.write_to_repository(seat, verb, vec![path])
+                self.issue_git_write(&origin, verb, vec![path])
             }
             // **The two ref deletions** (v2 ④), keyed by root rather than by
             // seat: the surface that asked may have gone while the gate stood,
@@ -35579,11 +35972,8 @@ impl Runtime<'_> {
             ) => {
                 // The same gate the row's own `×` raises, which is the point: one
                 // discard, one question, whichever gesture asked it.
-                let GitOrigin::Column(seat) = origin else {
-                    return Ok(());
-                };
                 self.raise_dirty_gate(restore::GateRequest::GitDiscard {
-                    seat,
+                    origin: origin.clone(),
                     path: path.clone(),
                     untracked: *untracked,
                 })?;
@@ -35756,6 +36146,12 @@ impl Runtime<'_> {
                 .git_graphs
                 .get(root)
                 .map(|state| &state.cache),
+            GitOrigin::Float(id) => self
+                .window
+                .float
+                .live(*id)
+                .and_then(float::FloatWin::files)
+                .map(|files| &files.git),
         }
     }
 
@@ -35768,6 +36164,10 @@ impl Runtime<'_> {
                 tab,
                 root: root.clone(),
             },
+            // The tab travels with it for the pool a *document* answer would
+            // land in — see [`git::GitHost::Float`]; the page's own five answers
+            // come home by the epoch.
+            GitOrigin::Float(id) => git::GitHost::Float { id: *id, tab },
         }
     }
 
@@ -35796,6 +36196,12 @@ impl Runtime<'_> {
                 .git_graphs
                 .get_mut(root)
                 .and_then(|state| state.cache.begin_write(verb, paths)),
+            GitOrigin::Float(id) => self
+                .window
+                .float
+                .live_mut(*id)
+                .and_then(float::FloatWin::files_mut)
+                .and_then(|files| files.git.begin_write(verb, paths)),
         };
         let Some(question) = question else {
             return Ok(());
@@ -35916,6 +36322,7 @@ impl Runtime<'_> {
                 let root = root.clone();
                 self.checkout_in_graph(&root, target, detach)
             }
+            GitOrigin::Float(id) => self.checkout_from_float(*id, target, detach),
         }
     }
 
@@ -35945,6 +36352,9 @@ impl Runtime<'_> {
                 tab: self.window.tabs[self.window.active_tab].id,
                 root: root.to_owned(),
             }),
+            // A window is not a seat, so there is no pane for the card to stand
+            // over — which is precisely the case `Window` is the answer to.
+            GitOrigin::Float(_) => toast::ToastAnchor::Window,
         };
         self.toast(
             toast::ToastKind::Ok,
@@ -35967,11 +36377,27 @@ impl Runtime<'_> {
         if self.window.tabs[active].git_graphs.contains_key(root) {
             return Some(GitOrigin::Graph(root.to_owned()));
         }
-        self.window.tabs[active]
+        if let Some(seat) = self.window.tabs[active]
             .git_trees
             .iter()
             .find(|(_, cache)| cache.root() == Some(root))
-            .map(|(seat, _)| GitOrigin::Column(*seat))
+            .map(|(seat, _)| *seat)
+        {
+            return Some(GitOrigin::Column(seat));
+        }
+        // **And last, a floating page** (user ruling, 2026-08-19). Last because
+        // the docked surfaces are where these menus mostly come from, and a
+        // window on this repository is still a place the receipt can be spent —
+        // which it has to be, or a `git branch -d` raised from a float would
+        // find nowhere to come home to when the gate is answered.
+        self.window
+            .float
+            .live_windows()
+            .find(|win| {
+                win.files()
+                    .is_some_and(|files| files.git.root() == Some(root))
+            })
+            .map(|win| GitOrigin::Float(win.epoch))
     }
 
     /// One key, with a git context menu up.
@@ -37478,6 +37904,15 @@ impl Runtime<'_> {
                 Some(state) => ask.begin(&mut state.cache),
                 None => Vec::new(),
             },
+            GitOrigin::Float(id) => match self
+                .window
+                .float
+                .live_mut(*id)
+                .and_then(float::FloatWin::files_mut)
+            {
+                Some(files) => ask.begin(&mut files.git),
+                None => Vec::new(),
+            },
         };
         if questions.is_empty() {
             return false;
@@ -37524,6 +37959,25 @@ impl Runtime<'_> {
                 ))
             })
             .collect();
+        // **And the floating pages** (user ruling, 2026-08-19), on the identical
+        // terms: a window standing on its Git page is a surface looking at a
+        // repository, so it subscribes to the kernel's news and re-reads with
+        // everything else. `float_git_pages_shown` is its "drawn, not merely
+        // turned to" — the float's own answer to the flag above it.
+        for win in self.window.float.live_windows() {
+            let Some(root) = win
+                .files()
+                .and_then(|files| files.git.root())
+                .map(Path::to_path_buf)
+            else {
+                continue;
+            };
+            surfaces.push((
+                GitOrigin::Float(win.epoch),
+                root,
+                self.window.float_git_pages_shown.contains_key(&win.epoch),
+            ));
+        }
         // A graph is addressed by its root, so two seats showing one repository
         // are one surface — and the second would find the first's re-read already
         // owed in any case.
@@ -37916,15 +38370,46 @@ impl Runtime<'_> {
                 dock_label,
                 tools,
             );
-            // Only a tree has rows to be hit; a buffer's own body is asked by the
-            // preview's pointer path, which resolves its surface for itself.
-            let tree = win.files().map(|files| {
+            // **Whichever list this window is showing.** A buffer's own body is
+            // asked by the preview's pointer path, which resolves its surface for
+            // itself; a tree and a Git page are both lists in this rectangle, and
+            // which of them answers is the one question the paint has already
+            // decided (`float_git_pages_shown` holds the page it drew, or does
+            // not hold one).
+            let page = self.window.float_git_pages_shown.get(&id).cloned();
+            let tree = win.files().filter(|_| page.is_none()).map(|files| {
                 let rows = files::tree_view(&files.files, &files.cache).rows.len();
                 seats::files_tree_geometry(geometry.body, rows, files.cache.scroll_px, scale)
             });
+            let git = page.as_ref().map(|page| {
+                (
+                    git_panel::git_panel_geometry(geometry.body, page, scale),
+                    page,
+                )
+            });
             if let Some(part) = float::float_hit(&geometry, x, y, |x, y| {
-                tree.as_ref()?
-                    .row_at(x + geometry.body[0], y + geometry.body[1])
+                let (x, y) = (x + geometry.body[0], y + geometry.body[1]);
+                if let Some((geometry, page)) = git.as_ref() {
+                    let index = geometry.row_at(x, y)?;
+                    let row = page.rows.get(index)?;
+                    // **The verbs before the row they stand on**, which is the
+                    // docked page's own order (`hit_git_panel`): first match
+                    // wins, and a row asked first would swallow every button
+                    // inside it.
+                    let hovered = matches!(
+                        self.window.float_hover,
+                        Some((on, float::FloatPart::Row(at) | float::FloatPart::GitAct { index: at, .. }))
+                            if on == id && at == index
+                    );
+                    let boxes = git_panel::act_boxes(row, geometry.row_rect(index), scale, hovered);
+                    if let Some((act, _)) = boxes.into_iter().find(|(_, rect)| {
+                        x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3]
+                    }) {
+                        return Some(float::FloatPart::GitAct { index, act });
+                    }
+                    return Some(float::FloatPart::Row(index));
+                }
+                tree.as_ref()?.row_at(x, y).map(float::FloatPart::Row)
             }) {
                 return Some((id, part));
             }
@@ -38062,7 +38547,64 @@ impl Runtime<'_> {
         }
         // A living float asks the worker for whatever it has not yet been told.
         self.ask_float_directories();
+        self.ask_git_for_floats();
         Ok(())
+    }
+
+    /// What the floating **Git pages** have not asked their repositories yet
+    /// (user ruling, 2026-08-19).
+    ///
+    /// [`Self::ask_git_for_column`] for the windows that are not columns, and
+    /// idempotent for its reason: the plan is derived from each cache
+    /// ([`git::GitCache::pending_questions`]) rather than remembered here, so a
+    /// slot already in flight or already answered asks for nothing however often
+    /// this is called — which matters more here than there, because this rides
+    /// the float clock and is called on every turn of the loop.
+    ///
+    /// **R31's gate is two conditions and it is the column's own** (§7.1.6g ②):
+    /// the master switch is on *and* this window is actually standing on its Git
+    /// page. A float on its tree costs exactly what a float cost before this
+    /// slice — not one process — and a window that never turned to the page
+    /// never reads a repository, however git-shaped the folder it is looking at.
+    fn ask_git_for_floats(&mut self) {
+        if !self.git_panel_on() {
+            return;
+        }
+        // Which pool a document answer would land in. Read once, before the
+        // host is walked, because it is a fact about the window and not about
+        // any one float.
+        let tab = self.window.tabs[self.window.active_tab].id;
+        let mut asks = Vec::new();
+        for win in self.window.float.live_windows_mut() {
+            let id = win.epoch;
+            let Some(files) = win.files_mut() else {
+                continue;
+            };
+            if files.files.view != seats::FilesView::Git {
+                continue;
+            }
+            let root = files.files.root.clone();
+            if root.trim().is_empty() {
+                continue;
+            }
+            files.git.retarget(std::path::Path::new(&root));
+            let questions = files.git.pending_questions();
+            // Marked before any send, so a second turn of the loop on the same
+            // frame sees questions already asked rather than asking them twice.
+            for question in &questions {
+                files.git.mark_pending(question);
+            }
+            asks.extend(questions.into_iter().map(|question| git::GitRequest {
+                host: git::GitHost::Float { id, tab },
+                question,
+            }));
+        }
+        for ask in asks {
+            if !self.app.git_worker.request(ask) {
+                self.disable_git_worker();
+                break;
+            }
+        }
     }
 
     /// The directories the floats are showing but have never read.
@@ -38137,6 +38679,20 @@ impl Runtime<'_> {
             float::FloatPart::Foot => self.reveal_float_root(id)?,
             float::FloatPart::Save => self.save_preview_on(PreviewSurface::Float(id))?,
             float::FloatPart::Flip => self.flip_preview_source_on(PreviewSurface::Float(id))?,
+            // **A row of whichever page this window is on.** A Git row is not a
+            // drag source and never was — the docked page's rows are not either
+            // (P150 delegates the *tree's* rows on both hosts) — so the drag arm
+            // is the tree's alone.
+            float::FloatPart::Row(index) if self.float_shows_git_page(id) => {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                self.press_float_git_row(id, index)?;
+            }
+            float::FloatPart::GitAct { index, act } => {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                self.press_float_git_act(id, index, act)?;
+            }
             float::FloatPart::Row(index) => {
                 // The float's rows are drag sources on the same terms the
                 // column's are — P150's "delegated on both hosts".
@@ -38211,6 +38767,296 @@ impl Runtime<'_> {
         // shape the pointer is wearing was decided by what just changed.
         self.apply_pointer_cursor();
         Ok(true)
+    }
+
+    /// **A Git row's body, pressed, in a floating window** (user ruling,
+    /// 2026-08-19) — [`Self::press_git_row`] with the window for a column.
+    ///
+    /// The same three verbs the docked page has and through the same doors, so
+    /// the two hosts cannot come to disagree about what a row does: the REMOTES
+    /// sub-group opens and shuts, a changed file opens its diff, a commit turns
+    /// its file list over, and a branch row is a checkout that answers the three
+    /// tiers at [`Self::ask_to_checkout`].
+    fn press_float_git_row(&mut self, id: float::FloatId, index: usize) -> Result<()> {
+        // The selection follows the hand, before anything else this press could
+        // mean — the docked page's own first line.
+        self.select_float_git_row(id, index);
+        let Some(root) = self
+            .window
+            .float
+            .live(id)
+            .and_then(float::FloatWin::files)
+            .and_then(|files| files.git.root())
+            .map(Path::to_path_buf)
+        else {
+            return Ok(());
+        };
+        let Some(row) = self
+            .window
+            .float_git_pages_shown
+            .get(&id)
+            .and_then(|page| page.rows.get(index))
+            .cloned()
+        else {
+            return Ok(());
+        };
+        if git_panel::row_toggles_remotes(&row) {
+            if let Some(files) = self
+                .window
+                .float
+                .live_mut(id)
+                .and_then(float::FloatWin::files_mut)
+            {
+                files.files.git_remotes_open = !files.files.git_remotes_open;
+            }
+            if self.refresh_chrome() {
+                self.present_chrome_change()?;
+            }
+            return Ok(());
+        }
+        let Some(open) = git_panel::row_document(&row, &root) else {
+            if self.refresh_chrome() {
+                self.present_chrome_change()?;
+            }
+            return Ok(());
+        };
+        match open {
+            git_panel::GitRowOpen::Document {
+                source,
+                name,
+                renamed_from,
+            } => self.open_float_git_document(id, source, name, renamed_from),
+            git_panel::GitRowOpen::Expand { hash } => self.expand_float_commit(id, &hash),
+            git_panel::GitRowOpen::Checkout { target, detach } => {
+                let said = target.clone();
+                let kind = if detach {
+                    restore::GitCheckoutKind::Detach
+                } else {
+                    restore::GitCheckoutKind::Stand
+                };
+                self.ask_to_checkout(&GitOrigin::Float(id), root, target, said, kind)
+            }
+        }
+    }
+
+    /// Put this window's Git page selection on one row.
+    fn select_float_git_row(&mut self, id: float::FloatId, index: usize) {
+        if let Some(files) = self
+            .window
+            .float
+            .live_mut(id)
+            .and_then(float::FloatWin::files_mut)
+        {
+            files.files.git_sel = Some(index);
+        }
+    }
+
+    /// A document opened from a floating Git page.
+    ///
+    /// [`Self::open_git_document`]'s two steps, with the window's host on the
+    /// question: the seat is taken first and the content arrives afterwards,
+    /// because a diff is not on a disk to be read synchronously. **The pane it
+    /// lands on is the tab's**, which is the same answer the docked page gives —
+    /// a window is where you read the repository from, not a second place for
+    /// documents to live.
+    fn open_float_git_document(
+        &mut self,
+        id: float::FloatId,
+        source: preview::PreviewSource,
+        name: String,
+        renamed_from: Option<String>,
+    ) -> Result<()> {
+        let Some(surface) = self.preview_landing_surface() else {
+            return Ok(());
+        };
+        self.open_preview_source_on(surface, source.clone(), name)?;
+        let unread = self
+            .preview_pool
+            .get(&source)
+            .is_some_and(|buffer| buffer.load == preview::PreviewLoad::Pending);
+        if !unread {
+            return Ok(());
+        }
+        let Some(question) = git_document_question(&source, renamed_from) else {
+            return Ok(());
+        };
+        let tab = self.window.tabs[self.window.active_tab].id;
+        if !self.app.git_worker.request(git::GitRequest {
+            host: git::GitHost::Float { id, tab },
+            question,
+        }) {
+            self.disable_git_worker();
+        }
+        Ok(())
+    }
+
+    /// Turn one commit's file list over, in a floating Git page (R15).
+    fn expand_float_commit(&mut self, id: float::FloatId, hash: &str) -> Result<()> {
+        let tab = self.window.tabs[self.window.active_tab].id;
+        let mut question = None;
+        if let Some(files) = self
+            .window
+            .float
+            .live_mut(id)
+            .and_then(float::FloatWin::files_mut)
+        {
+            let opened = git_panel::toggled_expansion(files.files.git_expanded.as_deref(), hash);
+            files.files.git_expanded.clone_from(&opened);
+            // Shutting one asks nothing: the answer stays in the cache, so
+            // pressing the same commit again draws its files without a second
+            // subprocess.
+            if let Some(hash) = opened {
+                question = files.git.begin_commit_files(&hash);
+            }
+        }
+        if let Some(question) = question
+            && !self.app.git_worker.request(git::GitRequest {
+                host: git::GitHost::Float { id, tab },
+                question,
+            })
+        {
+            self.disable_git_worker();
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// One of a floating Git row's verbs, pressed — [`Self::press_git_act`] with
+    /// the window for a column, and the judgement is still
+    /// [`git_panel::press_outcome`]'s alone.
+    fn press_float_git_act(
+        &mut self,
+        id: float::FloatId,
+        index: usize,
+        act: git_panel::GitAct,
+    ) -> Result<()> {
+        let Some(page) = self.window.float_git_pages_shown.get(&id) else {
+            return Ok(());
+        };
+        let Some(row) = page.rows.get(index).cloned() else {
+            return Ok(());
+        };
+        // The three verbs that are about no file at all, answered before a
+        // pathspec is gathered because there is none to gather.
+        match git_panel::press_outcome(act, false) {
+            git_panel::GitPress::MoreCommits => return self.load_more_float_commits(id),
+            // **The graph door works from a window too**, and it opens where
+            // every graph opens: on a preview seat in the tab you are looking
+            // at. A graph is a document about a repository (G-4) and has never
+            // belonged to the surface that summoned it.
+            git_panel::GitPress::Graph => return self.open_float_git_graph(id),
+            git_panel::GitPress::Reread => {
+                self.reread_git_origin(&GitOrigin::Float(id), Ask::Always);
+                if self.refresh_chrome() {
+                    self.present_chrome_change()?;
+                }
+                return Ok(());
+            }
+            git_panel::GitPress::Write(_) | git_panel::GitPress::Gate => {}
+        }
+        let (paths, untracked) = match &row {
+            git_panel::GitRow::Change(change) => (vec![change.path.clone()], change.untracked),
+            git_panel::GitRow::Heading {
+                group: Some(group), ..
+            } => {
+                let group = *group;
+                let paths: Vec<String> = page
+                    .rows
+                    .iter()
+                    .filter_map(|row| match row {
+                        git_panel::GitRow::Change(change) if change.group == group => {
+                            Some(change.path.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                (paths, group == crate::git::GitGroup::Untracked)
+            }
+            _ => return Ok(()),
+        };
+        if paths.is_empty() {
+            return Ok(());
+        }
+        match git_panel::press_outcome(act, untracked) {
+            git_panel::GitPress::Gate => {
+                let Some(path) = paths.into_iter().next() else {
+                    return Ok(());
+                };
+                self.raise_dirty_gate(restore::GateRequest::GitDiscard {
+                    origin: GitOrigin::Float(id),
+                    path,
+                    untracked,
+                })?;
+                Ok(())
+            }
+            git_panel::GitPress::Write(verb) => {
+                self.issue_git_write(&GitOrigin::Float(id), verb, paths)
+            }
+            git_panel::GitPress::MoreCommits => self.load_more_float_commits(id),
+            git_panel::GitPress::Graph => self.open_float_git_graph(id),
+            git_panel::GitPress::Reread => {
+                self.reread_git_origin(&GitOrigin::Float(id), Ask::Always);
+                if self.refresh_chrome() {
+                    self.present_chrome_change()?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// The next fifty commits, for a floating page (R16).
+    fn load_more_float_commits(&mut self, id: float::FloatId) -> Result<()> {
+        let tab = self.window.tabs[self.window.active_tab].id;
+        let Some(question) = self
+            .window
+            .float
+            .live_mut(id)
+            .and_then(float::FloatWin::files_mut)
+            .and_then(|files| files.git.more_commits())
+        else {
+            return Ok(());
+        };
+        if !self.app.git_worker.request(git::GitRequest {
+            host: git::GitHost::Float { id, tab },
+            question,
+        }) {
+            self.disable_git_worker();
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// The graph door, from a floating page — the same document on the same kind
+    /// of seat [`Self::open_git_graph`] opens it on.
+    fn open_float_git_graph(&mut self, id: float::FloatId) -> Result<()> {
+        let Some(root) = self
+            .window
+            .float
+            .live(id)
+            .and_then(float::FloatWin::files)
+            .and_then(|files| files.git.root())
+            .map(Path::to_path_buf)
+        else {
+            return Ok(());
+        };
+        let source = preview::PreviewSource::GitGraph { root: root.clone() };
+        let name = root.file_name().map_or_else(
+            || root.to_string_lossy().into_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let active = self.window.active_tab;
+        self.window.tabs[active]
+            .git_graphs
+            .entry(root)
+            .or_insert_with_key(|root| git_graph::GraphState::new(root.clone()));
+        let Some(surface) = self.preview_landing_surface() else {
+            return Ok(());
+        };
+        self.open_preview_source_on(surface, source, name)
     }
 
     /// A press on one row of the float's tree.
@@ -38489,6 +39335,7 @@ impl Runtime<'_> {
     fn resize_floats_to_content(&mut self) -> bool {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let viewport = self.float_viewport();
+        let git_panel_on = self.git_panel_on();
         // Read every window's answer first, then write them: the read wants the
         // whole host and each write wants one window of it.
         let grown: Vec<(float::FloatId, [f32; 4])> = self
@@ -38501,7 +39348,13 @@ impl Runtime<'_> {
                 // own opening rule and has no row count to follow.
                 let files = win.files()?;
                 let size = float::float_opening_size(
-                    files_float_content_height(&files.files, &files.cache, viewport, scale),
+                    files_float_content_height(
+                        &files.files,
+                        &files.cache,
+                        git_panel_on && files.files.view == seats::FilesView::Git,
+                        viewport,
+                        scale,
+                    ),
                     viewport,
                     scale,
                     float::FloatSizing::files(),
@@ -38743,6 +39596,10 @@ impl Runtime<'_> {
     /// there and merely obeyed here.
     fn float_layer(&mut self, now: Instant) -> Vec<marks::OverlayLayer> {
         let ids: Vec<float::FloatId> = self.window.float.drawn().map(|win| win.epoch).collect();
+        // Rebuilt from nothing on every pass, exactly as `git_pages_shown` is:
+        // it is a record of what this frame drew, and a stale entry in it is a
+        // press landing on a row that is not there.
+        self.window.float_git_pages_shown.clear();
         let mut layers = Vec::new();
         for id in ids {
             let Some(window) = self.float_window(id, now) else {
@@ -38792,7 +39649,14 @@ impl Runtime<'_> {
         self.files_float_layer(id, now)
     }
 
-    /// The tree tenant, drawn — the chassis's first and, until slice 5, only one.
+    /// The tree tenant, drawn — **on whichever of its two pages it is standing**.
+    ///
+    /// R2 used to answer this with one page and no question asked: a float drew
+    /// the file tree whatever `FilesLeafState::view` said, so a column popped out
+    /// of its Git page landed the reader on the tree without a word. The ruling
+    /// that closed the report (2026-08-19) is the plain one — a pop-out is a
+    /// *move*, and a move that changes what you were looking at is a different
+    /// verb — so the page comes with the window and works there.
     fn files_float_layer(
         &mut self,
         id: float::FloatId,
@@ -38801,61 +39665,11 @@ impl Runtime<'_> {
         let (geometry, fade) = self.float_geometry_of(id)?;
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let motion = self.app.motion;
-        // Everything the drawing needs, taken in one borrow so the measuring
-        // below — which wants the renderer — is not fighting the host for `self`.
-        let (mode, root, content) = {
+        let (mode, root) = {
             let win = self.window.float.drawn().find(|win| win.epoch == id)?;
-            let files = win.files()?;
-            let view = files::tree_view(&files.files, &files.cache);
-            let turns = view
-                .rows
-                .iter()
-                .filter_map(|row| match row.kind {
-                    files::RowKind::Directory { open } => Some((
-                        row.key.clone(),
-                        files.cache.row_turn(&row.key, open, now, motion).0,
-                    )),
-                    _ => None,
-                })
-                .collect();
-            (
-                win.mode,
-                files.files.root.clone(),
-                seats::FilesTreeContent {
-                    rows: view.rows,
-                    // **None, and R2 is why** — a float has no Git page (the
-                    // flyout was never given the switch), and a badge is
-                    // subordinate to a page: it shows what an open one is already
-                    // keeping true. There is a second reason in the type itself,
-                    // and it is the harder one: `FloatFiles` names no tab, so
-                    // "this tab's open Git page" is a question this window cannot
-                    // ask. Both would have to change together, and R2 is booked
-                    // for observation rather than for building.
-                    badges: crate::git_panel::GitTreeBadges::default(),
-                    scroll_px: files.cache.scroll_px,
-                    selected: files.files.sel.clone(),
-                    turns,
-                    // Never, for either mode — ruled 2026-08-12. A transient
-                    // peek is never keyboard-driven (G90). A pinned float holds
-                    // `win.focused` from the moment a *click* tore it off, which
-                    // is `:focus`; the ring is `:focus-visible`, earned only by
-                    // keys — and no key is routed to a float's tree at all yet
-                    // (the float-keyboard ledger item). When that lands, this
-                    // becomes the float's own keyboard-visible bit, exactly as
-                    // the docked column's.
-                    focus_ring: false,
-                    // A float wears its own foot, drawn by `float::build` from
-                    // the chassis geometry — these two are the *docked* strip's
-                    // and nothing here reads them.
-                    foot_path: String::new(),
-                    foot_revealed: false,
-                },
-            )
+            (win.mode, win.files()?.files.root.clone())
         };
         let palette = bt_render::chrome_palette();
-        // The tree, drawn by the very function the docked column uses (C39) —
-        // handed a body rect, a hovered row and its own ground's inks, and asking
-        // nothing about which host it is in.
         let mut quads = Vec::new();
         let mut labels = Vec::new();
         let mut sprites = Vec::new();
@@ -38867,19 +39681,82 @@ impl Runtime<'_> {
             .float_hover
             .filter(|(hovered, _)| *hovered == id)
             .map(|(_, part)| part);
-        let hovered_row = match hover {
-            Some(float::FloatPart::Row(index)) => Some(index),
-            _ => None,
-        };
-        seats::push_files_tree(
-            geometry.body,
-            &content,
-            hovered_row,
-            seats::FilesRowInk::on_float(&palette),
-            scale,
-            &palette,
-            (&mut quads, &mut labels, &mut sprites),
-        );
+        if self.float_shows_git_page(id) {
+            self.push_float_git_page(
+                id,
+                geometry.body,
+                hover,
+                scale,
+                &palette,
+                (&mut quads, &mut labels, &mut sprites),
+            );
+        } else {
+            // Everything the drawing needs, taken in one borrow so the measuring
+            // below — which wants the renderer — is not fighting the host for
+            // `self`.
+            let content = {
+                let win = self.window.float.drawn().find(|win| win.epoch == id)?;
+                let files = win.files()?;
+                let view = files::tree_view(&files.files, &files.cache);
+                let turns = view
+                    .rows
+                    .iter()
+                    .filter_map(|row| match row.kind {
+                        files::RowKind::Directory { open } => Some((
+                            row.key.clone(),
+                            files.cache.row_turn(&row.key, open, now, motion).0,
+                        )),
+                        _ => None,
+                    })
+                    .collect();
+                seats::FilesTreeContent {
+                    rows: view.rows,
+                    // **None, and R2's surviving half is why.** A badge is
+                    // subordinate to a page: it shows what an *open* Git page is
+                    // already keeping true, and this window is standing on its
+                    // tree — the one on its Git page is not drawing a tree to put
+                    // badges in. The old second reason ("`FloatFiles` names no
+                    // tab, so this tab's open Git page is a question this window
+                    // cannot ask") is gone with the ruling that gave the window a
+                    // repository of its own.
+                    badges: crate::git_panel::GitTreeBadges::default(),
+                    scroll_px: files.cache.scroll_px,
+                    selected: files.files.sel.clone(),
+                    turns,
+                    // Never, for either mode — ruled 2026-08-12. A transient
+                    // peek is never keyboard-driven (G90). A pinned float holds
+                    // `win.focused` from the moment a *click* tore it off, which
+                    // is `:focus`; the ring is `:focus-visible`, earned only by
+                    // keys — and no key is routed to a float's *either* page yet
+                    // (the float-keyboard ledger item). When that lands, this
+                    // becomes the float's own keyboard-visible bit, exactly as
+                    // the docked column's — and which page answers it is already
+                    // decided, by [`Self::float_shows_git_page`] above.
+                    focus_ring: false,
+                    // A float wears its own foot, drawn by `float::build` from
+                    // the chassis geometry — these two are the *docked* strip's
+                    // and nothing here reads them.
+                    foot_path: String::new(),
+                    foot_revealed: false,
+                }
+            };
+            let hovered_row = match hover {
+                Some(float::FloatPart::Row(index)) => Some(index),
+                _ => None,
+            };
+            // The tree, drawn by the very function the docked column uses (C39)
+            // — handed a body rect, a hovered row and its own ground's inks, and
+            // asking nothing about which host it is in.
+            seats::push_files_tree(
+                geometry.body,
+                &content,
+                hovered_row,
+                seats::FilesRowInk::on_float(&palette),
+                scale,
+                &palette,
+                (&mut quads, &mut labels, &mut sprites),
+            );
+        }
         let body = float::FloatBody {
             // Chrome fills are opaque by construction, so the lift into the
             // overlay's vocabulary is the rail's own: alpha 1.0, and the layer's
@@ -38956,6 +39833,108 @@ impl Runtime<'_> {
             &palette,
             fade,
         ))
+    }
+
+    /// Whether this window is standing on its **Git page** this frame.
+    ///
+    /// The float's answer to [`column_keyboard`]'s question, and it is made of
+    /// the same two facts a column's `git_pages_shown` entry is: the master
+    /// switch, and the page the view is on. A window has no seat layout to be
+    /// collapsed out of and no tab to be switched away from, so for a float
+    /// those two are the whole of it.
+    ///
+    /// One reader for the paint, the hit test, the wheel and — the day a float
+    /// takes the keyboard — the keys, which is exactly the arrangement
+    /// `git_pages_shown` gives a column and exactly what the docked bug was the
+    /// absence of.
+    fn float_shows_git_page(&self, id: float::FloatId) -> bool {
+        self.window
+            .float
+            .drawn()
+            .find(|win| win.epoch == id)
+            .and_then(float::FloatWin::files)
+            .is_some_and(|files| float_git_page_shown(self.git_panel_on(), files.files.view))
+    }
+
+    /// Build one floating Git page, draw it, and record what it drew.
+    ///
+    /// The record is [`WindowRuntime::float_git_pages_shown`] and it is owed for
+    /// `git_pages_shown`'s reason exactly: the hit test is `&self` by
+    /// construction and cannot measure a string, so a press lands on the row
+    /// that was drawn because it **is** the row that was drawn.
+    fn push_float_git_page(
+        &mut self,
+        id: float::FloatId,
+        body: [f32; 4],
+        hover: Option<float::FloatPart>,
+        scale: f32,
+        palette: &bt_render::ChromePalette,
+        out: (
+            &mut Vec<bt_render::ChromeQuad>,
+            &mut Vec<bt_render::ChromeLabel>,
+            &mut Vec<marks::ChromeSprite>,
+        ),
+    ) {
+        // Everything the build needs, lifted out of the host first: the measurer
+        // below wants the renderer, and a borrow of the float would be fighting
+        // it for `self`.
+        let Some((cache, expanded, remotes_open, stored, sel)) = self
+            .window
+            .float
+            .drawn()
+            .find(|win| win.epoch == id)
+            .and_then(float::FloatWin::files)
+            .map(|files| {
+                (
+                    files.git.clone(),
+                    files.files.git_expanded.clone(),
+                    files.files.git_remotes_open,
+                    files.git_scroll,
+                    files.files.git_sel,
+                )
+            })
+        else {
+            return;
+        };
+        let mut content = {
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            let mut measure = |text: &str, size: f32, face: git_panel::MeasureFace| {
+                renderer.measure_chrome_label(
+                    gpu,
+                    text,
+                    size,
+                    face.weight,
+                    face.letter_spacing_em,
+                    face.tabular_numerals,
+                )
+            };
+            git_panel::build(
+                &cache,
+                git_panel::GitPanelLook {
+                    expanded: expanded.as_deref(),
+                    remotes_open,
+                },
+                scale,
+                &mut measure,
+            )
+        };
+        // R2 乙案, one host along: the painter believes the stored scroll, so a
+        // page that got shorter is answered here rather than by the window
+        // quietly disagreeing with the number it was handed. The healed number
+        // goes back where it came from, so the picture and the window cannot
+        // disagree even on the frame the heal happens.
+        content.scroll_px = git_panel::clamp_git_scroll(body, &content, stored, scale);
+        content.selected = sel.filter(|row| *row < content.rows.len());
+        if let Some(files) = self
+            .window
+            .float
+            .live_mut(id)
+            .and_then(float::FloatWin::files_mut)
+        {
+            files.git_scroll = content.scroll_px;
+        }
+        git_panel::push_git_panel(body, &content, float_git_hover(hover), scale, palette, out);
+        self.window.float_git_pages_shown.insert(id, content);
     }
 
     /// The buffer tenant, drawn — P43-P67's window.
@@ -39304,6 +40283,10 @@ impl Runtime<'_> {
             return Ok(());
         };
         let root = self.trigger_root(trigger);
+        // A window summoned by a trigger is a **peek at a folder**, so it opens
+        // on the tree: there is no page for it to have been standing on. The
+        // Git page reaches a float only by being carried there — a column that
+        // was on it when it popped out (`undock_files_column`).
         let state = seats::FilesLeafState {
             root,
             ..seats::FilesLeafState::default()
@@ -39311,9 +40294,11 @@ impl Runtime<'_> {
         self.place_float(
             mode,
             Some(trigger),
-            state,
-            files::DirCache::default(),
-            bt_layout::FILES_W,
+            float::FloatFiles {
+                files: state,
+                width: bt_layout::FILES_W,
+                ..float::FloatFiles::default()
+            },
             Some(anchor),
         )
     }
@@ -39342,11 +40327,14 @@ impl Runtime<'_> {
         &mut self,
         mode: float::FloatMode,
         origin: float::FloatOrigin,
-        state: seats::FilesLeafState,
-        cache: files::DirCache,
-        width: bt_layout::LogicalPx,
+        tenant: float::FloatFiles,
         anchor: Option<[f32; 4]>,
     ) -> Result<()> {
+        let float::FloatFiles {
+            files: ref state,
+            ref cache,
+            ..
+        } = tenant;
         // E61: the opener closes what it must not coexist with. A float is a
         // window rather than a menu, so it does not join the menus' mutually
         // exclusive chain — but a menu hanging off a control that is about to be
@@ -39355,8 +40343,9 @@ impl Runtime<'_> {
         self.window.root_menu.close();
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let viewport = self.float_viewport();
+        let git_page = self.git_panel_on() && state.view == seats::FilesView::Git;
         let size = float::float_opening_size(
-            files_float_content_height(&state, &cache, viewport, scale),
+            files_float_content_height(state, cache, git_page, viewport, scale),
             viewport,
             scale,
             float::FloatSizing::files(),
@@ -39381,11 +40370,7 @@ impl Runtime<'_> {
         self.window.float.open(
             mode,
             origin,
-            float::FloatTenant::Files(float::FloatFiles {
-                files: state,
-                cache,
-                width,
-            }),
+            float::FloatTenant::Files(Box::new(tenant)),
             frame,
             anchor,
             Instant::now(),
@@ -39482,6 +40467,14 @@ impl Runtime<'_> {
     /// (G97; the cache holds the last of those, which is the half the mock-up
     /// never managed) — the column is not being closed and reopened, it is being
     /// moved, and a move that lost half its state would be a different verb.
+    ///
+    /// **Which page it is standing on is part of that state** (user ruling,
+    /// 2026-08-19). It always was — `FilesLeafState::view` travels in the clone
+    /// below — but the window it arrived in drew the tree unconditionally, so a
+    /// column popped out of its Git page landed on the file tree without a word.
+    /// The page comes with it now, and so does everything the page is drawn
+    /// from: the repository cache, its scroll and its selection. A move that
+    /// re-read the repository would be a different verb too.
     fn undock_files_column(&mut self, seat: SeatId) -> Result<()> {
         let active = self.window.active_tab;
         let Some(state) = self.window.tabs[active].files.get(&seat).cloned() else {
@@ -39492,6 +40485,16 @@ impl Runtime<'_> {
             .get(&seat)
             .cloned()
             .unwrap_or_default();
+        let git = self.window.tabs[active]
+            .git_trees
+            .get(&seat)
+            .cloned()
+            .unwrap_or_default();
+        let git_scroll = self.window.tabs[active]
+            .git_scroll
+            .get(&seat)
+            .copied()
+            .unwrap_or(0.0);
         let width = self
             .seats
             .fixed_extent_of(seat)
@@ -39515,7 +40518,21 @@ impl Runtime<'_> {
         // already answers that by keeping the tab alive, so there is no special
         // case left here to write.
         self.close_pane(seat)?;
-        self.place_float(float::FloatMode::Pinned, None, state, cache, width, anchor)
+        self.place_float(
+            float::FloatMode::Pinned,
+            None,
+            float::FloatFiles {
+                // The page it is standing on, its expansion and its row all
+                // travel inside this one value — they are the column's state and
+                // this *is* that column, moved.
+                files: state,
+                cache,
+                git,
+                git_scroll,
+                width,
+            },
+            anchor,
+        )
     }
 
     /// `DOCK` — the float becomes a column in the tab you are **looking at**.
@@ -39553,6 +40570,15 @@ impl Runtime<'_> {
         self.window.tabs[active]
             .file_trees
             .insert(seat, tenant.cache);
+        // **And the repository, the same way and for the same reason** (user
+        // ruling, 2026-08-19). `DOCK` is the reverse of the pop-out, so a window
+        // that was on its Git page becomes a column on its Git page — with what
+        // it had already read, so docking spends no subprocess and the page does
+        // not blink back through "Reading the repository…" on the way in.
+        self.window.tabs[active].git_trees.insert(seat, tenant.git);
+        self.window.tabs[active]
+            .git_scroll
+            .insert(seat, tenant.git_scroll);
         // `DOCK` is a button and this is the click on it.
         self.set_files_keyboard(Some(seat), FilesFocusArrival::Pointer);
         // **The hole this used to be** (user report, 2026-08-13). A column
@@ -40146,6 +41172,51 @@ impl Runtime<'_> {
             return Ok(());
         }
         files.cache.scroll_px = scrolled;
+        // The rows under a still pointer changed, so the hover row did too.
+        if let Some(position) = self.window.pointer_position {
+            self.window.float_hover = self.float_hit_at(position);
+        }
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// The same notch, one page along — [`Self::scroll_git_panel`] in a window.
+    ///
+    /// Its own function rather than a branch inside the tree's, for the docked
+    /// pair's stated reason: the two lists have different row heights and
+    /// different bounds and share only the rectangle. The bound is read from the
+    /// page that was actually **drawn** (`float_git_pages_shown`) and never from
+    /// a recomputation.
+    fn scroll_float_git_page(&mut self, id: float::FloatId, delta: MouseScrollDelta) -> Result<()> {
+        let Some((geometry, _)) = self.float_geometry_of(id) else {
+            return Ok(());
+        };
+        let body = geometry.body;
+        let travel = self.vertical_wheel_travel(delta, body[3] - body[1]);
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let Some(page) = self.window.float_git_pages_shown.get(&id) else {
+            return Ok(());
+        };
+        let stored = self
+            .window
+            .float
+            .live(id)
+            .and_then(float::FloatWin::files)
+            .map_or(0.0, |files| files.git_scroll);
+        let scrolled = git_panel::clamp_git_scroll(body, page, stored - travel, scale);
+        if scrolled == stored {
+            return Ok(());
+        }
+        if let Some(files) = self
+            .window
+            .float
+            .live_mut(id)
+            .and_then(float::FloatWin::files_mut)
+        {
+            files.git_scroll = scrolled;
+        }
         // The rows under a still pointer changed, so the hover row did too.
         if let Some(position) = self.window.pointer_position {
             self.window.float_hover = self.float_hit_at(position);
@@ -46780,6 +47851,17 @@ impl Runtime<'_> {
                 .any(|win| win.epoch == id && win.files().is_some())
         {
             return match part {
+                // `.git-view { overflow-y: auto }` in a window: the second page
+                // is a scroller too, and it is the *same* rectangle — which of
+                // the two answers a notch depends only on which page this window
+                // is on, exactly as it does for a column.
+                float::FloatPart::Row(_)
+                | float::FloatPart::GitAct { .. }
+                | float::FloatPart::Body
+                    if self.float_shows_git_page(id) =>
+                {
+                    self.scroll_float_git_page(id, delta)
+                }
                 float::FloatPart::Row(_) | float::FloatPart::Body => {
                     self.scroll_float_tree(id, delta)
                 }
@@ -47741,8 +48823,15 @@ impl Runtime<'_> {
         // (6199) and the reason Esc is answered inside rather than encoded: with
         // this owner, Esc is how you give the keyboard back, and it must never
         // reach a child (§7.1.5's layering says so in as many words).
+        //
+        // **And which of the column's two pages answers is decided here too**
+        // (焦点跟随可见视图, 2026-08-19): the rung lends the keyboard to a
+        // *column*, and [`Self::files_column_key`] hands it to whichever body
+        // that column has on the glass. It used to hand every key to the tree,
+        // which meant a column standing on its Git page walked a list nobody
+        // could see.
         if let Some(seat) = self.files_keyboard_seat()
-            && self.files_tree_key(seat, event)?
+            && self.files_column_key(seat, event)?
         {
             return Ok(());
         }
@@ -65370,6 +66459,63 @@ mod tests {
         );
     }
 
+    /// **Focus follows the visible view** (焦点跟随可见视图, 2026-08-19) — the
+    /// whole of the reported bug, in the one judgement that had been missing.
+    ///
+    /// A press on a docked Git page gave the *column* the keyboard, and the
+    /// router under it asked only whether the seat was a files column before
+    /// handing every key to the tree. So `↑`/`↓` walked a list nobody could see
+    /// and `Enter` opened a preview of a file the reader had never chosen:
+    /// nothing reached a shell, which is why it was silent, and state changed
+    /// under the user, which is why it was a bug.
+    ///
+    /// **Drawn, not merely turned to.** The argument is the frame's own record
+    /// of which columns put a Git page on the glass. A column whose `view` is
+    /// `Git` while the master switch is off — or one that is collapsed, or not
+    /// laid out — is showing its tree, and its keys are the tree's; that column
+    /// is simply not in the map, which is why this needs no second condition.
+    ///
+    /// Red gate: answer `GitPage` from `FilesLeafState::view` instead and a
+    /// column with the panel switched off answers its arrows with a page that is
+    /// not on screen — the same class of bug, pointing the other way.
+    #[test]
+    fn a_columns_keys_belong_to_the_page_that_is_on_the_glass() {
+        let (page, tree) = (bt_layout::SeatId(1), bt_layout::SeatId(2));
+        let mut drawn = BTreeMap::new();
+        drawn.insert(page, git_panel::GitPanelContent::default());
+
+        assert_eq!(column_keyboard(page, &drawn), ColumnKeyboard::GitPage);
+        assert_eq!(
+            column_keyboard(tree, &drawn),
+            ColumnKeyboard::Tree,
+            "a column beside it that is on its tree is still the tree's"
+        );
+        assert_eq!(
+            column_keyboard(page, &BTreeMap::new()),
+            ColumnKeyboard::Tree,
+            "and so is the same column on a frame that drew no Git page at all"
+        );
+    }
+
+    /// The same question, asked of the host that is not in a tab.
+    ///
+    /// A float has no seat layout and no tab, so the two facts left are the
+    /// master switch and the page the window was left on — and a window keeps
+    /// its page while the switch is off, exactly as a column does (§7.1.6g ②:
+    /// the setting decides reachability, the view records the choice).
+    #[test]
+    fn a_floating_window_shows_the_page_it_was_torn_off_on() {
+        assert!(float_git_page_shown(true, seats::FilesView::Git));
+        assert!(
+            !float_git_page_shown(false, seats::FilesView::Git),
+            "the master switch decides whether the page is reachable at all"
+        );
+        assert!(
+            !float_git_page_shown(true, seats::FilesView::Files),
+            "and a window torn off the tree is still on the tree"
+        );
+    }
+
     /// **U5 commits nothing it did not already commit.**
     ///
     /// **U7 — the commit table, all five landings** (mock-up 7202-7231).
@@ -72461,7 +73607,7 @@ mod tests {
         // Nobody has answered yet: the one row on screen is a placeholder for an
         // unknown number of them, so the window opens as tall as it is allowed.
         let pending =
-            files_float_content_height(&state, &files::DirCache::default(), viewport, scale);
+            files_float_content_height(&state, &files::DirCache::default(), false, viewport, scale);
         assert!(
             pending >= cap,
             "an unread tree must not be measured by its Loading row: {pending} < {cap}"
@@ -72477,7 +73623,15 @@ mod tests {
         // `self_sizing` then walks the window down to it.
         let mut cache = files::DirCache::default();
         cache.accept("", listing(&[("a.rs", false), ("b.rs", false)]));
-        let settled = files_float_content_height(&state, &cache, viewport, scale);
+        let settled = files_float_content_height(&state, &cache, false, viewport, scale);
+        // **And a window standing on its Git page opens at the cap whatever its
+        // tree has answered** (user ruling, 2026-08-19): the page it is showing
+        // is not the list this height is measured from.
+        assert_eq!(
+            files_float_content_height(&state, &cache, true, viewport, scale),
+            pending,
+            "a Git page is sized by the cap, not by the tree behind it"
+        );
         assert!(
             settled < pending,
             "a tree that has been read is measured by its rows: {settled} !< {pending}"

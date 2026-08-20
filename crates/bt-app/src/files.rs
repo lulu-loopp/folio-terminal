@@ -1042,6 +1042,7 @@ mod tests {
             sel: sel.map(str::to_owned),
             view: crate::seats::FilesView::default(),
             git_expanded: None,
+            git_sel: None,
             git_remotes_open: false,
         }
     }

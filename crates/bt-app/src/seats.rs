@@ -13306,6 +13306,25 @@ pub struct FilesLeafState {
     ///
     /// A single `Option` and not a set: see [`crate::git_panel::toggled_expansion`].
     pub git_expanded: Option<String>,
+    /// **The row the Git page's keyboard is standing on** (焦点跟随可见视图,
+    /// 2026-08-19), or nothing.
+    ///
+    /// It sits here beside `sel` because it is the same kind of fact — where
+    /// this column's keyboard is on the page it is showing — and it is
+    /// deliberately **not** on [`bt_persist::FilesLeafV1`] beside it, for
+    /// `git_expanded`'s reason exactly: `sel` is a node id and survives a
+    /// restart because the file it names does; this is an **index** into a list
+    /// the repository rebuilds every frame, and a session restored with a
+    /// selection on row 47 of a history that has since moved on would be a
+    /// window remembering something the repository does not.
+    ///
+    /// An index and not a row id, which is the graph's own choice (`GraphView`'s
+    /// `selected`, in the window) and for the same reason: this
+    /// page's rows are six different kinds with no identity in common, and the
+    /// one thing all nine of them have is a place in the list. It is clamped at
+    /// the *build* — see [`crate::git_panel::GitPanelContent::selected`] — so a
+    /// list that got shorter cannot leave it pointing past the end.
+    pub git_sel: Option<usize>,
     /// **Whether the REMOTES sub-group under BRANCHES is unfolded** (T9, v2 ③).
     ///
     /// It sits here with `view` and *not* with `git_expanded` above it, and the
