@@ -46394,6 +46394,17 @@ impl Runtime<'_> {
             })
             .and_then(|hit| self.hyperlink_hit(hit));
         if self.window.hyperlink_hover.observe(hyperlink, now) {
+            // **The hand moved with the modifier; now it moves with the cell**
+            // (§7.1.5g, user ruling 2026-08-20). While the finger meant only
+            // "`Ctrl` is down over a link", `ModifiersChanged` was the whole of
+            // when it could change and applying the shape there was enough. It
+            // now means "a press here would answer", which is a fact about *this
+            // link* — a plain hover over a readable file wears it and a plain
+            // hover over a page does not — so the shape has to be recomputed
+            // whenever the link under the pointer changes. Inside `observe`'s own
+            // answer because that is exactly when it did: a move within one run,
+            // or across the body between two of them, changes nothing to apply.
+            self.apply_pointer_cursor();
             self.repaint_hovered_pane()?;
         }
         self.refresh_image_reference_underline()?;
