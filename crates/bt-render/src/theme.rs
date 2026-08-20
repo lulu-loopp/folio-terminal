@@ -2516,8 +2516,18 @@ pub const FOCUS_EXIT_FONT_LOGICAL_PX: f32 = 11.0;
 // left" without anything downstream being told a thumbnail exists.
 // ---------------------------------------------------------------------------
 
-/// `.fc-tab-mini { height: 92px }` — the body under a card's head.
-pub const FOCUS_MINI_HEIGHT_LOGICAL_PX: f32 = 92.0;
+/// `.fc-tab-mini { height: 160px }` — the body under a card's head.
+///
+/// **160 and not 92 (user ruling, 2026-08-20).** The first F2 body was 92 tall
+/// and carried a fixed six rows; the ruling that followed the first real look at
+/// it is that the left column *is* a running terminal, only set smaller — and
+/// once the type size is a floor (7.5px) and the width is a constraint (a card
+/// is 203 wide, which is about 45 columns), the only two knobs left are **how
+/// tall the card is** and **how faithful the picture inside it is**. This is the
+/// first of those two turned: a lone pane's seat now holds thirteen or fourteen
+/// rows instead of six, which is the difference between a sample of a shell and
+/// a picture of one.
+pub const FOCUS_MINI_HEIGHT_LOGICAL_PX: f32 = 160.0;
 /// `.fc-tab-mini { padding: 5px }` — the inset between the card's edge and the
 /// mini tree's outermost seat.
 pub const FOCUS_MINI_PADDING_LOGICAL_PX: f32 = 5.0;
@@ -2558,16 +2568,21 @@ pub const FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX: f32 = 3.0;
 /// down with the font the way the two sizes above are: a tree that loses its
 /// indent stops being a tree, and ten pixels is what says "inside".
 pub const FOCUS_MINI_FILES_INDENT_LOGICAL_PX: f32 = 10.0;
-/// `termCardMini` — how many rows of a terminal seat's tail a card carries.
-///
-/// Six, and the number is a **budget** as much as a design value (§7.1.6b′ F2):
-/// it is multiplied by every visible card's every terminal seat on every
-/// projection, so it is written here beside the two font sizes it is legible at
-/// rather than chosen at the call site.
-pub const FOCUS_MINI_TERM_ROWS: usize = 6;
-/// `filesVisibleRows(l.files).slice(0, 4)` — how many rows of a files column a
-/// card carries, from the top of what that column is currently showing.
-pub const FOCUS_MINI_FILES_ROWS: usize = 4;
+
+// **There is no row count here any more** (user ruling, 2026-08-20). There used
+// to be two — `FOCUS_MINI_TERM_ROWS = 6` and `FOCUS_MINI_FILES_ROWS = 4` — and
+// both were the mock-up's `slice(-6)` / `slice(0, 4)` written down as constants.
+// They are gone because a fixed count is a second, disagreeing answer to a
+// question the geometry already answers: **how many rows a seat projects is how
+// many rows that seat's own rectangle holds**, which is its inner height divided
+// by the line height beside it (`bt_app::focus_thumb::mini_rows`). A tab split
+// four ways gives each of its seats a quarter of the body and each of them works
+// that quarter out for itself; a constant would have drawn six rows into a box
+// with room for three and three into a box with room for thirteen.
+//
+// The budget argument the old constant carried is unchanged and still lives in
+// `focus_thumb`: the four gates and the 10 Hz ceiling bound the *rate*, and the
+// row count is bounded by the card's own height, which is bounded by this file.
 
 /// A seat title's font size (`.panehead { font-size: 11.5px }`).
 pub const SEAT_TITLE_FONT_LOGICAL_PX: f32 = 11.5;

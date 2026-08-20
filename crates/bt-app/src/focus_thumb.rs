@@ -22,15 +22,16 @@
 //! 3. **Damage.** A seat re-projects only when the thing it is a picture *of*
 //!    has changed: a terminal's `screen_revision`, a files column's
 //!    [`DirCache::revision`] together with the state that decides which page it
-//!    is on and which of that page's rows are open, a face's own two words.
+//!    is on and which of that page's rows are open, a preview buffer's identity
+//!    and revision, a face's own two words.
 //!    **This is the gate that makes an idle window free** — twenty seats with
 //!    nothing happening in them answer twenty integer comparisons, produce no
 //!    allocation, and hand back the same strings, so the label list the renderer
 //!    is given is byte-identical and `set_chrome` uploads nothing.
 //! 4. **The clock.** A seat that *is* changing re-projects at most once every
 //!    [`MIN_INTERVAL`]. A shell writing at 10 000 lines a second and a shell
-//!    writing at ten cost the same, because a card 92 pixels tall cannot show the
-//!    difference and the eye cannot see it.
+//!    writing at ten cost the same, because a card 160 pixels tall cannot show
+//!    the difference and the eye cannot see it.
 //!
 //! The gates are in that order on purpose. Damage is asked *before* the clock
 //! because reading a generation is free and refusing on it costs nothing; the
@@ -39,23 +40,32 @@
 //!
 //! # What one projection is
 //!
-//! One seat's content, rebuilt: six rows of a terminal's tail cut to that seat's
-//! own column count, four rows of a files column's tree — or, when that column is
-//! standing on its Git page instead, [`git_face`]'s two words — or a face's two
-//! words.
+//! One seat's content, rebuilt: **as many rows of a terminal's tail as that
+//! seat's own rectangle holds**, cut to that seat's own column count; as many
+//! rows of a files column's tree — or, when that column is standing on its Git
+//! page instead, [`git_face`]'s two words; as many head lines of a preview's
+//! loaded document; or a face's two words.
 //! [`ThumbStats::projections`] counts exactly those, which is what the F2 tests
 //! assert on — a counter, not a stopwatch, so the gates are checked for what they
 //! are rather than for how fast the machine that ran them was.
 //!
-//! # Where the width comes in
+//! # Where the width and the height come in
 //!
 //! §3.3's multi-projection — the same session presented at more than one width —
 //! is the machine floor this stands on, and the shape it takes here is the
-//! **cut**: each seat is handed the number of characters that fit across *its*
-//! rectangle at the mini font's advance, and a row longer than that is cut before
-//! it is ever shaped. That is why `columns` is part of a terminal seat's damage
-//! key: a card that changed width has to re-cut even though the grid behind it
-//! did not move.
+//! **cut**: each seat is handed the number of columns that fit across *its*
+//! rectangle at the mini font's advance ([`mini_columns`]), and a row wider than
+//! that is cut before it is ever shaped. That is why `columns` is part of a
+//! terminal seat's damage key: a card that changed width has to re-cut even
+//! though the grid behind it did not move.
+//!
+//! The height is the same argument stood on its end, and it arrived on
+//! 2026-08-20 with the ruling that the column *is* a running terminal set
+//! smaller: **how many rows a seat projects is how many rows it holds**
+//! ([`mini_rows`]), which is a fact about that seat's rectangle and the line
+//! height beside it, and never a constant. So `rows` sits in the damage key
+//! beside `columns` for the same reason — a card that grew taller has to
+//! re-project even though nothing behind it moved.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -68,15 +78,16 @@ use bt_term::DualPlaneSession;
 use crate::{
     TabId,
     files::{self, DirCache, RowKind},
+    preview::{PreviewBuffer, PreviewSource},
     seats::{FilesLeafState, FilesView, MiniFilesRow, MiniSeatContent, seat_title},
 };
 
 /// **The rate ceiling: one projection per seat per 100 ms — 10 Hz.**
 ///
 /// Chosen against the thing being drawn rather than against the display: a mini
-/// seat carries six rows of 7.5px text inside a 92px card, and the difference
-/// between a tail redrawn ten times a second and one redrawn a hundred times is
-/// not visible at that size — it is only payable. Ten is also comfortably above
+/// seat carries a dozen-odd rows of 7.5px text inside a 160px card, and the
+/// difference between a tail redrawn ten times a second and one redrawn a
+/// hundred times is not visible at that size — it is only payable. Ten is also comfortably above
 /// the rate at which a reader can follow a scrolling card at all, so nothing
 /// legible is being withheld.
 ///
@@ -84,10 +95,10 @@ use crate::{
 /// quiet seat does not project at 10 Hz, it does not project at all.
 pub const MIN_INTERVAL: Duration = Duration::from_millis(100);
 
-/// How many rows of a terminal's tail a card carries, and how many rows of a
-/// files column's tree — the mock-up's `slice(-6)` and `slice(0, 4)`, read from
-/// the one place they are written down.
-use bt_render::{FOCUS_MINI_FILES_ROWS, FOCUS_MINI_TERM_ROWS};
+use bt_render::{
+    FOCUS_MINI_FILES_FONT_LOGICAL_PX, FOCUS_MINI_FILES_LINE_HEIGHT,
+    FOCUS_MINI_TERM_FONT_LOGICAL_PX, FOCUS_MINI_TERM_LINE_HEIGHT,
+};
 
 /// What the budget did this frame, in counts.
 ///
@@ -114,17 +125,22 @@ pub struct ThumbStats {
 /// look different now?" in the smallest form that can answer it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Damage {
-    /// A terminal seat: the screen's own damage counter, and the width it was cut
-    /// to.
+    /// A terminal seat: the screen's own damage counter, and the **shape** it was
+    /// projected into.
     ///
-    /// Both, because either can change the six strings on its own — new output
-    /// moves the tail, and a narrower card cuts it shorter.
+    /// All three, because any one of them can change the strings on its own —
+    /// new output moves the tail, a narrower card cuts it shorter, and a shorter
+    /// card carries fewer rows of it.
     ///
     /// `screen_revision` and **not** `grid_generation`, which is the near-miss
     /// this branch actually made first: that one counts reflow boundaries, so it
     /// stands perfectly still through a shell printing all day and a card keyed
     /// to it never updates at all. See `DualPlaneSession::screen_revision`.
-    Grid { revision: u64, columns: usize },
+    Grid {
+        revision: u64,
+        columns: usize,
+        rows: usize,
+    },
     /// A files column: the cache's write counter, and the state that decides
     /// **which page it is on** and which of that page's rows are visible.
     ///
@@ -150,6 +166,28 @@ enum Damage {
     Files {
         revision: u64,
         state: FilesLeafState,
+        rows: usize,
+    },
+    /// A preview seat drawing its document: **which** document, how many times
+    /// its body has changed, and the shape it was cut into.
+    ///
+    /// The identity is carried beside the revision and not instead of it,
+    /// because a revision counter is per-buffer and starts at zero: a pane
+    /// switched from one freshly-read file to another would otherwise present
+    /// the same key and go on showing the first file's head. That is the same
+    /// asymmetry [`Self::Files`] errs on — a superset costs one rebuild, a
+    /// subset is a card that lies.
+    ///
+    /// `mono` is here because it is the *view's* and not the buffer's: flipping
+    /// a markdown pane to its source changes both the face the head lines are
+    /// set in and the width they are cut to, with nothing behind the buffer
+    /// moving at all.
+    Document {
+        source: PreviewSource,
+        revision: u64,
+        columns: usize,
+        rows: usize,
+        mono: bool,
     },
     /// A face: the two words on it. There is nothing behind them to have a
     /// generation, so they *are* the generation.
@@ -176,8 +214,37 @@ pub enum SeatSource<'a> {
         state: &'a FilesLeafState,
         cache: &'a DirCache,
     },
-    /// A preview pane, a commit-graph document, a placeholder — see
-    /// [`MiniSeatContent::Face`].
+    /// **A preview pane with a body already in memory** (user ruling,
+    /// 2026-08-20, reopening F2's own v1 decision).
+    ///
+    /// v1 drew every preview seat as a face, and the sentence it gave was "a
+    /// page of prose at 7.5px is a grey smear". The ruling that reopened it is
+    /// that the same sentence would condemn the terminal tail beside it, which
+    /// nobody has ever wanted removed: prose at 7.5px and a compiler's output at
+    /// 7.5px are equally legible, and the card's job is to say *which tab this
+    /// is*, which the first lines of the document do far better than its
+    /// extension in capitals.
+    ///
+    /// **It still does not ask the disk.** `DESIGN.md` §7.1.6b′'s red line —
+    /// "a thumbnail must not put a question to the disk" — is what decides which
+    /// preview seats reach this variant at all: a buffer already loaded into the
+    /// tab's pool has its head in memory and can be quoted for free, and a pane
+    /// whose buffer has not arrived (a background tab that has never been
+    /// looked at) stays a [`Self::Face`]. Nothing here starts a read.
+    ///
+    /// The two things that are not text stay faces as well, and for the reason
+    /// they always were: a commit graph is a picture, and a placeholder has no
+    /// document behind it to quote.
+    Document {
+        buffer: &'a PreviewBuffer,
+        /// Whether this document is set in the terminal's face or the window's
+        /// — the ruling's "code monospaced, prose in the app font", decided
+        /// where the *view* is known ([`crate::preview::PreviewView`]) and
+        /// carried here as one bit.
+        mono: bool,
+    },
+    /// A commit-graph document, a picture, a placeholder, a preview whose body
+    /// has not arrived — see [`MiniSeatContent::Face`].
     ///
     /// Owned, where the other two are borrowed, and the asymmetry is the point:
     /// a face's two words **are** its damage key, so there is nothing behind them
@@ -197,9 +264,13 @@ pub enum SeatSource<'a> {
 /// seat" that a caller could get wrong in one place and right in the other.
 pub struct SeatDemand<'a> {
     pub id: SeatId,
-    /// How many characters fit across this seat's mini rectangle at the mini
-    /// font's advance — §3.3's "same session, another width", as a cut.
+    /// How many columns fit across this seat's mini rectangle at its own face's
+    /// advance — §3.3's "same session, another width", as a cut. See
+    /// [`mini_columns`].
     pub columns: usize,
+    /// How many whole lines fit down this seat's mini rectangle at its own
+    /// face's line height. See [`mini_rows`].
+    pub rows: usize,
     pub source: SeatSource<'a>,
 }
 
@@ -323,10 +394,19 @@ impl SeatDemand<'_> {
             SeatSource::Terminal(session) => Damage::Grid {
                 revision: session.screen_revision(),
                 columns: self.columns,
+                rows: self.rows,
             },
             SeatSource::Files { state, cache } => Damage::Files {
                 revision: cache.revision(),
                 state: (*state).clone(),
+                rows: self.rows,
+            },
+            SeatSource::Document { buffer, mono } => Damage::Document {
+                source: buffer.source.clone(),
+                revision: buffer.revision,
+                columns: self.columns,
+                rows: self.rows,
+                mono: *mono,
             },
             SeatSource::Face { name, kind } => Damage::Face {
                 name: name.clone(),
@@ -340,13 +420,17 @@ impl SeatDemand<'_> {
     fn project(&self) -> MiniSeatContent {
         match &self.source {
             SeatSource::Terminal(session) => {
-                MiniSeatContent::Transcript(transcript_tail(session, self.columns))
+                MiniSeatContent::Transcript(transcript_tail(session, self.columns, self.rows))
             }
+            SeatSource::Document { buffer, mono } => MiniSeatContent::Document {
+                lines: document_head(buffer, self.columns, self.rows),
+                mono: *mono,
+            },
             // **The page the column is on, and not the one it has** (§7.1.3g's
             // ruling, one surface further out): a Files seat is a column with
             // two pages and `view` says which of them is on screen right now.
             SeatSource::Files { state, cache } => match state.view {
-                FilesView::Files => MiniSeatContent::Files(files_head(state, cache)),
+                FilesView::Files => MiniSeatContent::Files(files_head(state, cache, self.rows)),
                 FilesView::Git => git_face(state),
             },
             SeatSource::Face { name, kind } => MiniSeatContent::Face {
@@ -357,13 +441,97 @@ impl SeatDemand<'_> {
     }
 }
 
-/// **How many characters fit across one mini seat** — §3.3's second width, as
+/// **Which face one mini seat's content is set in**, as the numbers a row is
+/// measured and drawn with.
+///
+/// One table for three readers — the row count below, the cut above and the
+/// painter (`seats::focus_mini_seat_content`) — so that a seat cannot be
+/// *measured* at the terminal's line height and *drawn* at the window's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MiniMetrics {
+    pub font_logical_px: f32,
+    pub line_height: f32,
+    /// The terminal's face rather than the window's — `ChromeLabel::mono`.
+    pub mono: bool,
+}
+
+impl MiniMetrics {
+    /// The terminal's: a shell's tail, and a document that is code.
+    pub const TERM: Self = Self {
+        font_logical_px: FOCUS_MINI_TERM_FONT_LOGICAL_PX,
+        line_height: FOCUS_MINI_TERM_LINE_HEIGHT,
+        mono: true,
+    };
+    /// The window's: a files column's rows, prose, and a face's two words.
+    pub const FACE: Self = Self {
+        font_logical_px: FOCUS_MINI_FILES_FONT_LOGICAL_PX,
+        line_height: FOCUS_MINI_FILES_LINE_HEIGHT,
+        mono: false,
+    };
+
+    /// One row's height in physical pixels, rounded exactly the way the painter
+    /// rounds it — the same expression in one place rather than two that agree
+    /// until somebody changes one.
+    #[must_use]
+    pub fn line_px(self, scale: f32) -> f32 {
+        (self.font_logical_px * self.line_height * scale).round()
+    }
+}
+
+impl SeatSource<'_> {
+    /// Which of the two faces this seat's content is set in.
+    ///
+    /// A face's own two lines answer `FACE` for the reason the painter gives:
+    /// they are the window talking about a pane, not a document quoted out of
+    /// one.
+    #[must_use]
+    pub fn metrics(&self) -> MiniMetrics {
+        match self {
+            Self::Terminal(_) | Self::Document { mono: true, .. } => MiniMetrics::TERM,
+            Self::Files { .. } | Self::Document { mono: false, .. } | Self::Face { .. } => {
+                MiniMetrics::FACE
+            }
+        }
+    }
+}
+
+/// **How many whole rows fit down one mini seat** (user ruling, 2026-08-20) —
+/// the number that replaced `FOCUS_MINI_TERM_ROWS = 6`.
+///
+/// The seat's own rectangle, less its hairline and the padding its rows are set
+/// inside, divided by one row's height. `line` is already scaled — see
+/// [`MiniMetrics::line_px`] — because the painter lays its rows out on that very
+/// number, and a count derived from an unrounded height would disagree with the
+/// boxes actually drawn.
+///
+/// **Floored, where [`mini_columns`] adds one.** The two edges are not
+/// symmetrical: a character straddling the right edge is drawn as far as the box
+/// goes and reads as *cut*, which is what a line running off the side of a
+/// terminal looks like; a row straddling the top edge is a band of half-glyphs,
+/// which reads as damage. So the horizontal edge takes the extra unit and the
+/// vertical one does not.
+#[must_use]
+pub fn mini_rows(rect: [f32; 4], line: f32, scale: f32) -> usize {
+    let border = (bt_render::FOCUS_MINI_BORDER_LOGICAL_PX * scale)
+        .round()
+        .max(1.0);
+    let pad_top = (bt_render::FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX * scale).round();
+    let pad_bottom = (bt_render::FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX * scale).round();
+    let height = rect[3] - rect[1] - 2.0 * border - pad_top - pad_bottom;
+    // A line height of zero — a face nobody has measured, a scale of nothing —
+    // answers "no rows" rather than dividing, for [`mini_columns`]'s reason.
+    if height <= 0.0 || line <= 0.0 || !line.is_finite() {
+        return 0;
+    }
+    (height / line) as usize
+}
+
+/// **How many columns fit across one mini seat** — §3.3's second width, as
 /// the number a session's tail is cut to.
 ///
-/// `advance` is one character of the mini transcript's face, measured by the
-/// renderer (`WindowRuntime::focus_mini_advance`); the face is monospaced, so one
-/// character's advance is every character's, and the division is exact rather
-/// than a guessed ratio.
+/// `advance` is one character of the seat's own face, measured by the renderer
+/// (`WindowRuntime::focus_mini_advance` for the terminal's, `focus_mini_face_advance`
+/// for the window's).
 ///
 /// **One over the count that fits, deliberately.** The row is clipped at the
 /// seat's edge, so the character straddling that edge is drawn as far as the box
@@ -387,25 +555,38 @@ pub fn mini_columns(rect: [f32; 4], advance: f32, scale: f32) -> usize {
     (width / advance) as usize + 1
 }
 
-/// The last [`FOCUS_MINI_TERM_ROWS`] rows of a session's screen **that have
-/// anything on them**, oldest first, each cut to `columns` characters.
+/// The last `rows` rows of a session's screen, oldest first, each cut to
+/// `columns` **columns**.
 ///
-/// **Trailing blanks are skipped, and that is the difference between a
+/// # What is kept, and what is skipped
+///
+/// **A blank row inside the tail is kept, and keeps its place.** A real terminal
+/// prints blank lines on purpose — the gap between paragraphs, the empty line
+/// above a prompt — and a projection that closed those gaps would be a picture
+/// that does not line up with the screen it is a picture of. The bottom-up walk
+/// pushes every row it sees once it has seen a non-blank one, so those gaps
+/// arrive as empty strings and the painter spends a row's height on each.
+///
+/// **The blank *floor* is skipped, and that is the difference between a
 /// thumbnail and a picture of the bottom of a rectangle.** A shell that has not
-/// filled its screen yet leaves every row under its prompt empty; the six
-/// *bottom* rows of that grid are six empty rows, which is a true statement about
-/// the grid and tells a reader nothing at all. The mock-up's own model is a list
-/// of lines with no blank padding in it (`s.lines.slice(-6)`), and this is that
-/// list, found by walking up from the floor.
+/// filled its screen yet leaves every row under its prompt empty; the bottom
+/// rows of that grid are empty rows, which is a true statement about the grid
+/// and tells a reader nothing at all. So the walk starts counting at the last
+/// row with something on it. The two rules are one rule seen from two ends —
+/// the tail begins at the last thing the shell said, and everything from there
+/// up is carried whole.
 ///
 /// The walk is bounded by the grid and is only ever reached when the generation
 /// moved, so a session with nothing happening in it does not walk at all — and a
 /// session busy enough to walk far is, by the time it is, a session whose screen
 /// has filled and whose walk is one row long.
-fn transcript_tail(session: &DualPlaneSession, columns: usize) -> Vec<String> {
-    let (_, rows) = session.live_dimensions();
-    let mut tail: Vec<String> = Vec::with_capacity(FOCUS_MINI_TERM_ROWS);
-    for row in (0..rows.get()).rev() {
+fn transcript_tail(session: &DualPlaneSession, columns: usize, rows: usize) -> Vec<String> {
+    if rows == 0 {
+        return Vec::new();
+    }
+    let (_, grid_rows) = session.live_dimensions();
+    let mut tail: Vec<String> = Vec::with_capacity(rows);
+    for row in (0..grid_rows.get()).rev() {
         let Some(captured) = session.live_row(row) else {
             continue;
         };
@@ -426,7 +607,7 @@ fn transcript_tail(session: &DualPlaneSession, columns: usize) -> Vec<String> {
             continue;
         }
         tail.push(cut_to(text, columns));
-        if tail.len() == FOCUS_MINI_TERM_ROWS {
+        if tail.len() == rows {
             break;
         }
     }
@@ -434,18 +615,36 @@ fn transcript_tail(session: &DualPlaneSession, columns: usize) -> Vec<String> {
     tail
 }
 
-/// `text`, cut to `columns` characters.
+/// `text`, cut to `columns` **drawn columns** — leading whitespace and all.
 ///
-/// **By character and not by byte**: the cut is the card's width in cells, and a
-/// byte cut through a multi-byte character would not even be a string. Counted in
-/// `char`s rather than graphemes because the advance being counted against is a
-/// monospaced cell's, which is what the grid the text came out of already
-/// measured it in.
+/// **Columns and not characters** (user ruling, 2026-08-20). The count this is
+/// measured against came out of a division by a monospaced cell's advance
+/// ([`mini_columns`]), and a cell is what [`bt_unicode`] calls a column: a CJK
+/// ideograph occupies two of them and a `char` count says one, so a line with
+/// any wide text in it used to be cut a character-for-column too late and ran
+/// out past the seat's edge under the clip. Counting the way the grid the text
+/// came out of counts is what makes the seat's right edge the *same* edge the
+/// terminal's would be.
+///
+/// **Nothing is trimmed off the front.** A row's indent is its position in the
+/// grid, and a projection that left-aligned every row would hand back a picture
+/// with every table, every tree and every centred banner flattened against the
+/// left margin. The row is written from column zero and clipped at the seat's
+/// right edge, which is exactly what the terminal under it does.
+///
+/// The cluster straddling the edge is kept for [`mini_columns`]'s reason: the
+/// painter's clip is what makes a cut line look cut.
 fn cut_to(text: &str, columns: usize) -> String {
-    match text.char_indices().nth(columns) {
-        Some((end, _)) => text[..end].to_owned(),
-        None => text.to_owned(),
+    let mut used = 0;
+    let mut end = 0;
+    for cluster in bt_unicode::graphemes(text) {
+        if used >= columns {
+            return text[..end].to_owned();
+        }
+        used += bt_unicode::cluster_width(cluster);
+        end += cluster.len();
     }
+    text.to_owned()
 }
 
 /// **What a column standing on its Git page says**: the place, and the page
@@ -506,24 +705,60 @@ fn git_face(state: &FilesLeafState) -> MiniSeatContent {
     }
 }
 
-/// The first [`FOCUS_MINI_FILES_ROWS`] rows a files column is showing **on its
-/// tree page** — see [`git_face`] for the other one.
+/// The first `rows` rows a files column is showing **on its tree page** — see
+/// [`git_face`] for the other one.
 ///
 /// The column's **own** walk (`files::tree_view`), so a card can never show a
 /// tree the pane under it disagrees with — and it asks for nothing: `tree_view`
 /// returns the directories it would like read next and this drops them on the
 /// floor, because a thumbnail must not put a question to the disk. A folder
 /// nobody has opened stays a folder nobody has opened.
-fn files_head(state: &FilesLeafState, cache: &DirCache) -> Vec<MiniFilesRow> {
+fn files_head(state: &FilesLeafState, cache: &DirCache, rows: usize) -> Vec<MiniFilesRow> {
     files::tree_view(state, cache)
         .rows
         .into_iter()
-        .take(FOCUS_MINI_FILES_ROWS)
+        .take(rows)
         .map(|row| MiniFilesRow {
             directory: matches!(row.kind, RowKind::Directory { .. }),
             depth: u16::try_from(row.depth).unwrap_or(u16::MAX),
             name: row.name,
         })
+        .collect()
+}
+
+/// **The first `rows` lines of a preview's body** (user ruling, 2026-08-20).
+///
+/// The head of the head. [`PreviewBuffer::content`] is already only the first
+/// `PREVIEW_HEAD_BYTES` of the file — a preview *is* a head read — so what this
+/// takes is the top of a body that is in memory, and there is nothing behind it
+/// to go and ask. That is the whole of how the ruling was satisfied without
+/// crossing §7.1.6b′'s red line: **a thumbnail must not put a question to the
+/// disk**, and a `take(rows)` over a `String` this window already holds asks
+/// nobody anything.
+///
+/// **The head and not the scrolled view**, deliberately. A card is a picture of
+/// *which tab this is*, and the answer to that question is at the top of the
+/// document; following a pane's scroll would mean re-deriving the pane's own
+/// body layout (a rendered markdown page has no line-to-pixel mapping at all)
+/// inside a projection whose entire budget is four gates and a walk over
+/// strings. The files column beside it already answers the same way — the top
+/// of its tree, not the top of its scrollport — so this is the house's existing
+/// grammar rather than a second one.
+///
+/// A mono document is cut like a transcript row; prose is cut at the same count
+/// measured against the app face's own advance, so that in both cases the
+/// painter's clip has at most one column's worth of text left to bite off.
+fn document_head(buffer: &PreviewBuffer, columns: usize, rows: usize) -> Vec<String> {
+    buffer
+        .content
+        .as_deref()
+        .unwrap_or_default()
+        .lines()
+        .take(rows)
+        // A `\r\n` file read as text leaves the carriage return on the end of
+        // every line, and a chrome label handed one shapes a box for a glyph
+        // nobody asked for.
+        .map(|line| cut_to(line.trim_end_matches('\r'), columns))
         .collect()
 }
 
@@ -548,6 +783,7 @@ mod tests {
         SeatDemand {
             id: seat(id),
             columns: 40,
+            rows: 6,
             source: SeatSource::Face {
                 name: name.to_owned(),
                 kind: "TXT".to_owned(),
@@ -592,7 +828,35 @@ mod tests {
         SeatDemand {
             id: seat(1),
             columns: 24,
+            rows: 4,
             source: SeatSource::Files { state, cache },
+        }
+    }
+
+    /// A file already read into a buffer — a preview seat with something to
+    /// quote. `PREVIEW_HEAD_BYTES` is not involved: this is a body the window is
+    /// already holding, which is the only kind a thumbnail is allowed to read.
+    fn loaded_buffer(name: &str, body: &str) -> PreviewBuffer {
+        let mut buffer = PreviewBuffer::new(
+            PreviewSource::File(std::path::PathBuf::from(format!(
+                r"D:\Developer\folio\{name}"
+            ))),
+            name.to_owned(),
+        );
+        buffer.accept(crate::preview::HeadOutcome::Read {
+            text: body.to_owned(),
+            truncated: false,
+            mtime: None,
+        });
+        buffer
+    }
+
+    fn document_demand(buffer: &PreviewBuffer, columns: usize, rows: usize) -> SeatDemand<'_> {
+        SeatDemand {
+            id: seat(1),
+            columns,
+            rows,
+            source: SeatSource::Document { buffer, mono: true },
         }
     }
 
@@ -900,6 +1164,7 @@ mod tests {
             SeatDemand {
                 id: seat(1),
                 columns: 40,
+                rows: 6,
                 source: SeatSource::Terminal(shell),
             }
         }
@@ -933,6 +1198,7 @@ mod tests {
         let demand = |columns| SeatDemand {
             id: seat(1),
             columns,
+            rows: 6,
             source: SeatSource::Terminal(&shell),
         };
         thumbs.project(tab(1), &[demand(40)], start);
@@ -952,7 +1218,7 @@ mod tests {
             .feed(b"one\r\ntwo\r\nthree\r\n")
             .expect("a shell takes its own output");
         assert_eq!(
-            transcript_tail(&shell, 40),
+            transcript_tail(&shell, 40, 6),
             vec!["one".to_owned(), "two".to_owned(), "three".to_owned()]
         );
     }
@@ -968,7 +1234,7 @@ mod tests {
                 .expect("a shell takes its own output");
         }
         assert_eq!(
-            transcript_tail(&shell, 40),
+            transcript_tail(&shell, 40, 6),
             (4..=9)
                 .map(|line| format!("line {line}"))
                 .collect::<Vec<_>>()
@@ -983,14 +1249,295 @@ mod tests {
         shell
             .feed(b"abcdefghijklmnopqrstuvwxyz\r\n")
             .expect("a shell takes its own output");
-        assert_eq!(transcript_tail(&shell, 8), vec!["abcdefgh".to_owned()]);
+        assert_eq!(transcript_tail(&shell, 8, 6), vec!["abcdefgh".to_owned()]);
     }
 
-    /// A cut that landed inside a character would not be a string at all.
+    /// A cut that landed inside a character would not be a string at all — and,
+    /// since 2026-08-20, it is counted in the unit the grid counts in.
+    ///
+    /// Three columns of a line of ideographs is one whole ideograph and the one
+    /// straddling the edge, which is two of them: the same "draw it and let the
+    /// clip cut it" rule [`mini_columns`] adds its extra column for. It used to
+    /// answer `日本語` — three *characters*, six columns, half a card's width
+    /// past the edge.
     #[test]
-    fn the_cut_counts_characters_and_never_bytes() {
-        assert_eq!(cut_to("日本語のテキスト", 3), "日本語");
+    fn the_cut_counts_columns_and_never_bytes() {
+        assert_eq!(cut_to("日本語のテキスト", 3), "日本");
+        assert_eq!(cut_to("日本語のテキスト", 4), "日本");
+        assert_eq!(cut_to("日本語のテキスト", 5), "日本語");
         assert_eq!(cut_to("ascii", 99), "ascii");
+        // A grapheme is one unit however many code points went into it.
+        assert_eq!(cut_to("e\u{301}xyz", 2), "e\u{301}x");
+    }
+
+    /// **A row keeps its columns** (user ruling, 2026-08-20).
+    ///
+    /// Three claims, and the middle one is the one that was wrong:
+    ///
+    /// * an indent is kept — a row is written from column zero, so the spaces in
+    ///   front of it are drawn and the shape of a tree, a table or a centred
+    ///   banner survives the shrink;
+    /// * the cut is measured in **columns** — a CJK ideograph is two of them,
+    ///   which is what the grid the text came out of counted it as, and counting
+    ///   `char`s instead put the right edge a character-per-ideograph too far
+    ///   right on every line with any wide text in it;
+    /// * and it is cut at the **right** edge, never from the left.
+    ///
+    /// Red gate: count characters instead of columns and the second assertion
+    /// goes red with `"中文ab"`, which is what it did before this branch.
+    #[test]
+    fn a_row_keeps_its_columns() {
+        assert_eq!(cut_to("    indented", 40), "    indented");
+        assert_eq!(cut_to("中文abc", 4), "中文");
+        assert_eq!(cut_to("abcdefgh", 4), "abcd");
+        // A row narrower than the seat is left entirely alone — no padding, and
+        // nothing taken off either end.
+        assert_eq!(cut_to("  ok", 40), "  ok");
+    }
+
+    /// And through a real grid, which is where the indent actually comes from: a
+    /// shell that printed a line four columns in has a card that says so.
+    #[test]
+    fn an_indented_row_is_still_indented_on_the_card() {
+        let mut shell = session();
+        shell
+            .feed(b"    indented\r\n")
+            .expect("a shell takes its own output");
+        assert_eq!(
+            transcript_tail(&shell, 40, 6),
+            vec!["    indented".to_owned()]
+        );
+    }
+
+    /// **A blank row inside the tail keeps its place** (user ruling,
+    /// 2026-08-20) — the gap between two paragraphs and the empty line above a
+    /// prompt are things the shell printed on purpose, and a projection that
+    /// closed them would not line up with the screen it is a picture of.
+    ///
+    /// This one was **already true** when the ruling was written, and the guard
+    /// is what the branch adds: the walk skips blanks only while it is still
+    /// under the floor. What was wrong was the doc comment above it, which said
+    /// "the last N rows that have anything on them".
+    #[test]
+    fn blank_rows_inside_the_tail_are_kept() {
+        let mut shell = session();
+        shell
+            .feed(b"one\r\n\r\ntwo\r\n")
+            .expect("a shell takes its own output");
+        assert_eq!(
+            transcript_tail(&shell, 40, 6),
+            vec!["one".to_owned(), String::new(), "two".to_owned()]
+        );
+    }
+
+    /// **A taller seat projects more rows** (user ruling, 2026-08-20) — the
+    /// count is the seat's own inner height over its own line height, floored,
+    /// and never a constant.
+    ///
+    /// The two halves are both needed: the first says the arithmetic is the
+    /// stated one at three scales, the second says the projection actually
+    /// spends it. A `mini_rows` that answered thirteen while `transcript_tail`
+    /// went on taking six would pass the first alone.
+    ///
+    /// Red gate: put `FOCUS_MINI_TERM_ROWS = 6` back and the second half goes
+    /// red with six lines out of a shell that has thirty.
+    #[test]
+    fn a_tall_seat_projects_as_many_rows_as_it_holds() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let line = MiniMetrics::TERM.line_px(scale);
+            let border = (bt_render::FOCUS_MINI_BORDER_LOGICAL_PX * scale)
+                .round()
+                .max(1.0);
+            let pad = (bt_render::FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX * scale).round()
+                + (bt_render::FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX * scale).round();
+            // A lone pane's seat: the whole card body less the body's own inset.
+            let height = (bt_render::FOCUS_MINI_HEIGHT_LOGICAL_PX * scale).round()
+                - 2.0 * (bt_render::FOCUS_MINI_PADDING_LOGICAL_PX * scale).round();
+            let rect = [0.0, 0.0, 203.0 * scale, height];
+            let held = mini_rows(rect, line, scale);
+            assert_eq!(
+                held,
+                ((height - 2.0 * border - pad) / line) as usize,
+                "the count is the inner height over the line height, floored"
+            );
+            assert!(
+                held > 6,
+                "a 160px card holds more than the six a constant used to allow \
+                 (scale {scale}: {held})"
+            );
+        }
+
+        // And the projection spends what it was given.
+        let mut shell = DualPlaneSession::new(
+            NonZeroU32::new(80).expect("80 is not zero"),
+            NonZeroU32::new(40).expect("40 is not zero"),
+        );
+        for line in 1..=30 {
+            shell
+                .feed(format!("line {line}\r\n").as_bytes())
+                .expect("a shell takes its own output");
+        }
+        assert_eq!(transcript_tail(&shell, 60, 13).len(), 13);
+        assert_eq!(
+            transcript_tail(&shell, 60, 13).first().map(String::as_str),
+            Some("line 18"),
+            "and they are the LAST thirteen, in reading order"
+        );
+    }
+
+    /// A seat with no room for a whole row asks for none, rather than for one it
+    /// would draw as a band of half-glyphs.
+    #[test]
+    fn a_seat_too_short_for_a_row_projects_none() {
+        let line = MiniMetrics::TERM.line_px(1.0);
+        assert_eq!(mini_rows([0.0, 0.0, 200.0, 10.0], line, 1.0), 0);
+        assert_eq!(mini_rows([0.0, 0.0, 200.0, 100.0], 0.0, 1.0), 0);
+    }
+
+    /// **A preview with a body in memory quotes it** (user ruling, 2026-08-20):
+    /// the head of the document, as many lines as the seat holds, cut to its
+    /// width — not two words about it.
+    ///
+    /// Red gate: send a loaded preview back through `SeatSource::Face` and this
+    /// goes red on the first assertion.
+    #[test]
+    fn a_loaded_preview_projects_its_head_lines() {
+        let buffer = loaded_buffer(
+            "main.rs",
+            "fn main() {\n    println!(\"hi\");\n}\n\nfn other() {}\n",
+        );
+        let mut thumbs = FocusThumbnails::default();
+        let start = Instant::now();
+        thumbs.project(tab(1), &[document_demand(&buffer, 40, 3)], start);
+        assert_eq!(
+            shown(&thumbs),
+            Some(&MiniSeatContent::Document {
+                lines: vec![
+                    "fn main() {".to_owned(),
+                    "    println!(\"hi\");".to_owned(),
+                    "}".to_owned(),
+                ],
+                mono: true,
+            }),
+            "the head of the document, indent and all, as many lines as it holds"
+        );
+
+        // A taller seat quotes further down, and a blank line inside the file
+        // keeps its place there exactly as it does in a shell's tail.
+        thumbs.project(
+            tab(1),
+            &[document_demand(&buffer, 40, 5)],
+            start + MIN_INTERVAL,
+        );
+        assert_eq!(
+            shown(&thumbs),
+            Some(&MiniSeatContent::Document {
+                lines: vec![
+                    "fn main() {".to_owned(),
+                    "    println!(\"hi\");".to_owned(),
+                    "}".to_owned(),
+                    String::new(),
+                    "fn other() {}".to_owned(),
+                ],
+                mono: true,
+            })
+        );
+    }
+
+    /// **A preview whose body has not arrived stays a face** — the red line, in
+    /// a test: the projection has nothing in memory to quote and does not go
+    /// looking for any.
+    ///
+    /// A background tab's preview pane is exactly this — `PreviewLoad::Pending`,
+    /// no content — and it is the case the ruling's "只能从已在内存里的缓冲取文本"
+    /// was written for.
+    #[test]
+    fn an_unloaded_preview_stays_a_face() {
+        let buffer = PreviewBuffer::new(
+            PreviewSource::File(std::path::PathBuf::from(r"D:\Developer\folio\notes.md")),
+            "notes.md".to_owned(),
+        );
+        assert!(
+            buffer.content.is_none(),
+            "a buffer nobody has read has nothing to quote"
+        );
+        // The caller's own rule (`Runtime::mini_source`) is what turns this into
+        // a face; asserted here as the fact it turns on, so the two cannot
+        // disagree about what "loaded" means.
+        assert_eq!(buffer.load, crate::preview::PreviewLoad::Pending);
+
+        let mut thumbs = FocusThumbnails::default();
+        thumbs.project(
+            tab(1),
+            &[SeatDemand {
+                id: seat(1),
+                columns: 40,
+                rows: 12,
+                source: SeatSource::Face {
+                    name: "notes.md".to_owned(),
+                    kind: buffer.kind_word(),
+                },
+            }],
+            Instant::now(),
+        );
+        assert_eq!(
+            shown(&thumbs),
+            Some(&MiniSeatContent::Face {
+                name: "notes.md".to_owned(),
+                kind: "MD".to_owned(),
+            })
+        );
+    }
+
+    /// **Gate 3 carries the buffer's identity, not only its revision.** Two
+    /// files freshly read are both at the same revision, so a key that was the
+    /// counter alone would leave the first file's head on the card after the
+    /// pane moved to the second.
+    #[test]
+    fn a_preview_that_changed_file_repaints_even_at_the_same_revision() {
+        let first = loaded_buffer("a.rs", "the first file\n");
+        let second = loaded_buffer("b.rs", "the second file\n");
+        assert_eq!(
+            first.revision, second.revision,
+            "two freshly-read buffers are at the same revision, which is the trap"
+        );
+        let mut thumbs = FocusThumbnails::default();
+        let start = Instant::now();
+        thumbs.project(tab(1), &[document_demand(&first, 40, 4)], start);
+        thumbs.project(
+            tab(1),
+            &[document_demand(&second, 40, 4)],
+            start + MIN_INTERVAL,
+        );
+        assert_eq!(thumbs.stats().projections, 2);
+        assert_eq!(
+            shown(&thumbs),
+            Some(&MiniSeatContent::Document {
+                lines: vec!["the second file".to_owned()],
+                mono: true,
+            })
+        );
+    }
+
+    /// A card that got **taller** re-projects even though the grid behind it did
+    /// not move — the vertical half of the §3.3 argument, and the reason `rows`
+    /// is in the damage key.
+    #[test]
+    fn a_taller_card_re_projects_a_grid_that_did_not_change() {
+        let shell = session();
+        let mut thumbs = FocusThumbnails::default();
+        let start = Instant::now();
+        let demand = |rows| SeatDemand {
+            id: seat(1),
+            columns: 40,
+            rows,
+            source: SeatSource::Terminal(&shell),
+        };
+        thumbs.project(tab(1), &[demand(6)], start);
+        thumbs.project(tab(1), &[demand(6)], start + MIN_INTERVAL);
+        assert_eq!(thumbs.stats().projections, 1);
+        thumbs.project(tab(1), &[demand(13)], start + MIN_INTERVAL * 2);
+        assert_eq!(thumbs.stats().projections, 2);
     }
 
     /// **The budget, in milliseconds** (§7.1.6b′ F2) — the two numbers the ruling
@@ -1018,6 +1565,16 @@ mod tests {
     /// The shape §7.1.6b′ names: ten tabs, two seats each.
     const BUDGET_TABS: usize = 10;
     const BUDGET_SEATS_PER_TAB: usize = 2;
+    /// **How many rows each of those seats carries** — the number the 2026-08-20
+    /// ruling more than doubled, and therefore the one the budget has to be
+    /// measured against again.
+    ///
+    /// Thirteen: what a **lone** pane's seat holds in a 160px card, spent on
+    /// *both* seats of all ten tabs. That is deliberately worse than the shape
+    /// it stands for — two seats sharing one body each hold about six — so the
+    /// ceiling below is being defended against more work than the mode can
+    /// actually be asked for.
+    const BUDGET_ROWS: usize = 13;
 
     /// The median of `samples`, which is what a frame budget is stated in — a
     /// mean would be moved by the one frame the scheduler took the core away.
@@ -1081,6 +1638,7 @@ mod tests {
                     .map(|(seat_index, shell)| SeatDemand {
                         id: SeatId(seat_index as u64),
                         columns: 44,
+                        rows: BUDGET_ROWS,
                         source: SeatSource::Terminal(shell),
                     })
                     .collect();
@@ -1124,6 +1682,7 @@ mod tests {
                     .map(|(seat_index, shell)| SeatDemand {
                         id: SeatId(seat_index as u64),
                         columns: 44,
+                        rows: BUDGET_ROWS,
                         source: SeatSource::Terminal(shell),
                     })
                     .collect();
