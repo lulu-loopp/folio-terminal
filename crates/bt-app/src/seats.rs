@@ -187,13 +187,22 @@ pub fn inline_rename_marks(box_: [f32; 4], edit: &TabEdit, scale: f32) -> Inline
     // 2026-08-19, screenshots of the preview head).
     //
     // This used to refuse a caret whose hairline reached past `box_[2]`, which
-    // sounds like "the caret walked out of the visible window" and is in fact
-    // the preview head's ordinary state: that head sizes its name box to the
-    // draft's own measured width (the mock-up's `size` attribute), the editor
-    // opens with the caret at the END of the file name, and so the caret lands
-    // exactly ON the right edge every single time — one hairline too far, from
-    // the first frame, for as long as the field is open. The head was drawing a
-    // selection band and no insertion point at all.
+    // sounds like "the caret walked out of the visible window" and is in fact an
+    // ordinary place for the preview head's caret to be: that head sizes its
+    // name box to the draft's own measured width (the mock-up's `size`
+    // attribute), so a caret at the END OF THE DRAFT lands exactly ON the right
+    // edge — one hairline too far, and no insertion point drawn at all.
+    //
+    // **The caret reaches that end by several roads and the clamp answers all of
+    // them.** `End` walks there from anywhere; a whole-draft selection (a tab's
+    // name, or a file named `.gitignore`, which has no suffix to leave out)
+    // starts there; and typing to the end of a name arrives there. It was the
+    // *opening* frame of a file rename too, until 2026-08-20 — a bug on the
+    // other side of this call, where the editor seeded its caret at the end of
+    // the name while selecting only the stem, so the head drew a band under
+    // `Cargo` and a hairline after `.toml`. That is fixed at the seed
+    // (`TabRename::seed`); this clamp is not what fixed it and is not made
+    // unnecessary by it.
     //
     // `dress_preview_name_editor` had already written the answer down for the
     // IME's candidate anchor — `(name_box[0] + caret_px).min(name_box[2] -
@@ -15972,10 +15981,12 @@ mod tests {
         // **A caret at or past the box's own right edge is CLAMPED, never
         // dropped** (user report 2026-08-19). It used to be dropped, and the
         // surface that paid was the preview head: its name box is the draft's
-        // own measured width and its editor opens with the caret at the end of
-        // the file name, so "the caret is one hairline past the edge" was that
-        // head's ordinary, permanent state and it drew no insertion point at
-        // all. A field's last legal caret position is against its right edge.
+        // own measured width, so a caret at the end of the draft lands exactly
+        // on the right edge and drew no insertion point at all. `End`, a
+        // whole-draft selection and typing to the end all put it there, which is
+        // why this stays after the seed that used to put it there on the opening
+        // frame was fixed. A field's last legal caret position is against its
+        // right edge.
         //
         // Red gate: put `left + width <= box_[2]` back in front of the caret and
         // both of these go `None`.
@@ -15993,6 +16004,38 @@ mod tests {
                 "and it stands on the last hairline the box holds"
             );
         }
+        // **AND A CARET THAT IS NOT AT THE END OF THE DRAFT STANDS ON THE
+        // SELECTION'S EDGE, NOT ON THE BOX'S** (user report 2026-08-20,
+        // screenshot `[Cargo].toml|`).
+        //
+        // This is the drawn half of `TabRename::seed`'s invariant, and it is the
+        // reason the clamp above is not a licence to put every caret at the far
+        // edge: a file rename opens with the stem selected, so `caret_px` equals
+        // `selection_px`, and what the reader must see is one hairline standing
+        // where the wash stops — inside a box the head sized to the whole name.
+        // The box here is the draft's own width the way the preview head sizes
+        // it, so "on the band's edge" and "on the box's edge" are genuinely
+        // different pixels and the assertion can tell them apart.
+        let box_ = [100.0_f32, 0.0, 100.0 + 62.0, 32.0];
+        let opened = TabEdit {
+            caret_px: 34.0,
+            selection_px: 34.0,
+            ..edit.clone()
+        };
+        let marks = inline_rename_marks(box_, &opened, 1.0);
+        let caret = marks
+            .caret
+            .expect("the opening frame draws an insertion point");
+        let band = marks.selection.expect("under a stem that is selected");
+        assert_eq!(
+            caret[0], band[2],
+            "the hairline stands where the wash stops"
+        );
+        assert!(
+            caret[2] < box_[2],
+            "and that is short of the box's own right edge, which is where the \
+             end of the draft would have put it"
+        );
         let dark = TabEdit {
             caret_lit: false,
             ..edit
@@ -16072,9 +16115,11 @@ mod tests {",
     ///   and therefore with no mark at all, and every editor lost its last mark
     ///   at the first keystroke (the selection collapses), and
     /// - the preview head, whose name box is the draft's own measured width and
-    ///   whose caret opens at the END of the file name, had its caret refused by
-    ///   a bounds test for being one hairline past the box's right edge — so
-    ///   that surface drew no insertion point at all, ever.
+    ///   whose caret at that time opened at the END of the file name (a separate
+    ///   bug in the editor's seed, fixed 2026-08-20), had its caret refused by a
+    ///   bounds test for being one hairline past the box's right edge — so that
+    ///   surface drew no insertion point at all, ever. `End` still walks there,
+    ///   so the clamp that replaced the bounds test is still what is tested.
     ///
     /// # Why the pin that existed did not hold
     ///
