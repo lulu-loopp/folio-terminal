@@ -15856,8 +15856,8 @@ fn pane_into_new_tab(
     }
     let graph_view = from
         .git_graph_view
-        .remove(&seat.id)
-        .map(|view| BTreeMap::from([(key, view)]))
+        .remove(&PreviewSurface::Seat(seat.id))
+        .map(|view| BTreeMap::from([(PreviewSurface::Seat(key), view)]))
         .unwrap_or_default();
     from.refocus_after_losing(seat.id);
     let (seat_layout, seat_overflow) = solve(&seats);
