@@ -1396,7 +1396,15 @@ pub enum GateRequest {
     /// default answer the wrong way round. What had to be generalized is only the
     /// vocabulary: the title now comes from the request.
     GitDiscard {
-        seat: bt_layout::SeatId,
+        /// **Which surface's cache carries the write** — a column, or a floating
+        /// Git page (user ruling, 2026-08-19).
+        ///
+        /// It was a bare `SeatId` while a column was the only surface that could
+        /// stage or discard. A window can now, and a request that names a seat
+        /// is a request half the places that make it cannot express — the same
+        /// argument [`Self::GitDeleteBranch`] already makes one line down, one
+        /// surface earlier.
+        origin: crate::GitOrigin,
         /// Repo-relative, in git's grammar — and the name the gate says out loud.
         path: String,
         /// Whether git has ever seen this file, which decides both the sentence
@@ -3463,7 +3471,7 @@ in the folders you left them, as new shells."
         );
         assert_eq!(
             GateRequest::GitDiscard {
-                seat: bt_layout::SeatId(1),
+                origin: crate::GitOrigin::Column(bt_layout::SeatId(1)),
                 path: "a.txt".to_owned(),
                 untracked: false,
             }

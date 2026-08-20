@@ -42,6 +42,7 @@ use std::path::Path;
 use crate::git::{
     GitCache, GitCommitFile, GitFault, GitGroup, GitSlot, GitStatusEntry, GitWriteVerb, StatusCode,
 };
+use crate::git_graph::{GraphKey, GraphKeyAction};
 use crate::i18n::Text;
 use crate::marks::{ChromeMark, ChromeSprite};
 use crate::preview::PreviewSource;
@@ -886,6 +887,25 @@ pub enum GitRow {
 }
 
 impl GitRow {
+    /// Whether a pointer resting on this row lights its ground, and the inks
+    /// that go with it.
+    ///
+    /// Two kinds answer something other than "wherever the pointer is": the
+    /// branch you are **already standing on** has nowhere to go, so lighting it
+    /// would offer a checkout that is not on the table; and an **open commit
+    /// keeps the ground its hover gave it** — the accordion's whole affordance,
+    /// and the reason the row's inks are then the hovered set too, because a lit
+    /// row with unlit text reads as a row the pointer has left rather than as
+    /// one that is open.
+    #[must_use]
+    fn ground_lit(&self, hovered: bool) -> bool {
+        match self {
+            Self::Branch(branch) => hovered && !branch.current,
+            Self::Commit(commit) => hovered || commit.expanded,
+            _ => hovered,
+        }
+    }
+
     /// Whether this row stands on a section card.
     ///
     /// The masthead and the headings do not — they sit on the pane's own body,
@@ -1155,6 +1175,21 @@ pub struct GitPanelContent {
     /// wrote it — [`clamp_git_scroll`] — on `FilesTreeContent::scroll_px`'s own
     /// ruling.
     pub scroll_px: f32,
+    /// The row wearing the selected ground — where this page's keyboard is
+    /// standing (焦点跟随可见视图, 2026-08-19).
+    ///
+    /// **Filled by the frame and clamped there**, exactly as `scroll_px` is: the
+    /// number is remembered on the column ([`crate::seats::FilesLeafState::git_sel`])
+    /// and the list under it is rebuilt from the repository every frame, so a
+    /// selection that was legal when it was written can point past the end of a
+    /// list a `git add` has since shortened. Clamping at the *build* is what
+    /// keeps the painter, the hit test and the keyboard looking at one row.
+    pub selected: Option<usize>,
+    /// Where the one open commit's row is, if one is open (R15) —
+    /// [`crate::git_graph::GraphContent::open_rows`]'s opposite number, and it
+    /// exists for the same one reader: `Esc` folds the innermost thing first and
+    /// then stands on the row it came out of, which needs that row's number.
+    pub open_row: Option<usize>,
     /// The whole page is one sentence: there is no repository here (R17), the
     /// answer has not arrived yet, or git would not read this repository at all.
     /// Drawn centred, and the rows are then empty.
@@ -1455,6 +1490,15 @@ pub fn build(
             let last = log.commits.len().saturating_sub(1);
             for (index, commit) in log.commits.iter().enumerate() {
                 let open = expanded == Some(commit.hash.as_str());
+                if open {
+                    // Recorded where the row is pushed rather than searched for
+                    // afterwards, which is the same choice `cards` makes in the
+                    // geometry: the one place that knows an index is the loop
+                    // that produced it, and a second walk looking for "the
+                    // commit whose hash matches" is a second answer waiting to
+                    // disagree with this one.
+                    content.open_row = Some(content.rows.len());
+                }
                 content.rows.push(GitRow::Commit(commit_row(
                     commit,
                     index == 0,
@@ -1846,6 +1890,33 @@ impl GitPanelGeometry {
         &self.cards
     }
 
+    /// How far this page has to be scrolled for row `index` to stand whole
+    /// inside the viewport — [`crate::git_graph::GraphGeometry::reveal`]'s law,
+    /// written for a list whose rows are not all the same height.
+    ///
+    /// The same three cases and the same order: above the window, scroll to its
+    /// top; below it, scroll until its bottom is the window's bottom; already
+    /// inside, do not move at all. The rectangles have the scroll baked into
+    /// them already ([`git_panel_geometry`] translates once at the end), so it is
+    /// taken back out here to turn a place on screen into a place in the content.
+    #[must_use]
+    pub fn reveal(&self, index: usize) -> f32 {
+        let Some(rect) = self.rows.get(index) else {
+            return self.scroll_px;
+        };
+        let row_top = rect[1] - self.viewport[1] + self.scroll_px;
+        let row_bottom = rect[3] - self.viewport[1] + self.scroll_px;
+        let height = (self.viewport[3] - self.viewport[1]).max(0.0);
+        let wanted = if row_top < self.scroll_px {
+            row_top
+        } else if row_bottom > self.scroll_px + height {
+            row_bottom - height
+        } else {
+            self.scroll_px
+        };
+        wanted.clamp(0.0, self.max_scroll.max(0.0))
+    }
+
     /// Which row the pointer is on, if any is.
     ///
     /// Clipped to the viewport first, which is what stops a row scrolled under
@@ -1963,6 +2034,116 @@ pub fn clamp_git_scroll(
     probe.scroll_px = 0.0;
     let max = git_panel_geometry(body, &probe, scale).max_scroll;
     scroll_px.clamp(0.0, max)
+}
+
+/// One page of a repository that has answered, for tests in **other** modules.
+///
+/// It lives out here rather than in `mod tests` because the float's chassis has
+/// to be able to ask for one: the whole of the 2026-08-19 ruling is that this is
+/// the same page in a second host, and a fixture that could only be built inside
+/// this module would make the two hosts' tests two different pages.
+#[cfg(test)]
+#[must_use]
+pub fn sample_page_for_tests() -> GitPanelContent {
+    use crate::git::{GitAnswer, GitLog};
+    use std::path::{Path, PathBuf};
+
+    let root = PathBuf::from(r"D:\repo");
+    let mut cache = GitCache::default();
+    cache.retarget(Path::new(r"D:\repo"));
+    cache.accept(GitAnswer::Repo {
+        dir: root.clone(),
+        outcome: Ok(root.clone()),
+    });
+    cache.accept(GitAnswer::Status {
+        root: root.clone(),
+        outcome: Ok(crate::git::parse_status(
+            b"## main\0 M src/main.rs\0A  src/new.rs\0?? junk.tmp\0",
+        )),
+    });
+    cache.accept(GitAnswer::Log {
+        root,
+        skip: 0,
+        outcome: Ok(GitLog {
+            skip: 0,
+            commits: Vec::new(),
+            has_more: false,
+        }),
+    });
+    build(
+        &cache,
+        GitPanelLook::default(),
+        1.0,
+        &mut |text: &str, size: f32, _: MeasureFace| text.chars().count() as f32 * size * 0.5,
+    )
+}
+
+// ── the keyboard (焦点跟随可见视图, 2026-08-19) ──────────────────────────────
+
+/// What one key does to a docked Git page, given the list it is looking at.
+///
+/// # The page a column is showing is the page its keyboard is on
+///
+/// A files column lends its keyboard to whichever of its two bodies is on the
+/// glass. Until this ruling only one of them had a keyboard at all: a press
+/// anywhere in a column standing on its Git page handed the keys to the column,
+/// and the router asked only whether the seat *was* a files column — never which
+/// page it was showing. So the arrows walked the **tree nobody could see**. The
+/// selection and the scroll moved in the dark, and `Enter` opened a preview of a
+/// file the reader had never chosen and could not have pointed at.
+///
+/// This is the other half. It deliberately speaks [`crate::git_graph`]'s
+/// vocabulary rather than a second one of its own: the two git surfaces answer
+/// the same six keys, the travel arithmetic **is**
+/// [`crate::git_graph::list_travel`], and the actions a caller carries out are
+/// the same enum. What differs is only what this page has:
+///
+/// * **No comparison.** `Ctrl+Enter` does nothing here, and that is the
+///   2026-08-16 ruling as code rather than as a gap — 「面板不给比较,是裁决不是
+///   缺口」: a 240-pixel column has no room for two lit rows with a detail block
+///   between them, and the graph is where that gesture lives.
+/// * **No detail block**, so nothing to step over: a travel key lands where the
+///   shared law says and stops there.
+/// * **A rung under `Esc` that the graph has not.** With nothing folded open
+///   this answers [`GraphKeyAction::Pass`], and the *column's* own Esc rung takes
+///   it — which is how the keyboard goes back to the shell (D47 / §7.1.5). It
+///   still never reaches a child: with a column focused there is nothing to type
+///   into, and the caller consumes every key it is offered.
+///
+/// **Every row is a place.** The selection walks the list exactly as drawn,
+/// headings and masthead included, because this page has no rows that exist only
+/// to make the geometry a multiplication — that is the graph's detail block, and
+/// it is the only thing `step_over_detail` was ever about.
+#[must_use]
+pub fn panel_key(content: &GitPanelContent, key: GraphKey) -> GraphKeyAction {
+    let total = content.rows.len();
+    if total == 0 {
+        // A page with no rows has nothing to walk and nothing folded open, so
+        // `Esc` is not its either — it is the column's, and means "give the
+        // keyboard back".
+        return match key {
+            GraphKey::Escape => GraphKeyAction::Pass,
+            _ => GraphKeyAction::None,
+        };
+    }
+    if let Some(row) = crate::git_graph::list_travel(total, content.selected, key) {
+        return GraphKeyAction::Select(row);
+    }
+    match key {
+        GraphKey::Enter => match content.selected {
+            Some(row) if row < total => GraphKeyAction::Toggle(row),
+            _ => GraphKeyAction::None,
+        },
+        GraphKey::Compare => GraphKeyAction::None,
+        GraphKey::Escape => match content.open_row {
+            Some(row) => GraphKeyAction::Collapse(row),
+            None => GraphKeyAction::Pass,
+        },
+        // Answered above, all four: the list has rows, so `list_travel` had a
+        // landing for each of them. The arm keeps a seventh key from being added
+        // without this function being asked what it means here.
+        GraphKey::Up | GraphKey::Down | GraphKey::Home | GraphKey::End => GraphKeyAction::None,
+    }
 }
 
 /// Where a row's verbs are, right to left from its trailing edge — and whether
@@ -2252,6 +2433,21 @@ pub fn push_git_panel(
             continue;
         }
         let hovered = hover.row == Some(index);
+        // **One ground for every row kind there is**, drawn before the row it is
+        // under. It used to be six calls inside the arms below, which is why
+        // three kinds had none at all — and the keyboard can stand on all nine
+        // (焦点跟随可见视图, 2026-08-19), so a selection on a heading or on the
+        // masthead would have been a selection you cannot see.
+        let lit = row.ground_lit(hovered);
+        push_row_ground(
+            rect,
+            lit,
+            content.selected == Some(index),
+            scale,
+            palette,
+            sprites,
+            &crop,
+        );
         match row {
             GitRow::Masthead(head) => {
                 push_git_masthead(head, rect, scale, palette, (labels, sprites), &crop);
@@ -2292,7 +2488,6 @@ pub fn push_git_panel(
                 );
             }
             GitRow::Change(change) => {
-                push_row_ground(rect, hovered, scale, palette, sprites, &crop);
                 // Derived once and read twice: the room the name gives up is
                 // the room these boxes stand in, and two derivations of that is
                 // a path clipped short of a button that is not there.
@@ -2310,31 +2505,9 @@ pub fn push_git_panel(
                 push_acts(&acts, row, hover, scale, palette, sprites, &crop);
             }
             GitRow::Branch(branch) => {
-                push_row_ground(
-                    rect,
-                    hovered && !branch.current,
-                    scale,
-                    palette,
-                    sprites,
-                    &crop,
-                );
-                push_branch(
-                    branch,
-                    rect,
-                    hovered && !branch.current,
-                    scale,
-                    palette,
-                    (labels, sprites),
-                    &crop,
-                );
+                push_branch(branch, rect, lit, scale, palette, (labels, sprites), &crop);
             }
             GitRow::Commit(commit) => {
-                // **An open commit keeps the ground its hover gave it** — the
-                // accordion's whole affordance, and the reason the row's inks
-                // are then the hovered set too: a lit row with unlit text reads
-                // as a row the pointer has left, not as one that is open.
-                let lit = hovered || commit.expanded;
-                push_row_ground(rect, lit, scale, palette, sprites, &crop);
                 push_commit(
                     commit,
                     rect,
@@ -2346,7 +2519,6 @@ pub fn push_git_panel(
                 );
             }
             GitRow::CommitFile(file) => {
-                push_row_ground(rect, hovered, scale, palette, sprites, &crop);
                 push_commit_file(
                     file,
                     rect,
@@ -2358,7 +2530,6 @@ pub fn push_git_panel(
                 );
             }
             GitRow::LoadMore => {
-                push_row_ground(rect, hovered, scale, palette, sprites, &crop);
                 labels.push(ChromeLabel {
                     text: git_load_more().to_owned(),
                     rect,
@@ -2403,23 +2574,33 @@ fn inset(rect: [f32; 4], by: f32) -> [f32; 4] {
     ]
 }
 
+#[allow(clippy::fn_params_excessive_bools)]
 fn push_row_ground(
     rect: [f32; 4],
     hovered: bool,
+    selected: bool,
     scale: f32,
     palette: &ChromePalette,
     sprites: &mut Vec<ChromeSprite>,
     crop: &dyn Fn([f32; 4]) -> [f32; 4],
 ) {
-    if !hovered {
+    // **The selection is the top rung**, which is [`crate::git_graph`]'s
+    // `RowGround::fill` order and its reason: the selection is where the
+    // keyboard is standing, and a pointer resting on that row must not hide the
+    // one thing telling the reader where the arrows are about to go.
+    let fill = if selected {
+        palette.git_row_selected
+    } else if hovered {
+        palette.git_row_hover
+    } else {
         return;
-    }
+    };
     sprites.push(ChromeSprite::new(
         ChromeMark::ControlPill {
             radius_px: (GIT_ROW_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32,
         },
         crop(rect),
-        palette.git_row_hover,
+        fill,
     ));
 }
 
@@ -5507,6 +5688,264 @@ mod tests {
         assert!(
             GitTreeBadges::of(&sources(&columns), Path::new(r"D:\repository")).is_empty(),
             "and neither is one whose name merely starts the same way"
+        );
+    }
+
+    // ── the keyboard (焦点跟随可见视图, 2026-08-19) ─────────────────────────
+
+    /// A page with rows in it, and something selected.
+    fn keyed(selected: Option<usize>) -> GitPanelContent {
+        let mut content = rows_of(&answered(
+            PORCELAIN,
+            vec![
+                commit("aaaaaaa", "first", 1),
+                commit("bbbbbbb", "second", 1),
+            ],
+            false,
+        ));
+        content.selected = selected;
+        content
+    }
+
+    /// **The Git page answers the arrows itself, and it answers them the graph's
+    /// way** — the whole of the ruling this function exists for.
+    ///
+    /// Red gate: delete `panel_key` and route the column's keys to
+    /// `files::tree_command` as the router did before 2026-08-19, and a reader
+    /// standing on the Git page walks the file tree behind it — invisibly, and
+    /// with `Enter` opening a preview of a file they never chose.
+    ///
+    /// The travel law itself is [`crate::git_graph::list_travel`]'s and is not
+    /// restated here; what this pins is that this page uses it, including the
+    /// edge that matters most: **the first press with nothing selected lands on
+    /// the top row**, never on the bottom one.
+    #[test]
+    fn the_git_pages_keyboard_walks_its_own_list_the_way_the_graph_walks_its() {
+        let fresh = keyed(None);
+        let last = fresh.rows.len() - 1;
+        assert_eq!(panel_key(&fresh, GraphKey::Down), GraphKeyAction::Select(0));
+        assert_eq!(panel_key(&fresh, GraphKey::Up), GraphKeyAction::Select(0));
+        assert_eq!(
+            panel_key(&fresh, GraphKey::End),
+            GraphKeyAction::Select(last)
+        );
+
+        let standing = keyed(Some(3));
+        assert_eq!(
+            panel_key(&standing, GraphKey::Down),
+            GraphKeyAction::Select(4)
+        );
+        assert_eq!(
+            panel_key(&standing, GraphKey::Up),
+            GraphKeyAction::Select(2)
+        );
+        assert_eq!(
+            panel_key(&standing, GraphKey::Home),
+            GraphKeyAction::Select(0)
+        );
+
+        // The ends hold: neither key walks off the list it is in.
+        assert_eq!(
+            panel_key(&keyed(Some(0)), GraphKey::Up),
+            GraphKeyAction::Select(0)
+        );
+        assert_eq!(
+            panel_key(&keyed(Some(last)), GraphKey::Down),
+            GraphKeyAction::Select(last)
+        );
+        // And a selection left over from a longer list is clamped before it is
+        // stepped, not after.
+        assert_eq!(
+            panel_key(&keyed(Some(last + 40)), GraphKey::Up),
+            GraphKeyAction::Select(last - 1)
+        );
+    }
+
+    /// **`Enter` is the row's own press, minus the pointer** — and with nothing
+    /// selected there is no row for it to be the press of.
+    #[test]
+    fn enter_turns_over_the_row_the_selection_is_standing_on_and_no_other() {
+        assert_eq!(
+            panel_key(&keyed(Some(5)), GraphKey::Enter),
+            GraphKeyAction::Toggle(5)
+        );
+        assert_eq!(
+            panel_key(&keyed(None), GraphKey::Enter),
+            GraphKeyAction::None
+        );
+    }
+
+    /// **The page gives no comparison, however it is asked** — 「面板不给比较,是
+    /// 裁决不是缺口」 (2026-08-16). A 240-pixel column has no room for two lit
+    /// rows and a detail block between them; the graph is where D6 lives.
+    ///
+    /// Red gate: hand `Ctrl+Enter` through to a compare and the page grows a
+    /// mode it has no way to draw and no way to leave.
+    #[test]
+    fn the_page_gives_no_comparison_however_it_is_asked() {
+        for selected in [None, Some(0), Some(5)] {
+            assert_eq!(
+                panel_key(&keyed(selected), GraphKey::Compare),
+                GraphKeyAction::None
+            );
+        }
+    }
+
+    /// **`Esc` folds the innermost thing first, and only then gives the keyboard
+    /// back** — the ladder every dismissible thing on this platform has.
+    ///
+    /// `Pass` is the outer rung and it is *not* "let it reach the shell": with a
+    /// column focused there is nothing behind it to type into, so the caller
+    /// answers `Pass` by taking the keyboard back to the shell (D47 / §7.1.5).
+    #[test]
+    fn esc_folds_the_open_commit_first_and_only_then_gives_the_keyboard_back() {
+        let shut = keyed(Some(2));
+        assert_eq!(shut.open_row, None);
+        assert_eq!(panel_key(&shut, GraphKey::Escape), GraphKeyAction::Pass);
+
+        let cache = answered(
+            PORCELAIN,
+            vec![
+                commit("aaaaaaa", "first", 1),
+                commit("bbbbbbb", "second", 1),
+            ],
+            false,
+        );
+        let open = build(
+            &cache,
+            look("bbbbbbb0000000000000000000000000000000000"),
+            1.0,
+            &mut ruler,
+        );
+        let Some(row) = open.open_row else {
+            panic!("the page records where the open commit stands");
+        };
+        assert!(
+            matches!(open.rows.get(row), Some(GitRow::Commit(commit)) if commit.expanded),
+            "and it records the commit's own row, not the one under it"
+        );
+        assert_eq!(
+            panel_key(&open, GraphKey::Escape),
+            GraphKeyAction::Collapse(row),
+            "the accordion goes first, and the selection stands on what it came out of"
+        );
+    }
+
+    /// A page with no rows at all — a repository git would not read — walks
+    /// nowhere and keeps no key it has no use for.
+    #[test]
+    fn an_empty_page_walks_nowhere_and_hands_esc_straight_back() {
+        let empty = GitPanelContent::default();
+        assert_eq!(panel_key(&empty, GraphKey::Down), GraphKeyAction::None);
+        assert_eq!(panel_key(&empty, GraphKey::Enter), GraphKeyAction::None);
+        assert_eq!(panel_key(&empty, GraphKey::Escape), GraphKeyAction::Pass);
+    }
+
+    /// **A row the keyboard moved to is scrolled whole into view**, in the three
+    /// cases and no others: above the window, below it, already inside.
+    ///
+    /// The graph's own `reveal` law, written for a list whose rows are not all
+    /// the same height — which is why it reads the rectangles rather than
+    /// multiplying a row height by an index.
+    #[test]
+    fn the_keyboard_scrolls_a_row_whole_into_view_and_moves_nothing_otherwise() {
+        let commits: Vec<_> = (0..40)
+            .map(|n| commit(&format!("{n:07}"), "a commit", 1))
+            .collect();
+        let mut content = rows_of(&answered(PORCELAIN, commits, false));
+        let body = [0.0, 0.0, 240.0, 300.0];
+        let geometry = git_panel_geometry(body, &content, 1.0);
+        assert!(
+            geometry.max_scroll > 0.0,
+            "this page is longer than its window"
+        );
+
+        // A row already whole on screen moves nothing at all.
+        assert_eq!(geometry.reveal(1), 0.0);
+
+        // The last row comes up from below, and stops with its bottom on the
+        // window's bottom — not centred, and never past the end of the list.
+        let last = content.rows.len() - 1;
+        let down = geometry.reveal(last);
+        assert!(down > 0.0 && down <= geometry.max_scroll);
+        let scrolled = {
+            content.scroll_px = down;
+            git_panel_geometry(body, &content, 1.0)
+        };
+        let rect = scrolled.row_rect(last);
+        assert!(
+            rect[1] >= body[1] - 0.5 && rect[3] <= body[3] + 0.5,
+            "the row it scrolled to is whole inside the window: {rect:?}"
+        );
+        assert_eq!(
+            scrolled.reveal(last),
+            down,
+            "and standing still costs nothing"
+        );
+        // Coming back up puts the **row's own top** at the top of the window,
+        // which is the graph's law to the letter: the page's top padding is
+        // content like any other and scrolls off with it.
+        assert_eq!(scrolled.reveal(0), geometry.row_rect(0)[1] - body[1]);
+    }
+
+    /// **Exactly the selected row wears the selected ground**, whatever kind of
+    /// row it is — and it wears it *over* a hover, because the selection is where
+    /// the keyboard is.
+    ///
+    /// Red gate: leave the ground inside the six arms that used to draw one and
+    /// a selection standing on a heading, on the masthead or on a notice is a
+    /// selection the reader cannot see — which is the reported bug in a
+    /// different hat.
+    #[test]
+    fn exactly_the_selected_row_wears_the_selected_ground() {
+        let palette = bt_render::chrome_palette();
+        let content = keyed(None);
+        let grounds = |content: &GitPanelContent| {
+            painted(content, 2000.0)
+                .sprites
+                .into_iter()
+                .filter(|sprite| sprite.color == palette.git_row_selected)
+                .count()
+        };
+        assert_eq!(grounds(&content), 0, "nothing selected, nothing lit");
+
+        // Every row kind on the page, one at a time — including the three that
+        // had no ground of their own before this slice.
+        for index in 0..content.rows.len() {
+            let mut standing = content.clone();
+            standing.selected = Some(index);
+            assert_eq!(
+                grounds(&standing),
+                1,
+                "row {index} ({:?}) wears exactly one selected ground",
+                standing.rows[index]
+            );
+        }
+
+        // And the pointer does not take it away: a hover on the selected row is
+        // still the selection, which is the graph's own rung order. Asked of the
+        // **row's own rectangle**, because a hovered row also reveals its verbs
+        // and those wear a hover ground of their own inside it.
+        let mut standing = content.clone();
+        standing.selected = Some(4);
+        let rect = git_panel_geometry([0.0, 0.0, 240.0, 2000.0], &standing, 1.0).row_rect(4);
+        let hovered = painted_at(
+            &standing,
+            240.0,
+            2000.0,
+            GitHover {
+                row: Some(4),
+                act: None,
+            },
+        );
+        let ground = hovered
+            .sprites
+            .iter()
+            .find(|sprite| sprite.rect == rect)
+            .expect("the row it is standing on has a ground");
+        assert_eq!(
+            ground.color, palette.git_row_selected,
+            "the hover ground gives way to the selection it is standing on"
         );
     }
 }

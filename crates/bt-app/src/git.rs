@@ -163,16 +163,32 @@ pub struct GitRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GitHost {
     /// The Git page in one docked Files column.
-    ///
-    /// **A docked seat and nothing else.** A floating tree gets no Git page
-    /// (R2): the float is a peek at a folder, not a seat in a tab, and the
-    /// panel's whole vocabulary — a page beside a Files page, a branch head, a
-    /// list you stage from — is seat-shaped. So there is no `Float` variant
-    /// here, and the epoch dance [`crate::files::FilesHost`] needs does not
-    /// arise.
     Column(LeafId),
     /// The commit graph document of one repository, in one tab.
     Graph { tab: crate::TabId, root: PathBuf },
+    /// **The Git page in one floating window**, by the epoch that minted its
+    /// view (user ruling, 2026-08-19).
+    ///
+    /// R2 used to say this variant could not exist — "a floating tree gets no
+    /// Git page: the float is a peek at a folder, not a seat in a tab, and the
+    /// panel's whole vocabulary is seat-shaped". The report that overturned it
+    /// is the plainest kind: a column *standing on* its Git page was popped out
+    /// and the window silently showed the file tree instead. A pop-out is a
+    /// move, and a move that changes what you were looking at is not one.
+    ///
+    /// The **page** is addressed by epoch, which is the dance
+    /// [`crate::files::FilesHost::Float`] already does for the same window's
+    /// directory reads and for the same reason: a pinned window floats across
+    /// tabs by ruling (§7.1.2), so no tab can be asked whether it is still
+    /// there. `live_mut` finds the window that asked, and two windows on one
+    /// folder never fill in with each other's answers.
+    ///
+    /// `tab` is here for the *other* kind of answer this host can receive. Two
+    /// of git's six questions come back as **documents**, and a document goes
+    /// into a pool, which is a tab's (§7.1.3) — so the window records which tab
+    /// was in front when it opened one, because that is the pool the reader is
+    /// looking at it in. It is unused by the five answers that make the page.
+    Float { id: u64, tab: crate::TabId },
 }
 
 impl GitHost {
@@ -181,7 +197,7 @@ impl GitHost {
     pub fn tab(&self) -> crate::TabId {
         match self {
             Self::Column(leaf) => leaf.tab,
-            Self::Graph { tab, .. } => *tab,
+            Self::Graph { tab, .. } | Self::Float { tab, .. } => *tab,
         }
     }
 }

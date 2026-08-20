@@ -813,8 +813,20 @@ pub enum FloatPart {
     Flip,
     /// The `×`.
     Close,
-    /// A row of the tree, by visible index.
+    /// A row of whatever list is in the body, by visible index — the tree's, or
+    /// the Git page's.
     Row(usize),
+    /// **A verb on one row of a floating Git page** (user ruling, 2026-08-19).
+    ///
+    /// The chassis knows a git word here for [`crate::seats::ChromeTarget`]'s
+    /// reason: a verb is *smaller* than the row it stands on, so "which button"
+    /// has to be decided by the same hit test that decides "which row", or the
+    /// row swallows the button. The tree has no such thing, which is why this
+    /// variant never arises for one.
+    GitAct {
+        index: usize,
+        act: crate::git_panel::GitAct,
+    },
     /// The body, but not on a row.
     Body,
     /// The foot, which reveals the folder in the OS file manager.
@@ -825,16 +837,18 @@ pub enum FloatPart {
 
 /// Resolve a pointer against the chassis, smallest target first.
 ///
-/// `row` is the tenant's own hit test — for the files tree,
-/// `FilesTreeGeometry::row_at` — passed in rather than performed here, because
-/// the chassis does not know what is inside it and that is the whole point of it
-/// being a chassis.
+/// `body` is the tenant's own hit test — `FilesTreeGeometry::row_at` for a tree,
+/// the Git page's rows and verbs for a Git page — passed in rather than
+/// performed here, because the chassis does not know what is inside it and that
+/// is the whole point of it being a chassis. It answers `None` for a place
+/// inside the body that belongs to nothing in particular, which is the body
+/// itself.
 #[must_use]
 pub fn float_hit(
     geometry: &FloatGeometry,
     x: f32,
     y: f32,
-    row: impl Fn(f32, f32) -> Option<usize>,
+    body: impl Fn(f32, f32) -> Option<FloatPart>,
 ) -> Option<FloatPart> {
     let hit = |rect: [f32; 4]| x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3];
     if !hit(geometry.frame) {
@@ -864,9 +878,7 @@ pub fn float_hit(
         return Some(FloatPart::Foot);
     }
     if hit(geometry.body) {
-        return Some(
-            row(x - geometry.body[0], y - geometry.body[1]).map_or(FloatPart::Body, FloatPart::Row),
-        );
+        return Some(body(x - geometry.body[0], y - geometry.body[1]).unwrap_or(FloatPart::Body));
     }
     Some(FloatPart::Head)
 }
@@ -997,6 +1009,29 @@ pub struct FloatFiles {
     /// so `Dock`/pop-out carry it for free, which is the half of G97 the mock-up
     /// never managed.
     pub cache: crate::files::DirCache,
+    /// **What it knows about the repository under that root** (user ruling,
+    /// 2026-08-19).
+    ///
+    /// R2 used to say a float had no Git page at all — "the flyout was never
+    /// given the switch" — and the paint acted on it by drawing the tree
+    /// whatever page the view was on. Undocking a column that was *standing* on
+    /// its Git page therefore dropped the reader back onto the file tree without
+    /// saying so, and the ruling that answered the report is the plain one: a
+    /// float is the same place seen the same way it was being seen, so it keeps
+    /// the page it was torn off on and the page works.
+    ///
+    /// Its own cache and not a share of the column's, for `cache`'s reason
+    /// exactly: the column it came out of no longer exists, and a pinned window
+    /// outlives the tab it was born in. It travels through `Dock` and the
+    /// pop-out in both directions, so neither move re-reads a repository that
+    /// has already answered.
+    pub git: crate::git::GitCache,
+    /// How far the Git page is scrolled, in physical pixels.
+    ///
+    /// Beside `cache.scroll_px` rather than sharing it: the two pages are two
+    /// lists of different lengths in the same rectangle, and one number for both
+    /// would make turning the page jump the one you arrived at.
+    pub git_scroll: f32,
     /// The column width this view carries between float and dock (F75/G97).
     pub width: bt_layout::LogicalPx,
 }
@@ -1022,9 +1057,15 @@ pub struct FloatPreview {
 /// inside it, not the thing it is for". An enum rather than two optional fields,
 /// because a window shows one thing — two `Option`s can both be `Some`, and the
 /// frame that finds them both has no rule to fall back on.
+/// **The tree is boxed and the buffer is not**, which is the size difference
+/// stated rather than suffered: a files view carries two caches — a directory
+/// listing and, since 2026-08-19, a repository — while a buffer view carries a
+/// `TabId`, because §7.1.3 keeps the buffer itself in the tab's pool. An enum as
+/// large as its largest arm would make every entry in the host's `Vec` pay for a
+/// tenant it is not.
 #[derive(Debug)]
 pub enum FloatTenant {
-    Files(FloatFiles),
+    Files(Box<FloatFiles>),
     Preview(FloatPreview),
 }
 
@@ -1944,11 +1985,11 @@ mod tests {
 
     /// A tree tenant on this root, at the column's opening width.
     fn files_tenant(root: &str) -> FloatTenant {
-        FloatTenant::Files(FloatFiles {
+        FloatTenant::Files(Box::new(FloatFiles {
             files: state(root),
-            cache: crate::files::DirCache::default(),
             width: bt_layout::LogicalPx::px(240),
-        })
+            ..FloatFiles::default()
+        }))
     }
 
     /// G79: the chassis is the mock-up's, value for value — a 30px head, a 30px
@@ -2370,6 +2411,66 @@ mod tests {
 
     /// The body hands its rows to the tenant's own hit test, in the body's
     /// coordinates — the chassis does not know what is inside it.
+    /// **A window standing on its Git page draws one** (user ruling,
+    /// 2026-08-19) — the report was a float with a head, a foot and nothing at
+    /// all between them.
+    ///
+    /// The picture is the docked page's own painter handed this chassis's body
+    /// rect, which is the whole of what the fix is: one page, two hosts, and
+    /// nothing about `push_git_panel` that knows which one it is in. What this
+    /// pins is the body it is given — a real chassis rectangle, not a strip —
+    /// and that a repository that has answered fills it.
+    ///
+    /// Red gate: give the window the tree's painter whatever page the view is on
+    /// (which is what it did) and this body carries the wrong list; give it a
+    /// body of zero height (which is what the strip-sized window had) and it
+    /// carries nothing.
+    #[test]
+    fn a_window_on_its_git_page_fills_its_body_with_the_repositorys_own_rows() {
+        let geometry = float_geometry(
+            frame(100.0, 100.0, 264.0, 520.0),
+            FloatMode::Pinned,
+            SCALE,
+            30.0,
+            FloatHeadTools::default(),
+        );
+        assert!(
+            geometry.body[3] - geometry.body[1] > 100.0,
+            "the chassis leaves a body to draw into: {:?}",
+            geometry.body
+        );
+        let content = crate::git_panel::sample_page_for_tests();
+        assert!(!content.rows.is_empty(), "the fixture repository answered");
+        let (mut quads, mut labels, mut sprites) = (Vec::new(), Vec::new(), Vec::new());
+        crate::git_panel::push_git_panel(
+            geometry.body,
+            &content,
+            crate::git_panel::GitHover::default(),
+            SCALE,
+            &bt_render::chrome_palette(),
+            (&mut quads, &mut labels, &mut sprites),
+        );
+        assert!(
+            !labels.is_empty() && !sprites.is_empty(),
+            "a floating Git page is not a blank window: {} labels, {} sprites",
+            labels.len(),
+            sprites.len()
+        );
+        // And every mark of it is inside the body the chassis gave it — a window
+        // is not entitled to paint over its own head or its own foot.
+        for rect in labels
+            .iter()
+            .map(|label| label.rect)
+            .chain(sprites.iter().map(|sprite| sprite.rect))
+        {
+            assert!(
+                rect[0] >= geometry.body[0] - 0.5 && rect[2] <= geometry.body[2] + 0.5,
+                "drawn inside the body: {rect:?} in {:?}",
+                geometry.body
+            );
+        }
+    }
+
     #[test]
     fn the_body_asks_its_tenant_which_row_the_pointer_is_on() {
         let geometry = float_geometry(
@@ -2383,7 +2484,7 @@ mod tests {
         assert_eq!(
             float_hit(&geometry, inside.0, inside.1, |x, y| {
                 assert!(x >= 0.0 && y >= 0.0, "coordinates arrive body-local");
-                Some(3)
+                Some(FloatPart::Row(3))
             }),
             Some(FloatPart::Row(3))
         );
@@ -3037,11 +3138,11 @@ mod tests {
         let peek = host.open(
             FloatMode::Peek,
             Some(TAB),
-            FloatTenant::Files(FloatFiles {
+            FloatTenant::Files(Box::new(FloatFiles {
                 files: opened,
-                cache: crate::files::DirCache::default(),
                 width: bt_layout::LogicalPx::px(240),
-            }),
+                ..FloatFiles::default()
+            })),
             frame(180.0, 90.0, 264.0, 300.0),
             None,
             now,

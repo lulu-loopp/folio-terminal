@@ -3445,6 +3445,35 @@ pub enum GraphKeyAction {
     Pass,
 }
 
+/// Where a travel key lands in a list of `total` rows, or `None` for a key that
+/// does not travel.
+///
+/// **The one place this arithmetic is written**, because two lists in this
+/// window now answer the same four keys: the graph, and the docked Git page a
+/// column turns to (`git_panel::panel_key`, 焦点跟随可见视图 2026-08-19). The
+/// rules a second copy would eventually get wrong are the two edge ones — the
+/// first press with nothing selected lands on the **top** row rather than the
+/// bottom, because the reader is looking at the top of a list they have just
+/// given the keyboard to; and a stored selection past the end of a list that has
+/// since got shorter is clamped before it is stepped, not after.
+///
+/// The graph pushes the answer past its detail block afterwards; a page with no
+/// detail block takes it as it stands.
+#[must_use]
+pub fn list_travel(total: usize, selected: Option<usize>, key: GraphKey) -> Option<usize> {
+    if total == 0 {
+        return None;
+    }
+    let last = total - 1;
+    match key {
+        GraphKey::Up => Some(selected.map_or(0, |row| row.min(last).saturating_sub(1))),
+        GraphKey::Down => Some(selected.map_or(0, |row| (row + 1).min(last))),
+        GraphKey::Home => Some(0),
+        GraphKey::End => Some(last),
+        GraphKey::Enter | GraphKey::Compare | GraphKey::Escape => None,
+    }
+}
+
 /// What one key does to a graph, given the list it is looking at (V14).
 ///
 /// The auto-paging is deliberately **not** here: `↓` at the last loaded row
@@ -3465,26 +3494,18 @@ pub fn graph_key(content: &GraphContent, key: GraphKey) -> GraphKeyAction {
         };
     }
     let last = total - 1;
+    // The travel keys, on the law [`list_travel`] holds for every list in this
+    // window. Only the two *step* keys push past the detail block, and only in
+    // the direction they were travelling: `Home` and `End` are absolute and land
+    // where they say.
+    if let Some(row) = list_travel(total, content.selected, key) {
+        return GraphKeyAction::Select(match key {
+            GraphKey::Up => step_over_detail(content, row, false),
+            GraphKey::Down => step_over_detail(content, row, true),
+            _ => row,
+        });
+    }
     match key {
-        // With nothing selected, the first press lands on the top row rather
-        // than on the bottom one: the reader is looking at the top of a list
-        // they have just given the keyboard to, and a selection that appeared
-        // ten thousand rows away would be the page answering a different
-        // question.
-        GraphKey::Up => GraphKeyAction::Select(step_over_detail(
-            content,
-            content
-                .selected
-                .map_or(0, |row| row.min(last).saturating_sub(1)),
-            false,
-        )),
-        GraphKey::Down => GraphKeyAction::Select(step_over_detail(
-            content,
-            content.selected.map_or(0, |row| (row + 1).min(last)),
-            true,
-        )),
-        GraphKey::Home => GraphKeyAction::Select(0),
-        GraphKey::End => GraphKeyAction::Select(last),
         GraphKey::Enter => match content.selected {
             Some(row) if row <= last => GraphKeyAction::Toggle(row),
             _ => GraphKeyAction::None,
@@ -3501,6 +3522,11 @@ pub fn graph_key(content: &GraphContent, key: GraphKey) -> GraphKeyAction {
             (None, Some((row, _))) => GraphKeyAction::Collapse(row),
             (None, None) => GraphKeyAction::Pass,
         },
+        // Answered above, every one of them: `list_travel` has a landing row for
+        // each of the four whenever the list has rows at all, and a list with
+        // none returned at the top of this function. The arm is here so that a
+        // seventh key cannot be added without this function being asked about it.
+        GraphKey::Up | GraphKey::Down | GraphKey::Home | GraphKey::End => GraphKeyAction::None,
     }
 }
 
@@ -6373,6 +6399,32 @@ mod tests {
             "a row that is merely drawn is not open"
         );
         assert_eq!(graph_key(&shut, GraphKey::Escape), GraphKeyAction::Pass);
+        // The travel arithmetic under all of this is `list_travel`, and it is
+        // shared with the docked Git page (焦点跟随可见视图, 2026-08-19) so that
+        // the two git surfaces cannot come to disagree about where `↓` lands.
+        // The three edges that a second copy would eventually get wrong:
+        assert_eq!(
+            list_travel(9, None, GraphKey::Down),
+            Some(0),
+            "the first press with nothing selected lands on the top row"
+        );
+        assert_eq!(
+            list_travel(9, Some(40), GraphKey::Up),
+            Some(7),
+            "a selection past the end is clamped before it is stepped"
+        );
+        assert_eq!(
+            list_travel(0, Some(3), GraphKey::End),
+            None,
+            "and a list with no rows has nowhere for a travel key to land"
+        );
+        for key in [GraphKey::Enter, GraphKey::Compare, GraphKey::Escape] {
+            assert_eq!(
+                list_travel(9, Some(3), key),
+                None,
+                "only the four travel keys travel"
+            );
+        }
 
         let open = frame(&state, Some(GRAPH_UNCOMMITTED_HASH), WIDE);
         assert_eq!(open.open_rows, Some((0, 3)));
