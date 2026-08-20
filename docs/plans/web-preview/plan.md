@@ -1,4 +1,6 @@
-# Web 预览块方案 v3(Codex 一轮必改表 + 二轮四处遗留全部落实;含用户历史/收藏两条追加裁决)
+# Web 预览块方案 v3 + W0′ 修订(2026-08-20)
+
+**W0′ 已执行,十扇门全 pass(触屏无设备、IME 须人工两条如实标注),W2 六片全部 GO**——证据 `w0-evidence.md`,四条按实测修订本方案的发现:①门 5 的「AcceleratorKeyPressed 覆盖有限」**被推翻**:30 和弦逐测全部被宿主夺回,键盘接线不需要兜底设计;②隐藏 WebView 的 CapturePreview 不返回 → 片⑥ 收窄为**低频抓+缓存最后成功帧**(这是唯一可行实现,活缩略图仍无受支持路径),且隐藏座位是纯黑洞 → **W1 的失败态三张(加载失败/进程崩溃/Runtime 缺失)从可选升为必须**;③`BrowserProcessExited` 有时 280ms 有时永不到 → UDF 收尾 = 两事件之一 + 超时;④`AddVisual(insertAbove=TRUE, NULL)` 落到视觉树最底层,与 airspace 失败同相——web 视觉入树时的插入次序是片① 的第一条红测。其余九条新增约束见 w0-evidence.md §2,开工时落进各片单;片① 验收含人工 IME 记录(spike 04 先例)。
 
 仓库 D:\Developer\BetterTerminal。审阅记录:一轮 `web-preview-codex-review.md`、二轮 `web-preview-codex-confirm.md`。v2 改动:①按必改句子表全部落实(最重的:composition 是 **visual hosting 不是 render-to-texture**,三种像素通道分开说;仓库已有 2026-08-13 WebView2 spike 与 §2.3 DComp/wgpu 地基,W0 改为 W0′ 复验+补洞);②并入用户 2026-08-19 两条追加裁决(历史进预览切换器、钉式收藏)。
 
