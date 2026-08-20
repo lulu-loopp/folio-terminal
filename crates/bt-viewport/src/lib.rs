@@ -856,24 +856,48 @@ impl ViewportFrame {
     /// occurrence", and trusting it lights a whole file listing at once.
     ///
     /// What is trustworthy is the **label**: when the two fragments' printed text, concatenated,
-    /// spells the link's own target exactly, they can only be one broken link. Two unrelated
-    /// mentions of one URL each spell it in full, so their concatenation spells it twice and never
-    /// matches; a label that is not the target (`[img] photo.png`) offers no evidence and is left
-    /// as the two segments it looks like. The geometry still has to hold as well — consecutive
-    /// rows, nothing but blank cells across the seam — so an occurrence with any ink after it on
-    /// its row is not a fragment of anything.
+    /// spells the link's target exactly, they can only be one broken link. Two unrelated mentions
+    /// of one URL each spell it in full, so their concatenation spells it twice and never matches;
+    /// a label that is not the target (`[img] photo.png`) offers no evidence and is left as the
+    /// two segments it looks like.
+    ///
+    /// A target has **two spellings**, not one, and a `file:` link is almost always written in the
+    /// second: what an application prints beside such a link is the path — `D:\shots\a b.png` —
+    /// and never the URI — `file:///D:/shots/a%20b.png`. Both are the same target spelled exactly,
+    /// so both are evidence. See [`file_uri_printed_form`].
+    ///
+    /// **The power to refuse is the label's, not the geometry's** (2026-08-20, revising the
+    /// paragraph this one replaces). The rule first also demanded a blank seam, which read an
+    /// occurrence with ink after it on its row as a fragment of nothing — and that is precisely
+    /// the shape of a path wrapped between the columns of an application's own table, where a
+    /// file size is printed after every fragment. All the geometry now asks is that the fragments
+    /// stand on consecutive rows; see [`Self::run_across_break`].
     fn rejoined_across_break(&self, run: (usize, usize), uri: &str) -> Option<(usize, usize)> {
+        // The target's two spellings. A `file:` link's label is the path, not the URI, so the
+        // printed form is the only one that can ever match it — see [`file_uri_printed_form`].
+        let printed = file_uri_printed_form(uri);
+        let spells_target = |label: &str| {
+            label == uri
+                || printed
+                    .as_deref()
+                    .is_some_and(|printed| printed_path_folded(label) == printed)
+        };
+        // How much the fragments must spell before there is nothing left to gather: the longest
+        // of the spellings that would be accepted, since a label shorter than that could still be
+        // one fragment short of the window that spells the target. Measuring against the URI
+        // alone was enough while the URI was the only spelling.
+        let target = uri.len().max(printed.as_deref().map_or(0, str::len));
         let mut runs = vec![run];
         let mut hit = 0usize;
         let mut spelled = self.run_label(run, uri).len();
-        while spelled < uri.len()
+        while spelled < target
             && let Some(previous) = self.run_across_break(runs[0].0, uri, false)
         {
             spelled += self.run_label(previous, uri).len();
             runs.insert(0, previous);
             hit += 1;
         }
-        while spelled < uri.len()
+        while spelled < target
             && let Some(next) = self.run_across_break(runs[runs.len() - 1].1, uri, true)
         {
             spelled += self.run_label(next, uri).len();
@@ -889,7 +913,7 @@ impl ViewportFrame {
                     .iter()
                     .map(|run| self.run_label(*run, uri))
                     .collect::<String>();
-                if label == uri && (first, last) != (hit, hit) {
+                if spells_target(&label) && (first, last) != (hit, hit) {
                     return Some((runs[first].0, runs[last].1));
                 }
             }
@@ -907,13 +931,19 @@ impl ViewportFrame {
             .collect()
     }
 
-    /// The same-target run sitting immediately across one line break from `edge`: on the next row
-    /// (or the previous one), with nothing but blank cells between the two.
+    /// The same-target run sitting immediately across one line break from `edge`: the nearest run
+    /// with this target on the next row (or on the previous one).
+    ///
+    /// **Nothing about the seam disqualifies it but the row count.** The two runs are consecutive
+    /// occurrences of the target by construction, so what stands between them is always foreign
+    /// ink or nothing, and foreign ink is exactly what the case this rule exists for looks like:
+    /// an application that wraps a path between the columns of its own table prints the next
+    /// column — a file size — after each fragment (user report 2026-08-20). Requiring a blank seam
+    /// put the power to refuse in the geometry, where it does not belong; the power to refuse is
+    /// the label's, and it is spent in [`Self::rejoined_across_break`], which joins nothing whose
+    /// fragments do not spell the target exactly.
     fn run_across_break(&self, edge: usize, uri: &str, forward: bool) -> Option<(usize, usize)> {
         let columns = self.columns.get() as usize;
-        let blank = |cell: &bt_transcript::CapturedCell| {
-            cell.text.is_empty() || cell.text.chars().all(char::is_whitespace)
-        };
         let (earlier, later) = if forward {
             let next = self.cells.get(edge + 1..)?;
             let offset = next.iter().position(|cell| cell_targets(cell, uri))?;
@@ -926,9 +956,7 @@ impl ViewportFrame {
                 .rposition(|cell| cell_targets(cell, uri))?;
             (previous, edge)
         };
-        if later / columns != earlier / columns + 1
-            || !self.cells[earlier + 1..later].iter().all(blank)
-        {
+        if later / columns != earlier / columns + 1 {
             return None;
         }
         let seed = if forward { later } else { earlier };
@@ -3813,6 +3841,91 @@ fn cell_targets(cell: &CapturedCell, uri: &str) -> bool {
     cell.hyperlink.as_ref().is_some_and(|link| link.uri == uri)
 }
 
+/// The local path a `file:` target names, spelled the way an application prints it — `None` for
+/// every other scheme, and for bytes that do not spell text.
+///
+/// This is a **second spelling for one target**, and it exists because the label evidence in
+/// [`ViewportFrame::rejoined_across_break`] is an exact comparison against the target. A `file:`
+/// link's label is almost never the URI: what the application prints beside it is the path, and
+/// the two differ three ways at once — the `file://` prefix, the slash direction, and percent
+/// encoding — so `file:///D:/a%20b.png` and its perfectly ordinary label `D:\a b.png` never once
+/// matched, and a wrapped file link could never be rejoined (user report 2026-08-20).
+///
+/// The authority is the UNC server when there is one, and `localhost` is the same as no authority
+/// at all (RFC 8089). The drive letter comes back upper-cased so that two spellings of one drive
+/// compare equal — see [`printed_path_folded`], which folds the label the same way; nothing else
+/// in the path is folded, because everything else is the application's own spelling of a name and
+/// a comparison this rule makes must stay an exact one.
+///
+/// This is deliberately not `bt_term::inline_image::file_uri_to_local_path`: that one is a
+/// **gate** — it rejects remote shares, demands a rooted path, and applies an extension allowlist,
+/// because what it answers is whether this machine may read the file. This one only answers how
+/// the target is spelled when it is written as a path, which is a question about text; and
+/// `bt-viewport` does not depend on `bt-term` (the dependency runs the other way).
+fn file_uri_printed_form(uri: &str) -> Option<String> {
+    if !uri
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
+    {
+        return None;
+    }
+    let (authority, path) = match uri[5..].strip_prefix("//") {
+        // `file://host/path`, and `file:///path` as the empty-authority case of it.
+        Some(rest) => rest.split_once('/').unwrap_or((rest, "")),
+        // `file:/path` has no authority at all, which RFC 8089 also allows.
+        None => ("", uri[5..].strip_prefix('/').unwrap_or(&uri[5..])),
+    };
+    if path.is_empty() {
+        // An authority and no path names a machine, not a file on it, and so has no path spelling.
+        return None;
+    }
+    let path = percent_decoded(path)?.replace('/', "\\");
+    let printed = if authority.is_empty() || authority.eq_ignore_ascii_case("localhost") {
+        path
+    } else {
+        format!("\\\\{}\\{path}", percent_decoded(authority)?)
+    };
+    Some(printed_path_folded(&printed))
+}
+
+/// One printed path with its drive letter upper-cased, so that two spellings of one drive compare
+/// equal. Everything after the drive is left exactly as it was written.
+fn printed_path_folded(path: &str) -> String {
+    let mut folded = path.to_owned();
+    if folded.as_bytes().get(1) == Some(&b':')
+        && let Some(drive) = folded.get_mut(..1)
+    {
+        drive.make_ascii_uppercase();
+    }
+    folded
+}
+
+/// One percent-decoded URI component, or `None` when the decoded bytes are not UTF-8.
+///
+/// Decoding is over the component as a whole rather than per segment, because the answer wanted
+/// here is what the path *looks like* printed: a `%2F` inside a name decodes to a `/` that the
+/// separator pass then turns into a `\`, which is exactly what an application printing that name
+/// would show. Nothing resolves this text against the filesystem — see [`file_uri_printed_form`].
+fn percent_decoded(component: &str) -> Option<String> {
+    let nibble = |byte: Option<&u8>| -> Option<u32> { (*byte? as char).to_digit(16) };
+    let bytes = component.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while let Some(byte) = bytes.get(index) {
+        if *byte == b'%'
+            && let (Some(high), Some(low)) =
+                (nibble(bytes.get(index + 1)), nibble(bytes.get(index + 2)))
+        {
+            decoded.push((high * 16 + low) as u8);
+            index += 3;
+        } else {
+            decoded.push(*byte);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
 /// The screen column at which the grapheme `offset` of a frozen logical line sits, *within the
 /// physical row that carries it*.
 ///
@@ -5233,6 +5346,225 @@ mod tests {
                     "and only it, column {column} (explicit OSC 8: {explicit})"
                 );
             }
+        }
+    }
+
+    /// PIN (user report 2026-08-20) — **a `file:` link the application wrapped between the columns
+    /// of its own table is one link**, however much foreign ink stands in the seams.
+    ///
+    /// Claude Code prints a column of `[image]` references: one OSC 8 link per row whose target is
+    /// a `file:` URI and whose label is the Windows path it prints, laid out at its own computed
+    /// width so a long path comes apart into three emissions — and with a size column printed
+    /// *after* each fragment, so no seam is blank. The dotted resting mark covered all three rows
+    /// (it is painted cell by cell and says nothing about joining), but hovering lit only the row
+    /// under the pointer.
+    ///
+    /// Both halves of the 2026-08-20 rejoining rule failed here, and both for reasons about
+    /// geometry rather than about evidence: the seam carried the size column's ink, and the label
+    /// — `D:\shots\…` — is not the URI's own spelling of itself. MUTATIONS: require the seam to be
+    /// blank, or compare the label only against the URI verbatim, and this goes red with two of
+    /// the three rows resting.
+    #[test]
+    fn a_file_link_wrapped_by_the_application_between_table_columns_is_one_link() {
+        const URI: &str = "file:///D:/shots/ca-2026-08-20-rest.png";
+        const COLUMNS: usize = 20;
+        // The printed path `D:\shots\ca-2026-08-20-rest.png` in the three fragments the
+        // application's own wrap makes of it, each followed by the size column's ink.
+        let fragments = [
+            ("D:\\shots\\ca", " (25.4K"),
+            ("-2026-08-20-rest", "B)"),
+            (".png", ""),
+        ];
+        let mut frame = application_wrapped_file_link(URI, &fragments, COLUMNS);
+
+        let hit = frame
+            .hyperlink_at(0, 2)
+            .expect("the first fragment is a link");
+        assert_eq!(
+            hit.uri, URI,
+            "a fragment's hit carries the whole target, never the fragment's own label"
+        );
+        for (row, column) in [(1u32, 2u32), (2, 1)] {
+            assert_eq!(
+                frame.hyperlink_at(row, column).unwrap(),
+                hit,
+                "the fragment on row {row} is the same link as the one above it"
+            );
+        }
+
+        assert!(frame.underline_hyperlink(&hit));
+        for (row, (label, _)) in fragments.iter().enumerate() {
+            for column in 0..label.len() {
+                assert!(solid_at(&frame, row, column), "row {row}, column {column}");
+            }
+            for column in label.len()..COLUMNS {
+                assert!(
+                    !solid_at(&frame, row, column),
+                    "the size column is not the link, row {row}, column {column}"
+                );
+            }
+        }
+    }
+
+    /// The same shape from a second user report the same day, with the seam ink where the first
+    /// sample did not have it: Claude Code's `[file]` reference to a long scratchpad path, wrapped
+    /// mid-path into three emissions, with the size column printed after the **middle** fragment
+    /// only. The first sample's seams were both inked; this one's first seam is blank and its
+    /// second is not, so between the two of them every seam a three-fragment link can have is
+    /// covered.
+    ///
+    /// It also pins what a fragment's hit says its target is, because a link the reader can see
+    /// but not open is the half of this defect the picture does not show: **each emission carries
+    /// the whole URI**, so the hit taken on any one row is the whole target and never the
+    /// fragment's own printed text.
+    #[test]
+    fn a_file_link_wrapped_mid_path_is_one_link_carrying_the_whole_target() {
+        const URI: &str = "file:///C:/Users/Weiyi/AppData/Local/Temp/claude/\
+            D--Developer-BetterTerminal/cafff1bf-5221-42c8-997c-a57c9d1ae041/scratchpad/\
+            attention-status.md";
+        const COLUMNS: usize = 71;
+        let fragments = [
+            (
+                "C:\\Users\\Weiyi\\AppData\\Local\\Temp\\claude\\D--Developer-BetterTer",
+                "",
+            ),
+            (
+                "minal\\cafff1bf-5221-42c8-997c-a57c9d1ae041\\scratchpad\\attention",
+                " (9.4KB)",
+            ),
+            ("-status.md", ""),
+        ];
+        let mut frame = application_wrapped_file_link(URI, &fragments, COLUMNS);
+
+        let hit = frame
+            .hyperlink_at(1, 4)
+            .expect("the middle fragment is a link");
+        assert_eq!(
+            hit.uri, URI,
+            "the middle fragment's hit is the whole path, which is what activation is handed"
+        );
+        for (row, column) in [(0u32, 9u32), (2, 3)] {
+            assert_eq!(
+                frame.hyperlink_at(row, column).unwrap(),
+                hit,
+                "the fragment on row {row} is the same link as the middle one"
+            );
+        }
+
+        assert!(frame.underline_hyperlink(&hit));
+        for (row, (label, _)) in fragments.iter().enumerate() {
+            for column in 0..label.len() {
+                assert!(solid_at(&frame, row, column), "row {row}, column {column}");
+            }
+            for column in label.len()..COLUMNS {
+                assert!(
+                    !solid_at(&frame, row, column),
+                    "only the path is the link, row {row}, column {column}"
+                );
+            }
+        }
+    }
+
+    /// A live frame of one `file:` link an application wrapped itself: each row carries one
+    /// printed fragment of the path, in its own OSC 8 emission with its own id, followed by
+    /// whatever else that row of the application's layout prints.
+    fn application_wrapped_file_link(
+        uri: &str,
+        fragments: &[(&str, &str)],
+        columns: usize,
+    ) -> ViewportFrame {
+        let rows = fragments
+            .iter()
+            .enumerate()
+            .map(|(index, (label, tail))| {
+                let text = format!("{label}{tail}");
+                let mut row = CapturedRow::plain(&format!("{text:<columns$}"), false);
+                for cell in &mut row.cells[..label.len()] {
+                    // A fresh id per emission, which is what the vendor mints.
+                    cell.hyperlink = Some(CellHyperlink {
+                        id: Some(format!("{}_alacritty", 40 + index)),
+                        uri: uri.to_owned(),
+                    });
+                }
+                row
+            })
+            .collect();
+        live_frame_of(rows)
+    }
+
+    /// RED LINE for the pin above — **two mentions of one `file:` target on neighbouring rows are
+    /// two links**, even though the seam is now allowed to carry ink.
+    ///
+    /// Relaxing the seam takes the whole burden of refusing onto the label, so this is the shape
+    /// that proves the label still carries it: each row prints the path in full, so the two of
+    /// them spell it twice, and twice is not once.
+    #[test]
+    fn two_mentions_of_one_file_target_on_neighbouring_lines_stay_two_links() {
+        const URI: &str = "file:///D:/shots/a.png";
+        const PRINTED: &str = "D:\\shots\\a.png";
+        let osc_8 = CellHyperlink {
+            // The one id the vendor reuses for one target: geometry and id both say join.
+            id: Some("7_alacritty".to_owned()),
+            uri: URI.to_owned(),
+        };
+        let row = || {
+            let mut row = CapturedRow::plain(&format!("{PRINTED} (2.1KB)"), false);
+            for cell in &mut row.cells[..PRINTED.len()] {
+                cell.hyperlink = Some(osc_8.clone());
+            }
+            row
+        };
+        let mut frame = live_frame_of(vec![row(), row()]);
+
+        let upper = frame.hyperlink_at(0, 3).unwrap();
+        let lower = frame.hyperlink_at(1, 3).unwrap();
+        assert_eq!(upper.uri, URI);
+        assert_ne!(upper, lower, "two mentions are two things to hover");
+        assert!(frame.underline_hyperlink(&upper));
+        for column in 0..PRINTED.len() {
+            assert!(
+                solid_at(&frame, 0, column),
+                "the hovered mention, column {column}"
+            );
+            assert!(!solid_at(&frame, 1, column), "and only it, column {column}");
+        }
+    }
+
+    /// The second spelling a `file:` target has: the local path an application prints for it.
+    #[test]
+    fn file_uri_printed_form_spells_the_path_an_application_prints() {
+        for (uri, printed) in [
+            ("file:///D:/shots/a.png", Some("D:\\shots\\a.png")),
+            // Percent encoding, both the ASCII kind and a multi-byte UTF-8 name.
+            ("file:///D:/a%20b/c%20d.png", Some("D:\\a b\\c d.png")),
+            ("file:///D:/%E4%B8%AD%E6%96%87.png", Some("D:\\中文.png")),
+            // A UNC share keeps its authority as the server.
+            (
+                "file://server/share/x.png",
+                Some("\\\\server\\share\\x.png"),
+            ),
+            // `localhost` is the same as no host at all (RFC 8089).
+            ("file://localhost/D:/a.png", Some("D:\\a.png")),
+            ("file://LocalHost/D:/a.png", Some("D:\\a.png")),
+            // The drive letter is folded so two spellings of one drive compare equal; nothing else
+            // in the path is.
+            ("file:///c:/Shots/A.png", Some("C:\\Shots\\A.png")),
+            // The scheme is case-insensitive, and an authority-less `file:` URI is legal.
+            ("FILE:///D:/a.png", Some("D:\\a.png")),
+            ("file:/D:/a.png", Some("D:\\a.png")),
+            // No second spelling for anything that is not a file, for bytes that do not spell
+            // text, or for a URI that names a machine rather than a file on it.
+            ("https://example.test/a", None),
+            ("mailto:someone@example.test", None),
+            ("file:///D:/%FF.png", None),
+            ("file://server", None),
+            ("file:", None),
+        ] {
+            assert_eq!(
+                file_uri_printed_form(uri).as_deref(),
+                printed,
+                "the printed form of {uri}"
+            );
         }
     }
 
