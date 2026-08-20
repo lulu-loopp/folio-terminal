@@ -27079,7 +27079,7 @@ impl Runtime<'_> {
             String::new()
         };
         let tools = seats::PreviewHeadTools {
-            switcher: pool > 1,
+            switcher: self.preview_switcher_rows(seat) > 1,
             name_width: self.window.renderer.measure_chrome_text(
                 &mut self.app.gpu,
                 &name,
@@ -27117,15 +27117,31 @@ impl Runtime<'_> {
 
     /// The tools **this seat's** head must be laid out with — this frame's, off
     /// the widths the paint stored for that seat.
+    /// How many rows the switcher would put in front of you — **the list's own
+    /// length, and not the pool's** (user ruling 2026-08-19).
+    ///
+    /// The chevron is the only way into that list, so gating it on the pool was
+    /// gating a door on the size of a room it no longer opens onto: a kept file
+    /// nobody has opened is a row of that list, and on the first frame after a
+    /// restart it may be the only row there is. Found by a real window, where a
+    /// pane showing one file could not be made to show the file the user had
+    /// pinned in the session before.
+    ///
+    /// The badge beside the chevron keeps counting *buffers* rather than rows,
+    /// because that is what it means — P19's honest inventory of hidden state —
+    /// and a shortcut to a file nobody has opened is not hidden state.
+    fn preview_switcher_rows(&self, seat: SeatId) -> usize {
+        self.preview_menu_items(seat).len()
+    }
+
     fn preview_head_tools(&self, seat: SeatId) -> seats::PreviewHeadTools {
         let surface = PreviewSurface::Seat(seat);
-        let pool = self.preview_pool.len();
         let buffer = self.preview_buffer_on(surface);
         let measured = self.window.preview_head_measures.get(&seat).copied();
         seats::PreviewHeadTools {
             save: self.preview_is_editable(surface),
             flip: buffer.is_some_and(|buffer| buffer.ftype == preview::PreviewFtype::Markdown),
-            switcher: pool > 1,
+            switcher: self.preview_switcher_rows(seat) > 1,
             // Zero until this seat's head has been drawn once, which is the
             // honest answer for a frame the paint has not reached yet: a pill
             // sized to no name is a pill nothing is inside, and the press it

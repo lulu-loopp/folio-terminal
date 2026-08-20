@@ -4701,12 +4701,16 @@ pub fn root_menu_layout(
     // The kept rows and their own heading, above everything, when there are any
     // (user ruling 2026-08-19: "排 home 之上,与下方段之间一条既有 hairline").
     let kept = pinned_run(choices);
+    let found = choices.len() - kept;
+    // **The rule between the two sections is drawn only when there are two.**
+    // Keeping every place this window found leaves nothing under it, and a
+    // hairline with nothing under it would sit directly on `Browse…`'s own — two
+    // rules touching, which is a section boundary drawn twice for one boundary.
     let kept_block = if kept == 0 {
         0.0
     } else {
-        section_block + item_height * kept as f32 + separator_block
+        section_block + item_height * kept as f32 + if found == 0 { 0.0 } else { separator_block }
     };
-    let found = choices.len() - kept;
     let found_block = if found == 0 {
         0.0
     } else {
@@ -4746,9 +4750,12 @@ pub fn root_menu_layout(
             items.push([content_left, cursor, content_right, cursor + item_height]);
             cursor += item_height;
         }
-        let rule = hairline(cursor);
-        cursor += separator_block;
-        (Some(band), Some(rule))
+        let rule = (found > 0).then(|| {
+            let rule = hairline(cursor);
+            cursor += separator_block;
+            rule
+        });
+        (Some(band), rule)
     };
     let label = (found > 0).then(|| {
         let band = [content_left, cursor, content_right, cursor + section_block];
@@ -8377,6 +8384,8 @@ pub struct PreviewMenuLayout {
     /// their own: they are what the switcher has always been, and naming them
     /// now would be labelling a list that never needed a label.
     pinned_label: Option<[f32; 4]>,
+    /// …and absent again when *everything* is pinned, because a rule with
+    /// nothing under it is a boundary between one thing and no things.
     pinned_separator: Option<[f32; 4]>,
     items: Vec<[f32; 4]>,
 }
@@ -8440,10 +8449,14 @@ pub fn preview_menu_layout(
         + SECTION_LABEL_LINE_LOGICAL_PX
         + SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX)
     .round();
+    // The rule is drawn only when something is under it — the root menu's rule,
+    // and here it matters more, because keeping every open buffer is one press
+    // away and would otherwise leave a hairline along the bottom of the box.
+    let ruled = kept > 0 && kept < items.len();
     let kept_block = if kept == 0 {
         0.0
     } else {
-        section_block + separator_block
+        section_block + if ruled { separator_block } else { 0.0 }
     };
     let height = (2.0 * (border + padding) + kept_block + item_height * items.len() as f32).round();
 
@@ -8475,14 +8488,17 @@ pub fn preview_menu_layout(
             rects.push([content_left, cursor, content_right, cursor + item_height]);
             cursor += item_height;
         }
-        let rule = [
-            content_left,
-            cursor + separator_margin,
-            content_right,
-            cursor + separator_margin + separator_thickness,
-        ];
-        cursor += separator_block;
-        (Some(band), Some(rule))
+        let rule = ruled.then(|| {
+            let rule = [
+                content_left,
+                cursor + separator_margin,
+                content_right,
+                cursor + separator_margin + separator_thickness,
+            ];
+            cursor += separator_block;
+            rule
+        });
+        (Some(band), rule)
     };
     for _ in kept..items.len() {
         rects.push([content_left, cursor, content_right, cursor + item_height]);
@@ -8919,6 +8935,31 @@ mod tests {
                 .filter(|sprite| sprite.mark == ChromeMark::Pin { filled: false })
                 .count(),
             1
+        );
+
+        // **Keep every row and the rule goes with the section it divided.** One
+        // press away in a switcher of two, and a hairline along the bottom of
+        // the box is a boundary between one thing and no things.
+        let all_kept: Vec<PreviewMenuItem> = items
+            .iter()
+            .filter(|item| item.path.is_some())
+            .map(|item| PreviewMenuItem {
+                pinned: true,
+                ..item.clone()
+            })
+            .collect();
+        let all_kept_layout = preview_menu_layout(
+            [40.0, 8.0, 140.0, 27.0],
+            (960.0, 600.0),
+            1.0,
+            &all_kept,
+            &mut fake_measure,
+        );
+        assert!(all_kept_layout.pinned_label.is_some());
+        assert_eq!(all_kept_layout.pinned_separator, None);
+        assert!(
+            all_kept_layout.items.last().expect("rows")[3] <= all_kept_layout.frame[3],
+            "and the box shrank with it rather than keeping the room"
         );
     }
 
@@ -9359,6 +9400,10 @@ mod tests {
         assert_eq!(
             all_kept_layout.label, None,
             "no places left to head, so no heading"
+        );
+        assert_eq!(
+            all_kept_layout.pinned_separator, None,
+            "and no rule either: it would sit straight on `Browse…`'s own"
         );
         assert!(all_kept_layout.browse[3] <= all_kept_layout.frame[3]);
         assert!(

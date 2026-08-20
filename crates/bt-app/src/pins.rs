@@ -436,5 +436,19 @@ mod tests {
         let (top, rest) = lift_pinned(&[r"Z:\archive".to_owned()], &recent, Clone::clone);
         assert_eq!(top, vec![r"Z:\archive".to_owned()]);
         assert_eq!(rest, recent);
+
+        // **And that is what the switcher's chevron is gated on** (found on a
+        // real window, 2026-08-19): one buffer open and one kept file that is
+        // not it are *two* rows, so a pane showing a lone file still has a way
+        // into the list. Gating the chevron on the pool instead — one buffer,
+        // no chevron — is a list with no door, which is what the first frame
+        // after a restart looked like.
+        let one_open = vec![r"C:\work\open.md".to_owned()];
+        let (top, rest) = lift_pinned(&[r"C:\work\kept.md".to_owned()], &one_open, Clone::clone);
+        assert_eq!(
+            top.len() + rest.len(),
+            2,
+            "the chevron follows the list, and the list is longer than the pool"
+        );
     }
 }
