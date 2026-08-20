@@ -460,7 +460,7 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Action::NewTab,
         Chord::new(CTRL_SHIFT, character("n")),
     ),
-    // **`Ctrl+Shift+M`, and it is a placeholder with its reasons written down**
+    // **`Ctrl+Shift+M`, and it is a ruled 2026-08-19 with its reasons written down**
     // (multiwindow slice C, 2026-08-19).
     //
     // The chord this verb *wants* is `Ctrl+Shift+N`: Windows Terminal, WezTerm,
