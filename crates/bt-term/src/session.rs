@@ -672,6 +672,35 @@ impl From<InvalidSourceTransition> for SessionError {
     }
 }
 
+/// One desktop notification a program asked this terminal to raise.
+///
+/// **A request and not a state.** Nothing on [`SessionStatus`] moves when one of these arrives:
+/// the pane goes unread because bytes reached it, exactly as it would for any other output, and
+/// the attention ladder this terminal already keeps is untouched. That is the whole relationship
+/// between the two — the notification is a *system-level outlet* for a fact the ledger was
+/// already keeping, not a fourth kind of claim (DESIGN §7.6).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TerminalNotification {
+    /// The title the protocol carried, or `None` when it carries no such field.
+    ///
+    /// `OSC 9` has one field and it is the message; naming the sender is not that program's to
+    /// do, so it arrives here as `None` and the application supplies the pane's own name.
+    /// `OSC 777;notify;<title>;<body>` does have the field, and it is used as written.
+    pub title: Option<String>,
+    /// The message. Empty only when a title carried the whole of it.
+    pub body: String,
+}
+
+/// How many notifications one session holds between two drains.
+///
+/// The queue is emptied on every turn of the application's loop, so this bounds a *burst* — a
+/// program that prints a thousand `OSC 9`s in one read. Sixteen is kept and the rest of that
+/// burst is dropped, oldest kept rather than newest, because the first thing a program said is
+/// the thing it said first. It is a memory bound and deliberately not a rate limit: how often a
+/// person may be interrupted is Windows' own question, and its notification platform already
+/// answers it per app.
+const MAX_PENDING_NOTIFICATIONS: usize = 16;
+
 /// Progress state reported by ConEmu's OSC 9;4 protocol.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProgressState {
@@ -744,6 +773,12 @@ pub struct DualPlaneSession {
     window_title: Option<String>,
     progress: Option<ProgressState>,
     bell_latched: bool,
+    /// Notifications this session has been asked for and nobody has collected yet.
+    ///
+    /// Deliberately **not** on [`SessionStatus`]: a status is a state that can be read twice and
+    /// answers the same, and a notification is an event that happens once. It leaves through
+    /// [`Self::take_notifications`], which is the only reader, and it is empty at rest.
+    notifications: Vec<TerminalNotification>,
     failure_exit_code: Option<i32>,
     working: bool,
     published_revision: u64,
@@ -1119,6 +1154,7 @@ impl DualPlaneSession {
             window_title: None,
             progress: None,
             bell_latched: false,
+            notifications: Vec::new(),
             failure_exit_code: None,
             working: false,
             published_revision: 0,
@@ -1188,6 +1224,20 @@ impl DualPlaneSession {
 
     fn advance_published_revision(&mut self) {
         self.published_revision = self.published_revision.saturating_add(1);
+    }
+
+    /// Take every notification asked for since the last call, in the order they were asked for.
+    ///
+    /// **Taking, because a notification is spent by being read.** The alternative — leaving them
+    /// and having the caller remember a watermark — would be a second ledger to keep in step with
+    /// this one, and the reason it is not needed is that there is exactly one reader: the
+    /// application's own drain, once per turn, for every leaf of every tab.
+    ///
+    /// It is *not* gated on anything here. Whether a request becomes a toast depends on which
+    /// pane is on screen, which window has the keyboard and what the user asked for in Settings —
+    /// none of which this crate knows, and all of which it would have to guess at to answer here.
+    pub fn take_notifications(&mut self) -> Vec<TerminalNotification> {
+        std::mem::take(&mut self.notifications)
     }
 
     /// Clear both attention latches without changing progress, execution, or publication state.
@@ -7533,6 +7583,11 @@ impl DualPlaneSession {
                 }
                 LifecycleDirective::Progress(progress) => {
                     self.progress = progress;
+                }
+                LifecycleDirective::Notification(notification) => {
+                    if self.notifications.len() < MAX_PENDING_NOTIFICATIONS {
+                        self.notifications.push(notification);
+                    }
                 }
                 LifecycleDirective::GridWrites { screen, rows } => {
                     let screen = match screen {

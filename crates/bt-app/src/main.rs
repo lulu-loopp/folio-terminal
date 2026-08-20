@@ -42,6 +42,7 @@ mod highlight;
 mod i18n;
 mod input;
 mod marks;
+mod notify;
 mod peek_strip;
 mod persist;
 mod pins;
@@ -297,6 +298,20 @@ enum AppEvent {
     /// answering. The row is applied the instant it is pressed and the picture
     /// arrives behind it, which is what this variant carries.
     BackgroundPictureReady,
+    /// **A desktop notification was clicked** (§7.6).
+    ///
+    /// Carries nothing, for [`Self::GitChanged`]'s reason: the launch string is
+    /// already in `NotificationDesk`'s own queue by the time this is posted, put
+    /// there by the platform thread the click arrived on. A payload here would be
+    /// a second copy of it, travelling a different way, able to arrive in a
+    /// different order.
+    ///
+    /// **The one variant not routed to every window.** Every other lane is a
+    /// worker's answer that carries its own address (§2.4 rule 1); this one names
+    /// a window explicitly, because the whole content of a notification's click
+    /// is *which* window, tab and pane it came from — and that window may be
+    /// behind, minimised, or gone.
+    NotificationClicked,
 }
 
 /// One answer from the picture worker (§7.1.6c-4d).
@@ -4381,6 +4396,16 @@ struct App {
     /// entry that opens nothing, and the launch is the only moment this product
     /// has to notice.
     context_menu_installed: bool,
+    /// **This process's voice in the notification centre** (§7.6).
+    ///
+    /// On `App` and not on `WindowRuntime`, which is the opposite of
+    /// `TaskbarMirror` two fields' worth of reasoning away, and the difference is
+    /// what each surface belongs to: a taskbar button belongs to an HWND, and an
+    /// AppUserModelID belongs to a *program*. Two windows raising toasts under
+    /// two identities would be two apps in the reader's notification settings.
+    /// The window a click must return to is carried in the toast instead — see
+    /// `notify::NotificationRoute`.
+    notifications: NotificationDesk,
     session_store: persist::SessionStore,
     settings_store: persist::SettingsStore,
     /// The shortcut table dispatch reads: this build's defaults with the user's
@@ -10083,7 +10108,7 @@ fn tab_trailing_targets(hand: TabTriggerHand) -> (f32, f32) {
 /// Clearing on "active tab" alone would silently eat every bell that rang while
 /// the user was away in another application — which is the one moment a bell is
 /// actually doing its job.
-fn attention_is_consumed(tab_is_active: bool, window_is_focused: bool) -> bool {
+pub(crate) fn attention_is_consumed(tab_is_active: bool, window_is_focused: bool) -> bool {
     tab_is_active && window_is_focused
 }
 
@@ -10500,6 +10525,91 @@ impl TaskbarMirror {
             self.refused = true;
         }
     }
+}
+
+/// **This process's voice in the notification centre** (§7.6).
+///
+/// [`TaskbarMirror`]'s shape, one layer out: an object the platform charges for, built on the
+/// first thing that actually needs it and never before, with a refusal that is remembered so a
+/// machine which cannot do this costs one line of stderr rather than one per message.
+///
+/// **Lazy is a promise and not an optimisation here.** Constructing this writes a registry value,
+/// and a reader who has turned the row off — or who simply never runs anything that asks — must
+/// end the day with nothing of Folio's in `HKCU\Software\Classes\AppUserModelId` and no entry in
+/// Windows' own notification settings. Both of those appear on the first toast and not on the
+/// first launch, which is the only version of "off" a switch can honestly keep.
+struct NotificationDesk {
+    /// Built on the first toast this window actually raises, and never before.
+    voice: Option<bt_platform::Notifier>,
+    /// Set once the platform has refused. Nothing clears it: every reason `CreateToastNotifier`
+    /// fails is a fact about the session rather than about this message.
+    refused: bool,
+    /// How the activation callback — which runs on whatever thread the platform delivers a click
+    /// on — gets the loop to come round and read the queue. Held rather than taken from `App`
+    /// at construction time because the desk is built lazily and the proxy is not.
+    proxy: EventLoopProxy<AppEvent>,
+}
+
+impl NotificationDesk {
+    fn new(proxy: EventLoopProxy<AppEvent>) -> Self {
+        Self {
+            voice: None,
+            refused: false,
+            proxy,
+        }
+    }
+
+    /// Raise one toast, building the platform side if this is the first.
+    fn show(&mut self, title: &str, body: &str, launch: &str) {
+        if self.refused {
+            return;
+        }
+        if self.voice.is_none() {
+            let proxy = self.proxy.clone();
+            match bt_platform::Notifier::new(Box::new(move || {
+                // Nothing is done here beyond waking the loop, for
+                // `AppEvent::GitChanged`'s reason and one of its own: this runs on
+                // a platform thread with no access to any window, and the launch
+                // string is already in the notifier's own queue.
+                let _ = proxy.send_event(AppEvent::NotificationClicked);
+            })) {
+                Ok(voice) => self.voice = Some(voice),
+                Err(error) => {
+                    eprintln!("desktop notifications unavailable: {error}");
+                    self.refused = true;
+                    return;
+                }
+            }
+        }
+        if let Some(voice) = self.voice.as_mut()
+            && let Err(error) = voice.show(title, body, launch)
+        {
+            eprintln!("desktop notification refused: {error}");
+            self.refused = true;
+        }
+    }
+
+    /// Every clicked toast's launch string since the last call.
+    fn take_activations(&self) -> Vec<String> {
+        self.voice
+            .as_ref()
+            .map(bt_platform::Notifier::take_activations)
+            .unwrap_or_default()
+    }
+}
+
+/// One notification on its way from a pane to the desktop.
+///
+/// Assembled during the drain, where the tab and the seat are in hand, and spent after it —
+/// because raising reaches `App` while the drain holds every tab. The title is resolved here
+/// rather than carried as a `TerminalNotification`, since the pane's own name and its profile's
+/// are both facts of the tab and neither survives the loop.
+struct NotificationRequest {
+    tab: TabId,
+    tab_is_active: bool,
+    seat: SeatId,
+    title: String,
+    body: String,
 }
 
 /// The window's one taskbar reading, and the gate that keeps it off the wire
@@ -15907,6 +16017,15 @@ struct DrainOutcome {
     /// A list because a tab is drained leaf by leaf and two shells can finish
     /// inside one turn of the loop.
     command_ends: Vec<PathBuf>,
+    /// **What programs asked the desktop to say**, and which pane each asked from
+    /// (§7.6).
+    ///
+    /// The seat travels with the request because a notification's whole value is
+    /// that clicking it goes *back somewhere*, and a leaf cannot name itself —
+    /// exactly [`Self::arrived_off_focus`]'s reason for being filled in one level
+    /// up. Empty on every turn of every loop in which no program asked, which is
+    /// almost all of them.
+    notifications: Vec<(SeatId, bt_term::TerminalNotification)>,
 }
 
 impl DrainOutcome {
@@ -15916,6 +16035,7 @@ impl DrainOutcome {
         self.renamed |= other.renamed;
         self.moved |= other.moved;
         self.command_ends.extend(other.command_ends);
+        self.notifications.extend(other.notifications);
     }
 }
 
@@ -16040,6 +16160,18 @@ fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<DrainOutcome> {
     }
     let name_after = leaf.name_evidence();
     Ok(DrainOutcome {
+        // Taken here because this is the one place every leaf of every tab
+        // passes through on every turn, which is the same sentence
+        // `output_revision` and the command ledger above are written under: a
+        // pane nobody is watching is exactly the pane whose notification matters.
+        // The seat is filled in by `drain_tab_pty`, which is the level that knows
+        // it.
+        notifications: leaf
+            .session
+            .take_notifications()
+            .into_iter()
+            .map(|notification| (SeatId(0), notification))
+            .collect(),
         command_ends: leaf
             .session
             .working_directory()
@@ -16294,8 +16426,13 @@ fn drain_tab_pty(tab: &mut TabState) -> Result<DrainOutcome> {
     let focused = tab.focused_leaf;
     let mut outcome = DrainOutcome::default();
     for (seat, leaf) in tab.leaves_mut() {
-        let leaf_outcome = drain_leaf_pty(leaf)?;
+        let mut leaf_outcome = drain_leaf_pty(leaf)?;
         outcome.arrived_off_focus |= leaf_outcome.arrived && *seat != focused;
+        // The address a leaf cannot write on its own request, stamped by the
+        // level that holds the key it is filed under.
+        for (address, _) in &mut leaf_outcome.notifications {
+            *address = *seat;
+        }
         outcome.merge(leaf_outcome);
     }
     Ok(outcome)
@@ -17025,6 +17162,7 @@ impl Runtime<'_> {
             // Reads the registry once and, on a machine whose `folio.exe`
             // has moved since, writes the verb again — see the field.
             context_menu_installed: context_menu::reassert(),
+            notifications: NotificationDesk::new(proxy.clone()),
             session_store,
             settings_store,
             shortcuts,
@@ -21365,6 +21503,7 @@ impl Runtime<'_> {
             tables: self.app.settings_store.loaded().tables,
             block_max_height: self.app.settings_store.loaded().block_max_height,
             scrollback_lines: self.app.settings_store.loaded().scrollback_lines,
+            terminal_notifications: self.app.settings_store.loaded().terminal_notifications,
             git_panel: self.app.settings_store.loaded().git_panel,
             // The machine's own answer, cached at the three moments it can
             // change — see `App::context_menu_installed`.
@@ -22563,6 +22702,9 @@ impl Runtime<'_> {
         if let Some(enabled) = settings::git_panel_requested(target) {
             self.apply_git_panel(enabled)?;
         }
+        if let Some(enabled) = settings::terminal_notifications_requested(target) {
+            self.apply_terminal_notifications(enabled);
+        }
         if let Some(install) = settings::context_menu_requested(target) {
             self.apply_context_menu(install)?;
         }
@@ -22800,6 +22942,7 @@ impl Runtime<'_> {
             | Row::ContextMenu
             | Row::PsReadLine
             | Row::Scrollback
+            | Row::Notifications
             // The editor's own advanced rows are put back by the page's own foot
             // verb — `Restore all defaults` on a built-in — which restores the
             // whole profile rather than four of its fields. A second verb that
@@ -26185,6 +26328,30 @@ impl Runtime<'_> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// Whether a program may put a message on the desktop (§7.6).
+    ///
+    /// **The whole of the switch is this one key**, and there is deliberately nothing else in
+    /// here — no registry to undo, no notifier to tear down, no state to clear.
+    ///
+    /// *No registry to undo*, because the AppUserModelID is where Windows keeps the **user's**
+    /// own choices about Folio's notifications; deleting it on `Off` would throw those away and
+    /// `On` would come back as a stranger. It is also measurably a bad idea: deleting the
+    /// platform's own settings key from under a live session wedges every later toast for that
+    /// identity until the platform notices, which the probe behind §7.6 hit on this machine.
+    ///
+    /// *No notifier to tear down*, because the object is built on the first toast that passes the
+    /// gate and this switch is upstream of the gate — a reader who has never let one through has
+    /// nothing to release.
+    ///
+    /// *No state to clear*, because a notification never made any. The tab's dot, the bell latch
+    /// and the unread ledger are untouched on both sides of this row, which is the sentence
+    /// §7.6 is written under: this is an outlet for the ledger, never a second copy of it.
+    fn apply_terminal_notifications(&mut self, enabled: bool) {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.terminal_notifications = enabled;
+        self.app.settings_store.store(settings);
     }
 
     fn apply_git_panel(&mut self, enabled: bool) -> Result<bool> {
@@ -41866,6 +42033,88 @@ impl Runtime<'_> {
         }
     }
 
+    /// Put on the desktop whatever passes the gate, and drop the rest without a trace.
+    ///
+    /// **The dropping is the ordinary case and it is silent by design.** A request that does not
+    /// reach the desktop has not failed and is not deferred — the pane is on screen in a focused
+    /// window, so the person has already been told by the only medium that can say more than a
+    /// toast can. Nothing is queued for later, because "later" would mean interrupting somebody
+    /// about output they read half an hour ago.
+    ///
+    /// Nothing is written to the ledger on either branch. §7.6's whole relationship to §7.1.5b is
+    /// that a notification is an *outlet* for facts the ledger is already keeping: the pane went
+    /// unread when its bytes arrived, which happened in `drain_leaf_pty` above and would have
+    /// happened identically had the program printed a letter instead of an escape sequence.
+    fn raise_notifications(&mut self, requests: Vec<NotificationRequest>) {
+        if requests.is_empty() {
+            return;
+        }
+        let enabled = self.app.settings_store.loaded().terminal_notifications;
+        let window_is_focused = self.window.window_focused;
+        let window = u64::from(self.window.window.id());
+        for request in requests {
+            if !notify::reaches_the_desktop(enabled, request.tab_is_active, window_is_focused) {
+                continue;
+            }
+            let route = notify::NotificationRoute {
+                window,
+                tab: request.tab.0,
+                seat: request.seat.0,
+            };
+            self.app
+                .notifications
+                .show(&request.title, &request.body, &route.launch());
+        }
+    }
+
+    /// Answer a clicked toast: this window forward, that tab on screen, that pane holding the
+    /// keyboard.
+    ///
+    /// All three, and in that order, because a notification's promise is the pane and not the
+    /// window: raising a window onto the wrong tab would be the click half-honoured, and the
+    /// order matters because the tab switch clears pointer and frame state that a later window
+    /// activation would otherwise race.
+    ///
+    /// **Every step is allowed to find nothing.** A tab can be closed, a pane can be closed or
+    /// split away, and the toast that named them can sit in the notification centre for as long
+    /// as the reader leaves it there. Each miss stops the walk where it is rather than falling
+    /// back to something nearby — a click that lands on a pane the notification was not about is
+    /// worse than one that lands on the window and stops.
+    fn open_from_notification(&mut self, route: notify::NotificationRoute) -> Result<()> {
+        let Some(index) = self
+            .window
+            .tabs
+            .iter()
+            .position(|tab| tab.id.0 == route.tab)
+        else {
+            return Ok(());
+        };
+        // Un-minimised first: `focus_window` on an iconified window brings it forward without
+        // restoring it on some configurations, and a restored window that never came forward is
+        // the same click going unanswered twice.
+        if self.window.window.is_minimized() == Some(true) {
+            self.window.window.set_minimized(false);
+        }
+        self.window.window.focus_window();
+        self.activate_tab(index, false)?;
+        let seat = route.seat_id();
+        if !self.window.tabs[index].sessions.contains_key(&seat) {
+            return Ok(());
+        }
+        if self.window.tabs[index].focused_leaf != seat {
+            self.window.tabs[index].focused_leaf = seat;
+            // The slot holds the pane that *was* focused; leaving it would let the next present
+            // assert a stale grid against the new one (`focus_pane_at`'s own reason).
+            self.window.last_presented_frame = None;
+        }
+        if self.seats.set_focus(seat) {
+            self.apply_window_min_inner_size()?;
+            self.commit_seat_geometry()?;
+            self.mark_session_dirty(Instant::now());
+        }
+        Ok(())
+    }
+
     fn drain_pty(&mut self) -> Result<()> {
         // Lowered first: see [`PtyWakeSignal::accept`].
         self.window.pty_wake.accept();
@@ -41874,8 +42123,25 @@ impl Runtime<'_> {
         let mut chrome_changed = false;
         let mut moved = false;
         let mut command_ends: Vec<PathBuf> = Vec::new();
+        let mut notifications: Vec<NotificationRequest> = Vec::new();
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             let outcome = drain_tab_pty(tab)?;
+            // Resolved here and spent below: the pane's name and its profile's are
+            // facts of this tab, and raising reaches a field of `App` that this
+            // loop's borrow of `self.window.tabs` cannot be holding at the time.
+            for (seat, notification) in outcome.notifications {
+                notifications.push(NotificationRequest {
+                    tab: tab.id,
+                    tab_is_active: index == self.window.active_tab,
+                    seat,
+                    title: notify::toast_title(
+                        notification.title.as_deref(),
+                        tab.terminal_name(seat).as_deref(),
+                        profiles::title(tab.leaf_profile(seat)),
+                    ),
+                    body: notification.body,
+                });
+            }
             if index == self.window.active_tab {
                 active_changed = outcome.arrived;
                 active_changed_off_focus = outcome.arrived_off_focus;
@@ -41888,6 +42154,7 @@ impl Runtime<'_> {
             chrome_changed |= outcome.renamed;
             moved |= outcome.moved;
         }
+        self.raise_notifications(notifications);
         // Raised before anything below can publish, because it is what that
         // publish's own gate reads. Only the tab on screen: a pane of a tab
         // nobody is looking at is not painted by any pass, and its backlog is
@@ -50785,6 +51052,31 @@ impl FolioApp {
         Ok(())
     }
 
+    /// Answer every toast clicked since the last turn.
+    ///
+    /// **Here and not in a `Runtime`**, because this is the one lane whose answer names its own
+    /// window: a `Runtime` is one window by construction, and the window a click belongs to is
+    /// read out of the click. An id that is not open is a window closed since the toast was
+    /// raised, which is the ordinary case rather than a defect — the notification centre keeps a
+    /// message for as long as the reader leaves it there.
+    ///
+    /// The queue is drained before the loop over it, so the borrow of the application ends before
+    /// the first window is reached.
+    fn route_clicked_notifications(&mut self) -> Result<()> {
+        let Some(app) = self.app.as_ref() else {
+            return Ok(());
+        };
+        for launch in app.notifications.take_activations() {
+            let Some(route) = notify::NotificationRoute::parse(&launch) else {
+                continue;
+            };
+            if let Some(mut runtime) = self.runtime(WindowId::from(route.window)) {
+                runtime.open_from_notification(route)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Take a window off the screen, and the process with it if it was the last.
     ///
     /// **The last window closing is the process exiting** — the semantics this
@@ -50999,6 +51291,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             AppEvent::BackgroundPictureReady => {
                 self.for_each_window(|runtime| runtime.adopt_background_picture())
             }
+            AppEvent::NotificationClicked => self.route_clicked_notifications(),
         };
         if let Err(error) = applied {
             self.fail(event_loop, error);

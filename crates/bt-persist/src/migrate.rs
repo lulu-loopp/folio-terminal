@@ -50,6 +50,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (12, migrate_settings_v12_to_v13),
     (13, migrate_settings_v13_to_v14),
     (14, migrate_settings_v14_to_v15),
+    (15, migrate_settings_v15_to_v16),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -333,6 +334,25 @@ fn migrate_settings_v14_to_v15(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(15));
         object.insert("focus_mode".to_owned(), Value::from(false));
+    }
+    value
+}
+
+/// v15 -> v16: whether a program may put a message on the desktop, defaulted **on**.
+///
+/// One key a sixth time, and the first of the six to take the product's default rather than the
+/// answer earlier builds gave — because they gave none. No build that wrote a v15 file could
+/// raise a desktop notification at all, so `false` here would not be preserving anybody's status
+/// quo, only freezing an absence; that is exactly `migrate_settings_v2_to_v3`'s distinction, and
+/// it reaches the opposite conclusion from `migrate_settings_v14_to_v15` for the opposite reason.
+/// The difference between the two cases is whether the feature *replaces* something the reader
+/// was already living with. Focus mode changes the window they open every morning. This changes
+/// nothing they can see until a program asks for it, and a program that asks has been told to.
+/// See `SettingsV1::terminal_notifications`.
+fn migrate_settings_v15_to_v16(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(16));
+        object.insert("terminal_notifications".to_owned(), Value::from(true));
     }
     value
 }

@@ -155,6 +155,13 @@ pub enum AdapterEvent {
     ResetTitle,
     Bell,
     Progress(Option<crate::session::ProgressState>),
+    /// A program asked for a desktop notification, over `OSC 9` or `OSC 777;notify`.
+    ///
+    /// A *request*, and this seam is deliberately the last place that is true of it: whether
+    /// anything reaches the operating system is an application question — see
+    /// `DualPlaneSession::take_notifications` and `bt-app`'s own gate — and a terminal that
+    /// decided it here would be one that could not be turned off.
+    Notification(crate::session::TerminalNotification),
     GridWrites {
         screen: RemovalScreen,
         rows: Vec<u32>,
@@ -614,6 +621,9 @@ impl TerminalAdapter {
                 }
                 InlineImageStreamAction::Progress(progress) => {
                     events.push(AdapterEvent::Progress(progress));
+                }
+                InlineImageStreamAction::Notification(notification) => {
+                    events.push(AdapterEvent::Notification(notification));
                 }
                 InlineImageStreamAction::TooLarge => {
                     self.write_inline_image_placeholder(b"[image:too-large]");

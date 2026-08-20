@@ -1009,6 +1009,89 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 * **空段的段头和空段下的横线一起消失。** 把本窗口找到的地方全钉上，`OPEN FOLDER` 就会站在一条横线上方什么也不领；把两个 buffer 全钉上，PINNED 下面那条横线就贴着盒子底。两处同一条规则：段头之于空段、横线之于空段，都是「告诉读者下面有东西」而下面没有东西。root 菜单里它还顺手避掉两条紧挨着的横线（PINNED 的那条和 `Browse…` 的那条）。
 * ** **第一枚文件钉的入口——已裁（2026-08-20）。** 文件钉只长在切换器的行上，而切换器要两行才有门；用户裁决**接受现状**：只开一个文件时先开第二个文件即可，不为此新开表面。
 
+### 7.6 终端通知（Windows landing 块 slice 3，2026-08-20，已落地）
+
+**一句话：程序说的话可以离开这扇窗，落到桌面上；而它离不离开，由「注意力账本会不会说你已经看过了」决定。**本节分三面写：协议面（终端认哪些序列）、系统面（一个没有包身份的绿色 exe 怎么发 toast——这是本片最重要的取证）、以及它与 §7.1.5b 注意力体系的关系。
+
+#### 协议面
+
+认两条事实标准，都在 `Osc1337Scanner`（`crates/bt-term/src/inline_image.rs`）这一个既有接缝上——它本来就是为「vte 把 OSC 吃掉之前先看一眼」而存在的，所以这一片**没有给 vendor 打任何补丁**。
+
+* **`OSC 9;<body>`（iTerm2 式）。** 一个字段，就是正文；协议里没有标题这一格，所以标题由本产品补（见下）。
+* **`OSC 777;notify;<title>;<body>`（urxvt 式）。** 有标题格。**只在第一个 `;` 处切标题与正文，其后的所有 `;` 都算正文**——这是 foot 的原话（"split title from body at the first ';', with any remaining ';' characters treated as part of 'body'"），也是唯一有人实现的读法；`make: *** [all] Error 2; see log` 是每天都会打出来的正文。`notify` 之外的动词整条丢弃（WezTerm 同：只支持 notify），因为别人的扩展的第二格不是任何东西的名字。
+* **`OSC 9` 与 `OSC 9;4`（ConEmu 进度）的冲突，按 Ghostty 的规则裁**——它是唯一同时实现「OSC 9 通知 + OSC 777 通知 + OSC 9;4 进度」三者的终端。规则一句话：**首字段全是数字的是 ConEmu 的编号子命令槽，其余一律是 iTerm2 的消息。**ConEmu 那张表有十二个号（1 sleep / 2 消息框 / 3 改标题 / 4 进度 / 5 等键 / 9 报 cwd / …），本产品只实现 `4`，**其余号一律静默丢弃而不是当文本弹出来**——`OSC 9;9;C:\src` 是 shell 在报自己在哪，弹一条写着 `9;C:\src` 的通知等于本终端发明了一句没人写过的话。代价照 Ghostty 的文档原样写下：真的以 `12;` 开头的通知正文发不了 `OSC 9`，它该走 `OSC 777`。
+* **BEL（0x07）不是通知源。** 调研过的终端里没有一个从裸 BEL 弹系统 toast：Windows Terminal 的 `bellStyle` 只放声音／闪窗／闪任务栏（默认 `audible`），foot 的 BEL notify 命令默认 `none`，iTerm2 的铃是窗内提示。Folio 的答案与它一直以来的答案相同——BEL 只驱动既有的 `bell_latched`，一个字节也不上系统面。
+* **上限与拒绝。** 正文上限 1KB（toast 只画两行，再多也读不到），超限**整条丢弃而不是截断**——半句话是没人写过的话；非 UTF-8 丢弃（没有「半解出来的句子」值得给人看）；标题正文都空则丢弃（那是一张空白矩形）。会话侧的待取队列封顶 16 条，是**内存上限而不是频率上限**：多久可以打扰人一次是 Windows 自己的问题，它的通知平台按 app 已经在答。
+
+四条状态被折成一条：`OSC 133;` / `OSC 7;` / `OSC 9;` / `OSC 777;` 在扫描器里现在是**同一台机器**（`TextOsc`），只有上限和收尾函数不同——第五条文本 OSC 是一个 variant 加两条 match 臂，而不是再抄一对状态。顺带钉住的一条：**`7;` 与 `777;` 共享首字节而不打架**，因为判定看的是整个前缀不是首字符。
+
+#### 系统面——无包身份发 toast 的取证（本片最重要的产出）
+
+Folio 是没有 MSIX、没有 installer、没有开始菜单快捷方式的绿色 exe。win-landing spike 已经在这台机器（Windows 11 Pro 26200）上证明「完整形态」可行：AUMID ＋ `CustomActivator` ＋ `CLSID` ＋ `LocalServer32` ＋ `INotificationActivationCallback`。本片**继续往下量，问的是最小面**，结论比 spike 更小一圈：
+
+| 探针模式 | 写了什么 | `Show()` | 点击回调 |
+|---|---|---|---|
+| `no-registry` | 什么都不写 | 返回 `Ok`，**但屏幕上什么都没有**，平台连自己的 `Notifications\Settings\<AUMID>` 都没建 | — |
+| `aumid-only` | `HKCU\Software\Classes\AppUserModelId\<AUMID>` 的 `DisplayName` ＋ `IconUri` | toast 出现，署名与图标正确 | **`ToastNotification::Activated` 在本进程内触发**，`launch` 原样回来 |
+| `no-icon` | 只写 `DisplayName` | toast 出现 | 同上 |
+| `no-setaumid` | 只写 `DisplayName`，且**不调** `SetCurrentProcessExplicitAppUserModelID` | toast 出现 | 同上 |
+
+于是**本片写下去的东西是一个键里的一个字符串**：
+
+```
+HKCU\Software\Classes\AppUserModelId\Folio.Terminal
+    DisplayName  REG_SZ  "Folio"
+```
+
+没有 `CustomActivator`，没有 `CLSID` 树，没有 `LocalServer32`，没有 `.lnk`，也不调 `SetCurrentProcessExplicitAppUserModelID`——最后这条是有意的：那个 API 的文档要求「在展示任何 UI 之前调」，而本片是**首次真要发通知时才注册**，那时窗口早已开着；量到不需要它，就不在一个已经开着的进程上改它的 AUMID（那会动任务栏按钮的分组）。微软自己那份（已归档的）Win32 toast 指南至今写着「必须有开始菜单快捷方式」——**在 26200 上这句话是过期的**。
+
+* **`IconUri` 不写。** 它要的是盘上一个真实图片文件的绝对路径，而 Folio 一个图片文件都不发——理由与 §7.4 拒绝随二进制发一个 `.ico` 完全相同。写一个不存在的路径是往注册表里写一句谎话。等哪天产品有了图标文件，这个值和它一起来。**只写 `DisplayName` 时署名照样是「Folio」**（实机截图 `artifacts/win-landing/notifications/shot-4-two-windows-toast.png`），只是图标位置是平台的占位方块。
+* **一条开发机上的坑，本片把 spike 的「疑似」坐实了：署名会被通知平台按 AUMID 缓存住。** 本片一度看到 toast 署名是裸的 `Folio.Terminal` 而不是 `Folio`——`DisplayName` 明明写着。对照实验：同一支探针换一个**全新** AUMID，署名立刻正确；把探针的 AUMID 强行改成 `Folio.Terminal` 并把 `DisplayName` 写成 `PROBE-NAME-CHECK`，署名仍旧是 `Folio.Terminal`。这个身份是 win-landing spike 几周前用同一个字符串跑过留下的缓存。解法是 `ToastNotificationManager.History.Clear("<AUMID>")`（或重启 explorer），清完之后同一个 build 的署名当场变回 `Folio`。**这是开发机现象不是产品缺陷**：没见过这个 AUMID 的机器上，注册的 `DisplayName` 一次就生效。
+* **放弃的是「冷激活」，而那不是缺口。** 没有 COM server，就没法在 Folio 已经退出之后由系统把它拉起来；通知中心里一条隔夜的旧 toast 点了不会有反应。这是诚实的结果：它指的那个 pane 已经随进程一起没了。终端的实际情形只有两种——在跑（进程内 `Activated` 就够）或者已退出（那就没有可去的地方）。
+* **注册是懒的，而这是一个承诺不是优化。** 构造 `Notifier` 会写注册表，所以它挂在**第一条真正通过闸门的 toast** 上：把设置关掉、或者干脆没有程序发过通知的读者，机器上不会多出 `AppUserModelId` 下的键，Windows 的通知设置里也不会多出 Folio 一项。
+* **关掉开关不删注册表，这一条是被实测改过来的。** 那个键是 Windows 用来存**用户自己**对 Folio 通知的选择（横幅开不开、响不响、Focus Assist 里的优先级）的地方；`Off` 删掉它等于把用户的选择连同我们的键一起扔了，`On` 回来时是个陌生人。而且探针在这台机器上直接量到：把平台自己的 `Notifications\Settings\<AUMID>` 从活着的会话底下删掉，会**把这个身份之后的每一条 toast 都卡住**。所以 Off 的含义是「不发」，那也是一个开关唯一能诚实承诺的事——这与 §7.4「卸载只删自己造的那一个键」不矛盾：那里删的是**用户看得见的一条菜单**，这里留的是**用户自己写下的偏好**。
+* **`notifier.Setting()` 故意不读。** 一个全新身份的第一次调用它答 `0x80070490 "Element not found"`（平台还没建自己的设置项），而 `Show` 照样成功。把它读成「通知被关了」会在每台机器上静音第一条通知一次，而且只在什么都没出错的机器上。
+* **XML 逃逸是承重的，不是装饰。** 正文是管道另一端来的任意文本，构建日志里全是 `&`、`<`、`"`；平台把这串东西当 XML 解析，一个没逃逸的 `&` 不是一个花掉的词，而是一份加载失败的文档——也就是一条恶意输出让这个终端从此不再通知。`launch` 属性同样逃逸：那串是**我们自己**写的、看起来最安全，而它偏偏就是含 `&` 的那一个。
+
+#### 行为
+
+* **闸门就是注意力账本自己的谓词，反过来读。** `attention_is_consumed(tab_is_active, window_is_focused)` 本来就在裁决「在你正看着的 tab、且这扇窗有键盘时响的铃，已经被这一眼答掉了」。通知是同一句话的背面：**账本会说「他已经看见了」的那一刻，桌面上什么都不发生。**写成一次调用而不是抄一遍条件——两份拼写就是它们跑偏的方式，而跑偏的后果是给一个用户正盯着的 pane 弹 toast，那是终端能做的最烦人的一件事。
+* 于是四格真值表：pane 在屏上且窗口聚焦＝不弹；窗口在别的程序后面＝弹（这正是通知存在的那一刻）；tab 不是屏上那个＝弹；两者都不＝弹。设置 Off＝四格全静。
+* **标题三层，顺序是协议事实不是偏好：** `OSC 777` 自带的标题 → 这个 pane 自己的名字（`terminal_name`，即程序报的 OSC 2 标题或它报的目录）→ profile 的名字。只有空白字符的标题按「没给」算，和这扇窗对待其他任何程序给的名字的规则（`title_layer`）相同。
+* **点击＝这扇窗上前、那个 tab 上台、那个 pane 拿键盘**，三件事按这个顺序。路由**装在 toast 里**（`launch="w=<WindowId>&t=<TabId>&s=<SeatId>"`），不是在这一侧留一张按通知 id 索引的表：那张表得有上限，而它的上限会悄悄变成「多久以前的通知还能点」。窗口先解最小化再 `focus_window`，因为对着一个图标化的窗口 `SetForegroundWindow` 在某些配置下会「拿到前台但没还原」。**每一步都允许找不到东西**：tab 关了、pane 拆了，就在那一步停住，绝不退而求其次落到旁边一个 pane——落错 pane 比只到窗口为止更糟。多窗下这是唯一按窗口 id 显式路由的一条 lane（其余四条都是 worker 的答案自带地址，§2.4 规则 1）。
+* **AUMID 挂在 `App` 上而不是 `WindowRuntime` 上**，与 `TaskbarMirror` 恰好相反，因为任务栏按钮属于 HWND 而 AppUserModelID 属于**程序**：两扇窗用两个身份发通知，在读者的通知设置里就是两个 app。窗口身份改由 toast 自己携带。
+
+#### 与 §7.1.5b 注意力体系的关系
+
+**通知不新增任何状态。**它不是第四种 claim，不进 `StatusClaim` 的阶梯，不动 `bell_latched`，不动 `failure_exit_code`，不动未读账本。发通知的那个 pane 之所以变成未读，是因为**有字节到了它**——`output_revision` 在 `drain_leaf_pty` 里照常加一，程序打的是一条转义序列还是一个字母，在那一层完全一样。所以这一片与 P1-8 的关系可以写成一句：**它是既有 attention/unread 事实的系统级出口，账本照旧。**开关关掉时也是这一句——出口关了，账本一个字不改。
+
+#### 设置
+
+`Settings ▸ Terminal ▸ Notifications`，Off/On，**默认 On**，schema v16 的 `terminal_notifications`。默认这条是有裁决的，因为业界是对半开的：foot、WezTerm、Ghostty 出厂就开（foot 还带 `inhibit-when-focused=yes`，与本片的闸门同源），Windows Terminal 的 `compatibility.allowOSC777` 出厂关，iTerm2 的「转义序列生成的提醒」出厂也关。定 On 的理由是：**保守的那两家要防的那件事，在本片的闸门下发生不了**——他们防的是「`cat` 一个恶意文件，把正盯着屏幕的人弹一脸」，而本片在 pane 就在眼前时一条都不发；而一个必须先在设置里找到才生效一次的功能，大多数用户永远不会知道自己有它。这一条是可以被推翻的裁决，推翻它只需改一个常量与一个 migration 值。
+
+行文案只陈述两件读者推不出来的事实：**得由程序主动要求**（这不是铃，也不是每个 shell 都会发），以及**你正看着的时候什么都不弹**。
+
+`Terminal` 页因此是三行：`PSReadLine 补丁` / `回滚` / `通知`，通知排最后——与 General 页把 `Explorer context menu` 排最后是同一个判断：前两行说的是一个 pane 留什么、一个 shell 打了什么补丁，而这一行是这一页上**唯一一条答案会出现在这扇窗之外**的。
+
+#### 红测与实机
+
+单元层：`bt-term` 七条（OSC 9 的数字槽与消息、OSC 777 只切一次、`7;`/`777;` 不打架、裸 BEL 不通知、超限与非 UTF-8 整条丢、分块不变、队列封顶与取空）、`bt-platform` 三条（三个字段全逃逸、无正文只画一行、注册表路径由 AUMID 推导）、`bt-app` 三条（路由往返与严格拒收、四格闸门真值表、标题三层）、`bt-persist` 两条（v15→v16 迁到 **on**、v16 的 `false` 存得住）。五处**先红后绿**逐条量过：把 OSC 9 一律读成消息 → 两条挂；把 OSC 777 按每个 `;` 切 → 一条挂；闸门只看 `tab_is_active` → 「窗口在别的程序后面」那一格挂；`&` 不逃逸 → 逃逸测试挂；迁移写 `false` → 迁移测试挂。
+
+实机（本机，Windows 11 Pro 26200，隔离 `APPDATA` ＋ `BT_PTY_DUMP`，pane 里跑一个按固定时钟发序列的脚本而不靠注入按键——这台机器的中文 IME 会改写注入的 Unicode）：
+
+1. **窗格在屏、窗口聚焦 → 一条都不弹**：连续 18 帧角落零变化，而 PTY dump 证明那条 `OSC 777` 确实到过（`shot-1-pane-said-it.png`）。
+2. **同一个程序、窗口最小化 → 弹**：`shot-2-toast.png`，标题 `cargo`、正文 `build finished in 41.2s -- A`。
+3. **点击 → 那扇窗回来**：`IsIconic` 从 true 变 false，前台窗口等于 Folio 那一扇（`shot-3-window-came-back.png`）。
+4. **两扇窗各一**：A 保持聚焦（它自己的报告被闸门吃掉），只有 B 的 toast 出现（`shot-4-two-windows-toast.png`，署名 `Folio`，正文带 B 那个 pane 的 pid）；点它，前台从 **A 变成 B**，而 B 的 pane 里正是那个 pid（`shot-5-two-windows-b-forward.png`）。
+5. **设置 Off → 全静**：22 帧、33 秒角落零变化，而同一次运行的 PTY dump 里两条 `OSC 777` 一字不少。
+
+#### 挂账
+
+* **`design/ui-mockup.html` 未改。** 设置页的这一行没有进原型文件；本片按 §7.4 的先例把它记在这里。
+* **`FlashWindowEx` 没有做。** 本片的降级预案是「toast 全路径都要包身份就退到闪任务栏」，而取证结论是不需要包身份，所以降级预案没有被触发。闪窗与 BEL 的 `bellStyle` 是同一个题目（窗内提示的强度），归铃那一片，不归这一片。
+* **`cmd.exe` 的 profile 不发 OSC 133**（`profiles.rs` 有长注释说明理由），所以 §7.4 时代记下的「cmd 标签没有完成信号」在这里不成立也不重要：本片的触发源是程序**主动发的转义序列**，与 shell integration 无关，`cmd.exe` 里 `printf` 一条 `OSC 777` 照样弹。
+* **实机只跑了 `OSC 777`，`OSC 9` 只有单元测试。** 两条序列在 `bt-term` 里汇到同一个 `push_notification`，从那一点往后没有任何分岔；实机跑的是「从 pane 到桌面再回到 pane」这条链路，而不是解析器——解析器有七条测试和一条逐字节分块不变性。
+
 ## 8. 依赖策略
 
 同 v3 表格，关键修订：**alacritty_terminal 稳态配置 scrollback=0**。vendor seam 包含既有上滚事件钩子，以及窄事务操作：打开 primary native history、查询行数、在 coalesced final viewport 上用 vendor row/WRAPLINE/cursor 重新评估高度、一次性 `take_history(oldest→newest)`、清空并恢复 limit=0，以及只针对唯一未闭合 staging candidate 的 `restore_history(oldest→newest)`；没有可独立呈现的 transcript snapshot/backing 镜像，也不复制 reflow 算法。事务期 vendor grid 是 mutable tail 唯一权威；收割后转录层拥有 staging ID/配额/定稿权，vendor 只保留该候选的原生 row escrow 供下一事务无损交还。升级必须 diff `grid/resize.rs`/history 语义，跑 vendor 181 项与完整生命周期矩阵。
