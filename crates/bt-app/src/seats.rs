@@ -33,13 +33,13 @@ use bt_render::{
     FOCUS_CARD_CLOSE_GLYPH_LOGICAL_PX, FOCUS_CARD_CLOSE_RADIUS_LOGICAL_PX,
     FOCUS_CARD_FONT_LOGICAL_PX, FOCUS_CARD_GAP_LOGICAL_PX, FOCUS_CARD_HEAD_GAP_LOGICAL_PX,
     FOCUS_CARD_HEAD_PADDING_X_LOGICAL_PX, FOCUS_CARD_HEAD_PADDING_Y_LOGICAL_PX,
-    FOCUS_CARD_PIN_BOX_LOGICAL_PX, FOCUS_CARD_RADIUS_LOGICAL_PX, FOCUS_EXIT_FONT_LOGICAL_PX,
-    FOCUS_EXIT_GAP_LOGICAL_PX, FOCUS_EXIT_GLYPH_LOGICAL_PX, FOCUS_EXIT_HEIGHT_LOGICAL_PX,
-    FOCUS_EXIT_PADDING_X_LOGICAL_PX, FOCUS_EXIT_RADIUS_LOGICAL_PX, FOCUS_MINI_BORDER_LOGICAL_PX,
-    FOCUS_MINI_FILES_FONT_LOGICAL_PX, FOCUS_MINI_FILES_ICON_LOGICAL_PX,
-    FOCUS_MINI_FILES_INDENT_LOGICAL_PX, FOCUS_MINI_FILES_LINE_HEIGHT,
-    FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX, FOCUS_MINI_GAP_LOGICAL_PX, FOCUS_MINI_HEIGHT_LOGICAL_PX,
-    FOCUS_MINI_PADDING_LOGICAL_PX, FOCUS_MINI_RADIUS_LOGICAL_PX,
+    FOCUS_CARD_PIN_BOX_LOGICAL_PX, FOCUS_CARD_RADIUS_LOGICAL_PX, FOCUS_CARD_WAIT_HALO_LOGICAL_PX,
+    FOCUS_CARD_WAIT_HALO_OPACITY, FOCUS_EXIT_FONT_LOGICAL_PX, FOCUS_EXIT_GAP_LOGICAL_PX,
+    FOCUS_EXIT_GLYPH_LOGICAL_PX, FOCUS_EXIT_HEIGHT_LOGICAL_PX, FOCUS_EXIT_PADDING_X_LOGICAL_PX,
+    FOCUS_EXIT_RADIUS_LOGICAL_PX, FOCUS_MINI_BORDER_LOGICAL_PX, FOCUS_MINI_FILES_FONT_LOGICAL_PX,
+    FOCUS_MINI_FILES_ICON_LOGICAL_PX, FOCUS_MINI_FILES_INDENT_LOGICAL_PX,
+    FOCUS_MINI_FILES_LINE_HEIGHT, FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX, FOCUS_MINI_GAP_LOGICAL_PX,
+    FOCUS_MINI_HEIGHT_LOGICAL_PX, FOCUS_MINI_PADDING_LOGICAL_PX, FOCUS_MINI_RADIUS_LOGICAL_PX,
     FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX,
     FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX, FOCUS_MINI_TERM_FONT_LOGICAL_PX,
     FOCUS_MINI_TERM_LINE_HEIGHT, OverlayQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX,
@@ -5486,6 +5486,9 @@ pub fn build_chrome_with_preview(
             rail: RailState::default(),
             rail_scroll: 0.0,
             exit_caption_width: 0.0,
+            // The settled column: every geometry in this module is measured at
+            // the end of the entrance, which is where it spends its whole life.
+            focus_reveal: 1.0,
             focus_thumbnails: &[],
             preview_titles: &preview_titles,
             terminal_names: &NO_TERMINAL_NAMES,
@@ -5646,6 +5649,25 @@ pub struct TabMarkState {
     pub opacity: f32,
     /// Whether the mark is drawn with its hue removed (a dead session).
     pub grayscale: bool,
+    /// **The attention claim's second face** (§7.1.5b, §7.1.6b′ F3): how far
+    /// through its breath the "somebody in here is waiting on you" halo is, or
+    /// `None` when nobody is.
+    ///
+    /// The *same* assertion [`Self::dot`] already carries and not a second
+    /// aggregation of anything — both are computed once, in `bt-app`, from the
+    /// one `StatusClaim` a tab's whole fleet folds down to. The dot says it in
+    /// colour on the mark; this says it in motion on the card's edge. §7.1.5b's
+    /// ladder is what makes them different fields rather than one: **`Bell` and
+    /// `Awaiting` wear the same warn dot, and only `Awaiting` breathes** — a
+    /// bell is a thing that *rang*, and a ringing bell you have not looked at is
+    /// not a program standing still waiting for you to type.
+    ///
+    /// A number and not a `bool` for [`Self::opacity`]'s reason one line up:
+    /// this module holds no clock, so the phase is sampled where the clocks are
+    /// and arrives here already resolved. `None` under reduced motion, at every
+    /// phase — the border stays warn and only the motion goes, because motion
+    /// was never the message.
+    pub pulse: Option<f32>,
 }
 
 impl Default for TabMarkState {
@@ -5661,6 +5683,7 @@ impl Default for TabMarkState {
             ring: None,
             opacity: 1.0,
             grayscale: false,
+            pulse: None,
         }
     }
 }
@@ -5730,6 +5753,21 @@ pub struct ChromeContent<'a> {
     /// carried and ignored, which is cheaper than making the field optional and
     /// then having to answer what `None` means to a solver.
     pub exit_caption_width: f32,
+    /// **How far into its entrance the card column is**, `0.0..=1.0` (§7.1.6b′
+    /// F3).
+    ///
+    /// `1.0` is the settled column and is what every frame of a mode that has
+    /// been on for a fifth of a second carries; below that the list is still
+    /// sliding in from behind the panel's left edge. Sampled where the clocks
+    /// are, like [`Self::chevron_turn`] beside it and for the same reason.
+    ///
+    /// **Nothing else in this module reads it.** It is applied once, at the very
+    /// end of the column's own paint ([`focus_rail_entrance`]), to rectangles
+    /// that have already been solved — so no geometry, no hit test and no
+    /// posture has any way to be asked about it. That is the shape of the ruling
+    /// rather than a convenience: an animation that could reach a solver would
+    /// be a third posture, and this mode is one bit.
+    pub focus_reveal: f32,
     /// **What each card's body has to show, this frame** (§7.1.6b′ F2) — one
     /// entry per tab, in [`Self::tabs`]'s order.
     ///
@@ -6093,6 +6131,7 @@ pub fn build_chrome_for_tabs(
         rail,
         rail_scroll,
         exit_caption_width,
+        focus_reveal,
         focus_thumbnails,
         preview_titles,
         float_shown,
@@ -7116,6 +7155,7 @@ pub fn build_chrome_for_tabs(
                 state: rail,
                 profile_menu_open,
                 chevron_turn,
+                reveal: focus_reveal,
             },
             palette,
             rail_group.as_output(),
@@ -9414,6 +9454,9 @@ struct FocusRail<'a> {
     state: RailState,
     profile_menu_open: bool,
     chevron_turn: f32,
+    /// How far into its entrance the column is, `0.0..=1.0` — see
+    /// [`ChromeContent::focus_reveal`].
+    reveal: f32,
 }
 
 /// Paint the focus column: its ground, its bar, its cards and the way out.
@@ -9451,6 +9494,7 @@ fn focus_rail_chrome(
         state,
         profile_menu_open,
         chevron_turn,
+        reveal,
     } = rail;
     let (quads, labels, sprites) = output;
     let Some(geometry) =
@@ -9464,6 +9508,11 @@ fn focus_rail_chrome(
     // and the card column is the same panel holding a different list.
     quads.push(ChromeQuad::ground(geometry.body, ground));
     quads.push(ChromeQuad::ink(geometry.edge, palette.rail_edge));
+    // **The entrance starts here** (§7.1.6b′ F3): the panel and its hairline are
+    // the *furniture*, and the furniture is where the settled posture put it on
+    // the very first frame — the stage has already been solved against it. What
+    // arrives is the list, and everything appended below this line is the list.
+    let entrance_from = (quads.len(), labels.len(), sprites.len());
 
     let [list_top, list_bottom] = geometry.viewport;
     let in_list = |rect: [f32; 4]| rect[3] > list_top && rect[1] < list_bottom;
@@ -9603,7 +9652,15 @@ fn focus_rail_chrome(
             // `--accent` is hover's; putting the stage on either would make one
             // colour say two things, which is the collision the pane header
             // settled the same way.
-            if content.mark.dot == Some(palette.status_warn) {
+            //
+            // **Read off the pulse and not off the dot's colour** (F3). The
+            // mock-up's own line is `el.classList.toggle("attn", …some(l =>
+            // session(l.uid).awaiting))` (9059) — the edge is the *attention
+            // queue's* face, and `Bell` wears the same warn on its dot without
+            // being in the queue. Keying the edge on the colour made a bell turn
+            // a card orange, which said "this tab is waiting for you" about a
+            // tab that had merely rung.
+            if content.mark.pulse.is_some() {
                 palette.status_warn
             } else if hovered {
                 palette.accent
@@ -9613,6 +9670,38 @@ fn focus_rail_chrome(
                 palette.focus_card_edge
             },
         ));
+        // ── the breath: `@keyframes fcard-wait` (§7.1.5b, §7.1.6b′ F3) ──
+        //
+        // A second ring, `0 0 0 3px` *outside* the border and at `24%` of the
+        // warn, which is `box-shadow`'s spread said in this module's vocabulary.
+        // The card's own edge is untouched by the clock — it is warn at every
+        // phase — so what breathes is a halo and not the statement, and a frame
+        // sampled at the trough still says the tab is waiting.
+        //
+        // **The phase rides `ChromeSprite::opacity` and never the colour.** The
+        // raster cache is keyed by the mark and the ink; a halo whose alpha were
+        // mixed into `color` would mint a texture on every frame of a 1.7s
+        // breath, which is the discipline `marks::ChromeIcon::opacity` was
+        // written for and the one
+        // `a_waiting_cards_halo_is_one_raster_at_every_phase` pins here.
+        if let Some(phase) = content.mark.pulse.filter(|phase| *phase > 0.0) {
+            let halo = (FOCUS_CARD_WAIT_HALO_LOGICAL_PX * scale).round().max(1.0);
+            let mut ring = ChromeSprite::new(
+                ChromeMark::ControlPillRing {
+                    radius_px: card_radius + halo as u32,
+                    stroke_px: halo as u32,
+                },
+                clip_to_list([
+                    card.body[0] - halo,
+                    card.body[1] - halo,
+                    card.body[2] + halo,
+                    card.body[3] + halo,
+                ]),
+                palette.status_warn,
+            );
+            ring.opacity = phase * FOCUS_CARD_WAIT_HALO_OPACITY;
+            sprites.push(ring);
+        }
 
         // ── the body: this tab's own tree, in miniature (§7.1.6b′ F2) ──
         //
@@ -9906,6 +9995,87 @@ fn focus_rail_chrome(
             palette.title_text_muted
         },
     ));
+
+    focus_rail_entrance(
+        reveal,
+        geometry.body,
+        entrance_from,
+        (quads, labels, sprites),
+    );
+}
+
+/// Slide the column's list in from behind the panel's own left edge (§7.1.6b′
+/// F3), and clip whatever has not arrived yet.
+///
+/// **First-Last-Invert-Play, and the invert is the only part that is drawn.**
+/// The Last is what every box above this was solved at — the settled column,
+/// measured by [`focus_rail_geometry`] with no idea an animation exists. The
+/// First is that same column one width to the left, off the panel entirely. So
+/// the play is one number applied to rectangles at the very end, which is what
+/// keeps three promises at once:
+///
+/// * **the solver never sees a third posture.** Nothing here is a geometry
+///   anyone asks a question of: [`focus_rail_geometry`], [`hit_focus_rail`] and
+///   [`RailState::terminal_inset_logical_px`] all answer from the settled
+///   column, on this frame and on every frame of the flight. A press that lands
+///   mid-entrance chooses the tab whose card is *going* to be under the pointer,
+///   because a card in flight is a picture and the target is a fact.
+/// * **it is free.** Translation moves rectangles and touches no ink: every
+///   sprite keeps its raster and every label keeps its shaping, so a frame of
+///   this costs a `Vec` walk. Clipping past the panel's edge is the same clip
+///   [`rail_chrome`] already does at `panel_right`, taken from the other side.
+/// * **it cannot cross the stage.** Everything is clipped to the panel the
+///   settled posture gave, so not one pixel of the list is ever drawn over a
+///   pane — which is the whole of the 2026-08-19 occlusion rework, kept.
+///
+/// **Only the arriving list animates.** There is no departure here: the moment
+/// the bit goes off the posture has no column, so `draws_focus_rail()` is false
+/// and this is never reached. That asymmetry is the house's own — `PaneMotion`
+/// gives an arriving pane a fade and a closed one nothing at all — and the
+/// reason is the same one, one surface up: the space a departing card would
+/// travel through already belongs to the stage.
+fn focus_rail_entrance(
+    reveal: f32,
+    panel: [f32; 4],
+    from: (usize, usize, usize),
+    output: (
+        &mut Vec<ChromeQuad>,
+        &mut Vec<ChromeLabel>,
+        &mut Vec<ChromeSprite>,
+    ),
+) {
+    if reveal >= 1.0 {
+        return;
+    }
+    let (quads, labels, sprites) = output;
+    let (quads_from, labels_from, sprites_from) = from;
+    let left = panel[0];
+    let travel = (panel[2] - panel[0]) * (1.0 - reveal.clamp(0.0, 1.0));
+    // A box that has slid wholly behind the edge has nothing left to show, so it
+    // is dropped rather than drawn at zero width — `rail_chrome`'s own rule for
+    // a label that starts past the panel's right edge, read from this end.
+    let slide = |rect: &mut [f32; 4]| {
+        rect[0] -= travel;
+        rect[2] -= travel;
+        let arrived = rect[2] > left;
+        rect[0] = rect[0].max(left);
+        rect[2] = rect[2].max(rect[0]);
+        arrived
+    };
+    let mut moved_quads = quads.split_off(quads_from);
+    moved_quads.retain_mut(|quad| slide(&mut quad.rect));
+    quads.append(&mut moved_quads);
+    let mut moved_sprites = sprites.split_off(sprites_from);
+    moved_sprites.retain_mut(|sprite| slide(&mut sprite.rect));
+    sprites.append(&mut moved_sprites);
+    let mut moved_labels = labels.split_off(labels_from);
+    moved_labels.retain_mut(|label| {
+        if let Some(clip) = label.clip.as_mut() {
+            slide(clip);
+        }
+        slide(&mut label.rect)
+    });
+    labels.append(&mut moved_labels);
 }
 
 /// Paint one card's body: the tab's tree in miniature, and what each of its
@@ -15055,6 +15225,9 @@ mod tests {
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                // The settled column: every geometry in this module is measured at
+                // the end of the entrance, which is where it spends its whole life.
+                focus_reveal: 1.0,
                 focus_thumbnails: &[],
                 preview_titles: &titles,
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -15125,6 +15298,9 @@ mod tests {
                     rail: RailState::default(),
                     rail_scroll: 0.0,
                     exit_caption_width: 0.0,
+                    // The settled column: every geometry in this module is measured at
+                    // the end of the entrance, which is where it spends its whole life.
+                    focus_reveal: 1.0,
                     focus_thumbnails: &[],
                     preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
@@ -17174,6 +17350,9 @@ mod tests {",
                     rail: RailState::default(),
                     rail_scroll: 0.0,
                     exit_caption_width: 0.0,
+                    // The settled column: every geometry in this module is measured at
+                    // the end of the entrance, which is where it spends its whole life.
+                    focus_reveal: 1.0,
                     focus_thumbnails: &[],
                     preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
@@ -17391,6 +17570,9 @@ mod tests {",
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                // The settled column: every geometry in this module is measured at
+                // the end of the entrance, which is where it spends its whole life.
+                focus_reveal: 1.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -17494,6 +17676,9 @@ mod tests {",
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                // The settled column: every geometry in this module is measured at
+                // the end of the entrance, which is where it spends its whole life.
+                focus_reveal: 1.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -21320,6 +21505,9 @@ mod tests {",
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                // The settled column: every geometry in this module is measured at
+                // the end of the entrance, which is where it spends its whole life.
+                focus_reveal: 1.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -21519,6 +21707,9 @@ mod tests {",
                     rail: RailState::default(),
                     rail_scroll: 0.0,
                     exit_caption_width: 0.0,
+                    // The settled column: every geometry in this module is measured at
+                    // the end of the entrance, which is where it spends its whole life.
+                    focus_reveal: 1.0,
                     focus_thumbnails: &[],
                     preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
@@ -21627,6 +21818,9 @@ mod tests {",
                     rail: RailState::default(),
                     rail_scroll: 0.0,
                     exit_caption_width: 0.0,
+                    // The settled column: every geometry in this module is measured at
+                    // the end of the entrance, which is where it spends its whole life.
+                    focus_reveal: 1.0,
                     focus_thumbnails: &[],
                     preview_titles: &[],
                     terminal_names: &NO_TERMINAL_NAMES,
@@ -21839,6 +22033,9 @@ mod tests {",
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                // The settled column: every geometry in this module is measured at
+                // the end of the entrance, which is where it spends its whole life.
+                focus_reveal: 1.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -23879,6 +24076,9 @@ mod tests {",
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                // The settled column: every geometry in this module is measured at
+                // the end of the entrance, which is where it spends its whole life.
+                focus_reveal: 1.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names,
@@ -23941,6 +24141,9 @@ mod tests {",
                 rail: RailState::default(),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                // The settled column: every geometry in this module is measured at
+                // the end of the entrance, which is where it spends its whole life.
+                focus_reveal: 1.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -24733,6 +24936,9 @@ mod tests {",
                 rail: state,
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                // The settled column: every geometry in this module is measured at
+                // the end of the entrance, which is where it spends its whole life.
+                focus_reveal: 1.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -24983,6 +25189,9 @@ mod tests {",
                 rail: state,
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                // The settled column: every geometry in this module is measured at
+                // the end of the entrance, which is where it spends its whole life.
+                focus_reveal: 1.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -25237,6 +25446,9 @@ mod tests {",
                 rail: expanded_rail(),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                // The settled column: every geometry in this module is measured at
+                // the end of the entrance, which is where it spends its whole life.
+                focus_reveal: 1.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -25396,6 +25608,9 @@ mod tests {",
                 rail: expanded_rail(),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                // The settled column: every geometry in this module is measured at
+                // the end of the entrance, which is where it spends its whole life.
+                focus_reveal: 1.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -26394,7 +26609,12 @@ mod tests {",
         rail: RailState,
         hover: Option<ChromeTarget>,
     ) -> WindowChrome {
-        window_chrome_with_thumbnails(tabs, active_tab, rail, hover, &[])
+        window_chrome_with_thumbnails(tabs, active_tab, rail, hover, &[], 1.0)
+    }
+
+    /// The same column, caught partway through its entrance (§7.1.6b′ F3).
+    fn window_chrome_at_reveal(tabs: &[TabContent], rail: RailState, reveal: f32) -> WindowChrome {
+        window_chrome_with_thumbnails(tabs, 0, rail, None, &[], reveal)
     }
 
     /// [`window_chrome_with_rail`] with the F2 thumbnails named — the shape the
@@ -26406,6 +26626,7 @@ mod tests {",
         rail: RailState,
         hover: Option<ChromeTarget>,
         focus_thumbnails: &[Option<FocusThumbnail<'_>>],
+        focus_reveal: f32,
     ) -> WindowChrome {
         let metrics = seat_metrics(1_000);
         // **A split tree, so the stage has something in it.** A lone terminal
@@ -26436,6 +26657,7 @@ mod tests {",
                 rail,
                 rail_scroll: 0.0,
                 exit_caption_width: EXIT_CAPTION,
+                focus_reveal,
                 focus_thumbnails,
                 preview_titles: &[],
                 terminal_names: &NO_TERMINAL_NAMES,
@@ -26834,29 +27056,44 @@ mod tests {",
         );
     }
 
-    /// PIN (§7.1.6b′) — **a card's dot is the tab strip's own, not a second
-    /// aggregation.**
+    /// PIN (§7.1.6b′, §7.1.5b) — **a card's dot is the tab strip's own, not a
+    /// second aggregation — and the edge is the queue's, not the dot's.**
     ///
     /// The ruling is explicit that the card takes `tabIcon`/`tabDotClass`'s
-    /// answer — *"不新写第二套聚合"* — so what is pinned here is that the colour
-    /// travels through [`TabContent::mark`] untouched, and that the same content
-    /// paints the same dot on the rail. A tab with a session waiting on the
-    /// reader turns its card's edge to the same warn, which is the attention
-    /// queue reaching the column for free.
+    /// answer — *"不新写第二套聚合"* — so what is pinned first is that the
+    /// colour travels through [`TabContent::mark`] untouched, and that the same
+    /// content paints the same dot on the rail.
+    ///
+    /// **The last assertion is F3's, and it is the one that changed.** F1 keyed
+    /// the warn edge on the dot's *colour*, which made a tab that had merely rung
+    /// wear the attention queue's ring: `Bell` and `Awaiting` are the same warn
+    /// on the mock-up's own two consecutive lines (345-346), and only the second
+    /// is a program standing still waiting for you. The edge now reads
+    /// [`TabMarkState::pulse`] — the very same `StatusClaim` the dot came from,
+    /// asked its other question — so a bell dots and does not ring the card.
     ///
     /// Red gate: recompute the dot inside `focus_rail_chrome` from anything at
-    /// all and the first assertion can drift; drop the warn edge and the second
-    /// goes red.
+    /// all and the first assertion can drift; drop the warn edge and the third
+    /// goes red; put the edge back on `mark.dot == status_warn` (F1's rule) and
+    /// the last does — which is exactly how this test failed on the commit that
+    /// introduced `pulse`, before its fixture was rewritten.
     #[test]
     fn a_cards_dot_is_the_strips_dot_and_a_waiting_tab_turns_its_card_warn() {
         let palette = chrome_palette();
         let waiting = TabMarkState {
+            dot: Some(palette.status_warn),
+            pulse: Some(1.0),
+            ..TabMarkState::default()
+        };
+        // Rang, and nothing more: the same warn dot, no place in the queue.
+        let rang = TabMarkState {
             dot: Some(palette.status_warn),
             ..TabMarkState::default()
         };
         let tabs = vec![
             card_tab("quiet", 1, TabMarkState::default(), false),
             card_tab("waiting", 1, waiting, false),
+            card_tab("rang", 1, rang, false),
         ];
         let state = focus_rail(TabLayoutMode::Vertical);
         let column = window_chrome_with_rail(&tabs, 0, state, None).rail;
@@ -26891,15 +27128,339 @@ mod tests {",
             "and one with a session waiting wears the very colour `TabContent` \
              handed over, in the same slot the strip and the rail use"
         );
+        assert_eq!(
+            dot_of(&geometry.cards[2]),
+            Some(palette.status_warn),
+            "and a bell wears the very same dot — the two claims are one colour"
+        );
+        let edged = |card: &FocusCardGeometry| {
+            column.sprites.iter().any(|sprite| {
+                sprite.color == palette.status_warn
+                    && matches!(sprite.mark, ChromeMark::ControlPillRing { .. })
+                    && sprite.rect[1] >= card.body[1] - 1.0
+                    && sprite.rect[3] <= card.body[3] + 1.0
+            })
+        };
+        assert!(
+            edged(&geometry.cards[1]),
+            "the whole card is edged in it, which is the attention queue arriving \
+             in the column without a second rule being written for it"
+        );
+        assert!(
+            !edged(&geometry.cards[2]),
+            "and the tab that only rang is not: a bell is a thing that rang, and \
+             the ring says a program is standing there waiting for you"
+        );
+    }
+
+    /// PIN (§7.1.5b, §7.1.6b′ F3) — **the waiting halo is one raster at every
+    /// phase, and the statement under it never moves.**
+    ///
+    /// The discipline `marks::ChromeIcon::opacity` was written for, applied to
+    /// the second thing in this window that breathes: a sprite's alpha rides
+    /// *beside* its pixels, so a full 1.7s period draws one texture. Mix the
+    /// phase into the ink instead and the mark cache — keyed by mark and colour —
+    /// mints a fresh raster on every frame of every breath.
+    ///
+    /// The second half is the ruling's own: the card's **border** is `--warn` at
+    /// every phase, so the halo is the only thing the clock touches and a frame
+    /// caught at the trough still says the tab is waiting.
+    ///
+    /// Red gate: bake the phase into `palette.status_warn` and the first
+    /// assertion goes red (two colours, one mark); let the border read the phase
+    /// and the last two do.
+    #[test]
+    fn a_waiting_cards_halo_is_one_raster_at_every_phase() {
+        let palette = chrome_palette();
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let geometry = focus_of(state, 1);
+        let card = geometry.cards[0];
+        let halo_and_edge = |phase: f32| {
+            let tabs = vec![card_tab(
+                "waiting",
+                1,
+                TabMarkState {
+                    dot: Some(palette.status_warn),
+                    pulse: Some(phase),
+                    ..TabMarkState::default()
+                },
+                false,
+            )];
+            let column = window_chrome_with_rail(&tabs, 0, state, None).rail;
+            let rings: Vec<ChromeSprite> = column
+                .sprites
+                .iter()
+                .filter(|sprite| {
+                    matches!(sprite.mark, ChromeMark::ControlPillRing { .. })
+                        && sprite.rect[1] <= card.body[1]
+                        && sprite.rect[3] >= card.body[3]
+                })
+                .copied()
+                .collect();
+            // The outer of the two is the halo: it reaches past the card on
+            // every side, which is what `box-shadow`'s spread means.
+            let halo = rings
+                .iter()
+                .copied()
+                .find(|sprite| sprite.rect[0] < card.body[0])
+                .expect("a waiting card wears a halo");
+            let edge = rings
+                .iter()
+                .copied()
+                .find(|sprite| sprite.rect[0] >= card.body[0])
+                .expect("and its own border under it");
+            (halo, edge)
+        };
+        let (low, low_edge) = halo_and_edge(0.1);
+        let (high, high_edge) = halo_and_edge(0.9);
+        assert_eq!(
+            (low.mark, low.color),
+            (high.mark, high.color),
+            "two phases of one breath are one cache key: the mark and the ink are \
+             what the raster is stored under, and neither of them is the clock"
+        );
+        assert!(
+            high.opacity > low.opacity && low.opacity > 0.0,
+            "and the phase reaches the glass on the sprite's own opacity: \
+             {low:?} vs {high:?}"
+        );
+        assert!(
+            (high.opacity - 0.9 * FOCUS_CARD_WAIT_HALO_OPACITY).abs() < 1e-5,
+            "at the mock-up's own 24% of the warn: {}",
+            high.opacity
+        );
+        assert_eq!(
+            (low_edge.color, high_edge.color),
+            (palette.status_warn, palette.status_warn),
+            "the border says `waiting` at every phase — the halo breathes, the \
+             statement does not"
+        );
+        assert_eq!(
+            (low_edge.opacity, high_edge.opacity),
+            (1.0, 1.0),
+            "and it is drawn at full strength at both, so a reader who catches \
+             the trough is not shown a fainter claim"
+        );
+    }
+
+    /// PIN (§7.1.6b′ F3) — **the entrance moves the list and never the panel,
+    /// and never reaches past the panel's own edge.**
+    ///
+    /// The three promises `focus_rail_entrance` is written to keep, checked
+    /// against the one thing that can falsify them: the rectangles that come out.
+    ///
+    /// The panel and its hairline are the furniture the settled posture put
+    /// there — the stage has already been solved against them — so they are
+    /// identical at every reveal. Everything else is one list arriving, displaced
+    /// by a fraction of the column's own width and clipped where the panel ends.
+    /// **Not one pixel is ever drawn to the left of the panel or, more to the
+    /// point, ever left over the stage**: the 2026-08-19 occlusion rework said
+    /// the column occupies and does not float, and an animation that crossed the
+    /// terminal for 180ms would be that bug wearing a tween.
+    ///
+    /// Red gate: take the entrance's `from` index before the ground quad and the
+    /// first assertion goes red (the panel slides too); drop the
+    /// `rect[0].max(left)` clamp and the second does; return early on any reveal
+    /// and the third does.
+    #[test]
+    fn the_entrance_slides_the_list_alone_and_stays_inside_its_panel() {
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let tabs = three_cards();
+        let geometry = focus_of(state, tabs.len());
+        let panel = geometry.body;
+
+        let home = window_chrome_at_reveal(&tabs, state, 1.0).rail;
+        let midway = window_chrome_at_reveal(&tabs, state, 0.5).rail;
+
+        assert_eq!(
+            midway.quads.first(),
+            home.quads.first(),
+            "the panel is where the posture put it, on the entrance's first frame \
+             as on its last"
+        );
+        assert_eq!(
+            midway.quads.get(1),
+            home.quads.get(1),
+            "and so is the hairline facing the terminal"
+        );
+
+        let outside = |group: &ChromeGroup| {
+            group
+                .quads
+                .iter()
+                .map(|quad| quad.rect)
+                .chain(group.sprites.iter().map(|sprite| sprite.rect))
+                .chain(group.labels.iter().map(|label| label.rect))
+                .any(|rect| rect[0] < panel[0] - 0.01 || rect[0] > rect[2] + 0.01)
+        };
+        assert!(
+            !outside(&midway),
+            "nothing is drawn left of the panel's own edge, at any moment of the \
+             entrance — the column occupies, it does not float"
+        );
+
+        let title_left = |group: &ChromeGroup| {
+            group
+                .labels
+                .iter()
+                .find(|label| label.text == "alpha")
+                .map(|label| label.rect[0])
+        };
+        let (home_left, midway_left) = (title_left(&home), title_left(&midway));
+        assert!(
+            midway_left.is_some() && midway_left < home_left,
+            "and the list itself really has moved: {midway_left:?} is left of \
+             {home_left:?}"
+        );
+    }
+
+    /// PIN (§7.1.6b′ F3) — **the settled column is the solved geometry,
+    /// untouched: reduced motion is pixel-for-pixel the picture F2 shipped.**
+    ///
+    /// Under `Motion::Reduced` the tween reports its target and asks for no
+    /// frames, so the very first frame of the mode is drawn at `reveal == 1.0`.
+    /// What this has to pin is that `reveal == 1.0` is not *nearly* the old
+    /// picture but exactly it.
+    ///
+    /// **Stated against [`focus_rail_geometry`] and not against another reveal**,
+    /// which is the correction this pin needed: comparing `1.0` with `1.5` only
+    /// ever exercised the early return, and the arithmetic behind it happens to
+    /// be the identity at zero travel too — so the "red gate" first written here
+    /// (drop the guard) left the test green, and said nothing. Measuring the
+    /// cards against the boxes the solver handed over is independent of the
+    /// entrance altogether: it fails for **any** displacement at rest, whether it
+    /// comes from a missing guard, an off-by-one in the invert, or a travel that
+    /// does not reach zero.
+    ///
+    /// Red gate: make the entrance one that never fully arrives — stop the fast
+    /// path firing *and* write the invert as `1.1 - reveal`, which is one bug in
+    /// two lines because the guard is a fast path for the same arithmetic — and
+    /// the first assertion goes red at 22px. Either line alone leaves it green,
+    /// and that is the honest reading rather than a weak test: the settled column
+    /// is guarded twice, by a return and by a travel that reaches zero.
+    #[test]
+    fn a_settled_column_is_the_picture_the_entrance_never_touched() {
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let tabs = three_cards();
+        let geometry = focus_of(state, tabs.len());
+        let settled = window_chrome_at_reveal(&tabs, state, 1.0).rail;
+
+        for (index, card) in geometry.cards.iter().enumerate() {
+            let drawn = settled
+                .sprites
+                .iter()
+                .find(|sprite| {
+                    matches!(sprite.mark, ChromeMark::ControlPill { .. })
+                        && (sprite.rect[1] - card.body[1]).abs() < 0.01
+                        && sprite.rect[2] - sprite.rect[0] > 100.0
+                })
+                .unwrap_or_else(|| panic!("card {index} is drawn at all"));
+            assert_eq!(
+                (drawn.rect[0], drawn.rect[2]),
+                (card.body[0], card.body[2]),
+                "card {index} stands exactly where the solver put it — the stage \
+                 was solved against this column, so a settled card one pixel off \
+                 is a column the terminal beside it does not agree with"
+            );
+        }
+
+        // And the guard really is a guard: past the target nothing runs at all.
+        let over = window_chrome_at_reveal(&tabs, state, 1.5).rail;
+        assert_eq!(settled.quads, over.quads);
+        assert_eq!(settled.sprites, over.sprites);
+        assert_eq!(settled.labels.len(), over.labels.len());
+    }
+
+    /// PIN (§7.1.6b′ F3) — **a press mid-entrance answers the settled column.**
+    ///
+    /// 命中不许说谎: the mode is one bit, and the moment it turns the hit test
+    /// answers the mode's own geometry. The animation is a picture of a list
+    /// catching up, and a picture has never been asked a question in this module.
+    ///
+    /// It is stated at the strongest reveal there is — `0.0`, where the column
+    /// has not begun to arrive and nothing at all is drawn in it — because that
+    /// is the frame on which a hit test built from the picture would answer
+    /// `RailBody` or nothing. Note what the assertion needs in order to be
+    /// possible: [`hit_focus_rail`] has no reveal in its signature, so there is
+    /// nowhere for the lie to enter.
+    ///
+    /// Red gate: give `hit_focus_rail` the reveal and displace its cards by it,
+    /// and the first assertion goes red on the very first frame.
+    #[test]
+    fn a_press_during_the_entrance_chooses_the_tab_the_card_is_going_to_be() {
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let tabs = three_cards();
+        let trailers = resting(tabs.len());
+        let geometry = focus_of(state, tabs.len());
+        let card = geometry.cards[1];
+        let (x, y) = (
+            f64::from((card.body[0] + card.body[2]) / 2.0),
+            f64::from((card.body[1] + card.body[3]) / 2.0),
+        );
+
+        let invisible = window_chrome_at_reveal(&tabs, state, 0.0).rail;
+        assert!(
+            invisible
+                .labels
+                .iter()
+                .all(|label| label.text != "alpha" && label.text != "beta"),
+            "nothing of the list has arrived yet, which is what makes the next \
+             assertion worth making"
+        );
+        assert_eq!(
+            hit_focus_rail(618.0, 1.0, &trailers, EXIT_CAPTION, 0.0, state, x, y),
+            Some(ChromeTarget::Tab(1)),
+            "and a press there still chooses the second tab: the target is a fact \
+             about the mode, and the card is a picture of it arriving"
+        );
+    }
+
+    /// PIN (§7.1.5b) — **reduced motion keeps the warn edge and takes the
+    /// halo.**
+    ///
+    /// *"reduced-motion 关脉动"*, and the mock-up's `animation: none` on a
+    /// keyframe set with no `0%` frame means exactly this: no shadow at all. What
+    /// must **not** go with it is the border — 动效从来不是消息. That is why
+    /// `TabMarkState::pulse` is `Some(0.0)` under reduced motion and not `None`:
+    /// the presence of the number is the claim, and the number is the motion.
+    ///
+    /// Red gate: answer `None` from `wait_halo_opacity` under `Reduced` and the
+    /// second assertion goes red, because the edge would fall through to the
+    /// resting one.
+    #[test]
+    fn reduced_motion_keeps_a_waiting_cards_edge_and_draws_it_no_halo() {
+        let palette = chrome_palette();
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let geometry = focus_of(state, 1);
+        let card = geometry.cards[0];
+        let tabs = vec![card_tab(
+            "waiting",
+            1,
+            TabMarkState {
+                dot: Some(palette.status_warn),
+                // What `wait_halo_opacity` answers under `Motion::Reduced`.
+                pulse: Some(0.0),
+                ..TabMarkState::default()
+            },
+            false,
+        )];
+        let column = window_chrome_with_rail(&tabs, 0, state, None).rail;
+        assert!(
+            !column
+                .sprites
+                .iter()
+                .any(|sprite| sprite.rect[0] < card.body[0] && sprite.rect[2] > card.body[2]),
+            "nothing is drawn outside the card at all: the halo is the only thing \
+             that ever reaches past its border"
+        );
         assert!(
             column.sprites.iter().any(|sprite| {
                 sprite.color == palette.status_warn
                     && matches!(sprite.mark, ChromeMark::ControlPillRing { .. })
-                    && sprite.rect[1] >= geometry.cards[1].body[1] - 1.0
-                    && sprite.rect[3] <= geometry.cards[1].body[3] + 1.0
+                    && sprite.rect[1] >= card.body[1] - 1.0
+                    && sprite.rect[3] <= card.body[3] + 1.0
             }),
-            "the whole card is edged in it, which is the attention queue arriving \
-             in the column without a second rule being written for it"
+            "and the card still says it is waiting"
         );
     }
 
@@ -27285,7 +27846,7 @@ mod tests {",
             }),
         ];
         let state = focus_rail(TabLayoutMode::Vertical);
-        let column = window_chrome_with_thumbnails(&tabs, 0, state, None, &thumbnails).rail;
+        let column = window_chrome_with_thumbnails(&tabs, 0, state, None, &thumbnails, 1.0).rail;
         let geometry = focus_of(state, tabs.len());
         let in_body = |index: usize| {
             let card = &geometry.cards[index];
@@ -27509,7 +28070,7 @@ mod tests {",
         ];
         let state = focus_rail(TabLayoutMode::Vertical);
         let bare = window_chrome_with_rail(&tabs, 0, state, None).rail;
-        let dressed = window_chrome_with_thumbnails(&tabs, 0, state, None, &thumbnails).rail;
+        let dressed = window_chrome_with_thumbnails(&tabs, 0, state, None, &thumbnails, 1.0).rail;
         let geometry = focus_of(state, tabs.len());
         let heads = |chrome: &ChromeGroup| {
             let in_head = |rect: [f32; 4]| {
@@ -27561,7 +28122,7 @@ mod tests {",
             }),
         ];
         let state = focus_rail(TabLayoutMode::Vertical);
-        let column = window_chrome_with_thumbnails(&tabs, 0, state, None, &thumbnails).rail;
+        let column = window_chrome_with_thumbnails(&tabs, 0, state, None, &thumbnails, 1.0).rail;
         let geometry = focus_of(state, tabs.len());
         let card = &geometry.cards[1];
         let boxes = focus_mini_seats(&tree, card.mini, 1.0);
@@ -27928,6 +28489,9 @@ mod tests {",
                 rail: icon_rail(1.0),
                 rail_scroll: 0.0,
                 exit_caption_width: 0.0,
+                // The settled column: every geometry in this module is measured at
+                // the end of the entrance, which is where it spends its whole life.
+                focus_reveal: 1.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
                 terminal_names: &names,

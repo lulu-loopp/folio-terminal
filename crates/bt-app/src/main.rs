@@ -3840,6 +3840,28 @@ struct LeafSession {
     /// is no program and therefore nothing for a title to be repeating.
     program: Option<PathBuf>,
     session: DualPlaneSession,
+    /// **This pane's place in the attention queue**, or `None` when it is not in
+    /// it (§7.1.5b P1-8, landed with §7.1.6b′ F3).
+    ///
+    /// A **monotonic serial and not a clock**, which is the ruling's own wording
+    /// (时间戳用单调序号, mock 可确定重放): the queue is walked oldest-first, and
+    /// ordering by a counter makes the walk a function of the order things
+    /// happened rather than of what the clock read while they happened. Two
+    /// sessions that ask in the same millisecond still have an order, and a
+    /// replay of the same events gives the same one.
+    ///
+    /// **On the leaf, so it dies with the leaf.** A queue kept as a table beside
+    /// the tabs would need pruning every time a pane closed or moved, and the way
+    /// to get that wrong is to forget once; here a tear-out carries the place
+    /// with the shell (`profile`'s own argument, two fields up) and a close takes
+    /// it away with no bookkeeping at all.
+    ///
+    /// **What puts a ticket here, and what takes it away, are different events.**
+    /// [`Runtime::admit_to_attention_queue`] hands one out; only
+    /// [`Runtime::answer_attention`] — an `Enter` typed into this very session —
+    /// takes it back. Looking at the tab does not, which is the point of the
+    /// whole mechanism: 看一眼阻塞的 agent 不解除阻塞.
+    attention_ticket: Option<u64>,
     projection: ViewportProjection,
     /// **The last moment this pane's scroll bar had a reason to be up** — a
     /// wheel, a keyboard page, a jump, or a pointer in its lane (P2-9 slice 1).
@@ -5275,6 +5297,31 @@ struct WindowRuntime {
     /// three fields that describe the ordinary chrome, so leaving it restores
     /// them by not having touched them.
     focus_mode: bool,
+    /// **The card column's entrance**, `0.0` out and `1.0` home (§7.1.6b′ F3).
+    ///
+    /// Beside [`Self::focus_mode`] and pointedly not inside it: the bit is what
+    /// the window *is*, and this is what the panel's list happens to look like
+    /// while catching up. Everything that answers a question — the posture, the
+    /// solver, the hit test, `terminal_inset_logical_px` — reads the bit alone,
+    /// on the flight's first frame as on its last. Only `focus_rail_chrome`'s
+    /// final pass reads this, and only to move rectangles it has already solved.
+    ///
+    /// `RevealTween` on the rail's own `RAIL_TRANSITION`/`EASE`, because this is
+    /// the rail's panel changing what it holds and a second curve for it would be
+    /// a second tempo in one piece of furniture. Reduced motion is handled where
+    /// every other tween handles it: inside `RevealTween`, which reports the
+    /// target with no frames asked for, so the mode arrives in one frame and that
+    /// frame is pixel-for-pixel the one F1 shipped.
+    focus_reveal: RevealTween,
+    /// **The next place in the attention queue** (§7.1.5b P1-8).
+    ///
+    /// The window's own counter, like `next_tab_id` above it, and per window for
+    /// the reason the badge is per title bar: a queue is a claim on *your*
+    /// attention in *this* window, and two windows sharing one counter would make
+    /// "who has been waiting longest" a question about a program rather than
+    /// about a screen. Never reset, never reused — see
+    /// [`LeafSession::attention_ticket`] for why it is a serial and not a clock.
+    attention_next_ticket: u64,
     /// How far the rail is scrolled, in physical pixels.
     ///
     /// Its own field beside [`Self::tab_scroll`] rather than a shared one, because
@@ -5692,6 +5739,10 @@ struct WindowRuntime {
     /// margin and the radius — so the transition owes a present when it moves a
     /// pixel and not when it moves a thousandth.
     last_drawn_resizing_card: Option<(f32, f32)>,
+    /// How far the card column's list was displaced on the last frame drawn, in
+    /// whole physical pixels — the entrance's half of the `tab_owes_frame`
+    /// ledger (§7.1.6b′ F3).
+    last_drawn_focus_reveal: Option<i32>,
     /// The last work area that was successfully observed (tiny-window §4.4).
     work_area: WorkAreaHint,
     /// Tabs from the last session that were **not** pinned, waiting on the
@@ -7116,6 +7167,7 @@ impl LeafSession {
             output_revision: self.output_revision,
             last_seen_revision: self.last_seen_revision,
             tab_is_active,
+            awaiting: self.attention_ticket.is_some(),
         }
     }
 }
@@ -10259,12 +10311,10 @@ impl ImeCursorThrottle {
 /// claim the loudest of its members' rather than a hand-rolled cascade that has
 /// to be kept in step with the per-session one.
 ///
-/// **The slot above [`Self::Failed`] belongs to `await`** — "an agent is blocked
-/// on YOU", the mock-up's loudest claim (line 262). It is deliberately absent
-/// here rather than stubbed: no session in this build can report it, and an
-/// unreachable variant is a promise the code cannot keep. When the attention
-/// queue lands it goes at the end of this enum, wears `--warn` with
-/// `fcpulse .9s`, and every consumer below keeps working unchanged.
+/// **The slot above [`Self::Failed`] belongs to `await`**, and since the
+/// attention queue landed (§7.1.6b′ F3) it is [`Self::Awaiting`], filled the way
+/// the note that used to stand here promised: at the end of the enum, wearing
+/// `--warn`, with every consumer below working unchanged.
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 enum StatusClaim {
     /// Nothing to say — no dot is drawn at all.
@@ -10276,21 +10326,44 @@ enum StatusClaim {
     Bell,
     /// Finished with a failing exit code (`--err`).
     Failed,
+    /// **This session is in the attention queue and has not been answered**
+    /// (§7.1.5b P1-8) — the mock-up's loudest claim (line 262), `.unreaddot.await`.
+    ///
+    /// Louder than [`Self::Bell`] even though the two are seeded by the same
+    /// byte in this build, and the difference is the whole of §7.1.5b's ladder:
+    /// a bell is a thing that *rang* and looking at the tab answers it, while a
+    /// place in the queue is a thing that is *still standing there* and only an
+    /// answer typed into that session retires it. The two therefore go out at
+    /// different moments and cannot be one variant.
+    Awaiting,
 }
 
 impl StatusClaim {
     /// The dot's fill, or `None` when there is no dot to draw.
     ///
-    /// `.unreaddot` is `--accent`, `.fail` is `--err` and `.bell` is `--warn`
-    /// (mock-up lines 253-264). All three are opaque and land on the mark, not
-    /// on the tab, so none of them needs the palette's compositing treatment.
+    /// `.unreaddot` is `--accent`, `.fail` is `--err` and `.bell`/`.await` are
+    /// `--warn` (mock-up lines 253-264, 346). All are opaque and land on the
+    /// mark, not on the tab, so none of them needs the palette's compositing
+    /// treatment.
     fn dot_color(self, palette: &ChromePalette) -> Option<[u8; 3]> {
         match self {
             Self::Silent => None,
             Self::Unread => Some(palette.accent),
-            Self::Bell => Some(palette.status_warn),
+            Self::Bell | Self::Awaiting => Some(palette.status_warn),
             Self::Failed => Some(palette.status_err),
         }
+    }
+
+    /// Whether this claim breathes.
+    ///
+    /// **Exactly one of them does.** `.unreaddot.bell` is a flat warn dot and
+    /// `.unreaddot.await` is the same warn under `animation: fcpulse` — the
+    /// mock-up writes the two on consecutive lines (345-346) precisely so that
+    /// the colour is the *claim* and the motion is the *queue*. A bell that
+    /// pulsed would say "a program is standing still waiting for you" about a
+    /// program that rang and carried on.
+    fn pulses(self) -> bool {
+        matches!(self, Self::Awaiting)
     }
 }
 
@@ -10309,6 +10382,15 @@ struct SessionFacts {
     last_seen_revision: u64,
     /// Whether the tab holding this session is the one on screen.
     tab_is_active: bool,
+    /// **Whether this session holds an unanswered place in the attention
+    /// queue** (§7.1.5b P1-8) — `LeafSession::attention_ticket.is_some()`.
+    ///
+    /// A fact about the *queue* and not about the shell, which is why it is
+    /// carried in beside the status rather than read out of it: the signal that
+    /// puts a session in the queue is the shell's, the thing that takes it out
+    /// is the user's, and no snapshot of a `SessionStatus` can answer the
+    /// second.
+    awaiting: bool,
 }
 
 impl SessionFacts {
@@ -10345,7 +10427,13 @@ impl SessionFacts {
     fn claim(self) -> StatusClaim {
         let work_in_flight = self.status.working || self.status.progress.is_some();
         let unread = !work_in_flight && self.has_unseen_output();
-        if unread && self.status.failure_exit_code.is_some() {
+        if self.awaiting {
+            // Above every suppression below it, and deliberately: a queue place
+            // is not a claim *about output*, so neither "work in flight" nor
+            // "you have already looked" has anything to say about it. §7.1.5b:
+            // 看一眼阻塞的 agent 不解除阻塞.
+            StatusClaim::Awaiting
+        } else if unread && self.status.failure_exit_code.is_some() {
             StatusClaim::Failed
         } else if self.status.bell_latched {
             StatusClaim::Bell
@@ -10550,6 +10638,61 @@ pub(crate) fn attention_is_consumed(tab_is_active: bool, window_is_focused: bool
     tab_is_active && window_is_focused
 }
 
+/// The place a session holds after one look at whether it is asking (§7.1.5b
+/// P1-8).
+///
+/// **Two rules, and the second is the one that is easy to lose.** A session that
+/// is asking and has no place takes the next serial. A session that *already*
+/// has one keeps it — the serial is not re-stamped, whatever the signal is doing
+/// now. Re-stamping would hand a shell that rings twice while unanswered a
+/// younger place than one that rang once and waited, which turns 先到先服务 into
+/// its opposite for exactly the shells that are trying hardest to be noticed.
+///
+/// And a session that is not asking keeps whatever it has, which is nothing at
+/// all if it never asked: **nothing here takes a place away.** The signal that
+/// hands one out is the program's and retires on its own terms
+/// ([`attention_is_consumed`]); the only thing that gives one up is the user
+/// answering ([`Runtime::answer_attention`]), and that is a different event in a
+/// different function.
+fn attention_ticket(held: Option<u64>, asking: bool, next: &mut u64) -> Option<u64> {
+    if held.is_some() || !asking {
+        return held;
+    }
+    let ticket = *next;
+    *next += 1;
+    Some(ticket)
+}
+
+/// **Where `Ctrl+Shift+A` goes next** (§7.1.5b P1-8, landed with §7.1.6b′ F3).
+///
+/// The ruling in one function, and each of its three clauses is one line here:
+///
+/// * **先到先服务** — the queue is ordered by the serial each place was handed
+///   when it was taken, so the stop is the one that has been waiting longest.
+///   `min_by_key` over a serial and never over a clock: see
+///   [`LeafSession::attention_ticket`].
+/// * **已在队列中再按 = 走到下一个** — `standing_on` is the serial of the seat
+///   the keyboard is already in, if that seat is itself in the queue. When it is,
+///   the answer is the next one *after* it rather than the oldest, so a second
+///   press moves rather than staying put.
+/// * **循环** — and when there is nothing after it, the walk wraps to the oldest.
+///   Which is why the two halves below are written as one `min` on a rotated key
+///   and not as a search-then-fallback: a walk that falls back is a walk with two
+///   answers to "and then?", and the one-element queue is the case that finds it.
+///
+/// Nothing here knows what a tab or a seat is. It is handed places and hands one
+/// back, which is what lets it be replayed against a list rather than a window.
+fn next_attention_stop<T: Copy>(queue: &[(T, u64)], standing_on: Option<u64>) -> Option<T> {
+    let pivot = standing_on.unwrap_or(u64::MAX);
+    queue
+        .iter()
+        // The rotation: everything after the pivot sorts before everything at or
+        // before it. With no pivot the first half is empty and this is plain
+        // oldest-first, which is the ruling's own default.
+        .min_by_key(|(_, ticket)| (*ticket <= pivot, *ticket))
+        .map(|(place, _)| *place)
+}
+
 /// The claim a tab wears: the loudest of the claims its sessions make.
 ///
 /// The mock-up's rule, from a user correction it records at line 1930: "a tab
@@ -10679,14 +10822,56 @@ fn breathe_opacity(elapsed: Duration, motion: Motion) -> f32 {
     if motion == Motion::Reduced {
         return WINDOW_TAB_BREATHE_REDUCED_OPACITY;
     }
-    let period = WINDOW_TAB_BREATHE_PERIOD_MS as f32;
-    let phase = (elapsed.as_secs_f32() * 1000.0).rem_euclid(period) / period;
+    let phase = breath_phase(elapsed);
     let (from, to, half) = if phase < 0.5 {
         (1.0, WINDOW_TAB_BREATHE_MIN_OPACITY, phase * 2.0)
     } else {
         (WINDOW_TAB_BREATHE_MIN_OPACITY, 1.0, (phase - 0.5) * 2.0)
     };
     from + (to - from) * cubic_bezier(half, EASE_IN_OUT)
+}
+
+/// Where in its 1.7s cycle a breath is, `0.0..1.0`.
+///
+/// One clock and one period for both of the things in this window that breathe.
+/// The mock-up writes the same `1.7s ease-in-out infinite` twice — once for the
+/// working mark (`@keyframes breathe`, line 245) and once for a waiting card's
+/// halo (`@keyframes fcard-wait`, line 2744) — and taking the number from one
+/// constant is what stops those two drifting into a window with two tempos in
+/// it. What the two do *with* the phase differs, and that is all that differs.
+fn breath_phase(elapsed: Duration) -> f32 {
+    let period = WINDOW_TAB_BREATHE_PERIOD_MS as f32;
+    (elapsed.as_secs_f32() * 1000.0).rem_euclid(period) / period
+}
+
+/// How bright a waiting card's halo is, `0.0..=1.0` of
+/// [`bt_render::FOCUS_CARD_WAIT_HALO_OPACITY`] (§7.1.5b, §7.1.6b′ F3).
+///
+/// `@keyframes fcard-wait { 50% { box-shadow: … } }` (mock-up 2744-2748): one
+/// keyframe at the midpoint and *no* `0%`/`100%` frame, so the halo grows out of
+/// nothing and goes back into nothing every cycle. That is why this is a ramp
+/// from zero rather than [`breathe_opacity`]'s swing between two visible values
+/// — the mark breathes *between* two strengths because it is always there, and
+/// the halo breathes *in and out* because it is a glow.
+///
+/// **Reduced motion answers a flat `0.0` at every phase, and that is the ruling
+/// rather than a shortcut**: `@media (prefers-reduced-motion: reduce)` turns the
+/// animation off (line 550), and an animation with no `0%` frame that is turned
+/// off simply has no shadow. Note what it does *not* answer — "not waiting". The
+/// card's warn border keys on there being a number here at all, so a reader with
+/// animation off still sees the statement, and only the motion has gone. That
+/// distinction is the whole of "留橙边、去动效": 动效从来不是消息.
+fn wait_halo_opacity(elapsed: Duration, motion: Motion) -> f32 {
+    if motion == Motion::Reduced {
+        return 0.0;
+    }
+    let phase = breath_phase(elapsed);
+    let half = if phase < 0.5 {
+        phase * 2.0
+    } else {
+        1.0 - (phase - 0.5) * 2.0
+    };
+    cubic_bezier(half, EASE_IN_OUT)
 }
 
 /// Whether the system wants animation at all.
@@ -14458,12 +14643,33 @@ impl TabState {
             // that has died while its tab lives on — see `reap_exited_tabs`,
             // which closes the tab the moment the PTY exits.
             grayscale: false,
+            // **The dot's own claim, sampled** — the second face of the very
+            // `claim` two lines up and not a second fold over the fleet
+            // (§7.1.6b′: 不新写第二套聚合). `StatusClaim::pulses` is what makes
+            // the ladder's top rung the only one that breathes, so the card can
+            // never disagree with the row about which of the two warns this is.
+            pulse: claim
+                .pulses()
+                .then(|| wait_halo_opacity(self.animation_elapsed(now), motion)),
         }
     }
 
     /// How long this tab's animations have been running.
     fn animation_elapsed(&self, now: Instant) -> Duration {
         now.saturating_duration_since(self.animation_epoch)
+    }
+
+    /// Whether any shell in this tab is standing in the attention queue
+    /// unanswered (§7.1.5b P1-8).
+    ///
+    /// A fold over the fleet like its three neighbours, and asked the same way
+    /// [`TabState::fleet_working`] is asked: "anyone here", never "the focused
+    /// one" — a card is the whole tab, so a queue place on a background pane is
+    /// still the tab's.
+    fn fleet_awaiting(&self) -> bool {
+        self.sessions
+            .values()
+            .any(|leaf| leaf.attention_ticket.is_some())
     }
 
     /// Whether anything in this tab's mark slot is moving under its own steam,
@@ -14484,6 +14690,13 @@ impl TabState {
         self.fleet_working()
             || matches!(self.fleet_progress(), Some(ProgressState::Indeterminate))
             || self.ring_tween.is_some_and(|tween| tween.sample(now).1)
+            // The waiting halo breathes on the same clock and never finishes on
+            // its own, so it owes a frame for exactly as long as the queue place
+            // stands — [`TabState::fleet_working`]'s own terms, one channel over.
+            // Above the `Reduced` early return on purpose: under reduced motion
+            // `wait_halo_opacity` draws nothing at all, so there is nothing to
+            // schedule and this must not wake the loop.
+            || self.fleet_awaiting()
     }
 
     /// Notice a new progress reading and start the arc easing toward it.
@@ -15946,6 +16159,8 @@ fn create_leaf_session(
         profile,
         program: resolved_program,
         session,
+        // Nobody has asked for anything yet.
+        attention_ticket: None,
         projection,
         thumb_awake: Instant::now(),
         grid,
@@ -17283,6 +17498,10 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         // Resting values; the caller that knows what a new window opens as
         // (settings.focus_mode, §7.1.6b′ ①) sets the bit right after assembly.
         focus_mode: false,
+        // Resting where the bit is, and the two are set together below: a window
+        // that opens *in* focus mode has not animated into it, it was born there.
+        focus_reveal: RevealTween::resting(0.0, RAIL_TRANSITION),
+        attention_next_ticket: 0,
         focus_exit_width: 0.0,
         focus_mini_advance: 0.0,
         focus_thumbs: focus_thumb::FocusThumbnails::default(),
@@ -17444,6 +17663,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         resizing_card_transition: RevealTween::over(RESIZING_CARD_TRANSITION),
         resizing_card_split: None,
         last_drawn_resizing_card: None,
+        last_drawn_focus_reveal: None,
         work_area: WorkAreaHint::NeverKnown,
         // "It opens BEFORE it asks — like a browser, which lands you on
         // your pages and puts 'restore?' on top of a window that already
@@ -18047,6 +18267,11 @@ impl Runtime<'_> {
             placeholder_tab,
         });
         window.focus_mode = focus_mode;
+        // Born in the posture, not eased into it: a window that opens with the
+        // card column up has no entrance to play, because there was never a
+        // frame in which the column was not there.
+        window.focus_reveal =
+            RevealTween::resting(f32::from(u8::from(focus_mode)), RAIL_TRANSITION);
         // **The facade is assembled here and dropped at the end of this
         // function** (multiwindow slice C). `Runtime` is two borrows now, so the
         // tail of the launch — every verb below that reads settings and writes
@@ -18372,6 +18597,8 @@ impl Runtime<'_> {
             placeholder_tab: placeholder.then_some(TabId(1)),
         });
         window.focus_mode = app.settings_store.loaded().focus_mode;
+        window.focus_reveal =
+            RevealTween::resting(f32::from(u8::from(window.focus_mode)), RAIL_TRANSITION);
         let mut runtime = Runtime {
             app,
             window: &mut window,
@@ -19748,6 +19975,7 @@ impl Runtime<'_> {
                 rail: self.sampled_rail(now),
                 rail_scroll: self.window.rail_scroll,
                 exit_caption_width: self.window.focus_exit_width,
+                focus_reveal: self.window.focus_reveal.sample(now, self.app.motion).0,
                 focus_thumbnails: &focus_thumbnails,
                 preview_titles: &preview_titles,
                 float_shown: &float_shown,
@@ -27780,9 +28008,12 @@ impl Runtime<'_> {
             // ruling asked for — "a summon key is per-slot configurable, and the
             // prototype's default is only a default" — and it is why this arm
             // exists before the window it summons does.
-            shortcuts::Action::JumpAttention
-            | shortcuts::Action::CommandPalette
-            | shortcuts::Action::SummonPip(_) => Ok(()),
+            // **P1-8 landed** (§7.1.6b′ F3): the row is no longer inert. It walks
+            // the attention queue oldest-first and puts the keyboard in the pane
+            // it lands on — the same `activate_tab` a card's own click makes, so
+            // in focus mode a jump *is* the stage changing.
+            shortcuts::Action::JumpAttention => self.jump_to_attention(),
+            shortcuts::Action::CommandPalette | shortcuts::Action::SummonPip(_) => Ok(()),
             // The glyph names the divider it draws, as in Windows Terminal: the
             // minus lays a horizontal rule across the pane and the new shell
             // opens below it; the equals stands a vertical one and the new shell
@@ -28021,12 +28252,7 @@ impl Runtime<'_> {
         };
         // Keyboard first, and independently of whether layout focus moved: the
         // two can already disagree when a pane was focused by other means.
-        if self.sessions.contains_key(&seat) && self.focused_leaf != seat {
-            self.focused_leaf = seat;
-            // The frame slot holds the pane that *was* focused. Leaving it would
-            // let the next present assert a stale grid against the new pane.
-            self.window.last_presented_frame = None;
-        }
+        self.take_keyboard_into(seat);
         // **D40's rule, now that there is a second kind of thing to focus.**
         // Pressing a pane is how you say "type here", and a files column is
         // somewhere you can type — arrows and Enter are its whole vocabulary. So
@@ -28047,6 +28273,37 @@ impl Runtime<'_> {
         if self.set_files_keyboard(files.then_some(seat), FilesFocusArrival::Pointer) {
             self.refresh_chrome();
         }
+        self.settle_focus_on(seat)
+    }
+
+    /// **Put the keyboard in one named pane of the active tab**, however it was
+    /// named.
+    ///
+    /// [`Runtime::focus_pane_at`] without the pointer: the press resolves a
+    /// position to a seat and then does exactly this, and the attention queue's
+    /// jump names its seat outright. Two doors, one room — a second spelling of
+    /// "focus this pane" is a second place for the frame slot to be forgotten.
+    fn focus_seat(&mut self, seat: SeatId) -> Result<()> {
+        self.take_keyboard_into(seat);
+        self.settle_focus_on(seat)
+    }
+
+    /// The keyboard half: typing goes here now.
+    ///
+    /// Guarded on there being a session at the seat, because a files column has
+    /// nothing to type into and a folder tab has no shell at all — the guard
+    /// every focus move in this window carries, written once.
+    fn take_keyboard_into(&mut self, seat: SeatId) {
+        if self.sessions.contains_key(&seat) && self.focused_leaf != seat {
+            self.focused_leaf = seat;
+            // The frame slot holds the pane that *was* focused. Leaving it would
+            // let the next present assert a stale grid against the new pane.
+            self.window.last_presented_frame = None;
+        }
+    }
+
+    /// The layout half: the tree's own focus, and everything that hangs off it.
+    fn settle_focus_on(&mut self, seat: SeatId) -> Result<()> {
         if !self.seats.set_focus(seat) {
             return Ok(());
         }
@@ -43911,6 +44168,13 @@ impl Runtime<'_> {
             return Ok(());
         }
         self.window.strip_animation_ticked_at = Some(now);
+        // **Before the latch is spent, and that ordering is the mechanism.** The
+        // loop below retires a bell the moment its tab is on screen in a focused
+        // window; a session that rang while you were reading it would therefore
+        // never be seen to have rung at all if the queue were filled after. Asked
+        // here, the place is taken on the same turn the byte arrived, and what
+        // happens to the *latch* afterwards has nothing to do with it.
+        self.admit_to_attention_queue();
         let active = self.window.active_tab;
         let window_is_focused = self.window.window_focused;
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
@@ -44029,6 +44293,19 @@ impl Runtime<'_> {
             self.window.last_drawn_resizing_card = carded;
             owes_frame = true;
         }
+        // **§7.1.6b′ F3 — the card column's entrance, settled on the same
+        // terms.** Quantised to the whole physical pixel the slide can actually
+        // move a rectangle by, for `drawn_rail`'s reason one paragraph up: a
+        // tween settling through the long tail of an ease would otherwise owe a
+        // frame for every one of the sixty in it while nothing on the glass
+        // changed. Read here and not inside the chrome build because the last
+        // frame of the entrance is the one nothing else asks for — the chord is
+        // long over and the pointer never moved.
+        let arriving = self.drawn_focus_reveal(now);
+        if self.window.last_drawn_focus_reveal != Some(arriving) {
+            self.window.last_drawn_focus_reveal = Some(arriving);
+            owes_frame = true;
+        }
         // **U8 — the panes' own debt, settled as it is asked.**
         //
         // Asked separately from "is anything moving?" for the reason
@@ -44120,6 +44397,13 @@ impl Runtime<'_> {
         // down for a hundred milliseconds after the divider is let go, with the
         // pointer already still. Nothing else would wake the loop to draw them.
         let cards_moving = self.window.resizing_card_transition.sample(now, motion).1;
+        // §7.1.6b′ F3, and the same argument once more: the card column's
+        // entrance runs for 180ms after a chord that moved no pointer, and
+        // nothing else in the window is moving while it does. `None` under
+        // reduced motion, where `RevealTween` reports the target and asks for
+        // nothing — which is what keeps a mode toggle as instant as it was
+        // before it could animate.
+        let focus_arriving = self.window.focus_reveal.sample(now, motion).1;
         // P168, and the same argument again: a rail that has been left behind by
         // the pointer keeps sliding shut with nothing else in the window moving,
         // and its labels keep fading for 100ms after that. Under reduced motion
@@ -44158,6 +44442,7 @@ impl Runtime<'_> {
                 || chevron_turning
                 || dock_fading
                 || cards_moving
+                || focus_arriving
                 || rail_moving
                 || files_turning)
                 .then(|| now + STRIP_ANIMATION_FRAME),
@@ -44183,6 +44468,28 @@ impl Runtime<'_> {
     /// state the chrome will be built from. Reading the two tweens again here
     /// would be a second opinion about the same instant, and the frame it would
     /// get wrong is the one where they disagree.
+    /// How far the card column's list is displaced this frame, in whole physical
+    /// pixels — [`Runtime::drawn_rail`]'s opposite number for the entrance.
+    ///
+    /// The *displacement* and not the tween's position, because that is what
+    /// reaches the glass: `focus_rail_entrance` turns the reveal into one offset
+    /// applied to rectangles, and two reveals that round to the same offset draw
+    /// the same picture. It answers `0` whenever the column is home or absent,
+    /// which is every frame of a window that is not entering the mode.
+    fn drawn_focus_reveal(&self, now: Instant) -> i32 {
+        // No column, no displacement. Without this the answer would be "one
+        // whole column's width" for every frame of every window that is not in
+        // focus mode — a stable number, so it owes no frames, but a false one,
+        // and the next reader of this ledger would have to know why.
+        if !self.rail_posture().draws_focus_rail() {
+            return 0;
+        }
+        let reveal = self.window.focus_reveal.sample(now, self.app.motion).0;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let width = self.rail_posture().width_logical_px() * scale;
+        (width * (1.0 - reveal.clamp(0.0, 1.0))).round() as i32
+    }
+
     fn drawn_rail(&self, now: Instant) -> (i32, u8) {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let state = self.sampled_rail(now);
@@ -49611,6 +49918,28 @@ impl Runtime<'_> {
             return Ok(());
         }
         self.window.focus_mode = on;
+        // **The entrance, aimed at the bit that has already turned** (F3). Only
+        // the picture is behind: `rail_posture()` answers the new posture on this
+        // very line, the solve below is made against it, and the hit test has
+        // been answering the card column since the assignment above. What the
+        // tween buys is the 180ms in which the list is still arriving — and on
+        // the way *out* it buys nothing, by design: `draws_focus_rail()` is
+        // already false, so nothing reads it and the column is simply gone. The
+        // stage owns that space the moment the bit does, and a departing card
+        // drawn across it would be the 2026-08-19 occlusion wearing a tween.
+        if on {
+            self.window
+                .focus_reveal
+                .retarget(1.0, Instant::now(), self.app.motion);
+        } else {
+            // **Put down, not eased down.** A tween left running on the way out
+            // would keep the loop awake for 180ms drawing nothing — nothing
+            // reads it once `draws_focus_rail()` is false — which is a schedule
+            // for an animation that does not exist. Said here rather than left
+            // to fall out of the paint, so "the departing list is not animated"
+            // is true of the wake-ups too and not only of the pixels.
+            self.window.focus_reveal = RevealTween::resting(0.0, RAIL_TRANSITION);
+        }
         // The scroll offset is the panel's, and the panel now holds a list of a
         // different length. Left where it was, a window that had scrolled a long
         // rail would enter focus mode looking at nothing; both geometries clamp,
@@ -49645,6 +49974,116 @@ impl Runtime<'_> {
     /// directions, because the mode is one bit.
     fn toggle_focus_mode(&mut self) -> Result<()> {
         self.set_focus_mode(!self.window.focus_mode)
+    }
+
+    /// **Hand a place in the attention queue to every session that has just
+    /// asked for one** (§7.1.5b P1-8).
+    ///
+    /// **What "asked" means in this build, said out loud.** The queue's members
+    /// are the sessions whose bell is latched, because `BEL` is the only byte a
+    /// program can send this terminal that means *I want you* — the taxonomy's
+    /// own `await`, "an agent blocked on stdin", is `bt-shellint`'s interactive
+    /// detection and there is no such crate here. So this covers the half of the
+    /// ruling a real signal can reach and invents nothing for the other: a shell
+    /// that sits at a prompt without ringing is not in this queue, and will not
+    /// be until something honest tells us it is standing still.
+    ///
+    /// **A place is taken once and only once.** The guard is `is_none()`, not the
+    /// latch's edge, and the difference matters at the other end: the bell latch
+    /// retires when the tab is *looked at* ([`attention_is_consumed`]), while a
+    /// place retires only when it is *answered*. Re-reading the latch would hand
+    /// the same session a fresh, younger ticket every time it rang again while
+    /// still unanswered, and 先到先服务 would quietly become last-come-first.
+    fn admit_to_attention_queue(&mut self) {
+        let WindowRuntime {
+            tabs,
+            attention_next_ticket,
+            ..
+        } = &mut self.window;
+        for tab in tabs.iter_mut() {
+            for leaf in tab.sessions.values_mut() {
+                leaf.attention_ticket = attention_ticket(
+                    leaf.attention_ticket,
+                    leaf.session.status().bell_latched,
+                    attention_next_ticket,
+                );
+            }
+        }
+    }
+
+    /// **回答才消费** — an `Enter` typed into a session gives up its place.
+    ///
+    /// The one door out of the queue, and it is a *keystroke into that shell*
+    /// rather than a glance at it. §7.1.5b is explicit about why: looking at a
+    /// blocked agent does not unblock it, so a queue that emptied on sight would
+    /// be a queue that forgot exactly the things it exists to remember. Answering
+    /// is the only event that can plausibly have ended the wait.
+    ///
+    /// Silent when the seat holds no place, which is the ordinary case: every
+    /// `Enter` in every shell comes through here, and almost none of them is
+    /// answering anything.
+    fn answer_attention(&mut self, seat: SeatId) {
+        let active = self.window.active_tab;
+        if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) {
+            leaf.attention_ticket = None;
+        }
+    }
+
+    /// `Ctrl+Shift+A` — go to the session that has been waiting longest, and put
+    /// the keyboard in it (§7.1.5b P1-8).
+    ///
+    /// **One transaction, and it is the card's own.** The tab switch is
+    /// [`Runtime::activate_tab`] — the very call `release_tab_press` makes when a
+    /// card in the focus column is clicked, reached through the same
+    /// `ChromeTarget::Tab(index)` the column answers with. There is no second way
+    /// to bring a tab up, in focus mode or out of it, which is what makes
+    /// "聚焦态下跳转 = 换上舞台" true by construction rather than by a branch: the
+    /// mode changes what the stage is drawn beside, and this verb never mentions
+    /// it.
+    ///
+    /// **The pane, and not only the tab.** A jump that landed on the tab and left
+    /// the keyboard in whichever pane it was last in would be a jump that puts
+    /// the answer in the wrong shell. The move is guarded on the tab actually
+    /// holding a session at that seat — the same guard every focus move in this
+    /// window carries — so a stop whose seat is not a terminal lands the tab and
+    /// stops there, which is §7.1.5b's own answer for a non-terminal stage: 落
+    /// tab,由卡片橙框指路.
+    ///
+    /// **Nothing is consumed here.** Arriving is looking, and looking is not
+    /// answering; the place stands until an `Enter` retires it. That is what
+    /// makes a second press walk on to the next one instead of finding the queue
+    /// one shorter than it was.
+    fn jump_to_attention(&mut self) -> Result<()> {
+        let queue: Vec<((usize, SeatId), u64)> = self
+            .window
+            .tabs
+            .iter()
+            .enumerate()
+            .flat_map(|(index, tab)| {
+                tab.sessions.iter().filter_map(move |(seat, leaf)| {
+                    leaf.attention_ticket.map(|ticket| ((index, *seat), ticket))
+                })
+            })
+            .collect();
+        let active = self.window.active_tab;
+        let standing_on = self.window.tabs[active]
+            .sessions
+            .get(&self.focused_leaf)
+            .and_then(|leaf| leaf.attention_ticket);
+        let Some((tab, seat)) = next_attention_stop(&queue, standing_on) else {
+            return Ok(());
+        };
+        self.activate_tab(tab, false)?;
+        if self.window.tabs[tab].sessions.contains_key(&seat) {
+            self.focus_seat(seat)?;
+        }
+        // The tab switch published a frame with the focus where it *was*; the
+        // move above happened after it. `set_focus_mode`'s own tail, for the same
+        // reason — a verb that changes what the chrome says has to say so.
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 
     /// The rail's trailers and the length of its pinned run, together.
@@ -51255,6 +51694,14 @@ impl Runtime<'_> {
         ) else {
             return Ok(());
         };
+        // **回答才消费** (§7.1.5b P1-8). The one event that gives up a place in
+        // the attention queue is an answer typed into the session that took it,
+        // so it is read here — off the key that is about to become bytes, and not
+        // from anything downstream: `send_user_input` is handed a byte string and
+        // cannot tell an answer from a paste that happens to end in a newline.
+        if matches!(event.logical_key, Key::Named(NamedKey::Enter)) {
+            self.answer_attention(self.focused_leaf);
+        }
         self.send_user_input(
             &bytes,
             "write keyboard input to PTY",
@@ -59225,6 +59672,18 @@ mod tests {
             output_revision,
             last_seen_revision,
             tab_is_active,
+            // Not in the queue: the fixtures below are about the *output*
+            // ledger, and a place in the queue outranks every one of its rules.
+            // The tests that are about the queue say so ([`waiting`]).
+            awaiting: false,
+        }
+    }
+
+    /// The same shell, standing unanswered in the attention queue.
+    fn waiting(status: SessionStatus, tab_is_active: bool) -> SessionFacts {
+        SessionFacts {
+            awaiting: true,
+            ..facts_with(status, 0, 0, tab_is_active)
         }
     }
 
@@ -60047,6 +60506,202 @@ mod tests {
         // And it is genuinely quieter than a mark that is not working at all,
         // which is what makes it still say something.
         const { assert!(WINDOW_TAB_BREATHE_REDUCED_OPACITY < 1.0) };
+    }
+
+    /// PIN (§7.1.5b) — **a place in the attention queue is the ladder's top
+    /// rung, and the only rung that breathes.**
+    ///
+    /// The taxonomy's severity order, said as `Ord` so `max` is the aggregation:
+    /// 等你回答 > 未读·失败 > bell > 未读·完成. And the half of it that F3 exists
+    /// to make true: `Bell` and `Awaiting` are **the same warn dot** and only the
+    /// second pulses, because the colour is the claim and the motion is the
+    /// queue (mock-up 345-346, two consecutive lines).
+    ///
+    /// The last assertion is the one worth stating: a place outranks even the
+    /// suppressions. A shell that is *still working* and *has already been
+    /// looked at* has nothing to report on the output ledger — and it is still
+    /// standing there waiting for you, which no fact about output can answer.
+    ///
+    /// Red gate: move `Awaiting` below `Failed` in the enum and the ladder
+    /// assertion goes red; let `pulses` match `Bell` too and the second does;
+    /// read `awaiting` after the `unread` cascade in `claim` and the last does.
+    #[test]
+    fn a_place_in_the_queue_outranks_every_claim_and_is_the_only_one_that_breathes() {
+        let palette = bt_render::chrome_palette();
+        assert!(StatusClaim::Awaiting > StatusClaim::Failed);
+        assert!(StatusClaim::Failed > StatusClaim::Bell);
+        assert!(StatusClaim::Bell > StatusClaim::Unread);
+        assert!(StatusClaim::Unread > StatusClaim::Silent);
+        assert_eq!(
+            loudest_claim([StatusClaim::Failed, StatusClaim::Awaiting]),
+            StatusClaim::Awaiting,
+            "and `max` over that order is the tab's own aggregation"
+        );
+
+        assert_eq!(
+            StatusClaim::Awaiting.dot_color(&palette),
+            StatusClaim::Bell.dot_color(&palette),
+            "one warn, two claims — the mock-up writes `--warn` for both"
+        );
+        assert!(StatusClaim::Awaiting.pulses());
+        assert!(
+            !StatusClaim::Bell.pulses(),
+            "§7.1.5b: bell 的橙点明确不脉动"
+        );
+        assert!(!StatusClaim::Failed.pulses() && !StatusClaim::Unread.pulses());
+
+        let mut busy_and_read = quiet();
+        busy_and_read.working = true;
+        assert_eq!(
+            facts_with(busy_and_read, 0, 0, true).claim(),
+            StatusClaim::Silent,
+            "the output ledger has nothing to say about a shell you are watching \
+             work — which is what makes the next line a claim about the queue"
+        );
+        assert_eq!(
+            waiting(busy_and_read, true).claim(),
+            StatusClaim::Awaiting,
+            "看一眼阻塞的 agent 不解除阻塞"
+        );
+    }
+
+    /// PIN (§7.1.5b, §7.1.6b′ F3) — **the waiting halo breathes on the mark's
+    /// own period, out of nothing and back into nothing.**
+    ///
+    /// `@keyframes fcard-wait 1.7s ease-in-out` beside `@keyframes breathe 1.7s
+    /// ease-in-out`: one tempo, taken from one constant, so the two things in
+    /// this window that breathe cannot drift apart. What differs is the shape —
+    /// the mark swings between two visible strengths because it is always there,
+    /// and the halo ramps from zero because a glow that never went out would be a
+    /// second border.
+    ///
+    /// Red gate: give the halo a period of its own and the first assertion goes
+    /// red at the quarter; make it swing from a non-zero floor and the endpoints
+    /// do; answer anything but a flat zero under `Reduced` and the last does.
+    #[test]
+    fn the_waiting_halo_breathes_on_the_marks_own_period_and_out_of_nothing() {
+        let period = Duration::from_millis(WINDOW_TAB_BREATHE_PERIOD_MS);
+        let at = |fraction: f32| wait_halo_opacity(period.mul_f32(fraction), Motion::Full);
+
+        assert!(at(0.0).abs() < 1e-6, "out of nothing: {}", at(0.0));
+        assert!(
+            (at(1.0)).abs() < 1e-6,
+            "and back into it, one period later: {}",
+            at(1.0)
+        );
+        assert!(
+            (at(0.5) - 1.0).abs() < 1e-6,
+            "full at the one keyframe the mock-up writes: {}",
+            at(0.5)
+        );
+        assert!(
+            (at(0.25) - at(0.75)).abs() < 1e-6,
+            "and symmetric about it — in and out are the same curve"
+        );
+        assert!(
+            (at(2.5) - at(0.5)).abs() < 1e-6,
+            "`infinite`: the second period is the first"
+        );
+
+        // It shares the mark's clock exactly: both are read off `breath_phase`,
+        // so the peak of one is the trough of the other on the same tab.
+        assert!(
+            (breathe_opacity(period.mul_f32(0.5), Motion::Full) - WINDOW_TAB_BREATHE_MIN_OPACITY)
+                .abs()
+                < 1e-6,
+            "one clock, one period, two shapes"
+        );
+
+        for fraction in [0.0_f32, 0.25, 0.5, 0.75, 1.0, 3.7] {
+            assert_eq!(
+                wait_halo_opacity(period.mul_f32(fraction), Motion::Reduced),
+                0.0,
+                "reduced motion draws no halo at any phase — and the card's warn \
+                 border, which is not this number, stays"
+            );
+        }
+    }
+
+    /// PIN (§7.1.5b P1-8) — **a place is taken once and never re-stamped.**
+    ///
+    /// 先到先服务 is a claim about *order*, and the way to lose it is to re-read
+    /// the signal: a shell that rings a second time while still unanswered would
+    /// take a younger serial than one that rang once and waited, which sorts the
+    /// most insistent program last. The guard is "does it already hold one",
+    /// never "did the signal just arrive".
+    ///
+    /// And the counter is never rewound, so two sessions that ask on the same
+    /// turn of the loop still have an order.
+    ///
+    /// Red gate: change the guard to `asking && !held.is_some()` → unchanged;
+    /// change it to re-stamp on every ask and the third assertion goes red.
+    #[test]
+    fn a_place_in_the_queue_is_taken_once_and_never_re_stamped() {
+        let mut next = 0;
+        assert_eq!(attention_ticket(None, false, &mut next), None);
+        assert_eq!(next, 0, "a shell that is not asking spends no serial");
+
+        let first = attention_ticket(None, true, &mut next);
+        let second = attention_ticket(None, true, &mut next);
+        assert_eq!((first, second), (Some(0), Some(1)));
+
+        assert_eq!(
+            attention_ticket(first, true, &mut next),
+            first,
+            "asking again while still in the queue keeps the place it has — \
+             otherwise the loudest program sorts last"
+        );
+        assert_eq!(next, 2, "and spends nothing");
+        assert_eq!(
+            attention_ticket(first, false, &mut next),
+            first,
+            "and the signal going quiet does not empty the queue either: only an \
+             answer does, and that is `answer_attention`'s business"
+        );
+    }
+
+    /// PIN (§7.1.5b P1-8) — **`Ctrl+Shift+A` serves the oldest, then walks on,
+    /// then wraps.**
+    ///
+    /// The ruling's three clauses against the one function that implements them,
+    /// with the queue handed over out of order on purpose: the walk is a function
+    /// of the serials, not of the order anything was collected in.
+    ///
+    /// Red gate: order by the tuple's first element and the first assertion goes
+    /// red; drop the pivot and the second does; fall back to `.next()` instead of
+    /// rotating and the last does.
+    #[test]
+    fn the_attention_queue_serves_the_oldest_then_walks_on_and_wraps() {
+        let queue = [("c", 9_u64), ("a", 2), ("b", 5)];
+        assert_eq!(next_attention_stop::<&str>(&[], None), None);
+        assert_eq!(
+            next_attention_stop(&queue, None),
+            Some("a"),
+            "先到先服务 — the oldest serial, whatever order the window walked its \
+             tabs in"
+        );
+        assert_eq!(
+            next_attention_stop(&queue, Some(2)),
+            Some("b"),
+            "已在队列中再按 = 走到下一个"
+        );
+        assert_eq!(next_attention_stop(&queue, Some(5)), Some("c"));
+        assert_eq!(
+            next_attention_stop(&queue, Some(9)),
+            Some("a"),
+            "循环 — past the newest is back to the oldest"
+        );
+        assert_eq!(
+            next_attention_stop(&[("only", 4_u64)], Some(4)),
+            Some("only"),
+            "a queue of one wraps onto itself rather than answering nothing"
+        );
+        assert_eq!(
+            next_attention_stop(&queue, Some(7)),
+            Some("c"),
+            "and a pivot that is nobody's serial still names a position in the \
+             order — the walk is over serials, not over membership"
+        );
     }
 
     /// PIN (T2 D41): the indeterminate arc turns once per its own period, and
@@ -75143,6 +75798,7 @@ mod tests {
             // fact: nothing was started, so nothing can have announced itself.
             program: None,
             session,
+            attention_ticket: None,
             projection,
             thumb_awake: Instant::now(),
             grid,
