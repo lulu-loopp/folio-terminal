@@ -460,8 +460,8 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Action::NewTab,
         Chord::new(CTRL_SHIFT, character("n")),
     ),
-    // **`Ctrl+Shift+M`, and it is a ruled 2026-08-19 with its reasons written down**
-    // (multiwindow slice C, 2026-08-19).
+    // **`Ctrl+Shift+M`, ruled by the user 2026-08-19** — no longer a placeholder
+    // (multiwindow slice C shipped it provisionally the same day).
     //
     // The chord this verb *wants* is `Ctrl+Shift+N`: Windows Terminal, WezTerm,
     // Alacritty, kitty and VS Code all open a new window with it, and they can
