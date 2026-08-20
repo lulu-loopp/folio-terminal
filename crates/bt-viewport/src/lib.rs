@@ -732,38 +732,31 @@ impl ViewportFrame {
         }
         let index = row as usize * self.columns.get() as usize + column as usize;
         let link = self.cells.get(index)?.hyperlink.as_ref()?;
-        if link.id.is_some() {
-            // OSC 8 with a grouping id: the link is the **geometrically continuous** run of
-            // same-(id, uri) cells around this one, joined across the layout-indent gaps a
-            // soft wrap leaves behind. See [`Self::link_group_run`] for why the group is
-            // narrowed to a run and what the id is still for.
-            let (first, last) = self.link_group_run(index, link)?;
-            return Some(HyperlinkHit {
-                uri: link.uri.clone(),
-                id: link.id.clone(),
-                start: self.cell_anchors.get(first)?.start.clone(),
-                end: self.cell_anchors.get(last)?.end.clone(),
-            });
-        }
-        let same_uri = |cell: &bt_transcript::CapturedCell| {
-            cell.hyperlink
-                .as_ref()
-                .is_some_and(|other| other.uri == link.uri)
-        };
-        let mut first = index;
-        while first > 0 && same_uri(&self.cells[first - 1]) {
-            first -= 1;
-        }
-        let mut last = index + 1;
-        while last < self.cells.len() && same_uri(&self.cells[last]) {
-            last += 1;
-        }
+        // Explicit OSC 8 and inferred bare URLs read the same way: the link is the segment of
+        // same-target cells the pointer is standing on. See [`Self::link_span`].
+        let (first, last) = self.link_span(index)?;
         Some(HyperlinkHit {
             uri: link.uri.clone(),
-            id: None,
+            // The **segment's** id, read off its first cell rather than off whichever cell the
+            // pointer happens to be on. A link the application broke across a line arrives as two
+            // emissions with two synthesized ids, and one link must be one hit however it is
+            // pointed at — the app compares whole hits to decide that the pointer is still on the
+            // same thing.
+            id: self.cells.get(first)?.hyperlink.as_ref()?.id.clone(),
             start: self.cell_anchors.get(first)?.start.clone(),
-            end: self.cell_anchors.get(last - 1)?.end.clone(),
+            end: self.cell_anchors.get(last)?.end.clone(),
         })
+    }
+
+    /// The cells one link occupies on screen around a hit cell, as a pair of flat cell indices.
+    ///
+    /// This is [`Self::link_group_run`] — the geometrically continuous run — plus the one thing a
+    /// run cannot see: **a line break the application made itself**. See
+    /// [`Self::rejoined_across_break`].
+    fn link_span(&self, index: usize) -> Option<(usize, usize)> {
+        let link = self.cells.get(index)?.hyperlink.as_ref()?;
+        let run = self.link_group_run(index, link)?;
+        Some(self.rejoined_across_break(run, &link.uri).unwrap_or(run))
     }
 
     /// One id-group's **geometrically continuous run** around a hit cell, as a pair of flat
@@ -792,6 +785,10 @@ impl ViewportFrame {
     /// nothing but blank cells stands between them. `row_map[..].continues` is the terminal's
     /// own answer to the first half; the blank test is the second, and it is what keeps a
     /// wrapped line that names the same URL twice from being read as one link.
+    ///
+    /// The one break `continues` cannot answer for — the one the application made itself — is
+    /// [`Self::rejoined_across_break`], which is decided on the label and never on the id, for
+    /// the reason above.
     fn link_group_run(
         &self,
         index: usize,
@@ -838,67 +835,151 @@ impl ViewportFrame {
         Some((first, last))
     }
 
+    /// Grow one run into the whole link when the break beside it was made by the **application**
+    /// rather than by the terminal, as a pair of flat cell indices — `None` when the run stands
+    /// alone.
+    ///
+    /// # The case
+    ///
+    /// A full-screen application lays its own text out and wraps it itself, so a link too long for
+    /// the pane arrives as two OSC 8 emissions with a real newline between them and no `continues`
+    /// on the seam (user report 2026-08-20: Claude Code's footer, `…/en/arti` over `cles/15363606`,
+    /// where hovering lit one line and left the other resting). Nothing [`Self::link_group_run`]
+    /// reads can join those: the terminal never wrapped that row, and the two halves need not even
+    /// share an id — the vendor synthesizes one per emission, so a re-opened link gets a fresh one.
+    ///
+    /// # The evidence, and why it is not the id
+    ///
+    /// OSC 8's `id=` exists to say "these two runs are one link", but this product already ruled it
+    /// unusable as that (2026-08-18, [`Self::link_group_run`]): the applications in front of us
+    /// stamp one id on **every** occurrence of a URL, so an id says "same target", not "same
+    /// occurrence", and trusting it lights a whole file listing at once.
+    ///
+    /// What is trustworthy is the **label**: when the two fragments' printed text, concatenated,
+    /// spells the link's own target exactly, they can only be one broken link. Two unrelated
+    /// mentions of one URL each spell it in full, so their concatenation spells it twice and never
+    /// matches; a label that is not the target (`[img] photo.png`) offers no evidence and is left
+    /// as the two segments it looks like. The geometry still has to hold as well — consecutive
+    /// rows, nothing but blank cells across the seam — so an occurrence with any ink after it on
+    /// its row is not a fragment of anything.
+    fn rejoined_across_break(&self, run: (usize, usize), uri: &str) -> Option<(usize, usize)> {
+        let mut runs = vec![run];
+        let mut hit = 0usize;
+        let mut spelled = self.run_label(run, uri).len();
+        while spelled < uri.len()
+            && let Some(previous) = self.run_across_break(runs[0].0, uri, false)
+        {
+            spelled += self.run_label(previous, uri).len();
+            runs.insert(0, previous);
+            hit += 1;
+        }
+        while spelled < uri.len()
+            && let Some(next) = self.run_across_break(runs[runs.len() - 1].1, uri, true)
+        {
+            spelled += self.run_label(next, uri).len();
+            runs.push(next);
+        }
+        if runs.len() == 1 {
+            return None;
+        }
+        // The widest window around the hovered run whose fragments spell the target.
+        for first in 0..=hit {
+            for last in (hit..runs.len()).rev() {
+                let label = runs[first..=last]
+                    .iter()
+                    .map(|run| self.run_label(*run, uri))
+                    .collect::<String>();
+                if label == uri && (first, last) != (hit, hit) {
+                    return Some((runs[first].0, runs[last].1));
+                }
+            }
+        }
+        None
+    }
+
+    /// The printed text of one run — its link cells only, so the layout indent a soft wrap leaves
+    /// inside a run is not mistaken for part of the label.
+    fn run_label(&self, (first, last): (usize, usize), uri: &str) -> String {
+        self.cells[first..=last]
+            .iter()
+            .filter(|cell| !cell.wide_spacer && cell_targets(cell, uri))
+            .map(|cell| cell.text.as_str())
+            .collect()
+    }
+
+    /// The same-target run sitting immediately across one line break from `edge`: on the next row
+    /// (or the previous one), with nothing but blank cells between the two.
+    fn run_across_break(&self, edge: usize, uri: &str, forward: bool) -> Option<(usize, usize)> {
+        let columns = self.columns.get() as usize;
+        let blank = |cell: &bt_transcript::CapturedCell| {
+            cell.text.is_empty() || cell.text.chars().all(char::is_whitespace)
+        };
+        let (earlier, later) = if forward {
+            let next = self.cells.get(edge + 1..)?;
+            let offset = next.iter().position(|cell| cell_targets(cell, uri))?;
+            (edge, edge + 1 + offset)
+        } else {
+            let previous = self
+                .cells
+                .get(..edge)?
+                .iter()
+                .rposition(|cell| cell_targets(cell, uri))?;
+            (previous, edge)
+        };
+        if later / columns != earlier / columns + 1
+            || !self.cells[earlier + 1..later].iter().all(blank)
+        {
+            return None;
+        }
+        let seed = if forward { later } else { earlier };
+        self.link_group_run(seed, self.cells[seed].hyperlink.as_ref()?)
+    }
+
+    /// This frame's cells for one hit's segment, as flat cell indices in reading order — exactly
+    /// the set [`Self::underline_hyperlink`] marks, and empty when the hit does not describe this
+    /// frame.
+    ///
+    /// **One segment is not one rectangle.** It can cover the tail of one row and the head of the
+    /// next, so a consumer placing something over "the lit cells" gets a row's worth at a time and
+    /// must union or choose; deriving that from the underline flags instead would read a
+    /// neighbouring link's marks as part of this one.
+    pub fn hyperlink_cells(&self, hyperlink: &HyperlinkHit) -> Vec<u32> {
+        // **The hit names which segment**, through the anchor it was taken at: a target with three
+        // segments on screen has three hits, and the one being hovered is the one whose first cell
+        // carries this anchor.
+        let Some(hit) = self.cells.iter().enumerate().find_map(|(index, cell)| {
+            (cell_targets(cell, &hyperlink.uri)
+                && self.cell_anchors[index].start == hyperlink.start)
+                .then_some(index)
+        }) else {
+            return Vec::new();
+        };
+        let Some((first, last)) = self.link_span(hit) else {
+            return Vec::new();
+        };
+        // The hit must describe this frame's segment, not a stale frame's.
+        if self.cell_anchors[first].start != hyperlink.start
+            || self.cell_anchors[last].end != hyperlink.end
+        {
+            return Vec::new();
+        }
+        (first..=last)
+            .filter(|index| cell_targets(&self.cells[*index], &hyperlink.uri))
+            .map(|index| index as u32)
+            .collect()
+    }
+
     /// Add the ordinary terminal underline flag to the active link in this frame only. Source
     /// cells and transcript styles remain unchanged.
     pub fn underline_hyperlink(&mut self, hyperlink: &HyperlinkHit) -> bool {
-        if hyperlink.id.is_some() {
-            let group = bt_transcript::CellHyperlink {
-                id: hyperlink.id.clone(),
-                uri: hyperlink.uri.clone(),
-            };
-            // **The hit names which run**, through the anchor it was taken at — which is the
-            // shape the no-id path below has always had, and the reason the id path can now
-            // borrow it: a group with three runs on screen has three hits, and the one being
-            // hovered is the one whose first cell carries this anchor.
-            let Some(hit) = self.cells.iter().enumerate().find_map(|(index, cell)| {
-                (cell_in_link_group(cell, &group)
-                    && self.cell_anchors[index].start == hyperlink.start)
-                    .then_some(index)
-            }) else {
-                return false;
-            };
-            let Some((first, last)) = self.link_group_run(hit, &group) else {
-                return false;
-            };
-            // The hit must describe this frame's run, not a stale frame's.
-            if self.cell_anchors[first].start != hyperlink.start
-                || self.cell_anchors[last].end != hyperlink.end
-            {
-                return false;
-            }
-            for index in first..=last {
-                if cell_in_link_group(&self.cells[index], &group) {
-                    let flags = &mut self.cells[index].style.flags;
-                    flags.remove(CellFlags::DOTTED_UNDERLINE);
-                    flags.insert(CellFlags::UNDERLINE);
-                }
-            }
-            return true;
-        }
-        let same_uri = |cell: &bt_transcript::CapturedCell| {
-            cell.hyperlink
-                .as_ref()
-                .is_some_and(|other| other.uri == hyperlink.uri)
-        };
-        let Some(index) = self.cells.iter().enumerate().find_map(|(index, cell)| {
-            (same_uri(cell) && self.cell_anchors[index].start == hyperlink.start).then_some(index)
-        }) else {
-            return false;
-        };
-        let mut first = index;
-        while first > 0 && same_uri(&self.cells[first - 1]) {
-            first -= 1;
-        }
-        let mut last = index + 1;
-        while last < self.cells.len() && same_uri(&self.cells[last]) {
-            last += 1;
-        }
-        if self.cell_anchors[last - 1].end != hyperlink.end {
+        let cells = self.hyperlink_cells(hyperlink);
+        if cells.is_empty() {
             return false;
         }
-        for cell in &mut self.cells[first..last] {
-            cell.style.flags.remove(CellFlags::DOTTED_UNDERLINE);
-            cell.style.flags.insert(CellFlags::UNDERLINE);
+        for index in cells {
+            let flags = &mut self.cells[index as usize].style.flags;
+            flags.remove(CellFlags::DOTTED_UNDERLINE);
+            flags.insert(CellFlags::UNDERLINE);
         }
         true
     }
@@ -1626,6 +1707,7 @@ impl ViewportProjection {
             })?;
         let presentation_rows = presentation_row_count.get() as usize;
         let mut presented = Vec::with_capacity(presentation_rows);
+        let implicit = implicit_hyperlinks(&rows.iter().collect::<Vec<_>>());
         for (row_index, row) in rows.into_iter().enumerate() {
             if row.cells.len() != expected_columns {
                 return Err(FrameProjectionError::ColumnCount {
@@ -1634,8 +1716,11 @@ impl ViewportProjection {
                     actual: row.cells.len(),
                 });
             }
-            let visual =
-                captured_visual_row(row, expected_columns, |column, bias| ContentAnchor::Live {
+            let visual = captured_visual_row(
+                row,
+                expected_columns,
+                &implicit[row_index],
+                |column, bias| ContentAnchor::Live {
                     screen: ScreenId::Primary,
                     point: GridPoint {
                         row: row_index as u32,
@@ -1643,7 +1728,8 @@ impl ViewportProjection {
                     },
                     bias,
                     generation: self.grid_generation,
-                });
+                },
+            );
             presented.push(PresentedRow {
                 visual,
                 height_subpixels: self.cell_height_subpixels.get(),
@@ -1748,6 +1834,20 @@ impl ViewportProjection {
         }
 
         let primary = screen == ScreenId::Primary;
+        // Bare-URL recognition reads whole logical lines (see [`implicit_hyperlinks`]), and one
+        // logical line can begin in staging and finish on the live grid, so the two planes are
+        // read as the single sequence they are presented as. Over the **complete** sequence, not
+        // the window about to be cut from it: a URL whose tail falls below the viewport must not
+        // become a link to the shorter address its visible half spells.
+        let staged_sequence: &[StagedRow] = if primary { staged_rows } else { &[] };
+        let implicit_live_base = staged_sequence.len();
+        let implicit = implicit_hyperlinks(
+            &staged_sequence
+                .iter()
+                .map(|staged| &staged.row)
+                .chain(live_rows.iter())
+                .collect::<Vec<_>>(),
+        );
         let live_height = self.live_row_prefix.last().copied().unwrap_or_else(|| {
             i64::from(self.live_rows.get()).saturating_mul(self.cell_height_subpixels.get())
         });
@@ -2261,7 +2361,12 @@ impl ViewportProjection {
                 .saturating_sub(staging_base)
                 .min(staged_rows.len());
             for (offset, staged) in staged_rows[first..last].iter().enumerate() {
-                let row = captured_staged_visual_row(staged, column_count, self.source_generation);
+                let row = captured_staged_visual_row(
+                    staged,
+                    column_count,
+                    &implicit[first + offset],
+                    self.source_generation,
+                );
                 validate_visual_row(&row, column_count, "staging", first + offset)?;
                 presented.push(PresentedRow {
                     visual: row,
@@ -2284,8 +2389,11 @@ impl ViewportProjection {
                     .map(|(offset, row)| {
                         let live_row = first + offset;
                         PresentedRow {
-                            visual: captured_visual_row(row, column_count, |column, bias| {
-                                ContentAnchor::Live {
+                            visual: captured_visual_row(
+                                row,
+                                column_count,
+                                &implicit[implicit_live_base + live_row],
+                                |column, bias| ContentAnchor::Live {
                                     screen,
                                     point: GridPoint {
                                         row: live_row as u32,
@@ -2293,8 +2401,8 @@ impl ViewportProjection {
                                     },
                                     bias,
                                     generation: self.grid_generation,
-                                }
-                            }),
+                                },
+                            ),
                             height_subpixels: self.live_row_prefix[live_row + 1]
                                 .saturating_sub(self.live_row_prefix[live_row]),
                             live_grid_row: Some(live_row as u32),
@@ -3504,6 +3612,7 @@ fn captured_row_is_blank(row: &CapturedRow) -> bool {
 fn captured_visual_row(
     row: CapturedRow,
     columns: usize,
+    implicit: &[ImplicitCellLink],
     anchor: impl Fn(usize, Bias) -> ContentAnchor,
 ) -> VisualRow {
     let continues = row.continues;
@@ -3519,7 +3628,8 @@ fn captured_visual_row(
             end: anchor(lead, Bias::After),
         });
     }
-    apply_implicit_hyperlinks(&mut cells);
+    mark_osc_8_dotted(&mut cells);
+    apply_implicit_hyperlinks(&mut cells, implicit);
     VisualRow {
         cells,
         anchors,
@@ -3530,6 +3640,7 @@ fn captured_visual_row(
 fn captured_staged_visual_row(
     staged: &StagedRow,
     columns: usize,
+    implicit: &[ImplicitCellLink],
     generation: SourceGeneration,
 ) -> VisualRow {
     let mut anchors = Vec::with_capacity(columns);
@@ -3552,7 +3663,8 @@ fn captured_staged_visual_row(
         });
     }
     let mut cells = staged.row.cells.clone();
-    apply_implicit_hyperlinks(&mut cells);
+    mark_osc_8_dotted(&mut cells);
+    apply_implicit_hyperlinks(&mut cells, implicit);
     VisualRow {
         cells,
         anchors,
@@ -3560,43 +3672,120 @@ fn captured_staged_visual_row(
     }
 }
 
-fn apply_implicit_hyperlinks(cells: &mut [CapturedCell]) {
-    // At this point every existing hyperlink came from OSC 8 in the captured terminal row.
-    // Projection owns the affordance: the source grid/transcript remains byte-for-byte unchanged,
-    // while inferred URLs added below deliberately retain their unmarked resting presentation.
+/// Give every OSC 8 cell of one row its resting dotted underline.
+///
+/// Projection owns the affordance: the source grid/transcript remains byte-for-byte unchanged, and
+/// the inferred URLs [`implicit_hyperlinks`] finds deliberately keep their unmarked resting
+/// presentation, so this must run before they are laid on and see only what OSC 8 declared.
+fn mark_osc_8_dotted(cells: &mut [CapturedCell]) {
     for cell in cells.iter_mut().filter(|cell| cell.hyperlink.is_some()) {
         cell.style.flags.insert(CellFlags::DOTTED_UNDERLINE);
     }
+}
 
-    let mut text = String::new();
-    let mut byte_ranges = Vec::with_capacity(cells.len());
-    for cell in cells.iter() {
-        let start = text.len();
-        if !cell.wide_spacer {
-            text.push_str(&cell.text);
+/// One inferred bare URL's claim on one cell of one row.
+struct ImplicitCellLink {
+    column: usize,
+    link: CellHyperlink,
+}
+
+/// Find the bare URLs in a run of captured rows, **one logical line at a time**, and report them
+/// as per-row cell claims parallel to `rows`.
+///
+/// # Why the logical line and not the row
+///
+/// A URL wider than the pane is one URL that the terminal wrapped, not two things. Reading a
+/// single visual row cannot see that: the row holding `…> https://support.cla` parses as a
+/// complete, valid URL at a host that someone else may own, and the row holding
+/// `ude.com/en/articles/15363606` has no scheme and parses as nothing at all. That is what shipped
+/// on the live grid until 2026-08-20, and it was not a drawing fault — the first row became a
+/// **link to the wrong site** and the second row was not a link at all, so a click went somewhere
+/// the reader never typed. The frozen plane never had the bug, because
+/// [`layout_frozen_line`] has always read `FrozenLine::text` whole; this is the live plane being
+/// given the same answer.
+///
+/// `CapturedRow::continues` is the terminal's own record of which rows are one line, the same fact
+/// the frozen plane knows by construction, so the grouping is read and not guessed. Detection runs
+/// over the **complete** row sequence rather than the visible window, because a URL clipped by the
+/// top or bottom of the viewport would otherwise be truncated into that same wrong target.
+fn implicit_hyperlinks(rows: &[&CapturedRow]) -> Vec<Vec<ImplicitCellLink>> {
+    let mut claims: Vec<Vec<ImplicitCellLink>> = rows.iter().map(|_| Vec::new()).collect();
+    let mut start = 0usize;
+    while start < rows.len() {
+        let mut end = start;
+        while end + 1 < rows.len() && rows[end].continues {
+            end += 1;
         }
-        byte_ranges.push(start..text.len());
+        implicit_hyperlinks_in_line(&rows[start..=end], start, &mut claims);
+        start = end + 1;
     }
+    claims
+}
+
+/// One logical line's worth of [`implicit_hyperlinks`]. `base` is the index `line[0]` has in the
+/// full sequence the claims are indexed by.
+fn implicit_hyperlinks_in_line(
+    line: &[&CapturedRow],
+    base: usize,
+    claims: &mut [Vec<ImplicitCellLink>],
+) {
+    let mut text = String::new();
+    // (row, column, byte range) for every cell of the line, in reading order.
+    let mut spots = Vec::new();
+    for (offset, row) in line.iter().enumerate() {
+        for (column, cell) in row.cells.iter().enumerate() {
+            let start = text.len();
+            if !cell.wide_spacer {
+                text.push_str(&cell.text);
+            }
+            spots.push((base + offset, column, start..text.len()));
+        }
+    }
+    let cell_at = |row: usize, column: usize| &line[row - base].cells[column];
     for range in detect_http_urls(&text) {
-        let affected = byte_ranges
+        let affected = spots
             .iter()
             .enumerate()
-            .filter(|(_, cell)| cell.start < range.byte_end && range.byte_start < cell.end)
+            .filter(|(_, (_, _, bytes))| {
+                bytes.start < range.byte_end && range.byte_start < bytes.end
+            })
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
         if affected.is_empty()
-            || affected
-                .iter()
-                .any(|index| cells[*index].hyperlink.is_some())
+            || affected.iter().any(|index| {
+                cell_at(spots[*index].0, spots[*index].1)
+                    .hyperlink
+                    .is_some()
+            })
         {
             continue;
         }
         let link = CellHyperlink::implicit(text[range.byte_start..range.byte_end].to_owned());
         for index in affected {
-            cells[index].hyperlink = Some(link.clone());
-            if index + 1 < cells.len() && cells[index + 1].wide_spacer {
-                cells[index + 1].hyperlink = Some(link.clone());
+            let (row, column, _) = spots[index];
+            claims[row].push(ImplicitCellLink {
+                column,
+                link: link.clone(),
+            });
+            // A wide glyph's spacer column belongs to the same on-screen cell as the glyph and
+            // must carry its link. It is only ever the column after its own lead, never the first
+            // column of the next row.
+            let spacer = column + 1;
+            if spacer < line[row - base].cells.len() && line[row - base].cells[spacer].wide_spacer {
+                claims[row].push(ImplicitCellLink {
+                    column: spacer,
+                    link: link.clone(),
+                });
             }
+        }
+    }
+}
+
+/// Lay one row's share of [`implicit_hyperlinks`] onto its cells.
+fn apply_implicit_hyperlinks(cells: &mut [CapturedCell], implicit: &[ImplicitCellLink]) {
+    for claim in implicit {
+        if let Some(cell) = cells.get_mut(claim.column) {
+            cell.hyperlink = Some(claim.link.clone());
         }
     }
 }
@@ -3615,6 +3804,13 @@ fn cell_in_link_group(cell: &CapturedCell, link: &CellHyperlink) -> bool {
     cell.hyperlink
         .as_ref()
         .is_some_and(|other| other.id == link.id && other.uri == link.uri)
+}
+
+/// Whether `cell` carries a link to `uri`, whatever emission it came from. This is the coarser of
+/// the two memberships: it holds across the fresh id a re-opened OSC 8 sequence is given, which is
+/// what a link broken by the application's own line break arrives as.
+fn cell_targets(cell: &CapturedCell, uri: &str) -> bool {
+    cell.hyperlink.as_ref().is_some_and(|link| link.uri == uri)
 }
 
 /// The screen column at which the grapheme `offset` of a frozen logical line sits, *within the
@@ -4447,12 +4643,14 @@ mod tests {
 
     #[test]
     fn implicit_links_fill_only_cells_not_owned_by_osc_8() {
-        let mut cells =
-            CapturedRow::plain("https://shown.example https://plain.example).", false).cells;
-        for cell in &mut cells[..21] {
+        let mut row = CapturedRow::plain("https://shown.example https://plain.example).", false);
+        for cell in &mut row.cells[..21] {
             cell.hyperlink = Some(CellHyperlink::implicit("file:///real-target"));
         }
-        apply_implicit_hyperlinks(&mut cells);
+        let implicit = implicit_hyperlinks(&[&row]);
+        let mut cells = row.cells;
+        mark_osc_8_dotted(&mut cells);
+        apply_implicit_hyperlinks(&mut cells, &implicit[0]);
 
         assert!(cells[..21].iter().all(
             |cell| cell.hyperlink.as_ref().map(|link| link.uri.as_str())
@@ -4840,6 +5038,329 @@ mod tests {
                 "the second mention is its own link, column {column}"
             );
         }
+    }
+
+    /// A live frame from one grid, with the rows given verbatim.
+    fn live_frame_of(rows: Vec<CapturedRow>) -> ViewportFrame {
+        let columns = rows[0].cells.len();
+        ViewportProjection::new(
+            key(columns as u32),
+            DetectionRevision(1),
+            nz32(rows.len() as u32),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        )
+        .live_frame(
+            nz32(columns as u32),
+            rows,
+            GridCursor {
+                row: 0,
+                column: 0,
+                visible: false,
+            },
+        )
+        .unwrap()
+    }
+
+    fn solid_at(frame: &ViewportFrame, row: usize, column: usize) -> bool {
+        let flags = frame.cells[row * frame.columns.get() as usize + column]
+            .style
+            .flags;
+        flags.contains(CellFlags::UNDERLINE) && !flags.contains(CellFlags::DOTTED_UNDERLINE)
+    }
+
+    /// PIN (user report 2026-08-20) — **a bare URL wider than the pane is one link, and its
+    /// target is the whole address.**
+    ///
+    /// The live grid used to recognise bare URLs one *visual row* at a time, so the address the
+    /// user had just typed at the prompt came apart along the wrap: the first row parsed as the
+    /// complete and perfectly valid `https://support.claude`, and the second row, having no
+    /// scheme on it, parsed as nothing and carried no link at all. That is not a drawing fault.
+    /// The first row became a **link to a different site** — one someone else may own — and
+    /// clicking it went there. The frozen plane never had it, because `layout_frozen_line` reads
+    /// the logical line whole; this holds the live plane to the same answer.
+    ///
+    /// MUTATIONS: run `implicit_hyperlinks` per visual row instead of per logical line and the
+    /// `uri` assertion goes red with the truncated address; drop the `continues` grouping and it
+    /// goes red the same way.
+    #[test]
+    fn a_wrapped_bare_url_is_one_link_to_the_complete_address() {
+        const URI: &str = "https://support.claude.com/en/a";
+        // 24 columns: the prompt's tail, then the address breaking mid-host.
+        let head = "> https://support.claude";
+        let tail = ".com/en/a";
+        let mut frame = live_frame_of(vec![
+            CapturedRow::plain(head, true),
+            CapturedRow::plain(&format!("{tail:<24}"), false),
+        ]);
+
+        let hit = frame.hyperlink_at(0, 5).expect("the address is a link");
+        assert_eq!(
+            hit.uri, URI,
+            "the link's target is the address, not the part of it that fitted on one row"
+        );
+        assert_eq!(
+            frame.hyperlink_at(1, 3).expect("so is its continuation"),
+            hit,
+            "one address wrapped is one link, hit from either row"
+        );
+        assert!(
+            (0..frame.drawable_rows() * 24).all(|index| !frame.cells[index]
+                .style
+                .flags
+                .contains(CellFlags::DOTTED_UNDERLINE)),
+            "an inferred URL keeps its unmarked resting presentation"
+        );
+
+        assert!(frame.underline_hyperlink(&hit));
+        for column in 2..24 {
+            assert!(solid_at(&frame, 0, column), "first row, column {column}");
+        }
+        for column in 0..tail.len() {
+            assert!(solid_at(&frame, 1, column), "second row, column {column}");
+        }
+        for column in [0, 1] {
+            assert!(
+                !frame.cells[column]
+                    .style
+                    .flags
+                    .intersects(CellFlags::UNDERLINE | CellFlags::DOTTED_UNDERLINE),
+                "the prompt before it is not part of the link, column {column}"
+            );
+        }
+    }
+
+    /// PIN (user report 2026-08-20) — **a link the application broke itself is one link when the
+    /// two halves spell its target.**
+    ///
+    /// Claude Code lays its own footer out and wraps the address at its own computed width, so
+    /// the two halves reach the terminal as two OSC 8 emissions with a real newline between
+    /// them: `continues` is false, and — because the vendor mints an id per emission — the two
+    /// halves need not even carry the same id. Hovering lit one line and left the other resting,
+    /// which is the picture telling the reader there are two links here where there is one.
+    ///
+    /// What licenses the join is the label: the halves, concatenated, spell the target exactly.
+    /// MUTATIONS: require `continues` on the seam, or require the two halves to share an id, and
+    /// this goes red; compare the label loosely (prefix instead of equality) and the red line
+    /// below goes red.
+    #[test]
+    fn an_application_wrapped_link_joins_when_its_halves_spell_its_target() {
+        const URI: &str = "https://support.claude.com/en/articles/15363606";
+        let head = "more: https://support.claude.com/en/arti";
+        let tail = "cles/15363606";
+        let emission = |id: &str| CellHyperlink {
+            id: Some(id.to_owned()),
+            uri: URI.to_owned(),
+        };
+        let mut first = CapturedRow::plain(head, false);
+        for cell in &mut first.cells[6..] {
+            cell.hyperlink = Some(emission("17_alacritty"));
+        }
+        let mut second = CapturedRow::plain(&format!("{tail:<40}"), false);
+        for cell in &mut second.cells[..tail.len()] {
+            cell.hyperlink = Some(emission("18_alacritty"));
+        }
+        let mut frame = live_frame_of(vec![first, second]);
+
+        let hit = frame.hyperlink_at(0, 10).unwrap();
+        assert_eq!(hit.uri, URI);
+        assert_eq!(
+            frame.hyperlink_at(1, 3).unwrap(),
+            hit,
+            "the two halves are one link to hover, from either half"
+        );
+
+        assert!(frame.underline_hyperlink(&hit));
+        for column in 6..head.len() {
+            assert!(solid_at(&frame, 0, column), "first half, column {column}");
+        }
+        for column in 0..tail.len() {
+            assert!(solid_at(&frame, 1, column), "second half, column {column}");
+        }
+        for column in 0..6 {
+            assert!(
+                !frame.cells[column]
+                    .style
+                    .flags
+                    .contains(CellFlags::UNDERLINE),
+                "the words before it are not the link, column {column}"
+            );
+        }
+    }
+
+    /// RED LINE for the pin above — **two mentions of one address on neighbouring lines are two
+    /// links**, however the seam looks.
+    ///
+    /// This is the shape the rejoining rule must never swallow: both rows are full to their last
+    /// column, the seam is a real newline, nothing but the row edge stands between the two, and
+    /// the vendor has stamped both with the one id it reuses for this URL. Geometry says join.
+    /// What says no is the label — each row already spells the whole address, so the two of them
+    /// spell it twice, and twice is not once.
+    #[test]
+    fn two_mentions_of_one_address_on_neighbouring_lines_stay_two_links() {
+        const URI: &str = "https://example.test/a-fairly-long-path";
+        let osc_8 = CellHyperlink {
+            id: Some("4_alacritty".to_owned()),
+            uri: URI.to_owned(),
+        };
+        for explicit in [true, false] {
+            let row = || {
+                let mut row = CapturedRow::plain(URI, false);
+                if explicit {
+                    for cell in &mut row.cells {
+                        cell.hyperlink = Some(osc_8.clone());
+                    }
+                }
+                row
+            };
+            let mut frame = live_frame_of(vec![row(), row()]);
+            let upper = frame.hyperlink_at(0, 9).unwrap();
+            let lower = frame.hyperlink_at(1, 9).unwrap();
+            assert_eq!(upper.uri, URI);
+            assert_ne!(
+                upper, lower,
+                "two mentions are two things to hover (explicit OSC 8: {explicit})"
+            );
+            assert!(frame.underline_hyperlink(&upper));
+            for column in 0..URI.len() {
+                assert!(
+                    solid_at(&frame, 0, column),
+                    "the hovered mention, column {column} (explicit OSC 8: {explicit})"
+                );
+                assert!(
+                    !solid_at(&frame, 1, column),
+                    "and only it, column {column} (explicit OSC 8: {explicit})"
+                );
+            }
+        }
+    }
+
+    /// A wrapped bare URL with full-width text beside it: the spacer column that stands under a
+    /// wide glyph contributes no bytes to the line being read and takes no link, and the address
+    /// found across the wrap is still the whole address.
+    #[test]
+    fn a_wrapped_bare_url_reads_past_wide_glyph_spacers() {
+        const URI: &str = "https://a.test/x";
+        let wide = |text: &str| {
+            let mut lead = CapturedCell::plain(text);
+            lead.style.flags.insert(CellFlags::WIDE_CHAR);
+            let spacer = CapturedCell {
+                wide_spacer: true,
+                ..CapturedCell::default()
+            };
+            [lead, spacer]
+        };
+        let mut first = Vec::new();
+        first.extend(wide("见"));
+        first.extend(CapturedRow::plain(" https://a.te", true).cells);
+        let mut second = CapturedRow::plain("st/x ", false).cells;
+        second.extend(wide("界"));
+        second.extend(CapturedRow::plain(&" ".repeat(8), false).cells);
+        assert_eq!((first.len(), second.len()), (15, 15));
+        let mut frame = live_frame_of(vec![
+            CapturedRow {
+                cells: first,
+                continues: true,
+                shell_mark: None,
+            },
+            CapturedRow {
+                cells: second,
+                continues: false,
+                shell_mark: None,
+            },
+        ]);
+
+        let hit = frame.hyperlink_at(0, 5).unwrap();
+        assert_eq!(hit.uri, URI, "the wide glyph's spacer spells nothing");
+        assert_eq!(frame.hyperlink_at(1, 1).unwrap(), hit);
+        assert!(frame.underline_hyperlink(&hit));
+        for column in 3..15 {
+            assert!(solid_at(&frame, 0, column), "first row, column {column}");
+        }
+        for column in 0..4 {
+            assert!(solid_at(&frame, 1, column), "second row, column {column}");
+        }
+        for column in [0, 1, 2] {
+            assert!(
+                frame.cells[column].hyperlink.is_none(),
+                "the full-width word before the address is not in it, column {column}"
+            );
+        }
+        for column in [4, 5, 6] {
+            assert_eq!(
+                frame.cells[frame.columns.get() as usize + column].hyperlink,
+                None,
+                "nor the one after it, column {column}"
+            );
+        }
+    }
+
+    /// A logical line can have its head in staging and its tail still on the live grid
+    /// (`FreezeCandidate::live_tail`), so the two planes are read as the one sequence the frame
+    /// presents them as. Reading them apart truncates the address at the seam — the same wrong
+    /// target as reading a single row apart.
+    #[test]
+    fn a_bare_url_wrapping_from_staging_into_the_live_grid_is_one_link() {
+        const URI: &str = "https://support.claude.com/en/a";
+        let width = 32;
+        let staged = [StagedRow {
+            id: StagingId(77),
+            row: CapturedRow::plain("the docs: https://support.claude", true),
+        }];
+        let mut live_rows = vec![CapturedRow::plain(
+            &format!("{:<width$}", ".com/en/a", width = width as usize),
+            false,
+        )];
+        live_rows.extend(vec![
+            CapturedRow::plain(&" ".repeat(width as usize), false);
+            11
+        ]);
+        let document = HistoryDocument::default();
+        let mut projection = ViewportProjection::new(
+            key(width),
+            DetectionRevision(1),
+            nz32(12),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        projection.relayout(key(width), &document);
+        projection.project(&document);
+        let cursor = GridCursor {
+            row: 0,
+            column: 0,
+            visible: false,
+        };
+        // The staged row sits one row above the window's resting bottom; the first frame is what
+        // teaches the projection how tall the whole thing is.
+        projection
+            .continuous_frame(
+                &document,
+                &staged,
+                live_rows.clone(),
+                cursor,
+                ScreenId::Primary,
+            )
+            .unwrap();
+        projection.scroll_by_rows(1);
+        let frame = projection
+            .continuous_frame(&document, &staged, live_rows, cursor, ScreenId::Primary)
+            .unwrap();
+        let live_row = frame
+            .row_map
+            .iter()
+            .position(|row| row.live_grid_row == Some(0))
+            .expect("the live grid's first row is on screen") as u32;
+        assert!(live_row >= 1, "the staged row is above it");
+
+        let head = frame.hyperlink_at(live_row - 1, 12).expect("staged half");
+        assert_eq!(head.uri, URI, "the seam is not the end of the address");
+        assert_eq!(
+            frame.hyperlink_at(live_row, 3).expect("live half"),
+            head,
+            "one address across the seam is one link"
+        );
     }
 
     #[test]
