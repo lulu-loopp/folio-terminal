@@ -727,6 +727,14 @@
   .preview-head .pv-count.dirty { color: var(--accent); }
   .preview-head .pv-tool.pv-pin.on { color: var(--accent); }
   #pv-menu .tm-item.cur { color: var(--ink); background: var(--hover); }
+  /* a switcher row's favicon takes the box the row's `<svg>` mark takes, so a
+     list of pages and files keeps one left edge (the menu sets that box; only
+     the drawing inside it differs) */
+  #pv-menu .pv-fav {
+    width: 13px; height: 13px; flex: none; border-radius: 3px;
+    display: grid; place-items: center; color: #fff;
+    font: 700 8px/1 "Segoe UI", system-ui, sans-serif;
+  }
   #pv-menu .pvm-dot { margin-left: auto; padding-left: 12px; color: var(--accent); font-size: 12px; opacity: 0; }
   #pv-menu .pvm-dot.on { opacity: 1; }
   .preview-head .pv-tool {
@@ -783,16 +791,193 @@
   .pv-table table { border-collapse: collapse; font-size: 12px; font-family: Consolas, monospace; }
   .pv-table th, .pv-table td { border: 1px solid var(--border-soft); padding: 4px 10px; color: var(--ink2); text-align: left; }
   .pv-table th { color: var(--ink); background: var(--hover); font-weight: 600; }
-  .pv-unknown {
+  /* ══ THE BLANK CARD: A MARK, A SENTENCE, ONE VERB ══
+     This drawing was already here, under the name `.pv-unknown`, saying "No
+     preview for this file type" over a single `Open in default app`. W1 needed
+     five more of it — WebView2 missing, a page that did not load, a page whose
+     process died, an address that does not open here, a download that cannot be
+     handed on — and the W0′ evidence says why they are not decoration: a hidden
+     or dead WebView composites NOTHING (`SetIsVisible(false)` leaves 890 439 px
+     of pure black hole, w0-evidence §2⑨), so in those moments this card is not
+     a notice ON the seat, it IS the seat's only content.
+     So the class was widened rather than copied. ONE VERB AND NOT A ROW: the
+     existing card has exactly one and it is the reason it reads at a glance —
+     a wall of buttons on a failure is the program handing its own decision back
+     to the reader. The optional `.pvb-detail` line under the sentence carries
+     the one technical fact worth quoting into a bug report (a host name, an
+     error string, a version) and never a second sentence of prose. */
+  .pv-blank {
     height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 10px; color: var(--ink3); font-family: "Segoe UI", system-ui, sans-serif; font-size: 12.5px;
+    padding: 16px; text-align: center;
   }
-  .pv-unknown svg { width: 30px; height: 30px; opacity: .5; }
-  .pv-unknown button {
+  .pv-blank > svg { width: 30px; height: 30px; opacity: .5; }
+  .pv-blank .pvb-say { color: var(--ink2); max-width: 38ch; line-height: 1.5; }
+  /* the fact, in the face facts are written in everywhere else in this window */
+  .pv-blank .pvb-detail {
+    font: 11.5px/1.5 Consolas, "Cascadia Mono", monospace; color: var(--ink3);
+    max-width: 46ch; overflow-wrap: anywhere;
+  }
+  .pv-blank button {
     border: 1px solid var(--border); background: transparent; color: var(--ink2);
     border-radius: 6px; padding: 5px 12px; font-size: 12px; cursor: pointer;
+    font-family: "Segoe UI", system-ui, sans-serif;
   }
-  .pv-unknown button:hover { background: var(--hover); color: var(--ink); }
+  .pv-blank button:hover { background: var(--hover); color: var(--ink); }
+
+  /* ══════ THE WEB SEAT (W1, 2026-08-20) ══════
+     A page is a PREVIEW BUFFER, not a fourth leaf kind. That is the whole shape
+     of this block and it is read straight off the ruling: 方案 §0 says 「户口 =
+     预览 pane 新内容类」 and 「网页与文件同权进预览头切换器」— same list, same
+     index space, same pool, deduped by 规范化后的完整 URL (§3 切换器确定性三则).
+     Give the page its own leaf kind instead and "same list" becomes a second
+     list that has to be kept in step with the first, which is the failure this
+     file's `CONTENT` table exists to prevent.
+     So the head below is the SAME head: mark, name, dirty slot, spacer, tools,
+     close. Everything web-shaped rides in the slots that were already there —
+     the mark is a favicon where the site has one and the class's globe where it
+     has not, the NAME is the page title and it is the address editor for the
+     same double-click that renames a file, and the three navigation buttons sit
+     in the slot `Save` and `Edit source` sit in for the two kinds that have
+     kind-specific verbs. Nothing new is bolted to the outside. */
+  /* the favicon rides in the mark's own 14px box, so a row of heads does not
+     shift by a pixel when one seat holds a site with an icon and the next does
+     not (`.files-ico`'s box, restated only where the drawing differs) */
+  .preview-head .pv-fav {
+    width: 14px; height: 14px; flex: none; border-radius: 3px;
+    display: grid; place-items: center; color: #fff;
+    font: 700 8.5px/1 "Segoe UI", system-ui, sans-serif;
+  }
+  /* no icon of its own — the class's globe, in the accent every other pane mark
+     in this window wears */
+  .preview-head .pv-fav.globe { background: none; color: var(--accent); }
+  .preview-head .pv-fav.globe svg { width: 14px; height: 14px; }
+  /* THE THREE BUTTONS ARE RESIDENT AND THE REST ARE NOT. Every other pane tool
+     in this window fades in with the pane's hover because it is an OFFER; back,
+     forward and reload are the only way to move inside a page and a browser
+     whose back button appears when you approach it is a browser you cannot aim
+     at. Same box, same ink, same hover — only the resting opacity differs, and
+     it is written after the `.pane:hover` rules above so it wins (this file has
+     been bitten by `.adv-head` losing to `.row` for exactly this reason). */
+  .preview-head .pv-tool.pv-nav,
+  .pane:hover .preview-head .pv-tool.pv-nav { opacity: .7; }
+  .preview-head .pv-tool.pv-nav:hover,
+  .pane:hover .preview-head .pv-tool.pv-nav:hover { opacity: 1; background: var(--hover); color: var(--ink); }
+  /* nowhere to go: dimmed and inert, never hidden — a button that vanishes when
+     the history runs out moves the two beside it under the pointer */
+  .preview-head .pv-tool.pv-nav.off,
+  .pane:hover .preview-head .pv-tool.pv-nav.off,
+  .pane:hover .preview-head .pv-tool.pv-nav.off:hover { opacity: .22; pointer-events: none; background: none; }
+  .preview-head .pv-tool.pv-nav svg { width: 11px; height: 11px; }
+  /* `#i-chev` turned a quarter — the same sentence the submenu `▸` is drawn with
+     (see the note beside `.term-menu .tm-item .sub-chev`). This window has one directional
+     glyph and adding a second arrow family for two buttons would make it two. */
+  .preview-head .pv-nav[data-d="back"] svg { transform: rotate(90deg); }
+  .preview-head .pv-nav[data-d="fwd"] svg { transform: rotate(-90deg); }
+  /* THE RULE BELONGS TO WHAT IS AFTER IT. Written any other way it hangs at the
+     head's right edge introducing nothing for as long as the pointer is
+     elsewhere — the hover tools are invisible at rest and a divider with an
+     empty side is a line telling the reader something follows when nothing does.
+     (The switcher's own `PINNED` section is built on this sentence: an empty
+     section loses its heading and its rule together.) So the separator fades in
+     with the group it introduces and is never seen alone. */
+  .preview-head .pv-sep {
+    width: 1px; height: 14px; background: var(--border); flex: none; margin: 0 1px;
+    opacity: 0; transition: opacity .12s ease;
+  }
+  .pane:hover .preview-head .pv-sep { opacity: .7; }
+  @media (prefers-reduced-motion: reduce) { .preview-head .pv-sep { transition: none; } }
+  /* THE ADDRESS INPUT IS NOT RESIDENT (方案 §0: 预览头地址输入(非常驻)). It is
+     the rename editor one content class over: same `.rename` five declarations,
+     same double-click that opens it, same Enter/Escape/blur, same silence on a
+     refusal. What differs is only what the field holds — a file's name has no
+     name under it, and a page's title is not what you type to go somewhere, so
+     the box opens holding the whole URL, selected. It is WIDER than the rename
+     box because a URL is not a label: it takes the head's remaining room. */
+  .preview-head .pv-addr { flex: 1 1 auto; min-width: 60px; width: auto; }
+  /* the address that will not be navigated, said where it is typed — the search
+     capsule's own answer to a regex that does not parse (`.srchbar input.bad`),
+     and for the same reason: the reader is looking straight at the thing that is
+     wrong, so a card would be telling them what they can already see. */
+  .preview-head .pv-addr.bad { color: var(--err); }
+  /* while a page is loading the mark spins in place: no progress hairline, no
+     second row. The reload button becomes stop for the same reason — the seat
+     gains no chrome for a state that lasts a second. */
+  .preview-head .pv-fav.loading, .preview-head .files-ico.loading {
+    border-radius: 50%; border: 1.4px solid var(--border);
+    border-top-color: var(--accent); background: none; color: transparent;
+    animation: pvspin .7s linear infinite;
+  }
+  @keyframes pvspin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) {
+    .preview-head .pv-fav.loading, .preview-head .files-ico.loading { animation-duration: 2.4s; }
+  }
+  .pv-web { height: 100%; overflow: auto; background: var(--win); }
+  /* the mock page. It is deliberately a REAL dev-server page rather than a grey
+     rectangle: the seat's job is to hold somebody's localhost, and a frame drawn
+     around a placeholder cannot be judged for the one thing it is for. */
+  .pv-web-doc {
+    padding: 26px 30px 34px; max-width: 660px;
+    font-family: "Segoe UI", system-ui, sans-serif; font-size: 13px; line-height: 1.65; color: var(--ink2);
+  }
+  .pv-web-doc h1 { font-size: 21px; font-weight: 600; color: var(--ink); margin: 0 0 4px; line-height: 1.3; }
+  .pv-web-doc h2 { font-size: 14px; font-weight: 600; color: var(--ink); margin: 22px 0 6px; }
+  .pv-web-doc p { margin: 0 0 12px; }
+  .pv-web-doc .lede { color: var(--ink3); margin-bottom: 20px; }
+  .pv-web-doc code { font: 12px/1.5 Consolas, "Cascadia Mono", monospace; background: var(--hover); border-radius: 4px; padding: 1px 5px; }
+  .pv-web-doc pre {
+    margin: 0 0 14px; padding: 11px 13px; border: 1px solid var(--border-soft); border-radius: 8px;
+    background: var(--panel); font: 12px/1.6 Consolas, "Cascadia Mono", monospace; color: var(--ink2);
+    overflow-x: auto;
+  }
+  .pv-web-doc a { color: var(--accent); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); cursor: pointer; }
+  .pv-web-doc a:hover { border-bottom-color: var(--accent); }
+  .pv-web-doc ul { margin: 0 0 14px; padding-left: 20px; }
+  .pv-web-doc li { margin: 3px 0; }
+  /* ══ THE FOOT IS THE HOVER LINE (§7.1.5g, ruled 2026-08-20) ══
+     A preview's foot already says where its content lives and hands it to the
+     OS. A browser's status bubble says where a link goes. They are one band, so
+     they are one element: hovering a link inside the page swaps the foot's own
+     URL for the link's target, and a target this window will not follow is
+     written out in full and suffixed `· blocked` — the ruling's exact words for
+     the terminal's hover line, said in the surface that already had a hover
+     line. NOTHING HAPPENS ON THE CLICK, also by that ruling: 「什么都没发生比一
+     个确认框更诚实」. */
+  .preview-pane .files-foot .foot-blocked { color: var(--ink3); flex: none; }
+  .preview-pane .files-foot.hovering { color: var(--ink2); }
+  /* A PATH IS TRUNCATED FROM THE FRONT AND A URL FROM THE BACK. `.foot-path`
+     turns the run right-to-left so a path that will not fit loses its head and
+     keeps the file name — which is the half that identifies a file. A URL is the
+     other way round: the scheme and the host are what identify it and the query
+     string is what is expendable, so the run goes back to ltr and the ellipsis
+     falls at the end. Same band, same ellipsis, opposite ends, because the two
+     kinds of address are read from opposite ends. */
+  .preview-pane .files-foot .foot-path.url { direction: ltr; }
+  /* ══ THE SHEET: THE SAME CARD, OVER A PAGE THAT MUST STAY ══
+     Four of the five failure states leave the seat with nothing in it, so the
+     card IS the seat. The download that cannot be handed on is the one that does
+     not: the page that asked for the file is still standing, still scrolled
+     where you left it, and blanking it would throw away more than the failure
+     did. Same drawing, on a scrim, dismissed by Esc — a notice big enough to be
+     the answer to a verb you pressed, over a document that never stopped being
+     there. (One placement decision this ticket had to make rather than inherit;
+     it is listed as such in `docs/plans/web-preview/plan.md`.) */
+  .pv-sheet {
+    position: absolute; inset: 0; z-index: 24; display: grid; place-items: center;
+    background: color-mix(in srgb, var(--termbg) 82%, transparent);
+  }
+  /* IT NEEDS A GROUND OF ITS OWN. Measured on the machine rather than reasoned:
+     over a scrim alone the page's own paragraphs read straight through the
+     card's sentence and the two texts interleave — the notice becomes another
+     line of the document instead of the answer to a verb. So the card stands on
+     the surface every floating thing in this window stands on (`--menu`, one
+     hairline, 8px, the menu's own shadow), and the scrim's job goes back to
+     being what it is: saying the page is still there and is not the subject. */
+  .pv-sheet .pv-blank {
+    height: auto; max-width: 400px;
+    background: var(--menu); border: 1px solid var(--border); border-radius: 10px;
+    padding: 22px 26px 20px; box-shadow: 0 10px 34px rgba(0, 0, 0, .22);
+  }
   /* the foot flashes "Saved" the same way it flashes "Revealed"; its box styles
      are shared with the files pane's foot above */
 
@@ -4060,6 +4245,15 @@
   <symbol id="i-dock-right" viewBox="0 0 16 16"><rect x="1.6" y="2.6" width="12.8" height="10.8" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="9.4" y="2.6" width="5" height="10.8" rx="2.2" fill="currentColor" opacity=".7"/></symbol>
   <symbol id="i-float" viewBox="0 0 16 16"><path d="M8 3.2H4.4c-.7 0-1.2.6-1.2 1.2v7.2c0 .7.6 1.2 1.2 1.2h7.2c.7 0 1.2-.6 1.2-1.2V8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M10.2 2.8h3v3M13.2 2.8L8.3 7.7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M12.8 8a4.8 4.8 0 1 1-1.4-3.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M12.9 2.5v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <!-- THE WEB CONTENT CLASS'S MARK (W1, 2026-08-20). It is drawn at `#i-file`'s
+       own 1.15 stroke and inside `#i-file`'s own 16-box, because the two answer
+       the same question in two content classes — "what kind of thing is in this
+       seat" — and a mark that is heavier than the one it stands beside in the
+       switcher would say the web row is louder than the file row when the whole
+       ruling is that they are equals (方案 §0: 网页与文件同权进预览头切换器).
+       A globe and not a favicon: the favicon is the SITE's, this is the CLASS's,
+       and a seat holding a page with no icon of its own still has a kind. -->
+  <symbol id="i-globe" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.15"/><path d="M2.6 6.2h10.8M2.6 9.8h10.8" stroke="currentColor" stroke-width="1.15" stroke-linecap="round"/><ellipse cx="8" cy="8" rx="2.7" ry="6" fill="none" stroke="currentColor" stroke-width="1.15"/></symbol>
   <symbol id="i-clear" viewBox="0 0 16 16"><path d="M6.4 12.6H13" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M9.1 3.3l3.6 3.6c.4.4.4 1 0 1.4l-3.8 3.8c-.4.4-1 .4-1.4 0L3.9 8.5c-.4-.4-.4-1 0-1.4l3.8-3.8c.4-.4 1-.4 1.4 0z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></symbol>
   <symbol id="i-paste" viewBox="0 0 16 16"><rect x="3" y="2.8" width="10" height="11" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="5.6" y="1.4" width="4.8" height="2.8" rx=".9" fill="currentColor"/><path d="M5.4 7.2h5.2M5.4 9.6h5.2M5.4 12h3.2" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></symbol>
   <symbol id="i-select" viewBox="0 0 16 16"><path d="M2.4 4.4v-2h2M11.6 2.4h2v2M13.6 11.6v2h-2M4.4 13.6h-2v-2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M4.8 8h6.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
@@ -6415,13 +6609,77 @@
     return { path, name, ftype, dirty: false, mdSource: false, virtual: false,
              content: (ftype === "text" || ftype === "markdown" || ftype === "table") ? mockFileContent(name, ftype) : null };
   };
+  /* ══════ A PAGE IS A BUFFER (W1, 2026-08-20) ══════
+     `path` is the NORMALISED URL and `name` is the page title, so every verb
+     already written against a buffer works on a page without being told there
+     is such a thing as a page: the switcher lists it, the tab takes its name
+     from it, the pool dedups it, Recent seeds it, the focus card faces it.
+     方案 §3 «切换器确定性三则» decides the identity for us and it is exactly the
+     `path` slot's contract one class over: the dedup key is the whole
+     normalised URL WITH query and fragment, the身份 after a redirect is the
+     LAST SUCCESSFULLY COMMITTED url, and choosing a row is one ordinary
+     top-level navigation.
+     `virtual: true` because there is nothing on disk behind the name — the same
+     word a git diff opened from a review carries, and it is what makes the
+     rename affordance ABSENT rather than refused (see `.pv-rename`'s note).
+     `web.state` is the one field with no analogue in a file buffer, and it is
+     the reason W1 exists: `ok` is a page, and the other five are the five
+     moments when the seat has to draw something because the engine draws
+     nothing (w0-evidence §2⑨). */
+  const WEB_STATES = ["ok", "runtime", "load", "crash", "blocked", "download"];
+  /* ── THE `?web=` READER ──
+     `?web=ok|runtime|load|crash|blocked|download` puts the demo window's web
+     seat into one of the six states this ticket had to draw. It is the same kind
+     of reader `?lonehead=` and `?icons=` already are, and it exists for the same
+     reason: five of these six are moments the engine produces and a drawing
+     cannot, so without a door they could only ever be read in a description.
+     Unlike those two it is NOT temporary and picks no winner — every state here
+     ships. `blocked` also takes the scheme it should refuse, so both spellings
+     of that one card can be read: `?web=blocked&scheme=javascript`. */
+  const WEB_DEMO = (() => {
+    const q = new URLSearchParams(location.search);
+    const v = (q.get("web") || "").toLowerCase();
+    return { state: WEB_STATES.includes(v) ? v : "ok", scheme: (q.get("scheme") || "mailto").toLowerCase() };
+  })();
+  const mkWebState = (url, title, fav) => ({
+    path: url, name: title, ftype: "web", dirty: false, mdSource: false,
+    virtual: true, content: null,
+    web: { url, title, fav: fav || null, host: webHost(url),
+           loading: false, back: false, fwd: false, state: "ok", detail: "" },
+  });
+  /* the host as the head and the switcher say it — scheme and trailing slash
+     dropped, port kept (a dev server IS its port) */
+  function webHost(url) {
+    const m = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(url);
+    return m ? m[1] : url;
+  }
+  const isWebBuf = (pv) => !!(pv && pv.ftype === "web");
+  const isWebUrl = (s) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s) || /^[^\s/?#:]+\.[^\s/?#:]+/.test(s);
+  /* §3 地址输入 allowlist, drawn rather than merely described: http/https and a
+     bare host that can be given a scheme are the whole of what may be navigated;
+     everything else — including the `javascript:` that gate 9 proved this box is
+     the ONLY door for, because the engine runs it against the current document
+     and `NavigationStarting` never sees it at all — is refused right here. */
+  const webScheme = (s) => (/^([a-z][a-z0-9+.-]*):/i.exec(s.trim()) || [, ""])[1].toLowerCase();
+  function webAllowed(s) {
+    const v = s.trim();
+    if (!v || /\s/.test(v)) return false;
+    const sch = webScheme(v);
+    if (!sch) return isWebUrl(v);
+    return (sch === "http" || sch === "https") && /^[a-z]+:\/\/[^/?#]+/i.test(v);
+  }
+  const webNormalise = (s) => (webScheme(s.trim()) ? s.trim() : "http://" + s.trim());
   const poolOf = (w) => w.pvPool || (w.pvPool = []);
   /* one buffer per file per tab: find it or make it, evicting stale clean ones */
-  function poolBuffer(w, path, name) {
+  /* `make` is how a URL enters the same pool without `poolBuffer` growing a
+     second spelling: the caller says what to build if the path is new, and the
+     eviction, the cap and the dedup below are one implementation for both
+     kinds — which is the whole point of a page being a buffer. */
+  function poolBuffer(w, path, name, make) {
     const pool = poolOf(w);
     const existing = pool.find(b => b.path === path);
     if (existing) return existing;
-    const buf = mkPreviewState(path, name);
+    const buf = make ? make() : mkPreviewState(path, name);
     pool.push(buf);
     const displayed = new Set(leavesOf(w.tree).filter(isPreviewLeaf).map(l => l.preview));
     while (pool.length > PV_BUFFER_CAP) {
@@ -6546,6 +6804,13 @@
          exactly the first frame after a restart, when the pool is empty and the
          list is not */
       { kind: "file", target: "C:\\Users\\Weiyi\\Developer\\BetterTerminal\\docs\\DESIGN.md" },
+      /* AND THE THIRD KIND, WHICH THE NOTE ABOVE SAID WOULD DRAW NOTHING UNTIL
+         W2 — it draws now (W1). A pinned URL with no buffer behind it is the
+         file case one class over: the switcher lists it, pressing it navigates
+         rather than switches, and the navigation goes through the same allowlist
+         a typed address does. 「钉不是授权」 is checked at the press and not only
+         at the pin. */
+      { kind: "url", target: "https://doc.rust-lang.org/std/" },
     ],
   };
   /* one index space, asked two ways */
@@ -6625,9 +6890,22 @@
   const isFilesLeaf = (l) => l && l.kind === "files";
   const leafSession = (l) => (l && l.kind === "term" ? session(l.uid) : null);
   const termLeaves = (w) => leavesOf(w.tree).filter(l => l.kind === "term");
-  /* the tab's identity comes from a TERMINAL — a files pane has no title of its
-     own to lend the tab, so fall back to the first terminal leaf */
-  const identityLeaf = (w) => (isFilesLeaf(focusedLeaf(w)) ? termLeaves(w)[0] || focusedLeaf(w) : focusedLeaf(w));
+  /* ══ THE TAB'S IDENTITY SEAT — THE FIRST TERMINAL, ELSE THE FIRST SEAT ══
+     Native `seats::identity_seat` (`crates/bt-app/src/seats.rs`) is exactly two
+     lines: `seats_in_order().find(Terminal).or(seats.first())`. This prototype
+     used to answer with the FOCUSED leaf, falling back to a terminal only when
+     the focus happened to be on a files pane — and on a one-seat tab the two
+     agree, which is why the difference went unnoticed for as long as every tab
+     had a shell in it.
+     §7.1.6h ENDED THAT. A `[files | preview]` tab has no terminal at all, so the
+     old rule handed the strip whichever half the pointer was in: click the file
+     tree, the tab is called `folio-site`; click the document, the same tab is
+     called `reflow.md`. A tab's name is not allowed to move when nothing about
+     the tab moved. Tree order is a property of the tab; focus is a property of
+     the moment, and the strip draws tabs you are NOT looking at.
+     So the mock-up takes the native rule verbatim: first terminal in tree order,
+     and failing that the first seat in tree order — nothing about focus. */
+  const identityLeaf = (w) => termLeaves(w)[0] || leavesOf(w.tree)[0];
   const focusedSession = () => leafSession(focusedLeaf(activeTab()));
 
   /* ── content dispatch table (§7.0 in code) ──
@@ -6644,6 +6922,12 @@
        card   = focus-mode card html */
   const folderMark = () => `<span class="ticon"><svg class="pmark" style="color:var(--accent)"><use href="#i-folder"/></svg></span>`;
   const fileMark = () => `<span class="ticon"><svg class="pmark" style="color:var(--accent)"><use href="#i-file"/></svg></span>`;
+  const webMark = () => `<span class="ticon"><svg class="pmark" style="color:var(--accent)"><use href="#i-globe"/></svg></span>`;
+  /* the buffer's mark, wherever a preview buffer is drawn small: strip, rail,
+     card head, switcher row. ONE function, so a page can never be a globe in
+     the switcher and a page icon in the strip. */
+  const pvMark = (pv) => (isWebBuf(pv) ? webMark() : fileMark());
+  const pvMarkId = (pv) => (isWebBuf(pv) ? "#i-globe" : "#i-file");
   /* one drawing for every preview card, wherever it appears — a monitor box, a
      focus card's F2 thumbnail, whatever comes next — called with its own attrs */
   function pvCardMini(pv) {
@@ -6652,6 +6936,20 @@
         <rect width="120" height="52" rx="4" fill="#20262d"/>
         <path d="M0 44 L26 30 L52 38 L80 18 L120 26 L120 52 L0 52 Z" fill="#2a3a55"/>
         <path d="M0 44 L26 30 L52 38 L80 18 L120 26" fill="none" stroke="#4da3ff" stroke-width="1.5"/></svg>`;
+    }
+    /* A PAGE'S MINI IS ITS OWN FACE AND NOT A SHRUNK SCREENSHOT, and that is a
+       finding rather than a preference: W0′ gate 2 measured `CapturePreview`
+       returning NOTHING while the WebView is hidden (three runs, 10s timeout,
+       never), so a live thumbnail of an off-screen page has no supported path at
+       all and even the visible one costs a 61 ms encode round trip. A card that
+       promised a picture would be promising the one thing the engine will not
+       give. So: the title, the host, and — when the seat is not showing a page —
+       what it IS showing instead, which is the only honest small drawing here.
+       (方案 §1 推论 / w0-evidence §2②.) */
+    if (isWebBuf(pv)) {
+      const w = pv.web;
+      return `<div class="fcf-name">${esc(w.title)}</div>`
+           + `<div class="fcf-kind">${esc(w.state === "ok" ? w.host : WEB_FAIL[w.state].mini)}</div>`;
     }
     if (pv.content != null)
       return pv.content.split("\n").slice(0, 4).map(t => `<div>${esc(t)}</div>`).join("");
@@ -6664,6 +6962,10 @@
      called. */
   const pvKindWord = (pv) => {
     if (pv.path.startsWith("gitgraph:")) return "Graph";
+    /* a page says `Web` and not its host: this line answers "what kind of thing
+       is in that seat", and the host is WHICH page — it belongs to the face's
+       first line, beside the title, which is where `pvCardMini` puts it. */
+    if (isWebBuf(pv)) return "Web";
     const dot = pv.name.lastIndexOf(".");
     return dot > 0 ? pv.name.slice(dot + 1).toUpperCase() : "Preview";
   };
@@ -6673,7 +6975,7 @@
     /* no height override: every card body shares .fc-mini's default — a column
        of uniform cards reads as one instrument (user ruling 2026-07-18) */
     return `<div class="fcard ${cls || ""}" ${attrs}>
-      <div class="fc-head"><svg class="pmark" style="color:var(--accent);width:12px;height:12px"><use href="#i-file"/></svg>
+      <div class="fc-head"><svg class="pmark" style="color:var(--accent);width:12px;height:12px"><use href="${pvMarkId(pv)}"/></svg>
       <span class="name">${esc(pv.name)}</span>${pv.dirty ? `<span class="fc-badge">●</span>` : ""}
       <span class="fc-close" title="Close">${closeSvg}</span></div>
       <div class="fc-mini"></div></div>`;
@@ -6707,8 +7009,14 @@
            <span>${esc(r.node.name)}</span></div>`).join(""),
     },
     preview: {
-      mark: fileMark,
-      status: fileMark,
+      /* ONE ROW, TWO MARKS. A page did not get a row of its own in this table
+         (§7.0's classes are content classes, and 方案 §0 puts the web page's
+         户口 inside the preview pane), so the row asks the BUFFER what it is
+         instead of asking the leaf — which is the same shape `status` has used
+         all along for a terminal, and the reason a page cannot end up wearing a
+         page icon in the strip and a globe in the switcher. */
+      mark: (l) => pvMark(l.preview),
+      status: (l) => pvMark(l.preview),
       title: (l) => esc(l.preview.name),
       /* a preview card has a BODY too — mini real content, same philosophy as
          the terminal cards (user report: "聚焦模式下预览没有窗口") */
@@ -7150,6 +7458,22 @@
       path.innerHTML = orig;
     }, 1300);
   }
+  /* THE SAME FLASH, SAYING THE OTHER OS HAND-OFF (W1). A web seat's foot hands
+     its URL to the default browser rather than its path to Explorer, so the
+     confirmation is the one this band already gives — the check mark, the accent
+     ink, the phrase, and the URL back after 1.3 s. A second notice form for a
+     second hand-off would be two answers to "did that work". */
+  function webFootFlash(foot, phrase) {
+    const use = foot.querySelector(".foot-ico use"), path = foot.querySelector(".foot-path");
+    const orig = path.innerHTML, origIcon = use.getAttribute("href");
+    foot.classList.add("done"); use.setAttribute("href", "#i-check");
+    path.innerHTML = `<bdi>${esc(phrase)}</bdi>`;
+    setTimeout(() => {
+      if (!foot.isConnected) return;
+      foot.classList.remove("done"); use.setAttribute("href", origIcon);
+      path.innerHTML = orig;
+    }, 1300);
+  }
   /* leaf is a TERMINAL leaf; w is its tab. rect is the trigger's viewport rect,
      captured live by the caller. `pinned` and `focus` say which mode + whether to
      grab keyboard focus (only a click does). */
@@ -7462,8 +7786,22 @@
      window's key opens a fourth slot and is built by joining its children's keys
      with a NEWLINE, a character no Windows path can contain, so the join needs
      no escape and no tab's key can ever be spelled the same way. */
+  /* ══ AND THE THIRD SHAPE IS A PREVIEW (§7.1.6h, native since schema v8) ══
+     `RecentSeedV1::Preview { path }` has been in `bt-persist` since the slice
+     that made a lone preview pane a tab; the mock-up simply never wrote it, so
+     closing a preview-root tab here left NOTHING behind while the native build
+     put a row in the vault — the identical "two doors, one broken" asymmetry
+     this whole function was written to end, one leaf kind further along.
+     THE KEY KEEPS THE TWO PATHS APART, and that is deliberate rather than
+     incidental. Native spells the three shapes in three slots of one `a|b|c`
+     key and gives the preview THE THIRD, the one a place leaves empty — so a
+     preview tab on `D:\a\b` and a files tab rooted at `D:\a\b` are two rows and
+     never one, because a key that collapsed them would let opening a folder
+     evict the file you had open in it. This list's keys are prose rather than
+     pipes, so the same fact is said with a different prefix. */
   const recentKey = (r) => r.window ? "window @ " + r.window.seeds.map(recentKey).join("\n")
                                     : r.files ? "files @ " + r.files.root
+                                    : r.preview ? "preview @ " + r.preview.path
                                               : r.seed.title + " @ " + r.seed.cwd;
   /* A WINDOW WEARS A WINDOW. It is the one row in this list whose mark is not
      its content's: captioned `folio-site` with a PowerShell mark it would read
@@ -7471,9 +7809,15 @@
      WINDOW that had `folio-site` in it. `#i-max` is the drawing this product
      already uses for a window — the caption button's own — so the two cannot
      drift apart. */
+  /* A PREVIEW WEARS ITS PANE'S OWN MARK — `#i-file` for a document and the web
+     class's globe for a page, through the same `pvMarkId` the head, the strip
+     and the switcher use. Native reaches the same drawing the same way
+     (`tab_mark` → `seats::pane_mark`), which is why this row cannot drift from
+     the tab it came out of. */
   const recentMarkHtml = (r) =>
     r.window ? `<span class="ticon"><svg class="pmark" style="color:var(--accent)"><use href="#i-max"/></svg></span>`
     : r.files ? `<span class="ticon"><svg class="pmark" style="color:var(--accent)"><use href="#i-folder"/></svg></span>`
+    : r.preview ? `<span class="ticon"><svg class="pmark" style="color:var(--accent)"><use href="${r.preview.web ? "#i-globe" : "#i-file"}"/></svg></span>`
     : `<span class="ticon">${r.seed.icon}</span>`;
   /* A window is captioned by THE TAB IT OPENED WITH — the way a reader would name
      it ("the window I had `folio-site` in"). The word "window" is not in the
@@ -7481,14 +7825,27 @@
      count, where this list has always put its detail. */
   const recentLabel = (r) => r.window ? (r.window.seeds[0] ? recentLabel(r.window.seeds[0]) : "")
                                       : r.files ? cwdLeaf({ cwd: r.files.root })
+                                      : r.preview ? r.preview.name
                                                 : (r.seed.name || cwdLeaf(r.seed));
   const recentTip = (r) =>
     r.window ? `Window · ${r.window.seeds.length} ${r.window.seeds.length === 1 ? "tab" : "tabs"}`
-    : r.files ? r.files.root : r.seed.cwd;
+    : r.files ? r.files.root
+    : r.preview ? r.preview.path
+    : r.seed.cwd;
   function recordRecent(w) {
     leavesOf(w.tree).forEach(l => {
       const entry = isFilesLeaf(l)
         ? { files: { root: l.files.root, open: [...l.files.open], sel: l.files.sel, width: l.files.width }, at: Date.now() }
+        /* THE SEED IS THE PATH AND NOTHING ELSE, exactly as native's
+           `Seed::Preview { path }` is. Not the buffer, not its unsaved text, not
+           the scroll offset — "Recent restores the places you were, not a
+           layout" is the same sentence one content class over, and a dirty
+           buffer is confirmed by name on the way out rather than smuggled into
+           the vault. A page carries `web` so the row can wear the right mark and
+           come back as a page; its path is the normalised URL, which is the
+           identity 方案 §3 already gave it. */
+        : isPreviewLeaf(l)
+        ? { preview: { path: l.preview.path, name: l.preview.name, web: isWebBuf(l.preview) }, at: Date.now() }
         : (() => { const s = session(l.uid); return s ? { seed: seedOf(s), at: Date.now() } : null; })();
       if (!entry) return;
       state.recent = state.recent.filter(r => recentKey(r) !== recentKey(entry));
@@ -7603,24 +7960,28 @@
   /* a tab aggregates the state of every session in its layout */
   const tabBusy = (w) => leavesOf(w.tree).some(l => (session(l.uid) || {}).busy);
   const tabUnread = (w) => leavesOf(w.tree).some(l => (session(l.uid) || {}).unread);
-  /* The strip shows a TERMINAL's identity (a files pane lends none). identityLeaf
-     already falls back to the first terminal; if a tab holds only files panes,
-     the label falls back to that pane's folder and the icon to a folder. */
+  /* The strip shows the IDENTITY SEAT's identity: the first terminal in tree
+     order, and where there is none, the first seat in tree order (see
+     `identityLeaf`, which is `seats::identity_seat` verbatim). Both of the
+     answers below therefore ask the SAME seat the strip's icon asks — they used
+     to ask the focused leaf, and on a `[files | preview]` tab that made a tab
+     rename itself as the pointer crossed the divider. §7.1.6h's own sentence,
+     obeyed here rather than only over there: the tab's name and mark are the
+     PANE's own, through one function and not one rule said twice. */
   const tabIdentSession = (w) => leafSession(identityLeaf(w));
   const tabLabel = (w) => {
     const s = tabIdentSession(w);
     if (s) return displayName(s);
-    const fl = focusedLeaf(w);
-    if (isFilesLeaf(fl)) return cwdLeaf({ cwd: fl.files.root });
-    if (isPreviewLeaf(fl)) return fl.preview.name;
-    const any = leavesOf(w.tree).find(l => isFilesLeaf(l) || isPreviewLeaf(l));
-    return any ? (isFilesLeaf(any) ? cwdLeaf({ cwd: any.files.root }) : any.preview.name) : "…";
+    const il = identityLeaf(w);
+    if (isFilesLeaf(il)) return cwdLeaf({ cwd: il.files.root });
+    if (isPreviewLeaf(il)) return il.preview.name;
+    return "…";
   };
   function tabIcon(w) {
     const s = tabIdentSession(w);
     if (s) return stateIcon(s, tabBusy(w), tabUnread(w));
-    const fl = focusedLeaf(w);
-    const glyph = isPreviewLeaf(fl) ? "#i-file" : "#i-folder";
+    const il = identityLeaf(w);
+    const glyph = isPreviewLeaf(il) ? pvMarkId(il.preview) : "#i-folder";
     return `<span class="ticon-wrap"><span class="ticon"><svg class="pmark" style="color:var(--accent)"><use href="${glyph}"/></svg></span></span>`;
   }
   /* How many terminals this tab holds. "This one holds three" is exactly what you
@@ -7638,7 +7999,13 @@
      it is free: the placeholder IS the answer. */
   const tabTip = (w) => {
     const s = tabIdentSession(w);
-    if (!s) return `${tabLabel(w)}\n${isPreviewLeaf(focusedLeaf(w)) ? "Preview" : "Files"}${w.pinned ? "\nPinned — restored next launch" : ""}`;
+    if (!s) {
+      const il = identityLeaf(w);
+      /* the same seat the label and the mark came from — a tip that named a
+         different seat than the label beside it is a tab telling two stories */
+      const kind = !isPreviewLeaf(il) ? "Files" : isWebBuf(il.preview) ? "Web page" : "Preview";
+      return `${tabLabel(w)}\n${kind}${w.pinned ? "\nPinned — restored next launch" : ""}`;
+    }
     const src = NAME_SOURCE[nameSource(s)];
     return `${displayName(s)}\n${src} · ${s.cwd}${w.pinned ? "\nPinned — restored next launch" : ""}`;
   };
@@ -8497,8 +8864,161 @@
     if (code !== null) out.push(`<div class="md-code">${esc(code.join("\n"))}</div>`);
     return out.join("");
   }
+  /* ══════════ THE FIVE THINGS A WEB SEAT SAYS WHEN IT HAS NO PAGE ══════════
+     These are not decoration and W0′ is the reason. `SetIsVisible(false)` on a
+     WebView leaves the seat as 890 439 px of PURE BLACK — the window is
+     `WS_EX_NOREDIRECTIONBITMAP`, so the class background brush has nowhere to
+     land and the hole is `[0,0,0]` rather than any colour we chose
+     (w0-evidence §2⑨). A dead, missing or refused WebView draws exactly the same
+     nothing. So in each of these five moments the host is not decorating a
+     failure, it is drawing THE ONLY CONTENT THE SEAT HAS.
+
+     EVERY ROW HAS ONE VERB. Not two, not a row of them: a card that offers
+     Reload / Open in browser / Copy address / Report is a program handing its
+     own decision back to the reader, and the one honest verb is the one that
+     changes the situation. Where nothing can change it (an address this window
+     will not navigate to) the verb is the one that lets the reader take the
+     problem somewhere else, and nothing more.
+
+     NO PROSE ABOUT US. 本仓裁决「字面量只陈述事实」: what happened, and the fact
+     worth quoting into a bug report. No "sorry", no "we couldn't", no "this is
+     for your safety" — the reader is looking at a seat that is not showing a
+     page and wants to know why and what to press.
+
+     WHERE EACH ONE STANDS. Four of the five own the seat, because the seat has
+     nothing else in it. `download` does not: the page that asked for the file is
+     still there, still scrolled where it was, and blanking it would throw away
+     more than the failed download did — so the same card stands on a scrim over
+     the live page and Esc puts it away (see `.pv-sheet`).
+
+     WHAT IS NOT HERE, and deliberately:
+      · a link inside a page with an external scheme raises NOTHING. §7.1.5g ⑤
+        ruled the terminal's answer on 2026-08-20 — 「其余 scheme → 惰性:不激活、
+        不报错」, 「什么都没发生比一个确认框更诚实」 — and the WebView face is the
+        same ruling's other half (§7.1.1「external protocol 一律禁用」). The
+        target is written out in the foot's hover line with `· blocked` and the
+        click does nothing. `blocked` below is for a URL the SEAT ITSELF was
+        handed (a pin that no longer passes, a restored session, the palette),
+        which is the case where there is no page to say it over;
+      · a `file:` URL under a UNC path does not get a card of its own either —
+        §7.1.5g ④ sends it to §7.1.3's existing 「No preview — network paths are
+        not read automatically」, 「同款卡片、同一句话,不新造文案」;
+      · a 404 that a server answered with a page is NOT a failure here. That is
+        the site's own document and the seat shows it. `load` is for a navigation
+        that never committed one. */
+  const WEB_FAIL = {
+    runtime: {
+      mini: "Runtime missing",
+      say: () => "Microsoft Edge WebView2 Runtime is not installed.",
+      /* the API's own answer, and the reason the card exists at all: gate 7
+         watched the registry report 151.0.4129.93 for a runtime that was not
+         there, and `CreateCoreWebView2EnvironmentWithOptions` fail synchronously
+         in 0 ms. The registry lies; this line is what does not. */
+      detail: () => "CreateCoreWebView2Environment · 0x80070002",
+      verb: "Download the runtime",
+      done: "Opened in your browser",
+    },
+    load: {
+      mini: "Did not load",
+      say: (pv) => `${pv.web.host} did not respond.`,
+      detail: (pv) => pv.web.detail || "ERR_CONNECTION_REFUSED",
+      verb: "Reload",
+    },
+    crash: {
+      mini: "Process stopped",
+      /* renderer death is what a reader sees; `ProcessFailed` arrived 167 ms
+         after the kill in one run and 4 145 ms after it in another (gate 7), so
+         the card has to be able to stand for a while before the reload it is
+         offering has a chance of working. */
+      say: () => "This page stopped running. Its render process exited.",
+      detail: () => "",
+      verb: "Reload",
+    },
+    blocked: {
+      mini: "Blocked",
+      say: (pv) => {
+        const s = webScheme(pv.web.url);
+        return s ? `${s}: addresses do not open in a preview.`
+                 : "This address does not open in a preview.";
+      },
+      detail: (pv) => pv.web.url,
+      verb: "Copy address",
+      done: "Address copied",
+    },
+    download: {
+      mini: "Download refused",
+      /* 方案 §0: a download is cancelled and its URL re-opened outside — but a
+         POST body, a request header or an isolated cookie cannot be carried over
+         a plain GET link, and 「不可重放者提示无法下载」. Handing the PAGE over is
+         the one action left that gets the reader their file. */
+      say: () => "This download cannot be handed to your browser. The request carried data a plain link cannot replay.",
+      detail: (pv) => pv.web.detail || "",
+      verb: "Open this page in your browser",
+      done: "Opened in your browser",
+    },
+  };
+  /* one drawing, five rows, two placements */
+  function webFailHtml(pv) {
+    const f = WEB_FAIL[pv.web.state];
+    const detail = f.detail(pv);
+    return `<div class="pv-blank">
+      <svg><use href="#i-globe"/></svg>
+      <div class="pvb-say">${esc(f.say(pv))}</div>
+      ${detail ? `<div class="pvb-detail">${esc(detail)}</div>` : ""}
+      <button class="pv-fail-do" data-state="${pv.web.state}">${esc(f.verb)}</button>
+    </div>`;
+  }
+  /* THE PAGE. A real dev-server page and not a grey rectangle: this seat's whole
+     reason for existing is 「手还在终端里时需要的那个浏览器」, so what has to be
+     judged is a frame around somebody's localhost. It also has to be TEXT —
+     the find capsule below searches this document the way it searches a
+     transcript, and a screenshot cannot be searched. The `mailto:` in it is
+     there on purpose: hover it and read the foot. */
+  function webDocHtml(pv) {
+    if (pv.web.host !== "localhost:5173") {
+      return `<div class="pv-web-doc">
+        <h1>${esc(pv.web.title)}</h1>
+        <p class="lede">${esc(pv.web.host)}</p>
+        <p>A page this seat was navigated to from the address input. Any URL is
+        allowed here — the ruling of 2026-08-19 replaced the old localhost-only
+        whitelist with a scheme policy, so what is refused is a
+        <code>scheme</code> and never an origin.</p>
+        <p>Pin it and it lifts to the top of this pane's switcher, above the
+        files, in the section the switcher shares with the folder menu.</p>
+      </div>`;
+    }
+    return `<div class="pv-web-doc">
+      <h1>Folio site</h1>
+      <p class="lede">Vite dev server · hot reload on save</p>
+      <p>The build is watching <code>src/</code> and rebuilding on save. Every
+      route below is served from memory; nothing has been written to
+      <code>dist/</code> yet.</p>
+      <h2>Routes</h2>
+      <ul>
+        <li><a href="#/">/ — landing</a></li>
+        <li><a href="#/download">/download — installer</a></li>
+        <li><a href="#/docs">/docs — the manual</a></li>
+      </ul>
+      <h2>Reporting a bug</h2>
+      <p>Write to <a href="mailto:folio@example.com">folio@example.com</a> with
+      the version string from the About page.</p>
+      <pre>$ npm run dev
+  VITE v5.4.2  ready in 214 ms
+  ➜  Local:   http://localhost:5173/
+  ➜  press h + enter to show help</pre>
+    </div>`;
+  }
+  function webBodyHtml(pv) {
+    const w = pv.web;
+    /* the four that own the seat */
+    if (w.state !== "ok" && w.state !== "download") return webFailHtml(pv);
+    /* and the one that stands over a page that never went away */
+    return `<div class="pv-web">${webDocHtml(pv)}</div>`
+         + (w.state === "download" ? `<div class="pv-sheet">${webFailHtml(pv)}</div>` : "");
+  }
   function previewBodyHtml(pv) {
     if (pv.path.startsWith("gitgraph:")) return gitGraphBodyHtml(pv);
+    if (isWebBuf(pv)) return webBodyHtml(pv);
     if (pv.ftype === "image") {
       /* placeholder art: the design under test is the FRAME, not the pixels */
       return `<div class="pv-image">
@@ -8539,9 +9059,12 @@
       /* quick edit, NOT an IDE: plain textarea, explicit save (Ctrl+S) */
       return `<textarea class="pv-edit" spellcheck="false" aria-label="Edit ${pv.name}">${esc(pv.content)}</textarea>`;
     }
-    return `<div class="pv-unknown">
+    /* the card this whole family was generalised out of — a mark, a sentence and
+       ONE verb, unchanged word for word (the second class carries no styling of
+       its own; it is here so a reader grepping `pv-unknown` still lands on it) */
+    return `<div class="pv-blank pv-unknown">
       <svg><use href="#i-file"/></svg>
-      <span>No preview for this file type</span>
+      <span class="pvb-say">No preview for this file type</span>
       <button class="pv-open-ext">Open in default app</button>
     </div>`;
   }
@@ -8572,23 +9095,62 @@
        crowding this ticket is about is a property of a COLUMN of marks; one
        mark, alone, above a document, has nobody to crowd. So the head takes
        the shape and refuses the tint. */
+    const web = isWebBuf(pv) ? pv.web : null;
+    /* THE MARK SLOT HOLDS THE SITE'S ICON WHERE THERE IS ONE (方案 §0: 「带
+       favicon/地球标」). Same 14px box either way, so a column of heads does not
+       shuffle when one seat's site has an icon and the next one's has not. While
+       a navigation is in flight the same box spins — the seat gains no second
+       row and no progress hairline for a state that lasts under a second. */
+    const webMarkHtml = web
+      ? (web.fav
+          ? `<span class="pv-fav ${web.loading ? "loading" : ""}" style="background:${web.fav.bg}">${esc(web.fav.ch)}</span>`
+          : `<span class="pv-fav globe ${web.loading ? "loading" : ""}"><svg><use href="#i-globe"/></svg></span>`)
+      : "";
     const nameBits = `
-              <svg class="files-ico"><use href="#${ICONS === "a" ? "i-file" : "i-f-" + fileKind(pv.name)}"/></svg>
-              <span class="pv-name ${many ? "switch" : ""} ${menuOpen ? "pvopen" : ""}" data-leaf="${leaf.id}" title="${pv.path}${many ? " — click to switch files" : ""}${pv.virtual ? "" : " — double-click to rename"}">${esc(pv.name)}${many ? `<svg class="rootchev"><use href="#i-chev"/></svg><span class="pv-count ${othersDirty ? "dirty" : ""}">${pool.length}</span>` : ""}</span>`;
+              ${web ? webMarkHtml : `<svg class="files-ico"><use href="#${ICONS === "a" ? "i-file" : "i-f-" + fileKind(pv.name)}"/></svg>`}
+              <span class="pv-name ${many ? "switch" : ""} ${menuOpen ? "pvopen" : ""}" data-leaf="${leaf.id}" title="${web ? web.url : pv.path}${many ? (web ? " — click to switch pages and files" : " — click to switch files") : ""}${web ? " — double-click to edit the address" : pv.virtual ? "" : " — double-click to rename"}">${esc(pv.name)}${many ? `<svg class="rootchev"><use href="#i-chev"/></svg><span class="pv-count ${othersDirty ? "dirty" : ""}">${pool.length}</span>` : ""}</span>`;
+    /* ══ THE THREE BUTTONS SIT WHERE `Save` AND `Edit source` SIT ══
+       Every content class that has verbs of its own puts them in exactly this
+       slot — first in the tool run, before the three every pane has (pop out,
+       pin, close). Back / forward / reload are this class's, and they are here
+       for the same reason `Save` is there and not in a toolbar of its own.
+       They are the ONLY ones that do not fade with the pane's hover: see the
+       `.pv-nav` block in the CSS.
+       DEVTOOLS IS A HOVER TOOL AND NOT A RESIDENT ONE. 方案 §0 lists it among
+       the 五加项 and calls the whole shape C-精简; a verb a reader reaches for
+       twice a week does not get permanent pixels next to the three they reach
+       for every minute. It costs nothing at rest and is exactly where the eye
+       already goes for this seat's other verbs.
+       FIND IS NOT A BUTTON AT ALL. This window has one search and it is a
+       capsule opened with Ctrl+F, in the pane's top-right, for the terminal and
+       now for a page — a second door drawn as a button would be a second
+       instrument for one job. */
+    const webTools = web ? `
+              <span class="pv-tool pv-nav pv-back ${web.back ? "" : "off"}" data-d="back" title="Back"><svg><use href="#i-chev"/></svg></span>
+              <span class="pv-tool pv-nav pv-fwd ${web.fwd ? "" : "off"}" data-d="fwd" title="Forward"><svg><use href="#i-chev"/></svg></span>
+              <span class="pv-tool pv-nav pv-reload" title="${web.loading ? "Stop" : "Reload"}"><svg><use href="${web.loading ? "#i-close" : "#i-refresh"}"/></svg></span>
+              <span class="pv-sep"></span>
+              <span class="pv-tool pv-devtools" title="Developer tools (F12)"><svg><use href="#i-code"/></svg></span>` : "";
+    /* THE FOOT SAYS WHERE THIS SEAT'S CONTENT LIVES AND HANDS IT TO THE OS —
+       one band, two hand-offs. A file's foot reveals it in Explorer; a page's
+       foot opens it in the default browser, which is 外链一律外交 in the one
+       place a web seat has to say it. It is ALSO this seat's hover line: see
+       the `.foot-blocked` note in the CSS. */
     return `<div class="preview-head panehead" data-leaf="${leaf.id}">
               ${nameBits}
               <span class="pv-dirty ${pv.dirty ? "on" : ""}" title="Unsaved changes">●</span>
               <span class="pv-spacer"></span>
               ${editable ? `<span class="pv-tool pv-save" title="Save (Ctrl+S)"><svg><use href="#i-save"/></svg></span>` : ""}
               ${flippable ? `<span class="pv-tool pv-md-flip" title="${pv.mdSource ? "Rendered view" : "Edit source"}"><svg><use href="${pv.mdSource ? "#i-eye" : "#i-code"}"/></svg></span>` : ""}
+              ${webTools}
               <span class="pv-tool pv-popout" data-popout-leaf="${leaf.id}" title="Pop out to a floating window"><svg><use href="#i-float"/></svg></span>
-              <span class="pv-tool pv-pin ${leaf.pvPinned ? "on" : ""}" title="${leaf.pvPinned ? "Unpin — make this the reusable preview again" : "Pin — keep this pane; the next file opens a new preview"}">${leaf.pvPinned ? pinnedSvg : pinSvg}</span>
+              <span class="pv-tool pv-pin ${leaf.pvPinned ? "on" : ""}" title="${leaf.pvPinned ? "Unpin — make this the reusable preview again" : web ? "Pin — keep this pane; the next page opens a new preview" : "Pin — keep this pane; the next file opens a new preview"}">${leaf.pvPinned ? pinnedSvg : pinSvg}</span>
               <span class="pane-close" title="Close pane">${closeSvg}</span>
             </div>
             <div class="preview-body" data-leaf="${leaf.id}">${previewBodyHtml(pv)}</div>
-            <div class="files-foot" data-leaf="${leaf.id}" title="Reveal in File Explorer">
-              <svg class="foot-ico"><use href="#i-folder-open"/></svg>
-              <span class="foot-path"><bdi>${pv.path}</bdi></span>
+            <div class="files-foot" data-leaf="${leaf.id}" title="${web ? "Open in your browser" : "Reveal in File Explorer"}">
+              <svg class="foot-ico"><use href="${web ? "#i-globe" : "#i-folder-open"}"/></svg>
+              <span class="foot-path ${web ? "url" : ""}"><bdi>${web ? web.url : pv.path}</bdi></span>
             </div>`;
   }
   /* open a file in THE preview pane (the un-pinned one; DESIGN §7.1.3).
@@ -8738,14 +9300,42 @@
      something. That last case is the whole reason the section is worth having:
      the first frame after a restart has an empty pool and a list that is not
      empty. */
+  /* ══ AND A PAGE IS A ROW IN IT (方案 §0, 用户裁决 2026-08-19) ══
+     「历史 = 预览切换器」: a web page is not filed in a history page of its own,
+     it takes a row in the list that already answers "what has this seat had in
+     it". SAME LIST, SAME INDEX SPACE, SAME PINNED SECTION — 「网页与文件同权」 is
+     that sentence, and the cheapest way to break it would have been a second
+     section headed `PAGES`, which would make the equality a claim rather than a
+     fact about the drawing.
+     TWO PIN KINDS, ONE TABLE. `pins.json` carries `{kind, target}` and the kind
+     is the row's own string (`file` / `url` / `folder`), so a row asks for its
+     own kind rather than the list assuming one. That is what lets a build that
+     has never heard of `url` rewrite the table without renaming somebody else's
+     rows — the note beside `state.pins` says so, and this is the first consumer
+     that proves it.
+     THE URL IS THE IDENTITY (§3 切换器确定性三则): the dedup key is the whole
+     normalised URL with query and fragment, so `?tab=2` is a different row from
+     `?tab=1` — which is what a reader means by "the page I had open". */
   function previewSwitcherRows(w) {
-    const rows = poolOf(w).map(b => ({ path: b.path, name: b.name, buf: b }));
+    const rows = poolOf(w).map(b => ({
+      path: b.path, name: b.name, buf: b,
+      kind: isWebBuf(b) ? "url" : "file", web: isWebBuf(b) ? b.web : null,
+    }));
     pinsOf("file").forEach(p => {
       if (!rows.some(r => r.path === p))
-        rows.push({ path: p, name: p.split(/[\\/]/).pop(), buf: null });
+        rows.push({ path: p, name: p.split(/[\\/]/).pop(), buf: null, kind: "file", web: null });
     });
-    const pinned = rows.filter(r => isPinned("file", r.path));
-    const rest = rows.filter(r => !isPinned("file", r.path));
+    /* a pinned URL with no buffer behind it is the web case of exactly what the
+       note above describes: the first frame after a restart, an empty pool and a
+       list that is not empty. Pressing it NAVIGATES rather than switching, and
+       the navigation goes through the same allowlist a typed address does —
+       「钉不是授权」, verified again at the press and not only at the pin. */
+    pinsOf("url").forEach(u => {
+      if (!rows.some(r => r.path === u))
+        rows.push({ path: u, name: webHost(u), buf: null, kind: "url", web: { fav: webFavicon(u) } });
+    });
+    const pinned = rows.filter(r => isPinned(r.kind, r.path));
+    const rest = rows.filter(r => !isPinned(r.kind, r.path));
     return { pinned, rest, all: pinned.concat(rest) };
   }
   /* `PINNED` on top, one hairline, and THE LOWER SECTION HAS NO HEADING OF ITS
@@ -8756,12 +9346,23 @@
      never end up back to back. */
   function pvMenuHtml(leaf, w) {
     const { pinned, rest } = previewSwitcherRows(w);
+    /* A WEB ROW WEARS ITS SITE'S ICON WHERE THERE IS ONE AND THE CLASS'S GLOBE
+       WHERE THERE IS NOT, in the same 13px box the file rows' mark sits in — so
+       the two kinds line up down the left edge and neither reads as the guest.
+       The DIRTY DOT's cell is structurally there and structurally empty for a
+       page: a page has no unsaved text, and an empty cell is what "no ledger"
+       looks like in this window (§7.1.6h's folder tab, same sentence). */
     const row = (r) => `
       <div class="tm-item ${r.buf && r.buf === leaf.preview ? "cur" : ""}"
-           data-path="${esc(r.path)}" data-name="${esc(r.name)}" title="${esc(r.path)}">
-        <svg><use href="#i-file"/></svg><span>${esc(r.name)}</span>
+           data-path="${esc(r.path)}" data-name="${esc(r.name)}" data-kind="${r.kind}" title="${esc(r.path)}">
+        ${r.kind === "url" && r.web && r.web.fav
+          ? `<span class="pv-fav" style="background:${r.web.fav.bg}">${esc(r.web.fav.ch)}</span>`
+          : `<svg><use href="#${r.kind === "url" ? "i-globe" : "i-file"}"/></svg>`}<span>${esc(r.name)}</span>
         <span class="pvm-dot ${r.buf && r.buf.dirty ? "on" : ""}">●</span>
-        ${rowPinHtml("file", r.path, isPinned("file", r.path) ? "Unpin this file" : "Pin this file")}
+        ${rowPinHtml(r.kind, r.path,
+            isPinned(r.kind, r.path)
+              ? (r.kind === "url" ? "Unpin this page" : "Unpin this file")
+              : (r.kind === "url" ? "Pin this page" : "Pin this file"))}
       </div>`;
     return (pinned.length ? `<div class="tm-label">Pinned</div>` + pinned.map(row).join("") : "")
       + (rest.length ? (pinned.length ? `<div class="tm-sep"></div>` : "") + rest.map(row).join("") : "");
@@ -8782,9 +9383,15 @@
         return;
       }
       closePvMenu();
-      /* one verb for both halves: an open buffer is found, a pinned file with
-         none is made — which is what "pressing it opens the file" means */
-      leaf.preview = poolBuffer(w, el.dataset.path, el.dataset.name);
+      /* one verb for both halves and for both kinds: an open buffer is found, a
+         pinned file with none is made, a pinned URL with none is navigated to.
+         §3 calls that last one 「从切换器选择 = 一次正常顶层导航」 — it does not
+         bypass the policy, and this is the line that makes that true here by
+         going through the very constructor the address input goes through. */
+      const path = el.dataset.path;
+      leaf.preview = el.dataset.kind === "url"
+        ? poolBuffer(w, path, el.dataset.name, () => mkWebState(path, el.dataset.name))
+        : poolBuffer(w, path, el.dataset.name);
       render();
     }));
     const a = anchorEl.getBoundingClientRect();
@@ -9838,12 +10445,22 @@
       return;
     }
     /* Ctrl+F — in-pane search on the focused terminal. Reopening refocuses the
-       capsule and keeps the last query: search is a staying state, not a popup. */
+       capsule and keeps the last query: search is a staying state, not a popup.
+       ── AND ON THE FOCUSED WEB SEAT (W1). 方案 §0 lists 「页内查找」 among the
+       基础件 and says it in the language it has to be said in: 「搜索胶囊语言」.
+       So a page is searched by the capsule that searches a transcript — the same
+       element, the same query, the same toggles, the same Enter/Shift+Enter and
+       F3/Shift+F3, the same Esc. What was needed for that was not a second
+       search but a second HOST: see `srchHostEl`. Natively the marks come from
+       `ICoreWebView2Find` rather than from walking a DOM, which changes who
+       counts the hits and changes nothing about the capsule. */
     if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "f"
         && !document.body.classList.contains("shut")
         && !$("settings-overlay").classList.contains("show")) {
       const leaf = focusedLeaf(activeTab());
-      if (leaf && leaf.kind === "term") {
+      const searchable = leaf && (leaf.kind === "term"
+        || (isPreviewLeaf(leaf) && isWebBuf(leaf.preview) && leaf.preview.web.state === "ok"));
+      if (searchable) {
         e.preventDefault();
         openSearch(leaf.id);
         return;
@@ -9888,6 +10505,15 @@
       if (resize) { cancelResizeDrag(); return; }
       if (paletteOpen()) { closePalette(); return; }
       if ($("pv-menu").classList.contains("show")) { closePvMenu(); return; }
+      /* A NOTICE SHEET IS A LAYER AND TAKES ITS OWN RUNG. It is the only failure
+         card in this window standing over content that is still there, so it is
+         the only one Esc has anything to do with — the four that ARE the seat
+         cannot be dismissed, because dismissing them would leave the black hole
+         W0′ measured (w0-evidence §2⑨) and nothing else. It sits above the pane
+         menus for the ladder's own reason: top-most first. */
+      const sheetLeaf = leavesOf(activeTab() ? activeTab().tree : { type: "leaf" })
+        .find(l => isPreviewLeaf(l) && isWebBuf(l.preview) && l.preview.web.state === "download");
+      if (sheetLeaf) { sheetLeaf.preview.web.state = "ok"; render(); return; }
       /* one Esc leaves the child list for the parent, a second leaves the menu —
          the same rung the profile editor cut inside Settings (§7.1.6c-1) */
       if ($("split-with-menu").classList.contains("show")) { closeSplitWithMenu(); return; }
@@ -11080,6 +11706,12 @@
     if (r.window) {
       const revived = r.window.seeds.map(child => child.files
         ? { id: wsSeq++, tree: mkFilesLeaf(child.files.root), focus: null, pinned: false }
+        : child.preview
+        ? (() => {
+            const buf = child.preview.web ? mkWebState(child.preview.path, child.preview.name)
+                                          : mkPreviewState(child.preview.path, child.preview.name);
+            return { id: wsSeq++, tree: mkPreviewLeaf(buf), focus: null, pinned: false, pvPool: [buf] };
+          })()
         : mkWs(reviveSeed(child.seed)));
       revived.forEach(t => { t.focus = t.focus || leavesOf(t.tree)[0].id; state.tabs.push(t); });
       state.active = revived[revived.length - 1].id;
@@ -11093,6 +11725,18 @@
       leaf.files.open = new Set(r.files.open); leaf.files.sel = r.files.sel;
       if (r.files.width) leaf.files.width = r.files.width;
       w = { id: wsSeq++, tree: leaf, focus: leaf.id, pinned: false };
+    } else if (r.preview) {
+      /* a preview comes back as a preview-root tab holding a FRESH buffer on the
+         same path — the seed is a place, so what returns is the file read again
+         and not the text you had in the box. A page returns by being navigated
+         to, which is the ordinary top-level navigation 方案 §3 requires of every
+         door into this pane; nothing about coming out of the vault exempts a URL
+         from the allowlist («钉不是授权», and a Recent row is the same kind of
+         remembered string a pin is). */
+      const buf = r.preview.web ? mkWebState(r.preview.path, r.preview.name)
+                                : mkPreviewState(r.preview.path, r.preview.name);
+      const leaf = mkPreviewLeaf(buf);
+      w = { id: wsSeq++, tree: leaf, focus: leaf.id, pinned: false, pvPool: [buf] };
     } else {
       w = mkWs(reviveSeed(r.seed));
     }
@@ -11658,12 +12302,17 @@
     /* NB: the .pane click handler bubbles first and may re-render to adopt focus,
        detaching whatever was clicked. So for anything measured or mutated in place,
        re-query the LIVE node by its leaf id (the reroot-menu top-left-corner lesson). */
-    /* the path foot → reveal the folder in the OS file manager (mocked in place) */
+    /* the path foot → reveal the folder in the OS file manager (mocked in place).
+       A WEB SEAT'S FOOT HANDS THE URL TO THE DEFAULT BROWSER instead — same
+       band, same flash, the other OS hand-off (外链一律外交, said in the one
+       place a page can say it). */
     const foot = e.target.closest(".files-foot");
     if (foot) {
       e.stopPropagation();
       const live = $("termhost").querySelector(`.files-foot[data-leaf="${foot.dataset.leaf}"]`) || foot;
-      revealFolderFeedback(live);
+      const fleaf = findLeafIn(activeTab(), +foot.dataset.leaf);
+      if (fleaf && isPreviewLeaf(fleaf) && isWebBuf(fleaf.preview)) webFootFlash(live, "Opened in your browser");
+      else revealFolderFeedback(live);
       return;
     }
     /* pop the docked files pane back out into a floating window */
@@ -11709,7 +12358,14 @@
       if (nm) {
         e.stopPropagation();
         closePvMenu();
-        startPreviewRename(+nm.dataset.leaf);
+        /* ONE GESTURE, TWO EDITORS, PICKED BY WHAT IS IN THE SEAT. The head's
+           name is the content's own name in every class, so the field this
+           opens is the field that name can be edited through: a file's name is
+           renamed, a page's name is not a name at all and what you type is the
+           address. Same slot, same double-click, same Escape. */
+        const nl = findLeafIn(activeTab(), +nm.dataset.leaf);
+        if (nl && isPreviewLeaf(nl) && isWebBuf(nl.preview)) startWebAddress(+nm.dataset.leaf);
+        else startPreviewRename(+nm.dataset.leaf);
         return;
       }
     }
@@ -11770,6 +12426,49 @@
       e.stopPropagation();
       ext.textContent = "Opened ✓";
       setTimeout(() => { if (ext.isConnected) ext.textContent = "Open in default app"; }, 1100);
+      return;
+    }
+    /* ── the web seat's three buttons ──
+       Back and forward walk THIS SEAT'S navigation stack, which is not the same
+       thing as the switcher above them: 方案 §0 draws the line in one sentence —
+       「页内后退/前进管一次浏览会话的导航栈」 while the switcher is 「这个座位开
+       过什么」. One is where you have been inside a page's own links; the other
+       is every document this seat has held, files included. Two lists, two
+       controls, and neither is a spelling of the other. */
+    const nav = e.target.closest(".pv-nav");
+    if (nav) {
+      e.stopPropagation();
+      const leaf = findLeafIn(activeTab(), +nav.closest(".preview-head").dataset.leaf);
+      if (!leaf || !isWebBuf(leaf.preview)) return;
+      webNav(leaf, nav.classList.contains("pv-back") ? "back"
+                 : nav.classList.contains("pv-fwd") ? "fwd" : "reload");
+      return;
+    }
+    const dev = e.target.closest(".pv-devtools");
+    if (dev) {
+      e.stopPropagation();
+      /* natively `OpenDevToolsWindow()` — a separate OS window belonging to the
+         engine, so there is nothing for this drawing to show. The foot says the
+         verb ran, in the band that already answers "did that work". */
+      const dleaf = +dev.closest(".preview-head").dataset.leaf;
+      const dfoot = $("termhost").querySelector(`.preview-pane .files-foot[data-leaf="${dleaf}"]`);
+      if (dfoot) webFootFlash(dfoot, "Developer tools opened");
+      return;
+    }
+    /* the ONE verb on a failure card */
+    const failDo = e.target.closest(".pv-fail-do");
+    if (failDo) {
+      e.stopPropagation();
+      const body = failDo.closest(".preview-body");
+      const leaf = findLeafIn(activeTab(), +body.dataset.leaf);
+      if (!leaf || !isWebBuf(leaf.preview)) return;
+      const st = failDo.dataset.state;
+      if (st === "load" || st === "crash") { webNav(leaf, "reload"); return; }
+      /* the three that hand the problem somewhere else: the flash is the whole
+         feedback, and the card stays, because pressing it did not fix the seat */
+      if (st === "download") { leaf.preview.web.state = "ok"; render(); }
+      const ffoot = $("termhost").querySelector(`.preview-pane .files-foot[data-leaf="${leaf.id}"]`);
+      if (ffoot && WEB_FAIL[st].done) webFootFlash(ffoot, WEB_FAIL[st].done);
       return;
     }
     const row = e.target.closest(".frow");
@@ -11848,6 +12547,129 @@
      looking straight at the answer. The native build adds the two refusals a
      browser cannot have (a name already taken in that folder, a handle the
      filesystem will not release) to the same silent branch. */
+  /* ══ ONE NAVIGATION PATH (方案 §4 状态机, gate 10) ══
+     Every door into this seat — the three buttons, the address input, a switcher
+     row, a pin, a Recent row — ends here, and that is the whole point: 方案 §3's
+     `javascript:` finding says the address check is the ONLY gate (the engine
+     runs the script against the current document and `NavigationStarting` never
+     sees it), so a second way to reach `Navigate()` is a hole by construction.
+     The loading beat is not decoration either: gate 10 pinned down that a page
+     is not the seat's recoverable URL until `NavigationCompleted(IsSuccess)`,
+     which is why the title, the mark and the history flags all move together at
+     the END of the beat rather than at the press. */
+  function webNav(leaf, how, url, title) {
+    const web = leaf.preview.web;
+    if (how === "back" && !web.back) return;
+    if (how === "fwd" && !web.fwd) return;
+    web.loading = true;
+    render();
+    setTimeout(() => {
+      if (!leaf.preview || !leaf.preview.web) return;
+      const v = leaf.preview.web;
+      v.loading = false;
+      if (how === "back") { v.fwd = true; v.back = false; }
+      if (how === "fwd") { v.back = true; v.fwd = false; }
+      if (how === "go") {
+        /* the seat's identity follows the URL, so the buffer's own `path` and
+           `name` move with it — that is what makes a page a buffer rather than a
+           thing a buffer points at */
+        v.url = url; v.host = webHost(url); v.title = title || webHost(url);
+        v.back = true; v.fwd = false; v.state = "ok"; v.fav = webFavicon(url);
+        leaf.preview.path = url;
+        leaf.preview.name = v.title;
+      }
+      if (how === "reload") v.state = "ok";
+      render();
+    }, 420);
+  }
+  /* a stand-in for the site's real icon: the product reads it off the page, this
+     drawing derives one so both cases — a site with an icon and a site without —
+     can be seen in one window. localhost has none on purpose (a dev server
+     usually does not), which is what the globe is for. */
+  const WEB_FAVICONS = [
+    [/(^|\.)rust-lang\.org$/i, { bg: "#c56a3a", ch: "R" }],
+    [/(^|\.)docs\.rs$/i, { bg: "#3b7d4f", ch: "D" }],
+    [/(^|\.)github\.com$/i, { bg: "#24292f", ch: "G" }],
+  ];
+  function webFavicon(url) {
+    const host = webHost(url).replace(/:\d+$/, "");
+    for (const [re, fav] of WEB_FAVICONS) if (re.test(host)) return fav;
+    return null;
+  }
+  /* ══ THE ADDRESS INPUT IS THE RENAME EDITOR, ONE CONTENT CLASS OVER ══
+     方案 §0 asks for 「预览头地址输入(非常驻)」 and this window already had a
+     non-resident editor in exactly that slot: double-click the head's name and a
+     field opens IN ITS PLACE. So the gesture is not invented, it is inherited —
+     same slot, same `.rename` five declarations, same Enter / Escape / blur,
+     same silent refusal. What differs is what the field holds and what Enter
+     means, because a file's name is a name and a page's name is a title you
+     cannot type your way to; the address is what you type.
+     THE BOX OPENS HOLDING THE WHOLE URL, SELECTED. A rename box selects the stem
+     and leaves the suffix because that is what renaming a file almost always
+     means; going somewhere almost always means replacing the whole address.
+     A REFUSAL IS SAID WHERE IT IS TYPED and nowhere else — the field's ink turns
+     `--err` the moment the text stops being navigable, which is the search
+     capsule's own answer to a regex that does not parse. Enter on a refused
+     address does nothing at all: no card, no dialog, and the page that was there
+     is still there, which is the honest outcome for 「拒绝」 at this door (方案
+     §3 地址输入 allowlist; the seat-wide `blocked` card is for a URL the SEAT was
+     handed, where there is no page to leave standing). */
+  function startWebAddress(leafId) {
+    const leaf = findLeafIn(activeTab(), leafId);
+    if (!leaf || !isPreviewLeaf(leaf) || !isWebBuf(leaf.preview)) return;
+    const web = leaf.preview.web;
+    const host = $("termhost").querySelector(`.preview-head[data-leaf="${leafId}"] .pv-name`);
+    if (!host) return;
+
+    const input = document.createElement("input");
+    input.className = "rename pv-addr";
+    input.value = web.url;
+    input.spellcheck = false;
+    input.setAttribute("aria-label", "Address");
+    host.replaceWith(input);
+    input.focus();
+    input.select();
+
+    const mark = () => input.classList.toggle("bad", !!input.value.trim() && !webAllowed(input.value));
+    let done = false;
+    const finish = (commit) => {
+      if (done) return;
+      done = true;
+      const v = input.value.trim();
+      if (commit && v && webAllowed(v)) {
+        const url = webNormalise(v);
+        /* one buffer per address per tab, so typing your way to a page you
+           already had open lands on the row the switcher is already showing */
+        const w = activeTab();
+        const buf = poolBuffer(w, url, webHost(url), () => mkWebState(url, webHost(url), webFavicon(url)));
+        leaf.preview = buf;
+        render();
+        /* THE HOST STANDS IN UNTIL THE PAGE SAYS ITS NAME. A URL you have not
+           been to yet has no title, so the head shows the one thing that is
+           known — and a URL this tab HAS been to keeps the title it already
+           told us, because typing your way back to a page is the same arrival
+           as pressing its row in the switcher. */
+        webNav(leaf, "go", url, buf.web.title);
+        return;
+      }
+      render();
+    };
+    input.addEventListener("input", mark);
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") {
+        e.preventDefault();
+        /* a refused address is not committed AND not dismissed: the box stays
+           open holding what you typed, in the ink that says why */
+        if (input.value.trim() && !webAllowed(input.value)) { mark(); return; }
+        finish(true);
+      } else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+    });
+    input.addEventListener("blur", () => finish(true));
+    input.addEventListener("pointerdown", (e) => e.stopPropagation());
+    input.addEventListener("click", (e) => e.stopPropagation());
+    input.addEventListener("dblclick", (e) => e.stopPropagation());
+  }
   function startPreviewRename(leafId) {
     const leaf = findLeafIn(activeTab(), leafId);
     if (!leaf || !isPreviewLeaf(leaf)) return;
@@ -12439,6 +13261,76 @@
     loneHeadSet(head, e.clientY - r.top <= band);
   });
   $("termhost").addEventListener("pointerleave", () => { if (LONEHEAD === "b") loneHeadDrop(); });
+
+  /* ══════ A WEB SEAT'S FOOT IS ITS HOVER LINE (§7.1.5g, ruled 2026-08-20) ══════
+     A browser writes the link under the pointer in a bubble at the bottom of the
+     page; this pane already has a band at the bottom that says where its content
+     lives. They are one band. Hovering a link swaps the seat's own URL for the
+     link's target, and leaving puts it back — which also means the reader never
+     has to ask which of the two they are looking at, because the pointer is on
+     the link or it is not.
+     A TARGET THIS WINDOW WILL NOT FOLLOW IS WRITTEN OUT IN FULL AND SUFFIXED
+     `· blocked`. That is the ruling's own drawing, moved from the terminal's
+     hover line to this one: 「其余 scheme → 惰性:不激活、不报错,悬停行照旧写出
+     真实目标并缀一句 `· blocked`」. The click below does nothing, deliberately —
+     「什么都没发生比一个确认框更诚实」 — so the hover line carries the entire
+     answer, and it carries it BEFORE the press rather than after it. */
+  /* THE HOVER LINE SHOWS WHERE YOU WOULD GO, NOT WHAT THE MARKUP SAYS. An `href`
+     of `#/download` is not an address and writing it into this band would be the
+     band reporting the page's source instead of the page's meaning — and worse,
+     it would fail the allowlist and get stamped `· blocked` for a link that is
+     perfectly navigable. Resolved against the seat's own URL, both questions
+     answer themselves. */
+  const webResolve = (web, href) =>
+    href.startsWith("#") ? "http://" + web.host + "/" + href.replace(/^#\/?/, "")
+    : /^[a-z][a-z0-9+.-]*:/i.test(href) ? href
+    : "http://" + web.host + "/" + href.replace(/^\//, "");
+  function webHoverLine(leafId, target) {
+    const foot = $("termhost").querySelector(`.preview-pane .files-foot[data-leaf="${leafId}"]`);
+    if (!foot || foot.classList.contains("done")) return;
+    const leaf = findLeafIn(activeTab(), leafId);
+    if (!leaf || !isPreviewLeaf(leaf) || !isWebBuf(leaf.preview)) return;
+    const path = foot.querySelector(".foot-path");
+    if (target === null) {
+      foot.classList.remove("hovering");
+      path.innerHTML = `<bdi>${esc(leaf.preview.web.url)}</bdi>`;
+      return;
+    }
+    const url = webResolve(leaf.preview.web, target);
+    foot.classList.add("hovering");
+    path.innerHTML = `<bdi>${esc(url)}</bdi>`
+      + (webAllowed(url) ? "" : `<span class="foot-blocked"> · blocked</span>`);
+  }
+  $("termhost").addEventListener("pointerover", (e) => {
+    const a = e.target.closest && e.target.closest(".pv-web-doc a");
+    if (!a) return;
+    const body = a.closest(".preview-body");
+    if (body) webHoverLine(+body.dataset.leaf, a.getAttribute("href"));
+  });
+  $("termhost").addEventListener("pointerout", (e) => {
+    const a = e.target.closest && e.target.closest(".pv-web-doc a");
+    if (!a) return;
+    const body = a.closest(".preview-body");
+    if (body) webHoverLine(+body.dataset.leaf, null);
+  });
+  $("termhost").addEventListener("click", (e) => {
+    const a = e.target.closest && e.target.closest(".pv-web-doc a");
+    if (!a) return;
+    e.preventDefault();
+    const body = a.closest(".preview-body");
+    const leaf = body && findLeafIn(activeTab(), +body.dataset.leaf);
+    if (!leaf || !isWebBuf(leaf.preview)) return;
+    const href = a.getAttribute("href");
+    /* an in-page link is an in-page navigation: the seat's back button lights,
+       the switcher does NOT gain a row (§0 — the switcher is 「这个座位开过什么」
+       and the navigation stack is 「一次浏览会话」). A `mailto:` is the ruling's
+       inert arm and this is where nothing happens. */
+    const web = leaf.preview.web;
+    const url = webResolve(web, href);
+    if (!webAllowed(url)) return;         /* the inert arm: nothing happens */
+    web.url = url; web.back = true; web.fwd = false;
+    render();
+  });
   /* ── command rail wiring ──
      The rail, not the tick, is the pointer surface: heights form a smooth
      crest around the pointer (scaleY over base positions — transforms don't
@@ -12555,6 +13447,17 @@
     srch.leaf == null ? null
       : $("termhost").querySelector(`.pane[data-leaf="${srch.leaf}"] .pane-inner`);
   const srchBarEl = () => $("termhost").querySelector(".srchbar");
+  /* ── WHAT THIS CAPSULE IS SEARCHING ──
+     One capsule, two hosts. A transcript is a column of line elements; a page is
+     a column of block elements; `paintMatches` walks `host.children` and wraps
+     text nodes, so it never needed to know which of the two it had. Everything
+     that DID know — the scroller, the command rail, the math blocks — asks
+     through here or degrades to nothing (a web seat has no rail and no rendered
+     formulas, so those queries come back empty and their branches do not run).
+     Adding a second search implementation for the second host would have made
+     the two disagree about case folding, whole-word and regex within a week. */
+  const srchHostEl = (pane) => pane && pane.querySelector(".term, .pv-web-doc");
+  const srchIsTerm = (host) => !!host && host.classList.contains("term");
   function srchRegex() {
     if (!srch.q) return null;   /* null = nothing to search; undefined = broken pattern */
     let src = srch.re ? srch.q : srch.q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -12624,7 +13527,18 @@
     const curBlk = m.el.closest(".math");
     if (curBlk) curBlk.classList.add("srch-cur");
     if (!scroll) return;
-    const term = pane.querySelector(".term");
+    const term = srchHostEl(pane);
+    if (!srchIsTerm(term)) {
+      /* a page's scroller is the box AROUND the document, and its blocks are not
+         positioned against it — so the hit is placed by its own rectangle rather
+         than by an offsetTop that would be measured against the wrong parent.
+         Same rule either way: move only when the hit is off screen. */
+      const box = term.parentElement;
+      const r = m.el.getBoundingClientRect(), br = box.getBoundingClientRect();
+      if (r.top < br.top || r.bottom > br.bottom)
+        m.el.scrollIntoView({ block: "center", behavior: "smooth" });
+      return;
+    }
     const lineEl = term.children[m.line];
     if (!lineEl) return;
     /* scroll only when the hit is off screen — typing toward a visible match
@@ -12653,7 +13567,7 @@
   }
   function applySearch(keepCur, scroll = true) {
     const pane = srchPaneEl();
-    const term = pane && pane.querySelector(".term");
+    const term = srchHostEl(pane);
     if (!term) { closeSearch(); return; }
     unwrapMarks(term);
     term.querySelectorAll(".math.srch-hit, .math.srch-cur")
@@ -12672,11 +13586,20 @@
     if (!srch.marks.length) srch.cur = -1;
     else if (keepCur && srch.cur >= 0) srch.cur = Math.min(srch.cur, srch.marks.length - 1);
     else {
-      /* start from where the eye is: the first match at or below the viewport top */
-      const at = srch.marks.findIndex(m => {
-        const el = term.children[m.line];
-        return el && el.offsetTop >= term.scrollTop - 1;
-      });
+      /* start from where the eye is: the first match at or below the viewport top.
+         A page is asked the same question through its own rectangles, because a
+         document block's `offsetTop` is measured against the pane and not
+         against the scroller (`srchApplyCur`'s note, same reason). */
+      let at;
+      if (srchIsTerm(term)) {
+        at = srch.marks.findIndex(m => {
+          const el = term.children[m.line];
+          return el && el.offsetTop >= term.scrollTop - 1;
+        });
+      } else {
+        const top = term.parentElement.getBoundingClientRect().top;
+        at = srch.marks.findIndex(m => m.el.getBoundingClientRect().bottom >= top);
+      }
       srch.cur = at < 0 ? 0 : at;
     }
     srchApplyCur(scroll);
@@ -12695,7 +13618,7 @@
     const pane = srchPaneEl();
     document.querySelectorAll(".srchbar").forEach(b => b.remove());
     if (pane) {
-      const term = pane.querySelector(".term");
+      const term = srchHostEl(pane);
       if (term) {
         unwrapMarks(term);
         term.querySelectorAll(".math.srch-hit, .math.srch-cur")
@@ -12714,7 +13637,7 @@
   function mountSearchBar() {
     document.querySelectorAll(".srchbar").forEach(b => b.remove());
     const pane = srchPaneEl();
-    if (!pane || !pane.querySelector(".term")) { srch.leaf = null; srch.marks = []; srch.cur = -1; return; }
+    if (!srchHostEl(pane)) { srch.leaf = null; srch.marks = []; srch.cur = -1; return; }
     const bar = document.createElement("div");
     /* `:not(.lonehead)` — B's head is an OVERLAY that is usually not there, so it
        must not buy the capsule a permanent 28px of clearance for a band the eye
@@ -13296,6 +14219,48 @@
     const paper = wsFromLeaf(mkPreviewLeaf(paperBuf));
     paper.pvPool = [paperBuf];   /* §7.1.3's per-tab pool: this tab IS the singleton */
     state.tabs.push(paper);
+
+    /* ── THE WEB SEAT (W1, 2026-08-20) ──
+       `[files | web]`, and it is that shape on purpose rather than a lone page:
+        · it is the square the whole block is FOR — 「手还在终端里时需要的那个浏
+          览器」, the project tree on the left and its dev server on the right,
+          in one tab with no shell in it at all (§7.1.6h made that legal);
+        · and it is the tab that proves the identity seat. Two seats, no
+          terminal: `identityLeaf` answers with the FIRST seat in tree order, so
+          this tab is called `folio-site` whichever half the pointer is in. It
+          used to be called `folio-site` or `localhost:5173` depending on where
+          you last clicked, which is a tab renaming itself for a reason that has
+          nothing to do with the tab.
+       THE POOL HOLDS THREE BUFFERS AND TWO KINDS, because the switcher's whole
+       claim is that they are equals: a page that is pinned (lifted into PINNED,
+       one row, never copied), a page that is not, and a file. Open the head's
+       chevron to read it. */
+    const devBuf = mkWebState("http://localhost:5173/", "Folio site", null);
+    devBuf.web.state = WEB_DEMO.state;
+    devBuf.web.back = WEB_DEMO.state === "ok";
+    if (WEB_DEMO.state === "blocked") {
+      /* the seat was HANDED this address — by a pin that no longer passes, by a
+         restored session, by the palette — so there is no page to say it over.
+         A link with this scheme INSIDE a page raises nothing at all (§7.1.5g ⑤);
+         hover the `mailto:` in the demo page and read the foot instead. */
+      devBuf.web.url = WEB_DEMO.scheme + ":folio@example.com";
+      if (WEB_DEMO.scheme === "javascript") devBuf.web.url = "javascript:fetch('/admin').then(r=>r.text())";
+      /* nothing committed, so there is no title to show and no host to name: the
+         head's name IS the address, which is also the only thing the reader can
+         act on. `web.host` is left empty rather than guessed. */
+      devBuf.name = devBuf.web.title = devBuf.web.url;
+      devBuf.web.host = "";
+    }
+    if (WEB_DEMO.state === "download") devBuf.web.detail = "folio-0.4.1-x64.msi";
+    const stdBuf = mkWebState("https://doc.rust-lang.org/std/", "std - Rust",
+                              webFavicon("https://doc.rust-lang.org/std/"));
+    const docsBuf = mkWebState("https://docs.rs/wgpu/latest/wgpu/", "wgpu - Rust",
+                               webFavicon("https://docs.rs/wgpu/latest/wgpu/"));
+    const notesBuf = mkPreviewState("C:\\Users\\Weiyi\\Developer\\folio-site\\README.md", "README.md");
+    const site = wsFromLeaf(mkPreviewLeaf(devBuf));
+    site.pvPool = [devBuf, stdBuf, docsBuf, notesBuf];
+    splitRootOf(site, "left", mkFilesLeaf("C:\\Users\\Weiyi\\Developer\\folio-site"));
+    state.tabs.push(site);
 
     /* ── ONE CLOSED WINDOW, WAITING IN RECENT (§2.7, multiwindow slice D) ──
        Seeded rather than produced, and it has to be: `recordRecent` runs when a
