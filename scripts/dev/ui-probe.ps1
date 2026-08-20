@@ -139,6 +139,32 @@ public struct INPUTUNION { [FieldOffset(0)] public KEYBDINPUT ki; [FieldOffset(0
 public struct INPUT { public uint type; public INPUTUNION u; }
 public class Probe {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out PRECT r);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr param);
+  public delegate bool EnumProc(IntPtr h, IntPtr param);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  /* **The process's biggest visible top-level window, not `MainWindowHandle`.**
+     .NET picks the FIRST visible top-level window it enumerates for the process,
+     and folio owns more than one: measured 2026-08-19, the app answered a 26x26
+     window at the screen origin (a compositor helper) while the 1920x1200 window
+     the user is looking at came second. Every probe verb was then aimed at a
+     26-pixel square — captures came back 26x26 and clicks landed on whatever was
+     under the origin. Area is the honest discriminator: the window a person is
+     driving is the large one, and a helper is a helper because it is tiny. */
+  public static IntPtr AppWindow(uint targetPid) {
+    IntPtr best = IntPtr.Zero;
+    long bestArea = 0;
+    EnumWindows((h, p) => {
+      uint owner;
+      GetWindowThreadProcessId(h, out owner);
+      if (owner != targetPid || !IsWindowVisible(h)) return true;
+      PRECT r;
+      if (!GetWindowRect(h, out r)) return true;
+      long area = (long)(r.R - r.L) * (r.B - r.T);
+      if (area > bestArea) { bestArea = area; best = h; }
+      return true;
+    }, IntPtr.Zero);
+    return best;
+  }
   [DllImport("user32.dll")] public static extern IntPtr SetProcessDpiAwarenessContext(IntPtr v);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
@@ -430,9 +456,11 @@ $NAMED_KEYS = @{
 }
 
 function Get-AppWindow([int]$targetPid) {
-  $p = Get-Process -Id $targetPid -ErrorAction Stop
-  if ($p.MainWindowHandle -eq [IntPtr]::Zero) { throw "process $targetPid has no visible window (yet)" }
-  return $p.MainWindowHandle
+  # Asserts the process is alive and gives a clear error when it is not.
+  Get-Process -Id $targetPid -ErrorAction Stop | Out-Null
+  $h = [Probe]::AppWindow([uint32]$targetPid)
+  if ($h -eq [IntPtr]::Zero) { throw "process $targetPid has no visible window (yet)" }
+  return $h
 }
 
 switch ($Cmd) {
@@ -482,8 +510,21 @@ switch ($Cmd) {
   }
   "capture" {
     $h = Get-AppWindow $ProcId
+    # **The pixel-ownership law, on the camera too** (added 2026-08-19, after it
+    # cost two screenshots). `CopyFromScreen` copies the SCREEN at those
+    # coordinates, not the window: another window standing over the target is
+    # photographed instead, and the picture is perfectly plausible — a Folio
+    # window that simply is not the one under test. So the target is brought to
+    # the front and the pixel at the window's own centre is checked to belong to
+    # its process before the shutter opens. A refusal is a refusal to hand back a
+    # picture of something else.
+    [Probe]::BringToFront($h) | Out-Null
     $r = New-Object PRECT
     [Probe]::GetWindowRect($h, [ref]$r) | Out-Null
+    $cx = [int](($r.L + $r.R) / 2); $cy = [int](($r.T + $r.B) / 2)
+    if (-not [Probe]::PointBelongsTo($cx, $cy, $ProcId)) {
+      throw "REFUSED: the pixel at ($cx,$cy) is not owned by pid=$ProcId — something is standing over the window, and the capture would be of that instead"
+    }
     Add-Type -AssemblyName System.Drawing
     $x = $r.L - $Margin; $y = $r.T - $Margin
     $w = ($r.R - $r.L) + 2 * $Margin; $hh = ($r.B - $r.T) + 2 * $Margin
@@ -524,14 +565,23 @@ switch ($Cmd) {
     "wheeled $Delta notches mods=$Mods at ($px, $py) on pid=$ProcId (foreground verified)"
   }
   "click" {
+    # **Ownership of the pixel, which is the law this file already argues for a
+    # pointer** (see `PointBelongsTo`'s note): a click lands on whoever owns that
+    # screen pixel, so that — and not who currently holds the keyboard — is what
+    # decides where the press goes. Foreground is *requested* because clicking a
+    # background window is how a person raises it, and a failure to be granted it
+    # is not a reason to refuse: measured 2026-08-19, with two agents' windows on
+    # one screen the foreground lock denied every request while the pixel under
+    # the target's own rectangle plainly belonged to the target.
     $h = Get-AppWindow $ProcId
-    if (-not [Probe]::BringToFront($h)) { throw "REFUSED: target window did not take foreground — not clicking blind" }
+    [Probe]::BringToFront($h) | Out-Null
     $r = New-Object PRECT
     [Probe]::GetWindowRect($h, [ref]$r) | Out-Null
     $px = if ($X -lt 0) { $r.R + $X } else { $r.L + $X }
     $py = if ($Y -lt 0) { $r.B + $Y } else { $r.T + $Y }
+    if (-not [Probe]::PointBelongsTo($px, $py, $ProcId)) { throw "REFUSED: ($px, $py) is not over pid=$ProcId — not clicking blind" }
     [Probe]::Click($px, $py)
-    "clicked ($px, $py) = window+($X, $Y) on pid=$ProcId (foreground verified)"
+    "clicked ($px, $py) = window+($X, $Y) on pid=$ProcId (pixel ownership verified)"
   }
   "rightclick" {
     $h = Get-AppWindow $ProcId
@@ -549,7 +599,7 @@ switch ($Cmd) {
     # own PowerShell start-up, and the app's pairing window closes long before
     # the second one arrives.
     $h = Get-AppWindow $ProcId
-    if (-not [Probe]::BringToFront($h)) { throw "REFUSED: target window did not take foreground — not clicking blind" }
+    [Probe]::BringToFront($h) | Out-Null
     $r = New-Object PRECT
     [Probe]::GetWindowRect($h, [ref]$r) | Out-Null
     $px = if ($X -lt 0) { $r.R + $X } else { $r.L + $X }
@@ -558,7 +608,7 @@ switch ($Cmd) {
     [Probe]::Click($px, $py)
     Start-Sleep -Milliseconds $GapMs
     [Probe]::Click($px, $py)
-    "double-clicked ($px, $py) = window+($X, $Y) on pid=$ProcId, ${GapMs}ms apart (foreground verified)"
+    "double-clicked ($px, $py) = window+($X, $Y) on pid=$ProcId, ${GapMs}ms apart (pixel ownership verified)"
   }
   "burst" {
     # A run of captures from one process, to catch something that is moving.

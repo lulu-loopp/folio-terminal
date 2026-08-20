@@ -2132,7 +2132,8 @@ pub enum ChromeTarget {
     /// through the same rectangle: it is the same panel, holding a different
     /// list.
     RailBody,
-    /// **Door 5 — `Exit`, at the head of the focus column** (§7.1.6b′ ⑤).
+    /// **`Exit`, at the head of the focus column — the visible way out**
+    /// (§7.1.6b′).
     ///
     /// The one target this feature adds, and it carries no index because the
     /// mode is one bit for the whole window. Its own target rather than a press
@@ -2140,9 +2141,11 @@ pub enum ChromeTarget {
     /// heading with a button on it, and a heading that turned a layout mode off
     /// wherever you happened to click it would be a heading you learn to avoid.
     ///
-    /// It exists at all because four of the five doors are gestures — a setting
-    /// behind a modal, a chord, a double-click, a menu item — and a mode you can
-    /// only leave by remembering one is a trap.
+    /// It exists at all because the other three ways out cannot be seen — a
+    /// setting behind a modal, a chord and `Esc` — and a mode you can only leave
+    /// by remembering one of those is a trap. That was true when the mode had
+    /// five doors and it is more true now that it has four, two of which were
+    /// withdrawn from the panes themselves (user ruling 2026-08-19).
     FocusExit,
 }
 
@@ -3068,7 +3071,8 @@ pub struct RailState {
     ///
     /// Sampled here for the reason [`Self::open`] is: this module is a pure
     /// function of the numbers it is handed, and the bit itself lives on the
-    /// window (`WindowRuntime::focus_mode`) where five doors can turn it.
+    /// window (`WindowRuntime::focus_mode`) where two doors turn it on and four
+    /// turn it off.
     ///
     /// **It supersedes the other fields rather than combining with them.** Focus
     /// mode is its own layout layer: while it is on, neither the horizontal strip
@@ -3770,18 +3774,18 @@ pub struct FocusCardGeometry {
 pub struct FocusRailGeometry {
     /// The column's outer box `[left, top, right, bottom]`.
     pub body: [f32; 4],
-    /// The bar at the head of the column: the words `Focus mode` and door 5.
+    /// The bar at the head of the column: the words `Focus mode` and `Exit`.
     ///
     /// It stands where the rail's `Tabs` heading stands, and the list scrolls
     /// beneath it — which is `position: sticky; top: -6px` expressed the way
-    /// [`RailGeometry::label`] already expresses the same idea. §7.1.6b′ ⑤ is
-    /// what makes that non-negotiable: four of the five doors are gestures, and
-    /// a mode you can only leave by remembering one is a trap, so the way out
-    /// must not be scrollable off the screen.
+    /// [`RailGeometry::label`] already expresses the same idea. §7.1.6b′ is what
+    /// makes that non-negotiable: every other way out is invisible — a chord, a
+    /// settings row, `Esc` — and a mode you can only leave by remembering one of
+    /// those is a trap, so this one must not be scrollable off the screen.
     pub bar: [f32; 4],
     /// The bar's label run as `[left, right]`, ending one gap short of the exit.
     pub label: [f32; 2],
-    /// Door 5's own box.
+    /// The `Exit` button's own box.
     pub exit: [f32; 4],
     /// One card per tab, in tab order — **the only order there is**. v1 ships no
     /// card dragging (§7.1.6b′ ④), so there is no second sequence to store and
@@ -3825,7 +3829,7 @@ fn focus_card_height(scale: f32) -> f32 {
         .round()
 }
 
-/// How wide door 5's button is, given the measured width of the word on it.
+/// How wide the `Exit` button is, given the measured width of the word on it.
 ///
 /// The caption's width is carried in rather than derived for
 /// [`TabContent::badge_text_width`]'s reason: only the font knows how wide a word
@@ -4097,7 +4101,7 @@ pub fn hit_focus_rail(
     if !contains(geometry.body, x, y) {
         return None;
     }
-    // Door 5 answers before the bar it sits in, smallest target first — the same
+    // `Exit` answers before the bar it sits in, smallest target first — the same
     // order the `×` is asked in inside a card.
     if contains(geometry.exit, x, y) {
         return Some(ChromeTarget::FocusExit);
@@ -4172,6 +4176,16 @@ pub fn title_bar_app_run_right_px(
     tab_count: usize,
     rail: RailState,
 ) -> i32 {
+    // **Focus mode answers first, and answers `0` in both tab layouts**
+    // (§7.1.6b′). The mode takes the strip *and* the rail, and
+    // [`panel_toggle_box`] has already folded the one button the vertical bar
+    // carried — so below the caption run the app owns nothing up here, and every
+    // pixel of the bar is the window's to be dragged by. Asked of the layout
+    // alone, a horizontal window in focus mode would go on reserving the run of
+    // a strip that is not drawn: a dead band across the top of the window.
+    if rail.draws_focus_rail() {
+        return 0;
+    }
     match rail.layout {
         TabLayoutMode::Horizontal => tab_strip_right_px(width, scale, tab_count),
         // Written off the box itself rather than off `12 + 30`, so a toggle that
@@ -5478,7 +5492,7 @@ pub struct ChromeContent<'a> {
     /// same panel holding a different list, and a second scroll offset would be
     /// a second place for "how far down the tab list am I" to be true.
     pub rail_scroll: f32,
-    /// How wide the word on door 5's button is drawn (§7.1.6b′ ⑤).
+    /// How wide the word on the `Exit` button is drawn (§7.1.6b′).
     ///
     /// Measured by the renderer and carried in for [`TabContent::badge_text_width`]'s
     /// reason: only the font knows how wide a word is, and the button's box is
@@ -9125,7 +9139,7 @@ struct FocusRail<'a> {
     active_tab: usize,
     /// How far the column is scrolled, in physical pixels.
     scroll: f32,
-    /// The measured width of the word on door 5, at [`FOCUS_EXIT_FONT_LOGICAL_PX`].
+    /// The measured width of the word `Exit`, at [`FOCUS_EXIT_FONT_LOGICAL_PX`].
     exit_caption_width: f32,
     state: RailState,
     profile_menu_open: bool,
@@ -9191,7 +9205,7 @@ fn focus_rail_chrome(
         ]
     };
 
-    // ── the bar: the column's heading, and door 5 ──
+    // ── the bar: the column's heading, and the way out ──
     labels.push(ChromeLabel {
         rect: [
             geometry.label[0],
@@ -25781,7 +25795,7 @@ mod tests {",
             .expect("focus mode puts a column on screen")
     }
 
-    /// A plausible measured width for the word on door 5, so the button has a
+    /// A plausible measured width for the word `Exit`, so the button has a
     /// box. The number is a fixture and nothing is pinned to it.
     const EXIT_CAPTION: f32 = 22.0;
 
@@ -25875,24 +25889,34 @@ mod tests {",
     /// **THE STRUCTURAL PIN** (§7.1.6b′): *"`render` 里没有聚焦分支，画的仍是
     /// `renderNode(activeTab().tree)`，进出因此不需要恢复代码"*.
     ///
-    /// Said in a form this build can check: over **one solved layout**, the
-    /// chrome the *stage* is drawn from is byte-identical with the mode on and
-    /// with it off. Every difference the mode makes lives in the other half of
-    /// [`WindowChrome`] — the panel — which is the whole claim: there is no
-    /// second picture of the tree, so there is nothing to put back.
+    /// **It is a claim about the tree, not about the rectangle.** Said in the
+    /// form this build can check: hand the seat walk **one solved layout** and it
+    /// paints the same stage whether the mode is on or off — same quads, same
+    /// labels, same sprites, byte for byte. There is no second picture of the
+    /// tree, which is why entering and leaving need no restoring code. Every
+    /// difference the mode makes lives in the other half of [`WindowChrome`], the
+    /// panel.
     ///
-    /// The layout is shared deliberately. In the product the mode does change
-    /// what the solver is handed — the viewport starts 220 further in, which is
-    /// [`RailState::terminal_inset_logical_px`] and one number — and this pin is
-    /// about what happens *after* that: given the same rectangles, the same
-    /// picture. A build that grew a focus branch inside the seat walk would fail
-    /// here even though the panel it also drew was correct.
+    /// **What it deliberately does not say is that the stage stands still.** The
+    /// viewport handed to the solver is smaller in focus mode — the card column
+    /// is in the flow and the stage begins after it, which is
+    /// [`RailState::terminal_inset_logical_px`] and one number, pinned next door
+    /// by [`the_card_column_is_in_the_flow_and_the_stage_begins_after_it`]. That
+    /// number is *viewport geometry*, not a render branch: the seat walk below it
+    /// is handed rectangles and never asks which mode produced them.
+    ///
+    /// Reading this pin as "the stage is geometrically identical" is exactly how
+    /// the column came to be drawn floating over the panes: the panel painted
+    /// itself 220 wide while the solver was handed a state whose `focus` was
+    /// still false, and the left of every pane disappeared underneath it. The
+    /// fixture shares one layout on purpose, and that shared layout is what makes
+    /// this a question about the painter alone.
     ///
     /// Red gate: give any seat-side painter a `rail.focus` condition and the
     /// first assertion goes red; move the card column into the `seats` group and
     /// the second does.
     #[test]
-    fn the_stage_is_the_same_picture_with_the_mode_on_and_with_it_off() {
+    fn the_stage_is_the_same_tree_and_the_mode_adds_no_branch_to_its_render() {
         let tabs = three_cards();
         for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
             let off = window_chrome_with_rail(
@@ -25950,6 +25974,136 @@ mod tests {",
                 (&off.rail.quads, &off.rail.labels, &off.rail.sprites),
                 (&on.rail.quads, &on.rail.labels, &on.rail.sprites),
                 "{layout:?}: and the panel beside it is the whole of the difference"
+            );
+        }
+    }
+
+    /// **THE OTHER HALF OF THE STRUCTURAL PIN** (§7.1.6b′, user ruling
+    /// 2026-08-19: *"都不遮挡"*) — **the card column is in the flow, and the stage
+    /// begins where the column ends.**
+    ///
+    /// The column is a panel and not an overlay: it stands in the rail's own
+    /// place, it is 220 logical pixels wide in both tab layouts and under all
+    /// three `Sidebar` postures, and the terminal keeps exactly that much clear.
+    /// So the stage's left edge *is* the column's right edge, to within the half
+    /// pixel that separates a rounded device inset from an unrounded logical
+    /// width — no pane is ever under the column, in any combination.
+    ///
+    /// Checked against the very pair the product uses and not against the
+    /// constant: [`rail_inset_device_px`] is what `solve_seats` is handed and
+    /// [`focus_rail_geometry`]'s `body` is what the panel paints, so this pin
+    /// fails if either one stops answering to `focus` — which is what "the column
+    /// floats" means expressed in this module's own terms.
+    ///
+    /// The icon rail is the instructive comparison and is checked here too: it is
+    /// the one panel in this product that genuinely *is* an overlay, keeping only
+    /// its parked strip clear and opening across the terminal (Q179). The column
+    /// is deliberately the other kind, and a build that made it behave like the
+    /// icon rail would be a build where these two answers stopped differing.
+    ///
+    /// Red gate: drop the `focus` clause from
+    /// [`RailState::terminal_inset_logical_px`] — which is the column floating
+    /// again, in one line — and every layout/sidebar combination goes red on the
+    /// first assertion.
+    #[test]
+    fn the_card_column_is_in_the_flow_and_the_stage_begins_after_it() {
+        const W: u32 = 1600;
+        const H: u32 = 900;
+        for dpi_milli in [1_000, 1_250, 1_500, 2_000] {
+            let ppm = scale_ppm(dpi_milli);
+            let scale = dpi_milli as f32 / 1_000.0;
+            for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
+                for (mode, collapsed) in [
+                    (RailMode::Expanded, false),
+                    (RailMode::Icons, false),
+                    (RailMode::Expanded, true),
+                ] {
+                    let focused = RailState {
+                        layout,
+                        mode,
+                        collapsed,
+                        focus: true,
+                        ..RailState::default()
+                    };
+                    let case = format!("{layout:?}/{mode:?}/collapsed={collapsed}/dpi={dpi_milli}");
+                    let column =
+                        focus_rail_geometry(H as f32, scale, 3, EXIT_CAPTION, 0.0, focused)
+                            .expect("focus mode puts a column on screen");
+                    let stage = device_viewport(W, H, ppm, rail_inset_device_px(focused, ppm));
+                    assert!(
+                        (stage[0] - f64::from(column.body[2])).abs() <= 0.5,
+                        "{case}: the stage starts at the column's right edge \
+                         ({} vs {}), so no pane is under it and none of the panel \
+                         is over one",
+                        stage[0],
+                        column.body[2]
+                    );
+                    // The `+` and the exit button are inside that same run, so the
+                    // whole panel — not merely the cards — is clear of the stage.
+                    assert!(
+                        f64::from(column.new_tab_menu[2]) <= stage[0] + 0.5,
+                        "{case}: and so is the panel's own furniture"
+                    );
+                    // Turning the bit off hands the width back to whatever the two
+                    // settings rows ask for, which in the layout that has no rail
+                    // at all is every pixel of it.
+                    let ordinary = RailState {
+                        focus: false,
+                        ..focused
+                    };
+                    let left_back =
+                        device_viewport(W, H, ppm, rail_inset_device_px(ordinary, ppm))[0];
+                    match (layout, mode, collapsed) {
+                        (TabLayoutMode::Horizontal, _, _) | (TabLayoutMode::Vertical, _, true) => {
+                            assert_eq!(
+                                left_back, 0.0,
+                                "{case}: leaving gives the stage its whole width back \
+                             where the ordinary chrome keeps nothing clear"
+                            )
+                        }
+                        (TabLayoutMode::Vertical, RailMode::Icons, false) => assert!(
+                            left_back < stage[0],
+                            "{case}: and under `Sidebar: Icons` it gives back all \
+                             but the parked strip — the column was never wired to \
+                             that row"
+                        ),
+                        (TabLayoutMode::Vertical, RailMode::Expanded, false) => assert_eq!(
+                            left_back, stage[0],
+                            "{case}: while an expanded rail keeps exactly what the \
+                             column kept, which is why the panes do not move when \
+                             this window enters the mode"
+                        ),
+                    }
+                }
+            }
+            // **The comparison that says which kind of panel this is.** An icon
+            // rail opens to 220 over the terminal and the terminal never moves;
+            // the column is 220 and the terminal does move. One number apart, and
+            // the difference is the whole ruling.
+            let parked = RailState {
+                layout: TabLayoutMode::Vertical,
+                mode: RailMode::Icons,
+                open: 1.0,
+                ..RailState::default()
+            };
+            assert_eq!(
+                parked.width_logical_px(),
+                RAIL_WIDTH_LOGICAL_PX,
+                "an open icon rail is card-width on screen"
+            );
+            assert_eq!(
+                parked.terminal_inset_logical_px(),
+                RAIL_PARK_LOGICAL_PX,
+                "and costs the terminal only its parked strip — it is an overlay"
+            );
+            let column = RailState {
+                focus: true,
+                ..parked
+            };
+            assert_eq!(
+                column.terminal_inset_logical_px(),
+                column.width_logical_px(),
+                "while the card column costs every pixel it covers — it is not"
             );
         }
     }
@@ -26048,7 +26202,7 @@ mod tests {",
         }
     }
 
-    /// PIN (§7.1.6b′ ⑤) — **the way out is a target of its own, at the head of
+    /// PIN (§7.1.6b′) — **the way out is a target of its own, at the head of
     /// the column, and the list scrolls under it rather than over it.**
     ///
     /// *"一个只能靠记住快捷键才出得来的模式是个陷阱"*. The bar stands where the
@@ -26056,10 +26210,15 @@ mod tests {",
     /// is `position: sticky` expressed the way this module already expresses it,
     /// and is what stops a long column scrolling the exit away.
     ///
+    /// **It carries more weight since 2026-08-19**, when the ruling withdrew the
+    /// pane-header double-click and the pane menu's row: this button, the `Esc`
+    /// rung, the chord and the `Appearance` row are now the whole list of ways
+    /// out, and this is the only one of the four a reader can *see*.
+    ///
     /// Red gate: fold the exit into the bar's own target and the first assertion
     /// goes red; start the list at the column's top and the second does.
     #[test]
-    fn door_five_is_its_own_target_and_the_cards_scroll_beneath_it() {
+    fn the_visible_way_out_is_its_own_target_and_the_cards_scroll_beneath_it() {
         let state = focus_rail(TabLayoutMode::Vertical);
         let trailers = resting(30);
         let column = focus_of(state, trailers.len());
