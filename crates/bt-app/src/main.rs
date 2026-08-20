@@ -3839,6 +3839,30 @@ struct LeafSession {
     /// `None` for a leaf with no process behind it (the probe path), where there
     /// is no program and therefore nothing for a title to be repeating.
     program: Option<PathBuf>,
+    /// **Where this shell was put down**, in its own profile's namespace —
+    /// [`profiles::SpawnPlace::directory`], kept because only the spawn knew it.
+    ///
+    /// §7.1.4 gives one ladder for "where was this tab": the last trusted OSC 7
+    /// report, then the initial cwd, then `HOME`. `Restart shell` implements all
+    /// three; the vault implemented the first and wrote an empty string for the
+    /// rest, which is what put nameless rows in `RECENTLY OPENED` — a line
+    /// offering to bring something back without saying what.
+    ///
+    /// This field is the second and third rungs, resolved once and held. It is
+    /// **not** re-derived at the reader, and could not be: `profiles::spawn_place`
+    /// needs a `ShellEnvironment` and the profile's own table row, neither of
+    /// which a `TabState` has, and an answer computed later would drift with the
+    /// table anyway — a profile edited after this shell started would rewrite
+    /// history about where it began.
+    ///
+    /// Beside [`Self::program`] and for the same reason: it is a fact about the
+    /// process, so it travels with the leaf through a tear-out rather than being
+    /// re-derived from whichever tab the pane landed in.
+    ///
+    /// Runtime only — nothing writes it to disk. What a session file and a vault
+    /// row carry is the *string* this helps compute, in the field that already
+    /// held one, so no schema moves.
+    spawn_place: Option<PathBuf>,
     session: DualPlaneSession,
     /// **This pane's place in the attention queue**, or `None` when it is not in
     /// it (§7.1.5b P1-8, landed with §7.1.6b′ F3).
@@ -6355,11 +6379,26 @@ impl TabState {
     ///
     /// One computation, because there are three doors and they must not disagree
     /// about what a tab *is*: the vault, the session file and the restore prompt
-    /// all read this. The `cwd` is **that seat's own shell's** last OSC 7 report
-    /// and nothing else — not a guess, not a filesystem probe, and not a
-    /// sibling's. A shell that never reported one seeds an empty place, and
-    /// reviving that starts where a fresh tab would, which is the honest answer
-    /// to "where was it?" when nobody said.
+    /// all read this. The `cwd` is **that seat's own shell's** — not a sibling's,
+    /// not a filesystem probe, and never a guess.
+    ///
+    /// **The whole ladder, at last** (§7.1.4, and the ruling it states about
+    /// `Restart shell`: 保最后一次可信上报的 cwd —— OSC 7,无上报则初始 cwd,再退
+    /// HOME). This built only the first rung: a shell that had never reported an
+    /// OSC 7 seeded the empty string, which is a place that cannot be named, and
+    /// `RECENTLY OPENED` drew it as a row with no caption — an offer to bring
+    /// something back without saying what. `Restart shell` had all three rungs
+    /// and this door had one, for the same tab.
+    ///
+    /// The other two rungs are [`LeafSession::spawn_place`], which is where they
+    /// have to be: they are answers only the spawn knew, and the second of them
+    /// (`HOME`) is already folded into the first by `profiles::spawn_place`, so
+    /// this is one lookup rather than a second copy of the ladder.
+    ///
+    /// A leaf with no answer at any rung still seeds the empty string, and that
+    /// is still honest — it is a machine that cannot name where its own shell is
+    /// standing. What changed is that the vault now refuses to *store* such a row
+    /// ([`seed::SeedVault::record`]) instead of drawing it blank.
     ///
     /// `profile_id` is now **this leaf's own**, which is what the file always
     /// claimed it was. The field has been per-leaf on disk since v1 (§3.3) while
@@ -6383,7 +6422,12 @@ impl TabState {
             cwd: self
                 .sessions
                 .get(&seat)
-                .and_then(|leaf| leaf.session.working_directory())
+                .and_then(|leaf| {
+                    leaf.session
+                        .working_directory()
+                        .map(Path::to_path_buf)
+                        .or_else(|| leaf.spawn_place.clone())
+                })
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             manual_name: self.manual_name.clone(),
@@ -15608,7 +15652,12 @@ fn persisted_files_leaves(node: &LayoutNodeV1) -> Vec<&bt_persist::FilesLeafV1> 
 /// A tree with neither is still possible on paper — every leaf an unknown kind
 /// from a newer build — and it answers with an empty root, because there is
 /// genuinely nothing here to name it with. That is the honest row, and it is the
-/// same row the degradation ladder (M177) already promises.
+/// same row the degradation ladder (M177) already promises. **The vault will not
+/// keep it** ([`seed::Seed::names_itself`], 2026-08-20): the restore prompt draws
+/// a row per tab it is asking about and so must answer for every tab, and Recent
+/// offers rows you choose between and so must be able to caption each one. Two
+/// different questions, one seed, and the difference is settled at the store's
+/// door rather than by this function answering `Option`.
 ///
 /// **And a tab that holds only a preview is named by the file it was on**
 /// (multiwindow slice D). It takes the whole `TabV1` rather than its tree for
@@ -15963,6 +16012,42 @@ fn split_axis(direction: bt_persist::SplitDirectionV1, auto: Axis) -> Axis {
     }
 }
 
+/// **Where a new tab's shell stands** — the folder somebody named, or the one
+/// the pane you were looking at is standing in.
+///
+/// A free function for [`split_axis`]'s reason: it is the whole of what
+/// `New terminal in folder…` promises, and a promise that needs a live window
+/// and a ConPTY to state is a promise no test ever reads back.
+///
+/// **A named place wins outright.** `cwd_for_spawn` answers "where does a tab
+/// opened from *this* pane start", which is the right question for the `+` and
+/// for every picker row, and the wrong one for a row whose entire content is a
+/// folder the user just pointed at in a dialog. Feeding the chosen folder
+/// through the inheritance instead would let the pane under the menu overrule
+/// the answer — silently, and only on machines where the two profiles' spellings
+/// disagree.
+///
+/// Both branches end in the target profile's own namespace, which is what
+/// [`LeafSeed::cwd`] means by contract. The chooser speaks Windows, so a named
+/// place is crossed from there; a profile with no name for it inherits nothing
+/// rather than a path it cannot read, and starts where a fresh tab of that
+/// profile starts — `cwd_for_spawn`'s own rule, not a second one.
+fn new_tab_cwd(
+    profile: usize,
+    place: Option<&Path>,
+    source_profile: usize,
+    focused: Option<&Path>,
+) -> Option<PathBuf> {
+    match place {
+        Some(place) => profiles::translate_cwd(
+            profiles::PathNamespace::Windows,
+            profiles::paths(profile),
+            place,
+        ),
+        None => profiles::cwd_for_spawn(source_profile, profile, focused),
+    }
+}
+
 /// **What a returned folder pick actually asks the window to do**, if anything.
 ///
 /// Split out of [`Runtime::apply_folder_pick_result`] so that the three ways a
@@ -16026,6 +16111,14 @@ enum FolderPick {
     /// `New terminal in folder…` on a pane's menu (2026-08-16): split this pane,
     /// with the chosen folder as the arriving shell's directory.
     SplitInto(SeatId),
+    /// `New terminal in folder…` on the **new-tab** menu (user ruling
+    /// 2026-08-20): a whole tab there, on the default profile.
+    ///
+    /// Carries nothing, and the difference from [`Self::SplitInto`] is exactly
+    /// that: a split is about a pane that must still exist when the dialog shuts,
+    /// and a new tab is about no pane at all. There is nothing here that a minute
+    /// of an open chooser could invalidate.
+    NewTabIn,
     /// `Choose a folder…` in the profile editor's starting-directory picker: pin
     /// this profile to a fixed place (§7.1.6c-6b).
     ProfileStart(usize),
@@ -16237,6 +16330,30 @@ fn create_leaf_session(
     if chosen_id == profiles::WINDOWS_POWERSHELL_ID {
         psreadline::begin_probe();
     }
+    // **Where it opens, decided once for both paths.** A leaf with a directory
+    // of its own — inherited from the pane it was split off, revived from disk,
+    // translated across from the tab you were looking at — uses it; a leaf
+    // without one gets the profile's own starting directory. Either way the
+    // answer travels on the channel this profile's launcher listens on, which is
+    // the thing `profiles::spawn_place` exists to decide: a WSL leaf's directory
+    // is written in WSL's namespace and must be *said to the launcher*, not
+    // handed to `CreateProcess`, where it would fail the existence check and be
+    // silently replaced by this process's own folder.
+    //
+    // A leaf that is handed nothing at all used to reach `bt-pty` as `None`,
+    // which resolves to this process's working directory: the folder Folio
+    // itself was launched from, which for a shell started from an installed
+    // shortcut is `C:\WINDOWS\system32`. That is not a place anybody meant.
+    //
+    // Hoisted out of the spawn branch because `LeafSession::spawn_place` is the
+    // second rung of §7.1.4's ladder and a leaf is asked where it stands whether
+    // or not a process was started behind it.
+    let place = profiles::spawn_place(
+        seed.profile,
+        seed.cwd.clone(),
+        &bt_pty::SystemShellEnvironment,
+    );
+    let spawn_place = place.directory.clone();
     let mut resolved_program = None;
     let mut pty = if probe_input.is_none() {
         // **The line the picker was missing.** Choosing a profile used to change
@@ -16261,26 +16378,6 @@ fn create_leaf_session(
                 chosen_id
             )
         });
-        // **Where it opens.** A leaf with a directory of its own — inherited
-        // from the pane it was split off, revived from disk, translated across
-        // from the tab you were looking at — uses it; a leaf without one gets
-        // the profile's own starting directory. Either way the answer travels on
-        // the channel this profile's launcher listens on, which is the thing
-        // `profiles::spawn_place` exists to decide: a WSL leaf's directory is
-        // written in WSL's namespace and must be *said to the launcher*, not
-        // handed to `CreateProcess`, where it would fail the existence check and
-        // be silently replaced by this process's own folder.
-        //
-        // A leaf that is handed nothing at all used to reach `bt-pty` as `None`,
-        // which resolves to this process's working directory: the folder
-        // Folio itself was launched from, which for a shell started
-        // from an installed shortcut is `C:\WINDOWS\system32`. That is not a
-        // place anybody meant.
-        let place = profiles::spawn_place(
-            seed.profile,
-            seed.cwd.clone(),
-            &bt_pty::SystemShellEnvironment,
-        );
         // **And what makes it legible.** The profile's own arguments, the place,
         // and — for the bash family — the init file that installs OSC 133 and
         // OSC 7 into this one shell without touching anything the user owns.
@@ -16404,6 +16501,7 @@ fn create_leaf_session(
         pty,
         profile,
         program: resolved_program,
+        spawn_place,
         session,
         // Nobody has asked for anything yet.
         attention_ticket: None,
@@ -18949,18 +19047,36 @@ impl Runtime<'_> {
     /// so there is one sentence about what "new tab" means rather than a button's
     /// and a key's.
     fn new_tab(&mut self) -> Result<()> {
-        self.new_tab_with_profile(self.default_profile())
+        self.new_tab_with_profile(self.default_profile(), None)
     }
 
-    /// The picker's verb: a tab on the profile the row names.
+    /// The picker's verb: a tab on the profile the row names, optionally
+    /// standing somewhere the caller has already been told.
     ///
-    /// The parameter is the whole of the difference, and it is here rather than
-    /// deeper because this build launches one shell: routing it further would be
-    /// a parameter carried through three call frames to be ignored at the end of
-    /// them. What the door has to be is *open* — one entry point that takes which
-    /// profile, so a second profile is a launcher and not a new path through the
-    /// tab machinery.
-    fn new_tab_with_profile(&mut self, profile: usize) -> Result<()> {
+    /// The profile parameter is the whole of the difference between the `+` and
+    /// a picker row, and it is here rather than deeper because this build
+    /// launches one shell: routing it further would be a parameter carried
+    /// through three call frames to be ignored at the end of them. What the door
+    /// has to be is *open* — one entry point that takes which profile, so a
+    /// second profile is a launcher and not a new path through the tab
+    /// machinery.
+    ///
+    /// **`place` overrides the inheritance and does not merely feed it** (user
+    /// ruling 2026-08-20, `New terminal in folder…`). `cwd_for_spawn` answers
+    /// "where does a tab opened from *this* pane start", which is the right
+    /// question for every other door and the wrong one for this one: the folder
+    /// was named out loud in a dialog, and translating it out of the pane you
+    /// happened to be looking at would let the pane overrule the answer. `None`
+    /// is therefore "nobody said", and only then is the pane asked.
+    ///
+    /// It arrives in **the chooser's** namespace, which is Windows', and is
+    /// crossed into the profile's here — the same crossing `cwd_for_spawn` makes
+    /// on the other branch, because [`LeafSeed::cwd`] is by contract already
+    /// written in the namespace of the profile that will be spawned. A profile
+    /// that has no name for the chosen folder inherits nothing rather than a
+    /// path it cannot read, which is `cwd_for_spawn`'s own rule and not a second
+    /// one: it then starts where a fresh tab of that profile starts.
+    fn new_tab_with_profile(&mut self, profile: usize, place: Option<PathBuf>) -> Result<()> {
         debug_assert!(profile < profiles::count());
         let render_physical =
             presentation_physical_size(self.window.renderer.presentation_geometry());
@@ -18973,9 +19089,10 @@ impl Runtime<'_> {
         // exists to prevent. A tab with no shell reports no folder (§7.1.6h),
         // which `cwd_for_spawn` already has an answer for: a new tab opened from
         // a folder tab starts where a fresh one would.
-        let cwd = profiles::cwd_for_spawn(
-            self.session_profile(),
+        let cwd = new_tab_cwd(
             profile,
+            place.as_deref(),
+            self.session_profile(),
             self.focused()
                 .and_then(|leaf| leaf.session.working_directory()),
         );
@@ -22710,50 +22827,35 @@ impl Runtime<'_> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         // The button that opened the menu is the button the menu hangs off, and
-        // in a vertical layout that button is in the rail. Reading the
-        // horizontal strip's `˅` regardless is what put the picker adrift in the
-        // middle of the terminal: `tab_strip_geometry` is a pure function of a
-        // width and a trailer list, so it goes on answering with a box in the
-        // title bar long after the tabs have moved down the side.
-        // **The column answers first**, and it has to (§7.1.6b′): the focus rail
-        // keeps the panel's `+` and its `˅`, and `hit_focus_rail` answers
-        // `NewTabMenu` for it — so in focus mode this menu is reachable from a
-        // button that is *not* the one either branch below describes. Reading
-        // the horizontal strip's `˅` here is the very mistake this function's
-        // own comment is about, one surface later: `tab_strip_geometry` would go
-        // on answering with a box in the title bar and hang the picker there.
+        // which surface holds it is [`profile_menu_anchor`]'s whole subject —
+        // three geometries and a precedence rule, kept pure and kept out of
+        // here, because the version that lived inline picked its answers in an
+        // order that could return out of the function between them. See that
+        // function's doc for the dead switch this shape exists to prevent.
+        //
+        // All three surfaces are measured before the choice is made rather than
+        // measured inside the arm that wants them. That is what "pure" costs and
+        // what it buys: every one of the three is a pure function of numbers this
+        // window already has, and none of them can now abort the walk.
         let column = self
             .window
             .focus_mode
             .then(|| self.focus_rail_geometry_now(now))
-            .flatten()
-            .map(|column| (column.new_tab_menu, profiles::MenuSide::Beside));
-        let (anchor, side) = match self.window.rail.layout {
-            seats::TabLayoutMode::Vertical => {
-                let rail = self.rail_geometry_now(now)?;
-                // Q181: a parked rail has no chevron — 28px of it would leave the
-                // `+` nothing — so the `+` is what the menu hangs off there. The
-                // two share a right edge and a top, so the menu does not jump
-                // when the panel slides open and the chevron reappears.
-                (
-                    rail.new_tab_menu.unwrap_or(rail.new_tab),
-                    profiles::MenuSide::Beside,
-                )
-            }
-            seats::TabLayoutMode::Horizontal => (
-                seats::tab_strip_geometry(
-                    width as f32,
-                    scale,
-                    &self.tab_trailers(now),
-                    self.window.active_tab,
-                    self.window.tab_scroll,
-                )
-                .new_tab_menu,
-                profiles::MenuSide::Below,
-            ),
-        };
-        // Whichever surface is actually holding the button.
-        let (anchor, side) = column.unwrap_or((anchor, side));
+            .flatten();
+        let rail = self.rail_geometry_now(now);
+        let strip = seats::tab_strip_geometry(
+            width as f32,
+            scale,
+            &self.tab_trailers(now),
+            self.window.active_tab,
+            self.window.tab_scroll,
+        );
+        let (anchor, side) = profile_menu_anchor(
+            column.as_ref(),
+            rail.as_ref(),
+            strip.new_tab_menu,
+            self.window.rail.layout,
+        )?;
         // The menu is content-sized, so laying it out is a measuring job — the
         // same renderer, the same font, the same call `build` makes when it
         // draws the strings this width was computed from.
@@ -37124,6 +37226,14 @@ impl Runtime<'_> {
                     )?;
                 }
             }
+            // And for the whole window: the `+`'s own verb, told where to stand.
+            // The default profile, because that is what "new tab" means
+            // everywhere else in this build (`Runtime::new_tab`, `Ctrl+Shift+N`,
+            // the `+`'s tooltip) — this row chose a *place*, and choosing a shell
+            // as well is what the four rows above it are for.
+            FolderPick::NewTabIn => {
+                self.new_tab_with_profile(self.default_profile(), Some(path))?;
+            }
         }
         Ok(())
     }
@@ -40534,6 +40644,54 @@ impl Runtime<'_> {
             Ok(true) => self.window.folder_pick = Some(FolderPick::SplitInto(seat)),
             // Already queued or already open: a second request while one is up
             // is one dialog, not two, and whoever asked first keeps the answer.
+            Ok(false) => {}
+            Err(error) => eprintln!("recoverable folder chooser failure: {error}"),
+        }
+    }
+
+    /// **`New terminal in folder…`, from the new-tab menu** — ask the system for
+    /// a folder and open a tab there (user ruling 2026-08-20).
+    ///
+    /// [`Runtime::browse_for_split_root`]'s sibling and its whole difference is
+    /// the container: that row gives the pane you are in a neighbour, this one
+    /// gives the window a tab. Both queue rather than show, for the reason
+    /// written out at length on [`Runtime::browse_for_root`] — `IFileDialog::Show`
+    /// runs a nested message loop under the `&mut` borrow that started it.
+    ///
+    /// **The menu is already gone**: the picker's press router closes it before
+    /// it dispatches any row, which is §7.1.6e's requirement and not something
+    /// this verb has to remember. A popup left standing behind a system modal is
+    /// a popup nothing can dismiss.
+    ///
+    /// Where the chooser opens is the same courtesy every other door shows: the
+    /// folder the pane you are looking at last reported (OSC 7), and failing
+    /// that the place a tab of the default profile would have started in anyway.
+    /// The second half is asked of the profile rather than of this process,
+    /// because "wherever Folio happens to be running from" is
+    /// `C:\WINDOWS\system32` for an installed shortcut, which is not a place
+    /// anybody meant.
+    fn browse_for_new_tab_root(&mut self) {
+        let start = self
+            .focused()
+            .and_then(|leaf| leaf.session.working_directory().map(Path::to_path_buf))
+            .or_else(|| {
+                // `working_directory` and not the whole place: this is a Windows
+                // dialog, and that field is by construction the half of a
+                // `SpawnPlace` a Windows process can be handed. A profile that
+                // names its home to a launcher instead has no Windows spelling
+                // for it, and `None` there is the honest answer rather than a
+                // path the chooser would reject.
+                profiles::spawn_place(
+                    self.default_profile(),
+                    None,
+                    &bt_pty::SystemShellEnvironment,
+                )
+                .working_directory
+            });
+        match self.window.folder_picker.request(start.as_deref()) {
+            Ok(true) => self.window.folder_pick = Some(FolderPick::NewTabIn),
+            // Already queued or already open: a second request while one is up is
+            // one dialog, not two, and whoever asked first keeps the answer.
             Ok(false) => {}
             Err(error) => eprintln!("recoverable folder chooser failure: {error}"),
         }
@@ -49643,7 +49801,7 @@ impl Runtime<'_> {
                         // different things in two different sections.
                         match row {
                             Some(profiles::MenuRow::Profile(index)) => {
-                                self.new_tab_with_profile(index)?;
+                                self.new_tab_with_profile(index, None)?;
                             }
                             Some(profiles::MenuRow::Recent(index)) => {
                                 self.reopen_recent(index)?;
@@ -49654,6 +49812,12 @@ impl Runtime<'_> {
                             // reaches.
                             Some(profiles::MenuRow::FilesPane) => {
                                 self.toggle_files_pane()?;
+                            }
+                            // The picker's own `close_profile_menu` above is
+                            // what §7.1.6e asks for here: the menu is already
+                            // shut before a system modal goes up over it.
+                            Some(profiles::MenuRow::NewInFolder) => {
+                                self.browse_for_new_tab_root();
                             }
                             None => {}
                         }
@@ -54955,6 +55119,54 @@ fn display_title(
 /// subtlety a copy would lose. `None` is the fourth layer, which is nobody's
 /// claim: the profile's own name is what a tab is called when no one has said
 /// anything about it, and it has no provenance to report.
+/// **Which button the profile picker hangs off** — the fifth reader of the one
+/// fact [`tab_surface_tip_boxes`]'s doc lists four readers of, and the first one
+/// that got it wrong in a way nothing could see.
+///
+/// The rule is one sentence: **ask the column first, and if it answered that is
+/// the answer**; only a window with no focus column falls through to the two
+/// ordinary surfaces, where a vertical layout hangs the menu off the rail and a
+/// horizontal one off the strip. `None` means there is no button on screen to
+/// hang it off at all, which is a real state — a vertical layout whose rail is
+/// not being drawn — and not a failure.
+///
+/// **Pure, and that is the fix.** The live version computed the column's answer
+/// and then wrote `self.rail_geometry_now(now)?` on the way to a fallback it was
+/// never going to use: in focus mode `seats::rail_geometry` answers `None` by
+/// design, so the `?` returned out of the whole function and the picker's layout
+/// came back `None` while its state said open. The chevron flipped to `^`,
+/// `refresh_overlay` drew nothing, the press router had no rectangles to hit —
+/// a dead switch you could not even click away, in exactly one configuration
+/// (focus mode over a vertical rail). Precedence expressed as data cannot make
+/// that mistake, because there is no early return between the two answers.
+fn profile_menu_anchor(
+    focus_column: Option<&seats::FocusRailGeometry>,
+    rail: Option<&seats::RailGeometry>,
+    strip_new_tab_menu: [f32; 4],
+    layout: seats::TabLayoutMode,
+) -> Option<([f32; 4], profiles::MenuSide)> {
+    // §7.1.6b′: the focus column keeps the panel's `+` and its `˅`, and
+    // `hit_focus_rail` answers `NewTabMenu` for it — so in focus mode the button
+    // that opened this menu is not the one either arm below describes.
+    if let Some(column) = focus_column {
+        return Some((column.new_tab_menu, profiles::MenuSide::Beside));
+    }
+    match layout {
+        seats::TabLayoutMode::Vertical => {
+            // Q181: a parked rail has no chevron — 28px of it would leave the
+            // `+` nothing — so the `+` is what the menu hangs off there. The two
+            // share a right edge and a top, so the menu does not jump when the
+            // panel slides open and the chevron reappears.
+            let rail = rail?;
+            Some((
+                rail.new_tab_menu.unwrap_or(rail.new_tab),
+                profiles::MenuSide::Beside,
+            ))
+        }
+        seats::TabLayoutMode::Horizontal => Some((strip_new_tab_menu, profiles::MenuSide::Below)),
+    }
+}
+
 /// Every tippable box of the **tab surface** that is actually on screen, in
 /// innermost-first order.
 ///
@@ -66002,6 +66214,168 @@ mod tests {
         );
     }
 
+    /// PIN — a tab opened by `New terminal in folder…` stands in the folder that
+    /// was chosen, whatever the pane under the menu was standing in (user ruling
+    /// 2026-08-20).
+    ///
+    /// Red gate: `new_tab_with_profile` had one answer to "where does this
+    /// start" — `cwd_for_spawn` off the focused pane — and a row that opens a
+    /// dialog has a different one. Feeding the chosen folder through the
+    /// inheritance instead of over it is the failure that looks like the feature
+    /// working: on a machine whose panes all speak Windows the two answers agree,
+    /// and the day one of them is a WSL pane the tab opens somewhere else.
+    ///
+    /// And the cancel: a chooser that comes back with nothing asks for nothing.
+    #[test]
+    fn a_tab_opened_in_a_chosen_folder_stands_there_and_not_where_the_pane_was() {
+        let pwsh = profiles::index_of_id("pwsh");
+        let wsl = profiles::index_of_id("wsl");
+        let chosen = PathBuf::from(r"D:\Developer\BetterTerminal");
+        let pane = PathBuf::from(r"C:\Users\dev\elsewhere");
+
+        assert_eq!(
+            new_tab_cwd(pwsh, Some(&chosen), pwsh, Some(&pane)),
+            Some(chosen.clone()),
+            "the folder that was named out loud wins over the pane's own"
+        );
+        // The crossing is the chooser's, and the chooser speaks Windows: a WSL
+        // tab opened on a Windows folder lands in WSL's spelling of it, which is
+        // the same journey `StartAt::Fixed` makes at spawn.
+        assert_eq!(
+            new_tab_cwd(wsl, Some(&chosen), pwsh, Some(&pane)),
+            Some(PathBuf::from("/mnt/d/Developer/BetterTerminal")),
+        );
+        // Nobody said: the pane answers, exactly as it did before this row
+        // existed.
+        assert_eq!(
+            new_tab_cwd(pwsh, None, pwsh, Some(&pane)),
+            Some(pane.clone()),
+        );
+        assert_eq!(new_tab_cwd(pwsh, None, pwsh, None), None);
+
+        // A cancelled chooser asks for nothing at all — no tab, no toast.
+        assert_eq!(
+            folder_pick_outcome(Some(FolderPick::NewTabIn), Ok(None)),
+            None,
+        );
+        assert_eq!(
+            folder_pick_outcome(Some(FolderPick::NewTabIn), Ok(Some(chosen.clone()))),
+            Some((FolderPick::NewTabIn, chosen)),
+        );
+    }
+
+    /// PIN — the profile picker hangs off the button that is **drawn**, and in
+    /// focus mode that button is the column's.
+    ///
+    /// Red gate. `profile_menu_layout` computed the column's anchor first and
+    /// then walked into `self.rail_geometry_now(now)?` on its way to a fallback
+    /// it was about to discard — and `seats::rail_geometry` answers `None` for
+    /// every focus-mode window by design, so the `?` returned out of the whole
+    /// function. `toggle_profile_menu` had already flipped the state to open (the
+    /// chevron turned `^`), `refresh_overlay` gates the drawing on this layout
+    /// and drew nothing, and the press router gates on it too and so could
+    /// neither hit a row nor click the menu away. A dead switch, in exactly one
+    /// configuration: `focus_mode && layout == Vertical`.
+    ///
+    /// The first assertion is the one that was red. The rest are the precedence
+    /// rule's other corners, kept beside it because a fix that answered the
+    /// column *instead of* the two ordinary surfaces would pass the first alone.
+    #[test]
+    fn the_profile_picker_hangs_off_the_new_tab_button_that_is_on_screen() {
+        let scale = 1.0;
+        let trailers = [seats::TabTrailer {
+            pinned: false,
+            reveal: 1.0,
+            ..seats::TabTrailer::default()
+        }];
+        let strip = seats::tab_strip_geometry(960.0, scale, &trailers, 0, 0.0);
+        let column = seats::focus_rail_geometry(
+            600.0,
+            scale,
+            trailers.len(),
+            40.0,
+            0.0,
+            seats::RailState {
+                focus: true,
+                ..rail_state_for(seats::TabLayoutMode::Vertical, seats::RailMode::Expanded)
+            },
+        )
+        .expect("a focus-mode window draws its card column");
+        let rail = seats::rail_geometry(
+            600.0,
+            scale,
+            &trailers,
+            0,
+            0.0,
+            seats::RailState {
+                open: 1.0,
+                ..rail_state_for(seats::TabLayoutMode::Vertical, seats::RailMode::Expanded)
+            },
+        )
+        .expect("an expanded rail holding one tab is on screen");
+
+        // The bug, stated: focus mode over a vertical layout has a card column
+        // and **no** ordinary rail, and the menu still has a button to hang off.
+        assert_eq!(
+            profile_menu_anchor(
+                Some(&column),
+                None,
+                strip.new_tab_menu,
+                seats::TabLayoutMode::Vertical,
+            ),
+            Some((column.new_tab_menu, profiles::MenuSide::Beside)),
+            "the column answers first, and a rail that is not drawn is not a \
+             reason to answer nothing"
+        );
+        // The column supersedes the layout rather than combining with it
+        // (`RailState::focus`'s own sentence): focus mode over a horizontal
+        // strip hangs the menu off the column too, and beside it, not below.
+        assert_eq!(
+            profile_menu_anchor(
+                Some(&column),
+                None,
+                strip.new_tab_menu,
+                seats::TabLayoutMode::Horizontal,
+            ),
+            Some((column.new_tab_menu, profiles::MenuSide::Beside)),
+        );
+
+        // And with no column, the two ordinary surfaces answer as they always
+        // did — including the vertical layout's honest `None`.
+        assert_eq!(
+            profile_menu_anchor(
+                None,
+                Some(&rail),
+                strip.new_tab_menu,
+                seats::TabLayoutMode::Vertical
+            ),
+            Some((
+                rail.new_tab_menu.expect("an open rail draws its chevron"),
+                profiles::MenuSide::Beside
+            )),
+        );
+        assert_eq!(
+            profile_menu_anchor(
+                None,
+                None,
+                strip.new_tab_menu,
+                seats::TabLayoutMode::Vertical
+            ),
+            None,
+            "a vertical window with no rail on screen has no button to hang it off"
+        );
+        assert_eq!(
+            profile_menu_anchor(
+                None,
+                Some(&rail),
+                strip.new_tab_menu,
+                seats::TabLayoutMode::Horizontal,
+            ),
+            Some((strip.new_tab_menu, profiles::MenuSide::Below)),
+            "and a horizontal one reads the strip, whatever a rail geometry says"
+        );
+    }
+
     /// The caption run's four boxes map to four tooltip anchors and nothing else
     /// does — a divider is a click target nobody hovers for an explanation.
     #[test]
@@ -74913,6 +75287,100 @@ mod tests {
         );
     }
 
+    /// One lone-terminal tab holding exactly this shell.
+    fn tab_holding(leaf: LeafSession) -> TabState {
+        let seats = seats::Seats::lone_terminal();
+        let identity = seats.identity();
+        let (layout, overflow) = cross_solve(&seats);
+        assemble_tab_state(
+            TabId(1),
+            BTreeMap::from([(identity, leaf)]),
+            BTreeMap::new(),
+            preview::PreviewPool::default(),
+            PreviewPanes::default(),
+            BTreeMap::new(),
+            identity,
+            TabSeed::default(),
+            seats,
+            layout,
+            overflow,
+        )
+    }
+
+    /// PIN — §7.1.4's whole ladder: a tab that never heard an OSC 7 is seeded
+    /// with **the place its shell was put down**, not with nothing.
+    ///
+    /// Red gate, and the visible half of it is a row in `RECENTLY OPENED` with
+    /// no caption: `cwd_leaf("")` is the empty string, so closing a tab whose
+    /// shell had not yet reported a folder — every `cmd.exe` tab, every shell
+    /// with no integration script, and every tab closed inside the first second
+    /// of its life — put a blank line in the menu. `Restart shell` has answered
+    /// this with three rungs since §7.1.4 was written; this door had one.
+    #[test]
+    fn a_tab_that_never_reported_a_folder_is_seeded_where_its_shell_was_put_down() {
+        let started_in = PathBuf::from(r"C:\Users\dev");
+        let tab = tab_holding(LeafSession {
+            spawn_place: Some(started_in.clone()),
+            ..leaf_saying("no report from this one")
+        });
+        assert_eq!(
+            tab.seed(),
+            Some(seed::Seed::Term {
+                profile_id: profiles::id(profiles::fallback_profile()),
+                cwd: started_in.to_string_lossy().into_owned(),
+                manual_name: None,
+            }),
+            "the second rung of the ladder, which the vault had never been told"
+        );
+        // And it is a row the vault will actually keep, which is the point of
+        // computing it: the same tab used to seed an empty place and be refused.
+        let mut vault = seed::SeedVault::default();
+        vault.record(
+            tab.seed().expect("a terminal tab seeds"),
+            Vec::new(),
+            SystemTime::UNIX_EPOCH,
+        );
+        assert_eq!(vault.len(), 1);
+
+        // A report supersedes it the moment one arrives — the first rung is
+        // still first, and it is the only one anybody actually *said*.
+        let reported = tab_holding(LeafSession {
+            spawn_place: Some(started_in.clone()),
+            ..leaf_saying("\u{1b}]7;file://localhost/D:/Developer/BetterTerminal\u{7}")
+        });
+        assert_eq!(
+            reported.seed(),
+            Some(seed::Seed::Term {
+                profile_id: profiles::id(profiles::fallback_profile()),
+                cwd: r"D:\Developer\BetterTerminal".to_owned(),
+                manual_name: None,
+            }),
+        );
+
+        // And a machine that can name neither still says nothing rather than
+        // guessing — the honest empty place, which the vault then declines to
+        // store rather than drawing blank.
+        let nowhere = tab_holding(leaf_saying("no report and no place"));
+        assert_eq!(
+            nowhere.seed(),
+            Some(seed::Seed::Term {
+                profile_id: profiles::id(profiles::fallback_profile()),
+                cwd: String::new(),
+                manual_name: None,
+            }),
+        );
+        let mut vault = seed::SeedVault::default();
+        vault.record(
+            nowhere.seed().expect("a terminal tab seeds"),
+            Vec::new(),
+            SystemTime::UNIX_EPOCH,
+        );
+        assert!(
+            vault.is_empty(),
+            "an unwritable row is not written rather than written as a guess"
+        );
+    }
+
     /// PIN — M175. The restore prompt names a files-only tab by the folder it
     /// was looking at, not by nothing at all.
     ///
@@ -76568,6 +77036,8 @@ mod tests {
             // And no program either, which is the honest shape of the same
             // fact: nothing was started, so nothing can have announced itself.
             program: None,
+            // Nor a place: a fixture was never put down anywhere.
+            spawn_place: None,
             session,
             attention_ticket: None,
             projection,

@@ -3056,6 +3056,25 @@ pub struct SpawnPlace {
     pub working_directory: Option<PathBuf>,
     /// Appended to the profile's own arguments.
     pub arguments: Vec<OsString>,
+    /// **The place itself**, written in this profile's own namespace, whichever
+    /// of the two channels above ended up carrying it — and `None` only when
+    /// this machine could not name one at all.
+    ///
+    /// Not a duplicate of [`Self::working_directory`]: that field is the half a
+    /// *Windows process* can be handed, and it is empty by construction for a
+    /// profile whose place goes to a launcher instead. Both fields answer
+    /// questions the spawn asks; this one answers a question asked afterwards —
+    /// "where is this shell standing, before it has said anything?" — which
+    /// `TabState::term_leaf` needs for a leaf that never reported an OSC 7 and
+    /// which neither channel alone can answer.
+    ///
+    /// Computed here rather than at the reader, because here is the only place
+    /// that has the profile's table row, the inheritance and the environment at
+    /// once. §7.1.4 gives the chain as OSC 7 → the initial cwd → `HOME`, and the
+    /// second and third links are both this field: the fall to a home is already
+    /// inside the two arms below, so a reader gets one answer instead of a
+    /// second copy of the ladder.
+    pub directory: Option<PathBuf>,
 }
 
 /// A directory a leaf of `profile` was saved standing in, if it is still a
@@ -3168,18 +3187,25 @@ fn place_for(
         StartAt::Fixed(fixed) => translate_cwd(PathNamespace::Windows, namespace, &fixed),
     };
     match starting_dir {
-        StartingDir::WindowsHome => SpawnPlace {
-            working_directory: place
-                .or_else(|| environment.var_os("USERPROFILE").map(PathBuf::from)),
-            arguments: Vec::new(),
-        },
-        StartingDir::LauncherFlag { flag, home } => SpawnPlace {
-            working_directory: None,
-            arguments: vec![
-                OsString::from(flag.clone()),
-                place.map_or_else(|| OsString::from(home.clone()), PathBuf::into_os_string),
-            ],
-        },
+        StartingDir::WindowsHome => {
+            let directory = place.or_else(|| environment.var_os("USERPROFILE").map(PathBuf::from));
+            SpawnPlace {
+                working_directory: directory.clone(),
+                arguments: Vec::new(),
+                directory,
+            }
+        }
+        StartingDir::LauncherFlag { flag, home } => {
+            let directory = place.unwrap_or_else(|| PathBuf::from(home.clone()));
+            SpawnPlace {
+                working_directory: None,
+                arguments: vec![
+                    OsString::from(flag.clone()),
+                    directory.clone().into_os_string(),
+                ],
+                directory: Some(directory),
+            }
+        }
     }
 }
 
@@ -3372,6 +3398,15 @@ pub enum MenuRow {
     /// list, and a row that names no list is precisely the row that would have
     /// been mis-read as `Profile(4)` if the menu had gone on counting rows.
     FilesPane,
+    /// `New terminal in folder…` — a tab on the default profile, standing in a
+    /// folder the system's own chooser is about to ask for (user ruling
+    /// 2026-08-20).
+    ///
+    /// Indexes nothing, for [`Self::FilesPane`]'s reason, and carries no path
+    /// either: the row is the *question*, and the answer arrives a modal dialog
+    /// later. A variant holding a `PathBuf` would be a row claiming to know
+    /// where it was going before anybody said.
+    NewInFolder,
 }
 
 /// Whether the picker is up, and which row the pointer is on.
@@ -3437,15 +3472,18 @@ pub struct ProfileMenuLayout {
     /// and the hit test both read it rather than each recomputing which rows are
     /// on offer.
     profiles: Vec<usize>,
-    /// The `.menu-sep` above the `Files pane` row.
+    /// The `.menu-sep` above the middle section.
     ///
     /// Unconditional where the Recent separator is optional, and the asymmetry
     /// is the mock-up's: a Recent heading over an empty list is a promise the
-    /// menu cannot keep, while `Files pane` is always available — every tab can
-    /// be given a files column.
+    /// menu cannot keep, while both rows below this rule are always available —
+    /// every tab can be given a files column, and the folder chooser is a
+    /// question this window can always ask.
     files_separator: [f32; 4],
     /// The `Files pane` row itself.
     files_pane: [f32; 4],
+    /// `New terminal in folder…`, under it (user ruling 2026-08-20).
+    new_in_folder: [f32; 4],
     /// `.menu-sep`'s 1px rule, or `None` when there is nothing to separate.
     ///
     /// The three Recent boxes are `Option`/empty together and never singly:
@@ -3580,8 +3618,11 @@ pub fn layout(
     } else {
         separator_block + section_block + item_height * recent.len() as f32
     };
-    // The second section is one rule and one row, and it is never absent.
-    let files_block = separator_block + item_height;
+    // The second section is one rule and **two** rows, and it is never absent:
+    // the two things in this menu that are about a *folder* rather than about a
+    // shell — give this tab a column on one, or open a terminal in one you are
+    // about to choose (user ruling 2026-08-20).
+    let files_block = separator_block + 2.0 * item_height;
 
     // **`min-width`, at last read as a minimum.** The mock-up's menu is
     // content-sized — `min-width: 180px` over `white-space: nowrap` rows — and
@@ -3623,7 +3664,17 @@ pub fn layout(
     // same reason they do and not the reason Recent does not: its caption and
     // its annotation are both this module's own constants, so their length is a
     // fact the product is responsible for making room for.
-    let files_row = row_content(files_pane_text(), px(ITEM_FONT_LOGICAL_PX), files_hint);
+    //
+    // `New terminal in folder…` joins them on the same footing and by the same
+    // sentence — its caption is one of this module's own strings — and it needs
+    // to, because in both languages it is the longest row in the menu. It
+    // carries no annotation: the rows above the rule all open a tab and say so
+    // with a hint, and this one opens a tab too, so there is no difference for a
+    // hint to be about. Its ellipsis is what it has to say, and the caption
+    // already says it.
+    let files_row = row_content(files_pane_text(), px(ITEM_FONT_LOGICAL_PX), files_hint).max(
+        row_content(new_in_folder_text(), px(ITEM_FONT_LOGICAL_PX), 0.0),
+    );
     let offered = table().offered();
     let content = offered
         .iter()
@@ -3688,6 +3739,8 @@ pub fn layout(
     cursor += separator_block;
     let files_pane = [content_left, cursor, content_right, cursor + item_height];
     cursor += item_height;
+    let new_in_folder = [content_left, cursor, content_right, cursor + item_height];
+    cursor += item_height;
     let (separator, section_label, recent_rows) = if recent.is_empty() {
         (None, None, Vec::new())
     } else {
@@ -3719,6 +3772,7 @@ pub fn layout(
         profiles: offered,
         files_separator,
         files_pane,
+        new_in_folder,
         separator,
         section_label,
         recent: recent_rows,
@@ -3767,6 +3821,13 @@ pub fn hit(
     // profile row there is no machine to probe for and no greyed state to be in.
     if contains(layout.files_pane, x, y) {
         return Some(Some(MenuRow::FilesPane));
+    }
+    // Available on the same terms and for a nearer reason: this row does not
+    // start a shell, it opens a question. Which profile answers it is decided
+    // after the folder is known, and the default profile is startable by
+    // construction (`default_profile` refuses one this machine cannot run).
+    if contains(layout.new_in_folder, x, y) {
+        return Some(Some(MenuRow::NewInFolder));
     }
     for (index, (row, entry)) in layout.recent.iter().zip(menu_rows(recent)).enumerate() {
         if contains(*row, x, y) {
@@ -3912,6 +3973,27 @@ pub fn build(
             hovered: hover == Some(MenuRow::FilesPane),
             // A files column needs no program behind it, so there is nothing
             // this machine could be missing and no greyed state to reach.
+            available: true,
+            pin: None,
+        },
+        scale,
+        palette,
+        &mut quads,
+        &mut labels,
+        &mut sprites,
+    );
+    push_row(
+        &Row {
+            rect: layout.new_in_folder,
+            // The same generic folder the pane menu's own `New terminal in
+            // folder…` wears (`PaneMenuRow::mark`). Two rows under one rule both
+            // marked with a folder is the section saying what it is: the glyph
+            // names the thing being chosen, not the thing being opened.
+            mark: Some(ChromeMark::Folder),
+            name: new_in_folder_text(),
+            hint: None,
+            hint_ink: None,
+            hovered: hover == Some(MenuRow::NewInFolder),
             available: true,
             pin: None,
         },
@@ -4306,8 +4388,10 @@ fn recent_label(seed: &Seed) -> &str {
         // a preview head already prints (§7.1.6h).
         Seed::Preview { path } => cwd_leaf(path),
         // **A window is captioned by the tab it opened with** (multiwindow slice
-        // D) — see [`Seed::first_tab`] for why the word "window" is in the tip
-        // rather than here. A window with no tab at all is not recorded, so the
+        // D) — or, since 2026-08-20, by the first one that can say what it is;
+        // see [`Seed::first_tab`] for that and for why the word "window" is in
+        // the tip rather than here. A window none of whose tabs can name
+        // themselves never reaches the vault (`Seed::names_itself`), so the
         // fallback is a shape nothing constructs; it answers the empty string
         // because that is what an unnameable row already answers above.
         Seed::Window { .. } => seed.first_tab().map_or("", recent_label),
@@ -9765,13 +9849,15 @@ mod tests {
 
     /// The height the Recent section adds at `scale`: `.menu-sep` with its two
     /// margins, `.menu-label` with its padding, and one row per seed.
-    /// The `Files pane` section: one rule and one row, always drawn.
+    /// The middle section: one rule and **two** rows, always drawn — `Files
+    /// pane` and `New terminal in folder…` (user ruling 2026-08-20).
     ///
     /// Named beside [`recent_block`] so the three height pins state the menu's
     /// shape the same way, and so the day this section grows a second row there
-    /// is one place to say so.
+    /// is one place to say so. That day was 2026-08-20, and this is the one
+    /// place.
     fn files_block(scale: f32) -> f32 {
-        separator_block(scale) + (ITEM_HEIGHT_LOGICAL_PX * scale).round()
+        separator_block(scale) + 2.0 * (ITEM_HEIGHT_LOGICAL_PX * scale).round()
     }
 
     /// `.menu-sep` — 1px between two 5px margins.
@@ -10339,9 +10425,10 @@ mod tests {
             .iter()
             .filter_map(|(row, _, text)| match row {
                 MenuRow::Profile(index) => Some((*index, text.clone())),
-                // The files row's caption says everything it knows, so it is
-                // never tipped — the same rule an available profile row follows.
-                MenuRow::Recent(_) | MenuRow::FilesPane => None,
+                // The two folder rows' captions say everything they know, so
+                // they are never tipped — the same rule an available profile row
+                // follows.
+                MenuRow::Recent(_) | MenuRow::FilesPane | MenuRow::NewInFolder => None,
             })
             .collect();
         assert_eq!(
@@ -10378,6 +10465,7 @@ mod tests {
                 MenuRow::Profile(index) => layout.items[*index],
                 MenuRow::Recent(index) => layout.recent[*index],
                 MenuRow::FilesPane => layout.files_pane,
+                MenuRow::NewInFolder => layout.new_in_folder,
             };
             assert_eq!(*rect, expected);
         }
@@ -10458,6 +10546,7 @@ mod tests {
                 SpawnPlace {
                     working_directory: Some(PathBuf::from(r"C:\Users\dev")),
                     arguments: Vec::new(),
+                    directory: Some(PathBuf::from(r"C:\Users\dev")),
                 },
                 "{profile} is a Windows process and takes a working directory"
             );
@@ -10467,6 +10556,10 @@ mod tests {
             SpawnPlace {
                 working_directory: None,
                 arguments: vec![OsString::from("--cd"), OsString::from("~")],
+                // The place itself is still said, on the one channel that can
+                // carry it. `~` is where this shell stands, and it is what a leaf
+                // that never reported an OSC 7 has to answer with.
+                directory: Some(PathBuf::from("~")),
             },
             "WSL's home has no Windows spelling, so it is asked for rather than handed over"
         );
@@ -10510,6 +10603,7 @@ mod tests {
             SpawnPlace {
                 working_directory: Some(PathBuf::from(r"D:\Developer")),
                 arguments: Vec::new(),
+                directory: Some(PathBuf::from(r"D:\Developer")),
             },
             "a Windows process is simply started there"
         );
@@ -10522,6 +10616,7 @@ mod tests {
             SpawnPlace {
                 working_directory: None,
                 arguments: vec![OsString::from("--cd"), OsString::from("/mnt/d/Developer")],
+                directory: Some(PathBuf::from("/mnt/d/Developer")),
             },
             "the launcher is told the place, in the namespace the shell reads"
         );
@@ -11471,10 +11566,145 @@ mod tests {
             );
             assert_eq!(
                 layer.sprites.len(),
-                count() + 1,
-                "scale {scale}: one mark per profile row, plus the files row's folder"
+                count() + 2,
+                "scale {scale}: one mark per profile row, plus a folder on each of \
+                 the middle section's two rows"
             );
         }
+    }
+
+    /// PIN — the middle section is one rule and **two** rows, and the second of
+    /// them is `New terminal in folder…` (user ruling 2026-08-20).
+    ///
+    /// Red gate: the section's height is written once, as `files_block`, and the
+    /// rows are laid down against a cursor that advances by it. A row added to
+    /// the list without the block being told is a row drawn on top of whatever
+    /// comes next — the Recent rule under an empty vault, the menu's own bottom
+    /// padding otherwise — and it hit-tests over the top of it too. So the
+    /// arithmetic is asserted rather than the rectangle alone: that the new row
+    /// follows the old one exactly, and that everything below it moved down by
+    /// exactly one row.
+    #[test]
+    fn the_middle_section_is_a_rule_and_two_folder_rows() {
+        let vault = [term("C:\\repo", None, 0)];
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let item_height = (ITEM_HEIGHT_LOGICAL_PX * scale).round();
+            let empty = layout(
+                anchor(scale),
+                MenuSide::Below,
+                (960.0 * scale, 600.0),
+                scale,
+                NO_RECENT,
+                &mut fake_measure,
+            );
+
+            // Immediately under `Files pane`, on its edges: two rows of one
+            // section, not a row and an afterthought.
+            assert_eq!(
+                empty.new_in_folder[1], empty.files_pane[3],
+                "scale {scale}: the second row follows the first with no gap"
+            );
+            assert_eq!(empty.new_in_folder[0], empty.files_pane[0]);
+            assert_eq!(empty.new_in_folder[2], empty.files_pane[2]);
+            assert_eq!(
+                empty.new_in_folder[3] - empty.new_in_folder[1],
+                item_height,
+                "scale {scale}: and it is a `.profile-item` like every other row"
+            );
+
+            // Nothing is drawn over: under an empty vault the new row is the last
+            // thing in the menu, and the menu's own bottom padding follows it.
+            let chrome =
+                (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0) + MENU_PADDING_LOGICAL_PX * scale;
+            let gap = empty.frame[3] - empty.new_in_folder[3];
+            assert!(
+                (gap - chrome).abs() <= 0.5,
+                "scale {scale}: the menu grew by the row rather than covering it \
+                 — {gap} of trailing chrome against {chrome} (the frame's own \
+                 height is rounded to whole device pixels, so half a pixel of \
+                 that rounding lands here)"
+            );
+
+            // And with a vault, everything below moved down by exactly one row:
+            // the Recent rule stands its own margin below the new one.
+            // [`the_recent_section_is_a_rule_a_heading_and_one_row_for_each_seed`]
+            // states that offset from the other side of the same gap.
+            let full = layout(
+                anchor(scale),
+                MenuSide::Below,
+                (960.0 * scale, 600.0),
+                scale,
+                &vault,
+                &mut fake_measure,
+            );
+            let rule = full.separator.expect("a filled vault is separated");
+            assert!(
+                rule[1] > full.new_in_folder[3],
+                "scale {scale}: the Recent rule is below the row, not through it"
+            );
+
+            // The caption decides the width alongside the profile rows, because
+            // it is one of this module's own strings — and in both languages it
+            // is the longest row in the menu.
+            let px = |value: f32| value * scale;
+            let needed = 2.0
+                * ((FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0)
+                    + px(MENU_PADDING_LOGICAL_PX)
+                    + px(ITEM_PADDING_X_LOGICAL_PX))
+                + px(ITEM_ICON_COLUMN_LOGICAL_PX)
+                + px(ITEM_GAP_LOGICAL_PX)
+                + fake_measure(new_in_folder_text(), px(ITEM_FONT_LOGICAL_PX))
+                + px(ITEM_GAP_LOGICAL_PX);
+            assert!(
+                empty.frame[2] - empty.frame[0] >= needed,
+                "scale {scale}: the menu makes room for its own longest caption"
+            );
+        }
+    }
+
+    /// PIN — a press on the folder row is that row, and never the row above it.
+    ///
+    /// Red gate: a rectangle the layout hands out and the hit test does not read
+    /// is a row that lights nothing under the pointer and does nothing when
+    /// pressed — the menu's own `hit` doc calls the half-written version of this
+    /// "a menu lying about what it is about to do".
+    #[test]
+    fn a_press_on_the_folder_row_opens_the_chooser_and_never_the_files_column() {
+        let scale = 1.0;
+        let vault = [term("C:\\repo", None, 0)];
+        let layout = layout(
+            anchor(scale),
+            MenuSide::Below,
+            (960.0, 600.0),
+            scale,
+            &vault,
+            &mut fake_measure,
+        );
+        let centre = |rect: [f32; 4]| {
+            (
+                f64::from((rect[0] + rect[2]) / 2.0),
+                f64::from((rect[1] + rect[3]) / 2.0),
+            )
+        };
+        let (x, y) = centre(layout.new_in_folder);
+        assert_eq!(
+            hit(&layout, &equipped(), &vault, x, y),
+            Some(Some(MenuRow::NewInFolder)),
+        );
+        let (x, y) = centre(layout.files_pane);
+        assert_eq!(
+            hit(&layout, &equipped(), &vault, x, y),
+            Some(Some(MenuRow::FilesPane)),
+            "the row above still answers for itself",
+        );
+        // A machine with only Windows PowerShell on it changes nothing here:
+        // this row starts no shell of its own, so there is no program for it to
+        // be missing and no greyed state to reach.
+        let (x, y) = centre(layout.new_in_folder);
+        assert_eq!(
+            hit(&layout, &bare(), &vault, x, y),
+            Some(Some(MenuRow::NewInFolder)),
+        );
     }
 
     /// PIN — the Recent section is `.menu-sep` (1px between two 5px margins),
@@ -11509,10 +11739,13 @@ mod tests {
             let rule = full.separator.expect("a filled vault is separated");
             let band = full.section_label.expect("and titled");
             let last_profile = *full.items.last().expect("the profile list");
-            // The Recent rule now follows the `Files pane` row rather than the
-            // last profile: the menu has three sections, and this one is third.
+            // The Recent rule follows the middle section's **last** row rather
+            // than the last profile: the menu has three sections, and this one is
+            // third. Its last row has been `New terminal in folder…` since
+            // 2026-08-20; measuring from `files_pane` was right while that
+            // section held one row and is a rule drawn through a row now.
             assert_eq!(
-                rule[1] - full.files_pane[3],
+                rule[1] - full.new_in_folder[3],
                 (SEPARATOR_MARGIN_Y_LOGICAL_PX * scale).round(),
                 "scale {scale}: `margin: 5px 0` above the rule"
             );
@@ -11664,8 +11897,8 @@ mod tests {
         );
         assert_eq!(
             layer.sprites.len(),
-            count() + 1 + RECENT_CAPACITY,
-            "one mark per drawn row, the files row included"
+            count() + 2 + RECENT_CAPACITY,
+            "one mark per drawn row, the middle section's two included"
         );
     }
 

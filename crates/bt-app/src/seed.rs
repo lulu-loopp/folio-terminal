@@ -146,6 +146,44 @@ impl Seed {
         }
     }
 
+    /// **Whether this seed can say what it is** — the vault's own door policy
+    /// (2026-08-20).
+    ///
+    /// `TabState::seed`'s standing rule is that an unwritable row is not written
+    /// rather than written as a guess. That rule was enforced only where a seed
+    /// could not be *built* at all; a seed that was built out of nothing — a
+    /// shell that never reported a folder, a column that was never pointed
+    /// anywhere — went in and came out as a row with no caption. Which is the
+    /// same failure one layer down: a line in `RECENTLY OPENED` offering to bring
+    /// something back without saying what.
+    ///
+    /// So the rule is asked here, at the shape, and both doors into the store ask
+    /// it: [`SeedVault::record`] for what this run closes, and
+    /// [`SeedVault::from_persisted`] for what an older one left on disk. One
+    /// sentence, two doors — this module's own header explains what happens when
+    /// a store is reached by two paths that do not agree.
+    ///
+    /// **A window answers for its children**: it is captioned by the first tab
+    /// that can name itself ([`Self::first_tab`]), so it is nameable exactly when
+    /// one of them is. `any` and not `all`, on `recent_is_available`'s footing:
+    /// dropping a whole window because one tab of six is anonymous would refuse
+    /// the other five.
+    #[must_use]
+    pub fn names_itself(&self) -> bool {
+        match self {
+            // Your name for it, or the folder it stood in. Both empty is a row
+            // that would draw nothing at all.
+            Self::Term {
+                cwd, manual_name, ..
+            } => !cwd.is_empty() || manual_name.as_deref().is_some_and(|name| !name.is_empty()),
+            // A place and a file are their own captions, so an empty one is not a
+            // caption. There is no second field to fall through to.
+            Self::Files { root } => !root.is_empty(),
+            Self::Preview { path } => !path.is_empty(),
+            Self::Window { seeds } => seeds.iter().any(Self::names_itself),
+        }
+    }
+
     /// How many tabs a window seed stands for — the one number the row's tooltip
     /// says out loud, and `None` for every shape that is a tab rather than a
     /// window full of them.
@@ -157,18 +195,27 @@ impl Seed {
         }
     }
 
-    /// The tab a window row is *recognised* by — its first — and `None` for
-    /// every shape that is a tab already.
+    /// The tab a window row is *recognised* by — the first one that can say what
+    /// it is — and `None` for every shape that is a tab already.
     ///
     /// A window row wears the name of the tab it opened with, which is what a
     /// reader would name it by ("the window I had `alpha` in"). The word
     /// "window" is not in the label because a label is measured and a row is one
     /// line; it is in the tooltip, beside the count, where this list already
     /// puts its detail.
+    ///
+    /// **"First" means first nameable, and skipping is not the same as
+    /// dropping** (2026-08-20). A window can hold a tab this build cannot name —
+    /// a leaf a newer build wrote, a column never pointed anywhere — and a window
+    /// captioned by that tab is a blank row. The tab is still in `seeds` and
+    /// still comes back with the window; it simply is not what the window is
+    /// called. Filtering it out of the list instead would refuse to reopen a tab
+    /// merely because it has no caption, which is a much larger claim than the
+    /// label was making.
     #[must_use]
     pub fn first_tab(&self) -> Option<&Self> {
         match self {
-            Self::Window { seeds } => seeds.first(),
+            Self::Window { seeds } => seeds.iter().find(|seed| seed.names_itself()),
             Self::Term { .. } | Self::Files { .. } | Self::Preview { .. } => None,
         }
     }
@@ -261,7 +308,18 @@ impl SeedVault {
     /// `previews` is a parameter and not an `Option` with a default, so every
     /// door into the vault has to answer the question. A writer that could stay
     /// silent about a leaf kind is precisely how the files leaf went missing.
+    ///
+    /// **A seed that cannot name itself is not recorded** ([`Seed::names_itself`],
+    /// 2026-08-20). Not an error and not a log line: the caller asked the store
+    /// to remember a place, and a place nobody can name is not one this list can
+    /// offer to go back to. Refusing here rather than at the drawing is what
+    /// keeps the row indices honest — `MenuRow::Recent` carries the vault's own
+    /// index straight into [`Self::take`], so a menu that hid a row the vault
+    /// still held would revive the entry beside the one that was clicked.
     pub fn record(&mut self, seed: Seed, previews: Vec<String>, at: SystemTime) {
+        if !seed.names_itself() {
+            return;
+        }
         let key = seed.recent_key();
         self.entries.retain(|entry| entry.seed.recent_key() != key);
         self.entries.insert(0, RecentEntry { seed, previews, at });
@@ -302,14 +360,23 @@ impl SeedVault {
     /// Rebuild from what was on disk, newest-first order preserved. Entries whose
     /// timestamp cannot be read are dropped rather than guessed at: an entry
     /// claiming a time we invented would print a confident "just now" lie.
+    ///
+    /// And entries that cannot say what they are, on the same footing and for a
+    /// nearer reason: [`Self::record`] stopped writing them on 2026-08-20, and a
+    /// file written before that has them. A row this store cannot caption is a
+    /// row a reader cannot choose between, so it leaves by the door it came in
+    /// rather than being drawn blank — the load is the second door onto the one
+    /// rule, not a second rule.
     #[must_use]
     pub fn from_persisted(entries: &[RecentEntryV1]) -> Self {
         Self {
             entries: entries
                 .iter()
                 .filter_map(|entry| {
+                    let seed = Seed::from(&entry.seed);
+                    seed.names_itself().then_some(())?;
                     Some(RecentEntry {
-                        seed: Seed::from(&entry.seed),
+                        seed,
                         previews: entry.previews.clone(),
                         at: parse_iso8601_utc(&entry.timestamp)?,
                     })
@@ -554,6 +621,106 @@ mod tests {
             .can_be_named(),
             "a files place is identified by its root — there is nothing to type into"
         );
+    }
+
+    /// PIN — **the vault does not hold a row it cannot caption** (2026-08-20).
+    ///
+    /// Red gate: every one of these went in, and `RECENTLY OPENED` drew each as
+    /// a line with a mark, a timestamp and no words — an offer to bring
+    /// something back without saying what. `Seed::Term`'s own doc calls the
+    /// empty place "the honest answer to 'where was it?' when nobody said", and
+    /// it is; honest is not the same as *offerable*, and the difference is this
+    /// door.
+    ///
+    /// Both doors, because a vault has two: what this run closes, and what an
+    /// older one left on disk.
+    #[test]
+    fn the_vault_turns_away_a_row_that_cannot_say_what_it_is() {
+        let mut vault = SeedVault::default();
+        // Nothing said and nothing named: the shape that used to draw blank.
+        vault.record(term("", None), Vec::new(), at(1));
+        vault.record(term("", Some("")), Vec::new(), at(2));
+        vault.record(
+            Seed::Files {
+                root: String::new(),
+            },
+            Vec::new(),
+            at(3),
+        );
+        vault.record(
+            Seed::Preview {
+                path: String::new(),
+            },
+            Vec::new(),
+            at(4),
+        );
+        vault.record(
+            Seed::Window {
+                seeds: vec![term("", None)],
+            },
+            Vec::new(),
+            at(5),
+        );
+        assert!(vault.is_empty(), "not one of those five is a row");
+
+        // Your own name for it is a caption, even standing nowhere — which is
+        // exactly the tab an agent gets renamed into.
+        vault.record(term("", Some("build")), Vec::new(), at(6));
+        // And so is a place, with no name.
+        vault.record(term("C:\\repo", None), Vec::new(), at(7));
+        assert_eq!(vault.len(), 2);
+
+        // The disk door says the same sentence about a file written before this
+        // rule existed.
+        let legacy = SeedVault {
+            entries: vec![
+                RecentEntry {
+                    seed: term("", None),
+                    previews: Vec::new(),
+                    at: at(1),
+                },
+                RecentEntry {
+                    seed: term("C:\\repo", None),
+                    previews: Vec::new(),
+                    at: at(2),
+                },
+            ],
+        };
+        let reloaded = SeedVault::from_persisted(&legacy.to_persisted());
+        assert_eq!(
+            reloaded.entries().len(),
+            1,
+            "the blank row leaves by the door it came in"
+        );
+        assert_eq!(reloaded.entries()[0].seed, term("C:\\repo", None));
+    }
+
+    /// PIN — a window is recognised by the first tab that **can** say what it
+    /// is, and the tabs it skips still come back with it (2026-08-20).
+    ///
+    /// Red gate: `seeds.first()` and nothing else, so a window whose first tab
+    /// was an anonymous shell drew a blank row for the whole window — six tabs
+    /// behind a caption of nothing. Dropping that tab from the list instead
+    /// would be the opposite error: a tab is skipped for the *label*, not
+    /// refused for the reopening, and `recent_is_available` already reads the
+    /// list on exactly those terms.
+    #[test]
+    fn a_window_is_named_by_the_first_tab_that_can_name_itself() {
+        let window = Seed::Window {
+            seeds: vec![term("", None), term("C:\\repo", None)],
+        };
+        assert_eq!(window.first_tab(), Some(&term("C:\\repo", None)));
+        assert!(window.names_itself());
+        assert_eq!(
+            window.window_tabs(),
+            Some(2),
+            "and the count is still both of them — the tooltip says how many \
+             tabs come back, not how many have captions"
+        );
+
+        let mut vault = SeedVault::default();
+        vault.record(window, Vec::new(), at(1));
+        assert_eq!(vault.len(), 1);
     }
 
     /// The key is the spec's three slots, pipe-joined, with `None` as empty —
