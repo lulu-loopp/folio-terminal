@@ -30,10 +30,15 @@ use crate::i18n::Text;
 
 /// Everything the window can be asked to do from the keyboard.
 ///
-/// `JumpAttention` and `CommandPalette` are real rows with no machine behind them yet (the
-/// attention queue is P1-8, the palette is P1-9). They are listed, bound, and dispatched to an
-/// explicit no-op rather than omitted: the audit decided the key belongs to us, so nothing else may
-/// claim it and nothing may leak to the shell in the meantime.
+/// `CommandPalette` is a real row with no machine behind it yet (the palette is P1-9). It is
+/// listed, bound, and dispatched to an explicit no-op rather than omitted: the audit decided the
+/// key belongs to us, so nothing else may claim it and nothing may leak to the shell in the
+/// meantime.
+///
+/// `JumpAttention` was the other one until 2026-08-20, when the attention queue (P1-8) landed with
+/// §7.1.6b′ F3 and gave it [`crate::Runtime::jump_to_attention`]. What the stub bought is exactly
+/// what it was for: the chord was already the user's, already documented, and already unable to
+/// leak, so the verb arriving changed one arm of one `match` and nothing else.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Action {
     NewTab,
@@ -439,11 +444,14 @@ impl Action {
     /// is ours, nothing else may claim it, nothing leaks to the shell in the
     /// meantime — and the panel has to be able to *say* so, or the first user to
     /// press it reports a bug against a decision.
+    ///
+    /// **`JumpAttention` left this list on 2026-08-20** (§7.1.6b′ F3). It is the
+    /// first row ever to do so, which is the whole point of the mechanism: a
+    /// stub row is a promise with a date on it, and the note comes off the row
+    /// the day the verb lands rather than being maintained as a second opinion
+    /// about which verbs exist.
     const fn is_pending(self) -> bool {
-        matches!(
-            self,
-            Self::JumpAttention | Self::CommandPalette | Self::SummonPip(_)
-        )
+        matches!(self, Self::CommandPalette | Self::SummonPip(_))
     }
 }
 
@@ -2959,6 +2967,17 @@ mod tests {
         // sees nothing, and reports a decision as a bug.
         let palette = named("Command palette");
         assert_eq!(palette.note.as_deref(), Some(NOTE_MACHINE_PENDING.text()));
+
+        // **And the note comes off the day the verb lands** (§7.1.6b′ F3). This
+        // row was a stub for seven weeks beside the palette; the attention queue
+        // arrived, so the line under it no longer apologises for it. A stub that
+        // kept its note after the machine landed would be the panel telling the
+        // reader a working key does nothing.
+        assert_eq!(
+            named("Jump to the longest waiting").note,
+            None,
+            "P1-8 landed, so the row is an ordinary window row"
+        );
 
         // A window row wears no tag at all: twenty rows saying "Anywhere" is a
         // column that says nothing twenty times.

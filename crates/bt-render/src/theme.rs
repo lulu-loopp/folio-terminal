@@ -2438,6 +2438,21 @@ pub const FOCUS_CARD_GAP_LOGICAL_PX: f32 = 8.0;
 pub const FOCUS_CARD_BORDER_LOGICAL_PX: f32 = 1.0;
 /// `.fcard { border-radius: 10px }`.
 pub const FOCUS_CARD_RADIUS_LOGICAL_PX: f32 = 10.0;
+/// **The halo a card breathes while a session inside it is blocked on you**
+/// (§7.1.5b, §7.1.6b′ F3) — the spread of `@keyframes fcard-wait`'s ring:
+/// `0 0 0 3px color-mix(in srgb, var(--warn) 24%, transparent)` (mock-up 2745).
+///
+/// A ring *outside* the card's own border, which is what `box-shadow`'s spread
+/// means, so the warn edge underneath it never moves and never changes colour:
+/// the border says *this tab is waiting*, and the halo is the only thing the
+/// clock touches. Under reduced motion the halo is simply not drawn and the
+/// border stands alone — the mock-up's `animation: none` reads exactly that way,
+/// because `fcard-wait` has no `0%`/`100%` frame to hold.
+pub const FOCUS_CARD_WAIT_HALO_LOGICAL_PX: f32 = 3.0;
+/// The `24%` in the line above: how opaque the halo gets at the top of its
+/// breath. It rides the sprite's own `opacity`, never the raster, so a full
+/// period of this costs no textures at all — see `ChromeSprite::opacity`.
+pub const FOCUS_CARD_WAIT_HALO_OPACITY: f32 = 0.24;
 /// `.fc-head { padding: 5px 8px }`.
 pub const FOCUS_CARD_HEAD_PADDING_X_LOGICAL_PX: f32 = 8.0;
 pub const FOCUS_CARD_HEAD_PADDING_Y_LOGICAL_PX: f32 = 5.0;
