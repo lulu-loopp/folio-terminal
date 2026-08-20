@@ -3981,6 +3981,7 @@ pub fn build(
 fn section_label(text: &str, band: [f32; 4], scale: f32, palette: ChromePalette) -> ChromeLabel {
     let px = |value: f32| value * scale;
     ChromeLabel {
+        mono: false,
         text: text.to_owned(),
         // The band's content box: padding stripped, so the 12.5px line box is
         // centred in exactly its own height and the 3px above it and 5px below
@@ -4147,6 +4148,7 @@ fn push_row(
         .as_ref()
         .map_or(0.0, |(_, width)| width + px(ITEM_GAP_LOGICAL_PX));
     labels.push(ChromeLabel {
+        mono: false,
         text: row.name.to_owned(),
         // The name's box ends at the row's trailing padding, and the row's own
         // right edge is where `.recent-item`'s `max-width` already landed. A
@@ -4183,6 +4185,7 @@ fn push_row(
     });
     if let Some((hint, _)) = &row.hint {
         labels.push(ChromeLabel {
+            mono: false,
             text: hint.clone(),
             rect: [
                 item[0],
@@ -6032,6 +6035,7 @@ pub fn git_menu_build(layout: &GitMenuLayout, look: &GitMenuLook<'_>) -> Vec<Ove
 
     if let (Some(rects), Some(prompt)) = (layout.prompt, look.prompt) {
         labels.push(ChromeLabel {
+            mono: false,
             text: prompt.caption.to_owned(),
             rect: rects.caption,
             font_size_px: px(HINT_FONT_LOGICAL_PX),
@@ -6055,6 +6059,7 @@ pub fn git_menu_build(layout: &GitMenuLayout, look: &GitMenuLook<'_>) -> Vec<Ove
         let typed = !prompt.text.is_empty();
         let text_rect = rects.text_run(layout.scale);
         labels.push(ChromeLabel {
+            mono: false,
             text: if typed {
                 prompt.text.to_owned()
             } else {
@@ -6086,6 +6091,7 @@ pub fn git_menu_build(layout: &GitMenuLayout, look: &GitMenuLook<'_>) -> Vec<Ove
         });
         if let (Some(hint), Some(fault)) = (rects.hint, prompt.fault) {
             labels.push(ChromeLabel {
+                mono: false,
                 text: fault.sentence().to_owned(),
                 rect: hint,
                 font_size_px: px(HINT_FONT_LOGICAL_PX),
@@ -7945,6 +7951,7 @@ fn push_picker(
         );
     }
     labels.push(ChromeLabel {
+        mono: false,
         text: picker_caption_text().to_owned(),
         rect: layout.caption,
         font_size_px: px(SECTION_LABEL_FONT_LOGICAL_PX),

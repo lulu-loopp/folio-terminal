@@ -718,6 +718,7 @@ pub fn build(
     )];
 
     let label = |text: &str, rect: [f32; 4], size: f32, color: [u8; 3]| ChromeLabel {
+        mono: false,
         text: text.to_owned(),
         rect,
         clip: None,
@@ -765,6 +766,7 @@ pub fn build(
         1.0,
     ));
     labels.push(ChromeLabel {
+        mono: false,
         align_center: true,
         ..label(
             &content.ftype,
@@ -840,6 +842,7 @@ pub fn build(
     ));
     if !foot.notice.is_empty() {
         labels.push(ChromeLabel {
+            mono: false,
             align_right: true,
             clip: Some(foot.notice_box),
             ..label(

@@ -937,6 +937,7 @@ pub fn build(layout: &RestoreLayout, hover: Option<RestoreTarget>) -> Vec<Overla
     );
 
     labels.push(ChromeLabel {
+        mono: false,
         text: title_text().to_owned(),
         rect: layout.title,
         font_size_px: px(TITLE_FONT_LOGICAL_PX),
@@ -951,6 +952,7 @@ pub fn build(layout: &RestoreLayout, hover: Option<RestoreTarget>) -> Vec<Overla
 
     for (text, rect) in &layout.sub {
         labels.push(ChromeLabel {
+            mono: false,
             text: text.clone(),
             rect: *rect,
             font_size_px: px(SUB_FONT_LOGICAL_PX),
@@ -975,6 +977,7 @@ pub fn build(layout: &RestoreLayout, hover: Option<RestoreTarget>) -> Vec<Overla
         ));
         sprites.push(ChromeSprite::new(row.mark, row.mark_rect, palette.accent));
         labels.push(ChromeLabel {
+            mono: false,
             text: row.label.clone(),
             rect: row.label_rect,
             font_size_px: px(ROW_FONT_LOGICAL_PX),
@@ -992,6 +995,7 @@ pub fn build(layout: &RestoreLayout, hover: Option<RestoreTarget>) -> Vec<Overla
         // is, it is not drawn at all rather than drawn as a lone ellipsis.
         if let Some(rect) = clipped(row.cwd_rect, row.frame) {
             labels.push(ChromeLabel {
+                mono: false,
                 text: row.cwd.clone(),
                 rect,
                 font_size_px: px(ROW_CWD_FONT_LOGICAL_PX),
@@ -1013,6 +1017,7 @@ pub fn build(layout: &RestoreLayout, hover: Option<RestoreTarget>) -> Vec<Overla
                 1.0,
             ));
             labels.push(ChromeLabel {
+                mono: false,
                 text: text.clone(),
                 rect,
                 font_size_px: px(WINDOW_TAB_BADGE_FONT_LOGICAL_PX),
@@ -1140,6 +1145,7 @@ fn push_button_enabled(
         ));
     }
     labels.push(ChromeLabel {
+        mono: false,
         text: text.to_owned(),
         rect,
         font_size_px: px(BUTTON_FONT_LOGICAL_PX),
@@ -1812,6 +1818,7 @@ pub fn gate_build(
         alpha(palette.menu_border_alpha),
     );
     labels.push(ChromeLabel {
+        mono: false,
         text: layout.title_text.to_owned(),
         rect: layout.title,
         font_size_px: px(TITLE_FONT_LOGICAL_PX),
@@ -1825,6 +1832,7 @@ pub fn gate_build(
     });
     for (text, rect) in &layout.message {
         labels.push(ChromeLabel {
+            mono: false,
             text: text.clone(),
             rect: *rect,
             font_size_px: px(SUB_FONT_LOGICAL_PX),
@@ -2077,6 +2085,7 @@ pub fn invite_build(
         alpha(palette.menu_border_alpha),
     );
     labels.push(ChromeLabel {
+        mono: false,
         text: layout.title_text.to_owned(),
         rect: layout.title,
         font_size_px: px(TITLE_FONT_LOGICAL_PX),
@@ -2090,6 +2099,7 @@ pub fn invite_build(
     });
     for (text, rect) in &layout.message {
         labels.push(ChromeLabel {
+            mono: false,
             text: text.clone(),
             rect: *rect,
             font_size_px: px(SUB_FONT_LOGICAL_PX),
@@ -2106,6 +2116,7 @@ pub fn invite_build(
     // and the body is the offer.
     for (text, rect) in &layout.reason {
         labels.push(ChromeLabel {
+            mono: false,
             text: text.clone(),
             rect: *rect,
             font_size_px: px(SUB_FONT_LOGICAL_PX),

@@ -1061,6 +1061,7 @@ pub fn build(
         let mut labels = Vec::new();
         if let Some((rect, text)) = &card.title {
             labels.push(ChromeLabel {
+                mono: false,
                 text: text.clone(),
                 rect: *rect,
                 font_size_px: px(TOAST_TITLE_FONT_LOGICAL_PX),
@@ -1078,6 +1079,7 @@ pub fn build(
         }
         for (rect, text) in &card.lines {
             labels.push(ChromeLabel {
+                mono: false,
                 text: text.clone(),
                 rect: *rect,
                 font_size_px: px(TOAST_BODY_FONT_LOGICAL_PX),
@@ -1106,6 +1108,7 @@ pub fn build(
                 ));
             }
             labels.push(ChromeLabel {
+                mono: false,
                 text: word.clone(),
                 rect: [
                     rect[0] + px(TOAST_ACTION_PADDING_X_LOGICAL_PX),

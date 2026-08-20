@@ -1762,6 +1762,7 @@ pub fn build(
     let mut labels = Vec::new();
     sprites.push(ChromeSprite::new(mark, geometry.head_mark, palette.accent));
     labels.push(ChromeLabel {
+        mono: false,
         text: root_name.to_owned(),
         rect: geometry.head_title,
         font_size_px: px(FLOAT_HEAD_FONT_LOGICAL_PX),
@@ -1801,6 +1802,7 @@ pub fn build(
             },
         ));
         labels.push(ChromeLabel {
+            mono: false,
             text: dock_label.to_owned(),
             rect: [
                 glyph_left + glyph + px(FLOAT_DOCK_GAP_LOGICAL_PX),
@@ -1833,6 +1835,7 @@ pub fn build(
         && dirty
     {
         labels.push(ChromeLabel {
+            mono: false,
             text: crate::seats::PREVIEW_DIRTY_DOT.to_owned(),
             rect: slot,
             font_size_px: px(FLOAT_DIRTY_GLYPH_LOGICAL_PX),
@@ -1944,6 +1947,7 @@ pub fn build(
         px(crate::seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX),
     );
     labels.push(ChromeLabel {
+        mono: false,
         text: path.to_owned(),
         rect: path_box,
         font_size_px: px(FLOAT_FOOT_FONT_LOGICAL_PX),
@@ -1957,6 +1961,7 @@ pub fn build(
     });
     if !notice.is_empty() {
         labels.push(ChromeLabel {
+            mono: false,
             text: notice.to_owned(),
             rect: notice_box,
             font_size_px: px(FLOAT_FOOT_FONT_LOGICAL_PX),

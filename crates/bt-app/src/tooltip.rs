@@ -1180,6 +1180,7 @@ pub fn build(
         .lines
         .iter()
         .map(|(rect, text)| ChromeLabel {
+            mono: false,
             text: text.clone(),
             rect: *rect,
             font_size_px: px(face.font_logical_px()),

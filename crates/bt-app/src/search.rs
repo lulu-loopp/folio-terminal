@@ -1102,6 +1102,7 @@ pub fn build(
         capsule.field[3],
     ];
     labels.push(ChromeLabel {
+        mono: false,
         text: look.text.to_owned(),
         rect: text_rect,
         font_size_px: px(FIELD_FONT_LOGICAL_PX),
@@ -1137,6 +1138,7 @@ pub fn build(
             capsule.counter[3],
         ];
         labels.push(ChromeLabel {
+            mono: false,
             text: look.counter.to_owned(),
             rect,
             font_size_px: px(COUNTER_FONT_LOGICAL_PX),
@@ -1186,6 +1188,7 @@ pub fn build(
             palette.menu_item_hint_text
         };
         labels.push(ChromeLabel {
+            mono: false,
             text: text.to_owned(),
             rect: box_,
             font_size_px: px(TOGGLE_FONT_LOGICAL_PX),
