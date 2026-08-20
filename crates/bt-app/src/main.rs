@@ -44,9 +44,9 @@ mod input;
 mod marks;
 mod peek_strip;
 mod persist;
+mod pins;
 mod preview;
 mod preview_edit;
-mod profile_watch;
 mod profiles;
 mod psreadline;
 mod restore;
@@ -58,6 +58,7 @@ mod seed;
 mod settings;
 mod shell_integration;
 mod shortcuts;
+mod storage_watch;
 mod table_block;
 mod termscroll;
 mod text_field;
@@ -272,15 +273,20 @@ enum AppEvent {
     /// changed.
     SchemesChanged,
     /// **The kernel says something in `%APPDATA%\Folio\` moved** (§7.1.6c-6d,
-    /// `profile_watch`).
+    /// `storage_watch`).
     ///
     /// The third of the same family, and separate from [`Self::SchemesChanged`]
     /// for the reason that one is separate from [`Self::GitChanged`]: it carries
     /// no answer, only a nudge to look at a clock. Sharing a variant would mean
-    /// a scheme saved in the subfolder walked the profile clock and a profile
+    /// a scheme saved in the subfolder walked the storage clock and a profile
     /// hand-edited re-read every scheme file in the folder — two rescans for
     /// every one piece of news, each of them about the wrong file.
-    ProfilesChanged,
+    ///
+    /// One variant for the *folder* and not one per file in it: `profiles.json`
+    /// and `pins.json` are both in it, both hand-editable, and the kernel says
+    /// the same word about either. Which of them actually moved is answered by
+    /// re-reading each and comparing — see `storage_watch`'s header.
+    StorageChanged,
     /// **The window's ground picture has been decoded** (§7.1.6c-4d).
     ///
     /// 4b decoded it on the event thread and said why: the two moments it runs
@@ -3400,6 +3406,38 @@ fn files_row_activation(root: &str, key: &str) -> RowActivation {
     RowActivation::Preview(files::full_path(root, key))
 }
 
+/// Where a row's name **leads**, which is [`files_row_activation`]'s sentence
+/// said about the other kind of node (user ruling, 2026-08-19).
+///
+/// A file row's second press opens the file; a folder row's second press stands
+/// the whole column in that folder. Pure, and deliberately the same shape as its
+/// twin above: one root, one stable id, one answer, and the same last sentence —
+/// a column with no root leads nowhere, because it was never pointed anywhere.
+///
+/// Only a real directory answers. A `Cycle` row is a folder that resolves to one
+/// of its own ancestors, and entering it would be a way of standing where you
+/// already stand; a `Notice` names no folder at all.
+fn files_row_entry(root: &str, key: &str, kind: files::RowKind) -> Option<String> {
+    if !files::root_is_addressable(root) || !matches!(kind, files::RowKind::Directory { .. }) {
+        return None;
+    }
+    Some(files::full_path(root, key).display().to_string())
+}
+
+/// Whether the double-click counter pairs on this kind of row at all.
+///
+/// **Both kinds of node, since 2026-08-19.** It used to be files alone, because
+/// a folder row's second press meant nothing and a chain that ran through one
+/// would have turned two folds into an opening. Now a folder row carries a verb
+/// of its own ([`files_row_entry`]), so the row that breaks a chain is the row
+/// that leads nowhere and shows nothing: a cycle, or a notice.
+fn files_row_counts_clicks(kind: files::RowKind) -> bool {
+    matches!(
+        kind,
+        files::RowKind::File | files::RowKind::Directory { .. }
+    )
+}
+
 /// A file's own name, for the preview head and the buffer that fills it.
 ///
 /// Falls back to the whole path for the paths that have no last component,
@@ -4174,14 +4212,20 @@ struct App {
     motion: Motion,
     /// The schemes folder's watch and its debounce (§7.1.6c-4c).
     scheme_watch: scheme_watch::SchemeWatch,
-    /// And the storage folder's, which is `profiles.json`'s (§7.1.6c-6d).
+    /// And the storage folder's, which is `profiles.json`'s and `pins.json`'s
+    /// (§7.1.6c-6d).
     ///
     /// A second subscription rather than a share of the one above, although the
     /// schemes folder is *inside* this one and `DirWatch` watches a tree: one
     /// clock for both would mean every `settings.json` toggle re-read every
     /// scheme file on disk, and the reason to watch a folder is never "because
     /// something in it moved" but "because this file may have".
-    profile_watch: profile_watch::ProfileWatch,
+    ///
+    /// **One subscription for two files in it**, though, which is the other half
+    /// of the same sentence: both are in this folder, and the re-read-and-compare
+    /// that a notification is worth costs two small reads whichever of them the
+    /// kernel was actually talking about. See `storage_watch`'s header.
+    storage_watch: storage_watch::StorageWatch,
     /// The scheme file currently reported broken, so that it is reported once.
     ///
     /// **Cleared when the folder reads cleanly again**, which is the whole of
@@ -4288,6 +4332,14 @@ struct App {
     /// cleanly again**, whether or not it then says anything new, which is the
     /// whole of "again only after it was valid in between".
     profiles_file_broken: bool,
+    /// `pins.json` — the folders and files the user said to keep.
+    pins_store: pins::PinsStore,
+    /// The sentence a damaged `pins.json` owes the user, until it has been said
+    /// — [`Self::profiles_fault`]'s twin, for its reason.
+    pins_fault: Option<String>,
+    /// Whether the last re-read of `pins.json` found a file that would not
+    /// parse, so that it is said once — [`Self::profiles_file_broken`]'s rule.
+    pins_file_broken: bool,
     /// The one store that pin, Recent and undo-close all draw from — kept beside
     /// the tabs rather than inside the session file's mirror so the three doors
     /// read live state, not the last thing that happened to be flushed.
@@ -5506,6 +5558,7 @@ struct {name} {{
             "persist::SettingsStore",
             "persist::KeybindingsStore",
             "persist::ProfilesStore",
+            "pins::PinsStore",
             "seed::SeedVault",
             "shortcuts::Shortcuts",
             "profiles::ProfilePrograms",
@@ -5515,7 +5568,7 @@ struct {name} {{
             "git::GitWorker",
             "git_watch::GitWatch",
             "scheme_watch::SchemeWatch",
-            "profile_watch::ProfileWatch",
+            "storage_watch::StorageWatch",
         ] {
             assert!(
                 !body.contains(owned_by_the_app),
@@ -8022,9 +8075,10 @@ impl FilesRowClicks {
         }
     }
 
-    /// Forget the last click. Anything that is not a press on a row breaks the
-    /// chain — including a press on a *folder* row, which is why folding and
-    /// unfolding twice quickly can never come out as an activation.
+    /// Forget the last click. Anything that is not a press on a row that
+    /// carries a second verb breaks the chain — see [`files_row_counts_clicks`]
+    /// for which rows those are, and why the folder row stopped being one of
+    /// them on 2026-08-19.
     fn interrupt(&mut self) {
         self.last = None;
     }
@@ -16365,6 +16419,12 @@ impl Runtime<'_> {
             eprintln!("BT_PERSIST {}: {sentence}", persist::PROFILES_FILE_NAME);
             profiles_fault.get_or_insert(sentence);
         }
+        // The pin table, on the same terms and for a narrower reason: the root
+        // menu's width is measured from the folder names in it, and a PINNED
+        // section that arrived after the first measurement would be a menu drawn
+        // to fit a list it is not showing.
+        let mut pins_store = pins::PinsStore::open();
+        let pins_fault = pins_store.take_fault();
         // Defaults, then the file, then whatever the file could not be honoured
         // for — reported rather than repaired, because the file is the user's
         // own words and a build that silently rewrote one it could not read
@@ -16750,7 +16810,7 @@ impl Runtime<'_> {
             trace_perf,
             motion: read_motion_preference(),
             scheme_watch: scheme_watch::SchemeWatch::default(),
-            profile_watch: profile_watch::ProfileWatch::default(),
+            storage_watch: storage_watch::StorageWatch::default(),
             scheme_fault: None,
             scheme_source: [None, None],
             profile_programs,
@@ -16769,6 +16829,9 @@ impl Runtime<'_> {
             profiles_store,
             profiles_fault,
             profiles_file_broken: false,
+            pins_store,
+            pins_fault,
+            pins_file_broken: false,
             recent,
             theme_mode,
             // The first window is the one `session.json` is a picture of,
@@ -16841,7 +16904,7 @@ impl Runtime<'_> {
         // created by the first store that opened, several hundred lines above
         // this, so there is no second moment at which arming could start
         // succeeding.
-        runtime.app.profile_watch.arm(&runtime.app.event_proxy);
+        runtime.app.storage_watch.arm(&runtime.app.event_proxy);
         runtime.refresh_scheme_sources();
         let background_visible = startup_started.elapsed();
         runtime.window.background_visible = Some(background_visible);
@@ -25160,17 +25223,70 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// The storage folder moved and has gone quiet: read `profiles.json` again
-    /// (§7.1.6c-6d).
+    /// The storage folder moved and has gone quiet: read the two hand-editable
+    /// files in it again (§7.1.6c-6d).
     ///
     /// [`Self::advance_scheme_watch`]'s twin, called once per turn of the loop
     /// beside every other clock in this window, and costing one comparison while
     /// nothing is happening.
-    fn advance_profile_watch(&mut self, now: Instant) -> Result<()> {
-        if !self.app.profile_watch.due(now) {
+    ///
+    /// **Both files, on one piece of news.** The kernel's word is about the
+    /// folder, not about a file in it, so which of the two moved is not a fact
+    /// anybody here has — it is derived by re-reading each and comparing, which
+    /// is the same comparison that already had to absorb this window's own
+    /// writes. `pins.json` is re-read even when `profiles.json` was what changed,
+    /// and that costs one small read of a file that is nearly always identical.
+    fn advance_storage_watch(&mut self, now: Instant) -> Result<()> {
+        if !self.app.storage_watch.due(now) {
             return Ok(());
         }
-        self.reread_profiles()
+        self.reread_profiles()?;
+        self.reread_pins()
+    }
+
+    /// Read `pins.json` again, and put in force whatever that changed.
+    ///
+    /// [`Self::reread_profiles`]'s three answers, and what follows each is the
+    /// same shape: the two PINNED sections are derived from the store every time
+    /// a menu is built, never held, so installing a new table *is* refreshing
+    /// them — what is owed is a frame.
+    fn reread_pins(&mut self) -> Result<()> {
+        match self.app.pins_store.reread() {
+            pins::PinsNews::Unchanged => {
+                self.app.pins_file_broken = false;
+                return Ok(());
+            }
+            pins::PinsNews::Unreadable => {
+                if !std::mem::replace(&mut self.app.pins_file_broken, true) {
+                    self.toast(
+                        toast::ToastKind::Error,
+                        toast::ToastAnchor::Window,
+                        None,
+                        i18n::pins_file_kept(pins::PINS_FILE_NAME),
+                    )?;
+                }
+                return Ok(());
+            }
+            pins::PinsNews::Changed => self.app.pins_file_broken = false,
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Say what a damaged `pins.json` cost, once there is a window to say it in
+    /// — [`Self::announce_profiles_fault`]'s twin, for its reason.
+    fn announce_pins_fault(&mut self) -> Result<()> {
+        let Some(fault) = self.app.pins_fault.take() else {
+            return Ok(());
+        };
+        self.toast(
+            toast::ToastKind::Error,
+            toast::ToastAnchor::Window,
+            None,
+            fault,
+        )
     }
 
     /// Read the file again, and put in force whatever that changed.
@@ -32862,20 +32978,37 @@ impl Runtime<'_> {
         }
         let key = row.key.clone();
         let kind = row.kind;
-        // K156: the second press on one file row opens it. A folder row is
-        // deliberately not counted — the mock-up's `dblclick` handler returns at
-        // once for `dir === "1"` (7847), so unfolding twice quickly is two
-        // folds, which is what it looks like, and nothing else.
-        let activating = matches!(kind, RowKind::File)
+        // K156, and the 2026-08-19 ruling beside it: the second press on a row
+        // is a verb, and which verb is the row's own. A file row opens in the
+        // preview; a **folder row becomes this column's root**. The mock-up's
+        // `dblclick` handler returned at once for `dir === "1"` (7847) and that
+        // is the sentence the ruling overturns — a tree whose only way in was
+        // the root menu was a tree you could only walk downwards by unfolding.
+        let counted = files_row_counts_clicks(kind);
+        let doubled = counted
             && self
                 .window
                 .files_row_clicks
                 .register(RowHost::Column(seat), &key, now)
                 == TabClick::Double;
-        if !matches!(kind, RowKind::File) {
+        if !counted {
             self.window.files_row_clicks.interrupt();
         }
         let active = self.window.active_tab;
+        // **The way in is taken before the fold, and instead of it.** The fold
+        // is what the *first* press meant and it has already happened; running
+        // it again here would turn a triangle on a tree that is about to be
+        // thrown away, and owe the animation to a key the new root has never
+        // heard of. The door is [`Self::reroot_files_column`] — the root menu's
+        // own and the folder drop's own, so the expansion reset, the two caches
+        // and the session write all come along without being remembered again.
+        if doubled
+            && let Some(entered) =
+                files_row_entry(&self.window.tabs[active].files_state(seat).root, &key, kind)
+        {
+            return self.reroot_files_column(seat, &entered);
+        }
+        let activating = doubled && matches!(kind, RowKind::File);
         let Some(state) = self.window.tabs[active].files.get_mut(&seat) else {
             return Ok(());
         };
@@ -34174,7 +34307,17 @@ impl Runtime<'_> {
             .collect();
         let home = profiles::home_directory(&bt_pty::SystemShellEnvironment)
             .map(|home| home.display().to_string());
-        profiles::root_choices(&tab.files_state(seat).root, home.as_deref(), &cwds)
+        let found = profiles::root_choices(&tab.files_state(seat).root, home.as_deref(), &cwds);
+        // **What the user said to keep goes on top** (user ruling 2026-08-19).
+        // Applied here rather than inside `root_choices` because that function
+        // answers "what did this window find", which is a question about shells
+        // and a home directory; what somebody chose to keep is a different
+        // question with a file behind it, and folding the two would make the
+        // pure one need a store.
+        profiles::apply_pins(
+            found,
+            &self.app.pins_store.targets(bt_persist::PinKind::Folder),
+        )
     }
 
     /// Point a column somewhere else (E56).
@@ -34582,14 +34725,81 @@ impl Runtime<'_> {
         let current = self
             .preview_pane(PreviewSurface::Seat(seat))
             .and_then(|pane| pane.buffer.as_ref());
-        self.preview_pool
+        let live: Vec<profiles::PreviewMenuItem> = self
+            .preview_pool
             .buffers()
-            .map(|buffer| profiles::PreviewMenuItem {
+            .enumerate()
+            .map(|(pool, buffer)| profiles::PreviewMenuItem {
                 name: buffer.name.clone(),
                 dirty: buffer.dirty,
                 current: Some(&buffer.source) == current,
+                // Only a file on a disk can be kept — a diff and a commit's
+                // reading of a file are documents this window computed.
+                path: match &buffer.source {
+                    preview::PreviewSource::File(path) => Some(path.display().to_string()),
+                    _ => None,
+                },
+                pinned: false,
+                pool: Some(pool),
             })
+            .collect();
+        // **The kept files first, and each of them once** (user ruling
+        // 2026-08-19). A kept file that is also open is *lifted* out of the list
+        // below rather than copied above it, which is the ruling's own "PINNED
+        // 与最近列表不留双副本" — and a kept file nobody has opened is a row with
+        // no buffer behind it, which is what makes the section survive a restart.
+        let kept = self.app.pins_store.targets(bt_persist::PinKind::File);
+        let (pinned, rest) =
+            pins::lift_pinned(&kept, &live, |item| item.path.clone().unwrap_or_default());
+        pinned
+            .into_iter()
+            .map(|path| {
+                let open = live
+                    .iter()
+                    .find(|item| item.path.as_deref() == Some(path.as_str()));
+                profiles::PreviewMenuItem {
+                    // The pool's own name where there is a pool entry, and the
+                    // file's own name where there is not: the same function the
+                    // head uses, so a kept file reads the same before and after
+                    // it is opened.
+                    name: open.map_or_else(
+                        || files_row_display_name(Path::new(&path)),
+                        |item| item.name.clone(),
+                    ),
+                    dirty: open.is_some_and(|item| item.dirty),
+                    current: open.is_some_and(|item| item.current),
+                    path: Some(path),
+                    pinned: true,
+                    pool: open.and_then(|item| item.pool),
+                }
+            })
+            .chain(rest)
             .collect()
+    }
+
+    /// Keep this folder, or stop keeping it (user ruling 2026-08-19).
+    ///
+    /// The write is immediate and undebounced, for `PinsStore`'s own reason: the
+    /// press is the whole gesture, and a quiet window is a window in which it can
+    /// be lost. What follows is a frame — the root menu's PINNED section is
+    /// derived from the store every time the menu is built, never held.
+    fn toggle_folder_pin(&mut self, path: &str) -> Result<()> {
+        self.app
+            .pins_store
+            .toggle(bt_persist::PinKind::Folder, path);
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Keep this file, or stop keeping it — [`Self::toggle_folder_pin`]'s twin.
+    fn toggle_file_pin(&mut self, path: &str) -> Result<()> {
+        self.app.pins_store.toggle(bt_persist::PinKind::File, path);
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 
     /// The switcher's box this frame, or `None` when it is shut.
@@ -34660,7 +34870,22 @@ impl Runtime<'_> {
     /// nothing else: the buffer keeps its edits, its dirty bit and — through
     /// `open_preview_file`'s own filing — its caret and scroll, which is why
     /// §7.1.3 promises the switch costs "零提示零打断".
-    fn choose_preview_buffer(&mut self, seat: SeatId, index: usize) -> Result<()> {
+    fn choose_preview_row(&mut self, seat: SeatId, index: usize) -> Result<()> {
+        // **The row decides which buffer, and whether there is one.** A kept
+        // file nobody has opened has no pool entry (user ruling 2026-08-19), and
+        // that row's press is an *opening* rather than a change of view — which
+        // is what makes the PINNED section worth having on the first frame after
+        // a restart, when the pool is empty and the list is not.
+        let Some(item) = self.preview_menu_items(seat).into_iter().nth(index) else {
+            return Ok(());
+        };
+        let Some(pool) = item.pool else {
+            self.close_preview_menu()?;
+            let Some(path) = item.path else {
+                return Ok(());
+            };
+            return self.open_preview(PathBuf::from(path));
+        };
         self.close_preview_menu()?;
         // **The pool's own identity and the pool's own name.** The row was
         // drawn from this buffer, so re-deriving either from a filesystem would
@@ -34669,7 +34894,7 @@ impl Runtime<'_> {
         let Some((source, name)) = self
             .preview_pool
             .buffers()
-            .nth(index)
+            .nth(pool)
             .map(|buffer| (buffer.source.clone(), buffer.name.clone()))
         else {
             return Ok(());
@@ -37983,8 +38208,15 @@ impl Runtime<'_> {
         }
         // K156 on a floating tree too (user report, 2026-08-16): the second
         // press on one file row opens it, on the same counter and the same
-        // interval as a column's, keyed by this window. A folder is not
-        // counted, for the reason the column gives.
+        // interval as a column's, keyed by this window.
+        //
+        // **A folder is still not counted here**, and this is the one place the
+        // float and the column now differ. The 2026-08-19 ruling is written
+        // about a *column*'s root — "that folder becomes this column's new root,
+        // replacing it" — and a float is not a column; it is a window opened at
+        // one place, with a foot that says which place. Reading the ruling onto
+        // it would be deciding what a float's root means, which nobody has
+        // decided, so a folder press here breaks the chain exactly as it did.
         let activating = matches!(kind, files::RowKind::File)
             && self
                 .window
@@ -42403,8 +42635,11 @@ impl Runtime<'_> {
         }
         // And the preview's switcher, on the same terms as the root menu beside
         // it: it is the same popup with a different list in it.
-        if let Some(layout) = self.preview_menu_layout() {
-            let over = profiles::preview_menu_hit(&layout, position.x, position.y);
+        if let Some(seat) = self.window.preview_menu.seat()
+            && let Some(layout) = self.preview_menu_layout()
+        {
+            let items = self.preview_menu_items(seat);
+            let over = profiles::preview_menu_hit(&layout, &items, position.x, position.y);
             if self.window.preview_menu.set_hover(over.flatten()) && self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
@@ -45506,18 +45741,45 @@ impl Runtime<'_> {
                 Some(row) => {
                     if state == ElementState::Pressed && button == MouseButton::Left {
                         let seat = self.window.root_menu.seat();
-                        self.close_root_menu()?;
+                        // **The pin does not close the menu** (user ruling
+                        // 2026-08-19). Every other press here is an answer and
+                        // an answer puts the question away; a pin is a change to
+                        // the list you are looking at, and the row you just
+                        // kept has to be seen arriving at the top of it.
                         match (seat, row) {
-                            (Some(seat), Some(profiles::RootMenuRow::Choice(index))) => {
+                            (
+                                _,
+                                Some(profiles::RootMenuHit::Pin(profiles::RootMenuRow::Choice(
+                                    index,
+                                ))),
+                            ) => {
+                                if let Some(choice) = choices.get(index) {
+                                    let path = choice.path.clone();
+                                    self.toggle_folder_pin(&path)?;
+                                }
+                            }
+                            (
+                                Some(seat),
+                                Some(profiles::RootMenuHit::Row(profiles::RootMenuRow::Choice(
+                                    index,
+                                ))),
+                            ) => {
+                                self.close_root_menu()?;
                                 if let Some(choice) = choices.get(index) {
                                     let path = choice.path.clone();
                                     self.reroot_files_column(seat, &path)?;
                                 }
                             }
-                            (Some(seat), Some(profiles::RootMenuRow::Browse)) => {
-                                self.browse_for_root(seat)
+                            (
+                                Some(seat),
+                                Some(profiles::RootMenuHit::Row(profiles::RootMenuRow::Browse)),
+                            ) => {
+                                self.close_root_menu()?;
+                                self.browse_for_root(seat);
                             }
-                            _ => {}
+                            _ => {
+                                self.close_root_menu()?;
+                            }
                         }
                     }
                     return Ok(());
@@ -45546,11 +45808,23 @@ impl Runtime<'_> {
             && let (Some(layout), Some(position)) =
                 (self.preview_menu_layout(), self.window.pointer_position)
         {
-            match profiles::preview_menu_hit(&layout, position.x, position.y) {
+            let items = self.preview_menu_items(seat);
+            match profiles::preview_menu_hit(&layout, &items, position.x, position.y) {
                 Some(row) => {
                     if state == ElementState::Pressed && button == MouseButton::Left {
                         match row {
-                            Some(index) => self.choose_preview_buffer(seat, index)?,
+                            // The root menu's rule, one menu over: a pin changes
+                            // the list you are looking at and leaves it up.
+                            Some(profiles::PreviewMenuHit::Pin(index)) => {
+                                if let Some(path) =
+                                    items.get(index).and_then(|item| item.path.clone())
+                                {
+                                    self.toggle_file_pin(&path)?;
+                                }
+                            }
+                            Some(profiles::PreviewMenuHit::Row(index)) => {
+                                self.choose_preview_row(seat, index)?;
+                            }
                             None => {
                                 self.close_preview_menu()?;
                             }
@@ -48454,7 +48728,7 @@ impl Runtime<'_> {
         self.advance_cursor_blink_if_due(now)?;
         if application_clocks {
             self.advance_scheme_watch(now)?;
-            self.advance_profile_watch(now)?;
+            self.advance_storage_watch(now)?;
         }
         self.advance_rename_blink_if_due(now)?;
         // Ahead of the strip's own animation tick: paying the press's promise
@@ -48669,7 +48943,7 @@ impl Runtime<'_> {
             // And the storage folder's, on exactly the same terms — absent for
             // every window in which nothing at all has been written lately.
             application_clocks
-                .then(|| self.app.profile_watch.deadline())
+                .then(|| self.app.storage_watch.deadline())
                 .flatten(),
             // The debounce a change notification started (R31's D). Absent —
             // and therefore costing nothing — for every window that is not
@@ -49160,6 +49434,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                         // shared one because they name two different files a
                         // user would fix in two different places.
                         .and_then(|()| runtime.announce_profiles_fault())
+                        .and_then(|()| runtime.announce_pins_fault())
                         // The command line's own two debts, in the same place and
                         // for the same reason: a document to show, and whatever
                         // could not be honoured. Both need a window — the preview
@@ -49224,9 +49499,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // quiet window is read.
             AppEvent::SchemesChanged => Ok(()),
             // And the same again for the folder that one sits in: the time it
-            // moved is in `profile_watch`'s mailbox, and `about_to_wait` is
+            // moved is in `storage_watch`'s mailbox, and `about_to_wait` is
             // where the quiet window is read.
-            AppEvent::ProfilesChanged => Ok(()),
+            AppEvent::StorageChanged => Ok(()),
             // The answer is already in `psreadline::probe()`; what is owed is a
             // frame that reads it. `refresh_chrome` rebuilds the row's sentence
             // from scratch — `SettingsRow::description` asks `row_state` afresh
@@ -69122,6 +69397,119 @@ mod tests {
             clicks.register(a, "/notes.md", now + Duration::from_millis(90)),
             TabClick::Single
         );
+    }
+
+    /// PIN — the 2026-08-19 ruling. **The second press on a folder row is the
+    /// way in**: that folder becomes this column's root, in place, and the file
+    /// row's own second press is untouched beside it.
+    #[test]
+    fn a_second_press_on_a_folder_row_is_the_way_in_and_a_file_row_moves_no_root() {
+        // A folder row names the place it would stand the column at, which is
+        // the folder itself and not its parent.
+        assert_eq!(
+            files_row_entry(
+                r"D:\work",
+                "/src/ui",
+                files::RowKind::Directory { open: false }
+            )
+            .as_deref(),
+            Some(r"D:\work\src\ui")
+        );
+        // Already unfolded is the same folder: which way its triangle points is
+        // not a fact about where it is.
+        assert_eq!(
+            files_row_entry(
+                r"D:\work",
+                "/src/ui",
+                files::RowKind::Directory { open: true }
+            )
+            .as_deref(),
+            Some(r"D:\work\src\ui")
+        );
+
+        // A file row goes nowhere near the root — its second press is K156's
+        // opening and stays that.
+        assert_eq!(
+            files_row_entry(r"D:\work", "/notes.md", files::RowKind::File),
+            None
+        );
+        assert!(matches!(
+            files_row_activation(r"D:\work", "/notes.md"),
+            RowActivation::Preview(_)
+        ));
+
+        // A folder that resolves to one of its own ancestors is not a way in:
+        // entering it is standing where you already stand.
+        assert_eq!(
+            files_row_entry(r"D:\work", "/link", files::RowKind::Cycle),
+            None
+        );
+        assert_eq!(
+            files_row_entry(
+                r"D:\work",
+                "",
+                files::RowKind::Notice(files::RowNotice::Empty)
+            ),
+            None
+        );
+
+        // A column with no root has nowhere to go, exactly as it has nothing to
+        // open ([`files_row_activation`]'s own last sentence).
+        assert_eq!(
+            files_row_entry("   ", "/src", files::RowKind::Directory { open: false }),
+            None
+        );
+
+        // And the way in lands: the door it is handed to is the root menu's.
+        let mut state = seats::FilesLeafState {
+            root: r"D:\work".to_owned(),
+            ..seats::FilesLeafState::default()
+        };
+        state.open.insert("/src".to_owned());
+        let entered = files_row_entry(
+            &state.root,
+            "/src/ui",
+            files::RowKind::Directory { open: true },
+        )
+        .expect("a folder row is a way in");
+        assert!(reroot_files_state(&mut state, &entered));
+        assert_eq!(state.root, r"D:\work\src\ui");
+    }
+
+    /// PIN — the triangle is not touched by the ruling above: one press folds,
+    /// and a row with no second verb still breaks the chain behind it.
+    #[test]
+    fn one_press_on_a_folder_row_still_only_turns_its_triangle() {
+        let mut state = seats::FilesLeafState {
+            root: r"D:\work".to_owned(),
+            ..seats::FilesLeafState::default()
+        };
+        assert!(press_files_node(
+            &mut state,
+            "/src",
+            files::RowKind::Directory { open: false }
+        ));
+        assert!(state.open.contains("/src"));
+        assert_eq!(state.root, r"D:\work", "a first press moves no root");
+        assert!(!press_files_node(
+            &mut state,
+            "/src",
+            files::RowKind::Directory { open: true }
+        ));
+        assert!(state.open.is_empty());
+        assert_eq!(state.root, r"D:\work");
+
+        // Both kinds of node are counted now — the folder row has a second
+        // meaning of its own, so it can no longer be the thing that breaks a
+        // file row's pair. The rows that carry no verb still are.
+        assert!(files_row_counts_clicks(files::RowKind::File));
+        assert!(files_row_counts_clicks(files::RowKind::Directory {
+            open: false
+        }));
+        assert!(!files_row_counts_clicks(files::RowKind::Cycle));
+        assert!(!files_row_counts_clicks(files::RowKind::Notice(
+            files::RowNotice::Empty
+        )));
     }
 
     /// PIN — E56. Re-rooting keeps the width and drops everything that was

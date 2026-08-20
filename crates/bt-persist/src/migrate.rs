@@ -353,6 +353,15 @@ pub const KEYBINDINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[];
 /// this file never mentions is a row the reader appends. Neither is a version.
 pub const PROFILES_MIGRATIONS: &[(u32, MigrationStep)] = &[];
 
+/// Migration table for `pins.json`. Empty, and it starts empty for the reason
+/// the two above are empty and one of its own: this document's shape is *a list
+/// of rows with a category and a target*, and a build that adds a fourth
+/// category changes nothing about that shape — an entry naming a category this
+/// build has never heard of is a row that is carried and not offered, which
+/// `PinEntryV1` already does per row without a version. A step is owed only if
+/// the row itself stops being `{kind, target}`.
+pub const PINS_MIGRATIONS: &[(u32, MigrationStep)] = &[];
+
 /// Migration table for `session.json`. Schema v2 adds the runtime theme and maps every v1 session
 /// to the historical dark default.
 pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[
