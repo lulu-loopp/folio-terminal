@@ -1052,6 +1052,193 @@
   .pane:hover .panehead .pane-split { opacity: .7; }
   .pane:hover .panehead .pane-split:hover { opacity: 1; background: var(--hover); color: var(--accent); }
   @media (prefers-reduced-motion: reduce) { .panehead .pane-split { transition: none; } }
+
+  /* ============================================================================
+     THE LONE PANE'S VERB SURFACE — TWO VARIANTS FOR THE CHOOSING (2026-08-20)
+     ============================================================================
+     Read with `?lonehead=a` or `?lonehead=b`. Default is `a`. ON THE DAY ONE IS
+     CHOSEN THE LOSING BLOCK AND THE `?lonehead=` READER GO WITH IT — the same
+     discipline the `?icons=` exercise runs under, and the same one the Advanced
+     header's three treatments left by.
+
+     ---- THE HOLE ------------------------------------------------------------
+     `renderNode`'s `multi` is the whole rule: a pane wears a header only when it
+     has a sibling. That ruling stands and is not under review — the user's
+     objection to an unconditional head ("常驻头丑") was about a 30px grey band
+     that never earns its pixels in the picture you look at 90% of the day.
+
+     But that picture is EVERY NEW TAB, and in it the pane has no verb surface at
+     all. Gone with the head: the `⌄` menu (split either way, `Split with ▸`,
+     `New terminal in folder…`, `Duplicate pane`, `Move pane to new tab`, `Close
+     pane`), the files-peek trigger, and the cwd — the pane's own answer to
+     "where am I standing", which the tab's title only sometimes repeats. Three
+     chords reach some of that; a hand on the mouse reaches none of it. This is
+     the same shape of hole that §7.1.6e's `⊞` was cut to fill, one layout down.
+
+     ---- THE CONSTRAINT ------------------------------------------------------
+     Head not always there. Verbs always reachable. Neither ugly. So the surface
+     has to be summoned, and this house already speaks two summoning idioms:
+     furniture that fades in when its container is hovered (`.pane-files`,
+     `.tab-files`, `.pane-close` — 0 → .6/.7 → 1) and a thing that slides out of
+     an edge on a dwell (the rail peek, the file peek, the tip host). A is the
+     first idiom, B is the second. That is the actual axis under test: A moves
+     ONE BUTTON into the content and keeps the head gone forever; B keeps the
+     head and moves it OFF-SCREEN. Whatever else differs between the two is a bug
+     in this block.
+
+     ---- WHAT IS COMMON, AND NOT A VARIANT -----------------------------------
+     The terminal's right-click menu grows a pane-verb segment when the pane is
+     alone (see `openTermMenu`). That is not one of the two candidates and does
+     not switch with the reader: it is the KEYBOARD-AND-MOUSE FLOOR under both,
+     the one door that needs no discovery because every terminal on this OS has
+     taught the hand to right-click. Whichever variant wins, the segment stays;
+     if NEITHER wins, the segment alone is still a defensible ship.
+
+     ---- A. THE CORNER GHOST -------------------------------------------------
+     One `⌄` in the pane's top-right, floating over the content, opening the very
+     same `openPaneMenu` the split head's right-click opens — one menu, one place
+     it is built, no second list to drift.
+
+     REST STATE — MEASURED, AND THE MEASUREMENT MOVED THE ANSWER. Four rest inks
+     were drawn and compared at 1440×900 against the pane's own right edge:
+       · nothing at rest, fading in on pane-hover. This is the house's own
+         idiom (`.pane-files`, `.tab-files`), and it is the idiom's one bad
+         case: those live in a head that is itself visible, so the head does
+         the telling. Here there is no head. Nothing on screen would say a lone
+         pane has a menu — which is verbatim the testimony that got `⊞` built.
+       · `opacity: .10` and `.18`. Both looked defensible in the abstract and
+         both failed the same comparison, because `--ink3` IS ALREADY AN ALPHA
+         (`rgba(55,53,47,.45)`): .18 of it lands at 8% effective ink, half the
+         weight of the quietest thing this pane already draws. A mark fainter
+         than the faintest instrument on screen is a dead pixel, not a door —
+         all of a permanent mark's cost, none of its benefit.
+       · `opacity: .45` — CHOSEN, and not as a taste. It is `.cmdtick`'s rest
+         ink to the digit (ink3 × .45 ≈ 20% effective). The command rail is a
+         permanently-drawn instrument riding this same right edge and this same
+         lane; it has been quiet enough to live there since 2026-07-18. So the
+         ghost is not asking for a new licence — it is asking for the one the
+         rail already holds, and matching its ink is how the corner reads as
+         one instrument shelf instead of two marks that happen to be near each
+         other. Ladder: .45 at rest, .75 once the pane is hovered, full ink on
+         a menu-coloured chip under the pointer — the mark answers a hover
+         before it is asked to answer a click.
+     The one-line stance: A BUTTON NOBODY CAN SEE IS THE HOLE, NOT THE FIX — and
+     the floor for "seen" is already on this edge, drawn by the rail.
+
+     GEOMETRY. `right: 11px` is not a taste: it is `.cmdrail`'s own lane rule
+     (inboard of the ~8px scrollbar gutter, because a rail and a thumb may not
+     share a lane — user report 2026-07-18), and the ghost joins that lane rather
+     than opening a third one. The rail is vertically centred and the ghost is
+     pinned to the top, so they never meet. `top: 10px` puts 10px of dead band
+     between this hit rect and the caption buttons' — thin on paper, and the
+     reason it is enough is that the ghost only brightens once the pointer is
+     ALREADY inside the pane: a hand travelling to Close from the tab strip never
+     crosses it lit, and a hand aiming at the ghost is travelling downward, away
+     from the caption. An open search capsule takes the corner outright and the
+     ghost stands down (`:has(> .srchbar)`) — two instruments, one lane, and the
+     one you explicitly opened wins.
+
+     ---- B. THE SLIDING HEAD -------------------------------------------------
+     The pane's real head — the split view's markup, class for class — parked at
+     `translateY(-100%)` and slid in when the pointer rests in the top 8px. It
+     FLOATS over the content (absolute, shadowed) rather than pushing it: a head
+     that reflowed the terminal would move every line under the pointer on a
+     hover, and a re-wrap is not a hover response.
+
+     WHAT IT COVERS, AND WHY THAT EDGE. It lands on the pane's top 30px, which
+     holds the OLDEST line on screen. A terminal writes downward and its cursor
+     lives at the bottom; of the four edges, the top is the one whose content the
+     reader has already finished with. That is the whole defence of the overlay,
+     and it is why the head must never be translucent — a half-visible band over
+     text reads as a rendering fault. It is opaque `--panel` with a hairline and
+     a soft drop shadow: unmistakably a shelf slid ABOVE the text, never a
+     replacement for it.
+
+     THE TAB STRIP IS 1px ABOVE THIS HOT ZONE, so the guard cannot be geometry.
+     It is a DWELL: `LONEHEAD_IN_MS` (250ms — the same hover-rest every `⌄` in
+     this window opens on) and `LONEHEAD_OUT_MS` (150ms — the same grace they
+     close on). A pointer diving from the tabs into the terminal body crosses 8px
+     in about ten milliseconds and never arms it; a pointer that stops there
+     meant to stop there. The 150ms out is what lets the hand leave the hot strip
+     for the head's own buttons without the head fleeing under it.
+
+     The slide is 140ms on the house's disclosure curve — under the 150ms cap,
+     and it is `transform` only, so nothing in the pane re-lays-out while it
+     moves. `prefers-reduced-motion` deletes the transition and keeps the head:
+     the motion was never the message.
+
+     The one-line stance: THE HEAD WAS NEVER THE PROBLEM, ITS PERMANENCE WAS —
+     so keep it whole and charge one deliberate dwell for it. */
+  /* ── A. the corner ghost ── */
+  .pane-ghost {
+    position: absolute; top: 10px; right: 11px; z-index: 20;
+    width: 22px; height: 22px; border-radius: 6px; flex: none;
+    display: inline-flex; align-items: center; justify-content: center;
+    color: var(--ink3); cursor: pointer; opacity: .45;   /* = .cmdtick at rest */
+    transition: opacity .12s ease, background .12s ease, color .12s ease, box-shadow .12s ease;
+  }
+  .pane-ghost svg { width: 11px; height: 7px; pointer-events: none; }
+  .pane:hover .pane-ghost { opacity: .75; }
+  /* `--menu` and a shadow, NOT the run's `--hover`: that one is a 5.5% wash of
+     ink, which is exactly right on a head (there is opaque panel under it) and
+     useless here, where a line of output can be running under the glyph. A
+     button that floats over content has to bring its own ground. */
+  .pane .pane-ghost:hover, .pane .pane-ghost.open {
+    opacity: 1; color: var(--accent);
+    background: var(--menu); box-shadow: 0 2px 10px rgba(0, 0, 0, .16);
+  }
+  body.dark .pane .pane-ghost:hover, body.dark .pane .pane-ghost.open { box-shadow: 0 2px 10px rgba(0, 0, 0, .45); }
+  @media (prefers-reduced-motion: reduce) { .pane-ghost { transition: none; } }
+  /* Inside B's head the same element is a member of the `⌄ 🗀 ×` run, not a
+     floating mark: it drops out of the corner and takes the run's own metrics.
+     This is §7.1.6e's `⊞ → ⌄` read literally — the head's first slot is the
+     house's chevron. The SPLIT head still draws `⊞`; that swap is its own
+     ticket, and the day it lands these two heads become one string of markup. */
+  .panehead .pane-ghost {
+    position: static; top: auto; right: auto; z-index: auto;
+    width: 19px; height: 19px; border-radius: 5px; opacity: 0;
+  }
+  .panehead > .pane-ghost { margin-left: auto; }
+  .panehead .pane-ghost + .pane-files { margin-left: 0; }
+  .pane:hover .panehead .pane-ghost { opacity: .7; }
+  .pane:hover .panehead .pane-ghost:hover, .panehead .pane-ghost.open {
+    opacity: 1; background: var(--hover); color: var(--accent); box-shadow: none;
+  }
+  /* ── B. the sliding head ──
+     There is no hot-zone element: the 8px band is measured by the pointer
+     handler (`LONEHEAD_HOT_PX`), never drawn. See `loneVerbHtml`. */
+  /* `--termbg`, NOT `--panel`. Drawn on panel it was legible and WRONG: panel is
+     the title bar's own colour, the seam between the two vanished, and the head
+     read as a second row of window chrome that had grown downward — the exact
+     thing the ruling against a permanent head was about. The split head has no
+     background of its own and therefore stands on `--termbg`; this one paints
+     that same colour explicitly (it has to be opaque to float) and lets the
+     hairline and the shadow do all the separating. `--border` rather than the
+     split head's `--border-soft` is the one deliberate difference: an in-flow
+     head's bottom edge is a boundary between two panes, and this one's is the
+     only thing between a shelf and the text under it. */
+  .panehead.lonehead {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 20;
+    background: var(--termbg); border-bottom: 1px solid var(--border);
+    box-shadow: 0 6px 14px rgba(0, 0, 0, .16);
+    transform: translateY(-100%);
+    transition: transform .14s cubic-bezier(.2, 0, 0, 1);
+  }
+  .panehead.lonehead.show { transform: translateY(0); }
+  body.dark .panehead.lonehead { box-shadow: 0 6px 14px rgba(0, 0, 0, .45); }
+  @media (prefers-reduced-motion: reduce) { .panehead.lonehead { transition: none; } }
+  /* An open search capsule owns this corner and this edge — it was asked for out
+     loud, and neither summoned surface may stand on top of an explicit one. */
+  .pane-inner:has(> .srchbar) > .pane-ghost,
+  .pane-inner:has(> .srchbar) > .panehead.lonehead { display: none; }
+  /* the `▸` of a row that has a submenu: `#i-chev` turned a quarter, never a
+     second glyph — this window has one shape for "there is a list behind me" */
+  .term-menu .tm-item .sub-chev {
+    margin-left: auto; width: 10px; height: 6px; flex: none;
+    transform: rotate(-90deg); color: var(--ink3);
+  }
+  .term-menu .tm-item.subopen { background: var(--hover); color: var(--ink); }
+  .term-menu .tm-item.subopen svg { color: var(--accent); }
   .files-tree { flex: 1; min-height: 0; overflow-y: auto; padding: 2px 4px 8px; outline: none; font-size: 13px; }
 
   /* One row = one node. Indent is inline padding scaled by depth, so the whole
@@ -3948,6 +4135,14 @@
        skin, because it is the same kind of object: a flat list of verbs raised at
        a point. See openPaneMenu. -->
   <div class="term-menu" id="pane-menu"></div>
+  <!-- 2026-08-20 — `Split with ▸`'s child list. The first submenu this prototype
+       has ever drawn, and it is deliberately a SECOND popup of the same skin
+       rather than a nested list: the parent stays lit, the child is placed at the
+       row's right edge, and the two close together. The safety triangle that
+       keeps a diagonal approach from being stolen by the rows it crosses is
+       NATIVE's (`profiles::safe_triangle_holds`, §7.1.6e); the small sample's job
+       here is the segment's shape, not the triangle's geometry. -->
+  <div class="term-menu" id="split-with-menu"></div>
   <div class="term-menu" id="pv-menu"></div>
   <div class="layout-peek" id="layout-peek"></div>
   <div id="cmd-peek"></div>
@@ -7584,6 +7779,43 @@
     if (at < 0) return;
     jumpToPromptLine(term, idx[at]);
   }
+  /* THE `?lonehead=` READER — TEMPORARY, AND IT LEAVES WITH THE LOSER.
+     `?lonehead=a|b` picks which of the two lone-pane verb surfaces a headless
+     pane draws; the whole rationale, both stances and the rest-state experiment
+     are in the CSS block beside `.pane-ghost`. Default is `a`, and A at rest is
+     one chevron carrying the command rail's own rest ink in the command rail's
+     own lane, so every other demo on this page opens within a hair of how it
+     always has. On the day one is chosen, this reader,
+     the branch in `loneVerbHtml`, and the losing block all go together. */
+  const LONEHEAD = (() => {
+    const v = (new URLSearchParams(location.search).get("lonehead") || "").toLowerCase();
+    return v === "b" ? "b" : "a";
+  })();
+  document.body.dataset.lonehead = LONEHEAD;
+  /* 250ms in / 150ms out are not new numbers: they are the hover-rest and the
+     close grace every `⌄` in this window already runs on (§7.1.6e). A surface
+     that appears on a dwell and a menu that opens on a dwell must not disagree
+     about how long a dwell is. 8px is the hot strip; the tab strip's bottom edge
+     is the pixel above it, which is why the dwell exists at all. */
+  const LONEHEAD_IN_MS = 250, LONEHEAD_OUT_MS = 150, LONEHEAD_HOT_PX = 8;
+  /* The verb surface a pane with no sibling wears. One `⌄` either way — the same
+     element, the same click, the same `openPaneMenu` — so the two variants argue
+     about WHERE the door is and never about what is behind it. */
+  function loneVerbHtml(node, s) {
+    const chev = `<span class="pane-ghost" data-ghost-leaf="${node.id}" title="Pane actions"><svg><use href="#i-chev"/></svg></span>`;
+    if (LONEHEAD !== "b") return chev;
+    /* B's head is the split head's markup, class for class, plus `.lonehead` —
+       it inherits the drag handle, the right-click menu, the hover-revealed run
+       and the cwd caption by BEING that head rather than by copying it. */
+    /* NO HOT-ZONE ELEMENT. The 8px band is a MEASUREMENT the pointer handler
+       makes, not an invisible widget lying on the terminal — a transparent div
+       over the top of the scrollback is how a text surface ends up with a strip
+       you cannot select from, and nobody would ever guess why. */
+    return `<div class="panehead lonehead" data-leaf="${node.id}">${stateIcon(s, s.busy, s.unread)}<span class="ptitle">${s.cwd}</span>
+        ${chev}
+        <span class="pane-files" data-flyout-leaf="${node.id}" title="Peek files here">${folderSvg}</span>
+        <span class="pane-close" title="Close pane">${closeSvg}</span></div>`;
+  }
   function renderNode(node, w) {
     if (node.type === "leaf") {
       const focused = node.id === w.focus;
@@ -7620,7 +7852,7 @@
           ${multi ? `<div class="panehead" data-leaf="${node.id}">${stateIcon(s, s.busy, s.unread)}<span class="ptitle">${s.cwd}</span>
             <span class="pane-split" data-split-leaf="${node.id}" title="Split pane">${splitSvg}</span>
             <span class="pane-files" data-flyout-leaf="${node.id}" title="Peek files here">${folderSvg}</span>
-            <span class="pane-close" title="Close pane">${closeSvg}</span></div>` : ""}
+            <span class="pane-close" title="Close pane">${closeSvg}</span></div>` : loneVerbHtml(node, s)}
           <div class="term" data-leaf="${node.id}" data-uid="${s.uid}">${termHtml(s, focused)}</div>
           ${cmdRailHtml(s, node.id)}
         </div>
@@ -8301,6 +8533,11 @@
     $("term-menu").classList.remove("show");
     $("file-menu").classList.remove("show");
     $("pane-menu").classList.remove("show");
+    closeSplitWithMenu();
+    /* the lone pane's `⌄` is lit while its menu stands; every path that puts the
+       menu away has to put the light out, or the chevron is left stranded on —
+       the root menu's lesson, obeyed on day one this time */
+    document.querySelectorAll(".pane-ghost.open").forEach(g => g.classList.remove("open"));
     closePvMenu();
     document.querySelectorAll(".combo.open").forEach(c => c.classList.remove("open"));
   }
@@ -9119,6 +9356,24 @@
           splitPane(+ps.dataset.splitLeaf, r.width >= r.height ? "right" : "bottom");
           return;
         }
+        /* 2026-08-20 — the lone pane's `⌄`. Both variants raise the SAME menu at
+           the same place: under the button, left-clamped by `openPaneMenu`'s own
+           both-axis clamp, which is why a mark 11px from the window's right edge
+           does not need a right-anchored placement of its own. Second press on
+           the same button puts it away — a control that opens something must also
+           close it (the tab strip's chevron learned this the hard way). */
+        const pg = e.target.closest(".pane-ghost");
+        if (pg) {
+          e.stopPropagation();
+          const wasOpen = pg.classList.contains("open");
+          closeAllPopups();
+          document.querySelectorAll(".pane-ghost.open").forEach(g => g.classList.remove("open"));
+          if (wasOpen) return;
+          const r = pg.getBoundingClientRect();
+          openPaneMenu(+pg.dataset.ghostLeaf, r.left, r.bottom + 4);
+          pg.classList.add("open");
+          return;
+        }
         const pf = e.target.closest(".pane-files");
         if (pf) {
           const rect = pf.getBoundingClientRect();
@@ -9130,7 +9385,7 @@
       }));
     document.querySelectorAll(".panehead").forEach(el => {
       el.addEventListener("pointerdown", (e) => {
-        if (e.target.closest(".pane-close, .pane-files, .pane-split, .pv-tool")) return;
+        if (e.target.closest(".pane-close, .pane-files, .pane-split, .pane-ghost, .pv-tool")) return;
         /* NO GUARD HERE ANY MORE (§7.1.6b′ ②③). The stage is the real tree,
            so a pane drags, docks and splits inside focus mode exactly as it does
            outside it — the ruling's plainest sentence is that the mode disables
@@ -9441,9 +9696,16 @@
       if (resize) { cancelResizeDrag(); return; }
       if (paletteOpen()) { closePalette(); return; }
       if ($("pv-menu").classList.contains("show")) { closePvMenu(); return; }
+      /* one Esc leaves the child list for the parent, a second leaves the menu —
+         the same rung the profile editor cut inside Settings (§7.1.6c-1) */
+      if ($("split-with-menu").classList.contains("show")) { closeSplitWithMenu(); return; }
       if ($("term-menu").classList.contains("show")) { $("term-menu").classList.remove("show"); return; }
       if ($("file-menu").classList.contains("show")) { $("file-menu").classList.remove("show"); return; }
-      if ($("pane-menu").classList.contains("show")) { $("pane-menu").classList.remove("show"); return; }
+      if ($("pane-menu").classList.contains("show")) {
+        $("pane-menu").classList.remove("show");
+        document.querySelectorAll(".pane-ghost.open").forEach(g => g.classList.remove("open"));
+        return;
+      }
       if ($("root-menu").classList.contains("show")) { closeRootMenu(); return; }
       if ($("profile-menu").classList.contains("show")) { closeProfileMenu(); return; }
       const openCombo = document.querySelector(".combo.open");
@@ -11548,6 +11810,85 @@
      search over past output dies with it), so it carries the ellipsis and a
      confirm. "Restart shell…" is the honest name for what Refresh did: the
      process is killed and replaced — running work dies, so busy confirms. */
+  /* ── 2026-08-20 — THE LONE PANE'S PANE-VERB SEGMENT ──
+     Common to both `?lonehead=` variants and switched by NEITHER: this is the
+     floor under them. When the pane has a sibling the head is on screen and the
+     verbs are 18 pixels away, so the segment is not drawn — a menu that repeats
+     what is already visible beside it is how two lists come to disagree.
+
+     WHY THE RIGHT CLICK IS THE HONEST DOOR. Every other route into these verbs
+     has to be discovered: a chord you have to be told, a mark you have to notice,
+     an edge you have to rest on. A right click inside a terminal is the one
+     gesture this OS has already taught every hand, and the testimony that got
+     `⊞` built was exactly "I never found out the head had a menu".
+
+     WHAT IS IN IT, AND THE ONE ROW THAT IS ARGUABLE. `Split with ▸`, `New
+     terminal in folder…` and `Duplicate pane` are the pane-menu's three MAKING
+     verbs, in the pane menu's own order. `Close pane` is deliberately absent:
+     on a lone pane it closes the TAB, and a row that quietly means something
+     bigger than it says is the edge a hand finds by accident — the tab's own `×`
+     and Ctrl+W already say it out loud.
+     `Move pane to new tab` IS DRAWN BECAUSE THE TICKET NAMES IT, and it is the
+     row this file would cut: a lone pane is already the whole of its tab, so the
+     verb has nothing to move and nowhere to move it. Its honest sibling in this
+     layout is `Move pane to new window` (multi-window block C shipped the second
+     window), which is a real displacement and a real answer to "get this off
+     here". Flagged, not silently substituted. */
+  function loneVerbSegmentHtml(w) {
+    if (paneCount(w) !== 1) return "";
+    return `<div class="tm-sep"></div>
+       <div class="tm-item" data-act="splitwith"><svg><use href="#i-split"/></svg><span>Split with</span><svg class="sub-chev"><use href="#i-chev"/></svg></div>
+       <div class="tm-item" data-act="newfolder"><svg><use href="#i-folder"/></svg><span>New terminal in folder…</span></div>
+       <div class="tm-item" data-act="dupe"><svg><use href="#i-split-right"/></svg><span>Duplicate pane</span></div>
+       <div class="tm-item" data-act="movetab"><svg><use href="#i-float"/></svg><span>Move pane to new tab</span></div>`;
+  }
+  function closeSplitWithMenu() {
+    $("split-with-menu").classList.remove("show");
+    document.querySelectorAll("#term-menu .tm-item.subopen").forEach(el => el.classList.remove("subopen"));
+  }
+  /* One seat-a-shell path for every door in the segment: `splitPane` inherits the
+     source pane's profile AND place, and these two are the same call with one of
+     the two overridden. Two copies of "make a shell and seat it" is how a menu
+     and a button come to disagree about what a split is. */
+  function splitPaneSeeded(leafId, profile, cwd) {
+    const w = activeTab();
+    const leaf = findLeafIn(w, leafId);
+    if (!leaf) return;
+    const src = leafSession(leaf);
+    const p = profile || null;
+    const make = p ? p.make : ((src && src.make) || defaultProfile().make);
+    const name = p ? p.title.split(" ·")[0] : ((src && src.name) || defaultProfile().title.split(" ·")[0]);
+    const icon = p ? p.icon : ((src && src.icon) || defaultProfile().icon);
+    const s = mkSession(name, icon, make(), false, cwd || (src && src.cwd) || HOME, make);
+    const nl = mkLeaf(s.uid);
+    const r = $("termhost").querySelector(`.pane[data-leaf="${leafId}"]`);
+    const rect = r ? r.getBoundingClientRect() : { width: 1, height: 0 };
+    splitLeafIn(w, leafId, rect.width >= rect.height ? "right" : "bottom", nl);
+    w.focus = nl.id;
+    render();
+  }
+  function openSplitWithMenu(row, leafId) {
+    const menu = $("split-with-menu");
+    menu.innerHTML = PROFILES.map((p, i) =>
+      `<div class="tm-item" data-p="${i}"><span class="ticon">${p.icon}</span><span>${p.title}</span></div>`).join("");
+    menu.querySelectorAll(".tm-item").forEach(el => el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const p = PROFILES[+el.dataset.p];
+      closeSplitWithMenu();
+      $("term-menu").classList.remove("show");
+      splitPaneSeeded(leafId, p, null);
+    }));
+    menu.classList.add("show");
+    row.classList.add("subopen");
+    const r = row.getBoundingClientRect();
+    /* placed at the row's near vertical edge, flipping to the parent's LEFT when
+       the child would run off the window — the same both-axis clamp every popup
+       in this file makes, one level down */
+    let left = r.right - 4;
+    if (left + menu.offsetWidth > window.innerWidth - 8) left = r.left - menu.offsetWidth + 4;
+    menu.style.left = Math.max(6, left) + "px";
+    menu.style.top = Math.max(6, Math.min(r.top - 5, window.innerHeight - menu.offsetHeight - 8)) + "px";
+  }
   function openTermMenu(leafId, x, y) {
     closeAllPopups();   /* contextmenu is not a click; nobody else's closer will run */
     const menu = $("term-menu");
@@ -11558,11 +11899,64 @@
        <div class="tm-sep"></div>
        <div class="tm-item" data-act="clear"><svg><use href="#i-broom"/></svg><span>Clear screen</span></div>
        <div class="tm-item" data-act="clearsb"><svg><use href="#i-clear"/></svg><span>Clear scrollback…</span></div>
-       <div class="tm-item" data-act="restart"><svg><use href="#i-refresh"/></svg><span>Restart shell…</span></div>`;
+       <div class="tm-item" data-act="restart"><svg><use href="#i-refresh"/></svg><span>Restart shell…</span></div>`
+      + loneVerbSegmentHtml(activeTab());
+    /* the child list opens on the same hover-rest the rest of the window's `⌄`s
+       open on, and closes on the same grace; pointing at any OTHER row puts it
+       away, which is the cheap half of what a safety triangle buys */
+    let subT = 0;
+    menu.querySelectorAll(".tm-item").forEach(el => {
+      el.addEventListener("pointerenter", () => {
+        clearTimeout(subT);
+        if (el.dataset.act === "splitwith") subT = setTimeout(() => openSplitWithMenu(el, leafId), LONEHEAD_IN_MS);
+        else subT = setTimeout(closeSplitWithMenu, LONEHEAD_OUT_MS);
+      });
+    });
+    /* ASSIGNMENT, not addEventListener: `#term-menu` is a permanent element that
+       every open re-fills, so a subscription here would stack one more copy per
+       right click and the tenth close would run ten timers. The rows below can
+       subscribe freely — innerHTML just replaced them. */
+    menu.onpointerleave = () => {
+      clearTimeout(subT);
+      subT = setTimeout(() => { if (!$("split-with-menu").matches(":hover")) closeSplitWithMenu(); }, LONEHEAD_OUT_MS);
+    };
     menu.querySelectorAll(".tm-item").forEach(el => el.addEventListener("click", (e) => {
       e.stopPropagation();
+      /* the parent stays lit while its child stands: pressing the row is the
+         click half of the same door the dwell opens */
+      if (el.dataset.act === "splitwith") {
+        clearTimeout(subT);
+        if (el.classList.contains("subopen")) closeSplitWithMenu();
+        else openSplitWithMenu(el, leafId);
+        return;
+      }
       menu.classList.remove("show");
+      closeSplitWithMenu();
       const act = el.dataset.act;
+      if (act === "newfolder") {
+        /* prototype: a real folder picker goes here — the same stand-in the root
+           menu's `Browse…` uses, so the flow is testable end to end */
+        const src = leafSession(findLeafIn(activeTab(), leafId));
+        const picked = window.prompt("New terminal in folder:", (src && src.cwd) || HOME);
+        if (picked && picked.trim()) splitPaneSeeded(leafId, null, picked.trim());
+        return;
+      }
+      if (act === "dupe") { splitPaneSeeded(leafId, null, null); return; }
+      if (act === "movetab") {
+        /* the flagged row. `wsFromLeaf` + detach is the real verb; on a lone pane
+           there is nothing to detach FROM, so this returns having done nothing —
+           which is the finding, drawn rather than argued. */
+        const w = activeTab();
+        if (paneCount(w) <= 1) return;
+        const leaf = findLeafIn(w, leafId);
+        if (!leaf) return;
+        closePane(leafId);
+        const nw = wsFromLeaf(leaf);
+        state.tabs.push(nw);
+        state.active = nw.id;
+        render();
+        return;
+      }
       if (act === "copy") {
         const sel = String(window.getSelection() || "");
         if (sel) navigator.clipboard?.writeText(sel);
@@ -11783,6 +12177,52 @@
     e.preventDefault();
     openTermMenu(+term.dataset.leaf, e.clientX, e.clientY);
   });
+  /* ── B's dwell (`?lonehead=b`) ──
+     Delegated on `#termhost` and driven off pointer GEOMETRY rather than off
+     `pointerenter` on the strip, for one reason: the head, once in, covers the
+     strip that summoned it, so an enter/leave pair on the strip would fire the
+     moment the head arrived and the head would chase itself off screen. One
+     question asked of every move — "is the pointer inside the top band of this
+     pane" — where the band is the 8px hot strip at rest and the head's own 30px
+     while it stands. That is also what makes leaving downward feel right: the
+     boundary the hand crosses to dismiss is the bottom of the thing it can see. */
+  let loneHeadT = 0, loneHeadWant = null;
+  /* A DWELL, NOT A STILLNESS. The timer is armed once, on the frame the pointer
+     CROSSES into or out of the band, and is left alone while it stays on the same
+     side — re-arming on every move would make the head answer only a hand that
+     stops dead, and a slow deliberate approach that never quite stops would never
+     open it. Crossing back the other way inside the window cancels, which is what
+     makes a pointer passing through from the tab strip cost nothing. */
+  function loneHeadSet(head, on) {
+    if (on === head.classList.contains("show")) {
+      if (loneHeadWant !== null && loneHeadWant !== on) { clearTimeout(loneHeadT); loneHeadWant = null; }
+      return;
+    }
+    if (loneHeadWant === on) return;   /* already on its way — let it run out */
+    clearTimeout(loneHeadT);
+    loneHeadWant = on;
+    loneHeadT = setTimeout(() => { loneHeadWant = null; head.classList.toggle("show", on); },
+                           on ? LONEHEAD_IN_MS : LONEHEAD_OUT_MS);
+  }
+  function loneHeadDrop() {
+    clearTimeout(loneHeadT); loneHeadWant = null;
+    document.querySelectorAll(".lonehead.show").forEach(h => h.classList.remove("show"));
+  }
+  $("termhost").addEventListener("pointermove", (e) => {
+    if (LONEHEAD !== "b") return;
+    const pane = e.target.closest(".pane");
+    const head = pane && pane.querySelector(":scope > .pane-inner > .lonehead");
+    /* `offsetParent` is null while an open search capsule has stood the head
+       down: a surface that is not allowed on screen must not be armed to arrive */
+    if (!head || !head.offsetParent) { loneHeadDrop(); return; }
+    /* a menu raised OFF this head is the head still being used — it may not slide
+       out from under its own open list */
+    if (head.querySelector(".pane-ghost.open")) { clearTimeout(loneHeadT); loneHeadWant = null; return; }
+    const r = pane.getBoundingClientRect();
+    const band = head.classList.contains("show") ? head.offsetHeight : LONEHEAD_HOT_PX;
+    loneHeadSet(head, e.clientY - r.top <= band);
+  });
+  $("termhost").addEventListener("pointerleave", () => { if (LONEHEAD === "b") loneHeadDrop(); });
   /* ── command rail wiring ──
      The rail, not the tick, is the pointer surface: heights form a smooth
      crest around the pointer (scaleY over base positions — transforms don't
@@ -12060,7 +12500,11 @@
     const pane = srchPaneEl();
     if (!pane || !pane.querySelector(".term")) { srch.leaf = null; srch.marks = []; srch.cur = -1; return; }
     const bar = document.createElement("div");
-    bar.className = "srchbar" + (pane.querySelector(".panehead") ? " with-head" : "");
+    /* `:not(.lonehead)` — B's head is an OVERLAY that is usually not there, so it
+       must not buy the capsule a permanent 28px of clearance for a band the eye
+       cannot see. The two never collide anyway: an open capsule stands the whole
+       lone surface down (the `:has(> .srchbar)` rule beside `.pane-ghost`). */
+    bar.className = "srchbar" + (pane.querySelector(".panehead:not(.lonehead)") ? " with-head" : "");
     bar.innerHTML = `
       <input type="text" placeholder="Find" spellcheck="false">
       <span class="sb-cnt"></span>
@@ -12169,9 +12613,14 @@
     if (row && row.dataset.dir !== "1") fileMenuFromRow(e, row);
   });
   document.addEventListener("click", (e) => {
-    if (!e.target.closest("#term-menu")) $("term-menu").classList.remove("show");
+    /* the child list counts as inside its parent: a press on a profile row must
+       not be read as a press outside the menu it hangs off */
+    if (!e.target.closest("#term-menu, #split-with-menu")) { $("term-menu").classList.remove("show"); closeSplitWithMenu(); }
     if (!e.target.closest("#file-menu")) $("file-menu").classList.remove("show");
-    if (!e.target.closest("#pane-menu")) $("pane-menu").classList.remove("show");
+    if (!e.target.closest("#pane-menu")) {
+      $("pane-menu").classList.remove("show");
+      document.querySelectorAll(".pane-ghost.open").forEach(g => g.classList.remove("open"));
+    }
     if (!e.target.closest("#pv-menu, .pv-name.switch")) closePvMenu();
   });
 
