@@ -74,6 +74,21 @@ pub const GIT_HEAD_GAP_LOGICAL_PX: f32 = 8.0;
 /// letter across its cap height, so a mark cut to the type size always reads
 /// small beside it. Half a pixel is what closes that on this ladder.
 pub const GIT_HEAD_MARK_LOGICAL_PX: f32 = 14.0;
+/// The shortest run of a name this masthead will draw (user report, 2026-08-20).
+///
+/// **A name narrower than this says less than nothing.** At the sizes this line
+/// is set in, forty pixels is an ellipsis and three or four letters in front of
+/// it — the last width at which a reader learns *which* repository or *which*
+/// branch. Below it a name is holding room the segment beside it needed in order
+/// to say anything at all, so it is the floor the yielding order stops at: the
+/// repository's name shrinks to this before the branch gives up a pixel, the
+/// branch's name shrinks to this next, and then the `⑂ name` segment yields
+/// whole rather than shrink past it.
+///
+/// **A name already shorter than the floor never pads out to it** — see
+/// [`masthead_branch_min`]. The floor is a limit on *truncation*, not a
+/// reservation.
+pub const GIT_HEAD_NAME_MIN_LOGICAL_PX: f32 = 40.0;
 
 /// `.gud { font-size: 10.5px; border-radius: 9px; padding: 1px 7px }` — the
 /// ahead/behind pills, and the shape every pill on this page will wear (R22).
@@ -2280,38 +2295,163 @@ pub fn act_at(
         .map(|(act, _)| act)
 }
 
-/// Where the masthead's pills are, given how wide its branch name is drawn.
+/// Where every part of the masthead's identity segment stands, and which parts
+/// of it stand at all.
 ///
 /// **One derivation for the paint and for the tooltip**, which is why this is a
 /// function and not a loop inside the painter: R5's whole point is that these
 /// pills carry a sentence, and a sentence anchored to a rectangle the painter
 /// computed separately is a tip that appears next to nothing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MastheadRects {
+    /// The `⑂`. `None` exactly when [`Self::name`] is `None`.
+    pub mark: Option<[f32; 4]>,
+    /// The run the branch's name is laid out in and clipped to.
+    pub name: Option<[f32; 4]>,
+    /// The amber ring around a detached `HEAD`'s two words.
+    pub badge: Option<[f32; 4]>,
+    /// `↑ 2` and `↓ 1`, in order, as many as the room fits.
+    pub pills: Vec<[f32; 4]>,
+}
+
+/// The room the `⑂ name` segment asks for: the mark, its gap, the name in full,
+/// and — while `HEAD` is on no branch — the trailing half of the ring its badge
+/// draws around that name.
+///
+/// The badge's *leading* inset is not counted: it reaches back into the gap
+/// between the mark and the name, which is one pixel wider than the inset is.
 #[must_use]
-pub fn pill_boxes(head: &GitHead, rect: [f32; 4], scale: f32) -> Vec<[f32; 4]> {
+pub fn masthead_branch_width(head: &GitHead, scale: f32) -> f32 {
+    masthead_branch_room(head, scale, head.branch_width)
+}
+
+/// The least room the segment will stand in.
+///
+/// Below this it yields whole — **the mark is never left behind on its own**
+/// (user report, 2026-08-20). A branch's mark is not an ornament that can stand
+/// in for the name: it is the label's own glyph, it says nothing by itself, and
+/// the pixels it holds are pixels the controls beside it were about to be drawn
+/// over. What the reader loses when the segment goes is a name they could no
+/// longer have read anyway; what they keep is a strip whose parts are all
+/// legible.
+#[must_use]
+pub fn masthead_branch_min(head: &GitHead, scale: f32) -> f32 {
+    // A name already shorter than the floor is not padded out to it: there is
+    // nothing to truncate, so the segment's least room is its full room.
+    let name = head
+        .branch_width
+        .min((GIT_HEAD_NAME_MIN_LOGICAL_PX * scale).round());
+    masthead_branch_room(head, scale, name)
+}
+
+/// What a `⑂ name` segment costs with its name drawn `name` wide.
+fn masthead_branch_room(head: &GitHead, scale: f32, name: f32) -> f32 {
+    let gap = (GIT_HEAD_GAP_LOGICAL_PX * scale).round();
+    let mark = (GIT_HEAD_MARK_LOGICAL_PX * scale).round().max(1.0);
+    let badge = if head.detached {
+        (GIT_PILL_PADDING_X_LOGICAL_PX * scale).round()
+    } else {
+        0.0
+    };
+    mark + gap + name + badge
+}
+
+/// Lay the masthead's identity segment out inside `rect`.
+///
+/// **The yielding order, in one place** (user report, 2026-08-20). The strip is
+/// an identity segment on the left and a group of controls on the right, and the
+/// controls are verbs: they keep their whole boxes at every width, and what is
+/// left over is what the segment has. Inside the segment the order things give
+/// way is fixed — the repository's name truncates first (that half is
+/// [`crate::git_graph::graph_head_rects`], which is the only surface with a
+/// repository to name), then the branch's name, and then the whole `⑂ name`
+/// segment goes rather than shrink past [`masthead_branch_min`].
+///
+/// It went wrong by being written twice. The name was clipped at the buttons'
+/// edge and the mark was drawn at `rect[0]` whatever `rect` was, so a segment
+/// with no room left drew its mark anyway — on top of the filter button beside
+/// it, which is what the reader saw: a `⑂` inside the word `All`.
+///
+/// `carries_acts` is whether this masthead draws [`MASTHEAD_ACTS`] in its own
+/// trailing corner. The panel's does and the graph's toolbar does not — its
+/// refresh belongs to the strip, outside this rectangle entirely — and a segment
+/// that reserved room for buttons that are not there would be yielding forty-odd
+/// pixels to nothing.
+#[must_use]
+pub fn masthead_rects(
+    head: &GitHead,
+    rect: [f32; 4],
+    scale: f32,
+    carries_acts: bool,
+) -> MastheadRects {
     let gap = (GIT_HEAD_GAP_LOGICAL_PX * scale).round();
     let mark = (GIT_HEAD_MARK_LOGICAL_PX * scale).round().max(1.0);
     let height = (GIT_PILL_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
     let pad = (GIT_PILL_PADDING_X_LOGICAL_PX * scale).round();
-    let top = ((rect[1] + rect[3] - height) / 2.0).round();
     // The masthead's buttons hold the trailing edge (G24's `margin-left:auto`),
-    // so the pills' room ends where the leftmost of them begins. Laid out by
+    // so the segment's room ends where the leftmost of them begins. Laid out by
     // [`place_acts`] rather than re-measured here, on this function's own rule:
     // two derivations of one edge is a pill drawn under a button — which is
     // exactly what the arithmetic this replaced would have produced the moment a
     // second button joined the first.
-    let limit = masthead_acts_left(rect, scale, gap);
-    let name_right = (rect[0] + mark + gap + head.branch_width).min(limit);
-    let mut left = name_right + gap;
-    let mut boxes = Vec::with_capacity(head.pills.len());
+    let limit = if carries_acts {
+        masthead_acts_left(rect, scale, gap)
+    } else {
+        rect[2]
+    };
+    if limit - rect[0] < masthead_branch_min(head, scale) {
+        // The segment yields whole, and its pills go with it: `↑ 2` is a fact
+        // about a branch, and a count beside no name is a number about nothing.
+        return MastheadRects::default();
+    }
+    let middle = |size: f32| ((rect[1] + rect[3] - size) / 2.0).round();
+
+    let mark_rect = [rect[0], middle(mark), rect[0] + mark, middle(mark) + mark];
+    let name_left = mark_rect[2] + gap;
+    // The badge holds the pixels its ring needs on the trailing side, so a
+    // detached `HEAD` whose name is being cut is cut one inset earlier rather
+    // than wearing a ring with its end sliced off.
+    let name_limit = if head.detached { limit - pad } else { limit };
+    let name_rect = [
+        name_left,
+        rect[1],
+        (name_left + head.branch_width)
+            .min(name_limit)
+            .max(name_left),
+        rect[3],
+    ];
+    let badge = head.detached.then(|| {
+        [
+            (name_rect[0] - pad).max(rect[0]),
+            middle(height),
+            (name_rect[2] + pad).min(limit),
+            middle(height) + height,
+        ]
+    });
+
+    let top = middle(height);
+    let mut left = name_rect[2] + gap;
+    let mut pills = Vec::with_capacity(head.pills.len());
     for pill in &head.pills {
         let width = pill.text_width + pad * 2.0;
         if left + width > limit {
             break;
         }
-        boxes.push([left, top, left + width, top + height]);
+        pills.push([left, top, left + width, top + height]);
         left += width + gap;
     }
-    boxes
+    MastheadRects {
+        mark: Some(mark_rect),
+        name: Some(name_rect),
+        badge,
+        pills,
+    }
+}
+
+/// Where the **panel's** masthead draws its pills — the tooltip's own reader.
+#[must_use]
+pub fn pill_boxes(head: &GitHead, rect: [f32; 4], scale: f32) -> Vec<[f32; 4]> {
+    masthead_rects(head, rect, scale, true).pills
 }
 
 /// Where the masthead's leftmost button begins, less one gap — the edge its
@@ -2451,7 +2591,9 @@ pub fn push_git_panel(
         );
         match row {
             GitRow::Masthead(head) => {
-                push_git_masthead(head, rect, scale, palette, (labels, sprites), &crop);
+                // The panel's masthead keeps its own two buttons in its trailing
+                // corner, so its identity segment stops where they begin.
+                push_git_masthead(head, rect, scale, true, palette, (labels, sprites), &crop);
                 push_acts(
                     &act_boxes(row, rect, scale, hovered),
                     row,
@@ -2607,21 +2749,27 @@ fn push_row_ground(
     ));
 }
 
+/// Draw the masthead's identity segment — the `⑂`, the branch, its badge and
+/// its pills — inside the room [`masthead_rects`] gives each of them.
 pub fn push_git_masthead(
     head: &GitHead,
     rect: [f32; 4],
     scale: f32,
+    carries_acts: bool,
     palette: &ChromePalette,
     out: (&mut Vec<ChromeLabel>, &mut Vec<ChromeSprite>),
     crop: &dyn Fn([f32; 4]) -> [f32; 4],
 ) {
     let (labels, sprites) = out;
-    let gap = (GIT_HEAD_GAP_LOGICAL_PX * scale).round();
-    let mark = (GIT_HEAD_MARK_LOGICAL_PX * scale).round().max(1.0);
     let font = GIT_HEAD_FONT_LOGICAL_PX * scale;
-    let middle = |size: f32| ((rect[1] + rect[3] - size) / 2.0).round();
-
-    let mark_rect = [rect[0], middle(mark), rect[0] + mark, middle(mark) + mark];
+    // **Cut at the buttons and not at the strip's edge**, and stop being drawn
+    // at all below the width where that cut leaves anything to read: one
+    // derivation for the mark, the name, the badge and the pills alike, so that
+    // none of the four can be placed by arithmetic the other three never saw.
+    let rects = masthead_rects(head, rect, scale, carries_acts);
+    let (Some(mark_rect), Some(name_rect)) = (rects.mark, rects.name) else {
+        return;
+    };
     sprites.push(ChromeSprite::new(
         ChromeMark::GitBranch,
         crop(mark_rect),
@@ -2631,19 +2779,6 @@ pub fn push_git_masthead(
         palette.git_head_text,
     ));
 
-    let name_left = mark_rect[2] + gap;
-    // **Cut at the buttons and not at the strip's edge.** The pills have always
-    // stopped where the masthead's controls begin ([`pill_boxes`]); the name was
-    // clipped at `rect[2]`, which was invisible while one button sat in a corner
-    // a long branch name rarely reached and is not invisible now that two do. One
-    // edge, [`masthead_acts_left`]'s, for the name and the pills alike.
-    let limit = masthead_acts_left(rect, scale, gap);
-    let name_rect = [
-        name_left,
-        rect[1],
-        (name_left + head.branch_width).min(limit),
-        rect[3],
-    ];
     labels.push(ChromeLabel {
         mono: false,
         text: head.branch.clone(),
@@ -2683,15 +2818,11 @@ pub fn push_git_masthead(
     // name is the ordinary state of this line and boxing it would make every
     // repository look like it had something wrong with it. Drawn after the words
     // so its ring is over the strip rather than under the label's own clip.
-    if head.detached {
-        let inset = (GIT_PILL_PADDING_X_LOGICAL_PX * scale).round();
-        let height = (GIT_PILL_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
-        let badge = [
-            (name_rect[0] - inset).max(rect[0]),
-            middle(height),
-            (name_rect[2] + inset).min(limit),
-            middle(height) + height,
-        ];
+    //
+    // It is part of the identity segment and it yields with it: a ring around no
+    // name would be a warning about nothing, which is why it is laid out beside
+    // the name rather than from the row's own edge.
+    if let Some(badge) = rects.badge {
         sprites.push(ChromeSprite::new(
             ChromeMark::ControlPillRing {
                 radius_px: pill_radius,
@@ -2701,7 +2832,7 @@ pub fn push_git_masthead(
             palette.status_warn,
         ));
     }
-    for (pill, box_) in head.pills.iter().zip(pill_boxes(head, rect, scale)) {
+    for (pill, box_) in head.pills.iter().zip(rects.pills) {
         sprites.push(ChromeSprite::new(
             ChromeMark::ControlPillRing {
                 radius_px: pill_radius,
@@ -4042,6 +4173,60 @@ mod tests {
                 "no pill runs under a button: {pill:?}"
             );
         }
+    }
+
+    /// **The `⑂` is never left standing on its own** (user report, 2026-08-20).
+    ///
+    /// The mark used to be drawn at `rect[0]` whatever `rect` was, so a masthead
+    /// squeezed past the width its name needed drew a glyph with nothing beside
+    /// it — and, on the graph's own strip, drew it inside the filter button. The
+    /// mark and the name are one object: below the width the pair fits in, the
+    /// pair goes, and its badge and its pills go with it.
+    #[test]
+    fn the_marks_room_is_its_names_room_and_the_two_leave_together() {
+        let cache = answered(b"## main...origin/main [ahead 2]\x00", Vec::new(), false);
+        let GitRow::Masthead(head) = &rows_of(&cache).rows[0] else {
+            unreachable!("the masthead leads the page")
+        };
+        assert!(!head.pills.is_empty(), "a branch two ahead says so");
+        let least = masthead_branch_min(head, 1.0);
+        assert!(
+            least <= masthead_branch_width(head, 1.0),
+            "the floor is a limit on truncation, never a reservation"
+        );
+
+        // Wide enough for the pair, and then one pixel short of it. The buttons'
+        // own room is added on both sides, because that is what the segment is
+        // measured against.
+        let acts =
+            240.0 - masthead_acts_left([0.0, 0.0, 240.0, 30.0], 1.0, GIT_HEAD_GAP_LOGICAL_PX);
+        let fits = masthead_rects(head, [0.0, 0.0, least + acts, 30.0], 1.0, true);
+        assert!(
+            fits.mark.is_some() && fits.name.is_some(),
+            "at its least room the segment still stands: {fits:?}"
+        );
+        let short = masthead_rects(head, [0.0, 0.0, least + acts - 1.0, 30.0], 1.0, true);
+        assert_eq!(
+            short,
+            MastheadRects::default(),
+            "and one pixel under it the whole segment yields — mark, name, badge \
+             and pills together"
+        );
+
+        // The graph's toolbar draws no buttons inside this rectangle, so it
+        // yields to nothing but its own right edge: a segment that reserved room
+        // for the panel's two would be giving away forty pixels to a corner that
+        // is empty on that surface.
+        let strip = [0.0, 0.0, least + acts - 1.0, 30.0];
+        assert!(
+            masthead_rects(head, strip, 1.0, false).mark.is_some(),
+            "the same width stands on a masthead with no buttons of its own"
+        );
+        assert_eq!(
+            masthead_rects(head, strip, 1.0, false).name,
+            masthead_rects(head, [0.0, 0.0, strip[2] + acts, 30.0], 1.0, true).name,
+            "and the two differ by exactly the buttons' room"
+        );
     }
 
     /// T5 — **the docked page's head goes quiet while anything is owed**, and it
