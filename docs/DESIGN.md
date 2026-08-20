@@ -195,13 +195,13 @@ target  ← CreateTargetForHwnd(hwnd, topmost = true)
 
 **关窗的语义写死成两句。** 关**非最后一扇** = 只关那扇：提交它的重命名、还回它借给 IME 的光标、关掉它自己的 shell，别的窗一个字节不动。关**最后一扇** = 进程退出，`App::finish` 落一次运行哨兵（§5.5 的干净退出信号），这是本产品一直以来的语义，只是从"循环里只可能有一扇窗"的假设变成了一句写下来的话。`shutdown()` 因此拆成窗级的 `Runtime::close_window` 与应用级的 `App::finish`。
 
-**`session.json` 是**某一扇**窗的照片，而且文件自己说是哪一扇。** 它的 schema 只装得下一扇窗（一个 `WindowStateV1`、一列 tabs、一个 active），给它 `windows[]` 是片 D 的事。在那之前只有两个不诚实的答案和一个诚实的：让每扇窗都写，等于最后动的那扇覆盖掉别人的 tabs——开一扇草稿窗再关掉就毁掉了用户真正的会话；让谁都不写，等于今天的每一次单窗启动都不再记得任何事。所以**文件归进程开的那扇窗**（`App::session_window`，只在开窗处写一次），后开的窗从不写它、关掉时也什么都不带走——**它的会话随它一起死**，这句话可以照实说给用户听，而"你的 tabs 被你刚关掉的那扇窗换掉了"不能。第一扇窗关掉后镜像**不迁移**：文件保持它最后的含义，迁移到哪去是片 D 要裁的 per-window 政策。
+**`session.json` 是**某一扇**窗的照片，而且文件自己说是哪一扇（**本段已被 §2.7 取代，留作判例**）。** 它的 schema 当时只装得下一扇窗（一个 `WindowStateV1`、一列 tabs、一个 active）。在 `windows[]` 到来之前只有两个不诚实的答案和一个诚实的：让每扇窗都写，等于最后动的那扇覆盖掉别人的 tabs——开一扇草稿窗再关掉就毁掉了用户真正的会话；让谁都不写，等于每一次单窗启动都不再记得任何事。所以**文件归进程开的那扇窗**（`App::session_window`，只在开窗处写一次），后开的窗从不写它、关掉时也什么都不带走——**它的会话随它一起死**，这句话可以照实说给用户听，而"你的 tabs 被你刚关掉的那扇窗换掉了"不能。片 D 用 schema v9 让文件装得下每一扇窗，这条临时规则随之退役；它留在这里，因为**"两窗各写各的文件"仍然是错的**，片 D 的答案不是放开写权而是把写者升到 `App`——见 §2.7。
 
 **应用级的钟一转，窗级的钟每扇窗各转一次。** 四条 worker 与两个 watcher 是进程的（§2.4 规则 1），所以三个 watch 的 debounce 与 session 的 debounce **由开得最早的那扇窗代表整个进程转一次**（`Runtime::turn(now, application_clocks)`），否则一个文件夹会被读 N 遍、一个 debounce 会响 N 次。窗自己的三十几个钟——光标闪、tooltip、toast、rail、缩略滚动条、float、peek——每扇窗各读各的，事件循环取所有窗要求的最早那一刻作为 `ControlFlow::WaitUntil`。**一扇窗的钟不该由另一扇窗的事件来推**，这是"两窗互不扰"里最容易漏的一条。
 
 **进程级 static 改变了的东西，欠每一扇窗一次重新求解。** 三样：grid 的字体（`GpuContext::set_terminal_font` 动的是共享的 `FontSystem`，它的 doc 一直写着"调用方必须对设备上的每一扇窗跟一次 `apply_font_change`"）、配色与主题（`bt-render` 的 `THEME`）、语言（`i18n::install`）。改动作发生在某一扇窗里，那扇窗当场付清；`App::pending_application_change` 记下"改了什么、谁已经付过"，事件循环在同一轮里把同一笔账交给其余的窗——**是同一次付款再付一次，不是第二份"一次改动值多少钱"的清单**。两个位而不是一个：换字体要重量每一格并重设每个 shell 的列数，换配色只是重画，一扇窗只欠后者时绝不能让它去发一次多余的 PTY resize。
 
-**不做的三样，本片明确留给后面。** ① 撕 tab 出来成窗（片 F）；② per-window 持久化（片 D 的 `windows[]` schema 与按窗恢复）；③ 进程级 static 升进 `App`（片 E）——`profile_revision` 背后的表、`THEME` / `CURSOR_STYLE`、`WINDOW_CLASS_BACKGROUND` 与探针的 static 一律留在原地，本片只在它们改变时把账记下来发给每扇窗，没有搬动任何一个。
+**不做的三样，本片明确留给后面。** ① 撕 tab 出来成窗（片 F）；② per-window 持久化（片 D 的 `windows[]` schema 与按窗恢复——**已由 §2.7 兑现**）；③ 进程级 static 升进 `App`（片 E）——`profile_revision` 背后的表、`THEME` / `CURSOR_STYLE`、`WINDOW_CLASS_BACKGROUND` 与探针的 static 一律留在原地，本片只在它们改变时把账记下来发给每扇窗，没有搬动任何一个。
 
 **同名成员表（片 B 留下的铁律）。** 动手前先比对四层的字段名：`App`(43) × `WindowRuntime`(159) × `TabState`(44) × `LeafSession`(15)，六对里只有 `WindowRuntime` × `LeafSession` 的 `last_presented_frame` 一处同名，与片 B 记下的那一处完全相同——因为本片**没有把任何一个字段在两层之间搬动**（`App` 新增的三个 `gpu` / `session_window` / `pending_application_change` 都是新名字）。deref 链的静默遮蔽因此在本片没有新的接触面，但这张表仍然是下一片动手前的第一件事。
 
@@ -247,6 +247,26 @@ target  ← CreateTargetForHwnd(hwnd, topmost = true)
 **八行的纸逐字节相同**;已经达标的两行(white 12.25、默认前景 4.75)**墨也逐字节相同**,没被碰;不达标的六行全部落在 4.51–4.54,那点溢出正是背离背景取整留下的一个字节;蓝还是蓝、红还是红(色相守住)。标题栏与窗口 chrome 五处取样点两张图逐字节相同。Off 那张图里 ANSI 0 那一行**整行是空的**——这就是用户看见的东西。
 
 **欠账两笔,都记在这里而不是悄悄做掉。** ① `design/ui-mockup.html` 欠这一行的小样(本单不许动该文件);② **powerline / 制表字形没有豁免**。xterm.js 对 `treatGlyphAsBackgroundColor` 的字形无条件跳过下限(VS Code 文档里点名的 issue #146406),理由很实在:powerline 分隔符 `` 的颜色是**故意**配成邻段底色的,抬它的对比度会把提示词画坏。Folio 没做这条豁免,因为 `resolve_colors` 手上没有格子的文字,要它就得改签名、扩大接触面,与本单「交叠面最小」相冲。影响面有界(只在读者主动开启下限时出现),但这是一条真实的偏离,等一次裁决。
+
+### 2.7 一份文件，许多扇窗：`windows[]` 与按窗恢复（多窗块 片 D，2026-08-20，已落地；`crates/bt-persist/src/{session,migrate,lib}.rs`、`crates/bt-app/src/{main,seed,profiles,restore,i18n}.rs`）
+
+**schema v8 → v9：`window` 升格为 `windows[]`。** `docs/M2-persistence-schema-v1.md` §3.1 从 v1 起就把这张欠条写在纸上（"多窗口落地时用 `schema_version` bump 把 `window` 升格为 `windows[]`，现在不为假想中的形状买单"），本片是兑现它的那一天。顶层留下的三样是**进程**的事实——`theme` 与 `cursor_style` 是 `bt-render` 的 static，一个进程只有一份；`recent` 是 `App::recent`，pin / Recent / 撤销关闭三扇门读的同一个库。挪进 `SessionWindowV1` 的五个键是**一扇窗**的事实：`placement`（原 `window`：矩形、DPI、posture、monitor）、`tab_layout`、`sidebar_mode`、`tabs`、`active_tab`。
+
+**窗级事实的判定，是 §2.4 那一问再加一问。** §2.4 问"这是关于这个程序的事，还是关于一扇窗的事"；这里对 `WindowRuntime` 的 157 个字段先问"它**耐久**吗"，再问那一问，两问都答"是"的才进文件。逐个裁下来只有五样：几何、tab 树、活动 tab、以及 rail 的两半。悬停、手势、菜单、重命名、每一份按字号或按 seat 做 key 的缓存、"上一帧画了什么"的账——全部答不出第一问。`renderer` / `compositor` / 四座 Win32 桥答不出第一问（句柄不耐久）。而 `theme_mode`、`shortcuts`、四条 worker、两个 watcher 答不出第二问。**`tab_layout` / `sidebar_mode` 是本片唯一改判的两个**：它们原先在文件顶层，因为文件只装得下一扇窗；两扇窗可以真的穿着两种不同的条与栏，顶层写下其中一个就是把另一个写成了谎。改判之后"新窗穿什么"必须有答案，答案是**穿开它的那扇窗的**（`NewWindowPlan::like`）——§2.4 规则 3 仍然成立（设置一次改所有窗，但说给 DWM 听的那句话一扇窗一句），只是"一次一扇"现在不止一个答案。
+
+**单写者在 `App`，不在窗上。** 每扇窗仍然只会说自己那一段（`Runtime::window_snapshot` → `SessionWindowV1`），交给 `App::record_window`；整份文件只在 `App::session_document` 一处被组装，`session_store.record` 全文件只有一次调用，并有一条钉子数着它。**这不是把写权放开了，恰恰相反**：片 C 禁止第二扇窗写，是因为它只能整份覆盖；本片让每扇窗都能写，是因为它们写的不再是整份。两扇窗在同一帧各改一样东西，因此是一次 debounce、一次原子写，而不是两次 `rename` 抢同一个路径。
+
+**恢复：全部窗，一次提问（用户裁决 ①）。** 冷启动读 `windows[]`，`plan_windows` 把它们分成三堆——**开**（第一扇有 pinned tab 的窗，进程用它开场）、**跟着开**（其余带 pinned tab 的窗，走 `Ctrl+Shift+M` 同一扇门，由 `App::pending_new_windows` 在循环门口排出来）、**等**（一个 pinned 都没有的窗，`App::pending_restore_windows`）。§7.1.4 关于 tab 的那条规则——pinned 是已经给过的答案，其余是问题——在这里原样读给窗听。**恢复卡整进程只出一次**：只有进程开场的那扇窗 `raise_restore_prompt`，卡上列的是 `App::restore_question`（每扇开着的窗欠的 + 每扇没开的窗的全部），答案由 `FolioApp::settle_restore_answer` 一次发给所有窗——每一行回到它自己那扇窗（`WindowRuntime::pending_restore`），没开的窗整扇开出来。**拒绝**不是丢弃：开着的窗按老规矩把被拒的 tab 一条条记进 Recent，没开的窗**整扇记成一颗窗口种子**——与关掉它得到的完全是同一行。一个 pinned 都没有时仍然有一扇窗开出来（占位 shell 那条规则读给窗听：没有窗就没有地方问这个问题）。
+
+**关窗：`ending` 一个布尔就是全部语义（用户裁决 ②）。** 关**非最后一扇** = 用户关掉了一扇窗：它离开文件，它的种子进 Recent，不弹任何提示（`Runtime::close_window(false)` → `vault_this_window` + `App::forget_window`，一次写落两件事）。关**最后一扇** = 进程退出，它的照片留在文件里——这正是下次启动能开出你留下的东西的原因。`FolioApp::fail` 与 `exiting` 走 `ending = true`：循环停了是进程停了，不是有人关了五扇窗。**它还带走它欠的问题**：一扇窗关掉时如果恢复卡还没答，那些 tab 的种子一并进那颗窗口种子——对开着的窗，"未答复不算否"由 `window_snapshot` 把它们折回文件来兑现（§7.1.4），而这扇窗正在离开文件，于是只剩这一条路。
+
+**窗口种子是 Recent 的第四种形状。** `RecentSeedV1::Window { seeds }` / `seed::Seed::Window { seeds }`：**它装的是它那些 tab 的种子，别的什么都不装**——没有矩形、没有 rail、没有树。这是 Recent 一直以来那句话（"restores the places you were, not a layout"，也正是关掉的 files tab 会忘掉列宽的原因）说给一个更大的对象听。去重键开第**四**个槽（`|||…`，里面是子键用换行拼起来——换行是 Windows 路径不可能含有的字符），所以一扇窗永远不可能挤掉一个 tab 的行。行上的**字**是它开场那个 tab 的名字（一行只有一行的宽度），**图标**是 `#i-max`——本产品用来表示"一扇窗"的那张画；"窗口 · N 个标签页"在 tip 里，那本来就是这张列表放细节的地方。点它 = `NewWindowPlan::revived`：种子写回文件的词汇（`seeded_tab`），于是这扇窗仍然由 `revive_plan` 复活——启动时的 pinned tab、Restore、Recent 行、`Ctrl+Shift+T` 走的还是同一扇门。反向的 `restore_row_seed` 顺手补上了第三种形状：它现在收整个 `TabV1` 而不是一棵树，因为"这个 pane 在看哪个文件"是内容、按红线 L1 待在树**旁边**，只拿到树的走查器只能答 `Files { root: "" }`——正是 M175 立下的那条"绝不画无名的行"，在另一种叶子上又犯了一次。
+
+**一处裁决冲突，记在这里而不是绕过去。** 工单的实机脚本要求"开两窗→正常退出→重启两窗原位原内容"，而裁决 ② 说关非最后一扇窗 = 该窗离开 session。这两句在**今天的产品里不能同时为真**：本产品没有"退出"这个动词，关掉最后一扇窗就是退出，所以两扇窗只能一扇一扇地关，先关的那扇按 ② 已经进了 Recent。本片按 ② 的字面实现（红测与实机都按 ② 验），多窗恢复因此走的是"进程带着两扇窗结束"的那条路——`exiting` / 崩溃后的下一次启动，以及任何时刻文件里就是两扇窗。**要让脚本里那句话成立，需要一个 Quit 动词**（Firefox / Chrome 正是这个模型：关一扇窗进「最近关闭的窗口」，退出应用则整套恢复），而给它配哪个键归快捷键审计裁，本片不擅自加。**挂账一条，等裁决。**
+
+**欠账。** `design/ui-mockup.html` 欠 Recent 里那一行窗口种子的小样（本单不许动该文件）。
+
+**验收。** 全套测试绿（bt-app 1808，bt-persist 94 + 35 + 6 + 5 + 3，vendor ref 45/45），clippy `-D warnings` 与 `fmt --check` 干净。红测先红后绿逐条验过：v8→v9 迁移少搬一个键 → 两条迁移断言变红；`degrade_in_place` 只走第一扇窗 → 计数 1≠2；`plan_windows` 不排队第二扇窗 → 队列为空；窗口种子的键不开第四槽 → 与 tab 键相撞。
 
 ## 3. 内容模型
 

@@ -77,8 +77,8 @@ use bt_layout::{
 use bt_math::{MathEngine, MathRaster, MathRenderError};
 use bt_persist::{
     LayoutNodeV1, LeafNodeV1, SESSION_SCHEMA_VERSION, SessionCursorStyleV1, SessionSidebarModeV1,
-    SessionTabLayoutV1, SessionThemeV1, SessionV1, TabV1, TermLeafV1, ThemeModeV1, WindowBoundsV1,
-    WindowStateV1,
+    SessionTabLayoutV1, SessionThemeV1, SessionV1, SessionWindowV1, TabV1, TermLeafV1, ThemeModeV1,
+    WindowBoundsV1, WindowStateV1,
 };
 use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtySession, PtySize};
 use bt_render::{
@@ -4515,25 +4515,51 @@ struct App {
     /// Persisted user choice, distinct from the resolved renderer theme. Under `BT_BG` the process
     /// colors are locked but this mode is still kept across a diagnostic launch.
     theme_mode: ThemeModeV1,
-    /// **Which window `session.json` is a picture of** (multiwindow slice C).
+    /// **Every open window's picture of itself, in the order they opened**
+    /// (multiwindow slice D).
     ///
-    /// The file's schema holds one window — one `WindowStateV1`, one list of
-    /// tabs, one active index — and slice D is what gives it a `windows[]`.
-    /// Until then a second window has nowhere in that file to be, and the choice
-    /// is between two dishonest answers and one honest one. Letting every window
-    /// write it means whichever window moved last overwrites the others' tabs,
-    /// so opening a scratch window and closing it would destroy the session
-    /// somebody actually has; letting none write it means a single-window
-    /// launch — which is every launch today — stops remembering anything.
+    /// Slice C could only let *one* window write `session.json`, because the file
+    /// held one window and letting every window write it meant whichever moved
+    /// last overwrote the others' tabs. Schema v9 gives the file a `windows[]`,
+    /// and this is the other half of that: the document is assembled here, from
+    /// every window's own picture, so the two windows that both change something
+    /// in one frame produce **one** document and **one** atomic write rather than
+    /// two renames racing over a path.
     ///
-    /// So the file belongs to the window the process opened with, and says so.
-    /// A window opened later never writes it and takes nothing with it when it
-    /// closes: **its session dies with it**, which is a sentence a reader can be
-    /// told, unlike "your tabs were replaced by the ones in the window you just
-    /// shut". The mirror does not migrate when that first window closes — the
-    /// file keeps meaning the last thing it meant — because a migration would be
-    /// this slice inventing the per-window policy slice D exists to decide.
-    session_window: WindowId,
+    /// A `Vec` and not a map, for [`Windows`]'s reason one layer down: the order
+    /// is observable — it is the order the file lists its windows in, and
+    /// therefore the order they come back in — and a `HashMap` has no order to
+    /// borrow. It is kept in step with [`Windows::order`] by the two verbs that
+    /// write it, [`Self::record_window`] and [`Self::forget_window`].
+    window_pictures: Vec<(WindowId, SessionWindowV1)>,
+    /// **The tabs this launch is asking about, in the order they will come back**
+    /// (multiwindow slice D, ruling ①: 恢复提示恒一次).
+    ///
+    /// The prompt's *list*, and it is the application's rather than a window's
+    /// because the question is: with two saved windows the restore card names
+    /// everything that did not open, whichever window it will land in, and it is
+    /// asked once for the process. Where each row will actually go is not read
+    /// from here — that is [`WindowRuntime::pending_restore`] for a window that is
+    /// already open and [`Self::pending_restore_windows`] for one that is not.
+    /// Two lists rather than one because they answer two different questions, and
+    /// a single list would have to carry the routing that those two *are*.
+    restore_question: Vec<TabV1>,
+    /// **Saved windows that have not opened, because nothing in them was pinned**
+    /// (multiwindow slice D).
+    ///
+    /// A window whose tabs were all unpinned is a window the launch has no answer
+    /// about, exactly as an unpinned tab is — §7.1.4's rule read one level up. It
+    /// opens whole if the prompt is accepted, and goes into the vault as one
+    /// window seed if it is declined, which is the same thing closing it would
+    /// have done.
+    pending_restore_windows: Vec<SessionWindowV1>,
+    /// The answer the restore prompt was given, until the loop's door can spend
+    /// it (multiwindow slice D).
+    ///
+    /// [`Self::pending_new_windows`]'s shape for its reason: one press has to
+    /// reach every open window *and* open the windows that are not, and a
+    /// `Runtime` is one window by construction.
+    pending_restore_answer: Option<bool>,
     /// **What the application changed under its windows, and who has paid for
     /// it already** (multiwindow slice C).
     ///
@@ -4554,7 +4580,7 @@ struct App {
     /// a change merged from a second window before the first was drained leaves
     /// nobody exempt, because at that point no single window has had both.
     pending_application_change: Option<ApplicationChange>,
-    /// A window this application has been asked to open and has not opened yet.
+    /// Windows this application has been asked to open and has not opened yet.
     ///
     /// Opening one needs the `ActiveEventLoop`, which only the handler callbacks
     /// hold, and the chord is dispatched several frames down inside a `Runtime`
@@ -4562,7 +4588,84 @@ struct App {
     /// door, exactly as [`WindowRuntime::window_close_requested`] is — the same
     /// shape for the same reason, and for closing that shape is what keeps the
     /// shut going through the one door it always went through.
-    pending_new_window: bool,
+    ///
+    /// **A list rather than a flag** since slice D, because one press can now ask
+    /// for several: a launch that finds three saved windows opens the first here
+    /// and queues the other two, and an accepted restore prompt can queue as many
+    /// as the file described.
+    pending_new_windows: Vec<NewWindowPlan>,
+}
+
+/// **What a window that has been asked for should open as** (multiwindow slice
+/// D).
+///
+/// Three doors ask for a window and they differ in exactly two facts — what it
+/// holds and where it stands — so they are three constructors of one plan rather
+/// than three ways into [`Runtime::open_window`]. That is the same rule the
+/// launch already keeps about tabs: "one sentence about what *new* means, not
+/// three".
+#[derive(Clone, Debug)]
+struct NewWindowPlan {
+    /// The window whose rail this one copies, when a verb in a window asked for
+    /// it.
+    ///
+    /// A new window opens wearing the strip and the sidebar of the window it was
+    /// opened *from*: they are per-window facts as of schema v9, so there is no
+    /// longer one answer in the file to read, and the honest one is the window
+    /// the reader was looking at when they pressed. `None` for a window the
+    /// session file described, which brings its own.
+    like: Option<WindowId>,
+    /// What the window opens holding, or `None` for the default profile's single
+    /// tab — the same seed `New tab` plants and the same one a cold launch with
+    /// nothing to restore plants.
+    saved: Option<Box<SessionWindowV1>>,
+    /// Whether the tabs in `saved` are an answer already given (a restore that
+    /// was accepted, or a Recent row that was pressed) or a question still to be
+    /// asked. Only a launch queues the latter.
+    ask_about_unpinned: bool,
+}
+
+impl NewWindowPlan {
+    /// `Ctrl+Shift+M`: a window like the one that asked, holding one default tab.
+    fn fresh(like: WindowId) -> Self {
+        Self {
+            like: Some(like),
+            saved: None,
+            ask_about_unpinned: false,
+        }
+    }
+
+    /// A window the session file described, opening whole. Nothing about it is a
+    /// question: either it was pinned, or the reader has just said yes.
+    fn saved(window: SessionWindowV1) -> Self {
+        Self {
+            like: None,
+            saved: Some(Box::new(window)),
+            ask_about_unpinned: false,
+        }
+    }
+
+    /// The same, at launch, where the unpinned half of it is still the prompt's
+    /// to ask about (§7.1.4 read one level up).
+    fn launched(window: SessionWindowV1) -> Self {
+        Self {
+            ask_about_unpinned: true,
+            ..Self::saved(window)
+        }
+    }
+
+    /// A window drawn back out of the vault, holding the places its tabs stood
+    /// in, and wearing the rail of the window whose Recent list was pressed.
+    fn revived(like: WindowId, tabs: Vec<TabV1>) -> Self {
+        Self {
+            like: Some(like),
+            saved: Some(Box::new(SessionWindowV1 {
+                tabs,
+                ..SessionWindowV1::default()
+            })),
+            ask_about_unpinned: false,
+        }
+    }
 }
 
 /// **What is true of one window** (multiwindow slice B).
@@ -5579,8 +5682,19 @@ struct WindowRuntime {
     /// still open must put these back where they came from (§7.1.4: "restore 提示
     /// 未答复时再关窗：未答复计划并回 lastSession，不得丢失") — an unanswered
     /// question is not a "no".
+    ///
+    /// **This window's share of the question, which is where the answer lands**
+    /// (multiwindow slice D). Since schema v9 a launch can restore several
+    /// windows and each keeps its own list, so that accepting puts every row back
+    /// in the window it was saved from. What the card *shows* is the union —
+    /// [`App::restore_question`] — because there is one question.
     pending_restore: Vec<TabV1>,
-    /// Whether the "Reopen your other tabs?" question is on screen.
+    /// Whether the "Reopen your other tabs?" question is on screen **in this
+    /// window**.
+    ///
+    /// One window per process ever has it up (ruling ①): only a launch opens the
+    /// prompt, and it opens it in the window the process opened with. See
+    /// [`NewWindowParts::raise_restore_prompt`].
     restore_prompt: restore::RestorePrompt,
     /// The stand-in shell launch opened because nothing was pinned — "a stand-in
     /// for an answer we do not have yet" (mock-up 7464).
@@ -5793,23 +5907,39 @@ struct {name} {{
         );
     }
 
-    /// PIN (multiwindow slice C) — **`session.json` is one window's picture, and
-    /// the file says which window.**
+    /// PIN (multiwindow slice D) — **`session.json` has one writer, and it is the
+    /// application.**
     ///
-    /// The file's schema holds one window until slice D gives it a `windows[]`,
-    /// so the honest rule is that the window the process opened with owns it and
-    /// every later window's session dies with that window. That rule needs the
-    /// identity to be the *application's* — a window that stored "am I the
-    /// mirror?" on itself would be two windows both entitled to answer yes.
+    /// Slice C's rule was that one *window* owned the file, because the file held
+    /// one window; schema v9 holds them all, and the rule that replaces it is
+    /// stronger rather than looser. Every window hands its own paragraph to
+    /// `App`, and `App` is the only thing that ever builds a `SessionV1` — which
+    /// is what makes two windows changing something in one frame produce one
+    /// atomic write instead of two renames racing over a path.
+    ///
+    /// Red gate: give `WindowRuntime` a store, or let a window build a document
+    /// of its own, and the two windows are back to overwriting each other's tabs
+    /// — the exact failure slice C wrote `session_window` to prevent, arriving
+    /// through the door slice D opened.
     #[test]
-    fn the_window_the_session_file_mirrors_is_the_applications_own_fact() {
+    fn the_session_file_is_written_by_the_application_and_never_by_a_window() {
+        let app = struct_fields("App");
         assert!(
-            struct_fields("App").contains("session_window: WindowId,"),
-            "which window the file is a picture of is a fact about the file"
+            app.contains("session_store: persist::SessionStore,"),
+            "one store, on the layer there is one of"
         );
         assert!(
-            !struct_fields("WindowRuntime").contains("session_window"),
-            "a window that decided for itself would be two windows deciding"
+            app.contains("window_pictures: Vec<(WindowId, SessionWindowV1)>,"),
+            "the document is assembled from every window's own paragraph"
+        );
+        let window = struct_fields("WindowRuntime");
+        assert!(
+            !window.contains("session_store"),
+            "a window with a store of its own is a window that can race the others"
+        );
+        assert!(
+            !window.contains("window_pictures"),
+            "the list of windows is not a fact any one window holds"
         );
     }
 
@@ -14438,6 +14568,76 @@ fn launch_active_tab(cli_slot: Option<usize>, active_open: Option<usize>, tabs: 
     active_open.unwrap_or(0).min(tabs.saturating_sub(1))
 }
 
+/// **What a launch does with the windows the file describes** (multiwindow slice
+/// D).
+///
+/// [`plan_launch`] one level up, and it answers with the same vocabulary: a
+/// window holding a pinned tab is an answer already given and opens; a window
+/// holding none is a question. §7.1.4's rule is about *tabs*, and this is that
+/// rule read about the thing a tab is now in.
+#[derive(Debug, Default, PartialEq)]
+struct WindowLaunchPlan {
+    /// The window this process opens with, or `None` when the file described no
+    /// window at all.
+    first: Option<SessionWindowV1>,
+    /// Windows that open immediately after it, because something in each was
+    /// pinned.
+    queued: Vec<SessionWindowV1>,
+    /// Windows the launch has no answer about, waiting on the one question.
+    pending: Vec<SessionWindowV1>,
+}
+
+/// Split the saved windows into the one that opens, the ones that follow it, and
+/// the ones the prompt is about.
+///
+/// **A window with no tabs is not a window** and is dropped here rather than
+/// somewhere further down: nothing this build writes produces one, and a
+/// hand-edited or half-migrated document that does would otherwise open an empty
+/// frame with no way to tell it from a window whose shells all died.
+///
+/// **Something must open, even when nothing was pinned.** That is the placeholder
+/// rule (§7.1.4: "无 pinned 可恢复时以默认 profile 的占位 shell 起步") read one
+/// level up — a process with no window is a process nobody can answer a prompt
+/// in — so the first saved window opens and the rest wait. The asymmetry is real
+/// and it is the same one the single-window build already had: the first window
+/// is the one there has to be.
+fn plan_windows(saved: &[SessionWindowV1]) -> WindowLaunchPlan {
+    let mut standing = saved.iter().filter(|window| !window.tabs.is_empty());
+    let pinned = |window: &SessionWindowV1| window.tabs.iter().any(|tab| tab.pinned);
+    let mut plan = WindowLaunchPlan::default();
+    // The first window that has an answer of its own leads; failing that, the
+    // first window there is.
+    let mut before: Vec<SessionWindowV1> = Vec::new();
+    for window in standing.by_ref() {
+        if pinned(window) {
+            plan.first = Some(window.clone());
+            break;
+        }
+        before.push(window.clone());
+    }
+    match plan.first.take() {
+        Some(first) => {
+            plan.first = Some(first);
+            // Windows the pinned one overtook keep their place in the file's
+            // order among the ones still to be asked about.
+            plan.pending = before;
+        }
+        None => {
+            let mut before = before.into_iter();
+            plan.first = before.next();
+            plan.pending = before.collect();
+        }
+    }
+    for window in standing {
+        if pinned(window) {
+            plan.queued.push(window.clone());
+        } else {
+            plan.pending.push(window.clone());
+        }
+    }
+    plan
+}
+
 fn plan_launch(saved: &[TabV1], active: usize, cli_wants_pane: bool) -> LaunchPlan {
     let mut open = Vec::new();
     let mut ask = Vec::new();
@@ -14781,20 +14981,123 @@ fn persisted_files_leaves(node: &LayoutNodeV1) -> Vec<&bt_persist::FilesLeafV1> 
 /// from a newer build — and it answers with an empty root, because there is
 /// genuinely nothing here to name it with. That is the honest row, and it is the
 /// same row the degradation ladder (M177) already promises.
-fn restore_row_seed(node: &LayoutNodeV1) -> seed::Seed {
-    first_term_leaf(node).map_or_else(
-        || seed::Seed::Files {
-            root: persisted_files_leaves(node)
-                .first()
-                .map(|leaf| leaf.root.clone())
-                .unwrap_or_default(),
-        },
-        |leaf| seed::Seed::Term {
+///
+/// **And a tab that holds only a preview is named by the file it was on**
+/// (multiwindow slice D). It takes the whole `TabV1` rather than its tree for
+/// exactly that: which file a pane was showing is *content* and rides beside the
+/// tree by red line L1, so a function handed only the tree could not see it and
+/// answered `Files { root: "" }` — a nameless row for a tab whose whole identity
+/// is a name. The vault has spelled this shape since schema v8 and the three
+/// runtime doors have produced it since §7.1.6h; this is the fourth door
+/// learning the same word.
+fn restore_row_seed(tab: &TabV1) -> seed::Seed {
+    if let Some(leaf) = first_term_leaf(&tab.root) {
+        return seed::Seed::Term {
             profile_id: leaf.profile_id.clone(),
             cwd: leaf.cwd.clone(),
             manual_name: leaf.manual_name.clone(),
-        },
-    )
+        };
+    }
+    // A column before a page, which is the order the two arms already stood in:
+    // a `[files | preview]` tab has always been named by its column, and adding
+    // the third shape must not rename a tab that was already named.
+    if let Some(leaf) = persisted_files_leaves(&tab.root).first() {
+        return seed::Seed::Files {
+            root: leaf.root.clone(),
+        };
+    }
+    if let Some(path) = tab
+        .preview
+        .as_ref()
+        .and_then(|preview| preview.panes.iter().find_map(|pane| pane.cur.clone()))
+    {
+        return seed::Seed::Preview { path };
+    }
+    seed::Seed::Files {
+        root: String::new(),
+    }
+}
+
+/// **[`restore_row_seed`] run backwards: the tab one vault seed reopens as**
+/// (multiwindow slice D).
+///
+/// A window drawn out of Recent has to become a *window full of tabs*, and the
+/// only door that builds a window's tabs is the one the session file goes
+/// through — `revive_plan`, which every other route into a revived tab already
+/// shares by this module's own rule ("if this had its own revive path the three
+/// would drift, and the one that drifts is always the one you use least"). So
+/// rather than teaching that door a second vocabulary, a seed is written out in
+/// the vocabulary it already reads.
+///
+/// **Not pinned, and standing on nothing it was not given.** A reopened tab is
+/// coming back because you asked for it now, which is not the same as promising
+/// to bring it back forever — [`Runtime::reopen_recent`]'s own ruling, kept here
+/// because this is the same gesture. A files column is born at the width a fresh
+/// column gets and with nothing expanded, for that function's reason: the vault
+/// stores a place and not a layout.
+fn seeded_tab(seed: &seed::Seed) -> TabV1 {
+    let (root, preview) = match seed {
+        seed::Seed::Term {
+            profile_id,
+            cwd,
+            manual_name,
+        } => (
+            LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
+                profile_id: profile_id.clone(),
+                cwd: cwd.clone(),
+                manual_name: manual_name.clone(),
+            })),
+            None,
+        ),
+        seed::Seed::Files { root } => (
+            LayoutNodeV1::Leaf(LeafNodeV1::Files(bt_persist::FilesLeafV1 {
+                root: root.clone(),
+                open: Vec::new(),
+                sel: None,
+                width: bt_layout::FILES_W.floor_px().max(0) as u32,
+                view: bt_persist::FilesViewV1::Files,
+                remotes_open: false,
+            })),
+            None,
+        ),
+        seed::Seed::Preview { path } => (
+            LayoutNodeV1::Leaf(LeafNodeV1::Preview(bt_persist::PreviewLeafV1 {
+                pinned: false,
+            })),
+            Some(bt_persist::TabPreviewV1 {
+                panes: vec![bt_persist::PreviewPaneV1 {
+                    leaf: "leaf-0".to_owned(),
+                    cur: Some(path.clone()),
+                    graph: None,
+                }],
+                pool: vec![bt_persist::PreviewPoolEntryV1 {
+                    path: path.clone(),
+                    name: profiles::cwd_leaf(path).to_owned(),
+                }],
+            }),
+        ),
+        // **A window inside a window is a shape nothing constructs** — the vault
+        // records a window's *tabs*, and a tab is never a window. It is written
+        // as the tab its first child is rather than refused, so that a document
+        // that somehow held one is legible instead of losing a tab silently.
+        seed::Seed::Window { .. } => {
+            return seed.first_tab().map_or_else(
+                || TabV1 {
+                    root: LayoutNodeV1::Leaf(LeafNodeV1::Unknown),
+                    pinned: false,
+                    focused_leaf: "leaf-0".to_owned(),
+                    preview: None,
+                },
+                seeded_tab,
+            );
+        }
+    };
+    TabV1 {
+        root,
+        pinned: false,
+        focused_leaf: "leaf-0".to_owned(),
+        preview,
+    }
 }
 
 /// How many panes a persisted tab held — the number its badge would show.
@@ -16763,9 +17066,18 @@ struct NewWindowParts {
     ime_system_caret: bt_platform::ImeSystemCaret,
     rail: seats::RailState,
     seat_viewport: LogicalRect,
-    /// The tabs a restore prompt has still to ask about — empty for every window
-    /// but the one the session file is a picture of.
+    /// The tabs a restore prompt has still to ask about **in this window** —
+    /// where each row of the answer lands, which is a fact about the window that
+    /// saved them.
     pending_restore: Vec<TabV1>,
+    /// Whether this window is the one that *raises* the card (multiwindow slice
+    /// D, ruling ①: 恢复提示恒一次).
+    ///
+    /// Separate from the list beside it because the two are separate facts now:
+    /// a launch that restores three windows has three `pending_restore` lists and
+    /// **one** prompt, and the prompt names everything in all of them. Only the
+    /// window a process opens with is given this.
+    raise_restore_prompt: bool,
     /// The tab that is only scaffolding, if this window opened with one.
     placeholder_tab: Option<TabId>,
 }
@@ -16790,6 +17102,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         rail,
         seat_viewport,
         pending_restore,
+        raise_restore_prompt,
         placeholder_tab,
     } = parts;
     WindowRuntime {
@@ -16967,7 +17280,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         // runs, so the question arrives over something usable.
         restore_prompt: {
             let mut prompt = restore::RestorePrompt::default();
-            if !pending_restore.is_empty() {
+            if raise_restore_prompt {
                 prompt.open();
             }
             prompt
@@ -17090,12 +17403,19 @@ impl Runtime<'_> {
         }
         let theme_mode = render_theme_mode(session_store.loaded().theme);
         set_cursor_style(render_cursor_style(session_store.loaded().cursor_style));
+        // **Every window the file describes, sorted into the one that opens now,
+        // the ones that follow it, and the ones the prompt is about**
+        // (multiwindow slice D). Everything below reads `opening` where it used
+        // to read the document's own top level, because that is exactly what
+        // schema v9 moved.
+        let windows = plan_windows(&session_store.loaded().windows);
+        let opening = windows.first.clone().unwrap_or_default();
         // Through the same constructor the two live routes take, so a restored
         // rail is byte for byte the rail the user left rather than one assembled
         // a second way at startup.
         let rail = rail_state_for(
-            render_tab_layout(session_store.loaded().tab_layout),
-            render_sidebar_mode(session_store.loaded().sidebar_mode),
+            render_tab_layout(opening.tab_layout),
+            render_sidebar_mode(opening.sidebar_mode),
         );
         // **The shape a new window opens in** (§7.1.6b′ ①). From `settings.json`
         // and not from `session.json`, which is the whole difference between this
@@ -17121,7 +17441,7 @@ impl Runtime<'_> {
         // profile's namespace. Everything it could not honour comes back in the
         // plan's own list and is said on a card once the window is up.
         let mut cli_plan = cli::resolve(cli, default_profile, cli::machine_path_kind);
-        let restored = restore_window_placement(event_loop, session_store.loaded());
+        let restored = restore_window_placement(event_loop, &opening);
         let attributes = opening_window_attributes(
             profiles::title(default_profile),
             restored
@@ -17291,10 +17611,9 @@ impl Runtime<'_> {
         let plan = if probe_input.is_some() {
             LaunchPlan::default()
         } else {
-            let loaded = session_store.loaded();
             plan_launch(
-                &loaded.tabs,
-                loaded.active_tab as usize,
+                &opening.tabs,
+                opening.active_tab as usize,
                 cli_plan.wants_pane,
             )
         };
@@ -17483,13 +17802,55 @@ impl Runtime<'_> {
             pins_file_broken: false,
             recent,
             theme_mode,
-            // The first window is the one `session.json` is a picture of,
-            // and it is the only window that ever will be — see
-            // `App::session_window`.
-            session_window: window.id(),
+            // **The document is assembled from these, and the first window's
+            // paragraph is the only one that exists yet** (multiwindow slice D).
+            // It is seeded with what this window was *built from* rather than
+            // left empty, so the two postures that have no rectangle of their own
+            // — minimized, maximized — have the rectangle the file gave them to
+            // fall back to before this window has measured itself once.
+            window_pictures: vec![(window.id(), opening.clone())],
+            restore_question: Vec::new(),
+            pending_restore_windows: Vec::new(),
+            pending_restore_answer: None,
             pending_application_change: None,
-            pending_new_window: false,
+            pending_new_windows: Vec::new(),
         };
+        // **The rest of the file's windows, queued at the door.** A window that
+        // held a pinned tab opens straight away, through the very same door
+        // `Ctrl+Shift+M` goes through; a window that held none is a question, and
+        // there is exactly one question — see `App::restore_question`.
+        //
+        // A probe run opens nothing extra: `BT_PROBE_INPUT` replaces the session
+        // with a scripted one, and a second window arriving beside it would be a
+        // second window in every recorded frame.
+        if probe_input.is_none() {
+            app.pending_new_windows = windows
+                .queued
+                .iter()
+                .cloned()
+                .map(NewWindowPlan::launched)
+                .collect();
+            app.pending_restore_windows = windows.pending.clone();
+            // **The whole question, in the order it will come back** (ruling ①).
+            // This window's own unanswered tabs first, then every other window's:
+            // one card, one list, one press.
+            app.restore_question =
+                plan.ask
+                    .iter()
+                    .cloned()
+                    .chain(
+                        windows.queued.iter().flat_map(|window| {
+                            window.tabs.iter().filter(|tab| !tab.pinned).cloned()
+                        }),
+                    )
+                    .chain(
+                        windows
+                            .pending
+                            .iter()
+                            .flat_map(|window| window.tabs.iter().cloned()),
+                    )
+                    .collect();
+        }
         let mut window = new_window_runtime(NewWindowParts {
             renderer,
             tabs,
@@ -17507,6 +17868,11 @@ impl Runtime<'_> {
             rail,
             seat_viewport,
             pending_restore,
+            // **The one card, in the window the process opened with** (ruling
+            // ①). It names every tab the launch is asking about, in every window,
+            // which is why the question it reads is the application's list and
+            // not this window's.
+            raise_restore_prompt: !app.restore_question.is_empty(),
             placeholder_tab,
         });
         window.focus_mode = focus_mode;
@@ -17581,26 +17947,57 @@ impl Runtime<'_> {
     /// **The seed is the default profile's single tab**, which is the same seed
     /// [`Self::new_tab`] plants and the same one a cold launch with no saved
     /// session plants. One sentence about what "new" means, not three.
+    ///
+    /// **What the plan changes** (multiwindow slice D). `plan.saved` gives the
+    /// window tabs to open instead of that one seed, and the two facts a window
+    /// wears otherwise follow one rule each:
+    ///
+    /// * **the rectangle** is the saved one when the *file* asked for this window
+    ///   and the product's own size otherwise. A window a verb asked for must not
+    ///   open on top of the window that asked — slice C's note, kept — and a
+    ///   window drawn out of the vault gets the same answer for the vault's own
+    ///   reason: Recent restores places, never layouts.
+    /// * **the rail** is `plan.like`'s when a window asked, and the saved
+    ///   window's when the file did. Since schema v9 there is no single answer in
+    ///   the file to read: the strip and the sidebar are per-window, so the
+    ///   honest answer for a new window is the window the reader was looking at.
     fn open_window(
         event_loop: &ActiveEventLoop,
         app: &mut App,
+        plan: &NewWindowPlan,
+        like: Option<(SessionTabLayoutV1, SessionSidebarModeV1)>,
     ) -> Result<(WindowId, WindowRuntime)> {
         let default_profile = profiles::default_profile(
             &app.settings_store.loaded().default_profile,
             &app.profile_programs,
         );
-        // The product's own size, and pointedly not the saved one: the saved
-        // rectangle is where the window `session.json` mirrors was left, and a
-        // second window opened exactly on top of the first is a second window
-        // nobody can see. Where later windows *should* land is a placement
-        // question slice D answers, because slice D is what gives them somewhere
-        // to write the answer down.
+        // **Where this window opens** (multiwindow slice D). The saved rectangle
+        // when the file asked for the window, and the product's own size when a
+        // verb did: a second window opened exactly on top of the first is a
+        // second window nobody can see, and slice C left that as the open
+        // question this slice answers. The judgment is `restore_window_placement`'s
+        // in both cases, so a saved rectangle no monitor can see forfeits its
+        // corner here exactly as the first window's does.
+        let placement = plan
+            .like
+            .is_none()
+            .then_some(plan.saved.as_deref())
+            .flatten()
+            .and_then(|saved| restore_window_placement(event_loop, saved));
+        let attributes = opening_window_attributes(
+            profiles::title(default_profile),
+            placement.map_or(
+                LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT),
+                |placement| placement.size,
+            ),
+        );
+        let attributes = match placement.and_then(|placement| placement.position) {
+            Some(position) => attributes.with_position(position),
+            None => attributes,
+        };
         let window = Arc::new(
             event_loop
-                .create_window(opening_window_attributes(
-                    profiles::title(default_profile),
-                    LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT),
-                ))
+                .create_window(attributes)
                 .context("create native window")?,
         );
         install_theme_class_background(&window)?;
@@ -17636,7 +18033,7 @@ impl Runtime<'_> {
         let opened_at = dpi_snapshot(&window)?;
         bt_platform::set_window_outer_rect(
             hwnd,
-            startup_window_rect(None, opened_at.rect, opened_at.authoritative_scale),
+            startup_window_rect(placement, opened_at.rect, opened_at.authoritative_scale),
         )
         .map_err(|error| anyhow!(error))
         .context("state the new window's outer rectangle")?;
@@ -17669,12 +18066,23 @@ impl Runtime<'_> {
         let render_physical = presentation_physical_size(renderer.presentation_geometry());
         let pty_wake = PtyWakeSignal::new(app.event_proxy.clone());
         let wake = pty_wake.wake();
-        // The rail this window opens wearing is the layout the settings hold,
-        // read the same way the first window reads it: it is an application-level
-        // preference worn one window at a time (§2.4 rule 3).
+        // **The rail this window opens wearing** (multiwindow slice D). The strip
+        // and the sidebar became per-window facts with schema v9, so there is no
+        // longer one answer in the file to read: a window the file described
+        // wears its own, and a window a verb asked for wears the rail of the
+        // window that asked. §2.4 rule 3 still holds — the setting is worn one
+        // window at a time — it is only that "one window at a time" now has more
+        // than one answer to be.
+        let (tab_layout, sidebar_mode) = like
+            .or_else(|| {
+                plan.saved
+                    .as_deref()
+                    .map(|saved| (saved.tab_layout, saved.sidebar_mode))
+            })
+            .unwrap_or_default();
         let rail = rail_state_for(
-            render_tab_layout(app.session_store.loaded().tab_layout),
-            render_sidebar_mode(app.session_store.loaded().sidebar_mode),
+            render_tab_layout(tab_layout),
+            render_sidebar_mode(sidebar_mode),
         );
         // The posture this window opens in, which is that pair joined to the focus
         // bit — the state the two solves below are entitled to, for the reason the
@@ -17683,42 +18091,89 @@ impl Runtime<'_> {
             focus: app.settings_store.loaded().focus_mode,
             ..rail
         };
-        let (tab, _) = create_tab_state(
-            TabId(1),
-            seats::Seats::lone_terminal(),
-            &renderer,
-            render_physical,
-            Arc::clone(&wake),
-            None,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &PreviewRestore::default(),
-            TabSeed::default(),
-            &app.profile_programs,
-            default_profile,
-            // The opening rectangle is this program's, exactly as the first
-            // window's is: nobody has taken hold of a frame that has not been
-            // shown yet.
-            SizePolicy::Lawful,
-            opening_rail,
-            FormulaSwitches::from_settings(app.settings_store.loaded()),
-            scrollback_quota(app.settings_store.loaded().scrollback_lines),
-        )?;
-        let tabs = vec![tab];
+        // **What this window opens holding.** The launch's own split, run over
+        // this window's saved tabs (§7.1.4 read one level up): a pinned tab is an
+        // answer already given and opens, and the rest is the prompt's to ask
+        // about — but only when the launch is what queued this window. A window
+        // opened because the reader said "Restore", or pressed a Recent row, is
+        // itself the answer, so everything in it opens.
+        let saved = plan.saved.as_deref();
+        let plan_launched = saved.map(|saved| {
+            if plan.ask_about_unpinned {
+                plan_launch(&saved.tabs, saved.active_tab as usize, false)
+            } else {
+                LaunchPlan {
+                    open: saved.tabs.clone(),
+                    ask: Vec::new(),
+                    active_open: Some(saved.active_tab as usize),
+                    placeholder: false,
+                }
+            }
+        });
+        let roots: Vec<_> = plan_launched
+            .as_ref()
+            .filter(|plan| !plan.open.is_empty())
+            .map(|plan| plan.open.iter().map(revive_plan).collect())
+            .unwrap_or_else(|| {
+                vec![(
+                    seats::Seats::lone_terminal(),
+                    TabSeed::default(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    PreviewRestore::default(),
+                )]
+            });
+        let mut tabs = Vec::with_capacity(roots.len());
+        for (index, (seats, seed, leaves, files, preview)) in roots.into_iter().enumerate() {
+            let (tab, _) = create_tab_state(
+                TabId(index as u64 + 1),
+                seats,
+                &renderer,
+                render_physical,
+                Arc::clone(&wake),
+                None,
+                &leaves,
+                &files,
+                &preview,
+                seed,
+                &app.profile_programs,
+                default_profile,
+                // The opening rectangle is this program's, exactly as the first
+                // window's is: nobody has taken hold of a frame that has not been
+                // shown yet.
+                SizePolicy::Lawful,
+                opening_rail,
+                FormulaSwitches::from_settings(app.settings_store.loaded()),
+                scrollback_quota(app.settings_store.loaded().scrollback_lines),
+            )?;
+            tabs.push(tab);
+        }
+        let next_tab_id = tabs.len() as u64 + 1;
+        let active_tab = plan_launched
+            .as_ref()
+            .and_then(|plan| plan.active_open)
+            .unwrap_or(0)
+            .min(tabs.len() - 1);
+        let pending_restore = plan_launched
+            .as_ref()
+            .map(|plan| plan.ask.clone())
+            .unwrap_or_default();
+        let placeholder = plan_launched.as_ref().is_some_and(|plan| plan.placeholder);
         let (_, _, terminal_seat, seat_viewport) = solve_seats(
-            &tabs[0].seats,
+            &tabs[active_tab].seats,
             &renderer,
             render_physical,
             SizePolicy::Lawful,
             opening_rail,
         );
         renderer.set_seat_viewport(terminal_seat);
+        let maximized = placement.is_some_and(|placement| placement.maximized);
         let id = window.id();
         let mut window = new_window_runtime(NewWindowParts {
             renderer,
             tabs,
-            active_tab: 0,
-            next_tab_id: 2,
+            active_tab,
+            next_tab_id,
             pty_wake,
             translucency_available,
             custom_window_frame,
@@ -17730,11 +18185,20 @@ impl Runtime<'_> {
             ime_system_caret,
             rail,
             seat_viewport,
-            // Nothing to ask about and nothing that is scaffolding: this window
-            // restored nothing, so it has no question outstanding and no shell
-            // that a later answer would be entitled to sweep away.
-            pending_restore: Vec::new(),
-            placeholder_tab: None,
+            // **The question stays with the window it is about**, so answering it
+            // once puts each row back where it came from. The card itself is
+            // raised in one window and once per process — see
+            // [`App::restore_question`].
+            pending_restore,
+            // **Never here** (ruling ①). One process asks once, and the window
+            // that asks is the one the process opened with; a window that opens
+            // afterwards carries its own share of the question and raises no card
+            // of its own.
+            raise_restore_prompt: false,
+            // Only a shell opened *because there was no answer* is scaffolding —
+            // the launch's own rule, kept here because this door now takes the
+            // same plan the launch does.
+            placeholder_tab: placeholder.then_some(TabId(1)),
         });
         window.focus_mode = app.settings_store.loaded().focus_mode;
         let mut runtime = Runtime {
@@ -17742,9 +18206,9 @@ impl Runtime<'_> {
             window: &mut window,
         };
         runtime.dress_new_window(hwnd)?;
-        // Not maximized: a window nobody has told to be. The first window's
-        // answer comes out of the session file, and this window is not in it.
-        runtime.show_new_window(false)?;
+        // Maximized only if the file said this window was: a window a verb asked
+        // for is one nobody has told to be.
+        runtime.show_new_window(maximized)?;
         Ok((id, window))
     }
 
@@ -18108,6 +18572,24 @@ impl Runtime<'_> {
                 ));
                 pages = vec![path];
                 (seats, None, BTreeMap::new(), BTreeMap::new())
+            }
+            // **A window comes back as a window, not as a tab** (multiwindow
+            // slice D, ruling ②), so this is the one shape that leaves by
+            // another door. Recorded rather than opened, for
+            // [`App::pending_new_windows`]'s standing reason — opening a window
+            // needs the `ActiveEventLoop`, which a `Runtime` has never held —
+            // and the tabs are handed over in the *file's* vocabulary, so that
+            // the window is revived by `revive_plan`: the one function a pinned
+            // tab at launch, a Restore, a Recent row and Ctrl+Shift+T all
+            // already go through.
+            seed::Seed::Window { seeds } => {
+                let tabs = seeds.iter().map(seeded_tab).collect();
+                let id = self.window.window.id();
+                self.app
+                    .pending_new_windows
+                    .push(NewWindowPlan::revived(id, tabs));
+                self.mark_session_dirty(Instant::now());
+                return Ok(());
             }
         };
         // **The pages come back beside the shell** (裁决 10). Each one lands
@@ -21610,7 +22092,7 @@ impl Runtime<'_> {
     /// box that holds them can be sized, which is why the content is built here,
     /// where the renderer is, and handed to a module that knows only numbers.
     fn restore_layout(&mut self) -> Option<restore::RestoreLayout> {
-        if !self.window.restore_prompt.is_open() || self.window.pending_restore.is_empty() {
+        if !self.window.restore_prompt.is_open() || self.app.restore_question.is_empty() {
             return None;
         }
         let scale = self.window.renderer.metrics().scale_factor as f32;
@@ -21618,12 +22100,17 @@ impl Runtime<'_> {
         let (width, height) = (width as f32, height as f32);
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
+        // **The application's list, not this window's** (multiwindow slice D,
+        // ruling ①). The card names every tab the launch is asking about — this
+        // window's, the other open windows', and the windows that have not opened
+        // at all — because there is one question. Which window each row goes back
+        // to is not read here; it is where the row already lives.
         let rows = self
-            .window
-            .pending_restore
+            .app
+            .restore_question
             .iter()
             .map(|tab| {
-                let seed = restore_row_seed(&tab.root);
+                let seed = restore_row_seed(tab);
                 let mut row =
                     restore::RestoreRow::from_seed(&seed, persisted_pane_count(&tab.root));
                 row.label_text_width = measure(&row.label, restore::ROW_FONT_LOGICAL_PX * scale);
@@ -21654,9 +22141,15 @@ impl Runtime<'_> {
     }
 
     /// Answer the prompt and put it away.
+    ///
+    /// **The answer is recorded rather than spent** (multiwindow slice D). One
+    /// press has to reach every open window and open the windows that are not
+    /// open yet, and a `Runtime` is one window by construction — so it goes where
+    /// the other two things a window can ask of the process go, and the loop's
+    /// door spends it. `App::pending_new_windows`'s shape, for its reason.
     fn answer_restore_prompt(&mut self, answer: restore::RestoreAnswer) -> Result<()> {
         self.window.restore_prompt.close();
-        self.answer_restore(answer == restore::RestoreAnswer::Restore)?;
+        self.app.pending_restore_answer = Some(answer == restore::RestoreAnswer::Restore);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -24433,11 +24926,18 @@ impl Runtime<'_> {
             .context("apply the window's minimum client size")
     }
 
-    /// The durable form of everything this window would want back after a
+    /// The durable form of everything **this window** would want back after a
     /// restart. Layout *intent* only (L11): no rectangle, no cols/rows, no DPI
     /// of a seat — those are all recomputed by the next `solve`.
-    fn session_snapshot(&self) -> SessionV1 {
-        let mut session = self.app.session_store.loaded().clone();
+    ///
+    /// One window's paragraph of the document and not the document (multiwindow
+    /// slice D). What is here is what schema v9 moved inside `windows[]`, which
+    /// is `docs/DESIGN.md` §2.4's own question asked about durability: the
+    /// rectangle, the rail's resting shape, the tabs and which one was on top.
+    /// The theme, the cursor and the vault are the *process's* and are written by
+    /// [`App::session_document`], once, over every window's answer to this.
+    fn window_snapshot(&self) -> SessionWindowV1 {
+        let previous = self.app.window_picture(self.window.window.id());
         let scale = self
             .window
             .renderer
@@ -24463,24 +24963,17 @@ impl Runtime<'_> {
             .filter(|_| posture == WindowPosture::Normal)
             .and_then(|hwnd| bt_platform::get_window_rect(hwnd).ok())
             .map(|rect| persisted_window_bounds(rect, scale));
-        let (bounds, maximized) = recorded_window_placement(
-            posture,
-            measured,
-            session.window.bounds,
-            session.window.maximized,
-        );
-        session.schema_version = SESSION_SCHEMA_VERSION;
-        session.theme = session_theme_mode(self.app.theme_mode);
-        session.cursor_style = session_cursor_style(current_cursor_style());
-        session.tab_layout = session_tab_layout(self.window.rail.layout);
-        session.sidebar_mode = session_sidebar_mode(self.window.rail.mode);
-        session.window = WindowStateV1 {
-            bounds,
-            dpi: self.window.renderer.metrics().dpi_milli().get(),
-            maximized,
-            monitor_id: session.window.monitor_id.clone(),
-        };
-        session.tabs = self
+        // What this window last said about itself, which is what the two
+        // postures that have no rectangle of their own fall back to. A window
+        // that has never said anything falls back to the product's placeholder,
+        // which is `recorded_window_placement`'s own contract read with no prior
+        // reading to offer it.
+        let was = previous
+            .map(|window| window.placement.clone())
+            .unwrap_or_default();
+        let (bounds, maximized) =
+            recorded_window_placement(posture, measured, was.bounds, was.maximized);
+        let tabs = self
             .window
             .tabs
             .iter()
@@ -24502,43 +24995,44 @@ impl Runtime<'_> {
                 preview: tab.preview_content(),
             })
             .collect();
-        session.active_tab = self.window.active_tab as u32;
+        let mut window = SessionWindowV1 {
+            placement: WindowStateV1 {
+                bounds,
+                dpi: self.window.renderer.metrics().dpi_milli().get(),
+                maximized,
+                monitor_id: was.monitor_id,
+            },
+            tab_layout: session_tab_layout(self.window.rail.layout),
+            sidebar_mode: session_sidebar_mode(self.window.rail.mode),
+            tabs,
+            active_tab: self.window.active_tab as u32,
+        };
         // A question that was never answered is not a "no". Tabs still waiting on
         // the restore prompt go back to the file exactly as they came out of it,
         // so closing the window mid-question asks again next time rather than
         // deciding on the user's behalf (§7.1.4: "未答复计划并回 lastSession,
         // 不得丢失"). They are appended unpinned, which is what they were.
-        session
+        window
             .tabs
             .extend(self.window.pending_restore.iter().map(|tab| TabV1 {
                 pinned: false,
                 ..tab.clone()
             }));
-        // The vault is app state while the window is up and file state the moment
-        // it is not; this is the one place the two meet.
-        session.recent = self.app.recent.to_persisted();
-        session
+        window
     }
 
     /// Record a meaningful change and start the debounce window (§5.1).
     ///
-    /// **Only from the window the file mirrors** (multiwindow slice C). Every
-    /// verb in this window that changes something worth remembering comes
-    /// through here, so this is the one place the rule in
-    /// [`App::session_window`] can be kept without every one of them having to
-    /// know it exists.
+    /// **From every window, into its own slot** (multiwindow slice D). Slice C
+    /// had to turn all but one window away here, because the file held one
+    /// window; schema v9 holds them all, so what this does instead is put *this*
+    /// window's paragraph where it belongs and hand the assembled document to the
+    /// one store. Two windows that both change something in the same frame
+    /// therefore produce one write and not two — see [`App::record_window`].
     fn mark_session_dirty(&mut self, now: Instant) {
-        if !self.mirrors_the_session() {
-            return;
-        }
-        let snapshot = self.session_snapshot();
-        self.app.session_store.record(snapshot, now);
-    }
-
-    /// Whether `session.json` is a picture of *this* window. See
-    /// [`App::session_window`].
-    fn mirrors_the_session(&self) -> bool {
-        self.app.session_window == self.window.window.id()
+        let snapshot = self.window_snapshot();
+        let id = self.window.window.id();
+        self.app.record_window(id, snapshot, now);
     }
 
     /// Commit every theme-dependent surface at one event-loop safe point. Until the resulting frame
@@ -27049,9 +27543,10 @@ impl Runtime<'_> {
             // Opening one needs the `ActiveEventLoop`, which lives for the
             // duration of a handler callback and has never been reachable from
             // here; the loop spends this at its own door, exactly as it spends
-            // the dirty gate's request to shut. See [`App::pending_new_window`].
+            // the dirty gate's request to shut. See [`App::pending_new_windows`].
             shortcuts::Action::NewWindow => {
-                self.app.pending_new_window = true;
+                let id = self.window.window.id();
+                self.app.pending_new_windows.push(NewWindowPlan::fresh(id));
                 Ok(())
             }
             // I103's chain lives inside `close_pane`: the last pane of a tab
@@ -50322,7 +50817,7 @@ impl Runtime<'_> {
         // `lastSession` (§7.1.4), so Esc must dismiss the *prompt* without
         // deciding for the user. It sits above the PTY encoder so neither key
         // reaches the child while the question is up.
-        if self.window.restore_prompt.is_open() && !self.window.pending_restore.is_empty() {
+        if self.window.restore_prompt.is_open() && !self.app.restore_question.is_empty() {
             match &event.logical_key {
                 Key::Named(NamedKey::Enter) => {
                     if !event.repeat {
@@ -51714,14 +52209,32 @@ impl Runtime<'_> {
     ///
     /// The session snapshot is taken here rather than in `App::finish` because
     /// it is a picture of *this window's* tabs, and by the time the last window
-    /// has closed there is nothing left to photograph. It writes only when this
-    /// window is the one the file mirrors — see [`App::session_window`].
-    fn close_window(&mut self) -> Result<()> {
+    /// has closed there is nothing left to photograph.
+    ///
+    /// **`ending` is the whole of the close semantics** (multiwindow slice D,
+    /// ruling ②). A window closed while others remain is a window the *user*
+    /// closed: it leaves the document and its seed goes into the vault, so
+    /// "重开丢的窗从 Recent 一步找回" is one press and the file keeps describing
+    /// what is actually open. Closing the last one is the *process* ending, which
+    /// is this product's own long-standing sentence (§2.5), and there the window
+    /// stays in the file — that is what makes the next launch open what you left.
+    ///
+    /// Nothing is asked either way: closing a window raises no prompt. The one
+    /// question a shut can ask is the dirty gate, and it has already been asked,
+    /// at the door, before this is reached.
+    fn close_window(&mut self, ending: bool) -> Result<()> {
         // §7.1.4: "未提交的重命名在序列化前提交（blur 语义,输入到一半关窗不丢
         // 新名字）". Before the snapshot below, not after — the name has to be on
         // the tab by the time the tab is written down.
         self.finish_rename(true)?;
-        self.mark_session_dirty(Instant::now());
+        let now = Instant::now();
+        if ending {
+            self.mark_session_dirty(now);
+        } else {
+            self.vault_this_window(SystemTime::now());
+            let id = self.window.window.id();
+            self.app.forget_window(id, now);
+        }
         self.window.ime_system_caret.destroy();
         for tab in &mut self.window.tabs {
             for (_, leaf) in tab.leaves_mut() {
@@ -51732,9 +52245,126 @@ impl Runtime<'_> {
         }
         Ok(())
     }
+
+    /// **Put this window in the vault as one row** (multiwindow slice D, ruling
+    /// ②).
+    ///
+    /// Closing a tab has always filled Recent; closing a window closes every tab
+    /// in it, and one gesture that discards six tabs with no way back would be
+    /// the asymmetry `seed`'s own header exists to prevent. One row rather than
+    /// six, because what was lost was a window.
+    ///
+    /// A tab whose identity leaf seeds nothing contributes nothing, on
+    /// [`TabState::seed`]'s standing rule — an unwritable row is not written
+    /// rather than written as a guess — and a window that seeds nothing at all is
+    /// not recorded, because an empty row would offer to reopen nothing.
+    ///
+    /// The pages are deliberately **not** carried. A [`seed::RecentEntry`]'s
+    /// `previews` list belongs to one tab, and a window's row stands for several;
+    /// flattening every tab's pages into one list would reopen the first tab
+    /// holding all of them. What each tab was showing rides in its own child
+    /// seed, which for a preview tab is the file itself.
+    fn vault_this_window(&mut self, at: SystemTime) {
+        // **The tabs it was still being asked about go in with it.** An
+        // unanswered question is not a "no" (§7.1.4), and for an *open* window
+        // that promise is kept by `window_snapshot` folding them back into the
+        // file — but this window is leaving the file. So the row that stands for
+        // it carries them, which is the only place left that can, and the
+        // question loses the rows it can no longer land on.
+        let pending = std::mem::take(&mut self.window.pending_restore);
+        let seeds: Vec<seed::Seed> = self
+            .window
+            .tabs
+            .iter()
+            .filter_map(TabState::seed)
+            .chain(pending.iter().map(restore_row_seed))
+            .collect();
+        self.app
+            .restore_question
+            .retain(|asked| !pending.contains(asked));
+        if seeds.is_empty() {
+            return;
+        }
+        self.app
+            .recent
+            .record(seed::Seed::Window { seeds }, Vec::new(), at);
+    }
 }
 
 impl App {
+    /// What one window last said about itself, if it has said anything.
+    fn window_picture(&self, id: WindowId) -> Option<&SessionWindowV1> {
+        self.window_pictures
+            .iter()
+            .find(|(open, _)| *open == id)
+            .map(|(_, window)| window)
+    }
+
+    /// **The whole document, assembled from every window** (multiwindow slice D).
+    ///
+    /// The process's three facts, then each window's paragraph in the order they
+    /// opened. This is the only place a `SessionV1` is built, which is what makes
+    /// the file single-writer: a window never hands the store a document, it
+    /// hands *this* its own picture, and what reaches the disk is always every
+    /// window's latest word at once.
+    fn session_document(&self) -> SessionV1 {
+        SessionV1 {
+            schema_version: SESSION_SCHEMA_VERSION,
+            theme: session_theme_mode(self.theme_mode),
+            cursor_style: session_cursor_style(current_cursor_style()),
+            windows: self
+                .window_pictures
+                .iter()
+                .map(|(_, window)| window.clone())
+                .chain(
+                    // **A window the launch has not opened yet is still in the
+                    // file** (multiwindow slice D). It is waiting on one question
+                    // and an unanswered question is not a "no" — the same
+                    // sentence §7.1.4 already says about a tab, which
+                    // `window_snapshot` keeps for the window that *is* open.
+                    // Without this line, closing the last window while the prompt
+                    // still stands would answer it "no" on the reader's behalf,
+                    // and the windows they never declined would be gone.
+                    self.pending_restore_windows.iter().cloned(),
+                )
+                .collect(),
+            recent: self.recent.to_persisted(),
+        }
+    }
+
+    /// Take one window's picture and start the debounce (§5.1).
+    fn record_window(&mut self, id: WindowId, window: SessionWindowV1, now: Instant) {
+        match self
+            .window_pictures
+            .iter_mut()
+            .find(|(open, _)| *open == id)
+        {
+            Some(slot) => slot.1 = window,
+            // To the back, which is what makes this list the opening order — the
+            // same rule `Windows::insert` keeps, and the reason the two agree.
+            None => self.window_pictures.push((id, window)),
+        }
+        self.record_session(now);
+    }
+
+    /// **A window the user closed is not one of the windows that are open**
+    /// (multiwindow slice D, ruling ②).
+    ///
+    /// Its seed has already gone into the vault by the time this runs — see
+    /// [`Runtime::close_window`] — so the document this produces has one window
+    /// fewer and one Recent row more, written together because they are one
+    /// event.
+    fn forget_window(&mut self, id: WindowId, now: Instant) {
+        self.window_pictures.retain(|(open, _)| *open != id);
+        self.record_session(now);
+    }
+
+    /// Hand the store the document as it now stands.
+    fn record_session(&mut self, now: Instant) {
+        let document = self.session_document();
+        self.session_store.record(document, now);
+    }
+
     /// **Close the process** (multiwindow slice C).
     ///
     /// The clean-exit path (§5.5): flush whatever the debounce still owes, then
@@ -51915,6 +52545,221 @@ mod window_registry_tests {
 }
 
 #[cfg(test)]
+mod multiwindow_session_tests {
+    use super::{
+        LayoutNodeV1, LeafNodeV1, NewWindowPlan, SessionWindowV1, TabV1, TermLeafV1, plan_windows,
+        restore_row_seed, seed, seeded_tab,
+    };
+
+    /// This file, read as text — the witness for the one claim below that is
+    /// about *where* something is not written.
+    const SOURCE: &str = include_str!("main.rs");
+
+    fn term(cwd: &str, pinned: bool) -> TabV1 {
+        TabV1 {
+            root: LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
+                profile_id: "pwsh".to_owned(),
+                cwd: cwd.to_owned(),
+                manual_name: None,
+            })),
+            pinned,
+            focused_leaf: "leaf-0".to_owned(),
+            preview: None,
+        }
+    }
+
+    fn window(tabs: Vec<TabV1>) -> SessionWindowV1 {
+        SessionWindowV1 {
+            tabs,
+            ..SessionWindowV1::default()
+        }
+    }
+
+    /// The `cwd` of a window's first tab, which is how these tests tell one
+    /// window from another without comparing whole trees.
+    fn names(windows: &[SessionWindowV1]) -> Vec<String> {
+        windows
+            .iter()
+            .map(|window| match restore_row_seed(&window.tabs[0]) {
+                seed::Seed::Term { cwd, .. } => cwd,
+                other => panic!("these fixtures are terminals: {other:?}"),
+            })
+            .collect()
+    }
+
+    /// PIN (multiwindow slice D) — **every saved window with a pinned tab opens,
+    /// not only the first one.**
+    ///
+    /// The whole behavioural claim of the slice, said about the pure function
+    /// that decides it. Red gate: answer with `first` alone and the second
+    /// window never opens — which is precisely what slice C did, and precisely
+    /// what schema v9 exists to end.
+    #[test]
+    fn a_second_saved_window_opens_beside_the_first() {
+        let plan = plan_windows(&[
+            window(vec![term(r"D:\a", true)]),
+            window(vec![term(r"D:\b", true)]),
+        ]);
+        assert_eq!(
+            names(&plan.first.into_iter().collect::<Vec<_>>()),
+            [r"D:\a"]
+        );
+        assert_eq!(names(&plan.queued), [r"D:\b"]);
+        assert!(plan.pending.is_empty(), "nothing here is a question");
+    }
+
+    /// PIN — **a window with nothing pinned is a question, exactly as an unpinned
+    /// tab is** (§7.1.4 read one level up).
+    ///
+    /// And the window that leads is the first one that has an answer of its own,
+    /// even when it is not the first in the file: something must be on screen for
+    /// the prompt to be asked over, and a window built entirely out of the
+    /// question would be the prompt answering itself.
+    #[test]
+    fn a_window_with_nothing_pinned_waits_for_the_one_question() {
+        let plan = plan_windows(&[
+            window(vec![term(r"D:\draft", false)]),
+            window(vec![term(r"D:\kept", true)]),
+        ]);
+        assert_eq!(
+            names(&plan.first.into_iter().collect::<Vec<_>>()),
+            [r"D:\kept"],
+            "the window that was pinned is the one that opens without being asked about"
+        );
+        assert!(plan.queued.is_empty());
+        assert_eq!(names(&plan.pending), [r"D:\draft"]);
+    }
+
+    /// PIN — **when nothing anywhere was pinned, one window still opens.**
+    ///
+    /// The placeholder rule (§7.1.4: "无 pinned 可恢复时以默认 profile 的占位
+    /// shell 起步") read about windows: a process with no window has nowhere to
+    /// ask the question. The first saved window leads and the rest wait.
+    #[test]
+    fn something_opens_even_when_the_whole_session_was_a_question() {
+        let plan = plan_windows(&[
+            window(vec![term(r"D:\one", false)]),
+            window(vec![term(r"D:\two", false)]),
+        ]);
+        assert_eq!(
+            names(&plan.first.into_iter().collect::<Vec<_>>()),
+            [r"D:\one"]
+        );
+        assert!(plan.queued.is_empty());
+        assert_eq!(names(&plan.pending), [r"D:\two"]);
+    }
+
+    /// PIN — **a window with no tabs is not a window**, and a first run has no
+    /// windows at all.
+    #[test]
+    fn an_empty_entry_is_dropped_and_an_empty_file_opens_nothing_saved() {
+        let plan = plan_windows(&[window(Vec::new()), window(vec![term(r"D:\real", true)])]);
+        assert_eq!(
+            names(&plan.first.into_iter().collect::<Vec<_>>()),
+            [r"D:\real"]
+        );
+        assert!(plan.queued.is_empty() && plan.pending.is_empty());
+
+        let nothing = plan_windows(&[]);
+        assert!(nothing.first.is_none());
+        assert!(nothing.queued.is_empty() && nothing.pending.is_empty());
+    }
+
+    /// PIN (multiwindow slice D) — **a vault seed and a saved tab say the same
+    /// thing, in both directions.**
+    ///
+    /// A window drawn out of Recent is revived by `revive_plan`, the one door
+    /// every other restored tab goes through, and `seeded_tab` is how a seed
+    /// reaches it. If the two spellings ever disagree, a window taken back out of
+    /// the vault comes back holding a different place from the one it was closed
+    /// holding — silently, because both halves still produce a perfectly valid
+    /// tab.
+    ///
+    /// Red gate: drop the preview arm of either function and the file tab comes
+    /// back as a nameless folder.
+    #[test]
+    fn a_seed_written_as_a_tab_reads_back_as_the_same_seed() {
+        for original in [
+            seed::Seed::Term {
+                profile_id: "winps".to_owned(),
+                cwd: r"D:\work".to_owned(),
+                manual_name: Some("build".to_owned()),
+            },
+            seed::Seed::Files {
+                root: r"D:\work\crates".to_owned(),
+            },
+            seed::Seed::Preview {
+                path: r"D:\work\README.md".to_owned(),
+            },
+        ] {
+            assert_eq!(
+                restore_row_seed(&seeded_tab(&original)),
+                original,
+                "a place must survive the round trip through the file's vocabulary"
+            );
+        }
+    }
+
+    /// PIN — **a tab a window seed reopens is not pinned.**
+    ///
+    /// `reopen_recent`'s own ruling, kept on the path that reopens several tabs
+    /// at once: coming back because you asked for it now is not the same as
+    /// promising to bring it back forever. Red gate: carry a pin through and a
+    /// window pulled out of Recent starts pinning tabs nobody pinned.
+    #[test]
+    fn a_window_out_of_the_vault_brings_back_no_pins() {
+        let tabs: Vec<TabV1> = [
+            seed::Seed::Term {
+                profile_id: "pwsh".to_owned(),
+                cwd: r"D:\a".to_owned(),
+                manual_name: None,
+            },
+            seed::Seed::Files {
+                root: r"D:\b".to_owned(),
+            },
+        ]
+        .iter()
+        .map(seeded_tab)
+        .collect();
+        assert!(tabs.iter().all(|tab| !tab.pinned));
+        let plan = NewWindowPlan::revived(winit::window::WindowId::from(1_u64), tabs);
+        assert!(
+            plan.like.is_some(),
+            "a window a press asked for wears the rail of the window that asked"
+        );
+        assert!(
+            plan.saved.is_some_and(|saved| saved.tabs.len() == 2),
+            "and it holds every tab the closed window held"
+        );
+    }
+
+    /// PIN (multiwindow slice D) — **there is exactly one place a session
+    /// document is handed to the store.**
+    ///
+    /// The single-writer rule, checked where it can actually be broken: a second
+    /// `record` call somewhere in these seventy thousand lines is a second writer,
+    /// and two windows writing in one frame is two `rename`s over one path. The
+    /// pin is textual because the property is about the *call sites*, and there
+    /// is no type that can forbid a second one.
+    ///
+    /// Red gate: give `mark_session_dirty` a store call of its own beside
+    /// `record_window` and the count is 2.
+    ///
+    /// The needle is assembled at run time rather than written out, so that this
+    /// test's own prose is not one of the call sites it is counting.
+    #[test]
+    fn only_one_line_in_this_file_hands_the_store_a_document() {
+        let needle = ["session_store", ".record("].concat();
+        assert_eq!(
+            SOURCE.matches(needle.as_str()).count(),
+            1,
+            "every window's change goes through `App::record_session`, which is \
+             what makes two windows one write"
+        );
+    }
+}
+
+#[cfg(test)]
 mod application_change_tests {
     use super::ApplicationChange;
     use winit::window::WindowId;
@@ -52088,10 +52933,18 @@ impl FolioApp {
     /// itself: its shells are shut, its surface and its tabs are dropped, and
     /// every other window is untouched.
     fn close(&mut self, event_loop: &ActiveEventLoop, id: WindowId) -> Result<()> {
+        if !self.windows.contains(id) {
+            return Ok(());
+        }
+        // **Asked before the window is told, because it decides what the close
+        // means** (multiwindow slice D, ruling ②). The last window's shut is the
+        // process ending and its picture stays in the file; any other window's is
+        // the user closing a window, and it leaves the file for the vault.
+        let ending = self.windows.len() == 1;
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
         };
-        let closed = runtime.close_window();
+        let closed = runtime.close_window(ending);
         self.windows.remove(id);
         if self.windows.is_empty() {
             // The run's sentinel, dropped once — see `App::finish`. This is the
@@ -52147,14 +53000,83 @@ impl FolioApp {
     }
 
     fn open_pending_window(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        let plans = match self.app.as_mut() {
+            Some(app) => std::mem::take(&mut app.pending_new_windows),
+            None => return Ok(()),
+        };
+        for plan in plans {
+            // The rail the asking window is wearing, read before the borrow is
+            // handed to the door: since schema v9 there is no single answer in
+            // the file, so a window a verb asked for copies the window that
+            // asked. See `Runtime::open_window`.
+            let like = plan.like.and_then(|id| {
+                self.windows.get_mut(id).map(|window| {
+                    (
+                        session_tab_layout(window.rail.layout),
+                        session_sidebar_mode(window.rail.mode),
+                    )
+                })
+            });
+            let Some(app) = self.app.as_mut() else {
+                return Ok(());
+            };
+            let (id, window) = Runtime::open_window(event_loop, app, &plan, like)?;
+            self.windows.insert(id, window);
+            // **Into the document the moment it exists**, measured rather than
+            // predicted: nothing else is guaranteed to change in this window
+            // before the process ends, and a window missing from the file is a
+            // window the next launch does not open.
+            if let Some(mut runtime) = self.runtime(id) {
+                runtime.mark_session_dirty(Instant::now());
+            }
+        }
+        Ok(())
+    }
+
+    /// **Spend the restore prompt's one answer, over every window it is about**
+    /// (multiwindow slice D, ruling ①).
+    ///
+    /// Accepting restores each open window's own unanswered tabs into that
+    /// window, and opens the windows that never opened at all — whole, because
+    /// the reader has just said so. Declining takes nothing back, and takes
+    /// nothing away either: an open window's declined tabs go into the vault one
+    /// by one (which is what `answer_restore` has always done), and a window that
+    /// never opened goes in as **one window seed** — the same row closing it
+    /// would have made, for the same reason.
+    fn settle_restore_answer(&mut self) -> Result<()> {
         let Some(app) = self.app.as_mut() else {
             return Ok(());
         };
-        if !std::mem::take(&mut app.pending_new_window) {
+        let Some(restore) = app.pending_restore_answer.take() else {
             return Ok(());
+        };
+        // The card is answered, so there is no question left to draw. Cleared
+        // before the sweep below rather than after it, so that a window repainted
+        // half way through the sweep is repainted without it.
+        app.restore_question.clear();
+        let pending = std::mem::take(&mut app.pending_restore_windows);
+        // Whichever window is at the front is the one a revived window copies its
+        // rail from when the file did not describe one — but a saved window
+        // always does, so this is only ever `None`-safe plumbing.
+        for window in pending {
+            if restore {
+                self.app
+                    .as_mut()
+                    .expect("an answered prompt implies an application")
+                    .pending_new_windows
+                    .push(NewWindowPlan::saved(window));
+            } else if let Some(app) = self.app.as_mut() {
+                let seeds: Vec<seed::Seed> = window.tabs.iter().map(restore_row_seed).collect();
+                if !seeds.is_empty() {
+                    app.recent
+                        .record(seed::Seed::Window { seeds }, Vec::new(), SystemTime::now());
+                }
+            }
         }
-        let (id, window) = Runtime::open_window(event_loop, app)?;
-        self.windows.insert(id, window);
+        self.for_each_window(|runtime| runtime.answer_restore(restore))?;
+        if let Some(app) = self.app.as_mut() {
+            app.record_session(Instant::now());
+        }
         Ok(())
     }
 
@@ -52162,8 +53084,10 @@ impl FolioApp {
         eprintln!("{APP_NAME} stopped: {error:#}");
         // Every window, because the failure is the process's: a shell left
         // running behind a window nobody can see is the one outcome worse than
-        // stopping.
-        if let Err(shutdown_error) = self.for_each_window(|runtime| runtime.close_window()) {
+        // stopping. `ending` for every one of them, and that is the point: this
+        // is the process stopping, not somebody closing five windows, so what
+        // was open stays in the file and nothing is filed away as "closed".
+        if let Err(shutdown_error) = self.for_each_window(|runtime| runtime.close_window(true)) {
             eprintln!("child shutdown also failed: {shutdown_error:#}");
         }
         self.windows.clear();
@@ -52454,6 +53378,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // opened after a settings row was pressed reads that row's stored value
         // when it is built and would then be handed the same change twice.
         let result = result.and_then(|()| self.settle_application_change());
+        // The prompt's one answer, if this event was it — before the door below,
+        // because accepting is one of the three things that queues a window.
+        let result = result.and_then(|()| self.settle_restore_answer());
         // And the door the other way round: a window this window's keyboard asked
         // for. After the shut, because a chord cannot both close this window and
         // open another, and asking in this order means a failure to open never
@@ -52470,6 +53397,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         }
         if let Err(error) = self
             .settle_application_change()
+            .and_then(|()| self.settle_restore_answer())
             .and_then(|()| self.open_pending_window(event_loop))
         {
             self.fail(event_loop, error);
@@ -52507,7 +53435,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         if self.windows.is_empty() {
             return;
         }
-        if let Err(error) = self.for_each_window(|runtime| runtime.close_window()) {
+        // `ending` for the reason `fail` gives: the loop stopping is the process
+        // stopping, and every window still up at that moment is a window the
+        // reader had open — the file says so and the next launch opens them.
+        if let Err(error) = self.for_each_window(|runtime| runtime.close_window(true)) {
             eprintln!("child shutdown failed: {error:#}");
         }
         self.windows.clear();
@@ -54469,14 +55400,15 @@ struct RestoredPlacement {
 /// off-screen.
 fn restore_window_placement(
     event_loop: &ActiveEventLoop,
-    session: &SessionV1,
+    window: &SessionWindowV1,
 ) -> Option<RestoredPlacement> {
-    // An empty tab list is the first run: there is nothing to restore, and the
-    // product's opening size stands.
-    if session.tabs.is_empty() {
+    // An empty tab list is a window that is not a window: on a first run there
+    // are no entries at all, and an entry with nothing in it describes nothing to
+    // put on screen. Either way the product's opening size stands.
+    if window.tabs.is_empty() {
         return None;
     }
-    let bounds = session.window.bounds;
+    let bounds = window.placement.bounds;
     // Corrected before the visibility test below, not after: the test asks
     // whether *this rectangle* is reachable, and it should be asking about the
     // rectangle the window will actually open at.
@@ -54502,7 +55434,7 @@ fn restore_window_placement(
     Some(RestoredPlacement {
         size,
         position: Some(position).filter(|_| visible),
-        maximized: session.window.maximized,
+        maximized: window.placement.maximized,
     })
 }
 
@@ -72066,6 +72998,15 @@ mod tests {
     /// describe.
     #[test]
     fn a_files_only_tab_is_named_on_the_restore_prompt_by_the_folder_it_held() {
+        // The naming rule is about the tab, and since multiwindow slice D the
+        // function takes one — a preview pane's file is content and does not
+        // live in the tree, so a walker handed only the tree could not see it.
+        let tab = |root: LayoutNodeV1| TabV1 {
+            root,
+            pinned: false,
+            focused_leaf: "leaf-0".to_owned(),
+            preview: None,
+        };
         let files = |root: &str| {
             LayoutNodeV1::Leaf(LeafNodeV1::Files(bt_persist::FilesLeafV1 {
                 view: bt_persist::FilesViewV1::Files,
@@ -72077,7 +73018,7 @@ mod tests {
             }))
         };
         assert_eq!(
-            restore_row_seed(&files(r"C:\Users\dev\project")),
+            restore_row_seed(&tab(files(r"C:\Users\dev\project"))),
             seed::Seed::Files {
                 root: r"C:\Users\dev\project".to_owned()
             }
@@ -72098,7 +73039,7 @@ mod tests {
             ],
         });
         assert_eq!(
-            restore_row_seed(&mixed),
+            restore_row_seed(&tab(mixed)),
             seed::Seed::Term {
                 profile_id: "pwsh".to_owned(),
                 cwd: r"C:\repo\crates".to_owned(),
@@ -72115,9 +73056,36 @@ mod tests {
             children: [Box::new(files(r"C:\first")), Box::new(files(r"C:\second"))],
         });
         assert_eq!(
-            restore_row_seed(&two),
+            restore_row_seed(&tab(two)),
             seed::Seed::Files {
                 root: r"C:\first".to_owned()
+            }
+        );
+
+        // PIN (multiwindow slice D) — **and a tab that is one preview pane is
+        // named by the file it was on**, which is the fourth door onto §7.1.6h's
+        // third shape. Before this, a saved file tab drew a row about a nameless
+        // place: the walker was handed the *tree*, and which file a pane was
+        // showing is content, so the answer it could give was `Files { root: ""
+        // }` — the very row M175 was written to abolish, one leaf kind over.
+        assert_eq!(
+            restore_row_seed(&TabV1 {
+                root: LayoutNodeV1::Leaf(LeafNodeV1::Preview(bt_persist::PreviewLeafV1 {
+                    pinned: false
+                })),
+                pinned: false,
+                focused_leaf: "leaf-0".to_owned(),
+                preview: Some(bt_persist::TabPreviewV1 {
+                    panes: vec![bt_persist::PreviewPaneV1 {
+                        leaf: "leaf-0".to_owned(),
+                        cur: Some(r"C:\repo\README.md".to_owned()),
+                        graph: None,
+                    }],
+                    pool: Vec::new(),
+                }),
+            }),
+            seed::Seed::Preview {
+                path: r"C:\repo\README.md".to_owned()
             }
         );
     }

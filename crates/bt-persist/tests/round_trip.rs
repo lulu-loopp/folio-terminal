@@ -19,14 +19,28 @@ use bt_persist::{
     MinimumContrastV1, PreviewLeafV1, PreviewPaneV1, PreviewPoolEntryV1, PsReadLineInviteV1,
     ReadReport, RecentSeedV1, SESSION_SCHEMA_VERSION, SETTINGS_SCHEMA_VERSION,
     SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1,
-    SettingsV1, SplitDirectionV1, TabPreviewV1, TabV1, TermLeafV1, ThemeModeV1, read_session,
-    read_settings, write_session_atomic, write_settings_atomic,
+    SessionWindowV1, SettingsV1, SplitDirectionV1, TabPreviewV1, TabV1, TermLeafV1, ThemeModeV1,
+    read_session, read_settings, write_session_atomic, write_settings_atomic,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
         .join(name)
+}
+
+/// The `windows` list of a document that describes exactly one window — which is
+/// what every test below that is not *about* schema v9's plural is.
+///
+/// Written as a helper rather than repeated, so that the tests about tabs stayed
+/// tests about tabs when `window` became `windows[]`: the level the document
+/// gained is one line here instead of a paragraph in each of them.
+fn one_window(tabs: Vec<TabV1>, active_tab: u32) -> Vec<SessionWindowV1> {
+    vec![SessionWindowV1 {
+        tabs,
+        active_tab,
+        ..SessionWindowV1::default()
+    }]
 }
 
 fn canonical_bytes() -> Vec<u8> {
@@ -58,23 +72,36 @@ fn messy_input_parses_clean_and_matches_canonical_struct() {
     assert_eq!(session.schema_version, SESSION_SCHEMA_VERSION);
     assert_eq!(session.theme, SessionThemeV1::Dark);
     assert_eq!(session.cursor_style, SessionCursorStyleV1::Bar);
-    assert_eq!(session.tab_layout, SessionTabLayoutV1::Horizontal);
-    assert_eq!(session.sidebar_mode, SessionSidebarModeV1::Expanded);
-    assert_eq!(session.active_tab, 1);
-    assert_eq!(session.window.dpi, 144);
-    assert!(session.window.maximized);
-    assert_eq!(session.window.bounds.x, -100);
-    assert_eq!(session.window.bounds.width, 1920);
-    assert_eq!(session.window.monitor_id.as_deref(), Some(r"\\.\DISPLAY2"));
-    assert_eq!(session.tabs.len(), 2);
-    assert!(session.tabs[0].pinned);
-    assert!(!session.tabs[1].pinned);
+    // **The one window the v8 document described, now reached through
+    // `windows[0]`** (schema v9). Everything below this line is the same
+    // assertion it always was, one level deeper — which is the whole of what the
+    // migration did to a document with one window in it.
+    assert_eq!(
+        session.windows.len(),
+        1,
+        "a document that described one window describes one window"
+    );
+    let window = &session.windows[0];
+    assert_eq!(window.tab_layout, SessionTabLayoutV1::Horizontal);
+    assert_eq!(window.sidebar_mode, SessionSidebarModeV1::Expanded);
+    assert_eq!(window.active_tab, 1);
+    assert_eq!(window.placement.dpi, 144);
+    assert!(window.placement.maximized);
+    assert_eq!(window.placement.bounds.x, -100);
+    assert_eq!(window.placement.bounds.width, 1920);
+    assert_eq!(
+        window.placement.monitor_id.as_deref(),
+        Some(r"\\.\DISPLAY2")
+    );
+    assert_eq!(window.tabs.len(), 2);
+    assert!(window.tabs[0].pinned);
+    assert!(!window.tabs[1].pinned);
     assert_eq!(session.recent.len(), 2);
     match &session.recent[1].seed {
         RecentSeedV1::Files { root } => assert_eq!(root, r"C:\Users\dev\docs"),
         other => panic!("expected a files seed, got {other:?}"),
     }
-    let LayoutNodeV1::Split(root_split) = &session.tabs[0].root else {
+    let LayoutNodeV1::Split(root_split) = &window.tabs[0].root else {
         panic!("tab 0's root must be the split written in the fixture");
     };
     assert_eq!(root_split.ratio, 350_000);
@@ -114,7 +141,7 @@ fn messy_input_parses_clean_and_matches_canonical_struct() {
         // The step renamed the profile and nothing standing beside it.
         assert_eq!(term.cwd, expected_cwd);
     }
-    let LayoutNodeV1::Leaf(LeafNodeV1::Term(lone)) = &session.tabs[1].root else {
+    let LayoutNodeV1::Leaf(LeafNodeV1::Term(lone)) = &window.tabs[1].root else {
         panic!("tab 1's root must be the lone term leaf");
     };
     assert_eq!(lone.profile_id, "pwsh");
@@ -160,10 +187,11 @@ fn a_preview_pane_keeps_its_pin_in_the_tree_and_its_file_in_the_content_section(
     assert_eq!(session.schema_version, SESSION_SCHEMA_VERSION);
     assert_eq!(session.theme, SessionThemeV1::Light);
     assert_eq!(session.cursor_style, SessionCursorStyleV1::Block);
-    assert_eq!(session.tab_layout, SessionTabLayoutV1::Vertical);
-    assert_eq!(session.sidebar_mode, SessionSidebarModeV1::Icons);
+    let window = &session.windows[0];
+    assert_eq!(window.tab_layout, SessionTabLayoutV1::Vertical);
+    assert_eq!(window.sidebar_mode, SessionSidebarModeV1::Icons);
 
-    let LayoutNodeV1::Split(root) = &session.tabs[0].root else {
+    let LayoutNodeV1::Split(root) = &window.tabs[0].root else {
         panic!("tab 0's root is the split the fixture writes");
     };
     let LayoutNodeV1::Split(column) = root.children[1].as_ref() else {
@@ -185,7 +213,7 @@ fn a_preview_pane_keeps_its_pin_in_the_tree_and_its_file_in_the_content_section(
         "the pin is per leaf, and it is geometry"
     );
 
-    let content = session.tabs[0]
+    let content = window.tabs[0]
         .preview
         .as_ref()
         .expect("the fixture's first tab carries a content section");
@@ -242,6 +270,126 @@ fn a_preview_pane_keeps_its_pin_in_the_tree_and_its_file_in_the_content_section(
     );
 }
 
+/// PIN (multiwindow slice D) — **a v8 document is a v9 document with one window
+/// in it, and every field lands inside that window rather than beside it.**
+///
+/// The two fixtures are the same session written twice: `session_v8_single_window`
+/// is the exact bytes this repository shipped as a v8 document, and
+/// `session_v8_sessionless` is the same session in v9's shape. Comparing the
+/// *structs* rather than the bytes is what makes the claim about meaning: a step
+/// that dropped `sidebar_mode` on the way in, or that put `tabs` beside `windows`
+/// instead of inside `windows[0]`, produces a document that still parses and is
+/// not the one the reader left.
+///
+/// **Every one of the five moved keys carries a non-default value**
+/// (`CONVENTIONS.md` §三): a maximized window at 144 DPI on the second monitor, a
+/// vertical strip, an icon rail, two tabs and `active_tab: 1`. A migration that
+/// forgot any of them would otherwise land on that key's default and pass.
+///
+/// Red gate: drop any one of the five `object.remove` lines in
+/// `migrate_session_v8_to_v9` and this fails naming the field.
+#[test]
+fn a_v8_document_arrives_at_v9_as_one_window_holding_everything_it_used_to_hold() {
+    let (migrated, report, degradation) =
+        read_session(&fixture_path("session_v8_single_window.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(degradation, DegradationReport::default());
+    assert_eq!(migrated.schema_version, SESSION_SCHEMA_VERSION);
+
+    let (native, report, _) = read_session(&fixture_path("session_v8_sessionless.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(
+        migrated, native,
+        "a v8 document read at v9 is the v9 document, field for field"
+    );
+
+    // And said once more field by field, so a failure names what moved wrongly
+    // rather than printing two whole documents.
+    assert_eq!(migrated.windows.len(), 1, "one window in, one window out");
+    let window = &migrated.windows[0];
+    assert_eq!(window.tab_layout, SessionTabLayoutV1::Vertical);
+    assert_eq!(window.sidebar_mode, SessionSidebarModeV1::Icons);
+    assert_eq!(window.active_tab, 1);
+    assert_eq!(window.tabs.len(), 2);
+    assert!(window.placement.maximized);
+    assert_eq!(window.placement.bounds.x, 40);
+    assert_eq!(window.placement.dpi, 144);
+    // The three that stayed at the top level stayed there, which is the other
+    // half of the ruling: they were never about a window.
+    assert_eq!(migrated.theme, SessionThemeV1::System);
+    assert_eq!(migrated.cursor_style, SessionCursorStyleV1::Underline);
+    assert_eq!(migrated.recent.len(), 2);
+}
+
+/// PIN (multiwindow slice D) — **two windows survive a restart as two windows,
+/// each with its own rectangle, its own rail and its own tabs.**
+///
+/// The whole point of the version. The fixture's two windows disagree about
+/// every per-window field there is — different monitors, different DPI, one
+/// maximized and one not, a horizontal strip against a vertical one, an expanded
+/// sidebar against an icon rail, two tabs against one, and a different active tab
+/// — because a reader that collapsed the list to its first or its last entry
+/// would pass a fixture whose windows agreed.
+///
+/// Fixed-point gated like every other fixture, which is what proves the *writing*
+/// side too: read, write, compare bytes.
+#[test]
+fn two_windows_round_trip_with_their_own_geometry_rail_and_tabs() {
+    let (session, report, degradation) = read_session(&fixture_path("session_v9_two_windows.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(degradation, DegradationReport::default());
+    assert_eq!(session.schema_version, SESSION_SCHEMA_VERSION);
+    assert_eq!(session.windows.len(), 2);
+
+    let (first, second) = (&session.windows[0], &session.windows[1]);
+    assert_eq!(first.placement.bounds.x, 12);
+    assert_eq!(second.placement.bounds.x, 1400);
+    assert_eq!(first.placement.dpi, 96);
+    assert_eq!(second.placement.dpi, 144);
+    assert!(!first.placement.maximized);
+    assert!(second.placement.maximized);
+    assert_eq!(first.tab_layout, SessionTabLayoutV1::Horizontal);
+    assert_eq!(second.tab_layout, SessionTabLayoutV1::Vertical);
+    assert_eq!(first.sidebar_mode, SessionSidebarModeV1::Expanded);
+    assert_eq!(second.sidebar_mode, SessionSidebarModeV1::Icons);
+    assert_eq!(first.tabs.len(), 2);
+    assert_eq!(second.tabs.len(), 1);
+    assert_eq!(first.active_tab, 1);
+    assert_eq!(second.active_tab, 0);
+
+    let LayoutNodeV1::Leaf(LeafNodeV1::Files(column)) = &second.tabs[0].root else {
+        panic!("the second window holds one folder tab");
+    };
+    assert_eq!(column.root, r"D:\work\gamma");
+    assert_eq!(column.view, FilesViewV1::Git);
+
+    // **A closed window is one row in the vault, holding the seeds of its tabs**
+    // (ruling ②). Not a layout and not a rectangle — see `RecentSeedV1::Window`.
+    assert_eq!(
+        session.recent[0].seed,
+        RecentSeedV1::Window {
+            seeds: vec![
+                RecentSeedV1::Term {
+                    profile_id: "pwsh".to_owned(),
+                    cwd: r"D:\work\delta".to_owned(),
+                    manual_name: None,
+                },
+                RecentSeedV1::Preview {
+                    path: r"D:\work\delta\notes.md".to_owned(),
+                },
+            ],
+        },
+    );
+
+    let reserialized = serde_json::to_vec_pretty(&session).expect("SessionV1 always serializes");
+    let expected = std::fs::read(fixture_path("session_v9_two_windows.json")).unwrap();
+    assert_eq!(
+        String::from_utf8(reserialized).unwrap(),
+        String::from_utf8(expected).unwrap().trim_end().to_owned(),
+        "the two-window fixture must be a fixed point of parse-then-serialize"
+    );
+}
+
 /// **v7 → v8 is a version and nothing else, and the vault is where that has to
 /// be proved.**
 ///
@@ -255,7 +403,7 @@ fn a_v7_vault_arrives_at_v8_with_nothing_but_its_version_changed() {
     let (migrated, report, degradation) = read_session(&fixture_path("session_v7_preview.json"));
     assert_eq!(report, ReadReport::Loaded);
     assert_eq!(degradation, DegradationReport::default());
-    assert_eq!(migrated.schema_version, 8);
+    assert_eq!(migrated.schema_version, SESSION_SCHEMA_VERSION);
 
     let (native, report, _) = read_session(&fixture_path("session_v8_preview.json"));
     assert_eq!(report, ReadReport::Loaded);
@@ -300,27 +448,28 @@ fn a_folder_tab_and_a_file_tab_round_trip_with_the_seeds_that_reopen_them() {
     assert_eq!(degradation, DegradationReport::default());
     assert_eq!(session.schema_version, SESSION_SCHEMA_VERSION);
 
-    let LayoutNodeV1::Leaf(LeafNodeV1::Files(column)) = &session.tabs[0].root else {
+    let window = &session.windows[0];
+    let LayoutNodeV1::Leaf(LeafNodeV1::Files(column)) = &window.tabs[0].root else {
         panic!("the first tab is one files leaf and nothing else");
     };
     assert_eq!(column.root, r"D:\work\folio");
     assert_eq!(column.view, FilesViewV1::Git);
     assert!(column.remotes_open);
     assert_eq!(
-        session.tabs[0].focused_leaf, "leaf-0",
+        window.tabs[0].focused_leaf, "leaf-0",
         "the token names the column, which is a seat this build now lets it name"
     );
     assert!(
-        session.tabs[0].pinned,
+        window.tabs[0].pinned,
         "a folder tab pins like any other tab"
     );
 
-    let LayoutNodeV1::Leaf(LeafNodeV1::Preview(preview)) = &session.tabs[1].root else {
+    let LayoutNodeV1::Leaf(LeafNodeV1::Preview(preview)) = &window.tabs[1].root else {
         panic!("the second tab is one preview leaf and nothing else");
     };
     assert!(preview.pinned);
     assert_eq!(
-        session.tabs[1]
+        window.tabs[1]
             .preview
             .as_ref()
             .expect("a preview tab carries the file it is on")
@@ -366,7 +515,10 @@ fn a_document_written_before_the_content_section_reads_as_no_preview_at_all() {
     assert_eq!(report, ReadReport::Loaded);
     assert!(degradation.is_clean());
     assert!(
-        session.tabs.iter().all(|tab| tab.preview.is_none()),
+        session.windows[0]
+            .tabs
+            .iter()
+            .all(|tab| tab.preview.is_none()),
         "no content section on disk is no content section in memory"
     );
     assert!(
@@ -385,16 +537,19 @@ fn a_tab_with_no_preview_writes_no_content_section() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("session.json");
     let session = SessionV1 {
-        tabs: vec![TabV1 {
-            root: LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
-                profile_id: "pwsh".to_owned(),
-                cwd: r"C:\work".to_owned(),
-                manual_name: None,
-            })),
-            pinned: false,
-            focused_leaf: "leaf-0".to_owned(),
-            preview: None,
-        }],
+        windows: one_window(
+            vec![TabV1 {
+                root: LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
+                    profile_id: "pwsh".to_owned(),
+                    cwd: r"C:\work".to_owned(),
+                    manual_name: None,
+                })),
+                pinned: false,
+                focused_leaf: "leaf-0".to_owned(),
+                preview: None,
+            }],
+            0,
+        ),
         ..SessionV1::default()
     };
     write_session_atomic(&path, &session).unwrap();
@@ -421,22 +576,25 @@ fn the_content_section_round_trips_through_the_public_session_api() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("session.json");
     let session = SessionV1 {
-        tabs: vec![TabV1 {
-            root: LayoutNodeV1::Leaf(LeafNodeV1::Preview(PreviewLeafV1 { pinned: true })),
-            pinned: false,
-            focused_leaf: "leaf-0".to_owned(),
-            preview: Some(TabPreviewV1 {
-                panes: vec![PreviewPaneV1 {
-                    leaf: "leaf-0".to_owned(),
-                    cur: None,
-                    graph: None,
-                }],
-                pool: vec![PreviewPoolEntryV1 {
-                    path: r"C:\work\notes.md".to_owned(),
-                    name: "notes.md".to_owned(),
-                }],
-            }),
-        }],
+        windows: one_window(
+            vec![TabV1 {
+                root: LayoutNodeV1::Leaf(LeafNodeV1::Preview(PreviewLeafV1 { pinned: true })),
+                pinned: false,
+                focused_leaf: "leaf-0".to_owned(),
+                preview: Some(TabPreviewV1 {
+                    panes: vec![PreviewPaneV1 {
+                        leaf: "leaf-0".to_owned(),
+                        cur: None,
+                        graph: None,
+                    }],
+                    pool: vec![PreviewPoolEntryV1 {
+                        path: r"C:\work\notes.md".to_owned(),
+                        name: "notes.md".to_owned(),
+                    }],
+                }),
+            }],
+            0,
+        ),
         ..SessionV1::default()
     };
     write_session_atomic(&path, &session).unwrap();
@@ -538,7 +696,10 @@ fn every_tab_layout_round_trips_through_the_public_session_api() {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("session.json");
         let session = SessionV1 {
-            tab_layout,
+            windows: vec![SessionWindowV1 {
+                tab_layout,
+                ..SessionWindowV1::default()
+            }],
             ..SessionV1::default()
         };
         write_session_atomic(&path, &session).unwrap();
@@ -560,7 +721,10 @@ fn every_sidebar_mode_round_trips_through_the_public_session_api() {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("session.json");
         let session = SessionV1 {
-            sidebar_mode,
+            windows: vec![SessionWindowV1 {
+                sidebar_mode,
+                ..SessionWindowV1::default()
+            }],
             ..SessionV1::default()
         };
         write_session_atomic(&path, &session).unwrap();
@@ -593,8 +757,7 @@ fn multi_tab_trees_and_active_index_round_trip_together() {
         })
         .collect();
     let session = SessionV1 {
-        tabs,
-        active_tab: 2,
+        windows: one_window(tabs, 2),
         ..SessionV1::default()
     };
 
@@ -1523,7 +1686,7 @@ fn the_git_page_migrates_on_and_every_files_column_arrives_on_its_tree() {
     assert_eq!(report, ReadReport::Loaded);
     assert_eq!(degradation, DegradationReport::default());
     assert_eq!(session.schema_version, SESSION_SCHEMA_VERSION);
-    let LayoutNodeV1::Split(split) = &session.tabs[0].root else {
+    let LayoutNodeV1::Split(split) = &session.windows[0].tabs[0].root else {
         panic!("the fixture's tab is a split");
     };
     let LayoutNodeV1::Leaf(LeafNodeV1::Files(column)) = split.children[0].as_ref() else {
@@ -1555,7 +1718,7 @@ fn the_git_page_migrates_on_and_every_files_column_arrives_on_its_tree() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("session.json");
     let mut chosen = session.clone();
-    let LayoutNodeV1::Split(split) = &mut chosen.tabs[0].root else {
+    let LayoutNodeV1::Split(split) = &mut chosen.windows[0].tabs[0].root else {
         unreachable!()
     };
     let LayoutNodeV1::Leaf(LeafNodeV1::Files(column)) = split.children[0].as_mut() else {

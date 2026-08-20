@@ -3498,22 +3498,12 @@ impl ProfileMenuLayout {
             .enumerate()
             .filter(|(index, _)| !programs.is_available(*index))
             .map(|(index, rect)| (MenuRow::Profile(index), *rect, unavailable_tip(index)));
-        let recents =
-            self.recent
-                .iter()
-                .zip(menu_rows(recent))
-                .enumerate()
-                .map(|(index, (rect, entry))| {
-                    (
-                        MenuRow::Recent(index),
-                        *rect,
-                        match &entry.seed {
-                            Seed::Term { cwd, .. } => cwd.clone(),
-                            Seed::Files { root } => root.clone(),
-                            Seed::Preview { path } => path.clone(),
-                        },
-                    )
-                });
+        let recents = self
+            .recent
+            .iter()
+            .zip(menu_rows(recent))
+            .enumerate()
+            .map(|(index, (rect, entry))| (MenuRow::Recent(index), *rect, recent_tip(&entry.seed)));
         profiles.chain(recents)
     }
 }
@@ -3802,6 +3792,12 @@ fn recent_is_available(seed: &Seed, programs: &ProfilePrograms) -> bool {
     match seed {
         Seed::Term { profile_id, .. } => programs.is_available(index_of_id(profile_id)),
         Seed::Files { .. } | Seed::Preview { .. } => true,
+        // **A window is offered while any one of its tabs can still be opened**
+        // (multiwindow slice D). Greying it because one shell of six has gone
+        // would refuse the other five, and the window comes back holding what it
+        // can — the missing pane's own banner is what says a shell is gone,
+        // exactly as it does for a tab restored from the session file.
+        Seed::Window { seeds } => seeds.iter().any(|seed| recent_is_available(seed, programs)),
     }
 }
 
@@ -4260,6 +4256,28 @@ fn recent_mark(seed: &Seed) -> ChromeMark {
         Seed::Term { profile_id, .. } => mark(index_of_id(profile_id)),
         Seed::Files { .. } => ChromeMark::Folder,
         Seed::Preview { .. } => ChromeMark::File,
+        // **A window wears a window** (multiwindow slice D), and it is the one
+        // row in this list whose mark is not its content's: a row captioned
+        // `alpha` with a PowerShell mark says "that shell", and the whole
+        // difference here is that pressing it brings back a *window* that had
+        // `alpha` in it. `#i-max` is the drawing this product already uses to
+        // mean a window — the caption button's own — so the two cannot drift.
+        Seed::Window { .. } => ChromeMark::WindowMaximize,
+    }
+}
+
+/// What a Recent row's tooltip says: the place, in full — and for a window, the
+/// fact that it *is* one and how many tabs it had.
+///
+/// The row itself is one measured line and says a leaf name; the tip is where
+/// this list has always put the whole path, and it is therefore where the one
+/// word a window row cannot fit belongs.
+fn recent_tip(seed: &Seed) -> String {
+    match seed {
+        Seed::Term { cwd, .. } => cwd.clone(),
+        Seed::Files { root } => root.clone(),
+        Seed::Preview { path } => path.clone(),
+        Seed::Window { seeds } => crate::i18n::recent_window_tip(seeds.len()),
     }
 }
 
@@ -4284,6 +4302,12 @@ fn recent_label(seed: &Seed) -> &str {
         // which for a path ending in a file name is that file name — the string
         // a preview head already prints (§7.1.6h).
         Seed::Preview { path } => cwd_leaf(path),
+        // **A window is captioned by the tab it opened with** (multiwindow slice
+        // D) — see [`Seed::first_tab`] for why the word "window" is in the tip
+        // rather than here. A window with no tab at all is not recorded, so the
+        // fallback is a shape nothing constructs; it answers the empty string
+        // because that is what an unnameable row already answers above.
+        Seed::Window { .. } => seed.first_tab().map_or("", recent_label),
     }
 }
 

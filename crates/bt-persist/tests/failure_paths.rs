@@ -98,12 +98,8 @@ fn session_from_a_future_schema_version_refuses_and_does_not_partially_parse() {
 
     let (session, report, degradation) = read_session(&path);
     assert!(
-        session.tabs.is_empty(),
+        session.windows.is_empty(),
         "must be the full default, not a partially-populated value"
-    );
-    assert_eq!(
-        session.active_tab, 0,
-        "the future file's active_tab must NOT leak through"
     );
     assert!(degradation.is_clean());
     assert_eq!(
@@ -158,7 +154,7 @@ fn illegal_ratio_and_unknown_leaf_kind_degrade_without_losing_the_rest_of_the_tr
     assert_eq!(degradation.clamped_ratios, 1);
     assert_eq!(degradation.unknown_leaves, 1);
 
-    let LayoutNodeV1::Split(split) = &session.tabs[0].root else {
+    let LayoutNodeV1::Split(split) = &session.windows[0].tabs[0].root else {
         panic!("tree shape must survive degradation");
     };
     assert_eq!(
@@ -210,7 +206,7 @@ fn invalid_cwd_is_passed_through_unchanged_fs_checks_are_not_this_crates_job() {
         degradation.is_clean(),
         "cwd validity is not this crate's concern, so nothing should be flagged"
     );
-    let LayoutNodeV1::Leaf(LeafNodeV1::Term(term)) = &session.tabs[0].root else {
+    let LayoutNodeV1::Leaf(LeafNodeV1::Term(term)) = &session.windows[0].tabs[0].root else {
         panic!("expected a term leaf");
     };
     assert_eq!(

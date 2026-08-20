@@ -15947,21 +15947,24 @@ mod tests {",
 
         let session = SessionV1 {
             schema_version: SESSION_SCHEMA_VERSION,
-            tabs: vec![TabV1 {
-                // Every leaf answers the same here on purpose: this pin is
-                // about the tree's shape surviving the round trip, and a
-                // per-seat answer would be noise in it.
-                root: seats.to_persisted(
-                    &|_| TermLeafV1 {
-                        profile_id: "pwsh".to_owned(),
-                        cwd: String::new(),
-                        manual_name: None,
-                    },
-                    &|_| FilesLeafState::default(),
-                ),
-                pinned: false,
-                focused_leaf: "leaf-0".to_owned(),
-                preview: None,
+            windows: vec![bt_persist::SessionWindowV1 {
+                tabs: vec![TabV1 {
+                    // Every leaf answers the same here on purpose: this pin is
+                    // about the tree's shape surviving the round trip, and a
+                    // per-seat answer would be noise in it.
+                    root: seats.to_persisted(
+                        &|_| TermLeafV1 {
+                            profile_id: "pwsh".to_owned(),
+                            cwd: String::new(),
+                            manual_name: None,
+                        },
+                        &|_| FilesLeafState::default(),
+                    ),
+                    pinned: false,
+                    focused_leaf: "leaf-0".to_owned(),
+                    preview: None,
+                }],
+                ..bt_persist::SessionWindowV1::default()
             }],
             ..SessionV1::default()
         };
@@ -15975,7 +15978,7 @@ mod tests {",
             degradation.is_clean(),
             "a tree this build wrote must reload without degrading"
         );
-        let restored = Seats::from_persisted(&loaded.tabs[0].root);
+        let restored = Seats::from_persisted(&loaded.windows[0].tabs[0].root);
         assert_eq!(
             restored.tree().ratios().len(),
             ratio_before.len(),
