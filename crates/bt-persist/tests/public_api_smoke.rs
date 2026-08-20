@@ -8,10 +8,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bt_persist::{
-    BackgroundFitV1, Debouncer, ExitState, LanguageV1, PsReadLineInviteV1, ReadReport,
-    SETTINGS_SCHEMA_VERSION, SettingsV1, SplitDirectionV1, ThemeModeV1, WriteAlertAction,
-    WriteFailureTracker, create_sentinel, probe_sentinel, read_settings, remove_sentinel,
-    write_settings_atomic,
+    BackgroundFitV1, Debouncer, ExitState, LanguageV1, MinimumContrastV1, PsReadLineInviteV1,
+    ReadReport, SETTINGS_SCHEMA_VERSION, SettingsV1, SplitDirectionV1, ThemeModeV1,
+    WriteAlertAction, WriteFailureTracker, create_sentinel, probe_sentinel, read_settings,
+    remove_sentinel, write_settings_atomic,
 };
 
 fn unique_dir(tag: &str) -> PathBuf {
@@ -40,6 +40,7 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         default_profile: "gitbash".to_owned(),
         git_panel: false,
         split_direction: SplitDirectionV1::Down,
+        minimum_contrast: MinimumContrastV1::Ratio45,
         language: LanguageV1::Chinese,
         terminal_font_family: "Cascadia Mono".to_owned(),
         terminal_font_size: 20,

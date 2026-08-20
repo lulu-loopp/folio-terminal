@@ -1312,6 +1312,17 @@ pub enum Text {
     DescFocusMode,
     /// The word on the way out, at the head of the card column.
     FocusExit,
+    // **Two entries for a four-item picker**, and the arithmetic is
+    // `BlockMaxHeight`'s: the row's name and its sentence are words, `Off` is a
+    // word this table already holds ([`Self::OptionOff`]), and `2:1` / `3:1` /
+    // `4.5:1` are quantities, which this table's own header excludes. A ratio
+    // written in Chinese would be the same three characters it is in English.
+    /// `Appearance ▸ Advanced ▸ Minimum contrast` — the row.
+    RowMinimumContrast,
+    /// Its sentence. Names what moves (the ink), what does not (the paper), and
+    /// the fact a reader has to know before they turn it on — that this is the
+    /// one row in the dialog that overrides a colour a program asked for.
+    DescMinimumContrast,
 }
 
 impl Text {
@@ -2351,6 +2362,20 @@ impl Text {
             // wears the `×` and the heading beside it already says which mode is
             // being left.
             Self::FocusExit => pick(lang, "Exit", "退出"),
+            // 「最小对比度」is the term of art both WCAG's Chinese translations
+            // and VS Code's own Chinese locale use for this quantity, so the row
+            // is findable by the name a reader already has for it.
+            Self::RowMinimumContrast => pick(lang, "Minimum contrast", "最小对比度"),
+            // Three clauses, in the order a reader needs them: what it does,
+            // what it will not touch, and the cost. The third clause is the one
+            // that earns its place — every rung above `Off` changes a colour the
+            // program named, and a reader who turns this on without knowing that
+            // will file the result as a bug. It states the fact and stops.
+            Self::DescMinimumContrast => pick(
+                lang,
+                "Lightens or darkens terminal text until it meets this ratio against the cell behind it. Backgrounds are never changed, and neither is anything outside the grid. Above Off, colours a program asked for are overridden",
+                "把终端文字提亮或压暗,直到与它所在格子的底色达到这个对比度。底色一律不动,网格以外的一切也不动。Off 以上的档位会覆盖程序指定的颜色",
+            ),
         }
     }
 
@@ -2366,7 +2391,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 415] = [
+    pub const ALL: [Self; 417] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -2782,6 +2807,8 @@ impl Text {
         Self::RowFocusMode,
         Self::DescFocusMode,
         Self::FocusExit,
+        Self::RowMinimumContrast,
+        Self::DescMinimumContrast,
     ];
 
     /// The entries whose two columns are allowed to be the same string.

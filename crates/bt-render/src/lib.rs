@@ -1,5 +1,6 @@
 //! wgpu + cosmic-text rendering for viewport-owned terminal frames.
 
+mod contrast;
 mod ground;
 mod procedural;
 mod rounded_rect;
@@ -36,6 +37,10 @@ use thiserror::Error;
 use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
 use wgpu::util::DeviceExt;
 
+pub use contrast::{
+    ALWAYS_REACHABLE_RATIO_LIMIT, MinimumContrast, contrast_ratio, current_minimum_contrast,
+    relative_luminance, set_minimum_contrast,
+};
 pub use ground::{
     BackgroundFit, BackgroundImage, MINIMUM_GROUND_ALPHA, WindowGround, background_uv_rect,
     premultiplied_clear, set_window_ground, window_ground,
@@ -9681,6 +9686,21 @@ fn surface_config_size(width: u32, height: u32, max_texture_dimension_2d: u32) -
     (width.max(1).min(limit), height.max(1).min(limit))
 }
 
+/// A cell's two colours, and the only place a `CellStyle` becomes bytes.
+///
+/// **The minimum-contrast floor is applied here and nowhere else** (DESIGN §2.6). The order of
+/// the three steps below is the whole of its specification and none of it is incidental:
+///
+/// 1. `DIM` first, because `SGR 2` is the program asking for a *different colour*, and the
+///    floor's question is about the colour that will actually be drawn. A floor applied before
+///    the dimming would be answered and then two-thirds undone.
+/// 2. `INVERSE` next, because `SGR 7` is how a program declares a background out of the two
+///    colours it already has — `rectangles`' own ruling — so after the swap, `foreground` is
+///    the ink and `background` is the paper, which is what the floor is about. Running the
+///    floor first would hold the *paper* to a contrast ratio and then paint text with it.
+/// 3. The floor last, on the pair as drawn. It moves `foreground` and never `background`: a
+///    cell's paper is a fact the program declared and a run of cells that share a ground must
+///    go on sharing it.
 fn resolve_colors(style: &CellStyle) -> ([u8; 3], [u8; 3]) {
     let mut foreground = terminal_color(style.foreground, true);
     let mut background = terminal_color(style.background, false);
@@ -9690,7 +9710,7 @@ fn resolve_colors(style: &CellStyle) -> ([u8; 3], [u8; 3]) {
     if style.flags.contains(CellFlags::INVERSE) {
         std::mem::swap(&mut foreground, &mut background);
     }
-    (foreground, background)
+    (contrast::raise_to_floor(foreground, background), background)
 }
 
 fn terminal_color(color: TerminalColor, foreground: bool) -> [u8; 3] {
@@ -9720,6 +9740,110 @@ fn indexed_color(index: u8) -> [u8; 3] {
 mod tests {
     use super::*;
     use bt_transcript::CapturedCell;
+
+    /// Every style the sweep below asks `resolve_colors` about: the two defaults, both ends of
+    /// the palette, a scheme index that collides with its own ground under Solarized, a direct
+    /// RGB, and the Folio-owned named codes — crossed with all four combinations of the two
+    /// flags that reach this function.
+    fn styles_under_test() -> Vec<CellStyle> {
+        let colours = [
+            TerminalColor::Named(16),
+            TerminalColor::Named(17),
+            TerminalColor::Named(18),
+            TerminalColor::Named(28),
+            TerminalColor::Named(21),
+            TerminalColor::Named(0),
+            TerminalColor::Named(15),
+            TerminalColor::Indexed(0),
+            TerminalColor::Indexed(8),
+            TerminalColor::Indexed(59),
+            TerminalColor::Indexed(255),
+            TerminalColor::Rgb(0x00, 0x2b, 0x36),
+            TerminalColor::Rgb(0x58, 0x6e, 0x75),
+            TerminalColor::Rgb(0xff, 0xff, 0xff),
+        ];
+        let flags = [
+            CellFlags::empty(),
+            CellFlags::DIM,
+            CellFlags::INVERSE,
+            CellFlags::DIM | CellFlags::INVERSE,
+        ];
+        let mut styles = Vec::new();
+        for foreground in colours {
+            for background in colours {
+                for flags in flags {
+                    styles.push(CellStyle {
+                        flags,
+                        foreground,
+                        background,
+                    });
+                }
+            }
+        }
+        styles
+    }
+
+    /// What `resolve_colors` was, to the byte, before the minimum-contrast floor existed.
+    ///
+    /// Copied out of the commit that introduced the floor rather than factored out of the live
+    /// function, and that is the point: a shared helper would move with the code it is meant to
+    /// hold still, and the pin would go on passing while both halves drifted together.
+    fn resolve_colors_before_the_floor(style: &CellStyle) -> ([u8; 3], [u8; 3]) {
+        let mut foreground = terminal_color(style.foreground, true);
+        let mut background = terminal_color(style.background, false);
+        if style.flags.contains(CellFlags::DIM) {
+            foreground = foreground.map(|channel| channel.saturating_mul(2) / 3);
+        }
+        if style.flags.contains(CellFlags::INVERSE) {
+            std::mem::swap(&mut foreground, &mut background);
+        }
+        (foreground, background)
+    }
+
+    /// **STRUCTURAL PIN (DESIGN §2.6)** — with the floor `Off`, this renderer draws the bytes it
+    /// drew before the floor existed, for every style that reaches `resolve_colors`.
+    ///
+    /// The default of a feature that overrides colours a program asked for has to be provably
+    /// inert, and "provably" means against the old arithmetic rather than against itself: the
+    /// reference above is the previous body verbatim, so a floor that leaked into the `Off` path
+    /// — an `Off` rung that quietly meant `1.0`, a memo consulted before the rung was read, a
+    /// clamp applied unconditionally — turns this red on the first style it touches.
+    ///
+    /// The second half proves the pin can fail, which is the only thing that makes the first
+    /// half worth running: raise the floor and the sweep must diverge, and it must diverge in
+    /// the foreground **only**. A background that moved would be the one thing §2.6 promises
+    /// never happens.
+    #[test]
+    fn the_floor_off_is_byte_for_byte_the_renderer_that_had_no_floor() {
+        let guard = contrast::FloorGuard::take();
+
+        guard.set(contrast::MinimumContrast::Off);
+        for style in styles_under_test() {
+            assert_eq!(
+                resolve_colors(&style),
+                resolve_colors_before_the_floor(&style),
+                "Off moved a byte for {style:?}"
+            );
+        }
+
+        guard.set(contrast::MinimumContrast::Ratio45);
+        let mut inks_moved = 0_usize;
+        for style in styles_under_test() {
+            let (foreground, background) = resolve_colors(&style);
+            let (was_foreground, was_background) = resolve_colors_before_the_floor(&style);
+            assert_eq!(
+                background, was_background,
+                "the floor moved the paper under {style:?}"
+            );
+            if foreground != was_foreground {
+                inks_moved += 1;
+            }
+        }
+        assert!(
+            inks_moved > 0,
+            "raising the floor to 4.5:1 changed no ink at all — the pin above proves nothing"
+        );
+    }
 
     #[test]
     fn peek_box_layout_places_below_right_without_upscaling() {

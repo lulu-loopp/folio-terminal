@@ -76,7 +76,16 @@ use serde::{Deserialize, Serialize};
 /// met the row opens exactly the window they opened yesterday. The key is what makes the mode a
 /// place somebody can *live* rather than a verb they re-press every morning: a window closed
 /// with the card column up reopens with it up.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 15;
+///
+/// **v16 carries `minimum_contrast`**, the Appearance page's own `Minimum contrast` row
+/// (DESIGN §2.6), and it is the same shape a sixth time: one key, its own day, and a migration
+/// that writes the answer every build before it gave. That answer is `Off`, and here the word
+/// is load-bearing rather than merely conservative: every value above it *changes colours a
+/// program asked for*, so a file that had never been asked this question must not come back
+/// from a migration having been answered `4.5:1` on the reader's behalf. A terminal that
+/// silently re-inked yesterday's output on the day it learned how would be the one thing this
+/// feature exists to prevent, pointed the other way.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 16;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -194,10 +203,10 @@ pub const DEFAULT_BLOCK_MAX_HEIGHT: u32 = 0;
 /// sentence [`DEFAULT_BLOCK_MAX_HEIGHT`] is written under.
 pub const DEFAULT_SCROLLBACK_LINES: u32 = 100_000;
 
-/// `settings.json` v15 — docs/M2-persistence-schema-v1.md §2:
+/// `settings.json` v16 — docs/M2-persistence-schema-v1.md §2:
 /// ```json
 /// {
-///   "schema_version": 15,
+///   "schema_version": 16,
 ///   "theme_mode": "System" | "Light" | "Dark",
 ///   "display_formulas": true | false,
 ///   "inline_formulas": true | false,
@@ -220,7 +229,8 @@ pub const DEFAULT_SCROLLBACK_LINES: u32 = 100_000;
 ///   "always_on_top": true | false,
 ///   "advanced_open": ["appearance", …],
 ///   "scrollback_lines": 25000 | 50000 | 100000 | 200000,
-///   "focus_mode": true | false
+///   "focus_mode": true | false,
+///   "minimum_contrast": "Off" | "Ratio2" | "Ratio3" | "Ratio45"
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -542,6 +552,17 @@ pub struct SettingsV1 {
     /// the way out.
     #[serde(default)]
     pub focus_mode: bool,
+    /// **The floor a cell's ink is held to against the paper it is printed on** — the
+    /// Appearance page's `Minimum contrast` row (DESIGN §2.6).
+    ///
+    /// The one setting in this document that overrides a colour a *program* asked for, which
+    /// is exactly why it exists: a scheme is free to give ANSI bright-black a value within a
+    /// hair of its own background, and when it does, everything printed in that colour is
+    /// gone. `Off` is the default and the honest one — a terminal's first duty is to show what
+    /// was sent — but a reader who cannot read their own prompt is not being served by that
+    /// duty, so the floor is offered rather than assumed.
+    #[serde(default)]
+    pub minimum_contrast: MinimumContrastV1,
 }
 
 /// `serde`'s door for a v14 key that is missing from a file this build is reading.
@@ -584,6 +605,8 @@ impl Default for SettingsV1 {
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
             // The shape every window this product has ever opened in.
             focus_mode: false,
+            // Every colour a program asks for, drawn as it was asked for.
+            minimum_contrast: MinimumContrastV1::Off,
         }
     }
 }
@@ -666,6 +689,33 @@ pub enum SplitDirectionV1 {
     Right,
     /// Always stacked, the new pane below.
     Down,
+}
+
+/// The contrast floor a terminal cell's ink is held to against its own paper — `docs/DESIGN.md`
+/// §2.6.
+///
+/// Four values, and they are Windows Terminal's four to the letter (`Off`, `2:1`, `3:1`,
+/// `4.5:1`) because this is one of the few rows where a user arriving from that product carries
+/// a number in their head: somebody who has typed `"experimental.minimumContrastRatio": 4.5`
+/// means the WCAG AA text ratio, and a Folio that offered `4:1` beside it would be asking them
+/// to re-derive an answer they already have. The three ratios are the accessibility bars
+/// themselves — 3:1 is WCAG AA for large text and for non-text objects, 4.5:1 is AA for body
+/// text, and 2:1 is below both on purpose: it is the "just make it visible" rung, for a reader
+/// who wants their scheme back the moment it stops being invisible rather than made compliant.
+///
+/// Named `Ratio45` rather than `Ratio4_5` because these are wire values (§2's PascalCase
+/// pin), and a variant with an underscore in it would be a key with an underscore in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum MinimumContrastV1 {
+    /// Every colour drawn as the program asked for it.
+    #[default]
+    Off,
+    /// 2:1 — visible, and no claim beyond that.
+    Ratio2,
+    /// 3:1 — WCAG AA for large text and non-text objects.
+    Ratio3,
+    /// 4.5:1 — WCAG AA for body text.
+    Ratio45,
 }
 
 /// `docs/DESIGN.md` §7.1.6: "主题 System/Light/Dark 跟随系统".

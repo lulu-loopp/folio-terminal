@@ -16705,6 +16705,10 @@ impl Runtime<'_> {
         // pair adopted afterwards would leave the first frame painted on the
         // canvas of whichever scheme the process was born with.
         adopt_stored_schemes(settings_store.loaded());
+        // Beside the schemes and for their reason: the floor is read on every cell of the
+        // first frame, so a file that asks for one must be obeyed before that frame is drawn
+        // rather than at the first press of the row.
+        install_minimum_contrast(settings_store.loaded().minimum_contrast);
         let resolved_theme = resolve_theme_mode(theme_mode, window.theme());
         if set_theme(resolved_theme) == ThemeChange::LockedByEnvironment {
             eprintln!(
@@ -21370,6 +21374,7 @@ impl Runtime<'_> {
             // change — see `App::context_menu_installed`.
             context_menu: self.app.context_menu_installed,
             split_direction: self.app.settings_store.loaded().split_direction,
+            minimum_contrast: self.app.settings_store.loaded().minimum_contrast,
             language: self.app.settings_store.loaded().language,
             default_profile: self.default_profile(),
             terminal_font: settings::family_index(
@@ -22569,6 +22574,9 @@ impl Runtime<'_> {
         if let Some(direction) = settings::split_direction_requested(target) {
             self.apply_split_direction(direction)?;
         }
+        if let Some(floor) = settings::minimum_contrast_requested(target) {
+            self.apply_minimum_contrast(floor)?;
+        }
         if let Some(language) = settings::language_requested(target) {
             self.apply_language(language)?;
         }
@@ -22775,6 +22783,9 @@ impl Runtime<'_> {
             }
             Row::SplitDirection => {
                 self.apply_split_direction(defaults.split_direction)?;
+            }
+            Row::MinimumContrast => {
+                self.apply_minimum_contrast(defaults.minimum_contrast)?;
             }
             // Not in any group, and therefore never handed here — see
             // `SettingsContent::advanced_rows`, which is what this loop walks.
@@ -24398,6 +24409,25 @@ impl Runtime<'_> {
         let mut settings = self.app.settings_store.loaded().clone();
         settings.split_direction = direction;
         Ok(self.app.settings_store.store(settings))
+    }
+
+    /// **The contrast floor, changed while the window is up** (DESIGN §2.6).
+    ///
+    /// Hot, like the scheme rows beside it and for the same reason: what this row changes is on
+    /// screen while the row is being pressed, and a floor that took effect at the next launch
+    /// would be a row nobody could evaluate. The renderer's own
+    /// `bt_render::set_minimum_contrast` advances the theme revision on a real change, which is
+    /// what discards the composed rows shaped under the old floor — so the work here is the
+    /// file, the push, and one repaint.
+    fn apply_minimum_contrast(&mut self, floor: bt_persist::MinimumContrastV1) -> Result<bool> {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.minimum_contrast = floor;
+        if !self.app.settings_store.store(settings) {
+            return Ok(false);
+        }
+        install_minimum_contrast(floor);
+        self.adopt_new_palette()?;
+        Ok(true)
     }
 
     /// **The window's language, changed while the window is up** (§7.1.6c-3c).
@@ -52345,6 +52375,22 @@ fn trace_surface_size_clamp(
 /// resolutions: a name the catalogue does not hold falls to Folio's own here
 /// exactly as `settings::scheme_index` makes the picker's tick fall to it, so
 /// the window and the row cannot disagree about which scheme is in force.
+/// Push `settings.json`'s contrast floor into the renderer that reads it.
+///
+/// **Two enums and one translation**, rather than `bt_persist` depending on `bt_render` or the
+/// renderer parsing a settings file: the file format's `MinimumContrastV1` is a wire value that
+/// must go on meaning what it meant, and `bt_render::MinimumContrast` is the renderer's own
+/// vocabulary. The `match` is where a rung added to one and not the other stops compiling,
+/// which is the whole benefit of not sharing the type.
+fn install_minimum_contrast(floor: bt_persist::MinimumContrastV1) -> bool {
+    bt_render::set_minimum_contrast(match floor {
+        bt_persist::MinimumContrastV1::Off => bt_render::MinimumContrast::Off,
+        bt_persist::MinimumContrastV1::Ratio2 => bt_render::MinimumContrast::Ratio2,
+        bt_persist::MinimumContrastV1::Ratio3 => bt_render::MinimumContrast::Ratio3,
+        bt_persist::MinimumContrastV1::Ratio45 => bt_render::MinimumContrast::Ratio45,
+    })
+}
+
 fn adopt_stored_schemes(settings: &bt_persist::SettingsV1) -> ThemeChange {
     let catalogue = schemes::catalogue();
     bt_render::set_schemes(
