@@ -371,6 +371,7 @@ pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (4, migrate_session_v4_to_v5),
     (5, migrate_session_v5_to_v6),
     (6, migrate_session_v6_to_v7),
+    (7, migrate_session_v7_to_v8),
 ];
 
 fn migrate_session_v1_to_v2(mut value: Value) -> Value {
@@ -485,6 +486,29 @@ fn migrate_session_v6_to_v7(mut value: Value) -> Value {
                 }
             }
         }
+    }
+    value
+}
+
+/// **v7 → v8 — the version alone, and that is the whole step.**
+///
+/// v8 exists because [`crate::RecentSeedV1`] gained a third shape (`preview`)
+/// for the tab shape §7.1.6h added. Nothing in a v7 document acquires a field, a
+/// meaning or a default: no v7 build could write a `preview` seed, so every
+/// entry in an old vault is already exactly what it should be at v8 and a step
+/// that touched one would be inventing a fact rather than upgrading a structure
+/// (rule 3, this file's own header).
+///
+/// The version still has to move, and the reason is the reader on the *other*
+/// side: `RecentSeedV1` has no `#[serde(other)]` arm, so a v7 build handed a
+/// document containing a `preview` seed would fail to parse it altogether. With
+/// the version bumped it refuses for the right reason instead — §5.4's
+/// future-version refusal, which is a sentence the user can act on ("this file
+/// was written by a newer Folio") rather than a corruption report about a file
+/// that is perfectly well formed.
+fn migrate_session_v7_to_v8(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(8));
     }
     value
 }

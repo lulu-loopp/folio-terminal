@@ -1,0 +1,79 @@
+{
+  "schema_version": 8,
+  "theme": "system",
+  "cursor_style": "underline",
+  "tab_layout": "vertical",
+  "sidebar_mode": "icons",
+  "window": {
+    "bounds": {
+      "x": 40,
+      "y": 30,
+      "width": 1440,
+      "height": 960
+    },
+    "dpi": 144,
+    "maximized": true,
+    "monitor_id": "\\\\.\\DISPLAY2"
+  },
+  "tabs": [
+    {
+      "root": {
+        "kind": "files",
+        "root": "D:\\work\\folio",
+        "open": [
+          "crates"
+        ],
+        "sel": "crates/bt-app",
+        "width": 300,
+        "view": "git",
+        "remotes_open": true
+      },
+      "pinned": true,
+      "focused_leaf": "leaf-0"
+    },
+    {
+      "root": {
+        "kind": "preview",
+        "pinned": true
+      },
+      "pinned": false,
+      "focused_leaf": "leaf-0",
+      "preview": {
+        "panes": [
+          {
+            "leaf": "leaf-0",
+            "cur": "D:\\work\\folio\\docs\\DESIGN.md"
+          }
+        ],
+        "pool": [
+          {
+            "path": "D:\\work\\folio\\docs\\DESIGN.md",
+            "name": "DESIGN.md"
+          }
+        ]
+      }
+    }
+  ],
+  "active_tab": 1,
+  "recent": [
+    {
+      "key": "|D:\\other|",
+      "seed": {
+        "kind": "files",
+        "root": "D:\\other"
+      },
+      "timestamp": "2026-08-19T21:40:00Z"
+    },
+    {
+      "key": "||D:\\work\\folio\\README.md",
+      "seed": {
+        "kind": "preview",
+        "path": "D:\\work\\folio\\README.md"
+      },
+      "timestamp": "2026-08-19T21:41:00Z",
+      "previews": [
+        "D:\\work\\folio\\README.md"
+      ]
+    }
+  ]
+}

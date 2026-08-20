@@ -225,13 +225,20 @@ const _: () = assert!(
 
 /// The tree, plus the two seat identities this window has a use for.
 ///
-/// `terminal` is a geometry identity, not a content one (L1): it says *which
-/// rectangle the terminal draws into*, and it would keep saying that if the
-/// session inside it were swapped for another.
+/// `identity` is a geometry identity, not a content one (L1): it says *which
+/// rectangle the tab is named and reopened by*, and it would keep saying that if
+/// whatever is inside it were swapped for something else.
+///
+/// **It was `terminal` until §7.1.6h**, and it meant "which rectangle this tab's
+/// shell draws into" — which was the same seat, because a tab was required to
+/// hold a shell. A tab made of a folder or a file has none, so the field
+/// generalised in the only direction that keeps every reader honest: the first
+/// Terminal leaf when there is one, and the first leaf otherwise. See
+/// [`identity_seat`] for why the preference is ordered rather than positional.
 #[derive(Clone, Debug)]
 pub struct Seats {
     tree: LayoutNode,
-    terminal: SeatId,
+    identity: SeatId,
     focus: SeatId,
     next_seat: u64,
     next_split: u64,
@@ -270,21 +277,21 @@ impl Seats {
     /// [`Self::lone_terminal`] is this function with the obvious seat, rather
     /// than a second constructor beside it: two ways to stand a one-seat tree up
     /// is two places for the counters to be seeded differently.
+    ///
+    /// **Any kind of seat, since §7.1.6h.** This used to debug-assert the
+    /// arriving seat was a Terminal, on I106's argument that a tab with no shell
+    /// was the 2026-07-16 crash. The sessionless-tab slice made such a tab a
+    /// legal, nameable, restorable thing, and this is now the ordinary way both
+    /// of the two new shapes are born — a torn-out files column and a torn-out
+    /// preview each arrive here as themselves. What is still refused is refused
+    /// one step upstream and for a different reason: `pane_can_become_a_tab`
+    /// turns away a `Placeholder`, a leaf this build cannot name.
     pub fn lone_seat(seat: &Seat) -> (Self, SeatId) {
         let id = SeatId(1);
-        // `terminal` is the seat the tab's shell draws into, and a tab with no
-        // shell is the 2026-07-16 crash I106 is the report for.
-        // `pane_can_become_a_tab` upstream is what guarantees only a Terminal
-        // ever reaches here; this says so out loud rather than trusting silently.
-        debug_assert_eq!(
-            seat.kind,
-            SeatKind::Terminal,
-            "I106: only a Terminal pane may become a tab of its own"
-        );
         (
             Self {
                 tree: LayoutNode::seat(Seat { id, ..seat.clone() }),
-                terminal: id,
+                identity: id,
                 focus: id,
                 next_seat: 2,
                 next_split: 1,
@@ -335,13 +342,18 @@ impl Seats {
         self.structure_revision
     }
 
-    pub fn terminal(&self) -> SeatId {
-        self.terminal
+    /// **The seat this tab is named and reopened by** (§7.1.6h).
+    ///
+    /// Always a seat this tree contains: every verb that can take a leaf out —
+    /// [`Self::close_seat`], [`Self::adopt_drop`], [`Self::stand_in_terminal`] —
+    /// re-asks [`identity_seat`] when the one it named is the leaf that left.
+    pub fn identity(&self) -> SeatId {
+        self.identity
     }
 
     /// Every Terminal leaf of this tab, in tree order.
     ///
-    /// The plural of [`Self::terminal`], and the key set the tab's session fleet
+    /// The key set the tab's session fleet
     /// is indexed by: one shell per Terminal leaf. Order is `seats_in_order`'s
     /// in-order walk (D2), so it is a function of the tree and never of a hash —
     /// the same discipline L8 puts on the solver's own output.
@@ -796,9 +808,9 @@ impl Seats {
         .ok()?;
         self.tree = outcome.tree;
         self.next_seat += 1;
-        // The identity shell's rectangle may have been the one that just left.
-        if !self.tree.contains(self.terminal) {
-            self.terminal = id;
+        // The identity seat's rectangle may have been the one that just left.
+        if !self.tree.contains(self.identity) {
+            self.identity = identity_seat(&self.tree);
         }
         if self.focus == seat {
             self.focus = id;
@@ -826,19 +838,20 @@ impl Seats {
                 // staying tree without mutating anything, and the gesture's
                 // commit installs it by calling exactly this verb.
                 self.structure_revision += 1;
-                // `terminal` names a seat that has to still exist: it is what
+                // `identity` names a seat that has to still exist: it is what
                 // focus falls back to, and what a caller with no seat in hand
-                // asks for. Closing the one it named repoints it at the first
-                // terminal left standing. Before panes could own sessions there
-                // was only ever one terminal and this branch was unreachable;
-                // now it is the ordinary case of closing the left-hand pane.
-                if self.terminal == seat
-                    && let Some(first) = self.terminals().first().copied()
-                {
-                    self.terminal = first;
+                // asks for. Closing the one it named re-asks [`identity_seat`] of
+                // what is left. Before panes could own sessions there was only
+                // ever one terminal and this branch was unreachable; now it is
+                // the ordinary case of closing the left-hand pane — and since
+                // §7.1.6h it is also how a `[files | shell]` tab whose shell
+                // exits becomes a folder tab rather than a tab with a dangling
+                // identity.
+                if self.identity == seat {
+                    self.identity = identity_seat(&self.tree);
                 }
                 if self.focus == seat {
-                    self.focus = self.terminal;
+                    self.focus = self.identity;
                 }
                 true
             }
@@ -1132,18 +1145,18 @@ impl Seats {
     /// would make the box a lie in the one direction that costs a pane.
     ///
     /// **There used to be a second, and deleting it is what N161 is.** A plan
-    /// whose tree no longer held [`Self::terminal`] was turned away, on the
+    /// whose tree no longer held [`Self::identity`] was turned away, on the
     /// argument that a `Seats` naming a seat its tree does not have cannot be
     /// solved against. The argument is still true; the refusal was the wrong
-    /// answer to it. `terminal` is a *geometry* identity (L1) — which rectangle
-    /// this tab's identity shell draws into — and N161's replace legitimately
-    /// takes that rectangle away: the target pane is ejected to the strip and an
-    /// arriving tab's whole layout takes its slot. Refusing there would forbid the
+    /// answer to it. `identity` is a *geometry* identity (L1) — which rectangle
+    /// this tab is named by — and N161's replace legitimately takes that
+    /// rectangle away: the target pane is ejected to the strip and an arriving
+    /// tab's whole layout takes its slot. Refusing there would forbid the
     /// gesture rather than serve it. So the field is **re-derived** instead, by
     /// exactly the rule [`Self::close_seat`] already applies when the pane you
-    /// closed was the one it named: repoint it at the first terminal left
-    /// standing. Two verbs, one sentence about what `terminal` means, and no
-    /// second opinion about when it has to move.
+    /// closed was the one it named: re-ask [`identity_seat`] of what is left.
+    /// Two verbs, one sentence about what `identity` means, and no second
+    /// opinion about when it has to move.
     ///
     /// **Focus (D43).** The seat the accent box covered is the seat that gets the
     /// focus: an edge or a rim gives it to the leaf that just landed, and a centre
@@ -1170,20 +1183,18 @@ impl Seats {
             "D43: the box was drawn on a seat the tree does not have"
         );
         self.tree = plan.tree;
-        if !self.tree.contains(self.terminal)
-            && let Some(first) = self.terminals().first().copied()
-        {
-            self.terminal = first;
+        if !self.tree.contains(self.identity) {
+            self.identity = identity_seat(&self.tree);
         }
-        // Every tab in this build holds at least one shell, so every tab's tree
-        // holds at least one Terminal leaf. A tree that arrives here without one
-        // is a tab that lost its last shell somewhere upstream — I106's crash
-        // with a longer fuse — and the honest place to notice is here, not in a
-        // branch that invents a seat to keep going.
-        debug_assert!(
-            !self.terminals().is_empty(),
-            "a tab's tree always holds a Terminal seat for its shell to draw into"
-        );
+        // A `debug_assert!(!self.terminals().is_empty())` stood here, on the
+        // argument that every tab holds at least one shell and a tree arriving
+        // without one had lost its last shell upstream — I106's crash with a
+        // longer fuse. §7.1.6h retired the premise: a tree of one files column is
+        // now a tab, so the assertion would fire on a landing that is exactly
+        // right. What replaces it is not a weaker version of the same check but
+        // `identity_seat`'s own totality — every tree has a first leaf, so there
+        // is no shape this can be handed that leaves the field dangling, and
+        // nothing has to be asserted about which kind that leaf is.
         // The identities the plan minted are the identities that landed. Re-
         // deriving them from the tree would be a second opinion about which names
         // are spent, and a name handed out twice is a `find_seat` answering about
@@ -6061,7 +6072,7 @@ pub fn build_chrome_for_tabs(
                 // Chrome is painted *after* the seat pass, so this quad covers
                 // whatever that pass put down — which is exactly right for a
                 // files column, a preview or a placeholder, and exactly wrong
-                // for a terminal. The test used to be `id != seats.terminal()`,
+                // for a terminal. The test used to be `id != seats.identity()`,
                 // written when a tab held one shell and that shell's seat was
                 // the only one with a picture to protect. U12 gave every
                 // Terminal leaf its own session, and the singular stayed: the
@@ -13394,29 +13405,58 @@ impl Seats {
     /// Rebuild a tree from disk. Split ids are re-minted from the shape (§3.2:
     /// the runtime `id` is a handle and is not persisted).
     ///
-    /// `None` when the persisted tree holds no terminal leaf at all — this
-    /// window has exactly one terminal and no way to be honest about a tree
-    /// that does not contain it. That is a per-*document* refusal, distinct
-    /// from the per-*leaf* degradation §5 asks for, which `bt-persist` has
-    /// already applied by the time this is called.
-    pub fn from_persisted(node: &LayoutNodeV1) -> Option<Self> {
+    /// **It used to answer `None` for a tree with no terminal leaf in it**, and
+    /// the caller answered that `None` by handing over `Seats::lone_terminal()`
+    /// — so a saved files-root tab came back as an empty shell standing where
+    /// the folder had been. That was the honest per-*document* refusal while a
+    /// tab was required to hold a shell; since §7.1.6h it is a silent content
+    /// swap, and the return type says so by no longer being able to express it.
+    ///
+    /// Total, and provably: every `LayoutNodeV1` bottoms out in at least one
+    /// leaf, so [`identity_seat`] always has one to name. The per-*leaf*
+    /// degradation §5 asks for has already been applied by `bt-persist` before
+    /// this runs, so a leaf this build cannot read arrives as a `Placeholder`
+    /// seat rather than as a hole in the tree.
+    pub fn from_persisted(node: &LayoutNodeV1) -> Self {
         let mut next_seat = 1u64;
         let mut next_split = 1u64;
         let tree = from_persisted(node, &mut next_seat, &mut next_split);
-        let terminal = tree
-            .seats_in_order()
-            .into_iter()
-            .find(|seat| seat.kind == SeatKind::Terminal)?
-            .id;
-        Some(Self {
+        let identity = identity_seat(&tree);
+        Self {
             tree,
-            terminal,
-            focus: terminal,
+            identity,
+            focus: identity,
             next_seat,
             next_split,
             structure_revision: 0,
-        })
+        }
     }
+}
+
+/// **Which seat a tab is named and reopened by** (§7.1.6h).
+///
+/// One rule, asked by every verb that can take the named seat away, so that
+/// "what is this tab" cannot be answered two ways in one window.
+///
+/// **Ordered, not positional.** The first Terminal leaf in tree order wins over
+/// every other kind, and only a tree with no terminal in it falls through to its
+/// own first leaf. That ordering is the whole content of the rule: a
+/// `[files | shell]` tab is named by its shell and reopened as its shell, and it
+/// must go on being so now that a files column is a legal identity in its own
+/// right. Reading it the other way — "the first leaf, whatever it is" — would
+/// rename half the split tabs in the product the day this landed.
+///
+/// Total by construction: `seats_in_order` is non-empty for every tree the
+/// solver can hold (G84 refuses to empty one), so there is always an answer and
+/// this never has to invent a seat.
+fn identity_seat(tree: &LayoutNode) -> SeatId {
+    let seats = tree.seats_in_order();
+    seats
+        .iter()
+        .find(|seat| seat.kind == SeatKind::Terminal)
+        .or_else(|| seats.first())
+        .expect("a layout tree always holds at least one seat (G84)")
+        .id
 }
 
 fn to_persisted(
@@ -13581,12 +13621,12 @@ mod tests {
                 let layout = solved(&seats, viewport, &metrics);
                 assert_eq!(layout.rects.len(), 1, "a lone leaf is one seat");
                 assert_eq!(
-                    layout.get(seats.terminal()).unwrap().rect,
+                    layout.get(seats.identity()).unwrap().rect,
                     Some(viewport),
                     "the seat rectangle is the viewport itself at {dpi_milli} milli-DPI"
                 );
                 assert_eq!(
-                    seat_viewport(&layout, seats.terminal()),
+                    seat_viewport(&layout, seats.identity()),
                     Some(seats_surface(width, height, dpi_milli)),
                     "{width}x{height} at {dpi_milli} milli-DPI must reserve exactly the title bar"
                 );
@@ -13602,7 +13642,7 @@ mod tests {
                 );
                 let shifted_layout = solved(&seats, shifted, &metrics);
                 assert_ne!(
-                    seat_viewport(&shifted_layout, seats.terminal()),
+                    seat_viewport(&shifted_layout, seats.identity()),
                     Some(seats_surface(width, height, dpi_milli)),
                     "the pin would pass even with an injected offset"
                 );
@@ -13877,7 +13917,7 @@ mod tests {
         let dpi_milli = 1_000;
         let metrics = seat_metrics(dpi_milli);
         let mut seats = Seats::lone_terminal();
-        let first = seats.terminal();
+        let first = seats.identity();
         assert_eq!(seats.terminals(), vec![first]);
 
         let second = seats
@@ -13919,7 +13959,7 @@ mod tests {
         let dpi_milli = 1_000;
         let metrics = seat_metrics(dpi_milli);
         let mut seats = Seats::lone_terminal();
-        let left = seats.terminal();
+        let left = seats.identity();
         let right = seats
             .split_terminal(&metrics, left, Axis::Row, false)
             .expect("room for two");
@@ -13987,7 +14027,7 @@ mod tests {
         let dpi_milli = 1_000;
         let metrics = seat_metrics(dpi_milli);
         let mut seats = Seats::lone_terminal();
-        let left = seats.terminal();
+        let left = seats.identity();
         let right = seats
             .split_terminal(&metrics, left, Axis::Row, false)
             .expect("room for two");
@@ -14039,7 +14079,7 @@ mod tests {
         let dpi_milli = 1_000;
         let metrics = seat_metrics(dpi_milli);
         let mut seats = Seats::lone_terminal();
-        let first = seats.terminal();
+        let first = seats.identity();
         let second = seats
             .split_terminal(&metrics, first, Axis::Row, false)
             .expect("room for two");
@@ -14047,7 +14087,7 @@ mod tests {
         assert!(seats.close_seat(&metrics, first));
         assert_eq!(seats.terminals(), vec![second]);
         assert_eq!(
-            seats.terminal(),
+            seats.identity(),
             second,
             "the named terminal must never be a seat that was closed"
         );
@@ -14061,11 +14101,11 @@ mod tests {
             let seats = Seats::lone_terminal();
             let metrics = seat_metrics(dpi_milli);
             let layout = solved(&seats, viewport_of(1200, 900, dpi_milli), &metrics);
-            let whole = seat_viewport(&layout, seats.terminal()).unwrap();
+            let whole = seat_viewport(&layout, seats.identity()).unwrap();
             let body = pane_body_viewport(
                 &seats,
                 &layout,
-                seats.terminal(),
+                seats.identity(),
                 dpi_milli as f32 / 1_000.0,
             )
             .unwrap();
@@ -14085,8 +14125,8 @@ mod tests {
         let mut seats = Seats::lone_terminal();
         seats.add_preview(&metrics).expect("the preview seat lands");
         let layout = solved(&seats, viewport_of(1600, 900, dpi_milli), &metrics);
-        let whole = seat_viewport(&layout, seats.terminal()).unwrap();
-        let body = pane_body_viewport(&seats, &layout, seats.terminal(), 1.0).unwrap();
+        let whole = seat_viewport(&layout, seats.identity()).unwrap();
+        let body = pane_body_viewport(&seats, &layout, seats.identity(), 1.0).unwrap();
         assert_eq!(body.y, whole.y + SEAT_TITLE_BAR_LOGICAL_PX as u32);
         assert_eq!(body.height, whole.height - SEAT_TITLE_BAR_LOGICAL_PX as u32);
 
@@ -14899,8 +14939,8 @@ mod tests {
             "and unpinning gives it back"
         );
         // Nothing else has a pin to turn over.
-        assert!(!seats.toggle_preview_pin(seats.terminal()));
-        assert!(!seats.preview_is_pinned(seats.terminal()));
+        assert!(!seats.toggle_preview_pin(seats.identity()));
+        assert!(!seats.preview_is_pinned(seats.identity()));
     }
 
     /// PIN (P95, slice 5) — **the pin's other half: a second preview leaf.**
@@ -15496,7 +15536,7 @@ mod tests {",
         let metrics = seat_metrics(1_000);
         let viewport = viewport_of(1600, 900, 1_000);
         let before = solved(&seats, viewport, &metrics)
-            .get(seats.terminal())
+            .get(seats.identity())
             .unwrap()
             .device_rect
             .unwrap();
@@ -15504,7 +15544,7 @@ mod tests {",
         seats.add_preview(&metrics).expect("the preview must open");
         assert!(seats.preview().is_some());
         let narrowed = solved(&seats, viewport, &metrics)
-            .get(seats.terminal())
+            .get(seats.identity())
             .unwrap()
             .device_rect
             .unwrap();
@@ -15525,7 +15565,7 @@ mod tests {",
         );
         assert!(seats.is_lone_terminal());
         let after = solved(&seats, viewport, &metrics)
-            .get(seats.terminal())
+            .get(seats.identity())
             .unwrap()
             .device_rect
             .unwrap();
@@ -15548,7 +15588,7 @@ mod tests {",
             .drag_divider(&metrics, slot.id, requested, usable)
             .expect("dragging to the left edge is feasible, only clamped");
         let terminal = solved(&seats, viewport, &metrics)
-            .get(seats.terminal())
+            .get(seats.identity())
             .unwrap()
             .rect
             .unwrap();
@@ -15572,7 +15612,7 @@ mod tests {",
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
         for _ in 0..3 {
-            let target = seats.terminal();
+            let target = seats.identity();
             seats
                 .split_terminal(&metrics, target, Axis::Row, false)
                 .expect("a terminal leaf splits");
@@ -15688,7 +15728,7 @@ mod tests {",
         // A tab already cut across, so "the whole left edge" is a different
         // rectangle from "the left half of the focused pane".
         seats
-            .split_terminal(&metrics, seats.terminal(), Axis::Col, false)
+            .split_terminal(&metrics, seats.identity(), Axis::Col, false)
             .expect("a lone terminal splits");
 
         let column = seats
@@ -15898,8 +15938,7 @@ mod tests {",
                     manual_name: None,
                 }))),
             ],
-        }))
-        .expect("the tree carries a terminal");
+        }));
 
         let layout = solved(&seats, viewport, &metrics);
         let root = seats.split_slots(&layout)[0];
@@ -15966,8 +16005,7 @@ mod tests {",
             degradation.is_clean(),
             "a tree this build wrote must reload without degrading"
         );
-        let restored = Seats::from_persisted(&loaded.tabs[0].root)
-            .expect("the reloaded tree still holds a terminal");
+        let restored = Seats::from_persisted(&loaded.tabs[0].root);
         assert_eq!(
             restored.tree().ratios().len(),
             ratio_before.len(),
@@ -16019,7 +16057,7 @@ mod tests {",
             seats.add_preview(&metrics).expect("the preview must open");
             let opened = seat_viewport(
                 &solved(&seats, viewport_of(width, height, dpi_milli), &metrics),
-                seats.terminal(),
+                seats.identity(),
             )
             .expect("the terminal keeps a rectangle");
             assert!(
@@ -16061,7 +16099,7 @@ mod tests {",
             );
             let closed = seat_viewport(
                 &solved(&seats, viewport_of(width, height, dpi_milli), &metrics),
-                seats.terminal(),
+                seats.identity(),
             )
             .expect("the terminal keeps a rectangle");
             assert_eq!(closed, seats_surface(width, height, dpi_milli));
@@ -16093,7 +16131,7 @@ mod tests {",
             "the non-focus seat is the one that gives way"
         );
         assert_eq!(
-            layout.get(seats.terminal()).unwrap().presentation,
+            layout.get(seats.identity()).unwrap().presentation,
             Presentation::Full,
             "W2: the focus seat falls last"
         );
@@ -16188,7 +16226,7 @@ mod tests {",
             f64::from(head.top as i32) + 8.0,
         );
         let terminal_rect = layout
-            .get(seats.terminal())
+            .get(seats.identity())
             .unwrap()
             .device_rect
             .expect("the terminal seat has a rectangle");
@@ -16209,7 +16247,7 @@ mod tests {",
         );
         assert_eq!(
             pane_at(&layout, terminal.0, terminal.1),
-            Some(seats.terminal()),
+            Some(seats.identity()),
             "the third point really is inside the terminal"
         );
 
@@ -16253,7 +16291,7 @@ mod tests {",
                 Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Unknown)),
             ],
         });
-        let seats = Seats::from_persisted(&node).unwrap();
+        let seats = Seats::from_persisted(&node);
         let kinds: Vec<_> = seats
             .tree()
             .seats_in_order()
@@ -21174,7 +21212,6 @@ mod tests {",
                 ))),
             ],
         }))
-        .expect("a two-leaf tree restores")
     }
 
     fn term_leaf() -> Box<LayoutNodeV1> {
@@ -21199,7 +21236,6 @@ mod tests {",
                 })),
             ],
         }))
-        .expect("a three-leaf tree restores")
     }
 
     /// Two terminal leaves side by side — the shape U12 made ordinary and the
@@ -21210,7 +21246,6 @@ mod tests {",
             ratio: 500_000,
             children: [term_leaf(), term_leaf()],
         }))
-        .expect("a two-leaf tree restores")
     }
 
     /// Is this point strictly inside this rectangle? Strictly, so a quad that
@@ -22303,7 +22338,7 @@ mod tests {",
     /// paint on it.**
     ///
     /// The real-machine bug this pins: the body floor was drawn for every pane
-    /// except `seats.terminal()`, the tab's single identity shell. That test was
+    /// except `seats.identity()`, the tab's single identity shell. That test was
     /// written when a tab held exactly one shell, and it survived U12 giving
     /// every Terminal leaf its own session — so the second pane of a split had
     /// an opaque `--termbg` quad (white, in the light theme) laid over its
@@ -23218,7 +23253,7 @@ mod tests {",
         }
         Seats {
             tree,
-            terminal: SeatId(1),
+            identity: SeatId(1),
             focus: SeatId(1),
             next_seat: count + 1,
             next_split: count,
@@ -23410,7 +23445,7 @@ mod tests {",
     fn split_pair() -> (Seats, SeatLayout, SeatId, SeatId) {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
-        let left = seats.terminal();
+        let left = seats.identity();
         let right = seats
             .split_terminal(&metrics, left, Axis::Row, false)
             .expect("a 1600x900 window divides");
@@ -23892,7 +23927,7 @@ mod tests {",
                 Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Unknown)),
             ],
         });
-        let seats = Seats::from_persisted(&node).unwrap();
+        let seats = Seats::from_persisted(&node);
         let metrics = seat_metrics(1_000);
         let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
         let parts = chrome_of(&seats, &layout, None);
@@ -23914,7 +23949,7 @@ mod tests {",
         // And it says it even with no sibling to earn it a head.
         let lone = Seats {
             tree: LayoutNode::seat(Seat::new(SeatId(1), SeatKind::Placeholder)),
-            terminal: SeatId(1),
+            identity: SeatId(1),
             focus: SeatId(1),
             next_seat: 2,
             next_split: 1,
@@ -24054,7 +24089,7 @@ mod tests {",
         for (width, height) in [(100u32, 100u32), (1, 1), (259, 400)] {
             let viewport = viewport_of(width, height, 1_000);
             let (layout, overflow) = fit_what_fits(&seats, viewport, &metrics);
-            assert_eq!(layout.get(seats.terminal()).unwrap().rect, Some(viewport));
+            assert_eq!(layout.get(seats.identity()).unwrap().rect, Some(viewport));
             assert_eq!(overflow, None);
         }
     }
@@ -25440,8 +25475,7 @@ mod tests {",
                 ))),
                 term_leaf(),
             ],
-        }))
-        .expect("a column beside a terminal restores");
+        }));
         let column = seats.files().first().copied().expect("a files column");
         let layout = solved(
             &seats,
@@ -25623,7 +25657,7 @@ mod tests {",
         assert_eq!(
             layout_events(&before, &opened),
             vec![
-                LayoutEvent::Moved(seats.terminal()),
+                LayoutEvent::Moved(seats.identity()),
                 LayoutEvent::Appeared(preview),
             ],
             "in tree order, and the terminal really did give up width"
@@ -25633,7 +25667,7 @@ mod tests {",
         assert_eq!(
             layout_events(&opened, &closed),
             vec![
-                LayoutEvent::Moved(seats.terminal()),
+                LayoutEvent::Moved(seats.identity()),
                 LayoutEvent::Vanished(preview),
             ],
             "a seat that left the tree is still reported, last"
@@ -25700,7 +25734,7 @@ mod tests {",
             "the seat that collapsed is reported as a presentation change, got {events:?}"
         );
         assert!(
-            events.contains(&LayoutEvent::Moved(seats.terminal())),
+            events.contains(&LayoutEvent::Moved(seats.identity())),
             "and the seat that took the room is reported as having moved"
         );
         assert_eq!(events.len(), 2, "one event per seat per commit");
@@ -25720,7 +25754,7 @@ mod tests {",
         let narrow = solved(&seats, viewport_of(1200, 900, 1_000), &metrics);
         assert_eq!(
             layout_events(&wide, &narrow),
-            vec![LayoutEvent::Moved(seats.terminal())]
+            vec![LayoutEvent::Moved(seats.identity())]
         );
     }
 
@@ -25832,7 +25866,7 @@ mod tests {",
         // empty lists is an assertion that cannot fail - which this repo has
         // shipped three times and written down about.
         let mut seats = Seats::lone_terminal();
-        let first = seats.terminal();
+        let first = seats.identity();
         seats
             .split_terminal(&metrics, first, Axis::Row, false)
             .expect("a 960x600 window has room for two terminals");
@@ -26318,6 +26352,101 @@ mod tests {",
             }),
             "the whole card is edged in it, which is the attention queue arriving \
              in the column without a second rule being written for it"
+        );
+    }
+
+    /// PIN (§7.1.6b′ + §7.1.6h) — **a tab with no shell is a card like any
+    /// other, wearing its own mark and no dot.**
+    ///
+    /// The two rulings meeting. §7.1.6b′ says a card *is* its tab and takes the
+    /// strip's own aggregation rather than a second one; §7.1.6h says a tab with
+    /// no shell has no ledger and therefore says nothing. Put together, a folder
+    /// tab's card is the ordinary card — its name, its folder glyph, its `×`, its
+    /// place in the column — with the status slot simply unspent.
+    ///
+    /// Nothing in this module knows that such a tab exists, and the assertions
+    /// are the proof: what arrives is a [`TabContent`] with a `Folder` mark and a
+    /// default [`TabMarkState`], which is a shape the rail could already draw.
+    /// That is the ruling's "aggregation borrowed verbatim" paying off — the
+    /// column needed no branch for the new tab shapes and got none.
+    ///
+    /// Red gate: give the empty fleet any claim but `Silent` upstream and the
+    /// dot assertion goes red; special-case the kind here and the first one does.
+    #[test]
+    fn a_tab_with_no_shell_is_an_ordinary_card_wearing_its_own_mark_and_no_dot() {
+        let palette = chrome_palette();
+        let mut folder = card_tab("folio", 1, TabMarkState::default(), false);
+        folder.mark_kind = ChromeMark::Folder;
+        let mut file = card_tab("DESIGN.md", 1, TabMarkState::default(), false);
+        file.mark_kind = ChromeMark::File;
+        let tabs = vec![
+            card_tab("build", 2, TabMarkState::default(), false),
+            folder,
+            file,
+        ];
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let column = window_chrome_with_rail(&tabs, 0, state, None).rail;
+        let geometry = focus_of(state, tabs.len());
+        assert_eq!(
+            geometry.cards.len(),
+            3,
+            "every tab in the window gets a card, shell or no shell"
+        );
+
+        let mark_in = |card: &FocusCardGeometry| {
+            column
+                .sprites
+                .iter()
+                .find(|sprite| {
+                    sprite.rect[0] >= card.mark[0] - 1.0
+                        && sprite.rect[2] <= card.mark[2] + 1.0
+                        && sprite.rect[1] >= card.body[1]
+                        && sprite.rect[3] <= card.body[3]
+                        && !matches!(sprite.mark, ChromeMark::ControlPill { .. })
+                        && !matches!(sprite.mark, ChromeMark::ControlPillRing { .. })
+                })
+                .map(|sprite| sprite.mark)
+        };
+        assert_eq!(
+            mark_in(&geometry.cards[1]),
+            Some(ChromeMark::Folder),
+            "a folder tab's card wears the folder its column head wears"
+        );
+        assert_eq!(
+            mark_in(&geometry.cards[2]),
+            Some(ChromeMark::File),
+            "and a file tab's the file its preview head wears"
+        );
+
+        let labelled = |card: &FocusCardGeometry, text: &str| {
+            column
+                .labels
+                .iter()
+                .any(|label| label.text == text && label.rect[1] >= card.body[1] - 1.0)
+        };
+        assert!(labelled(&geometry.cards[1], "folio"));
+        assert!(labelled(&geometry.cards[2], "DESIGN.md"));
+
+        let dotted = |card: &FocusCardGeometry| {
+            column.sprites.iter().any(|sprite| {
+                matches!(sprite.mark, ChromeMark::ControlPill { .. })
+                    && sprite.rect[2] - sprite.rect[0] <= WINDOW_TAB_MARK_LOGICAL_PX
+                    && sprite.rect[0] >= card.mark[0]
+                    && sprite.rect[1] >= card.body[1]
+                    && sprite.rect[3] <= card.body[3]
+                    && sprite.rect[2] <= card.mark[2] + WINDOW_TAB_MARK_LOGICAL_PX
+            })
+        };
+        assert!(
+            !dotted(&geometry.cards[1]) && !dotted(&geometry.cards[2]),
+            "§7.1.6h: no ledger, nothing said — a tab with no shell wears no dot"
+        );
+        assert!(
+            !column.sprites.iter().any(|sprite| {
+                sprite.color == palette.status_warn
+                    && matches!(sprite.mark, ChromeMark::ControlPillRing { .. })
+            }),
+            "and no ring either"
         );
     }
 
@@ -27949,8 +28078,129 @@ mod tests {",
         );
         // And back. The page is read where the root is, by the same code — see
         // `main`'s `restore_tab`, which is the only reader of both.
-        let restored = Seats::from_persisted(&persisted).expect("the tree holds a terminal");
+        let restored = Seats::from_persisted(&persisted);
         assert_eq!(restored.files().len(), 1, "one column out, one column back");
+    }
+
+    /// **T5 — a saved tree with no terminal in it comes back as the tab it was.**
+    ///
+    /// `from_persisted` used to answer `None` here, and `revive_plan` answered
+    /// that `None` by handing over `Seats::lone_terminal()` — so a files-root tab
+    /// read off disk came back as an empty PowerShell standing where the folder
+    /// had been. That was the honest answer while a tab was required to hold a
+    /// shell (§3.2's per-document refusal), and it is a silent content swap now
+    /// that it is not.
+    ///
+    /// The identity seat is the thing that had to generalise: it was `terminal`,
+    /// found by looking for the first Terminal leaf and refusing the document
+    /// when there was none. It is now the first Terminal leaf **if there is one**
+    /// and the first seat otherwise — a tab's identity is the pane it is named
+    /// and reopened by, and every tree has one of those.
+    ///
+    /// Red gate: refuse a term-less tree again and every files-root and
+    /// preview-root tab is replaced by a fresh shell on the next restart, with
+    /// nothing on screen to say a swap happened.
+    #[test]
+    fn a_saved_tree_with_no_terminal_comes_back_as_itself() {
+        let column = Seats::from_persisted(&LayoutNodeV1::Leaf(LeafNodeV1::Files(
+            bt_persist::FilesLeafV1 {
+                root: r"D:\work".to_owned(),
+                open: Vec::new(),
+                sel: None,
+                width: 240,
+                view: bt_persist::FilesViewV1::Files,
+                remotes_open: false,
+            },
+        )));
+        assert!(
+            column.terminals().is_empty(),
+            "no shell was saved and none is invented"
+        );
+        assert_eq!(column.files().len(), 1, "the column itself came back");
+        assert_eq!(
+            column.identity(),
+            column.files()[0],
+            "and it is what the tab is identified by"
+        );
+        assert_eq!(column.focus(), column.files()[0]);
+
+        let preview = Seats::from_persisted(&LayoutNodeV1::Leaf(LeafNodeV1::Preview(
+            bt_persist::PreviewLeafV1 { pinned: false },
+        )));
+        assert!(preview.terminals().is_empty());
+        assert_eq!(preview.preview_seats().len(), 1);
+        assert_eq!(preview.identity(), preview.preview_seats()[0]);
+    }
+
+    /// **T5 — the identity seat prefers a terminal and settles for whatever is
+    /// there.**
+    ///
+    /// The preference is not cosmetic: a `[files | shell]` tab is named and
+    /// reopened by its shell, and it must go on being so after this slice made
+    /// the files column a legal identity in its own right. So the rule is
+    /// ordered — first Terminal in tree order, and only a tree with none falls
+    /// through to its first seat.
+    #[test]
+    fn the_identity_seat_prefers_a_terminal_and_settles_for_what_is_there() {
+        let mixed = Seats::from_persisted(&LayoutNodeV1::Split(SplitNodeV1 {
+            dir: bt_persist::SplitDirV1::Row,
+            ratio: 250_000,
+            children: [
+                Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Files(
+                    bt_persist::FilesLeafV1 {
+                        root: r"D:\work".to_owned(),
+                        open: Vec::new(),
+                        sel: None,
+                        width: 240,
+                        view: bt_persist::FilesViewV1::Files,
+                        remotes_open: false,
+                    },
+                ))),
+                Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Term(
+                    bt_persist::TermLeafV1 {
+                        profile_id: "pwsh.exe".to_owned(),
+                        cwd: r"D:\work".to_owned(),
+                        manual_name: None,
+                    },
+                ))),
+            ],
+        }));
+        assert_eq!(
+            mixed.identity(),
+            mixed.terminals()[0],
+            "the column stands first in the tree and the shell is still the identity"
+        );
+    }
+
+    /// **T5 — any pane a person put there may be stood up as a tab of its own.**
+    ///
+    /// `lone_seat` used to debug-assert the arriving seat was a Terminal, on
+    /// I106's argument that a tab with no shell was the 2026-07-16 crash. It is
+    /// now the ordinary way both new tab shapes are born, and what the seat
+    /// carries across is everything §5 says is durable about it — the files
+    /// column's fixed width included, which is what keeps a torn-out column the
+    /// width it was.
+    #[test]
+    fn a_column_stands_up_as_a_tab_of_its_own_at_the_width_it_had() {
+        let seat = Seat {
+            id: SeatId(7),
+            kind: SeatKind::Files,
+            fixed_extent: Some(LogicalPx::px(300)),
+            pinned: false,
+        };
+        let (seats, id) = Seats::lone_seat(&seat);
+        assert_eq!(id, SeatId(1), "the ids are re-minted from one");
+        assert_eq!(seats.identity(), id);
+        assert_eq!(seats.files(), vec![id]);
+        assert!(seats.terminals().is_empty());
+        assert_eq!(
+            seats
+                .tree()
+                .find_seat(id)
+                .and_then(|seat| seat.fixed_extent),
+            Some(LogicalPx::px(300)),
+            "§5: a column torn into its own tab is still the width it was"
+        );
     }
 }
 
@@ -28374,7 +28624,7 @@ mod drop_plan_tests {
         let next_split = tree.ratios().iter().map(|(id, _)| id.0).max().unwrap_or(0) + 1;
         Seats {
             structure_revision: 0,
-            terminal: SeatId(1),
+            identity: SeatId(1),
             focus: SeatId(1),
             tree,
             next_seat,
@@ -29203,7 +29453,7 @@ mod drop_plan_tests {
             "the terminal took the outer slot and the files column went inboard"
         );
         assert_eq!(
-            seats.terminal(),
+            seats.identity(),
             SeatId(1),
             "identity travels with content, so the shell still knows its seat"
         );
@@ -29411,7 +29661,7 @@ mod drop_plan_tests {
     #[test]
     fn a_replace_that_takes_the_terminal_seat_re_derives_it() {
         let mut seats = window(row(1, term(1), term(2)));
-        assert_eq!(seats.terminal(), SeatId(1));
+        assert_eq!(seats.identity(), SeatId(1));
         let planned = seats
             .plan_drop(
                 &metrics(),
@@ -29430,11 +29680,11 @@ mod drop_plan_tests {
             "ReplaceSeat took the identity terminal's own seat away"
         );
         assert!(
-            seats.tree().contains(seats.terminal()),
+            seats.tree().contains(seats.identity()),
             "and `terminal` followed it to a seat that exists"
         );
         assert_eq!(
-            seats.terminal(),
+            seats.identity(),
             seats.terminals()[0],
             "the first terminal left standing, as `close_seat` also rules"
         );
@@ -29459,7 +29709,7 @@ mod drop_plan_tests {
         let preview = seats.preview().expect("the seat just opened");
         let planned = plan(
             &seats,
-            LayoutAim::SeatEdge(seats.terminal(), DropEdge::Left),
+            LayoutAim::SeatEdge(seats.identity(), DropEdge::Left),
             DropCargo::Pane(preview),
         );
         assert_eq!(seats.adopt_drop(planned), Some(preview));
@@ -29475,7 +29725,7 @@ mod drop_plan_tests {
             "the preview took the left column it was aimed at"
         );
         assert_eq!(
-            seats.terminal(),
+            seats.identity(),
             SeatId(1),
             "the shell's seat is where the shell is, wherever that seat now sits"
         );
@@ -29535,8 +29785,7 @@ mod drop_plan_tests {
         };
         let mut revived = Seats::from_persisted(
             &seats.to_persisted(&|_| seed.clone(), &|_| FilesLeafState::default()),
-        )
-        .expect("the tree has a terminal");
+        );
         revived.restore_focus_token(&format!("leaf-{focus_index}"));
         assert_eq!(
             in_order(&revived),
@@ -29629,7 +29878,7 @@ mod drop_plan_tests {
     #[test]
     fn popping_out_the_last_pane_leaves_a_stand_in_shell_rather_than_an_empty_tab() {
         let mut seats = window(preview(7));
-        seats.terminal = SeatId(7);
+        seats.identity = SeatId(7);
         seats.focus = SeatId(7);
         assert!(
             !seats.close_seat(&metrics(), SeatId(7)),
@@ -29654,7 +29903,7 @@ mod drop_plan_tests {
             "and what stayed is a shell, because a tab without one cannot be drawn (I106)"
         );
         assert_eq!(
-            seats.terminal(),
+            seats.identity(),
             arrived,
             "the identity shell is the one that is actually there"
         );

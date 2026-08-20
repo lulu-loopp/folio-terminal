@@ -3510,6 +3510,7 @@ impl ProfileMenuLayout {
                         match &entry.seed {
                             Seed::Term { cwd, .. } => cwd.clone(),
                             Seed::Files { root } => root.clone(),
+                            Seed::Preview { path } => path.clone(),
                         },
                     )
                 });
@@ -3795,11 +3796,12 @@ pub fn hit(
 /// then this one has to be too. Greying one and not the other would put, in one
 /// menu, both answers to the same question.
 ///
-/// A files locus has no shell, so nothing about it can be missing.
+/// A files locus has no shell, so nothing about it can be missing, and neither
+/// has a file (§7.1.6h).
 fn recent_is_available(seed: &Seed, programs: &ProfilePrograms) -> bool {
     match seed {
         Seed::Term { profile_id, .. } => programs.is_available(index_of_id(profile_id)),
-        Seed::Files { .. } => true,
+        Seed::Files { .. } | Seed::Preview { .. } => true,
     }
 }
 
@@ -4249,11 +4251,15 @@ fn separator_alpha(ink: [u8; 3]) -> f32 {
 /// A terminal seed wears **its own profile's** mark rather than a generic one:
 /// the row is offering to reopen that shell, and the picker's rows one section
 /// up are already teaching what the mark means. A files locus has no profile,
-/// so it wears the folder the pane is (`#i-folder` in `--accent`, mock-up 7427).
+/// so it wears the folder the pane is (`#i-folder` in `--accent`, mock-up 7427),
+/// and a file wears the file the pane is — the same pairing `pane_mark` already
+/// makes one module over, so a row and the head it reopens cannot wear two
+/// different glyphs for one thing.
 fn recent_mark(seed: &Seed) -> ChromeMark {
     match seed {
         Seed::Term { profile_id, .. } => mark(index_of_id(profile_id)),
         Seed::Files { .. } => ChromeMark::Folder,
+        Seed::Preview { .. } => ChromeMark::File,
     }
 }
 
@@ -4274,6 +4280,10 @@ fn recent_label(seed: &Seed) -> &str {
         // A files locus has no name of its own; the mock-up captions it with the
         // same leaf rule applied to its root.
         Seed::Files { root } => cwd_leaf(root),
+        // And a file is captioned by its own last segment through the same rule,
+        // which for a path ending in a file name is that file name — the string
+        // a preview head already prints (§7.1.6h).
+        Seed::Preview { path } => cwd_leaf(path),
     }
 }
 

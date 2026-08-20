@@ -19,12 +19,18 @@ pub const RECENT_CAPACITY: usize = 8;
 
 /// What survives a close.
 ///
-/// The two shapes mirror [`RecentSeedV1`] because they mirror the two kinds of
-/// leaf a tab can be made of — `docs/DESIGN.md` §7.1.4: "Recent 条目 = 终端
-/// seed **或 files 场所**（关闭纯 files tab 同样可撤销）". A files-only tab that
-/// could be restored by the shutdown prompt but not by Ctrl+Shift+T would be two
-/// doors onto one store with one of them broken, which is the exact failure this
+/// The shapes mirror [`RecentSeedV1`] because they mirror the kinds of leaf a
+/// tab can be made of — `docs/DESIGN.md` §7.1.4: "Recent 条目 = 终端 seed **或
+/// files 场所**（关闭纯 files tab 同样可撤销）". A files-only tab that could be
+/// restored by the shutdown prompt but not by Ctrl+Shift+T would be two doors
+/// onto one store with one of them broken, which is the exact failure this
 /// module exists to prevent.
+///
+/// **The third shape arrived with §7.1.6h**, and it arrived by that same
+/// sentence rather than beside it: the slice that made a lone preview pane a tab
+/// would otherwise have created a tab shape the vault had no row for, which is
+/// the identical asymmetry one file over. `session.json` carries it as
+/// `RecentSeedV1::Preview` from schema v8.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Seed {
     /// A terminal: the profile that launched it, where it stood, what you called
@@ -38,6 +44,8 @@ pub enum Seed {
     },
     /// A place a files pane was rooted at.
     Files { root: String },
+    /// The file a lone preview pane was on (§7.1.6h).
+    Preview { path: String },
 }
 
 impl Seed {
@@ -64,6 +72,12 @@ impl Seed {
             // The files locus has no profile and no name of its own, so it takes
             // the same three slots with the two it cannot fill left empty.
             Self::Files { root } => format!("|{root}|"),
+            // And the file takes the *third* slot, which is the one a place
+            // leaves empty — so a preview tab on `D:\a\b` and a files tab
+            // rooted at `D:\a\b` are two rows and not one. They are two
+            // different tabs and a key that collapsed them would let opening a
+            // folder evict the file you had open in it.
+            Self::Preview { path } => format!("||{path}"),
         }
     }
 
@@ -78,18 +92,19 @@ impl Seed {
     /// files pane has no field for the editor to write to, and the editor must
     /// decline to open rather than open onto nothing.
     ///
-    /// **Today this never answers `false` for a real tab.** Every tab in this
-    /// build holds a terminal (`TabState::seed` constructs `Term`
-    /// unconditionally), so the guard is satisfied by construction and this is
-    /// the stub the ticket asks for: the *shape* of the mock-up's condition,
-    /// carrying the one case that will exist once T5 gives a tab a files-only
-    /// identity leaf. It is a real function and not a comment because the day
-    /// that case arrives, the caller must already be asking.
+    /// A file is turned away on the same footing as a place and for the same
+    /// reason: what identifies it is a path on disk.
+    ///
+    /// **This used to say it never answered `false` for a real tab**, and stood
+    /// as the stub for "the one case that will exist once T5 gives a tab a
+    /// files-only identity leaf". §7.1.6h is that day: both `false` arms are now
+    /// reachable, `TabState::seed` builds all three shapes, and `open_rename`'s
+    /// guard is a live gate rather than a promise.
     #[must_use]
     pub fn can_be_named(&self) -> bool {
         match self {
             Self::Term { .. } => true,
-            Self::Files { .. } => false,
+            Self::Files { .. } | Self::Preview { .. } => false,
         }
     }
 }
@@ -107,6 +122,7 @@ impl From<&Seed> for RecentSeedV1 {
                 manual_name: manual_name.clone(),
             },
             Seed::Files { root } => Self::Files { root: root.clone() },
+            Seed::Preview { path } => Self::Preview { path: path.clone() },
         }
     }
 }
@@ -124,6 +140,7 @@ impl From<&RecentSeedV1> for Seed {
                 manual_name: manual_name.clone(),
             },
             RecentSeedV1::Files { root } => Self::Files { root: root.clone() },
+            RecentSeedV1::Preview { path } => Self::Preview { path: path.clone() },
         }
     }
 }

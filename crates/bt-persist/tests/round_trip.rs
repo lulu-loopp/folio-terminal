@@ -228,13 +228,131 @@ fn a_preview_pane_keeps_its_pin_in_the_tree_and_its_file_in_the_content_section(
     );
 
     // The same fixed-point gate the canonical fixture gets: reading and writing
-    // this document must reproduce it byte for byte.
+    // this document must reproduce it byte for byte. The bytes compared against
+    // are the **v8** copy of the same document, because the v7 one is now a
+    // migration source and a migrated document is by definition not what it was
+    // read from — see `a_v7_vault_arrives_at_v8_with_nothing_but_its_version
+    // _changed`, which is the other half of this pair.
     let reserialized = serde_json::to_vec_pretty(&session).expect("SessionV1 always serializes");
-    let expected = std::fs::read(fixture_path("session_v7_preview.json")).unwrap();
+    let expected = std::fs::read(fixture_path("session_v8_preview.json")).unwrap();
     assert_eq!(
         String::from_utf8(reserialized).unwrap(),
         String::from_utf8(expected).unwrap().trim_end().to_owned(),
         "the preview fixture must be a fixed point of parse-then-serialize"
+    );
+}
+
+/// **v7 → v8 is a version and nothing else, and the vault is where that has to
+/// be proved.**
+///
+/// The bump exists for a variant that no v7 document can contain, so the honest
+/// step touches no field — and "touches no field" is exactly the claim a
+/// migration test is for. The fixture carries a non-default value in every older
+/// field (`CONVENTIONS.md` §三) and a `term` vault entry with a `previews` list,
+/// which is the row a step that rewrote seeds would most easily damage.
+#[test]
+fn a_v7_vault_arrives_at_v8_with_nothing_but_its_version_changed() {
+    let (migrated, report, degradation) = read_session(&fixture_path("session_v7_preview.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(degradation, DegradationReport::default());
+    assert_eq!(migrated.schema_version, 8);
+
+    let (native, report, _) = read_session(&fixture_path("session_v8_preview.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(
+        migrated, native,
+        "a v7 document read at v8 is the v8 document, field for field"
+    );
+    assert_eq!(
+        migrated.recent[0].seed,
+        RecentSeedV1::Term {
+            profile_id: "pwsh".to_owned(),
+            cwd: r"C:\Users\dev\notes".to_owned(),
+            manual_name: None,
+        },
+        "an old vault entry is already what it should be at v8"
+    );
+}
+
+/// **T5/§7.1.6h — a tab made of a folder and a tab made of a file survive a
+/// restart, and so do the two vault rows that reopen them.**
+///
+/// The whole of what the sessionless slice asks of the disk, in one document,
+/// because the interesting failure is that they are *four* facts that look like
+/// one: a tree whose only leaf is a `files` leaf, a tree whose only leaf is a
+/// `preview` leaf, the content section that says which file that preview was on,
+/// and the two vault seeds. A reader that quietly required a `term` leaf
+/// somewhere would pass three of them.
+///
+/// **No field is new here except the vault's third seed shape.** That is the
+/// finding this slice recorded rather than a gap it closed: `files` leaves have
+/// carried their root since v1 and `preview` panes their file since the content
+/// section landed, so a term-less tab was *expressible* on disk long before it
+/// was constructible in the program. What was missing was upstream — the reader
+/// that answered "no terminal leaf" by handing back a lone terminal — and no
+/// schema change could have fixed that.
+///
+/// Fixed-point gated like every other fixture: read, write, compare bytes.
+#[test]
+fn a_folder_tab_and_a_file_tab_round_trip_with_the_seeds_that_reopen_them() {
+    let (session, report, degradation) = read_session(&fixture_path("session_v8_sessionless.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(degradation, DegradationReport::default());
+    assert_eq!(session.schema_version, SESSION_SCHEMA_VERSION);
+
+    let LayoutNodeV1::Leaf(LeafNodeV1::Files(column)) = &session.tabs[0].root else {
+        panic!("the first tab is one files leaf and nothing else");
+    };
+    assert_eq!(column.root, r"D:\work\folio");
+    assert_eq!(column.view, FilesViewV1::Git);
+    assert!(column.remotes_open);
+    assert_eq!(
+        session.tabs[0].focused_leaf, "leaf-0",
+        "the token names the column, which is a seat this build now lets it name"
+    );
+    assert!(
+        session.tabs[0].pinned,
+        "a folder tab pins like any other tab"
+    );
+
+    let LayoutNodeV1::Leaf(LeafNodeV1::Preview(preview)) = &session.tabs[1].root else {
+        panic!("the second tab is one preview leaf and nothing else");
+    };
+    assert!(preview.pinned);
+    assert_eq!(
+        session.tabs[1]
+            .preview
+            .as_ref()
+            .expect("a preview tab carries the file it is on")
+            .panes,
+        vec![PreviewPaneV1 {
+            leaf: "leaf-0".to_owned(),
+            cur: Some(r"D:\work\folio\docs\DESIGN.md".to_owned()),
+            graph: None,
+        }],
+    );
+
+    assert_eq!(
+        session.recent[0].seed,
+        RecentSeedV1::Files {
+            root: r"D:\other".to_owned()
+        },
+    );
+    assert_eq!(
+        session.recent[1].seed,
+        RecentSeedV1::Preview {
+            path: r"D:\work\folio\README.md".to_owned()
+        },
+        "§7.1.6h's third seed shape — without it, closing a file tab puts nothing \
+         in the vault and Ctrl+Shift+T is a door onto an empty store"
+    );
+
+    let reserialized = serde_json::to_vec_pretty(&session).expect("SessionV1 always serializes");
+    let expected = std::fs::read(fixture_path("session_v8_sessionless.json")).unwrap();
+    assert_eq!(
+        String::from_utf8(reserialized).unwrap(),
+        String::from_utf8(expected).unwrap().trim_end().to_owned(),
+        "the sessionless fixture must be a fixed point of parse-then-serialize"
     );
 }
 

@@ -3878,10 +3878,19 @@ struct TabState {
     /// which seat's frame is built first and which shell drains first — and
     /// hash order is not an order anyone chose.
     ///
-    /// The invariant every access below relies on: this is never empty, and it
-    /// always contains `focused_leaf`. A Terminal seat with no session behind it
-    /// is a black rectangle, so seats and sessions are created and destroyed
-    /// together.
+    /// The invariant every access below relies on: a Terminal seat with no
+    /// session behind it is a black rectangle, so seats and sessions are created
+    /// and destroyed together ([`Self::sessions_match_terminals`]), and when this
+    /// is non-empty it contains `focused_leaf`.
+    ///
+    /// **It may be empty, and that is §7.1.6h.** It used to say "never empty",
+    /// because a tab was a strip entry with at least one shell behind it. A tab
+    /// made of one folder or one file has none: it is named by its pane, drawn by
+    /// its pane, saved as its pane, and wears no status dot at all because it has
+    /// no ledger to report one from. What the emptiness costs is stated where it
+    /// is paid — [`TabState::focused`] answers `Option`, and every reader that
+    /// meant "the active tab's shell" now has to say what it means when there
+    /// isn't one.
     sessions: BTreeMap<SeatId, LeafSession>,
     /// This tab's files columns, one per Files leaf, keyed by the seat they draw
     /// into — the exact sibling of [`Self::sessions`], and deliberately a second
@@ -3958,12 +3967,20 @@ struct TabState {
     git_graph_view: BTreeMap<SeatId, GraphView>,
     /// Which leaf has the keyboard. Typing, pasting and IME all land here.
     ///
-    /// **Always a Terminal seat in this build**, which is what lets `sessions`
-    /// keep the invariant above. Opening a files column does not move it and
-    /// clicking into one does not take it (the focus move is guarded on
-    /// `sessions.contains_key`): a files pane has nothing to type into until
-    /// `InputOwner::FilesTree` exists, and a keyboard focus parked on a seat
-    /// with no session is the crash I106 is the report for.
+    /// **A Terminal seat whenever this tab has one.** Opening a files column does
+    /// not move it and clicking into one does not take it (the focus move is
+    /// guarded on `sessions.contains_key`): a files pane has nothing to type into
+    /// until `InputOwner::FilesTree` exists.
+    ///
+    /// **On a tab with no shell at all it names the identity seat** (§7.1.6h) —
+    /// a seat the tree provably contains, so no reader is ever handed a dangling
+    /// id, and one with no session behind it, so every reader that asks
+    /// [`TabState::focused`] is told there is nowhere for a keystroke to go. That
+    /// is the honest answer for a folder tab and it is the same answer whichever
+    /// seat the field happened to name, which is why the fallback can be a seat
+    /// rather than an `Option<SeatId>`: making it optional would put a second,
+    /// weaker spelling of "no shell here" beside the one `sessions` already
+    /// gives, and two ways to say it is one of them going out of date.
     focused_leaf: SeatId,
     /// "Bring this one back next time."
     ///
@@ -5959,25 +5976,66 @@ impl TabState {
     /// the strip needs all of them at once; `Runtime` reaches the active tab's
     /// through `Deref`, which is how the OS window title stays the active tab's
     /// title without a second code path deciding what that is.
+    ///
+    /// **A tab with no shell is named by the pane it is made of** (§7.1.6h), and
+    /// by that pane's *own* rule rather than by a rule the strip invents for it:
+    /// [`Self::pane_title`] asks [`seats::seat_caption`], which is the same
+    /// function the head above that pane prints from. So a folder tab and its
+    /// column head say the same word, a file tab and its preview head say the
+    /// same word, and there is no second place for the two to drift apart. The
+    /// ruling's own phrasing is "tab 标题沿用各自 pane 的标题规则", and this is
+    /// that read literally: not "a similar rule", the same call.
+    ///
+    /// The manual name is not consulted on that path because there is none to
+    /// consult — [`seed::Seed::can_be_named`] refuses the editor for both shapes,
+    /// so `manual_name` is `None` on a sessionless tab by construction rather
+    /// than by omission here.
     fn display_title(&self) -> String {
+        let Some(leaf) = self.focused() else {
+            return self.pane_title(self.seats.identity());
+        };
         display_title(
             self.manual_name.as_deref(),
-            self.announced_title(),
-            self.session.working_directory(),
+            leaf.announced_title(),
+            leaf.session.working_directory(),
             self.focused_profile_title(),
         )
     }
 
-    /// Which profile the focused pane is running.
+    /// **What one seat calls itself**, through the one function every pane head
+    /// in the product already calls (§7.1.6h).
     ///
-    /// Through the same `Deref` every other reader of the focused session uses,
-    /// rather than through `sessions[&focused_leaf]`: the two disagree exactly
-    /// when the focused seat holds no shell (a files column), and in that case
-    /// `focused()` is the leaf whose folder and title the whole window is already
-    /// reading. A caller pairing this profile with that folder must get them off
-    /// one leaf or it is describing a pane that does not exist.
+    /// Owned as a `String` rather than borrowed because two of the three names it
+    /// can answer with are computed — a folder's last segment and a preview's
+    /// buffer name — and the strip wants a name it can keep.
+    fn pane_title(&self, seat: SeatId) -> String {
+        let kind = self
+            .seats
+            .tree()
+            .find_seat(seat)
+            .map_or(bt_layout::SeatKind::Terminal, |seat| seat.kind);
+        let preview = self.preview_head_name(seat);
+        let files = self.files_head_name(seat);
+        let terminal = self.terminal_name(seat);
+        seats::seat_caption(
+            kind,
+            preview.as_deref(),
+            terminal.as_deref(),
+            files.as_deref(),
+        )
+        .to_owned()
+    }
+
+    /// Which profile the focused pane is running, or the fallback for a tab with
+    /// no shell to be running anything.
+    ///
+    /// Read off [`Self::focused`] rather than through `sessions[&focused_leaf]`
+    /// for a reason that survives the `Option`: a caller pairing this profile
+    /// with a folder must get both off one leaf or it is describing a pane that
+    /// does not exist.
     fn session_profile(&self) -> usize {
-        self.focused().profile
+        self.focused()
+            .map_or_else(profiles::fallback_profile, |leaf| leaf.profile)
     }
 
     /// The name the focused pane's *own* profile goes by.
@@ -5997,14 +6055,23 @@ impl TabState {
     /// already carries the leaf whenever the folder is what named the tab, and a
     /// tip that repeated it would answer a question nobody has while leaving the
     /// one they do have — *which* `app` is this? — unanswered.
+    ///
+    /// **A tab with no shell has no second line**, because the second line is a
+    /// working directory and there is no shell to have reported one. The tip is
+    /// then the tab's name and its pin, which is the whole of what such a tab
+    /// knows about itself — and a tip that invented a path from the pane's root
+    /// would be answering with a folder the shell never stood in.
     fn tooltip_text(&self) -> String {
+        let Some(leaf) = self.focused() else {
+            return tooltip::tab_tip(&self.display_title(), None, None, self.pinned);
+        };
         let (name, source) = resolve_title(
             self.manual_name.as_deref(),
-            self.announced_title(),
-            self.session.working_directory(),
+            leaf.announced_title(),
+            leaf.session.working_directory(),
             self.focused_profile_title(),
         );
-        let cwd = self
+        let cwd = leaf
             .session
             .working_directory()
             .map(|path| path.to_string_lossy().into_owned());
@@ -6052,7 +6119,7 @@ impl TabState {
 
     /// The same three facts in the vault's spelling, for the tab as a whole.
     ///
-    /// Seeded from the tab's **identity terminal** (`self.seats.terminal()`) —
+    /// Seeded from the tab's **identity terminal** (`self.seats.identity()`) —
     /// the one leaf a tab is reopened as when you ask for it back by name. A
     /// vault entry is one address, and a tab with two panes has to answer with
     /// one of them; the identity terminal is the one the tab has always been.
@@ -6092,21 +6159,68 @@ impl TabState {
     /// already renames itself to the focused pane's folder (`display_title`
     /// derefs to the focused leaf), and an icon that stayed on some other pane
     /// while the name moved would be half an identity pointing two ways.
+    ///
+    /// **A tab with no shell wears its pane's own mark** (§7.1.6h) — the folder
+    /// for a column, the file for a preview — through [`seats::pane_mark`], which
+    /// is the function the head above that pane already draws from. Same argument
+    /// as [`Self::display_title`]'s: giving a folder tab a second glyph, chosen
+    /// somewhere else, is how a strip row and the pane under it start describing
+    /// two different things.
     fn tab_mark(&self) -> marks::ChromeMark {
-        let leaf = if self.sessions.contains_key(&self.focused_leaf) {
+        let seat = if self.sessions.contains_key(&self.focused_leaf) {
             self.focused_leaf
         } else {
-            self.seats.terminal()
+            self.seats.identity()
         };
-        profiles::mark(self.leaf_profile(leaf))
+        let kind = self
+            .seats
+            .tree()
+            .find_seat(seat)
+            .map_or(bt_layout::SeatKind::Terminal, |seat| seat.kind);
+        let (mark, _, _) = seats::pane_mark(
+            kind,
+            Some(profiles::mark(self.leaf_profile(seat))),
+            bt_render::chrome_palette(),
+        );
+        mark
     }
 
-    fn seed(&self) -> seed::Seed {
-        let leaf = self.term_leaf(self.seats.terminal());
-        seed::Seed::Term {
-            profile_id: leaf.profile_id,
-            cwd: leaf.cwd,
-            manual_name: leaf.manual_name,
+    /// **What survives this tab being closed — one of the vault's three shapes**
+    /// (§7.1.4, §7.1.6h).
+    ///
+    /// Read off the identity seat, which is the pane a tab is reopened *as*, and
+    /// keyed on that pane's kind rather than on whether the tab happens to hold a
+    /// shell: a `[files | shell]` tab has a terminal identity and comes back as
+    /// that terminal, exactly as it always did.
+    ///
+    /// `None` for a tab whose identity pane is a placeholder — a leaf a newer
+    /// build wrote and this one cannot read. There is genuinely nothing to put in
+    /// the vault for it: no profile, no place, no path. Writing a row that
+    /// reopened as *something* would be inventing the tab the user closed, and
+    /// the honest answer to "what was that" is to say nothing rather than to
+    /// guess. It is the same refusal [`pane_can_become_a_tab`] makes about the
+    /// same leaf, one door over.
+    fn seed(&self) -> Option<seed::Seed> {
+        let seat = self.seats.identity();
+        match self.seats.tree().find_seat(seat)?.kind {
+            bt_layout::SeatKind::Terminal => {
+                let leaf = self.term_leaf(seat);
+                Some(seed::Seed::Term {
+                    profile_id: leaf.profile_id,
+                    cwd: leaf.cwd,
+                    manual_name: leaf.manual_name,
+                })
+            }
+            bt_layout::SeatKind::Files => Some(seed::Seed::Files {
+                root: self.files_state(seat).root,
+            }),
+            // A pane showing nothing has no file to be reopened on, so it seeds
+            // nothing — the same sentence `preview_showing` already writes about
+            // the session file, applied to the other store that reads it.
+            bt_layout::SeatKind::Preview => Some(seed::Seed::Preview {
+                path: self.preview_showing(seat)?.to_string_lossy().into_owned(),
+            }),
+            bt_layout::SeatKind::Placeholder => None,
         }
     }
 
@@ -6238,17 +6352,51 @@ impl DerefMut for Runtime<'_> {
 }
 
 impl TabState {
-    /// The leaf holding the keyboard — the shell a keystroke belongs to.
-    fn focused(&self) -> &LeafSession {
-        self.sessions
-            .get(&self.focused_leaf)
-            .expect("every tab holds a session for its focused leaf")
+    /// **The leaf holding the keyboard — the shell a keystroke belongs to, if
+    /// this tab has one.**
+    ///
+    /// `None` for a tab made of a folder or a file (§7.1.6h), and that `None` is
+    /// the whole cost of the slice: it used to `expect`, and `TabState` derefed
+    /// to it, so a hundred and thirty readers spelled "the active tab's focused
+    /// shell" as `self.session`. Each of those readers had to be asked what it
+    /// means when there is no shell, and the answer was never a default — it was
+    /// "there is nothing here to do", written out as an early return so the
+    /// difference is visible in the text rather than hidden in a deref.
+    fn focused(&self) -> Option<&LeafSession> {
+        self.sessions.get(&self.focused_leaf)
     }
 
-    fn focused_mut(&mut self) -> &mut LeafSession {
-        self.sessions
-            .get_mut(&self.focused_leaf)
-            .expect("every tab holds a session for its focused leaf")
+    fn focused_mut(&mut self) -> Option<&mut LeafSession> {
+        self.sessions.get_mut(&self.focused_leaf)
+    }
+
+    /// **The focused leaf, on a path that has already established there is
+    /// one.**
+    ///
+    /// Not "the shell, hopefully" — "the shell, on the branch where there is
+    /// one". Every caller stands downstream of an explicit
+    /// `focused().is_none()` guard that returned early a few lines above it, in
+    /// the same function, and the `expect` names that guard rather than a hope.
+    ///
+    /// It exists because the alternative does not compile: the functions with
+    /// several of these — the frame publisher, the resize flush — interleave
+    /// leaf access with `self.window` access, and one `&mut` binding held across
+    /// the whole body is a borrow the checker will not give. Re-asking is the
+    /// price, and the price is a `BTreeMap` lookup on a map with at most a
+    /// handful of entries.
+    ///
+    /// **Do not reach for this without the guard.** `focused()` is the total
+    /// question and is what a reader that does not already know the answer must
+    /// ask; this one is only ever the second half of a sentence whose first half
+    /// is visible in the same screenful.
+    fn shell(&self) -> &LeafSession {
+        self.focused()
+            .expect("a guard a few lines up returned early for a tab with no shell")
+    }
+
+    fn shell_mut(&mut self) -> &mut LeafSession {
+        self.focused_mut()
+            .expect("a guard a few lines up returned early for a tab with no shell")
     }
 
     /// Every leaf of this tab, focused one included, in seat order.
@@ -6696,34 +6844,25 @@ impl LeafSession {
     }
 }
 
-/// A tab dereferences to its focused leaf, exactly as `Runtime` dereferences to
-/// its active tab.
-///
-/// The two hops compose: `self.session` on a `Runtime` still reads "the active
-/// tab's focused shell", which is what every keystroke, every paste and every
-/// hit test meant by it when a tab could only hold one. That is deliberate —
-/// the alternative was rewriting a hundred and thirty call sites to say a longer
-/// version of the same sentence, and each rewrite would have been a chance to
-/// pick the wrong shell.
-///
-/// The sites this is *not* right for are the ones that meant "every shell in
-/// this tab" — draining, resizing, DPI changes, reaping. Those are the loops,
-/// and they are written out longhand against [`TabState::leaves_mut`] so that
-/// the difference between "the focused one" and "all of them" is visible in the
-/// text rather than hidden in a deref.
-impl Deref for TabState {
-    type Target = LeafSession;
-
-    fn deref(&self) -> &Self::Target {
-        self.focused()
-    }
-}
-
-impl DerefMut for TabState {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.focused_mut()
-    }
-}
+// **`TabState` used to dereference to its focused leaf**, so that the two hops
+// composed and `self.session` on a `Runtime` read "the active tab's focused
+// shell". That was deliberate and it was right while every tab held one: the
+// alternative at the time was rewriting a hundred and thirty call sites to say a
+// longer version of the same sentence, and each rewrite would have been a chance
+// to pick the wrong shell.
+//
+// §7.1.6h took it out, because the sentence stopped being total. A tab made of a
+// folder has no focused shell, and a `Deref` cannot answer "there isn't one" —
+// it can only panic, or invent one. So the deref is gone and its readers now go
+// through [`TabState::focused`], which answers `Option`, and each of them says in
+// its own text what it does with a tab that has no shell. That rewrite was the
+// audit: the compiler named all seventy-four sites, and not one of them wanted a
+// default.
+//
+// `Runtime` still dereferences to its **active tab** — that hop is total (a
+// window always has an active tab) and is untouched, which is what lets a reader
+// write `self.focused()` and mean "the shell this window is typing into, if it is
+// typing into one".
 
 /// A markdown block's scroll thumb in hand (user report, 2026-08-12).
 ///
@@ -7600,7 +7739,7 @@ fn should_copy_on_select_release(route: Option<&MouseRoute>, single_click: bool)
 /// a preview body and a placeholder are all seats without shells, and the surface
 /// between panes is no seat at all; none of them has cells for a press to select.
 ///
-/// This used to ask [`seats::terminal_contains`] of `seats.terminal()` — the tab's
+/// This used to ask [`seats::terminal_contains`] of `seats.identity()` — the tab's
 /// *primary* seat, a stored field naming one fixed leaf that moves only when the
 /// leaf it names is closed, and never with focus. In a lone-terminal tab that is
 /// the pane you are pressing in and the mistake was invisible. Split the tab and
@@ -13231,8 +13370,8 @@ fn release_verdict(landing: Option<DropLanding>) -> DragRelease {
     }
 }
 
-/// **I106 — which panes may become a tab of their own, stated once and asked in
-/// two places.**
+/// **Which panes may become a tab of their own, stated once and asked in two
+/// places.**
 ///
 /// The limit that used to live here was `tab_can_host`, and it forbade the wrong
 /// thing. It asked whether a *tree* held exactly one terminal leaf, on the
@@ -13240,20 +13379,26 @@ fn release_verdict(landing: Option<DropLanding>) -> DragRelease {
 /// **fleet**, so two shells in a tab is now the ordinary case and N159's merge
 /// and N161's replace are the gestures that put them there. That guard is gone.
 ///
-/// What survives it is narrower and is about the **strip**. A `TabState` in this
-/// build requires a non-empty `sessions` and a `focused_leaf` that names one of
-/// them: a tab is a strip entry with at least one shell behind it. So a *files*
-/// column or a *preview* cannot become a strip entry — it would be a tab whose
-/// terminal has no session, which is exactly the 2026-07-16 crash I106 is the
-/// report for.
+/// What replaced it was I106's, narrower and about the **strip**: a `TabState`
+/// required a non-empty `sessions` and a `focused_leaf` naming one of them, so a
+/// files column or a preview reaching the strip would have been a tab whose
+/// terminal has no session — the 2026-07-16 crash. Its own note recorded that
+/// this was "a limit, not a ruling": I106 never said such a pane may not leave
+/// its tab, it said it must become a **files tab**, and files tabs did not
+/// exist.
 ///
-/// **This is a limit, not a ruling, and it is deliberately not phrased as one.**
-/// I106 does not say such a pane may not leave its tab; it says it must become a
-/// **files tab**, which is a strip entry of a different kind that keeps no shell
-/// at all. Files tabs do not exist in this build. The honest answer today is
-/// therefore to refuse *visibly* rather than to mangle a files column into a
-/// terminal that has nothing running in it — and the day files tabs land, this
-/// function deletes itself and both of its callers stop asking.
+/// **§7.1.6h built them, so the limit is spent.** A files column becomes a tab
+/// identified by its folder and a preview one identified by its file; both are
+/// nameable, drawable, closable and restorable, and neither holds a shell.
+///
+/// **`Placeholder` is still refused, and that is why this function is still
+/// here** rather than deleting itself the way the old note predicted. A
+/// placeholder is a leaf whose `kind` this build did not recognise when it read
+/// the session file. A tab made of one could say nothing about itself, be named
+/// by nothing and be reopened as nothing — the strip entry equivalent of the
+/// silent promotion §1.1 forbids. It stays a *visible* refusal for M147's
+/// reason: the strip has no dashed form to wear, so the honest way to say "not
+/// this one" is to draw no caret at all.
 ///
 /// Asked where M147 can act on the answer: [`Runtime::tear_out_is_hostable`]
 /// declines to offer a tear-out the release could not perform, and
@@ -13261,13 +13406,13 @@ fn release_verdict(landing: Option<DropLanding>) -> DragRelease {
 /// A drop that cannot happen must not be drawn as one that can.
 fn pane_can_become_a_tab(kind: bt_layout::SeatKind) -> bool {
     match kind {
-        bt_layout::SeatKind::Terminal => true,
-        // A files column, a preview and an unrecognised leaf all reach the strip
-        // as a tab with nothing running. Written out rather than as a `_` arm so
-        // that a fifth kind has to answer this question on the way in.
-        bt_layout::SeatKind::Files
-        | bt_layout::SeatKind::Preview
-        | bt_layout::SeatKind::Placeholder => false,
+        // Every kind a person can deliberately put in a tab. Written out rather
+        // than as a `_` arm so that a fifth kind has to answer this question on
+        // the way in.
+        bt_layout::SeatKind::Terminal
+        | bt_layout::SeatKind::Files
+        | bt_layout::SeatKind::Preview => true,
+        bt_layout::SeatKind::Placeholder => false,
     }
 }
 
@@ -13406,29 +13551,28 @@ fn settle_pin_partition(tabs: &mut [TabState], active_tab: &mut usize) {
 /// merge can seat an arriving pane to the left of one already there. Asserting
 /// they match pairwise would be asserting a tree shape rather than the
 /// invariant.
-/// **I103/T226/I106 — when closing a pane is closing the tab.**
+/// **I103/T226 — when closing a pane is closing the tab.**
 ///
-/// Two ways to reach the same sentence, and the second one is a hole this stage
-/// found on its way past.
+/// One way to reach it, and it is I103's own and the mock-up's: `detachLeaf`
+/// returns null for a tree of one pane, and the answer to that is `closeTab(w.id)`
+/// rather than a refusal, because **an empty tab is not a state that exists**
+/// (T226/§2.1).
 ///
-/// **The pane count** is I103's own and the mock-up's: `detachLeaf` returns null
-/// for a tree of one pane, and the answer to that is `closeTab(w.id)` rather than
-/// a refusal, because **an empty tab is not a state that exists** (T226/§2.1).
+/// **There was a second clause and §7.1.6h removed it.** It read "or this is the
+/// last Terminal leaf, however many other panes survive it", and it was right
+/// for exactly as long as a tab was a strip entry *with at least one shell*: what
+/// closing the last shell would otherwise have left behind — a files column, a
+/// preview, and a `focused_leaf` naming a seat with nothing behind it — was
+/// I106's crash. The sessionless-tab slice made that leftover a legal tab, so the
+/// clause stopped guarding anything and started closing tabs nobody asked to
+/// close: the shell in a `[files | shell]` tab exits, and the folder you had been
+/// reading all afternoon goes with it. The ruling this slice implements says
+/// "关最后一个座位 = 关 tab", and a seat is a seat whatever is inside it.
 ///
-/// **The shell count** is the same rule read through I106. A tab is a strip entry
-/// *with at least one shell*: `TabState::sessions` is never empty and
-/// `focused_leaf` always names one of its members. So closing the last Terminal
-/// leaf is closing the tab too, even when some other kind of pane would survive
-/// it — a tab left holding a files column and a preview and no shell is exactly
-/// the pane-with-no-session I106 is the crash report for, and `focused_leaf`
-/// would be naming a seat with nothing behind it before the next keystroke.
-///
-/// The count-only test was right while every tab held one terminal, and stopped
-/// being right the moment a tab could hold a terminal *beside* something else.
-/// Both readings are asked because neither implies the other: three terminals and
-/// a preview trips neither, one terminal and a preview trips only the second, and
-/// a lone files column — a tab this build cannot make today — trips only the
-/// first.
+/// The `kind` and `shells` arguments went with the clause. Keeping them as
+/// ignored parameters would leave two facts in the signature that the answer no
+/// longer depends on, which is how a later reader concludes the rule must still
+/// be about shells.
 /// Whether closing this pane would leave the tab's preview pool unreachable —
 /// which is the only case gate ① asks about (P123).
 ///
@@ -13443,12 +13587,8 @@ fn closing_this_pane_strands_the_pool(closing_a_preview: bool, previews_in_tab: 
     closing_a_preview && previews_in_tab == 1
 }
 
-fn closing_this_pane_closes_the_tab(
-    panes: usize,
-    kind: bt_layout::SeatKind,
-    shells: usize,
-) -> bool {
-    panes <= 1 || (kind == bt_layout::SeatKind::Terminal && shells <= 1)
+fn closing_this_pane_closes_the_tab(panes: usize) -> bool {
+    panes <= 1
 }
 
 fn sessions_match_terminals(keys: &[SeatId], terminals: &[SeatId]) -> bool {
@@ -13755,15 +13895,26 @@ impl TabState {
     /// copies of "which shell do I type into now" is three chances for one of
     /// them to leave the keyboard pointed at a pane that is gone.
     ///
-    /// Does nothing when the leaf that left was not the focused one, and nothing
-    /// when there is no session left to move to: an empty `sessions` is a tab
-    /// that is closing, and I103 rules that closing the last pane *is* closing
-    /// the tab rather than a state to be repaired here.
+    /// Does nothing when the leaf that left was not the focused one.
+    ///
+    /// **When no session is left to move to it falls back to the tab's identity
+    /// seat** (§7.1.6h). It used to leave `focused_leaf` naming the departed seat
+    /// on that path, and the note said why: an empty `sessions` was a tab that
+    /// was closing, so there was nothing to repair. That is no longer true —
+    /// losing the last shell of a `[files | shell]` tab leaves a folder tab that
+    /// goes on living — and a `focused_leaf` pointing at a seat the tree no
+    /// longer has would be a dangling id waiting for the first reader that
+    /// forgets to ask whether a session is behind it. The identity seat is a seat
+    /// this tree provably contains, and the tab has no shell either way, so
+    /// nothing about *where keystrokes go* changes: they go nowhere.
     fn refocus_after_losing(&mut self, seat: SeatId) {
-        if self.focused_leaf == seat
-            && let Some(next) = self.sessions.keys().next().copied()
-        {
-            self.focused_leaf = next;
+        if self.focused_leaf == seat {
+            self.focused_leaf = self
+                .sessions
+                .keys()
+                .next()
+                .copied()
+                .unwrap_or_else(|| self.seats.identity());
         }
     }
 
@@ -14208,8 +14359,14 @@ fn revive_plan(
     BTreeMap<SeatId, seats::FilesLeafState>,
     PreviewRestore,
 ) {
-    let mut seats =
-        seats::Seats::from_persisted(&tab.root).unwrap_or_else(seats::Seats::lone_terminal);
+    // **The tree comes back as it was saved, whatever it is made of** (§7.1.6h).
+    // This used to read `from_persisted(..).unwrap_or_else(lone_terminal)`, and
+    // the fallback fired on exactly one shape: a tree with no Term leaf in it.
+    // No build could write one while a tab required a shell, so the fallback was
+    // unreachable and honest; the day a folder tab could be saved it became a
+    // silent content swap — the column you left came back as an empty
+    // PowerShell. `from_persisted` no longer has a `None` to answer with.
+    let mut seats = seats::Seats::from_persisted(&tab.root);
     seats.restore_focus_token(&tab.focused_leaf);
     let saved = persisted_term_leaves(&tab.root);
     let seed = TabSeed {
@@ -15175,7 +15332,7 @@ fn create_leaf_session(
 
 /// Stand a tab up: its tree, and **one shell per Terminal leaf of that tree**.
 ///
-/// A tab used to spawn exactly one shell, for `seats.terminal()`, whatever else
+/// A tab used to spawn exactly one shell, for `seats.identity()`, whatever else
 /// the tree held — so a two-pane tab revived from disk came back with one live
 /// pane and one black rectangle. The invariant [`TabState::sessions`] states is
 /// the fix, and it is established here: seats and sessions are created together
@@ -15241,7 +15398,7 @@ fn create_tab_state(
         solve_seats(&seats, renderer, render_physical, policy, rail);
     // Captured before `seats` moves into the tab: the seat the tab's identity
     // shell draws into is the key its session is filed under.
-    let terminal_seat_id = seats.terminal();
+    let terminal_seat_id = seats.identity();
     let scale = renderer.metrics().scale_factor as f32;
     let mut sessions = BTreeMap::new();
     for seat in seats.terminals() {
@@ -15279,13 +15436,20 @@ fn create_tab_state(
         )?;
         sessions.insert(seat, leaf);
     }
-    let conpty_source = sessions
-        .get(&terminal_seat_id)
-        .expect("a tab's identity terminal is one of its terminal seats")
-        .pty
-        .as_ref()
-        .map(|pty| pty.conpty_source().to_string())
-        .unwrap_or_else(|| "direct-input".to_string());
+    // A diagnostic about which ConPTY implementation the tab's identity shell
+    // came up on (`BT_CONPTY_SOURCE`). A tab with no shell has no answer, and
+    // `"none"` is that said out loud rather than borrowed from the
+    // shell-less-probe spelling beside it: `"direct-input"` means "a shell, fed
+    // by the probe instead of by a pipe", which is a different fact (§7.1.6h).
+    let conpty_source = sessions.get(&terminal_seat_id).map_or_else(
+        || "none".to_string(),
+        |leaf| {
+            leaf.pty
+                .as_ref()
+                .map(|pty| pty.conpty_source().to_string())
+                .unwrap_or_else(|| "direct-input".to_string())
+        },
+    );
     // Built off the *tree* and not off the caller's map, so the table is total
     // over this tab's Files leaves by construction — the same invariant the loop
     // above gives `sessions`, reached the same way. A seat the caller said
@@ -15407,9 +15571,16 @@ fn assemble_tab_state(
     seat_layout: SeatLayout,
     seat_overflow: Option<seats::FitOverflow>,
 ) -> TabState {
+    // **A tab with shells types into one of them; a tab with none types nowhere**
+    // (§7.1.6h). The old form of this said `sessions.contains_key(&focused_leaf)`
+    // unconditionally, which was the whole of I106's invariant. What survives it
+    // is the half that is still true and still load-bearing: `focused_leaf` names
+    // the shell a keystroke belongs to, so it may never name a Terminal seat this
+    // tab has no session for. A folder tab satisfies it vacuously, which is the
+    // honest reading of "there is nothing to type into" — not a weaker check.
     debug_assert!(
-        sessions.contains_key(&focused_leaf),
-        "every tab holds a session for its focused leaf"
+        sessions.is_empty() || sessions.contains_key(&focused_leaf),
+        "a tab that holds shells holds one for its focused leaf"
     );
     // **The texture lane, read off the panes rather than passed in.** The one
     // seat whose picture the renderer's single `set_preview_image` slot is spent
@@ -15539,11 +15710,22 @@ fn mark_leaf_painted(leaf: &mut LeafSession) {
 /// It is a `remove` and an `insert` on two different maps with nothing in
 /// between, which is what makes "never dropped and never duplicated" a fact about
 /// the code rather than a promise about it: the value exists in exactly one map
-/// at every point, and the `?` that gives up when there is no session to move
-/// gives up before the tree has been touched.
+/// at every point.
+///
+/// **Every kind of pane brings its own content across** (§7.1.6h). This used to
+/// take a `?` on `from.sessions.remove(&seat.id)` and hand over three empty
+/// tables beside it, with a note recording that the law for the other two kinds
+/// was written and reachable — in [`absorb_tab_sessions`] — and that what was
+/// missing was the *gesture*, not the law. The gesture landed, so the law is
+/// called from here too and the three tables are filled the same way that
+/// function fills them. There is nothing new invented here: a files column keeps
+/// its root, its read directories and what it knows about the repository under
+/// it; a preview keeps its whole view and the buffer behind it; and the reason
+/// in every case is the one the shell wins on, which is that **the pane is
+/// moving, not being rebuilt.**
 ///
 /// The pane is re-keyed on the way in, because [`seats::Seats::lone_seat`] mints
-/// its ids from 1 and the session has to be filed under the seat it now draws
+/// its ids from 1 and the content has to be filed under the seat it now draws
 /// into. `solve` is the caller's, so this verb never touches a `Renderer`: the
 /// new tab's rectangles come from the same [`bt_layout::solve`] every other
 /// layout comes from (red line L10), handed in by whoever knows the window.
@@ -15554,37 +15736,87 @@ fn pane_into_new_tab(
     pinned: bool,
     solve: impl FnOnce(&seats::Seats) -> (SeatLayout, Option<seats::FitOverflow>),
 ) -> Option<TabState> {
-    let session = from.sessions.remove(&seat.id)?;
-    from.refocus_after_losing(seat.id);
     let (seats, key) = seats::Seats::lone_seat(seat);
-    let (seat_layout, seat_overflow) = solve(&seats);
-    let tab = assemble_tab_state(
-        id,
-        BTreeMap::from([(key, session)]),
-        // Empty, and provably so rather than by omission: this verb takes the
-        // `?` above only for a seat with a session behind it, and
-        // `pane_can_become_a_tab` refuses every other kind on the way in. A
-        // files column reaching the strip is I124, and the day it does the seat
-        // arriving here brings its state with it exactly as this session does.
-        BTreeMap::new(),
-        // Same argument on the preview side, and it holds for the same reason:
-        // `pane_can_become_a_tab` lets only a Terminal seat through, so the new
-        // tab has no preview leaf to show anything on and no pool to show it
-        // from.
+    let sessions = from
+        .sessions
+        .remove(&seat.id)
+        .map(|session| BTreeMap::from([(key, session)]))
+        .unwrap_or_default();
+    let files = from
+        .files
+        .remove(&seat.id)
+        .map(|state| BTreeMap::from([(key, state)]))
+        .unwrap_or_default();
+    // The two caches behind a column travel with it, re-keyed the same way, and
+    // for `absorb_tab_sessions`' reason: dropping them would be correct and
+    // visibly worse — a column that merely changed tabs would blink back to
+    // "Loading …" and re-run a `git status` to rediscover the repository it is
+    // already standing in.
+    let file_trees = from
+        .file_trees
+        .remove(&seat.id)
+        .map(|cache| BTreeMap::from([(key, cache)]))
+        .unwrap_or_default();
+    let git_trees = from
+        .git_trees
+        .remove(&seat.id)
+        .map(|cache| BTreeMap::from([(key, cache)]))
+        .unwrap_or_default();
+    // And where that Git page was scrolled to, which is a fact about the page
+    // rather than about the repository and so has its own table (see
+    // [`TabState::git_scroll`]).
+    let git_scroll = from
+        .git_scroll
+        .remove(&seat.id)
+        .map(|scroll| BTreeMap::from([(key, scroll)]))
+        .unwrap_or_default();
+    let mut preview_panes = PreviewPanes::default();
+    let mut preview_pool = preview::PreviewPool::default();
+    let mut preview_views = PreviewViewStore::default();
+    if let Some(pane) = from.preview_panes.remove(PreviewSurface::Seat(seat.id)) {
+        // **§7.1.3 「pane 拆出/被顶出时携带其当前缓冲(同一对象)」.** The buffer is
+        // *taken* out of the source pool rather than copied: a second copy left
+        // behind is exactly the fork the one-buffer-per-file law exists to
+        // forbid, and an unsaved edit that existed in two places would be an
+        // edit the user could lose by saving the wrong one.
         //
-        // §7.1.3's cross-tab migration is **written and reachable**, just not
-        // through this door: [`absorb_tab_sessions`] is where a preview pane
-        // actually changes tabs today, and it carries the pane's whole view and
-        // merges the two pools under [`preview::PreviewPool::merge_buffer`]. What
-        // is missing here is not the law but the *gesture* — a strip entry with
-        // no shell behind it is I106's crash, and the day files/preview tabs land
-        // (§7.1.3 P128) this call site hands over `migrate` instead of `default`
-        // and the law it calls is already the one above.
-        preview::PreviewPool::default(),
-        PreviewPanes::default(),
-        // And the same argument a third time: a tab with no preview leaf has no
-        // graph seat to have filtered.
-        BTreeMap::new(),
+        // Where the reader was in it is *copied* rather than moved, and the
+        // asymmetry is the difference between content and memory: a view is
+        // three numbers about a document, [`PreviewViewStore`]'s own doc keeps
+        // entries for buffers that are long gone, and two tabs each remembering
+        // where you were in a file is the state `absorb` already describes as
+        // ordinary.
+        if let Some(source) = pane.buffer.as_ref() {
+            preview_views.remember(source, from.preview_views.restore(source));
+            if let Some(buffer) = from.preview_pool.take(source) {
+                preview_pool.insert(buffer);
+            }
+        }
+        // "若是原 tab 最后一个预览 pane 则整池随行" — the rest of the history goes
+        // with it when nothing is left to reach it from. Asked of the tree
+        // *after* the seat has left it, which is what `seats` being built at the
+        // top of this function buys: a pool stranded on a tab with no preview
+        // pane is a set of unsaved buffers with no door onto them.
+        if from.seats.preview_seats().is_empty() {
+            preview_pool.merge_from(std::mem::take(&mut from.preview_pool));
+            preview_views.absorb(std::mem::take(&mut from.preview_views));
+        }
+        *preview_panes.entry(PreviewSurface::Seat(key)) = pane;
+    }
+    let graph_view = from
+        .git_graph_view
+        .remove(&seat.id)
+        .map(|view| BTreeMap::from([(key, view)]))
+        .unwrap_or_default();
+    from.refocus_after_losing(seat.id);
+    let (seat_layout, seat_overflow) = solve(&seats);
+    let mut tab = assemble_tab_state(
+        id,
+        sessions,
+        files,
+        preview_pool,
+        preview_panes,
+        graph_view,
         key,
         TabSeed {
             // The profile is not stated here any more, and its absence is the
@@ -15603,9 +15835,23 @@ fn pane_into_new_tab(
         seat_layout,
         seat_overflow,
     );
+    // The four transient tables [`assemble_tab_state`] starts empty, filled in
+    // after the fact because they are *caches* rather than the content the
+    // constructor is total over: a tab born without them is a correct tab that
+    // has to read the disk again, which is exactly the flicker they exist to
+    // prevent. Adding four more arguments to a function whose whole argument is
+    // that its literal lives once would be the worse trade.
+    tab.file_trees = file_trees;
+    tab.git_trees = git_trees;
+    tab.git_scroll = git_scroll;
+    tab.preview_views = preview_views;
     debug_assert!(
         from.sessions_match_terminals(),
         "item 6: the tab a pane left still matches its own tree"
+    );
+    debug_assert!(
+        from.files_match_files_seats(),
+        "A3: and so do its files columns"
     );
     Some(tab)
 }
@@ -15637,10 +15883,14 @@ fn pane_into_new_tab(
 /// in the layout you were in, so without the wash a tab merely *exists* that did
 /// not a frame ago, in a run you are not looking at.
 ///
-/// `None` when the seat is not in this tree, when it is the last one (G84 —
+/// `None` when the seat is not in this tree, or when it is the last one (G84 —
 /// `close_seat` refuses to empty a tree, so the gesture is a no-op rather than a
-/// tab that closes behind your back), or when it holds no session. The tree is
-/// untouched on every one of those paths.
+/// tab that closes behind your back). The tree is untouched on both paths.
+///
+/// There used to be a third: "or when it holds no session". §7.1.6h removed it
+/// along with the premise — a pane with no session is now a tab with no session,
+/// and the only kind still turned away is turned away one step further upstream,
+/// by [`pane_can_become_a_tab`], before the gesture is ever offered.
 fn tear_pane_into_tab(
     from: &mut TabState,
     metrics: &SeatMetrics,
@@ -17416,21 +17666,24 @@ impl Runtime<'_> {
         let wake = self.window.pty_wake.wake();
         let id = TabId(self.window.next_tab_id);
         self.window.next_tab_id += 1;
-        // Both facts are read off the *same* leaf — `self` derefs to the focused
-        // session, which is also what `working_directory()` is asked of. A
-        // profile taken from one pane and a directory from another would be the
-        // exact mismatch the rule exists to prevent.
+        // Both facts are read off the *same* leaf — the focused session, which is
+        // also what `working_directory()` is asked of. A profile taken from one
+        // pane and a directory from another would be the exact mismatch the rule
+        // exists to prevent. A tab with no shell reports no folder (§7.1.6h),
+        // which `cwd_for_spawn` already has an answer for: a new tab opened from
+        // a folder tab starts where a fresh one would.
         let cwd = profiles::cwd_for_spawn(
             self.session_profile(),
             profile,
-            self.session.working_directory(),
+            self.focused()
+                .and_then(|leaf| leaf.session.working_directory()),
         );
         // A lone terminal is `Seats::lone_terminal`'s own seat id, so the map is
         // that one entry — or empty, when the shell you are looking at has never
         // named a folder.
         let seats = seats::Seats::lone_terminal();
         let leaves = BTreeMap::from([(
-            seats.terminal(),
+            seats.identity(),
             LeafSeed {
                 profile,
                 cwd,
@@ -17587,23 +17840,83 @@ impl Runtime<'_> {
         let Some(entry) = self.app.recent.take(index) else {
             return Ok(());
         };
-        let pages = entry.previews;
-        let seed::Seed::Term {
-            profile_id,
-            cwd,
-            manual_name,
-        } = entry.seed
-        else {
-            // A files place has no shell to start; the pane that would host it
-            // is T5's, and until then such an entry cannot be written either.
-            return Ok(());
-        };
+        let mut pages = entry.previews;
         let render_physical =
             presentation_physical_size(self.window.renderer.presentation_geometry());
         let wake = self.window.pty_wake.wake();
         let id = TabId(self.window.next_tab_id);
         self.window.next_tab_id += 1;
-        let mut seats = seats::Seats::lone_terminal();
+        // **The one seat the entry names, whichever of the three shapes it is**
+        // (§7.1.6h). Everything after this point is shape-blind: the pages, the
+        // pins, the `create_tab_state` call and the pin ruling are the same three
+        // dozen lines for a shell, a folder and a file, which is the whole reason
+        // the shapes are resolved into a seat here rather than into three copies
+        // of this function.
+        //
+        // The `Term` arm used to be the only one, with a `return` under it whose
+        // note read "a files place has no shell to start; the pane that would
+        // host it is T5's". T5 landed.
+        let (mut seats, manual_name, leaf_seed, files) = match entry.seed {
+            seed::Seed::Term {
+                profile_id,
+                cwd,
+                manual_name,
+            } => {
+                let seats = seats::Seats::lone_terminal();
+                // The seed's own profile, never the default one — H66's contract
+                // read for a Recent row: the shell you are asking back is the
+                // shell you had, and "whatever the default is today" is a
+                // different tab wearing this one's folder.
+                let leaves = BTreeMap::from([(
+                    seats.identity(),
+                    LeafSeed {
+                        profile: profiles::index_of_id(&profile_id),
+                        cwd: profiles::revived_cwd(
+                            profiles::index_of_id(&profile_id),
+                            Path::new(&cwd),
+                        ),
+                        unknown_profile_id: (!profiles::has_id(&profile_id))
+                            .then(|| profile_id.clone()),
+                    },
+                )]);
+                (seats, manual_name, leaves, BTreeMap::new())
+            }
+            // A folder tab comes back as the column it was, rooted where it was
+            // rooted, at the width a fresh column gets: the vault stores a place
+            // and not a layout (§7.1.4), so a remembered width would be the one
+            // promise Recent has always declined to make.
+            seed::Seed::Files { root } => {
+                let (seats, seat) = seats::Seats::lone_seat(
+                    &bt_layout::Seat::new(bt_layout::SeatId(1), bt_layout::SeatKind::Files)
+                        .with_fixed_extent(bt_layout::FILES_W),
+                );
+                let files = BTreeMap::from([(
+                    seat,
+                    seats::FilesLeafState {
+                        root,
+                        ..seats::FilesLeafState::default()
+                    },
+                )]);
+                (seats, None, BTreeMap::new(), files)
+            }
+            // And a file tab as the preview it was, on the file it was on.
+            //
+            // **The seed's path replaces the page list rather than joining it.**
+            // The two say the same thing — `preview_pages` reads the tab's
+            // preview panes, and a file tab has exactly the one — so appending
+            // would reopen a tab with the same file on two panes. The *seed* is
+            // the authority because it is what identifies the tab; `previews` is
+            // a list of what its panes were showing, which for this shape is a
+            // longer way of saying the same word.
+            seed::Seed::Preview { path } => {
+                let (seats, _) = seats::Seats::lone_seat(&bt_layout::Seat::new(
+                    bt_layout::SeatId(1),
+                    bt_layout::SeatKind::Preview,
+                ));
+                pages = vec![path];
+                (seats, None, BTreeMap::new(), BTreeMap::new())
+            }
+        };
         // **The pages come back beside the shell** (裁决 10). Each one lands
         // through the same `add_preview` an open goes through, so the address
         // rule (§7.1.3's far-right seat) is the rule and not a second copy of it
@@ -17616,15 +17929,28 @@ impl Runtime<'_> {
         //
         // Pins are not read back from the entry because they were never written
         // there: Recent restores the places you were, not a layout.
+        //
+        // **A preview seat the shape already stood up is used before a new one is
+        // added** (§7.1.6h). A file tab arrives here holding exactly the pane its
+        // page belongs on; calling `add_preview` for it would open a second pane
+        // beside the empty one and leave the tab showing its file in the wrong
+        // half of itself. Every other shape arrives with no preview seat at all,
+        // so the list is empty and the loop is the loop it always was.
         let metrics = self.seat_metrics();
+        let mut standing: std::collections::VecDeque<SeatId> =
+            seats.preview_seats().into_iter().collect();
         let mut preview_cur: BTreeMap<SeatId, PathBuf> = BTreeMap::new();
         for (page, is_last) in pages
             .iter()
             .enumerate()
             .map(|(i, page)| (page, i + 1 == pages.len()))
         {
-            let Some(seat) = seats.add_preview(&metrics) else {
-                break;
+            let seat = match standing.pop_front() {
+                Some(seat) => seat,
+                None => match seats.add_preview(&metrics) {
+                    Some(seat) => seat,
+                    None => break,
+                },
             };
             preview_cur.insert(seat, PathBuf::from(page));
             if !is_last {
@@ -17632,18 +17958,6 @@ impl Runtime<'_> {
             }
         }
         let preview = PreviewRestore::from_pages(preview_cur);
-        // The seed's own profile, never the default one — H66's contract read
-        // for a Recent row: the shell you are asking back is the shell you had,
-        // and "whatever the default is today" is a different tab wearing this
-        // one's folder.
-        let leaves = BTreeMap::from([(
-            seats.terminal(),
-            LeafSeed {
-                profile: profiles::index_of_id(&profile_id),
-                cwd: profiles::revived_cwd(profiles::index_of_id(&profile_id), Path::new(&cwd)),
-                unknown_profile_id: (!profiles::has_id(&profile_id)).then(|| profile_id.clone()),
-            },
-        )]);
         let (tab, _) = create_tab_state(
             id,
             seats,
@@ -17651,11 +17965,8 @@ impl Runtime<'_> {
             render_physical,
             wake,
             None,
-            &leaves,
-            // A `Seed::Term` reopens as one terminal. The files locus reopening
-            // as a files *tab* is M174, and it waits on I124 with everything
-            // else that needs a tab with no shell in it.
-            &BTreeMap::new(),
+            &leaf_seed,
+            &files,
             &preview,
             TabSeed {
                 manual_name,
@@ -17881,10 +18192,15 @@ impl Runtime<'_> {
                 // The one regular write path into the vault: closing is what
                 // fills Recent (mock-up 3929). It happens before the tab is
                 // taken apart, because the seed is read off the live session.
+                //
+                // A tab whose identity pane is a leaf this build cannot read
+                // seeds nothing ([`TabState::seed`]) and therefore records
+                // nothing: an unwritable row is not written rather than written
+                // as a guess.
                 let pages = self.window.tabs[index].preview_pages();
-                self.app
-                    .recent
-                    .record(self.window.tabs[index].seed(), pages, SystemTime::now());
+                if let Some(seed) = self.window.tabs[index].seed() {
+                    self.app.recent.record(seed, pages, SystemTime::now());
+                }
                 let mut removed = self.window.tabs.remove(index);
                 // Every leaf's shell, not the focused one's. Reaching for
                 // `removed.pty` went through the deref and closed exactly one of
@@ -17908,7 +18224,7 @@ impl Runtime<'_> {
     /// Re-solve the tree against the current surface and place the terminal
     /// seat.
     ///
-    /// It used to also *answer* a grid — the one `seats.terminal()`'s rectangle
+    /// It used to also *answer* a grid — the one `seats.identity()`'s rectangle
     /// asks for — and every caller handed that answer straight to the focused
     /// leaf, which is a different leaf as soon as a tab holds two. Deriving
     /// cols/rows is [`Self::resize_leaves_to_layout`]'s job now, once per leaf
@@ -18203,14 +18519,23 @@ impl Runtime<'_> {
                     // The layer under the override, which is exactly what the
                     // editor's placeholder shows: `autoName(s)` is `displayName`
                     // with the manual name taken out (mock-up 2605-2606).
-                    (renaming == Some(tab.id)).then(|| {
-                        display_title(
-                            None,
-                            tab.announced_title(),
-                            tab.session.working_directory(),
-                            tab.focused_profile_title(),
-                        )
-                    }),
+                    //
+                    // Only a tab with a shell can be renaming — `open_rename`
+                    // turns the other two shapes away through
+                    // [`seed::Seed::can_be_named`] — so the `and_then` is the
+                    // shape of that fact rather than a case being handled: no
+                    // shell, no editor, no placeholder to compute.
+                    (renaming == Some(tab.id))
+                        .then(|| tab.focused())
+                        .flatten()
+                        .map(|leaf| {
+                            display_title(
+                                None,
+                                leaf.announced_title(),
+                                leaf.session.working_directory(),
+                                tab.focused_profile_title(),
+                            )
+                        }),
                 )
             })
             .collect::<Vec<_>>();
@@ -18926,10 +19251,17 @@ impl Runtime<'_> {
                 .window
                 .tabs
                 .get(index)
-                .map(|tab| {
-                    let status = tab.session.status();
-                    tooltip::mark_tip(status.progress, status.working)
-                })
+                // **The fleet's reading, which is the one the mark itself draws**
+                // (D34). This asked the focused leaf's `status()` through the
+                // deref, which was already half a bug — the mark beside it is
+                // built from [`TabState::fleet_progress`] and
+                // [`TabState::fleet_working`], so a tab whose *sibling* pane was
+                // downloading wore a ring and offered a tip saying nothing. Both
+                // aggregates fold over the whole fleet and both have an honest
+                // answer for an empty one, so a tab with no shell reports no
+                // progress and no work, which is the empty tip — no ledger, and
+                // therefore nothing said (§7.1.6h).
+                .map(|tab| tooltip::mark_tip(tab.fleet_progress(), tab.fleet_working()))
                 .unwrap_or_default(),
             tooltip::TooltipAnchorId::Tab(index) => self
                 .window
@@ -22878,7 +23210,7 @@ impl Runtime<'_> {
     /// **A notice and not a silent fallback**, because the fallback is invisible
     /// by construction: the shortcuts simply work the way they always did, and a
     /// user whose customisations have quietly stopped applying has no way at all
-    /// to find out. `Error` rather than `Info` for the same reason §7.1.6d gives
+    /// to find out. `Error` rather than `Info` for the same reason §7.1.6h gives
     /// the kind to Git's refusals — something the user asked for did not happen.
     fn announce_keybindings_fault(&mut self) -> Result<()> {
         let Some(fault) = self.app.keybindings_fault.take() else {
@@ -26370,7 +26702,7 @@ impl Runtime<'_> {
         if self.raise_dirty_gate(restore::GateRequest::ClosePane(seat))? {
             return Ok(());
         }
-        if closing_this_pane_closes_the_tab(self.seats.pane_count(), kind, self.sessions.len()) {
+        if closing_this_pane_closes_the_tab(self.seats.pane_count()) {
             return self.close_tab(self.window.active_tab);
         }
         let metrics = self.seat_metrics();
@@ -28833,8 +29165,15 @@ impl Runtime<'_> {
             // never while a rename box, a menu, a tree or a preview holds the
             // keyboard. The alternate screen then takes it back: a full-screen
             // program owns its canvas and there is no scrollback behind it.
+            //
+            // A tab with no shell answers `false` twice over — there is no
+            // keyboard owner that is a shell, and no shell to be asked about the
+            // alternate screen — so `is_some_and` is the shape of "no shell, no
+            // terminal row" rather than a case being papered over (§7.1.6h).
             terminal_primary: self.keyboard_owner_is_a_shell()
-                && !self.session.terminal_modes().alternate_screen,
+                && self
+                    .focused()
+                    .is_some_and(|leaf| !leaf.session.terminal_modes().alternate_screen),
             // **The capsule being up, and pointedly not the caret being in it**
             // (B81). The stance `F3` exists for is "search open, hands back on
             // the terminal", so a flag that meant "the field is focused" would
@@ -31093,7 +31432,11 @@ impl Runtime<'_> {
         // The grid actually in force, which inside a coalescing window is not yet the one the
         // child has heard. The present gate admits the grid the frame will really carry, never the
         // one merely solved.
-        self.pending_resize_present = Some(self.grid);
+        //
+        // A tab with no shell has no grid and nothing to gate: the present it is
+        // about to make is chrome and a files column, neither of which is
+        // measured in cells (§7.1.6h).
+        self.pending_resize_present = self.focused().map(|leaf| leaf.grid);
         self.mark_session_dirty(now);
         self.publish_frame(FrameTrigger {
             occurred_at: now,
@@ -31145,7 +31488,13 @@ impl Runtime<'_> {
         PictureOnGlass {
             frame_pending: self.window.pending_frames.pending_frame().is_some(),
             has_presented_frame: self.window.last_presented_frame.is_some(),
-            presentation_hold: self.projection.presentation_hold(),
+            // A tab with no shell holds nothing: the hold is a projection's
+            // promise about a grid that is mid-reprint, and there is no grid
+            // (§7.1.6h). `false` is the reading that lets a folder tab's chrome
+            // tick reuse the picture, which is the only kind of frame it has.
+            presentation_hold: self
+                .focused()
+                .is_some_and(|leaf| leaf.projection.presentation_hold()),
             content_revision: self.window.terminal_content_revision,
             presented_revision: self.window.presented_picture_revision,
         }
@@ -31186,12 +31535,31 @@ impl Runtime<'_> {
              are about to be drawn at their new widths while their shells still \
              believe the old ones"
         );
+        // **A tab with no shell composes no terminal picture** (§7.1.6h), and
+        // that is the whole of what this branch says. Everything below composes,
+        // holds, decorates and diffs *one shell's grid*; a folder tab has no
+        // grid, so there is nothing here for it to do and nothing it could be
+        // given a default of.
+        //
+        // It is not a frame that is skipped, though: what such a tab shows —
+        // its column, its preview, the chrome around them — is retained renderer
+        // state, and the debt it owes the glass is a **present**. So it takes the
+        // door the strip's ring and the caret's blink already take, which is the
+        // same reading [`Self::publish_chrome_frame`] makes about the same debt.
+        // Answering `false` is then literally true: no picture entered the slot.
+        if self.focused().is_none() {
+            self.window.chrome_present_pending = true;
+            self.window.window.request_redraw();
+            return Ok(false);
+        }
         // Real-machine decoration-state trace (`BT_DECOR_TRACE=<path>`). Runs on every frame trigger
         // — including held/skipped frames — so a persistent stuck-source block is captured even when
         // the presented frame does not change. Zero cost when the variable is unset.
-        self.session.trace_decorations();
+        self.shell_mut().session.trace_decorations();
         if matches!(trigger.source, FrameSource::Keyboard) {
-            self.session.release_presentation_hold_for_user_input();
+            self.shell_mut()
+                .session
+                .release_presentation_hold_for_user_input();
         }
         // **The search re-asks itself here, before anything is projected** — so
         // a line that has just frozen, or a character the shell has just echoed,
@@ -31220,7 +31588,7 @@ impl Runtime<'_> {
             // two fields of one shell, and reaching each through its own deref
             // would be two borrows of the tab rather than one borrow of the
             // leaf.
-            let leaf = self.window.tabs[active].focused_mut();
+            let leaf = self.window.tabs[active].shell_mut();
             leaf.session.refresh_projection(&mut leaf.projection);
             leaf.session
                 .viewport_frame(&mut leaf.projection)
@@ -31231,18 +31599,24 @@ impl Runtime<'_> {
         // previous complete formula frame while a proven primary reprint is between clear and exact
         // source re-anchor. Both release through projection/session facts (re-anchor, explicit user
         // takeover, or hard lifecycle retirement), never a timer.
-        if self.projection.presentation_hold() && self.window.last_presented_frame.is_some() {
+        if self.shell().projection.presentation_hold() && self.window.last_presented_frame.is_some()
+        {
             if self.app.trace_perf {
                 eprintln!(
                     "BT_PERF_TRACE hold=presentation source={:?} review={} exact_source={}",
                     trigger.source,
-                    u8::from(self.projection.review_hold()),
-                    u8::from(self.projection.exact_source_reprint_hold()),
+                    u8::from(self.shell().projection.review_hold()),
+                    u8::from(self.shell().projection.exact_source_reprint_hold()),
                 );
             }
             return Ok(false);
         }
-        if self.session.schedule_visible_artifacts(&terminal_frame) != 0 {
+        if self
+            .shell_mut()
+            .session
+            .schedule_visible_artifacts(&terminal_frame)
+            != 0
+        {
             dispatch_tab_decoration_tasks(
                 &mut self.window.tabs[active],
                 &tasks,
@@ -31261,9 +31635,9 @@ impl Runtime<'_> {
         // Kept on the leaf rather than on the window, because "this frame" is one pane's frame.
         let scan = FrameImageReferences {
             columns: terminal_frame.columns.get(),
-            references: self.session.frame_image_references(&terminal_frame),
+            references: self.shell().session.frame_image_references(&terminal_frame),
         };
-        self.focused_mut().frame_image_references = scan;
+        self.shell_mut().frame_image_references = scan;
         // The pointer's marks, but only if the pointer is standing in *this* pane. The link's
         // underline and the verified reference's solid underline both follow the pointer
         // immediately; only what a hover *reveals* — a tooltip there, a thumbnail here — waits out
@@ -31358,7 +31732,8 @@ impl Runtime<'_> {
         // grid's caret exists, and [`Runtime::offer_ime_caret`] decides whether
         // the grid is the rung that owns it.
         self.offer_ime_caret(Some(&composed.frame));
-        self.session
+        self.shell_mut()
+            .session
             .record_published_frame(&composed.frame, trigger.occurred_at);
         self.flush_resize_trace();
         // **The one line a picture becomes newer than the glass.** Everything
@@ -38581,11 +38956,23 @@ impl Runtime<'_> {
     /// discoverable, keyboard-reachable".
     ///
     /// **Which terminal.** The one holding the keyboard, which `focused_leaf`
-    /// always names — a tab's invariant is that it holds a session for it. The
-    /// mock-up also searched the tree for a fallback terminal, because in the
-    /// mock-up focus could be *on* the files pane; here layout focus and the
-    /// keyboard are two different words (see [`Runtime::focus_pane_at`]), and
-    /// the keyboard's shell never stops being a shell.
+    /// names whenever this tab has a shell at all. The mock-up also searched the
+    /// tree for a fallback terminal, because in the mock-up focus could be *on*
+    /// the files pane; here layout focus and the keyboard are two different
+    /// words (see [`Runtime::focus_pane_at`]), and the keyboard's shell never
+    /// stops being a shell.
+    ///
+    /// **On a folder tab there is no terminal, and the verb does nothing**
+    /// (§7.1.6h). This is one of the two places the ruling's "cmdrail/shell
+    /// integration 面对无会话 tab 自然缺席,别为它们造空壳" is actually reached: a
+    /// files column in a tab of its own still offers `Insert path into terminal`
+    /// on its rows, because the row menu is the same menu wherever the column
+    /// stands. What it must not do is invent a shell to paste into, or paste
+    /// into a shell in *another* tab, which is the only other thing "the focused
+    /// terminal" could be made to mean here. Doing nothing is the honest answer
+    /// and it is silent because the menu row is not a promise the window made
+    /// about this tab — the clipboard row beside it works, and that is the one
+    /// that carries a path out of a tab with nothing running in it.
     ///
     /// **It is sent as a paste, not as typing.** The bytes are wrapped by
     /// [`input::paste_bytes`] exactly as a clipboard paste is, so a shell in
@@ -38593,11 +38980,11 @@ impl Runtime<'_> {
     /// stops a path from being read as anything but characters.
     fn insert_path_into_terminal(&mut self, path: &Path) -> Result<()> {
         let active = self.window.active_tab;
+        let Some(leaf) = self.window.tabs[active].focused() else {
+            return Ok(());
+        };
         let seat = self.window.tabs[active].focused_leaf;
-        let text = inserted_path_text(
-            path,
-            input_line_needs_a_space_first(&self.window.tabs[active].focused().session),
-        );
+        let text = inserted_path_text(path, input_line_needs_a_space_first(&leaf.session));
 
         // The keyboard goes back to the shell before the characters do. The
         // press that raised this menu very likely came from a column that had
@@ -38620,7 +39007,7 @@ impl Runtime<'_> {
             session,
             projection,
             ..
-        } = self.window.tabs[active].focused_mut();
+        } = self.window.tabs[active].shell_mut();
         paste_text(session, projection, &text, |chunk| {
             if let Some(pty) = pty.as_mut() {
                 pty.write(chunk)
@@ -40542,7 +40929,7 @@ impl Runtime<'_> {
                 .iter()
                 .find(|tab| tab.id == id)
                 .filter(|tab| tab.seats.is_lone_terminal())
-                .map(|tab| (tab, tab.seats.terminal())),
+                .map(|tab| (tab, tab.seats.identity())),
             float::FloatTrigger::Pane(leaf) => self
                 .window
                 .tabs
@@ -41754,13 +42141,15 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// A tab with no shell has no live output to stabilise, so the deadline it
+    /// would be compared against does not exist and this is a no-op (§7.1.6h).
     fn advance_live_math_if_due(&mut self, now: Instant) -> Result<()> {
         if self
-            .session
-            .live_stability_deadline()
+            .focused()
+            .and_then(|leaf| leaf.session.live_stability_deadline())
             .is_some_and(|deadline| now >= deadline)
         {
-            self.session.advance_live_stability(now);
+            self.shell_mut().session.advance_live_stability(now);
             let active = self.window.active_tab;
             let tasks = self.app.math_worker.tasks.clone();
             let scale_tasks = self.app.math_worker.scale_tasks.clone();
@@ -41807,7 +42196,12 @@ impl Runtime<'_> {
                 source: FrameSource::Expose,
             })?;
         }
-        let sync_open = self.session.synchronized_update_deadline().is_some();
+        // No shell, no synchronized-update window to be inside — the keyboard
+        // debt is simply cleared, which is what `sync_open == false` already says
+        // (§7.1.6h).
+        let sync_open = self
+            .focused()
+            .is_some_and(|leaf| leaf.session.synchronized_update_deadline().is_some());
         if published || !sync_open {
             self.pending_keyboard_at = None;
         } else if self.app.trace_perf {
@@ -41816,17 +42210,21 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// A diagnostic about a shell resizing. A tab with no shell has no
+    /// transaction, no trace and nothing to log (§7.1.6h) — and a trace that
+    /// printed a line about one would be a diagnostic inventing its subject.
     fn flush_resize_trace(&mut self) {
-        if !self.app.trace_resize {
+        if !self.app.trace_resize || self.focused().is_none() {
             return;
         }
-        let transaction = self.session.resize_trace_transaction();
+        let transaction = self.shell().session.resize_trace_transaction();
         if transaction != self.window.resize_trace_logged_transaction {
             self.window.resize_trace_logged_transaction = transaction;
             self.window.resize_trace_logged_events = 0;
         }
-        let trace = self.session.resize_trace();
+        let trace = self.shell().session.resize_trace();
         let conpty_source = self
+            .shell()
             .pty
             .as_ref()
             .map(|pty| pty.conpty_source().to_string())
@@ -42505,10 +42903,17 @@ impl Runtime<'_> {
         context: &'static str,
     ) -> Result<()> {
         let active = self.window.active_tab;
-        let conpty_grid = self.window.tabs[active].conpty_grid;
-        let grid = self.window.tabs[active].grid;
+        // A tab with no shell has no grid to carry anywhere and no child to
+        // carry it to (§7.1.6h). The rectangle it was solved into is real and
+        // the chrome uses it; what is absent is the *cell* reading of that
+        // rectangle, which is a fact about a terminal.
+        let Some(leaf) = self.window.tabs[active].focused() else {
+            return Ok(());
+        };
+        let conpty_grid = leaf.conpty_grid;
+        let grid = leaf.grid;
         let Some(reflow) = plan_grid_change(
-            &mut self.window.tabs[active].pending_pty_resize,
+            &mut self.window.tabs[active].shell_mut().pending_pty_resize,
             next_grid,
             conpty_grid,
             grid,
@@ -42517,13 +42922,14 @@ impl Runtime<'_> {
         ) else {
             return Ok(());
         };
-        self.session
+        let leaf = self.window.tabs[active].shell_mut();
+        leaf.session
             .resize(
                 nonzero_u32(reflow.columns.get()),
                 nonzero_u32(reflow.rows.get()),
             )
             .context(context)?;
-        self.grid = reflow;
+        leaf.grid = reflow;
         Ok(())
     }
 
@@ -42540,7 +42946,7 @@ impl Runtime<'_> {
     /// ConPTY, in the order every other resize path uses.
     ///
     /// The focused leaf used to be sized from [`Self::resolve_seat_layout`]'s
-    /// return instead, which is the body of `seats.terminal()` — the tab's
+    /// return instead, which is the body of `seats.identity()` — the tab's
     /// *primary* seat. That is a stored field naming one fixed leaf; it moves
     /// only when the leaf it names is closed, and never with focus. In a
     /// lone-terminal tab it is the focused leaf and the mistake was invisible,
@@ -42624,9 +43030,16 @@ impl Runtime<'_> {
         Ok(Some(next_grid))
     }
 
+    /// A tab with no shell has no pending ConPTY resize to release, because
+    /// nothing ever scheduled one: the queue this drains is a `LeafSession`
+    /// field, and there is no leaf (§7.1.6h). Answering `None` is answering
+    /// "nothing is owed and nothing has to be woken for", which is exactly true.
     fn flush_pending_pty_resize(&mut self, now: Instant) -> Result<Option<Instant>> {
+        if self.focused().is_none() {
+            return Ok(None);
+        }
         let (pending, wake_deadline) =
-            service_pending_pty_resize(&mut self.pending_pty_resize, now);
+            service_pending_pty_resize(&mut self.shell_mut().pending_pty_resize, now);
         let Some(pending) = pending else {
             return Ok(wake_deadline);
         };
@@ -42634,15 +43047,16 @@ impl Runtime<'_> {
         // in the same order the undeferred path uses (actor first, then ConPTY, then the vendor
         // reconcile). When nothing was deferred this is a no-op: our grid already moved at the
         // `Resized` that scheduled this.
-        let reflowed = pending.grid != self.grid;
+        let reflowed = pending.grid != self.shell().grid;
         if reflowed {
-            self.session
+            let leaf = self.shell_mut();
+            leaf.session
                 .resize(
                     nonzero_u32(pending.grid.columns.get()),
                     nonzero_u32(pending.grid.rows.get()),
                 )
                 .context("resize terminal actor for a released ConPTY resize")?;
-            self.grid = pending.grid;
+            leaf.grid = pending.grid;
             self.sync_math_layout_key();
             self.pending_resize_present = Some(pending.grid);
         }
@@ -42651,8 +43065,8 @@ impl Runtime<'_> {
         // the same post-resize repair. Its 2.4.x handler is
         // output-free for an empty buffer; using InvokePrompt there abandons old wrapped rows on
         // every committed divider stop (the real-ConPTY chain probe pins that distinction).
-        let shell_input_region_open = self.session.shell_input_region_open();
-        if let Some(pty) = self.pty.as_mut() {
+        let shell_input_region_open = self.shell().session.shell_input_region_open();
+        if let Some(pty) = self.shell_mut().pty.as_mut() {
             pty.resize(pty_size(pending.grid, pending.physical))
                 .context("commit coalesced final ConPTY resize")?;
         }
@@ -42660,16 +43074,16 @@ impl Runtime<'_> {
         // in `finish_resize_if_quiescent`, after ConPTY output has also been silent; a closed input
         // region records no debt and therefore still writes exactly zero private bytes.
         replace_psreadline_resize_reanchor_debt(
-            &mut self.pending_psreadline_resize_reanchor,
+            &mut self.shell_mut().pending_psreadline_resize_reanchor,
             shell_input_region_open,
         );
-        self.conpty_grid = pending.grid;
+        self.shell_mut().conpty_grid = pending.grid;
         // The quiet boundary is also where a resize *ends*, so it is the
         // meaningful change §5.1 asks the session write to be debounced behind.
         // Marking it on every intermediate `Resized` would turn one drag of a
         // window corner into a hundred disk writes.
         self.mark_session_dirty(now);
-        let reconciled = self.session.mark_pty_resize_requested_at(
+        let reconciled = self.shell_mut().session.mark_pty_resize_requested_at(
             nonzero_u32(pending.grid.columns.get()),
             nonzero_u32(pending.grid.rows.get()),
             now,
@@ -43518,7 +43932,13 @@ impl Runtime<'_> {
     }
 
     fn copy_math_latex(&mut self, anchor: &MathBlockAnchor) {
-        let Some(source) = self.session.math_source(anchor) else {
+        // A block anchor names a place in a shell's transcript, so a tab with no
+        // shell has no anchor anybody could have clicked and nothing to copy
+        // (§7.1.6h) — the same `None` a stale anchor already answers with.
+        let Some(source) = self
+            .focused()
+            .and_then(|leaf| leaf.session.math_source(anchor))
+        else {
             return;
         };
         let result = window_hwnd(&self.window.window).and_then(|hwnd| {
@@ -43629,12 +44049,18 @@ impl Runtime<'_> {
         self.window.tabs[active].clear_leaf_selection(seat);
     }
 
+    /// A tab with no shell has no live view to return to and no selection to
+    /// drop: nothing here is true of it, so nothing changed (§7.1.6h).
     fn return_to_live_for_input(&mut self) -> bool {
-        let changed = self.session.view_selection().is_some()
-            || self.projection.is_scrolled()
-            || self.session.release_presentation_hold_for_user_input();
+        if self.focused().is_none() {
+            return false;
+        }
+        let leaf = self.shell_mut();
+        let changed = leaf.session.view_selection().is_some()
+            || leaf.projection.is_scrolled()
+            || leaf.session.release_presentation_hold_for_user_input();
         self.clear_selection();
-        self.projection.scroll_to_bottom();
+        self.shell_mut().projection.scroll_to_bottom();
         changed
     }
 
@@ -43687,7 +44113,13 @@ impl Runtime<'_> {
             self.window.placeholder_tab = None;
         }
         self.pending_keyboard_at = Some(Instant::now());
-        if let Some(pty) = self.pty.as_mut() {
+        // No shell, nowhere for the bytes to go (§7.1.6h). Reached only if a
+        // keystroke got past `keyboard_owner_is_a_shell`, which a folder tab
+        // already answers `false` for — so this is the belt on a gesture that
+        // has no business arriving, written as a `flatten` rather than an
+        // `expect` because "nothing was typed into" is a real outcome and a
+        // panic is not.
+        if let Some(pty) = self.focused_mut().and_then(|leaf| leaf.pty.as_mut()) {
             pty.write(bytes).with_context(|| context)?;
         }
         if view_changed {
@@ -43702,7 +44134,9 @@ impl Runtime<'_> {
     fn copy_selection(&mut self) -> Result<()> {
         let window = Arc::clone(&self.window.window);
         let active = self.window.active_tab;
-        let leaf = self.window.tabs[active].focused_mut();
+        let Some(leaf) = self.window.tabs[active].focused_mut() else {
+            return Ok(());
+        };
         if !copy_selection(&mut leaf.session, &mut leaf.projection, |text| {
             write_terminal_clipboard_text(&window, text)
         }) {
@@ -43726,10 +44160,17 @@ impl Runtime<'_> {
         });
     }
 
+    /// A tab with no shell has no transcript to scroll: `Shift+PageUp` in a
+    /// folder tab moves nothing, because there is nothing behind the column that
+    /// scrolls in rows of cells (§7.1.6h).
     fn scroll_view(&mut self, rows: i32) -> Result<()> {
+        if self.focused().is_none() {
+            return Ok(());
+        }
+        let leaf = self.shell_mut();
         let subpixels =
-            i64::from(rows).saturating_mul(self.projection.cell_height_subpixels().get());
-        self.projection.scroll_by_subpixels(subpixels);
+            i64::from(rows).saturating_mul(leaf.projection.cell_height_subpixels().get());
+        leaf.projection.scroll_by_subpixels(subpixels);
         // `Shift`+`PageUp`/`PageDown` is a scroll like any other, so it lights
         // the bar like any other (P2-9 slice 1).
         self.woke_terminal_thumb(self.focused_leaf)?;
@@ -45284,23 +45725,30 @@ impl Runtime<'_> {
                         ),
                     })
             }
-            // **P85/S3's tab-strip verbs are held back, and the reason is
-            // structural rather than a preference** (recorded 2026-08-13).
+            // **P85/S3's tab-strip verbs are still held back, but the wall they
+            // were held back by is gone** (recorded 2026-08-13, revised with
+            // §7.1.6h).
             //
             // The mock-up's `fileToTab` makes "a fresh workspace holding one
             // preview pane" and `folderToTab` makes one holding a files column.
-            // Neither is representable here: a `TabState` requires a non-empty
-            // `sessions` map and a `focused_leaf` naming one of them, and the
-            // three layers that enforce it are written out at length above
-            // [`only_a_terminal_pane_can_become_a_tab_of_its_own`] — a hundred
-            // `Deref` sites that resolve to *the focused shell*, a `Seats` that
-            // carries a mandatory `terminal: SeatId`, and a strip whose identity
-            // paths are all built out of a shell. That is the files-tab slice,
-            // and it is the same wall `pane_can_become_a_tab` has been standing
-            // at since I106.
+            // The old note said neither was representable, and listed the three
+            // layers that made it so: a hundred `Deref` sites resolving to *the
+            // focused shell*, a `Seats` carrying a mandatory `terminal: SeatId`,
+            // and a strip whose identity paths were all built out of a shell. The
+            // sessionless-tab slice took all three down — those are exactly the
+            // two tab shapes it built, and `pane_into_new_tab` makes both of them
+            // today from a pane rather than from a row.
             //
-            // So the strip **offers nothing** rather than offering something it
-            // cannot perform. It is exactly what a non-hostable pane already
+            // What is missing now is only the **gesture**, and that is a smaller
+            // and differently shaped thing: a row drag's payload is a *path*, not
+            // a seat, so the strip would have to mint a tab out of a string —
+            // which is `reopen_recent`'s job description, not this survey's — and
+            // the caret, the ghost and the slot rules would all have to be
+            // written for a source that has never had them. That is its own
+            // slice and it is unblocked, not blocked.
+            //
+            // Until it lands the strip **offers nothing** rather than offering
+            // something it cannot perform. It is exactly what a non-hostable pane
             // gets one arm up, and M147 is satisfied the same way it is there:
             // the strip has no dashed form to wear, so the honest refusal is to
             // draw no insertion caret at all (6789's `paneCount > 1` guard is
@@ -45323,13 +45771,15 @@ impl Runtime<'_> {
     /// rather than beside it. Everything else survives by construction now that
     /// panes own sessions — the shells of the leaves that stayed stay with them.
     ///
-    /// **What leaves** is [`pane_can_become_a_tab`]'s question and it is I106's:
+    /// **What leaves** is [`pane_can_become_a_tab`]'s question. It was I106's —
     /// a strip entry needs a shell, so a Terminal pane may go and a files column
-    /// or a preview may not. This used to be `tab_can_host` asked of both halves,
-    /// and it was false for *every* pane — with one shell to a tab, either the
-    /// pane leaving was the terminal and what stayed had none, or it was not and
-    /// what left had none. Panes own sessions today, so the honest question is no
-    /// longer about the trees at all but about the one seat that is moving.
+    /// or a preview may not — and §7.1.6h retired that: all three may go now, and
+    /// only a leaf this build cannot read is turned away. This used to be
+    /// `tab_can_host` asked of both halves, and it was false for *every* pane —
+    /// with one shell to a tab, either the pane leaving was the terminal and what
+    /// stayed had none, or it was not and what left had none. Panes own sessions
+    /// today, so the honest question is no longer about the trees at all but
+    /// about the one seat that is moving.
     fn tear_out_is_hostable(&self, seat: SeatId) -> bool {
         self.seats.tear_out(&self.seat_metrics(), seat).is_some()
             && self
@@ -46046,10 +46496,16 @@ impl Runtime<'_> {
             return Ok(());
         };
         // Mock-up 5858-5859: a tab with no session to name does not open an
-        // editor. Every tab in this build has one, so this is the stub J104 asks
-        // for — the guard exists and is asked, and T5's files-only tab will be
-        // the first thing it turns away.
-        if !self.window.tabs[index].seed().can_be_named() {
+        // editor. This was J104's stub — "the guard exists and is asked, and
+        // T5's files-only tab will be the first thing it turns away" — and T5
+        // arrived, so it is a live gate. A folder tab and a file tab are
+        // identified by a path on disk, which is not a field anybody can type
+        // into; a tab whose identity leaf this build cannot read seeds nothing
+        // at all, and a name written onto nothing could not be saved either.
+        if !self.window.tabs[index]
+            .seed()
+            .is_some_and(|seed| seed.can_be_named())
+        {
             return Ok(());
         }
         self.window.rename = Some(TabRename::open(
@@ -47340,7 +47796,13 @@ impl Runtime<'_> {
             self.window.mouse_route = Some(MouseRoute::MathBlock);
             match (button, math_hit.target) {
                 (MouseButton::Left, MathHitTarget::ToggleSource) => {
-                    if self.session.toggle_math_source(&math_hit.anchor) {
+                    // `math_hit()` answered, so a shell drew the block that was
+                    // clicked and this tab has one (§7.1.6h).
+                    if self
+                        .shell_mut()
+                        .session
+                        .toggle_math_source(&math_hit.anchor)
+                    {
                         self.clear_selection();
                         self.publish_interaction_frame()?;
                     }
@@ -47358,7 +47820,7 @@ impl Runtime<'_> {
                     }
                 },
                 (MouseButton::Left, MathHitTarget::Block) => {
-                    if self.session.view_selection().is_some() {
+                    if self.shell().session.view_selection().is_some() {
                         self.clear_selection();
                         self.publish_interaction_frame()?;
                     }
@@ -47405,7 +47867,12 @@ impl Runtime<'_> {
         let Some(protocol_button) = protocol_mouse_button(button) else {
             return Ok(());
         };
-        let modes = self.session.terminal_modes();
+        // Mouse-protocol forwarding is a shell's mode, so a tab with no shell
+        // forwards nothing (§7.1.6h) — the same `return` a pane with no
+        // forwardable hit already takes one line down.
+        let Some(modes) = self.focused().map(|leaf| leaf.session.terminal_modes()) else {
+            return Ok(());
+        };
         let Some(forwarded_hit) = self.forwarded_mouse_hit() else {
             return Ok(());
         };
@@ -47913,10 +48380,26 @@ impl Runtime<'_> {
     /// the caller's to supply since only the caller knows how tall its viewport
     /// is. Shared by every vertical scroller in the chrome so a notch means the
     /// same distance in all of them.
+    /// **How tall one line is in this window** — the unit every chrome scroller
+    /// converts a wheel notch into.
+    ///
+    /// Read off the renderer's metrics rather than off a shell's projection, and
+    /// the difference matters twice. It is *correct*: the strip, the rail and
+    /// the settings sheet are not scrolling a terminal, and what they want is
+    /// "one of this product's lines" — the number the metrics own and every
+    /// projection is derived from, so the two agree by construction rather than
+    /// by coincidence. And it is *total*: a tab with no shell has no projection
+    /// to ask (§7.1.6h), and a rail that stopped scrolling because the tab
+    /// beside it happened to be a folder would be a scroller whose behaviour
+    /// depended on something the reader cannot see.
+    fn line_height_subpixels(&self) -> std::num::NonZeroI64 {
+        self.window.renderer.metrics().cell_height_subpixels()
+    }
+
     fn vertical_wheel_travel(&self, delta: MouseScrollDelta, page: f32) -> f32 {
         match delta {
             MouseScrollDelta::LineDelta(_, y) => {
-                let line = self.projection.cell_height_subpixels().get() as f32
+                let line = self.line_height_subpixels().get() as f32
                     / bt_viewport::SUBPIXELS_PER_PX as f32;
                 let amount =
                     match recoverable_wheel_scroll_amount(bt_platform::wheel_scroll_amount()) {
@@ -48084,7 +48567,7 @@ impl Runtime<'_> {
                 // terminal under it would have moved. A notch that changed length
                 // depending on what it was over is a distance the hand has to
                 // relearn at every surface.
-                let line = self.projection.cell_height_subpixels().get() as f32
+                let line = self.line_height_subpixels().get() as f32
                     / bt_viewport::SUBPIXELS_PER_PX as f32;
                 let amount =
                     match recoverable_wheel_scroll_amount(bt_platform::wheel_scroll_amount()) {
@@ -48357,6 +48840,21 @@ impl Runtime<'_> {
             },
             None => self.focused_leaf,
         };
+        // **Nobody's notch**, which is the sentence three arms above already
+        // write about a pane that is not a terminal — reached here by the two
+        // arms that fall back to `focused_leaf`, because on a tab with no shell
+        // that seat is a column or a preview (§7.1.6h). Asked once, after the
+        // routing, so the fallbacks do not each have to repeat the condition.
+        // Every chrome scroller — the strip, the rail, the settings sheet, a
+        // floating tree, a preview body — has already had its turn above this,
+        // so what is being declined here is only the terminal's own.
+        let Some(target_leaf) = self.sessions.get(&target_seat) else {
+            return Ok(());
+        };
+        let (cell_subpixels, target_rows) = (
+            target_leaf.projection.cell_height_subpixels().get() as f64,
+            target_leaf.grid.rows.get() as f64,
+        );
         // Scrolling moves the content the flyout was anchored to; the transient peek dissolves.
         self.dismiss_peek()?;
         // One physical event, two currencies. Local routes scroll by exact subpixels (stage C of
@@ -48368,20 +48866,6 @@ impl Runtime<'_> {
         // focused leaf's through the deref would scroll a hovered pane by a page
         // of somebody else's window, and the two stop agreeing the moment a
         // split is uneven.
-        let (cell_subpixels, target_rows) = self.sessions.get(&target_seat).map_or_else(
-            || {
-                (
-                    self.projection.cell_height_subpixels().get() as f64,
-                    self.grid.rows.get() as f64,
-                )
-            },
-            |leaf| {
-                (
-                    leaf.projection.cell_height_subpixels().get() as f64,
-                    leaf.grid.rows.get() as f64,
-                )
-            },
-        );
         let event_subpixels = match delta {
             MouseScrollDelta::LineDelta(_, y) => {
                 let multiplier =
@@ -49051,7 +49535,8 @@ impl Runtime<'_> {
             && input::should_copy_selection(
                 &event.logical_key,
                 self.window.modifiers,
-                self.session.view_selection().is_some(),
+                self.focused()
+                    .is_some_and(|leaf| leaf.session.view_selection().is_some()),
             )
         {
             if !event.repeat {
@@ -49121,8 +49606,15 @@ impl Runtime<'_> {
                 _ => {}
             }
         }
-        if !self.session.terminal_modes().alternate_screen {
-            let page = self.grid.rows.get() as i32;
+        // **The transcript's own keys, and only a transcript has them**
+        // (§7.1.6h). `Shift+PageUp`, `Ctrl+Home` and `Ctrl+End` all steer a
+        // projection over a shell's scrollback; a folder tab has neither, so the
+        // whole ladder is skipped and the keys fall through to whatever is below
+        // — which is where a column's own keyboard already lives.
+        if let Some(leaf) = self.focused()
+            && !leaf.session.terminal_modes().alternate_screen
+        {
+            let page = leaf.grid.rows.get() as i32;
             match &event.logical_key {
                 Key::Named(NamedKey::PageUp) if self.window.modifiers == ModifiersState::SHIFT => {
                     return self.scroll_view(page);
@@ -49133,12 +49625,12 @@ impl Runtime<'_> {
                     return self.scroll_view(-page);
                 }
                 Key::Named(NamedKey::Home) if self.window.modifiers == ModifiersState::CONTROL => {
-                    self.projection.scroll_to_top();
+                    self.shell_mut().projection.scroll_to_top();
                     self.woke_terminal_thumb(self.focused_leaf)?;
                     return self.publish_interaction_frame();
                 }
                 Key::Named(NamedKey::End) if self.window.modifiers == ModifiersState::CONTROL => {
-                    self.projection.scroll_to_bottom();
+                    self.shell_mut().projection.scroll_to_bottom();
                     self.woke_terminal_thumb(self.focused_leaf)?;
                     return self.publish_interaction_frame();
                 }
@@ -49146,12 +49638,14 @@ impl Runtime<'_> {
             }
         } else if matches!(&event.logical_key, Key::Named(NamedKey::End))
             && self.window.modifiers == ModifiersState::CONTROL
-            && self.projection.is_scrolled()
+            && self
+                .focused()
+                .is_some_and(|leaf| leaf.projection.is_scrolled())
         {
             // The application's own jump-to-bottom binding: also return the projection-local
             // overflow review to rest so both scroll layers land at the bottom together. The
             // bytes still reach the application below.
-            self.projection.scroll_to_bottom();
+            self.shell_mut().projection.scroll_to_bottom();
             self.publish_interaction_frame()?;
         }
 
@@ -49223,7 +49717,17 @@ impl Runtime<'_> {
         if self.search_field_key(event)? {
             return Ok(());
         }
-        let application_cursor_mode = self.session.application_cursor_mode();
+        // A tab with no shell has no cursor mode and, one line down, nowhere for
+        // the bytes to go — so the keystroke is simply not turned into any
+        // (§7.1.6h). Declined here rather than at the write, so that a folder tab
+        // never reaches the "typing into the stand-in shell is what makes it
+        // yours" bookkeeping in `send_user_input`.
+        let Some(application_cursor_mode) = self
+            .focused()
+            .map(|leaf| leaf.session.application_cursor_mode())
+        else {
+            return Ok(());
+        };
         let Some(bytes) = input::keyboard_bytes(
             &event.logical_key,
             self.window.modifiers,
@@ -49423,7 +49927,7 @@ impl Runtime<'_> {
                 self.pending_keyboard_at = Some(Instant::now());
                 // IMM32 also emits this commit when focus/layout changes mid-composition. M0-beta
                 // deliberately accepts it exactly like Windows Terminal: every commit reaches PTY.
-                if let Some(pty) = self.pty.as_mut() {
+                if let Some(pty) = self.focused_mut().and_then(|leaf| leaf.pty.as_mut()) {
                     pty.write(&ime_commit_bytes(&text))
                         .context("write IME UTF-8 commit to PTY")?;
                 }
@@ -49519,8 +50023,9 @@ impl Runtime<'_> {
         self.reclamp_float();
         self.sync_math_layout_key();
         // The grid actually in force, which inside a coalescing window is not yet the one the
-        // child has heard.
-        self.pending_resize_present = Some(self.grid);
+        // child has heard. A tab with no shell has no grid and nothing to gate,
+        // exactly as in `commit_seat_geometry` (§7.1.6h).
+        self.pending_resize_present = self.focused().map(|leaf| leaf.grid);
         self.publish_frame(resize_trigger)?;
         // Windows dispatches Resized from its modal move/size loop. `Renderer::resize` only records
         // the requested swapchain geometry; `present` prepares this newly projected frame first,
@@ -49625,7 +50130,14 @@ impl Runtime<'_> {
         // [`window_layout_key`] for which of the four revisions answers for
         // which. The session keeps same-source old pixels only while the
         // replacement is pending.
-        let width_cells = nonzero_u32(self.grid.columns.get());
+        // No shell, no typeset bands to re-key: the layout key is a session's
+        // cache key, and there is no session (§7.1.6h).
+        let Some(width_cells) = self
+            .focused()
+            .map(|leaf| nonzero_u32(leaf.grid.columns.get()))
+        else {
+            return;
+        };
         let dpi_milli = self.window.renderer.metrics().dpi_milli();
         // The window's own count, not a constant. It was `1` for as long as
         // nothing could change the face; the Terminal font row can, and a frozen
@@ -49633,8 +50145,11 @@ impl Runtime<'_> {
         // cell — correct glyphs at the wrong size, from a cache whose key did not
         // include the thing that moved.
         let font_rev = self.window.renderer.font_revision();
-        self.session
-            .set_layout_key(window_layout_key(width_cells, dpi_milli, font_rev));
+        self.shell_mut().session.set_layout_key(window_layout_key(
+            width_cells,
+            dpi_milli,
+            font_rev,
+        ));
     }
 
     fn apply_scale_factor(&mut self, scale_factor: f64) -> Result<()> {
@@ -49835,7 +50350,13 @@ impl Runtime<'_> {
     /// complete account of what an animation tick can have moved.
     fn present_retained_picture(&mut self) -> Result<()> {
         self.window.chrome_present_pending = false;
-        if self.window.last_presented_frame.is_none() {
+        // **A tab with a shell that has never presented has nothing to keep**,
+        // which is what this guard has always said. A tab with *no* shell always
+        // has something to keep — its column, its preview, the chrome around
+        // them are all retained renderer state — and for it this is not the
+        // fallback path but the **only** path: `publish_frame_inner` composes no
+        // terminal picture for it and sends it here (§7.1.6h).
+        if self.focused().is_some() && self.window.last_presented_frame.is_none() {
             return Ok(());
         }
         let focused_leaf = self.focused_leaf;
@@ -49855,31 +50376,42 @@ impl Runtime<'_> {
             ),
         );
         self.refresh_table_paints(&table_sources);
-        let frame = self
-            .window
-            .last_presented_frame
-            .as_ref()
-            .expect("the picture was there one statement ago and nothing here removes it");
-        let focused_body = bodies
-            .iter()
-            .find(|pane| pane.seat == focused_leaf)
-            .copied()
-            .unwrap_or_else(|| {
-                let viewport = self.window.renderer.seat_viewport();
-                PaneDraw {
-                    seat: focused_leaf,
-                    viewport,
-                    clip: viewport,
-                }
-            });
         let active = self.window.active_tab;
         let mut seat_frames = Vec::with_capacity(bodies.len());
-        seat_frames.push(bt_render::SeatFrame {
-            seat: focused_body.viewport,
-            clip: focused_body.clip,
-            frame,
-            focused: self.keyboard_owner_is_a_shell(),
-        });
+        // **The focused seat frame is pushed only when there is a shell to push
+        // one for** (§7.1.6h). On a folder tab the retained window picture is
+        // the *previous* tab's, and the fallback rectangle below is the whole
+        // viewport — so pushing it would paint another tab's terminal across
+        // this one and leave the chrome to cover its own tracks. The list is
+        // then simply empty, and `present_frame` composes zero seats and the
+        // chrome over them, which is exactly what such a tab is made of.
+        let keeps_a_terminal_picture =
+            self.focused().is_some() && self.window.last_presented_frame.is_some();
+        if keeps_a_terminal_picture {
+            let focused_body = bodies
+                .iter()
+                .find(|pane| pane.seat == focused_leaf)
+                .copied()
+                .unwrap_or_else(|| {
+                    let viewport = self.window.renderer.seat_viewport();
+                    PaneDraw {
+                        seat: focused_leaf,
+                        viewport,
+                        clip: viewport,
+                    }
+                });
+            let frame = self
+                .window
+                .last_presented_frame
+                .as_ref()
+                .expect("`keeps_a_terminal_picture` was true one statement ago");
+            seat_frames.push(bt_render::SeatFrame {
+                seat: focused_body.viewport,
+                clip: focused_body.clip,
+                frame,
+                focused: self.keyboard_owner_is_a_shell(),
+            });
+        }
         // Each unfocused pane's own last picture, for the same reason the
         // focused one's is reused: a pane that has not been given anything new
         // to say is showing what it last said, and re-projecting it would be
@@ -50315,7 +50847,9 @@ impl Runtime<'_> {
             .flat_map(|tab| tab.leaves())
             .filter_map(|(_, leaf)| leaf.session.synchronized_update_deadline())
             .min();
-        let live_stability_deadline = self.session.live_stability_deadline();
+        let live_stability_deadline = self
+            .focused()
+            .and_then(|leaf| leaf.session.live_stability_deadline());
         let wake_deadline = earliest_deadline([
             startup_deadline,
             self.window.ime_cursor_throttle.deadline(),
@@ -53026,7 +53560,7 @@ fn solve_seats(
     let terminal = seats::pane_body_viewport(
         seats,
         &layout,
-        seats.terminal(),
+        seats.identity(),
         renderer.metrics().scale_factor as f32,
     )
     .unwrap_or(SeatViewport::whole(
@@ -54928,7 +55462,7 @@ mod tests {
         let tab = saved_tab("wsl-ubuntu", "C:\\a", Some("notes"), true);
         let (seats, seed, leaves, _files, _preview) = revive_plan(&tab);
         assert_eq!(
-            leaves.get(&seats.terminal()).map(|leaf| leaf.profile),
+            leaves.get(&seats.identity()).map(|leaf| leaf.profile),
             Some(profiles::fallback_profile()),
             "an id this build cannot place falls to the default profile"
         );
@@ -55053,8 +55587,7 @@ mod tests {
         assert_ne!(here, up, "the two halves need two distinct real folders");
 
         // ── the write half ──
-        let seats = seats::Seats::from_persisted(&saved_row_of_two("", "").root)
-            .expect("a row of two terminals is a tree with a terminal in it");
+        let seats = seats::Seats::from_persisted(&saved_row_of_two("", "").root);
         let [left, right] = seats.terminals()[..] else {
             panic!("a row of two terminals holds two terminal seats");
         };
@@ -55381,7 +55914,7 @@ mod tests {
                 // A row naming the terminal: a hand edit, or a tree a newer
                 // build shaped differently. It costs that row and nothing else.
                 bt_persist::PreviewPaneV1 {
-                    leaf: token(seats.terminal()),
+                    leaf: token(seats.identity()),
                     cur: Some(r"C:\repo\stray.md".to_owned()),
                     graph: None,
                 },
@@ -55410,7 +55943,7 @@ mod tests {
             "a pane that was showing nothing comes back showing nothing"
         );
         assert!(
-            !restored.cur.contains_key(&seats.terminal()),
+            !restored.cur.contains_key(&seats.identity()),
             "a row naming a leaf of another kind is dropped, not obeyed"
         );
         assert_eq!(
@@ -55422,8 +55955,8 @@ mod tests {
         // And the write side agrees with the read side, which is the only way
         // the round trip can be a round trip. Assembled the way every other tab
         // is, so nothing here is a second opinion about what a tab is.
-        let sessions = BTreeMap::from([(seats.terminal(), leaf_saying("SHELL"))]);
-        let focused = seats.terminal();
+        let sessions = BTreeMap::from([(seats.identity(), leaf_saying("SHELL"))]);
+        let focused = seats.identity();
         let mut pool = preview::PreviewPool::default();
         for (path, name) in &restored.pool {
             pool.insert(preview::PreviewBuffer::new(
@@ -55530,7 +56063,7 @@ mod tests {
         let seat = seats
             .add_preview(&cross_metrics())
             .expect("a preview lands");
-        let focused = seats.terminal();
+        let focused = seats.identity();
         let mut panes = PreviewPanes::default();
         panes.entry(PreviewSurface::Seat(seat)).buffer =
             Some(preview::PreviewSource::file(r"D:\notes\README.md"));
@@ -55580,7 +56113,7 @@ mod tests {
             let seat = seats
                 .add_preview(&cross_metrics())
                 .expect("a preview lands");
-            let focused = seats.terminal();
+            let focused = seats.identity();
             let (layout, overflow) = cross_solve(&seats);
             let mut views = BTreeMap::new();
             if let Some(filter) = filter {
@@ -55722,7 +56255,7 @@ mod tests {
     #[test]
     fn a_restore_too_narrow_for_its_tree_folds_a_preview_and_never_the_terminal() {
         let (seats, metrics, viewport) = restored_two_previews_and_a_terminal();
-        let terminal = seats.terminal();
+        let terminal = seats.identity();
         let focus = seats.focus();
         let layout = seats
             .solve(viewport, &metrics, SizePolicy::Lawful)
@@ -55779,7 +56312,7 @@ mod tests {
     #[test]
     fn a_divider_drag_takes_the_room_a_preview_floor_was_holding() {
         let (mut seats, metrics, viewport) = restored_two_previews_and_a_terminal();
-        let terminal = seats.terminal();
+        let terminal = seats.identity();
         let root = seats
             .split_slots(
                 &seats
@@ -55882,7 +56415,7 @@ mod tests {
     #[test]
     fn a_tab_with_no_preview_pane_writes_no_content_section() {
         let seats = cross_seats(1);
-        let focused = seats.terminal();
+        let focused = seats.identity();
         let (layout, overflow) = cross_solve(&seats);
         let tab = assemble_tab_state(
             TabId(1),
@@ -56662,7 +57195,7 @@ mod tests {
         assert!(!tab.leaf_application_cursor_mode(keyboard));
         assert_eq!(tab.leaf_wheel_rows(keyboard), 4.0);
         assert_eq!(
-            tab.session.terminal_modes(),
+            tab.shell().session.terminal_modes(),
             keyboard_modes,
             "and the deref really does answer with the keyboard's pane — which is \
              the whole reason the readers above must not use it"
@@ -57914,7 +58447,7 @@ mod tests {
         let lone = seats::Seats::lone_terminal();
         let mut four = seats::Seats::lone_terminal();
         for _ in 0..3 {
-            let target = four.terminal();
+            let target = four.identity();
             four.split_terminal(&metrics, target, Axis::Row, false)
                 .expect("a terminal leaf splits");
         }
@@ -62761,7 +63294,7 @@ mod tests {
             Ok(layout) => layout,
             Err(_) => seats::fit_what_fits(seats, viewport, &metrics).0,
         };
-        seats::pane_body_viewport(seats, &layout, seats.terminal(), dpi_milli as f32 / 1_000.0)
+        seats::pane_body_viewport(seats, &layout, seats.identity(), dpi_milli as f32 / 1_000.0)
             .unwrap_or(bt_render::SeatViewport::whole(
                 render_physical.width.max(1),
                 render_physical.height.max(1),
@@ -62872,7 +63405,7 @@ mod tests {
                 )),
             ],
         });
-        let seats = seats::Seats::from_persisted(&node).expect("the tree carries a terminal leaf");
+        let seats = seats::Seats::from_persisted(&node);
         let dpi_milli = 1_000_u32; // the restored session's recorded DPI equals the monitor's at show
         let render_physical = PhysicalSize::new(1600, 900);
 
@@ -62968,7 +63501,7 @@ mod tests {
             ratio: 800_000,
             children: [term(), term()],
         });
-        let seats = seats::Seats::from_persisted(&node).expect("the tree carries terminal leaves");
+        let seats = seats::Seats::from_persisted(&node);
         let metrics = seats::seat_metrics(dpi_milli);
         let viewport = seats::logical_viewport(
             render_physical.width,
@@ -62986,7 +63519,7 @@ mod tests {
     /// own** body, never from the tab's primary seat.
     ///
     /// The reported bug. `resolve_seat_layout` used to answer the grid of
-    /// `seats.terminal()` — a stored field naming one fixed leaf, which moves
+    /// `seats.identity()` — a stored field naming one fixed leaf, which moves
     /// only when that leaf closes and never with focus — and all four callers
     /// handed that answer to `schedule_grid_change`, which writes through the
     /// `Runtime -> TabState -> LeafSession` deref chain to the *focused* leaf. A
@@ -62997,7 +63530,7 @@ mod tests {
     /// reported buffer width — raised "the value must be greater than or equal
     /// to zero and less than the console's buffer size".
     ///
-    /// MUTATION: hand the focused target `pane_body_viewport(.., seats.terminal())`
+    /// MUTATION: hand the focused target `pane_body_viewport(.., seats.identity())`
     /// — the exact pre-fix source — and the width assertions below go red.
     #[test]
     fn the_pane_holding_the_keyboard_is_sized_from_its_own_body_not_the_primary_seat() {
@@ -63008,7 +63541,7 @@ mod tests {
 
         let leaves = seats.terminals();
         assert_eq!(leaves.len(), 2, "the fixture is a two-pane tab");
-        let primary = seats.terminal();
+        let primary = seats.identity();
         let narrow = leaves
             .iter()
             .copied()
@@ -63093,7 +63626,7 @@ mod tests {
         };
 
         let mut seats = seats::Seats::lone_terminal();
-        let terminal = seats.terminal();
+        let terminal = seats.identity();
         let before_layout = solve(&seats);
         let before = seats::pane_body_viewport(&seats, &before_layout, terminal, scale)
             .expect("the solver placed the lone terminal");
@@ -63144,7 +63677,7 @@ mod tests {
         let render_physical = PhysicalSize::new(1600, 900);
         let scale = dpi_milli as f32 / 1_000.0;
         let (seats, layout) = solved_lopsided_split(dpi_milli, render_physical);
-        let primary = seats.terminal();
+        let primary = seats.identity();
         let narrow = seats
             .terminals()
             .into_iter()
@@ -64985,7 +65518,7 @@ mod tests {
         let metrics = seats::seat_metrics(1_000);
         let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000), 0);
         let mut seats = seats::Seats::lone_terminal();
-        let survivor = seats.terminal();
+        let survivor = seats.identity();
         let before = seats
             .solve(viewport, &metrics, SizePolicy::Lawful)
             .expect("a lone leaf solves");
@@ -65239,7 +65772,7 @@ mod tests {
         // because "focus moves rectangles" is a fact about W2 and about this
         // build's minimum sizes, not a number this test may invent.
         let mut narrow = seats::Seats::lone_terminal();
-        let first = narrow.terminal();
+        let first = narrow.identity();
         let second = narrow
             .split_terminal(&metrics, first, bt_layout::Axis::Row, false)
             .expect("a wide window divides");
@@ -65945,7 +66478,7 @@ mod tests {
         let metrics = seats::seat_metrics(1_000);
         let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000), 0);
         let mut seats = seats::Seats::lone_terminal();
-        let first = seats.terminal();
+        let first = seats.identity();
         let second = seats
             .split_terminal(&metrics, first, bt_layout::Axis::Row, false)
             .expect("a 1600x900 window divides");
@@ -66171,7 +66704,7 @@ mod tests {
         // The arriving tab, which was split twice while nobody was looking.
         let metrics = seats::seat_metrics(1_000);
         let mut arriving_tab = seats::Seats::lone_terminal();
-        let root = arriving_tab.terminal();
+        let root = arriving_tab.identity();
         let second = arriving_tab
             .split_terminal(&metrics, root, bt_layout::Axis::Row, false)
             .expect("it divides");
@@ -67006,67 +67539,46 @@ mod tests {
         assert_eq!(release_verdict(None), DragRelease::Home);
     }
 
-    /// **I106 — a strip entry needs a shell, so only a Terminal pane may become
-    /// one.**
+    /// **T5 — every pane a person put there may become a tab of its own; only a
+    /// leaf this build cannot name may not.**
     ///
-    /// The predicate that replaced `tab_can_host`, and it is narrower in exactly
-    /// the way U12 stage C is about: the old guard asked whether a *tree* held
-    /// one terminal leaf and therefore forbade the two-shell tab that N159 and
-    /// N161 exist to create. What is actually forbidden is a *files* or
-    /// *preview* pane arriving in the strip, because a `TabState` requires a
-    /// non-empty `sessions` and a `focused_leaf` naming one of them — a files tab
-    /// keeps no shell at all and this build has no such thing.
+    /// The predicate that used to answer I106 by refusing three kinds out of
+    /// four. I106 was never a ruling — it was a *limit*, and its own note said
+    /// so: "I106 does not say such a pane may not leave its tab; it says it must
+    /// become a **files tab**". The sessionless-tab slice built that, so the
+    /// limit is spent and the answer flips for the two kinds a person can point
+    /// at.
     ///
-    /// All four kinds are asked, including `Placeholder`, which is a leaf whose
-    /// kind this build did not recognise when it read the session file: it has no
-    /// shell either, and turning one into a terminal tab would be the silent
-    /// promotion §1.1 forbids.
+    /// `Placeholder` stays `false`, and it is the reason this function survives
+    /// rather than deleting itself the way the old note predicted. A placeholder
+    /// is a leaf whose kind this build did not recognise when it read the session
+    /// file; a tab made of one would be a strip entry that can say nothing about
+    /// itself, name nothing and be reopened as nothing. Refusing it is the same
+    /// sentence §1.1 already writes about never silently promoting one into a
+    /// terminal.
     ///
-    /// Red gate: answer `true` for Files and a files column torn into the strip
-    /// becomes a tab with nothing running in it — I106's crash by its own name.
-    /// Answer `false` for Terminal and the tear-out is never offered at all and
-    /// N157 is unreachable again.
-    ///
-    /// **Still `false` for Files after the files state landed, and the reason is
-    /// worth writing down** — the slice that gave a files column a home, a root
-    /// and a place on disk was also the slice that expected to overturn this,
-    /// and could not. A files *tab* is not one more `true` here; it is a tab with
-    /// an empty `sessions` map, and three separate layers currently rule that
-    /// out:
-    ///
-    /// 1. `Runtime` derefs to `TabState` derefs to `LeafSession`, a chain that
-    ///    resolves roughly a hundred `self.session` / `self.grid` /
-    ///    `self.projection` accesses to *the focused shell*. Each is a path that
-    ///    assumes a terminal, and each needs an answer for a tab that has none —
-    ///    which is a ruling per call site, not a mechanical edit. This is
-    ///    precisely the bomb family `UI-UX.md` §10 principle 20 describes.
-    /// 2. `seats::Seats` carries a mandatory `terminal: SeatId`, `lone_seat`
-    ///    debug-asserts the arriving seat is a Terminal, and `from_persisted`
-    ///    answers `None` for a tree with no Term leaf at all.
-    /// 3. The strip's identity paths — `tabLabel`'s three-level fallback,
-    ///    `tabIcon`'s folder mark, `tabTip`, `tabKey`, and `paintStrip`'s guard
-    ///    against a tab with no `.ticon`/`.unreaddot` (I118-I123) — are all
-    ///    unbuilt, and they are what a files tab would be *made of*.
-    ///
-    /// So the honest answer here is unchanged, and the file's own note above
-    /// still stands: the day files tabs land, this function deletes itself.
+    /// Red gate: answer `false` for Files or Preview and the two new tab shapes
+    /// are unreachable through the one door that offers them — the strip drag —
+    /// while `survey_strip` goes on drawing no caret over a pane the release
+    /// could now perfectly well host. Answer `true` for `Placeholder` and an
+    /// unreadable leaf becomes a tab nothing can name.
     #[test]
-    fn only_a_terminal_pane_can_become_a_tab_of_its_own() {
+    fn every_pane_but_an_unreadable_one_can_become_a_tab_of_its_own() {
         assert!(
             pane_can_become_a_tab(bt_layout::SeatKind::Terminal),
-            "a terminal pane brings the shell a strip entry needs"
+            "a terminal pane brings a shell with it"
         );
         assert!(
-            !pane_can_become_a_tab(bt_layout::SeatKind::Files),
-            "I106: a files column must become a files tab, which does not exist yet"
+            pane_can_become_a_tab(bt_layout::SeatKind::Files),
+            "T5: a files column becomes a files-root tab, identified by its folder"
         );
         assert!(
-            !pane_can_become_a_tab(bt_layout::SeatKind::Preview),
-            "a preview holds an image, not a session"
+            pane_can_become_a_tab(bt_layout::SeatKind::Preview),
+            "T5: a preview becomes a preview-root tab, identified by its file"
         );
         assert!(
             !pane_can_become_a_tab(bt_layout::SeatKind::Placeholder),
-            "an unrecognised leaf must not be promoted into a terminal"
+            "a leaf this build cannot name is a tab this build cannot name"
         );
     }
 
@@ -70832,6 +71344,74 @@ mod tests {
         );
     }
 
+    /// **T5/§7.1.4 — a tab is seeded by the pane it is reopened as, and all three
+    /// shapes now exist.**
+    ///
+    /// The vault's own sentence read against the three tab shapes: `TabState::seed`
+    /// answers off the *identity* seat, so a `[files | shell]` tab is still seeded
+    /// by its shell (that is what identity ordering is for) while a folder tab is
+    /// seeded by its folder and a file tab by its file.
+    ///
+    /// The fourth answer is `None`, and it is the one worth writing a test for
+    /// because nothing else in the product produces it: a tab whose identity pane
+    /// is a leaf this build cannot read has no profile, no place and no path, so
+    /// `close_tab` writes no vault row rather than one that reopens as a guess.
+    ///
+    /// Red gate: key `seed` on "does this tab hold a shell" instead of on the
+    /// identity pane's kind, and the first assertion turns into `Seed::Files` —
+    /// a split tab that would reopen as a bare column with its shell forgotten.
+    #[test]
+    fn a_tab_is_seeded_by_the_pane_it_would_be_reopened_as() {
+        let split = tab_with_a_files_column(1, "D:\\work\\folio");
+        assert!(
+            matches!(split.seed(), Some(seed::Seed::Term { .. })),
+            "a tab holding a shell beside a column is still reopened as the shell"
+        );
+
+        let mut source = tab_with_a_files_column(2, "D:\\work\\folio");
+        let column = source.seats.files()[0];
+        let folder = tear_pane_into_tab(
+            &mut source,
+            &cross_metrics(),
+            column,
+            TabId(9),
+            Instant::now(),
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("a files column may become a tab of its own");
+        assert_eq!(
+            folder.seed(),
+            Some(seed::Seed::Files {
+                root: "D:\\work\\folio".to_owned()
+            }),
+            "and a folder tab as the place it was standing"
+        );
+
+        let (mut source, pane) = tab_with_a_preview(
+            3,
+            vec![buffer_saying("D:\\work\\notes.md", "notes.md", "hello")],
+        );
+        let file = tear_pane_into_tab(
+            &mut source,
+            &cross_metrics(),
+            pane,
+            TabId(10),
+            Instant::now(),
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("a preview may become a tab of its own");
+        assert_eq!(
+            file.seed(),
+            Some(seed::Seed::Preview {
+                path: "D:\\work\\notes.md".to_owned()
+            }),
+            "and a file tab as the file it was on — the vault's third shape, \
+             without which Ctrl+Shift+T would be a door onto an empty store"
+        );
+    }
+
     /// PIN — K143, collapsed. **The menu's first row is one word.**
     ///
     /// While there were two doors this row had to be named after whichever one
@@ -71438,7 +72018,7 @@ mod tests {
         let preview_seat = seats
             .add_preview(&cross_metrics())
             .expect("the preview seat lands");
-        let focused = seats.terminal();
+        let focused = seats.identity();
         let mut pool = preview::PreviewPool::default();
         let showing = buffers.first().map(|buffer| buffer.source.clone());
         for buffer in buffers {
@@ -71800,51 +72380,451 @@ mod tests {
         );
     }
 
-    /// **I103/T226/I106 — closing the last *shell* is closing the tab, not only
-    /// closing the last pane.**
+    /// **I103/T226 — closing the last *seat* is closing the tab, and nothing
+    /// else is.**
     ///
-    /// The boundary review turned this up. While every tab held one terminal the
-    /// pane count answered both questions at once; with a fleet it answers only
-    /// one. A tab of one terminal beside a preview has two panes, so the count
-    /// says "just close the pane" — and what is left is a preview, no shell, and
-    /// a `focused_leaf` naming a seat with nothing behind it. That is I106 by its
-    /// own name, reached through I103's door.
+    /// This rule had a second clause for as long as a tab was required to hold a
+    /// shell: closing the last Terminal closed the tab too, however many panes
+    /// survived it, because what would have been left — a files column, a
+    /// preview, and a `focused_leaf` naming a seat with nothing behind it — was
+    /// I106's crash. The sessionless-tab slice made that leftover a **legal tab**
+    /// (`docs/DESIGN.md` §7.1.6h), so the clause is now a rule that closes a tab
+    /// the user did not ask to close: the shell in a `[files | shell]` tab exits,
+    /// and the folder you were reading goes with it.
     ///
-    /// The three shapes below are the three answers: an ordinary fleet closes a
-    /// pane, a lone pane of any kind closes the tab (T226), and the last terminal
-    /// closes the tab however many other panes survive it (I106). The Files rows
-    /// are the control — closing a files column beside a live shell must stay an
-    /// ordinary pane close, or the preview toggle would start closing tabs.
+    /// One clause left, and it is T226's own: an empty tab is not a state that
+    /// exists, so the last seat leaving takes the tab with it. Every other close
+    /// is an ordinary pane close, whichever kind the pane is and whether or not
+    /// it was the last one running anything.
     ///
-    /// Red gate: drop the shell clause and a terminal-plus-preview tab is left
-    /// with no shell at all; drop the pane clause and the last pane of a tab
-    /// refuses to close instead of closing the tab.
+    /// Red gate: put the shell clause back and closing the shell of a
+    /// files-plus-shell tab takes the column with it — the ruling's own "关最后
+    /// 一个座位 = 关 tab" read as "关最后一个终端". Drop the pane clause and the
+    /// last pane of a tab refuses to close instead of closing the tab.
     #[test]
-    fn closing_the_last_shell_closes_the_tab_even_when_a_pane_survives_it() {
-        use bt_layout::SeatKind::{Files, Preview, Terminal};
+    fn closing_the_last_seat_closes_the_tab_and_the_last_shell_does_not() {
         assert!(
-            !closing_this_pane_closes_the_tab(3, Terminal, 2),
+            !closing_this_pane_closes_the_tab(3),
             "an ordinary fleet just loses a pane"
         );
         assert!(
-            closing_this_pane_closes_the_tab(1, Terminal, 1),
-            "T226: the last pane closing is the tab closing"
+            closing_this_pane_closes_the_tab(1),
+            "T226: the last pane closing is the tab closing, whatever kind it is"
         );
         assert!(
-            closing_this_pane_closes_the_tab(1, Files, 1),
-            "whatever kind that last pane is"
+            !closing_this_pane_closes_the_tab(2),
+            "T5: the last shell leaving a two-pane tab leaves a sessionless tab, \
+             not a closed one"
+        );
+    }
+
+    // ── T5 / §7.1.6h: tabs made of a folder or a file, with no shell ─────────
+
+    /// **T5 — a files column torn into the strip is a tab identified by its
+    /// folder.**
+    ///
+    /// The first of the two shapes the sessionless slice adds, through the door
+    /// it uses: [`tear_pane_into_tab`], which is the same function the strip drag
+    /// and the `Move pane to new tab` row both run. What arrives is a tab with an
+    /// **empty `sessions` map** — the sentence that was unstateable while I106
+    /// stood — carrying the column's own root, so the folder you were reading is
+    /// the folder the new tab is standing in and not a fresh unrooted column.
+    ///
+    /// The name is the column's own name and not a second rule invented for the
+    /// strip: `files_head_name`'s last segment (B14), the same string the pane
+    /// head prints. The mark is the same folder glyph for the same reason — "给
+    /// 同一个对象发明第二套词汇" is the thing §7.1.6b′ names as the start of a
+    /// mode talking two languages, and a tab is no more entitled to a second
+    /// vocabulary than a card is.
+    ///
+    /// The tab it left is checked too, because a tear-out makes two tabs: the
+    /// shell that stayed is still there, still saying what it was saying.
+    ///
+    /// Red gate: refuse Files in `pane_can_become_a_tab` and the tear answers
+    /// `None`; drop the files state from `pane_into_new_tab` and the new tab is a
+    /// column pointed at nothing; leave the title reading through the old deref
+    /// and this panics on a tab that has no focused shell.
+    #[test]
+    fn a_files_column_torn_out_is_a_tab_with_no_shell_named_by_its_folder() {
+        let mut source = tab_with_a_files_column(1, "D:\\work\\folio");
+        let column = source.seats.files()[0];
+        let torn = tear_pane_into_tab(
+            &mut source,
+            &cross_metrics(),
+            column,
+            TabId(9),
+            Instant::now(),
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("T5: a files column may become a tab of its own");
+
+        assert!(
+            torn.sessions.is_empty(),
+            "a files-root tab holds no shell at all"
+        );
+        assert_eq!(torn.seats.pane_count(), 1, "and exactly the one pane");
+        assert_eq!(
+            torn.files
+                .values()
+                .map(|state| state.root.as_str())
+                .collect::<Vec<_>>(),
+            vec!["D:\\work\\folio"],
+            "carrying the root the column was standing on"
+        );
+        assert_eq!(
+            torn.display_title(),
+            "folio",
+            "B14: named by its folder's last segment, the same string its head prints"
+        );
+        assert_eq!(
+            torn.tab_mark(),
+            marks::ChromeMark::Folder,
+            "and wearing the same folder mark, not a shell's"
+        );
+
+        assert!(
+            !source.sessions.is_empty(),
+            "the tab it left keeps the shell that stayed"
+        );
+        assert!(source.sessions_match_terminals());
+        assert!(source.files_match_files_seats());
+        assert!(
+            torn.files_match_files_seats(),
+            "A3: and so does the tab it became"
+        );
+    }
+
+    /// **T5 — a preview torn into the strip is a tab identified by its file.**
+    ///
+    /// The second shape, and the half that had to carry more than a root: a
+    /// preview pane's content is a *buffer*, and §7.1.3 rules the pool belongs to
+    /// the tab. So the pane crosses with the buffer it was showing, exactly as
+    /// `absorb_tab_sessions` already carries one the other way — the same object,
+    /// unsaved edits and all, because "两个手势看起来一样而在用户的工作是否幸存
+    /// 上不同" is the thing this file refuses everywhere else.
+    ///
+    /// Red gate: leave `PreviewPool::default()` in `pane_into_new_tab` and the
+    /// pane arrives pointing at a path its new tab has no buffer for — the pane
+    /// draws empty and the edits are in memory with nothing on screen able to
+    /// reach them, which is P126's own bug in a new place.
+    #[test]
+    fn a_preview_torn_out_is_a_tab_with_no_shell_named_by_its_file() {
+        let (mut source, pane) = tab_with_a_preview(
+            1,
+            vec![buffer_saying("D:\\work\\notes.md", "notes.md", "hello")],
+        );
+        let torn = tear_pane_into_tab(
+            &mut source,
+            &cross_metrics(),
+            pane,
+            TabId(9),
+            Instant::now(),
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("T5: a preview may become a tab of its own");
+
+        assert!(
+            torn.sessions.is_empty(),
+            "a preview-root tab holds no shell at all"
+        );
+        assert_eq!(torn.seats.pane_count(), 1);
+        let landed = torn.seats.preview_seats();
+        assert_eq!(landed.len(), 1, "the pane crossed as a preview seat");
+        assert_eq!(
+            torn.preview_showing(landed[0]),
+            Some(Path::new("D:\\work\\notes.md")),
+            "still showing the file it was showing"
+        );
+        assert_eq!(
+            torn.display_title(),
+            "notes.md",
+            "P15: named by the file, the same string the pane head prints"
+        );
+        assert_eq!(
+            torn.tab_mark(),
+            marks::ChromeMark::File,
+            "and wearing the file mark"
         );
         assert!(
-            closing_this_pane_closes_the_tab(2, Terminal, 1),
-            "I106: a terminal beside a preview is still the tab's only shell"
+            !source.sessions.is_empty(),
+            "the tab it left keeps the shell that stayed"
+        );
+    }
+
+    /// **The ruling's own second sentence — 无会话 → 无状态点.**
+    ///
+    /// "没有账本就不说话": a tab with no shell has nothing that can be failing,
+    /// nothing that can be waiting for an answer and nothing that can have gone
+    /// unread, so it wears no dot, no ring and no breath. This is not a rule the
+    /// slice writes — it is the aggregation §7.1.6b′ already borrows verbatim
+    /// from the strip, folding over an empty fleet — and that is exactly why it
+    /// is worth pinning: a later reader who "fixes" `fleet_claim`'s empty case
+    /// with a default other than `Silent` would put a dot on every folder tab in
+    /// the window.
+    ///
+    /// Both faces are asked, because the ruling names both: the strip row and the
+    /// focus card are one `TabMarkState` by construction (`mark_state` is the
+    /// only builder), so this asserts the one thing both are drawn from.
+    ///
+    /// Red gate: give the empty fold any claim but `Silent` and the dot appears;
+    /// let `fleet_working` answer `true` for an empty fleet and a folder tab
+    /// starts breathing at nothing.
+    #[test]
+    fn a_tab_with_no_shell_wears_no_dot_no_ring_and_no_breath() {
+        let mut source = tab_with_a_files_column(1, "D:\\work\\folio");
+        let column = source.seats.files()[0];
+        let torn = tear_pane_into_tab(
+            &mut source,
+            &cross_metrics(),
+            column,
+            TabId(9),
+            Instant::now(),
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("T5: a files column may become a tab of its own");
+
+        let palette = bt_render::chrome_palette();
+        for active in [false, true] {
+            let mark = torn.mark_state(active, Instant::now(), Motion::Full, &palette);
+            assert_eq!(mark.dot, None, "no ledger, no dot (active = {active})");
+            assert!(mark.ring.is_none(), "and no ring");
+            assert_eq!(
+                mark.opacity, 1.0,
+                "and no breath — the breath is a shell working, and there is none"
+            );
+        }
+        assert!(
+            !torn.fleet_working(),
+            "an empty fleet is not a fleet that is busy"
+        );
+        assert!(torn.fleet_progress().is_none());
+    }
+
+    /// **T5 — the shell of a `[files | shell]` tab exits and the folder stays.**
+    ///
+    /// The ruling's "关最后一个座位 = 关 tab" from the other side: closing the
+    /// last *shell* is not closing the tab, and what is left has to be a whole
+    /// tab rather than a wreck. Four things are asked of it, and they are the
+    /// four a reader downstream would otherwise hit in turn — the identity seat
+    /// moved to a seat that still exists, `focused_leaf` stopped naming the seat
+    /// that left, the tab is named by the column it now is, and it wears no dot.
+    ///
+    /// The three steps are exactly `close_pane`'s, in `close_pane`'s order; the
+    /// branch that decides *whether* to take them instead of closing the tab is
+    /// [`closing_this_pane_closes_the_tab`], pinned one test above.
+    ///
+    /// Red gate: leave `refocus_after_losing` answering only when a session
+    /// survives and `focused_leaf` goes on naming the departed seat — a dangling
+    /// id that the first reader to forget the `focused()` guard turns into a
+    /// panic; leave `close_seat` repointing `identity` at `terminals().first()`
+    /// and the tab is named by a seat its tree does not have.
+    #[test]
+    fn the_last_shell_of_a_files_and_shell_tab_leaves_a_whole_folder_tab_behind() {
+        let mut tab = tab_with_a_files_column(1, "D:\\work\\folio");
+        let column = tab.seats.files()[0];
+        let shell = tab.seats.terminals()[0];
+        assert_eq!(tab.focused_leaf, shell, "the shell holds the keyboard");
+        assert!(
+            !closing_this_pane_closes_the_tab(tab.seats.pane_count()),
+            "two panes, so this is an ordinary pane close"
+        );
+
+        assert!(tab.seats.close_seat(&cross_metrics(), shell));
+        tab.sessions.remove(&shell);
+        tab.refocus_after_losing(shell);
+
+        assert!(tab.sessions.is_empty(), "the shell is gone");
+        assert_eq!(tab.seats.pane_count(), 1, "and the column is not");
+        assert_eq!(
+            tab.seats.identity(),
+            column,
+            "the tab is now identified by the column, which its tree does have"
+        );
+        assert_eq!(
+            tab.focused_leaf, column,
+            "and the keyboard's seat is a seat rather than a hole"
         );
         assert!(
-            !closing_this_pane_closes_the_tab(2, Files, 1),
-            "and closing the column beside it leaves the shell standing"
+            tab.focused().is_none(),
+            "there is still nothing to type into, which is the honest reading"
+        );
+        assert_eq!(tab.display_title(), "folio");
+        assert_eq!(tab.tab_mark(), marks::ChromeMark::Folder);
+        assert_eq!(
+            tab.mark_state(
+                true,
+                Instant::now(),
+                Motion::Full,
+                &bt_render::chrome_palette()
+            )
+            .dot,
+            None,
+            "and no ledger left to report a dot from"
+        );
+        assert!(tab.sessions_match_terminals());
+        assert!(tab.files_match_files_seats());
+    }
+
+    /// **T5 — a folder tab and a file tab survive a restart, through the same two
+    /// functions every other tab crosses the disk with.**
+    ///
+    /// The write half is `Seats::to_persisted` fed by the tab's own two readers,
+    /// which is literally the expression `session_snapshot` builds each `TabV1`
+    /// from; the read half is [`revive_plan`]. Both are asked here rather than
+    /// hand-building a `TabV1`, because the failure this guards against is the
+    /// two halves disagreeing about a tree they have never had to carry before.
+    ///
+    /// **The tree is the whole of the new persistence**, and that is the finding
+    /// rather than an omission: a `files` leaf has carried its root since v1 and
+    /// the content section has carried a preview's file since it was added, so a
+    /// term-less tab was *expressible* on disk long before it was constructible
+    /// in the program. What had to change was the reader — `from_persisted`
+    /// answered `None` for a tree with no Term leaf and `revive_plan` answered
+    /// that `None` with a lone terminal, so a folder tab came back as an empty
+    /// shell. The one thing the schema genuinely gained (v7 → v8) is the vault's
+    /// third seed shape, which is pinned in `bt-persist`'s own round trip.
+    ///
+    /// Red gate: restore the `unwrap_or_else(lone_terminal)` and the first block
+    /// comes back holding a terminal seat and no column at all.
+    #[test]
+    fn a_folder_tab_and_a_file_tab_cross_the_disk_and_come_back_as_themselves() {
+        let mut source = tab_with_a_files_column(1, "D:\\work\\folio");
+        let column = source.seats.files()[0];
+        let folder = tear_pane_into_tab(
+            &mut source,
+            &cross_metrics(),
+            column,
+            TabId(9),
+            Instant::now(),
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("a files column may become a tab of its own");
+
+        let saved = TabV1 {
+            root: folder
+                .seats
+                .to_persisted(&|seat| folder.term_leaf(seat), &|seat| {
+                    folder.files_state(seat)
+                }),
+            pinned: folder.pinned,
+            focused_leaf: format!("leaf-{}", focus_leaf_index(&folder.seats)),
+            preview: folder.preview_content(),
+        };
+        assert!(
+            matches!(saved.root, LayoutNodeV1::Leaf(LeafNodeV1::Files(_))),
+            "a folder tab writes one files leaf and nothing else: {:?}",
+            saved.root
+        );
+        let (seats, _, leaves, files, _) = revive_plan(&saved);
+        assert!(
+            seats.terminals().is_empty(),
+            "and comes back with no shell invented for it"
         );
         assert!(
-            !closing_this_pane_closes_the_tab(3, Preview, 2),
-            "a preview is never the thing a tab cannot do without"
+            leaves.is_empty(),
+            "so there is no leaf to seed a shell from"
+        );
+        assert_eq!(seats.files().len(), 1);
+        assert_eq!(
+            files
+                .values()
+                .map(|state| state.root.as_str())
+                .collect::<Vec<_>>(),
+            vec!["D:\\work\\folio"],
+            "standing on the folder it was standing on"
+        );
+        assert_eq!(
+            seats.identity(),
+            seats.files()[0],
+            "and identified by it, which is what names the tab"
+        );
+
+        // The other shape, through the same two functions.
+        let (mut source, pane) = tab_with_a_preview(
+            2,
+            vec![buffer_saying("D:\\work\\notes.md", "notes.md", "hello")],
+        );
+        let file = tear_pane_into_tab(
+            &mut source,
+            &cross_metrics(),
+            pane,
+            TabId(10),
+            Instant::now(),
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("a preview may become a tab of its own");
+        let saved = TabV1 {
+            root: file
+                .seats
+                .to_persisted(&|seat| file.term_leaf(seat), &|seat| file.files_state(seat)),
+            pinned: file.pinned,
+            focused_leaf: format!("leaf-{}", focus_leaf_index(&file.seats)),
+            preview: file.preview_content(),
+        };
+        assert!(
+            matches!(saved.root, LayoutNodeV1::Leaf(LeafNodeV1::Preview(_))),
+            "a file tab writes one preview leaf and nothing else: {:?}",
+            saved.root
+        );
+        assert_eq!(
+            saved
+                .preview
+                .as_ref()
+                .expect("a file tab carries a content section")
+                .panes
+                .iter()
+                .filter_map(|pane| pane.cur.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["D:\\work\\notes.md"],
+            "with the file it was on beside the tree, where content lives (L1)"
+        );
+        let (seats, _, leaves, _, preview) = revive_plan(&saved);
+        assert!(seats.terminals().is_empty() && leaves.is_empty());
+        assert_eq!(seats.preview_seats().len(), 1);
+        assert_eq!(
+            preview.cur.values().collect::<Vec<_>>(),
+            vec![&PathBuf::from("D:\\work\\notes.md")],
+            "and back on that file"
+        );
+    }
+
+    /// **T5 — a tab with no shell may not be renamed, and the guard that turns it
+    /// away was written for this day.**
+    ///
+    /// `Seed::can_be_named` has answered `false` for a files place since it was
+    /// written, with its own note recording that "today this never answers
+    /// `false` for a real tab" and that the case would exist once T5 landed. It
+    /// has now. A preview-root tab is turned away on the same footing: its
+    /// identity is a path on disk, and the manual name is a slot on the terminal
+    /// seed and on nothing else.
+    #[test]
+    fn a_sessionless_tab_has_no_name_slot_for_the_editor_to_write_to() {
+        assert!(
+            seed::Seed::Term {
+                profile_id: "pwsh.exe".to_string(),
+                cwd: "D:\\".to_string(),
+                manual_name: None,
+            }
+            .can_be_named()
+        );
+        assert!(
+            !seed::Seed::Files {
+                root: "D:\\work".to_string()
+            }
+            .can_be_named(),
+            "a place is identified by its root, which is a fact about the disk"
+        );
+        assert!(
+            !seed::Seed::Preview {
+                path: "D:\\work\\notes.md".to_string()
+            }
+            .can_be_named(),
+            "and so is a file"
         );
     }
 
@@ -72135,12 +73115,12 @@ mod tests {
     /// A press inside *any* pane of a split reaches that pane's grid, so the
     /// selection gesture begins there.
     ///
-    /// The bug this pins: the router asked `terminal_contains(seats.terminal())`,
+    /// The bug this pins: the router asked `terminal_contains(seats.identity())`,
     /// which is one fixed leaf, and answered "consumed by chrome" for a press in
     /// every other pane — `begin_local_selection` was never reached and only the
     /// primary pane in the window could be dragged over.
     ///
-    /// MUTATION: re-base the predicate on `seats.terminal()`'s rectangle and the
+    /// MUTATION: re-base the predicate on `seats.identity()`'s rectangle and the
     /// second and third panes go red, because the red gate below first proves
     /// their centres are points that rectangle does not contain.
     #[test]
@@ -72148,7 +73128,7 @@ mod tests {
         let seats = cross_seats(3);
         let (layout, _) = cross_solve(&seats);
         let shells: std::collections::BTreeSet<SeatId> = seats.terminals().into_iter().collect();
-        let primary = seats.terminal();
+        let primary = seats.identity();
         let rects = pane_rects_of(&layout);
         assert_eq!(rects.len(), 3, "a three-pane tab places three rectangles");
 
@@ -72873,7 +73853,7 @@ mod tests {
         let metrics = cross_metrics();
         for zone in profiles::SplitZone::ALL {
             let mut seats = seats::Seats::lone_terminal();
-            let source = seats.terminal();
+            let source = seats.identity();
             let arriving = seats
                 .split_terminal(&metrics, source, zone.axis(), zone.leading())
                 .expect("a lone terminal has room to divide");
@@ -73303,7 +74283,7 @@ mod tests {
         // Only the pane holding the keyboard is painted — the old shape of the
         // rule, and the sibling is still owed.
         let focused = tab.focused_leaf;
-        mark_leaf_painted(tab.focused_mut());
+        mark_leaf_painted(tab.shell_mut());
         assert_eq!(
             claim(&tab),
             StatusClaim::Unread,
@@ -73455,13 +74435,19 @@ mod tests {
     }
 
     /// **B3 in place: the replace is refused when the pane it would eject cannot
-    /// be a tab (I106/M147).**
+    /// be a tab (M147).**
     ///
     /// Asked of the pure predicate against the seat the plan would displace,
-    /// which is what [`Runtime::plan_for`] does with a `Seats` in hand. A tab let
-    /// go on a *files* column's middle would push a files column into the strip
-    /// as a tab with nothing running in it; refusing turns the promise dashed
-    /// while the hand is still moving, which is the whole of M147.
+    /// which is what [`Runtime::plan_for`] does with a `Seats` in hand.
+    ///
+    /// **What it turns down moved with §7.1.6h.** It used to be a files column,
+    /// on I106's argument that ejecting one would push a tab with nothing
+    /// running in it into the strip; a files column ejected today becomes a
+    /// folder tab, which is a tab like any other. What is still refused is a
+    /// `Placeholder` — a leaf read off disk whose kind this build has no code
+    /// for — because a tab made of one could be named by nothing and reopened as
+    /// nothing. Refusing turns the promise dashed while the hand is still
+    /// moving, which is the whole of M147.
     ///
     /// The seat the plan reads is taken from the live tree rather than from the
     /// plan's, because after `ReplaceSeat` the displaced seat is not in the
@@ -73480,8 +74466,12 @@ mod tests {
             "a terminal pane may be ejected to the strip"
         );
         assert!(
-            !pane_can_become_a_tab(bt_layout::SeatKind::Files),
-            "and the same question turns a files column down"
+            pane_can_become_a_tab(bt_layout::SeatKind::Files),
+            "T5: and so may a files column, which becomes a folder tab"
+        );
+        assert!(
+            !pane_can_become_a_tab(bt_layout::SeatKind::Placeholder),
+            "and the same question still turns an unreadable leaf down"
         );
     }
 
