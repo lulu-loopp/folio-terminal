@@ -717,6 +717,20 @@ pub struct SessionStatus {
     pub bell_latched: bool,
     pub failure_exit_code: Option<i32>,
     pub working: bool,
+    /// **Whether a full-screen program owns the grid right now** (DECSET 1049).
+    ///
+    /// A mode bit rather than a state this session keeps, read straight off the vendor terminal
+    /// through [`TerminalAdapter::modes`] on every snapshot — the protocol authority for it is the
+    /// same one `terminal_modes()` already answers from, and a second copy kept here would be a
+    /// second thing to migrate every time the screen swaps.
+    ///
+    /// It rides in the status because it is a *qualifier on the fields beside it*: `working` says a
+    /// command that started has not ended, and while a long-lived TUI holds the screen that
+    /// sentence is true and says nothing (§7.1.5b/c: alt-screen 一律不记 — the full-screen program's
+    /// own `A/B/C/D` describe its canvas, not this session's command history). Who is entitled to
+    /// act on that is the application's call, not this crate's, so this crate reports the fact and
+    /// makes no policy out of it.
+    pub alternate_screen: bool,
     pub published_revision: u64,
 }
 
@@ -1216,6 +1230,7 @@ impl DualPlaneSession {
             bell_latched: self.bell_latched,
             failure_exit_code: self.failure_exit_code,
             working: self.working,
+            alternate_screen: self.terminal.modes().alternate_screen,
             published_revision: self.published_revision,
         }
     }
@@ -3117,7 +3132,14 @@ impl DualPlaneSession {
                     .insert(screen, ShellIntegrationPhase::Input(region));
             }
             ShellIntegrationMarker::CommandExecuted => {
-                self.working = true;
+                // Primary only, on the same terms as the command-mark ledger three lines below and
+                // the prompt/finished arms around it (§7.1.5c: alt-screen 一律不记). A full-screen
+                // program running its own command cycle on its own canvas is describing that
+                // canvas; making the whole session "running" from it would have a TUI's internal
+                // redraw claim the shell had started something.
+                if screen == ScreenId::Primary {
+                    self.working = true;
+                }
                 self.failure_exit_code = None;
                 self.progress = None;
                 if let Some(ShellIntegrationPhase::Input(region)) = phase {
@@ -3137,7 +3159,21 @@ impl DualPlaneSession {
                     .insert(screen, ShellIntegrationPhase::Output(region));
             }
             ShellIntegrationMarker::CommandFinished { exit_code } => {
-                self.working = false;
+                // **`D` is only accepted on the primary screen, and that is a choice with a cost
+                // worth naming.** The symmetric case to `C` above is easy — a TUI must not be able
+                // to start the session running. This one is not: a command handed to a full-screen
+                // program stays `working` across any `D` that program emits on its own canvas, and
+                // is retired by the shell's own `D` once the grid comes back. The alternative,
+                // honouring an alt-screen `D`, would let any TUI that speaks shell integration
+                // close a command it did not open — and the shell would then never say anything
+                // about that command again, because its own `D` is still to come and would be
+                // clearing a flag already down. Between "a stale busy flag until the program
+                // exits" and "a command silently declared over by a stranger", only the first is
+                // recoverable, and §7.1.5c's isolated namespace already says whose account of a
+                // command boundary this session listens to.
+                if screen == ScreenId::Primary {
+                    self.working = false;
+                }
                 if let Some(exit_code) = exit_code.filter(|code| *code != 0) {
                     self.failure_exit_code = Some(exit_code);
                 }
