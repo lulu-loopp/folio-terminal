@@ -3884,6 +3884,7 @@ pub fn build(
                 hint_ink: None,
                 hovered: hover == Some(MenuRow::Profile(index)),
                 available,
+                pin: None,
             },
             scale,
             palette,
@@ -3914,6 +3915,7 @@ pub fn build(
             // A files column needs no program behind it, so there is nothing
             // this machine could be missing and no greyed state to reach.
             available: true,
+            pin: None,
         },
         scale,
         palette,
@@ -3948,6 +3950,7 @@ pub fn build(
                 hint_ink: None,
                 hovered: hover == Some(MenuRow::Recent(index)),
                 available: recent_is_available(&entry.seed, programs),
+                pin: None,
             },
             scale,
             palette,
@@ -3999,6 +4002,56 @@ fn section_label(text: &str, band: [f32; 4], scale: f32, palette: ChromePalette)
     }
 }
 
+/// The pin control's own box, at a menu row's trailing edge.
+///
+/// The window tab's number (`WINDOW_TAB_PIN_GLYPH_LOGICAL_PX`), because it is
+/// the window tab's control: the ruling that made pinning a folder possible said
+/// in as many words that the pin's vocabulary is the one this product already
+/// has, and a pin drawn two sizes in two places would be two vocabularies.
+const ROW_PIN_LOGICAL_PX: f32 = 13.0;
+
+/// The pin at the trailing edge of one menu row (user ruling 2026-08-19).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RowPin {
+    /// Whether the thing this row names is pinned.
+    ///
+    /// **State rides on `filled` and never on a different glyph** —
+    /// `ChromeMark::Pin`'s own rule, written where the tab strip already obeys
+    /// it: regular means *you could pin this*, filled means *it is pinned*.
+    filled: bool,
+    /// Whether the pointer is on the pin itself rather than merely on the row.
+    hovered: bool,
+    /// Whether the row is under the pointer at all.
+    ///
+    /// An unpinned pin is an **offer** and appears with the hand; a pinned one
+    /// is a **fact** about the row and stays whether or not anybody is pointing
+    /// at it, so that a list of pinned rows reads as pinned at a glance. Same
+    /// division the tab strip's pin makes, and for the same reason.
+    revealed: bool,
+}
+
+/// What the pin claims out of a row's trailing edge.
+///
+/// **Reserved on every row of a menu that has pins at all**, drawn or not: this
+/// is the reservation the note column and the dirty dot already make, and it is
+/// what stops a name from shortening under the pointer as a pin fades in.
+fn row_pin_claim(scale: f32) -> f32 {
+    (ROW_PIN_LOGICAL_PX * scale).round() + ITEM_GAP_LOGICAL_PX * scale
+}
+
+/// One row's pin box — **one derivation, two callers**.
+///
+/// The hit test and the painter ask this and nothing else, which is what makes
+/// the glyph somebody is pointing at and the rectangle that answers their press
+/// the same rectangle. A second derivation is how a control ends up half a pixel
+/// from the thing it draws.
+fn row_pin_rect(item: [f32; 4], scale: f32) -> [f32; 4] {
+    let size = (ROW_PIN_LOGICAL_PX * scale).round();
+    let right = item[2] - ITEM_PADDING_X_LOGICAL_PX * scale;
+    let top = ((item[1] + item[3] - size) / 2.0).round();
+    [right - size, top, right, top + size]
+}
+
 struct Row<'a> {
     rect: [f32; 4],
     /// The glyph in the row's icon column, or **nothing at all**.
@@ -4031,6 +4084,12 @@ struct Row<'a> {
     /// Whether this row can do what it says. A row that cannot is drawn and not
     /// offered — see [`hit`], which is where "not offered" is actually enforced.
     available: bool,
+    /// The pin at the trailing edge, on rows that name something keepable.
+    ///
+    /// `None` on every row that names no such thing — `Browse…`, a profile, a
+    /// context-menu verb — and those rows lose no width to a control they do not
+    /// have.
+    pin: Option<RowPin>,
 }
 
 fn push_row(
@@ -4073,6 +4132,10 @@ fn push_row(
         }
         sprites.push(sprite);
     }
+    // What the pin has claimed, out of the row's trailing padding and before the
+    // hint gets there: the control sits at the very end of the row, so every
+    // other trailing thing measures from where the pin stops.
+    let pin_claim = row.pin.map_or(0.0, |_| row_pin_claim(scale));
     // What the hint has already claimed, out of the row's trailing padding: its
     // own measured width, and the `gap: 10px` between two flex items. A row with
     // nothing to add gives the name the whole span, which is what every row did
@@ -4092,7 +4155,7 @@ fn push_row(
         rect: [
             column_right + px(ITEM_GAP_LOGICAL_PX),
             item[1],
-            item[2] - px(ITEM_PADDING_X_LOGICAL_PX) - hint_claim,
+            item[2] - px(ITEM_PADDING_X_LOGICAL_PX) - pin_claim - hint_claim,
             item[3],
         ],
         font_size_px: px(ITEM_FONT_LOGICAL_PX),
@@ -4122,7 +4185,7 @@ fn push_row(
             rect: [
                 item[0],
                 item[1],
-                item[2] - px(ITEM_PADDING_X_LOGICAL_PX),
+                item[2] - px(ITEM_PADDING_X_LOGICAL_PX) - pin_claim,
                 item[3],
             ],
             font_size_px: px(HINT_FONT_LOGICAL_PX),
@@ -4138,6 +4201,34 @@ fn push_row(
             tabular_numerals: false,
             clip: None,
         });
+    }
+    // ── the pin (user ruling 2026-08-19) ────────────────────────────────────
+    //
+    // Drawn last so it sits over the trailing edge the two labels were just
+    // held back from, and drawn at all only when it has something to say: a
+    // pinned row wears its pin always, an unpinned one only while the hand is
+    // on the row. An unpinned pin on a row nobody is pointing at would be a
+    // column of grey pins down a menu, which is a list of offers pretending to
+    // be a list of facts.
+    if let Some(pin) = row.pin
+        && (pin.filled || pin.revealed)
+    {
+        sprites.push(ChromeSprite::new(
+            ChromeMark::Pin { filled: pin.filled },
+            row_pin_rect(item, scale),
+            // Three inks in one order of precedence, and the same order the row
+            // label uses: the pin under the pointer is the one being offered to,
+            // a pinned pin is a state and wears the mark ink every other state
+            // glyph in this menu wears, and an offer nobody is on yet is the
+            // menu's quietest ink.
+            if pin.hovered {
+                palette.menu_item_text_selected
+            } else if pin.filled {
+                palette.accent
+            } else {
+                palette.menu_item_hint_text
+            },
+        ));
     }
 }
 
@@ -4216,6 +4307,9 @@ pub(crate) fn cwd_leaf(path: &str) -> &str {
 /// The note is the menu's honesty: "a terminal is here" is the reason that path
 /// is on the list at all, and a list of bare paths would make the user guess
 /// which of them the app thinks is interesting.
+///
+/// One folder may have more than one of these — see [`RootNotes`], which is what
+/// a row actually wears.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RootNote {
     Home,
@@ -4235,11 +4329,149 @@ impl RootNote {
     }
 }
 
+/// What separates two reasons on one row.
+///
+/// Punctuation and not a sentence, so it is written here rather than in the
+/// string table — the same middle dot `PreviewTruncated` sets between "Read-only"
+/// and a size, and it reads the same in both languages.
+const ROOT_NOTE_JOIN: &str = " · ";
+
+/// **Every** reason one folder is on the list (user report, 2026-08-19).
+///
+/// This used to be a single [`RootNote`], kept from whichever reason reached the
+/// row first, and that is a bug with a name: when the folder above the root
+/// happens to be the folder a shell is standing in — which is the ordinary case,
+/// because you cd into a project and then root the column at a subfolder of it —
+/// the row was offered as "a terminal is here" and the `parent` badge was
+/// dropped. The way *up* was on the menu and unrecognisable, which is
+/// indistinguishable from not being there.
+///
+/// A set and not a second `Option`: three reasons make seven badges, and "which
+/// one wins" is a question with no honest answer, because both sentences are
+/// true of the folder at the same time.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RootNotes {
+    home: bool,
+    terminal: bool,
+    parent: bool,
+}
+
+impl RootNotes {
+    /// The reasons in the order the list itself runs — most permanent address
+    /// first, most local last — so a row's badge reads the same way round as the
+    /// menu it is on.
+    const ORDER: [RootNote; 3] = [RootNote::Home, RootNote::Terminal, RootNote::Parent];
+
+    #[must_use]
+    pub fn of(note: RootNote) -> Self {
+        Self::default().and(note)
+    }
+
+    #[must_use]
+    pub fn and(mut self, note: RootNote) -> Self {
+        self.add(note);
+        self
+    }
+
+    pub fn add(&mut self, note: RootNote) {
+        match note {
+            RootNote::Home => self.home = true,
+            RootNote::Terminal => self.terminal = true,
+            RootNote::Parent => self.parent = true,
+        }
+    }
+
+    #[must_use]
+    pub fn has(self, note: RootNote) -> bool {
+        match note {
+            RootNote::Home => self.home,
+            RootNote::Terminal => self.terminal,
+            RootNote::Parent => self.parent,
+        }
+    }
+
+    /// The badge: every reason this row has, joined.
+    #[must_use]
+    pub fn text(self) -> String {
+        Self::ORDER
+            .into_iter()
+            .filter(|note| self.has(*note))
+            .map(RootNote::text)
+            .collect::<Vec<_>>()
+            .join(ROOT_NOTE_JOIN)
+    }
+
+    /// Every badge this menu could ever print.
+    ///
+    /// Enumerated rather than reasoned about, because the width reserved for the
+    /// note column has to cover the widest badge *possible* and not the widest
+    /// badge present — a menu that changed width because a shell moved would
+    /// move under the pointer. Seven, because the empty set is not a row.
+    pub fn every() -> impl Iterator<Item = Self> {
+        (1u8..8).map(|bits| Self {
+            home: bits & 1 != 0,
+            terminal: bits & 2 != 0,
+            parent: bits & 4 != 0,
+        })
+    }
+}
+
 /// One place the menu offers to point a column at.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RootChoice {
     pub path: String,
-    pub note: RootNote,
+    pub notes: RootNotes,
+    /// Whether the user said to keep this one (user ruling 2026-08-19).
+    ///
+    /// A flag on the row rather than a second list, because the menu is one list
+    /// with a heading in it — [`apply_pins`] puts the kept rows at the front and
+    /// this is what tells the layout where the heading and the hairline go, and
+    /// what tells the painter which pins are filled.
+    pub pinned: bool,
+}
+
+/// **The kept folders first, then everything this window found** (user ruling
+/// 2026-08-19).
+///
+/// One list and not two, for the reason the profile menu's Recent section is in
+/// the same list as the profiles above it: a heading is a heading, and two lists
+/// would mean two index spaces for one press to be resolved against.
+///
+/// A kept folder that this window *also* found — it is home, or a shell is
+/// standing in it, or it is the folder above — is **lifted**, not copied: it
+/// keeps every badge it earned and appears once, at the top. That is the same
+/// "PINNED 与 MRU 不留双副本" rule the preview switcher obeys, said about
+/// folders, and it is why this takes the whole [`RootChoice`] rather than only
+/// its path.
+///
+/// A kept folder this window did not find is offered with no badge at all: it is
+/// on the list because you put it there, and the section it is in says so.
+#[must_use]
+pub fn apply_pins(choices: Vec<RootChoice>, pinned: &[String]) -> Vec<RootChoice> {
+    let mut rest = choices;
+    let mut kept: Vec<RootChoice> = Vec::with_capacity(pinned.len());
+    for path in pinned {
+        let mut row = match rest.iter().position(|choice| &choice.path == path) {
+            Some(index) => rest.remove(index),
+            None => RootChoice {
+                path: path.clone(),
+                notes: RootNotes::default(),
+                pinned: false,
+            },
+        };
+        row.pinned = true;
+        kept.push(row);
+    }
+    kept.extend(rest);
+    kept
+}
+
+/// How many rows at the front of a menu's list are the kept ones.
+///
+/// Read off the list rather than carried beside it, so a layout and a painter
+/// handed the same rows cannot disagree about where the heading goes.
+fn pinned_run(choices: &[RootChoice]) -> usize {
+    choices.iter().take_while(|choice| choice.pinned).count()
 }
 
 /// The places worth offering, in the mock-up's own order (E54).
@@ -4249,19 +4481,30 @@ pub struct RootChoice {
 /// permanent address this machine has to the most local one, so the list reads
 /// the same on every window whatever the shells happen to be doing.
 ///
-/// De-duplicated on the path and keeping the *first* note, so a home directory
-/// a terminal happens to be standing in is offered once and called home.
+/// De-duplicated on the path, and a folder that arrives twice keeps its place
+/// and **collects the second reason** rather than dropping it (user report,
+/// 2026-08-19): a home directory a terminal is standing in is offered once, at
+/// home's own position, saying both things.
 #[must_use]
 pub fn root_choices(root: &str, home: Option<&str>, cwds: &[String]) -> Vec<RootChoice> {
     let mut list: Vec<RootChoice> = Vec::new();
     let mut add = |path: &str, note: RootNote| {
         let path = path.trim();
-        if path.is_empty() || list.iter().any(|choice| choice.path == path) {
+        if path.is_empty() {
+            return;
+        }
+        // The position is the *first* reason's and the badge is all of them.
+        // Moving the row to the later reason's place would make the menu
+        // re-order itself every time a shell moved, which is the thing the fixed
+        // permanent-to-local order exists to prevent.
+        if let Some(seen) = list.iter_mut().find(|choice| choice.path == path) {
+            seen.notes.add(note);
             return;
         }
         list.push(RootChoice {
             path: path.to_owned(),
-            note,
+            notes: RootNotes::of(note),
+            pinned: false,
         });
     };
     if let Some(home) = home {
@@ -4300,6 +4543,32 @@ pub enum RootMenuRow {
     Browse,
 }
 
+/// What a point in the root menu is over: a row, or the pin at the end of one
+/// (user ruling 2026-08-19).
+///
+/// Two verbs on one rectangle would be a menu where "go here" and "keep this"
+/// were told apart by how far right you happened to click, decided twice — so
+/// they are told apart once, here, and every caller downstream reads a verb
+/// rather than a coordinate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RootMenuHit {
+    /// The row itself: point the column at this folder.
+    Row(RootMenuRow),
+    /// The pin: keep this folder, or stop keeping it. The menu stays open,
+    /// because the row you just pinned has to be seen moving to the top.
+    Pin(RootMenuRow),
+}
+
+impl RootMenuHit {
+    /// Which row this is about, whichever half of it was hit.
+    #[must_use]
+    pub fn row(self) -> RootMenuRow {
+        match self {
+            Self::Row(row) | Self::Pin(row) => row,
+        }
+    }
+}
+
 /// Which column's root menu is up, and which row the pointer is on.
 ///
 /// The seat is *in* the state rather than beside it, which is what makes the
@@ -4309,7 +4578,7 @@ pub enum RootMenuRow {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RootMenu {
     open: Option<bt_layout::SeatId>,
-    hover: Option<RootMenuRow>,
+    hover: Option<RootMenuHit>,
 }
 
 impl RootMenu {
@@ -4330,14 +4599,14 @@ impl RootMenu {
         was_open
     }
 
-    pub fn set_hover(&mut self, hover: Option<RootMenuRow>) -> bool {
+    pub fn set_hover(&mut self, hover: Option<RootMenuHit>) -> bool {
         let hover = self.open.and(hover);
         let changed = self.hover != hover;
         self.hover = hover;
         changed
     }
 
-    pub fn hover(self) -> Option<RootMenuRow> {
+    pub fn hover(self) -> Option<RootMenuHit> {
         self.hover
     }
 }
@@ -4347,7 +4616,21 @@ impl RootMenu {
 pub struct RootMenuLayout {
     scale: f32,
     frame: [f32; 4],
-    label: [f32; 4],
+    /// The `PINNED` heading, and the hairline under the rows it heads — both
+    /// absent when nothing is pinned, because a heading over nothing is a
+    /// section the reader has to work out is empty.
+    pinned_label: Option<[f32; 4]>,
+    pinned_separator: Option<[f32; 4]>,
+    /// The `OPEN FOLDER` heading — absent when *its* section is empty, which is
+    /// the sentence above applied to the other one. It used to be
+    /// unconditional, and it could be: it was the menu's own title over the only
+    /// list there was. Since a kept folder can be lifted out of that list
+    /// (2026-08-19), the list can be emptied by pinning everything in it, and a
+    /// heading standing over the hairline below it would be the menu telling the
+    /// reader there is something there.
+    label: Option<[f32; 4]>,
+    /// Every row of the list, kept ones first. One vector and one index space —
+    /// see [`apply_pins`], which is what puts them in this order.
     items: Vec<[f32; 4]>,
     /// The hairline above `Browse…` — unconditional, because the row below it is
     /// unconditional too. The profile menu's is an `Option` only because the
@@ -4400,12 +4683,15 @@ pub fn root_menu_layout(
     // The widest note any row could carry, reserved for every row — the same
     // rule the profile menu's annotation follows and for the same reason: a
     // menu that changed width because a shell moved would move under the
-    // pointer.
-    let note = [RootNote::Home, RootNote::Terminal, RootNote::Parent]
-        .into_iter()
-        .map(|note| measure(note.text(), px(HINT_FONT_LOGICAL_PX)))
+    // pointer. Since 2026-08-19 a row may wear more than one badge, so the
+    // widest is measured over every combination and not over the three reasons.
+    let note = RootNotes::every()
+        .map(|notes| measure(&notes.text(), px(HINT_FONT_LOGICAL_PX)))
         .fold(0.0, f32::max);
     let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
+    // Every folder row carries a pin, so every folder row reserves one — the
+    // same reservation the note makes, one control further out.
+    let pin = row_pin_claim(scale);
     // Every row's name is a *directory* — arbitrary length, chosen by nobody
     // here — so the widest one does not get to stretch the popup across the
     // window. It is the same clamp `RECENT_ITEM_MAX_WIDTH_LOGICAL_PX` puts on
@@ -4418,6 +4704,7 @@ pub fn root_menu_layout(
                 + measure(&cwd_leaf_or_path(&choice.path), px(ITEM_FONT_LOGICAL_PX))
                 + px(ITEM_GAP_LOGICAL_PX)
                 + note
+                + pin
         })
         .fold(0.0, f32::max);
     // `Browse…` is measured with the rest rather than assumed to fit: it is a
@@ -4434,12 +4721,27 @@ pub fn root_menu_layout(
             px(ROOT_MENU_MIN_WIDTH_LOGICAL_PX + RECENT_ITEM_MAX_WIDTH_LOGICAL_PX),
         )
         .round();
-    let height = (2.0 * (border + padding)
-        + section_block
-        + item_height * choices.len() as f32
-        + separator_block
-        + item_height)
-        .round();
+    // The kept rows and their own heading, above everything, when there are any
+    // (user ruling 2026-08-19: "排 home 之上,与下方段之间一条既有 hairline").
+    let kept = pinned_run(choices);
+    let found = choices.len() - kept;
+    // **The rule between the two sections is drawn only when there are two.**
+    // Keeping every place this window found leaves nothing under it, and a
+    // hairline with nothing under it would sit directly on `Browse…`'s own — two
+    // rules touching, which is a section boundary drawn twice for one boundary.
+    let kept_block = if kept == 0 {
+        0.0
+    } else {
+        section_block + item_height * kept as f32 + if found == 0 { 0.0 } else { separator_block }
+    };
+    let found_block = if found == 0 {
+        0.0
+    } else {
+        section_block + item_height * found as f32
+    };
+    let height =
+        (2.0 * (border + padding) + kept_block + found_block + separator_block + item_height)
+            .round();
 
     let (surface_width, _) = surface;
     let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
@@ -4453,24 +4755,48 @@ pub fn root_menu_layout(
     let content_left = frame[0] + border + padding;
     let content_right = frame[2] - border - padding;
     let mut cursor = frame[1] + border + padding;
-    let label = [content_left, cursor, content_right, cursor + section_block];
-    cursor += section_block;
     let mut items = Vec::with_capacity(choices.len());
-    for _ in choices {
+    let hairline = |cursor: f32| {
+        [
+            content_left,
+            cursor + separator_margin,
+            content_right,
+            cursor + separator_margin + separator_thickness,
+        ]
+    };
+    let (pinned_label, pinned_separator) = if kept == 0 {
+        (None, None)
+    } else {
+        let band = [content_left, cursor, content_right, cursor + section_block];
+        cursor += section_block;
+        for _ in 0..kept {
+            items.push([content_left, cursor, content_right, cursor + item_height]);
+            cursor += item_height;
+        }
+        let rule = (found > 0).then(|| {
+            let rule = hairline(cursor);
+            cursor += separator_block;
+            rule
+        });
+        (Some(band), rule)
+    };
+    let label = (found > 0).then(|| {
+        let band = [content_left, cursor, content_right, cursor + section_block];
+        cursor += section_block;
+        band
+    });
+    for _ in 0..found {
         items.push([content_left, cursor, content_right, cursor + item_height]);
         cursor += item_height;
     }
-    let browse_separator = [
-        content_left,
-        cursor + separator_margin,
-        content_right,
-        cursor + separator_margin + separator_thickness,
-    ];
+    let browse_separator = hairline(cursor);
     cursor += separator_block;
     let browse = [content_left, cursor, content_right, cursor + item_height];
     RootMenuLayout {
         scale,
         frame,
+        pinned_label,
+        pinned_separator,
         label,
         items,
         browse_separator,
@@ -4481,15 +4807,23 @@ pub fn root_menu_layout(
 /// What a point is over, with the same three answers [`hit`] gives and for the
 /// same reasons.
 #[must_use]
-pub fn root_menu_hit(layout: &RootMenuLayout, x: f64, y: f64) -> Option<Option<RootMenuRow>> {
+pub fn root_menu_hit(layout: &RootMenuLayout, x: f64, y: f64) -> Option<Option<RootMenuHit>> {
     let (x, y) = (x as f32, y as f32);
     for (index, item) in layout.items.iter().enumerate() {
         if contains(*item, x, y) {
-            return Some(Some(RootMenuRow::Choice(index)));
+            let row = RootMenuRow::Choice(index);
+            // The pin is inside the row, so it is asked about first: a point on
+            // the pin is on the row too, and the narrower answer is the true one.
+            return Some(Some(if contains(row_pin_rect(*item, layout.scale), x, y) {
+                RootMenuHit::Pin(row)
+            } else {
+                RootMenuHit::Row(row)
+            }));
         }
     }
     if contains(layout.browse, x, y) {
-        return Some(Some(RootMenuRow::Browse));
+        // No pin: `Browse…` names no folder yet, so there is nothing to keep.
+        return Some(Some(RootMenuHit::Row(RootMenuRow::Browse)));
     }
     contains(layout.frame, x, y).then_some(None)
 }
@@ -4506,7 +4840,7 @@ pub fn root_menu_build(
     layout: &RootMenuLayout,
     choices: &[RootChoice],
     current: &str,
-    hover: Option<RootMenuRow>,
+    hover: Option<RootMenuHit>,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
@@ -4531,16 +4865,19 @@ pub fn root_menu_build(
         palette.menu_border,
         alpha(palette.menu_border_alpha),
     );
-    labels.push(section_label(
-        root_section_label(),
-        layout.label,
-        scale,
-        palette,
-    ));
+    // The kept rows and their heading, above the list this window derived (user
+    // ruling 2026-08-19).
+    if let Some(band) = layout.pinned_label {
+        labels.push(section_label(pinned_section_label(), band, scale, palette));
+    }
+    if let Some(band) = layout.label {
+        labels.push(section_label(root_section_label(), band, scale, palette));
+    }
 
     for (index, (item, choice)) in layout.items.iter().zip(choices).enumerate() {
-        let note = choice.note.text().to_owned();
+        let note = choice.notes.text();
         let width = measure(&note, px(HINT_FONT_LOGICAL_PX));
+        let row = RootMenuRow::Choice(index);
         push_row(
             &Row {
                 rect: *item,
@@ -4556,8 +4893,13 @@ pub fn root_menu_build(
                 name: &cwd_leaf_or_path(&choice.path),
                 hint: Some((note, width)),
                 hint_ink: None,
-                hovered: hover == Some(RootMenuRow::Choice(index)),
+                hovered: hover.map(RootMenuHit::row) == Some(row),
                 available: true,
+                pin: Some(RowPin {
+                    filled: choice.pinned,
+                    hovered: hover == Some(RootMenuHit::Pin(row)),
+                    revealed: hover.map(RootMenuHit::row) == Some(row),
+                }),
             },
             scale,
             palette,
@@ -4565,6 +4907,14 @@ pub fn root_menu_build(
             &mut labels,
             &mut sprites,
         );
+    }
+
+    if let Some(rule) = layout.pinned_separator {
+        quads.push(OverlayQuad {
+            rect: rule,
+            color: palette.menu_border,
+            alpha: separator_alpha(palette.menu_border),
+        });
     }
 
     // ── the escape hatch (E55) ──────────────────────────────────────────────
@@ -4587,10 +4937,13 @@ pub fn root_menu_build(
             // menu apologising for itself.
             hint: None,
             hint_ink: None,
-            hovered: hover == Some(RootMenuRow::Browse),
+            hovered: hover == Some(RootMenuHit::Row(RootMenuRow::Browse)),
             // The system always has a folder picker; there is no machine on which
             // this row is a promise the window cannot keep.
             available: true,
+            // No pin. This row names no folder — it names the question — and a
+            // pin on it would have nothing to keep.
+            pin: None,
         },
         scale,
         palette,
@@ -4609,6 +4962,11 @@ pub fn root_menu_build(
 /// `.rm-label` — the heading over the list (mock-up 5138).
 fn root_section_label() -> &'static str {
     crate::i18n::Text::RootSection.text()
+}
+
+/// The heading over the kept rows, in **both** menus that have them.
+fn pinned_section_label() -> &'static str {
+    crate::i18n::Text::PinnedSection.text()
 }
 
 /// The escape hatch's own words (mock-up 5151).
@@ -4851,6 +5209,7 @@ pub fn file_menu_build(
                 // and are spoken then, which is the same answer the double
                 // click gives.
                 available: true,
+                pin: None,
             },
             scale,
             palette,
@@ -5747,6 +6106,7 @@ pub fn git_menu_build(layout: &GitMenuLayout, look: &GitMenuLook<'_>) -> Vec<Ove
                 hint_ink: None,
                 hovered: look.hover == Some(item.row) && item.available,
                 available: item.available,
+                pin: None,
             },
             scale,
             palette,
@@ -6198,6 +6558,7 @@ pub fn term_menu_build(layout: &TermMenuLayout, look: &TermMenuLook) -> Vec<Over
                 hint_ink: None,
                 hovered: look.hover == Some(item.row) && item.available,
                 available: item.available,
+                pin: None,
             },
             scale,
             palette,
@@ -7447,6 +7808,7 @@ pub fn pane_menu_build(
                 // advance. Nothing here is a promise this build knows it cannot
                 // keep.
                 available: true,
+                pin: None,
             },
             scale,
             palette,
@@ -7641,6 +8003,7 @@ fn push_submenu(
                 // row that lights under the pointer and then does nothing is
                 // worse than one that says so.
                 available: programs.is_available(index),
+                pin: None,
             },
             scale,
             palette,
@@ -7944,6 +8307,7 @@ pub fn git_filter_menu_build(
                 // cannot be kept: what the *repository* answers to a filter is
                 // git's business, and an empty graph is an honest answer.
                 available: true,
+                pin: None,
             },
             scale,
             palette,
@@ -7973,7 +8337,8 @@ pub fn git_filter_menu_build(
 /// The dot a dirty buffer wears in the switcher — `.pvm-dot` (mock-up 581).
 pub const PREVIEW_MENU_DIRTY_DOT: &str = "\u{25cf}";
 
-/// One row of the switcher: a live buffer in the tab's pool.
+/// One row of the switcher: a live buffer in the tab's pool, **or a file the
+/// user pinned and nobody has opened yet** (user ruling 2026-08-19).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreviewMenuItem {
     pub name: String,
@@ -7981,6 +8346,26 @@ pub struct PreviewMenuItem {
     pub dirty: bool,
     /// Whether this is the buffer the pane is showing (`.tm-item.cur`).
     pub current: bool,
+    /// The file this row names, when it names one.
+    ///
+    /// The pin's identity, and the only thing that can be pinned: a diff and a
+    /// commit's reading of a file are documents this window computed, not files
+    /// on a disk, and keeping one across a restart would mean keeping the
+    /// question rather than the answer.
+    pub path: Option<String>,
+    /// Whether the user said to keep this file.
+    ///
+    /// The kept rows are at the front of the list — one list and one index
+    /// space, [`apply_pins`]'s rule said about buffers.
+    pub pinned: bool,
+    /// Which buffer of the pool this row was drawn from, when it was drawn from
+    /// one.
+    ///
+    /// `None` on a kept file that has no buffer yet — the row that makes the
+    /// PINNED section worth having across a restart. Choosing it opens the file;
+    /// choosing any other row is a change of view over a buffer that already
+    /// exists.
+    pub pool: Option<usize>,
 }
 
 /// Which preview pane's switcher is up, and which row the pointer is on.
@@ -7993,7 +8378,31 @@ pub struct PreviewMenuItem {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PreviewMenu {
     open: Option<bt_layout::SeatId>,
-    hover: Option<usize>,
+    hover: Option<PreviewMenuHit>,
+}
+
+/// What a point in the switcher is over: a row, or the pin at the end of one.
+///
+/// [`RootMenuHit`]'s division, said about the other menu that grew a pin on the
+/// same day, and kept a separate type for the reason the two menus keep separate
+/// row types: an index into the switcher is not an index into the root menu, and
+/// a shared type would let one be passed where the other was meant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreviewMenuHit {
+    /// The row itself: show this document in the pane.
+    Row(usize),
+    /// The pin: keep this file, or stop keeping it, and leave the menu open.
+    Pin(usize),
+}
+
+impl PreviewMenuHit {
+    /// Which row this is about, whichever half of it was hit.
+    #[must_use]
+    pub fn row(self) -> usize {
+        match self {
+            Self::Row(index) | Self::Pin(index) => index,
+        }
+    }
 }
 
 impl PreviewMenu {
@@ -8015,14 +8424,14 @@ impl PreviewMenu {
         was_open
     }
 
-    pub fn set_hover(&mut self, hover: Option<usize>) -> bool {
+    pub fn set_hover(&mut self, hover: Option<PreviewMenuHit>) -> bool {
         let hover = self.open.and(hover);
         let changed = self.hover != hover;
         self.hover = hover;
         changed
     }
 
-    pub fn hover(self) -> Option<usize> {
+    pub fn hover(self) -> Option<PreviewMenuHit> {
         self.hover
     }
 }
@@ -8032,6 +8441,14 @@ impl PreviewMenu {
 pub struct PreviewMenuLayout {
     scale: f32,
     frame: [f32; 4],
+    /// The `PINNED` heading and the hairline under the rows it heads — absent
+    /// when nothing is pinned. The rows below the hairline keep no heading of
+    /// their own: they are what the switcher has always been, and naming them
+    /// now would be labelling a list that never needed a label.
+    pinned_label: Option<[f32; 4]>,
+    /// …and absent again when *everything* is pinned, because a rule with
+    /// nothing under it is a boundary between one thing and no things.
+    pinned_separator: Option<[f32; 4]>,
     items: Vec<[f32; 4]>,
 }
 
@@ -8059,6 +8476,14 @@ pub fn preview_menu_layout(
     // the header's own `.pv-dirty { width: 12px }` makes, for the same reason.
     let dot = measure(PREVIEW_MENU_DIRTY_DOT, px(HINT_FONT_LOGICAL_PX)) + px(ITEM_GAP_LOGICAL_PX);
     let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
+    // The pin's column, reserved wherever any row could carry one — the dot's
+    // own reservation, one control further out. A switcher of nothing but
+    // computed documents has no pin anywhere and gives the width back.
+    let pin = if items.iter().any(|item| item.path.is_some()) {
+        row_pin_claim(scale)
+    } else {
+        0.0
+    };
     let content = items
         .iter()
         .map(|item| {
@@ -8066,6 +8491,7 @@ pub fn preview_menu_layout(
                 + px(ITEM_GAP_LOGICAL_PX)
                 + measure(&item.name, px(ITEM_FONT_LOGICAL_PX))
                 + dot
+                + pin
         })
         .fold(0.0_f32, f32::max);
     // A file name is arbitrary and chosen by nobody here, so the widest one does
@@ -8077,7 +8503,24 @@ pub fn preview_menu_layout(
             px(FILE_MENU_MIN_WIDTH_LOGICAL_PX + RECENT_ITEM_MAX_WIDTH_LOGICAL_PX),
         )
         .round();
-    let height = (2.0 * (border + padding) + item_height * items.len() as f32).round();
+    let kept = items.iter().take_while(|item| item.pinned).count();
+    let separator_thickness = (SEPARATOR_THICKNESS_LOGICAL_PX * scale).round().max(1.0);
+    let separator_margin = px(SEPARATOR_MARGIN_Y_LOGICAL_PX).round();
+    let separator_block = 2.0 * separator_margin + separator_thickness;
+    let section_block = px(SECTION_LABEL_PADDING_TOP_LOGICAL_PX
+        + SECTION_LABEL_LINE_LOGICAL_PX
+        + SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX)
+    .round();
+    // The rule is drawn only when something is under it — the root menu's rule,
+    // and here it matters more, because keeping every open buffer is one press
+    // away and would otherwise leave a hairline along the bottom of the box.
+    let ruled = kept > 0 && kept < items.len();
+    let kept_block = if kept == 0 {
+        0.0
+    } else {
+        section_block + if ruled { separator_block } else { 0.0 }
+    };
+    let height = (2.0 * (border + padding) + kept_block + item_height * items.len() as f32).round();
 
     let (surface_width, surface_height) = surface;
     let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
@@ -8097,29 +8540,64 @@ pub fn preview_menu_layout(
     let content_left = frame[0] + border + padding;
     let content_right = frame[2] - border - padding;
     let mut cursor = frame[1] + border + padding;
-    let items = items
-        .iter()
-        .map(|_| {
-            let rect = [content_left, cursor, content_right, cursor + item_height];
+    let mut rects = Vec::with_capacity(items.len());
+    let (pinned_label, pinned_separator) = if kept == 0 {
+        (None, None)
+    } else {
+        let band = [content_left, cursor, content_right, cursor + section_block];
+        cursor += section_block;
+        for _ in 0..kept {
+            rects.push([content_left, cursor, content_right, cursor + item_height]);
             cursor += item_height;
-            rect
-        })
-        .collect();
+        }
+        let rule = ruled.then(|| {
+            let rule = [
+                content_left,
+                cursor + separator_margin,
+                content_right,
+                cursor + separator_margin + separator_thickness,
+            ];
+            cursor += separator_block;
+            rule
+        });
+        (Some(band), rule)
+    };
+    for _ in kept..items.len() {
+        rects.push([content_left, cursor, content_right, cursor + item_height]);
+        cursor += item_height;
+    }
     PreviewMenuLayout {
         scale,
         frame,
-        items,
+        pinned_label,
+        pinned_separator,
+        items: rects,
     }
 }
 
 /// What a point is over, with the same three answers every other menu gives:
 /// `None` for "not this menu at all", `Some(None)` for "the menu but no row".
 #[must_use]
-pub fn preview_menu_hit(layout: &PreviewMenuLayout, x: f64, y: f64) -> Option<Option<usize>> {
+pub fn preview_menu_hit(
+    layout: &PreviewMenuLayout,
+    items: &[PreviewMenuItem],
+    x: f64,
+    y: f64,
+) -> Option<Option<PreviewMenuHit>> {
     let (x, y) = (x as f32, y as f32);
     for (index, item) in layout.items.iter().enumerate() {
         if contains(*item, x, y) {
-            return Some(Some(index));
+            // The pin is inside the row and is asked about first — and only on
+            // rows that have one: a computed document's row is a row all the way
+            // to its trailing edge.
+            let keepable = items.get(index).is_some_and(|item| item.path.is_some());
+            return Some(Some(
+                if keepable && contains(row_pin_rect(*item, layout.scale), x, y) {
+                    PreviewMenuHit::Pin(index)
+                } else {
+                    PreviewMenuHit::Row(index)
+                },
+            ));
         }
     }
     contains(layout.frame, x, y).then_some(None)
@@ -8130,7 +8608,7 @@ pub fn preview_menu_hit(layout: &PreviewMenuLayout, x: f64, y: f64) -> Option<Op
 pub fn preview_menu_build(
     layout: &PreviewMenuLayout,
     items: &[PreviewMenuItem],
-    hover: Option<usize>,
+    hover: Option<PreviewMenuHit>,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
@@ -8156,6 +8634,17 @@ pub fn preview_menu_build(
         alpha(palette.menu_border_alpha),
     );
 
+    if let Some(band) = layout.pinned_label {
+        labels.push(section_label(pinned_section_label(), band, scale, palette));
+    }
+    if let Some(rule) = layout.pinned_separator {
+        quads.push(OverlayQuad {
+            rect: rule,
+            color: palette.menu_border,
+            alpha: separator_alpha(palette.menu_border),
+        });
+    }
+
     let dot_width = measure(PREVIEW_MENU_DIRTY_DOT, px(HINT_FONT_LOGICAL_PX));
     for (index, (item, rect)) in items.iter().zip(&layout.items).enumerate() {
         push_row(
@@ -8180,8 +8669,19 @@ pub fn preview_menu_build(
                 // the pointer draws, which is what the mock-up asks for: the row
                 // you are on and the row you are pointing at look alike, and when
                 // they are the same row there is nothing to reconcile.
-                hovered: hover == Some(index) || item.current,
+                hovered: hover.map(PreviewMenuHit::row) == Some(index) || item.current,
                 available: true,
+                // Only a row that names a file on a disk. A diff and a commit's
+                // reading of a file are documents this window computed, and
+                // keeping one would be keeping a question.
+                pin: item.path.as_ref().map(|_| RowPin {
+                    filled: item.pinned,
+                    hovered: hover == Some(PreviewMenuHit::Pin(index)),
+                    // The *pointer's* row and not `.cur`: the current buffer is
+                    // shaded like a hovered row, but nobody is offering to pin
+                    // it merely because it is on screen.
+                    revealed: hover.map(PreviewMenuHit::row) == Some(index),
+                }),
             },
             scale,
             palette,
@@ -8264,10 +8764,14 @@ mod tests {
     fn pool(names: &[(&str, bool, bool)]) -> Vec<PreviewMenuItem> {
         names
             .iter()
-            .map(|(name, dirty, current)| PreviewMenuItem {
+            .enumerate()
+            .map(|(index, (name, dirty, current))| PreviewMenuItem {
                 name: (*name).to_owned(),
                 dirty: *dirty,
                 current: *current,
+                path: Some(format!(r"C:\work\{name}")),
+                pinned: false,
+                pool: Some(index),
             })
             .collect()
     }
@@ -8335,19 +8839,190 @@ mod tests {
         for (index, item) in layout.items.iter().enumerate() {
             let (x, y) = ((item[0] + item[2]) / 2.0, (item[1] + item[3]) / 2.0);
             assert_eq!(
-                preview_menu_hit(&layout, f64::from(x), f64::from(y)),
-                Some(Some(index))
+                preview_menu_hit(&layout, &items, f64::from(x), f64::from(y)),
+                Some(Some(PreviewMenuHit::Row(index)))
             );
         }
         assert_eq!(
             preview_menu_hit(
                 &layout,
+                &items,
                 f64::from(layout.frame[0] + 1.0),
                 f64::from(layout.frame[1] + 1.0)
             ),
             Some(None)
         );
-        assert_eq!(preview_menu_hit(&layout, 1.0, 1.0), None);
+        assert_eq!(preview_menu_hit(&layout, &items, 1.0, 1.0), None);
+    }
+
+    /// PIN — the kept files are a section of their own at the top of the
+    /// switcher, and a kept file that is also open appears **once** (user ruling
+    /// 2026-08-19).
+    ///
+    /// MUTATIONS:
+    /// ① list the kept files and then the pool — the open one is drawn twice,
+    ///    which is the "PINNED 与最近列表不留双副本" the ruling forbids by name;
+    /// ② give a computed document a pin — a diff is a question this window
+    ///    asked, and keeping it across a restart would keep the question;
+    /// ③ reveal an unkept pin on the *current* row — the buffer on screen is
+    ///    shaded like a hovered one, and its pin would appear with nobody
+    ///    pointing at it.
+    #[test]
+    fn the_kept_files_are_a_section_at_the_top_of_the_switcher_and_appear_once() {
+        let mut items = pool(&[("a.txt", true, false), ("notes.md", false, true)]);
+        // One kept file that is open, one kept file that is not, and a computed
+        // document that cannot be kept at all.
+        items.insert(
+            0,
+            PreviewMenuItem {
+                name: "a.txt".to_owned(),
+                dirty: true,
+                current: false,
+                path: Some(r"C:\work\a.txt".to_owned()),
+                pinned: true,
+                pool: Some(0),
+            },
+        );
+        items.remove(1);
+        items.insert(
+            1,
+            PreviewMenuItem {
+                name: "old.rs".to_owned(),
+                dirty: false,
+                current: false,
+                path: Some(r"C:\work\old.rs".to_owned()),
+                pinned: true,
+                pool: None,
+            },
+        );
+        items.push(PreviewMenuItem {
+            name: "main.rs (working tree)".to_owned(),
+            dirty: false,
+            current: false,
+            path: None,
+            pinned: false,
+            pool: Some(9),
+        });
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item.path.as_deref() == Some(r"C:\work\a.txt"))
+                .count(),
+            1,
+            "a kept file that is also open is one row, not two"
+        );
+
+        let layout = preview_menu_layout(
+            [40.0, 8.0, 140.0, 27.0],
+            (960.0, 600.0),
+            1.0,
+            &items,
+            &mut fake_measure,
+        );
+        let heading = layout.pinned_label.expect("the kept rows have a heading");
+        let rule = layout
+            .pinned_separator
+            .expect("and a rule between them and the buffers below");
+        assert!(heading[3] <= layout.items[0][1]);
+        assert!(rule[1] >= layout.items[1][3]);
+        assert!(layout.items[2][1] >= rule[3]);
+        assert!(
+            layout.items.last().expect("rows")[3] <= layout.frame[3],
+            "the box grew to hold the section it gained"
+        );
+
+        let layer = one_layer(preview_menu_build(&layout, &items, None, &mut fake_measure));
+        assert!(
+            layer
+                .labels
+                .iter()
+                .any(|label| label.text == pinned_section_label())
+        );
+        assert_eq!(
+            layer
+                .sprites
+                .iter()
+                .filter(|sprite| sprite.mark == ChromeMark::Pin { filled: true })
+                .count(),
+            2
+        );
+
+        // A computed document's row is a row all the way to its trailing edge:
+        // there is no pin there to press.
+        let diff = layout.items[3];
+        let y = f64::from((diff[1] + diff[3]) / 2.0);
+        let pin = row_pin_rect(diff, layout.scale);
+        assert_eq!(
+            preview_menu_hit(&layout, &items, f64::from((pin[0] + pin[2]) / 2.0), y),
+            Some(Some(PreviewMenuHit::Row(3)))
+        );
+        // A file's row does have one, and it answers for its own box.
+        let kept = layout.items[0];
+        let y = f64::from((kept[1] + kept[3]) / 2.0);
+        let pin = row_pin_rect(kept, layout.scale);
+        assert_eq!(
+            preview_menu_hit(&layout, &items, f64::from((pin[0] + pin[2]) / 2.0), y),
+            Some(Some(PreviewMenuHit::Pin(0)))
+        );
+        assert_eq!(
+            preview_menu_hit(&layout, &items, f64::from(pin[0] - 2.0), y),
+            Some(Some(PreviewMenuHit::Row(0)))
+        );
+
+        // `.cur` shades a row but offers nothing: the pin follows the pointer.
+        let current_row = items
+            .iter()
+            .position(|item| item.current)
+            .expect("one buffer is on screen");
+        let resting = one_layer(preview_menu_build(&layout, &items, None, &mut fake_measure));
+        assert_eq!(
+            resting
+                .sprites
+                .iter()
+                .filter(|sprite| sprite.mark == ChromeMark::Pin { filled: false })
+                .count(),
+            0,
+            "nobody is pointing at anything, so nothing is offered"
+        );
+        let pointed = one_layer(preview_menu_build(
+            &layout,
+            &items,
+            Some(PreviewMenuHit::Row(current_row)),
+            &mut fake_measure,
+        ));
+        assert_eq!(
+            pointed
+                .sprites
+                .iter()
+                .filter(|sprite| sprite.mark == ChromeMark::Pin { filled: false })
+                .count(),
+            1
+        );
+
+        // **Keep every row and the rule goes with the section it divided.** One
+        // press away in a switcher of two, and a hairline along the bottom of
+        // the box is a boundary between one thing and no things.
+        let all_kept: Vec<PreviewMenuItem> = items
+            .iter()
+            .filter(|item| item.path.is_some())
+            .map(|item| PreviewMenuItem {
+                pinned: true,
+                ..item.clone()
+            })
+            .collect();
+        let all_kept_layout = preview_menu_layout(
+            [40.0, 8.0, 140.0, 27.0],
+            (960.0, 600.0),
+            1.0,
+            &all_kept,
+            &mut fake_measure,
+        );
+        assert!(all_kept_layout.pinned_label.is_some());
+        assert_eq!(all_kept_layout.pinned_separator, None);
+        assert!(
+            all_kept_layout.items.last().expect("rows")[3] <= all_kept_layout.frame[3],
+            "and the box shrank with it rather than keeping the room"
+        );
     }
 
     /// PIN (P133/P136) — **one close path, and the button that opened it
@@ -8373,12 +9048,12 @@ mod tests {
         menu.toggle(one);
         menu.toggle(two);
         assert_eq!(menu.seat(), Some(two), "and another pane's takes it over");
-        assert!(menu.set_hover(Some(1)));
-        assert_eq!(menu.hover(), Some(1));
+        assert!(menu.set_hover(Some(PreviewMenuHit::Row(1))));
+        assert_eq!(menu.hover(), Some(PreviewMenuHit::Row(1)));
         assert!(menu.close());
         assert_eq!(menu.hover(), None, "a shut menu is over nothing");
         assert!(!menu.close(), "and closing it again is not a change");
-        assert!(!menu.set_hover(Some(0)));
+        assert!(!menu.set_hover(Some(PreviewMenuHit::Row(0))));
     }
 
     // ── E53-E61: the root menu ─────────────────────────────────────────────
@@ -8397,38 +9072,106 @@ mod tests {
             vec![
                 RootChoice {
                     path: r"C:\Users\dev".to_owned(),
-                    note: RootNote::Home
+                    notes: RootNotes::of(RootNote::Home),
+                    pinned: false
                 },
                 RootChoice {
                     path: r"D:\repos\api".to_owned(),
-                    note: RootNote::Terminal
+                    notes: RootNotes::of(RootNote::Terminal),
+                    pinned: false
                 },
                 RootChoice {
                     path: r"C:\work".to_owned(),
-                    note: RootNote::Terminal
+                    notes: RootNotes::of(RootNote::Terminal).and(RootNote::Parent),
+                    pinned: false
                 },
             ],
-            "the parent is already on the list as a terminal, and is not repeated"
+            "the parent is already on the list as a terminal, and wears both badges"
         );
 
         // With no shell standing in it, the parent is offered as the parent.
         let choices = root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[]);
         assert_eq!(choices.len(), 2);
         assert_eq!(choices[1].path, r"C:\work");
-        assert_eq!(choices[1].note, RootNote::Parent);
+        assert_eq!(choices[1].notes, RootNotes::of(RootNote::Parent));
     }
 
-    /// PIN — a home directory a shell happens to be standing in is offered once,
-    /// and called home.
+    /// PIN — a folder with two reasons to be on the list is **one row wearing
+    /// both badges** (user report, 2026-08-19).
+    ///
+    /// The bug this pins: the parent of the root, when a shell happened to be
+    /// standing in it, was folded into the terminal row and lost its `parent`
+    /// badge — so the one row every user looks for, the way *up*, was on the
+    /// menu and unrecognisable. Keeping the first note was the whole of it.
     #[test]
-    fn one_folder_is_one_row_however_many_reasons_it_has_to_be_there() {
+    fn one_folder_is_one_row_wearing_every_badge_it_has_earned() {
         let choices = root_choices(
             r"C:\Users\dev\work",
             Some(r"C:\Users\dev"),
             &[r"C:\Users\dev".to_owned()],
         );
         assert_eq!(choices.len(), 1);
-        assert_eq!(choices[0].note, RootNote::Home);
+        // Home, a shell is standing in it, *and* it is the folder above — all
+        // three, on one row, in the list's own permanent-to-local order.
+        assert_eq!(
+            choices[0].notes,
+            RootNotes::of(RootNote::Home)
+                .and(RootNote::Terminal)
+                .and(RootNote::Parent)
+        );
+        assert_eq!(
+            choices[0].notes.text(),
+            format!(
+                "{} · {} · {}",
+                RootNote::Home.text(),
+                RootNote::Terminal.text(),
+                RootNote::Parent.text()
+            )
+        );
+
+        // The user's own case: the folder above happens to be a shell's folder.
+        // The row is where the shell put it — the order does not move — and it
+        // says *both* things.
+        let choices = root_choices(
+            r"C:\work\project",
+            None,
+            &[r"D:\repos\api".to_owned(), r"C:\work".to_owned()],
+        );
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| choice.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![r"D:\repos\api", r"C:\work"],
+            "merging two reasons does not move the row"
+        );
+        assert!(choices[1].notes.has(RootNote::Parent));
+        assert!(choices[1].notes.has(RootNote::Terminal));
+        assert!(!choices[1].notes.has(RootNote::Home));
+        assert_eq!(
+            choices[1].notes.text(),
+            format!(
+                "{} · {}",
+                RootNote::Terminal.text(),
+                RootNote::Parent.text()
+            )
+        );
+
+        // One reason is one badge and no punctuation.
+        assert_eq!(
+            choices[0].notes.text(),
+            RootNote::Terminal.text(),
+            "a row with one reason wears one badge and no joiner"
+        );
+
+        // Every badge the menu could ever print is a badge the width was
+        // reserved for, which is what keeps the popup from moving under the
+        // pointer when a shell moves.
+        let every: Vec<RootNotes> = RootNotes::every().collect();
+        assert_eq!(every.len(), 7, "three reasons, every non-empty combination");
+        for notes in every {
+            assert!(!notes.text().is_empty());
+        }
     }
 
     /// PIN — the top of a drive has no parent, and an unrooted column has no
@@ -8484,10 +9227,13 @@ mod tests {
             .next()
             .expect("the menu has a first row");
         let middle = |rect: [f32; 4]| ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0);
-        let (x, y) = middle(first.1);
+        // The row's *left* half, deliberately: its right end is the pin's now,
+        // and a press there is a different verb (2026-08-19).
+        let (_, y) = middle(first.1);
+        let x = first.1[0] + 4.0;
         assert_eq!(
             root_menu_hit(&layout, f64::from(x), f64::from(y)),
-            Some(Some(RootMenuRow::Choice(0)))
+            Some(Some(RootMenuHit::Row(RootMenuRow::Choice(0))))
         );
         assert_eq!(
             root_menu_hit(
@@ -8546,7 +9292,14 @@ mod tests {
         let (x, y) = middle(layout.browse);
         assert_eq!(
             root_menu_hit(&layout, f64::from(x), f64::from(y)),
-            Some(Some(RootMenuRow::Browse))
+            Some(Some(RootMenuHit::Row(RootMenuRow::Browse)))
+        );
+        // And its trailing edge is the row's too: `Browse…` has no pin, so
+        // pressing where every other row's pin sits still says `Browse…`.
+        let pin_x = layout.browse[2] - 4.0;
+        assert_eq!(
+            root_menu_hit(&layout, f64::from(pin_x), f64::from(y)),
+            Some(Some(RootMenuHit::Row(RootMenuRow::Browse)))
         );
         let (x, y) = middle(layout.browse_separator);
         assert_eq!(
@@ -8559,7 +9312,7 @@ mod tests {
             &layout,
             &choices,
             r"C:\work\project",
-            Some(RootMenuRow::Browse),
+            Some(RootMenuHit::Row(RootMenuRow::Browse)),
             &mut fake_measure,
         ));
         assert!(
@@ -8614,6 +9367,220 @@ mod tests {
         );
     }
 
+    /// PIN — the kept folders are a section of their own, **above home**, with
+    /// one hairline between it and the list below (user ruling 2026-08-19).
+    ///
+    /// MUTATIONS:
+    /// ① append the kept rows instead of lifting them — the folder appears
+    ///    twice, once as a pin and once as the place this window found;
+    /// ② draw the `PINNED` heading whether or not anything is kept — a heading
+    ///    over nothing, which the reader has to work out is empty;
+    /// ③ leave the hairline out — the two sections read as one list with a
+    ///    label stuck in the middle of it.
+    #[test]
+    fn the_kept_folders_are_a_section_above_home_with_a_rule_under_them() {
+        let found = root_choices(
+            r"C:\work\project",
+            Some(r"C:\Users\dev"),
+            &[r"D:\repos\api".to_owned()],
+        );
+        // One kept folder this window also found, and one it did not.
+        let choices = apply_pins(
+            found,
+            &[r"D:\repos\api".to_owned(), r"Z:\archive".to_owned()],
+        );
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| (choice.path.as_str(), choice.pinned))
+                .collect::<Vec<_>>(),
+            vec![
+                (r"D:\repos\api", true),
+                (r"Z:\archive", true),
+                (r"C:\Users\dev", false),
+                (r"C:\work", false),
+            ],
+            "kept first, in the file's order, then what this window found"
+        );
+        assert!(
+            choices[0].notes.has(RootNote::Terminal),
+            "a kept row that was also found keeps every badge it earned"
+        );
+        assert_eq!(
+            choices[1].notes,
+            RootNotes::default(),
+            "and one that was not found is offered because you kept it, and says nothing else"
+        );
+
+        let layout = root_menu_layout(
+            [40.0, 8.0, 140.0, 27.0],
+            (960.0, 600.0),
+            1.0,
+            &choices,
+            &mut fake_measure,
+        );
+        let heading = layout.pinned_label.expect("the kept rows have a heading");
+        let rule = layout
+            .pinned_separator
+            .expect("and a rule between them and the list below");
+        assert!(
+            heading[3] <= layout.items[0][1],
+            "the heading is above them"
+        );
+        assert!(
+            rule[1] >= layout.items[1][3],
+            "the rule is under the last of them"
+        );
+        let found = layout
+            .label
+            .expect("the list below still has rows of its own");
+        assert!(
+            found[1] >= rule[3],
+            "and `OPEN FOLDER` sits under the rule, so home is below the kept rows"
+        );
+        assert!(layout.items[2][1] >= found[3]);
+        assert!(
+            layout.browse[3] <= layout.frame[3],
+            "the box grew to hold the section it gained"
+        );
+
+        // **A heading over nothing goes too**, which is the PINNED section's own
+        // rule read for the other one: pinning every place this window found
+        // leaves `OPEN FOLDER` standing over a hairline.
+        let all_kept = apply_pins(
+            root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[]),
+            &[r"C:\Users\dev".to_owned(), r"C:\work".to_owned()],
+        );
+        let all_kept_layout = root_menu_layout(
+            [40.0, 8.0, 140.0, 27.0],
+            (960.0, 600.0),
+            1.0,
+            &all_kept,
+            &mut fake_measure,
+        );
+        assert!(all_kept_layout.pinned_label.is_some());
+        assert_eq!(
+            all_kept_layout.label, None,
+            "no places left to head, so no heading"
+        );
+        assert_eq!(
+            all_kept_layout.pinned_separator, None,
+            "and no rule either: it would sit straight on `Browse…`'s own"
+        );
+        assert!(all_kept_layout.browse[3] <= all_kept_layout.frame[3]);
+        assert!(
+            !one_layer(root_menu_build(
+                &all_kept_layout,
+                &all_kept,
+                r"C:\work\project",
+                None,
+                &mut fake_measure,
+            ))
+            .labels
+            .iter()
+            .any(|label| label.text == root_section_label())
+        );
+
+        let layer = one_layer(root_menu_build(
+            &layout,
+            &choices,
+            r"C:\work\project",
+            None,
+            &mut fake_measure,
+        ));
+        assert!(
+            layer
+                .labels
+                .iter()
+                .any(|label| label.text == pinned_section_label()),
+            "the section says its own name"
+        );
+        assert_eq!(
+            layer
+                .sprites
+                .iter()
+                .filter(|sprite| sprite.mark == ChromeMark::Pin { filled: true })
+                .count(),
+            2,
+            "each kept row wears a filled pin, whether or not anybody is pointing at it"
+        );
+        assert_eq!(
+            layer
+                .sprites
+                .iter()
+                .filter(|sprite| sprite.mark == ChromeMark::Pin { filled: false })
+                .count(),
+            0,
+            "and an unkept row's pin is an offer, so it waits for the hand"
+        );
+
+        // Nothing kept is the menu exactly as it was: no heading, no rule.
+        let plain = apply_pins(
+            root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[]),
+            &[],
+        );
+        let plain_layout = root_menu_layout(
+            [40.0, 8.0, 140.0, 27.0],
+            (960.0, 600.0),
+            1.0,
+            &plain,
+            &mut fake_measure,
+        );
+        assert_eq!(plain_layout.pinned_label, None);
+        assert_eq!(plain_layout.pinned_separator, None);
+    }
+
+    /// PIN — the pin is a second verb on the row, told apart by the rectangle it
+    /// is in and not by how far right the press landed.
+    #[test]
+    fn a_root_row_carries_a_pin_that_answers_for_its_own_box() {
+        let choices = apply_pins(
+            root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[]),
+            &[],
+        );
+        let layout = root_menu_layout(
+            [40.0, 8.0, 140.0, 27.0],
+            (960.0, 600.0),
+            1.0,
+            &choices,
+            &mut fake_measure,
+        );
+        let item = layout.items[0];
+        let y = f64::from((item[1] + item[3]) / 2.0);
+        let pin = row_pin_rect(item, layout.scale);
+        assert_eq!(
+            root_menu_hit(&layout, f64::from((pin[0] + pin[2]) / 2.0), y),
+            Some(Some(RootMenuHit::Pin(RootMenuRow::Choice(0))))
+        );
+        assert_eq!(
+            root_menu_hit(&layout, f64::from(pin[0] - 2.0), y),
+            Some(Some(RootMenuHit::Row(RootMenuRow::Choice(0)))),
+            "one pixel outside the pin is the row again"
+        );
+        assert!(
+            pin[2] <= item[2],
+            "and the pin lives inside the row it belongs to"
+        );
+
+        // Hovering the row reveals the offer; hovering the pin lights it.
+        let revealed = one_layer(root_menu_build(
+            &layout,
+            &choices,
+            r"C:\work\project",
+            Some(RootMenuHit::Row(RootMenuRow::Choice(0))),
+            &mut fake_measure,
+        ));
+        assert_eq!(
+            revealed
+                .sprites
+                .iter()
+                .filter(|sprite| sprite.mark == ChromeMark::Pin { filled: false })
+                .count(),
+            1,
+            "the row under the hand offers its pin, and no other row does"
+        );
+    }
+
     /// PIN — E57. The button toggles, and opening one column's menu is closing
     /// every other column's.
     #[test]
@@ -8630,11 +9597,11 @@ mod tests {
         assert!(!menu.close(), "there was nothing left to shut");
 
         menu.toggle(a);
-        assert!(menu.set_hover(Some(RootMenuRow::Choice(1))));
-        assert_eq!(menu.hover(), Some(RootMenuRow::Choice(1)));
+        assert!(menu.set_hover(Some(RootMenuHit::Row(RootMenuRow::Choice(1)))));
+        assert_eq!(menu.hover(), Some(RootMenuHit::Row(RootMenuRow::Choice(1))));
         menu.close();
         assert!(
-            !menu.set_hover(Some(RootMenuRow::Choice(1))),
+            !menu.set_hover(Some(RootMenuHit::Row(RootMenuRow::Choice(1)))),
             "a shut menu has no row under the pointer"
         );
         assert_eq!(menu.hover(), None);

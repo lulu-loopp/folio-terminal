@@ -484,6 +484,13 @@ pub enum Text {
     RootNoteTerminal,
     RootNoteParent,
 
+    // ── what the user said to keep (`pins.json`) ───────────────────────────
+    /// The heading over the pinned rows, in **both** menus that have them: the
+    /// root menu's folders and the preview switcher's files. One string, because
+    /// it is one idea and a reader who learns it in one menu has learnt it in
+    /// the other.
+    PinnedSection,
+
     // ── a file row's menu ──────────────────────────────────────────────────
     FileMenuOpenPreview,
     FileMenuCopyPath,
@@ -1636,6 +1643,9 @@ impl Text {
             Self::RootNoteTerminal => pick(lang, "a terminal is here", "终端在这里"),
             Self::RootNoteParent => pick(lang, "parent", "上一级"),
 
+            // ── what the user said to keep ─────────────────────────────────
+            Self::PinnedSection => pick(lang, "PINNED", "已钉住"),
+
             // ── a file row's menu ──────────────────────────────────────────
             Self::FileMenuOpenPreview => pick(lang, "Open preview", "打开预览"),
             Self::FileMenuCopyPath => pick(lang, "Copy path", "复制路径"),
@@ -2356,7 +2366,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 414] = [
+    pub const ALL: [Self; 415] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -2451,6 +2461,7 @@ impl Text {
         Self::RootNoteHome,
         Self::RootNoteTerminal,
         Self::RootNoteParent,
+        Self::PinnedSection,
         Self::FileMenuOpenPreview,
         Self::FileMenuCopyPath,
         Self::FileMenuInsertPath,
@@ -4154,6 +4165,35 @@ fn profiles_file_kept_in(lang: Lang, file: &str) -> String {
     }
 }
 
+/// `pins.json` refusing to parse at startup, when there is nothing in force to
+/// keep — so what stands in for it is nothing at all, and the sentence says so.
+#[must_use]
+pub fn pins_file_unreadable(file: &str) -> String {
+    pins_file_unreadable_in(current(), file)
+}
+
+fn pins_file_unreadable_in(lang: Lang, file: &str) -> String {
+    match lang {
+        Lang::English => format!("{file} could not be read; nothing is pinned this session"),
+        Lang::Chinese => format!("{file} 无法读取；这次启动没有钉住的条目"),
+    }
+}
+
+/// And the same file refusing to parse **after** a window has been running on
+/// it, which is [`profiles_file_kept`]'s distinction one file over: what stands
+/// in for the damaged file is the table the reader has been using all along.
+#[must_use]
+pub fn pins_file_kept(file: &str) -> String {
+    pins_file_kept_in(current(), file)
+}
+
+fn pins_file_kept_in(lang: Lang, file: &str) -> String {
+    match lang {
+        Lang::English => format!("{file} could not be read; the pins already in force were kept"),
+        Lang::Chinese => format!("{file} 无法读取；保留了正在生效的钉住条目"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4831,6 +4871,11 @@ mod tests {
                     "profiles_file_kept",
                     profiles_file_kept_in(lang, "profiles.json"),
                 ),
+                (
+                    "pins_file_unreadable",
+                    pins_file_unreadable_in(lang, "pins.json"),
+                ),
+                ("pins_file_kept", pins_file_kept_in(lang, "pins.json")),
             ]
         };
         let english = said(Lang::English);

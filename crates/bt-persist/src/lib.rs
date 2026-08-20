@@ -27,6 +27,8 @@
 //! - [`sentinel`] — the crash-vs-clean-exit sentinel file primitives (§5.5).
 //! - [`profiles`] / [`ProfilesV1`] — `profiles.json`, the profile table's
 //!   departures from the shipped five plus the user's own profiles.
+//! - [`pins`] / [`PinsV1`] — `pins.json`, the one table of folders, files and
+//!   URLs the user said to keep.
 //! - [`scheme`] — one Windows Terminal colour-scheme object, parsed. The one
 //!   reader here that is not versioned by this crate, because the format is
 //!   somebody else's; where scheme files live and which of them exist is
@@ -38,6 +40,7 @@ mod error;
 mod keybindings;
 mod layout;
 mod migrate;
+mod pins;
 mod profiles;
 mod scheme;
 mod sentinel;
@@ -54,9 +57,10 @@ pub use layout::{
     SplitNodeV1, TermLeafV1,
 };
 pub use migrate::{
-    FallbackReason, KEYBINDINGS_MIGRATIONS, MigrationStep, PROFILES_MIGRATIONS, ReadReport,
-    SESSION_MIGRATIONS, SETTINGS_MIGRATIONS,
+    FallbackReason, KEYBINDINGS_MIGRATIONS, MigrationStep, PINS_MIGRATIONS, PROFILES_MIGRATIONS,
+    ReadReport, SESSION_MIGRATIONS, SETTINGS_MIGRATIONS,
 };
+pub use pins::{PINS_SCHEMA_VERSION, PinEntryV1, PinKind, PinsV1};
 pub use profiles::{
     CandidateV1, MarkV1, NamedStartAtV1, NamedStartingDirV1, PROFILES_SCHEMA_VERSION,
     ProfileEntryV1, ProfilesV1, ProgramV1, ResolutionV1, StartAtV1, StartingDirV1,
@@ -155,6 +159,27 @@ pub fn read_profiles(path: &Path) -> (ProfilesV1, ReadReport) {
 pub fn write_profiles_atomic(path: &Path, profiles: &ProfilesV1) -> Result<(), WriteError> {
     let bytes = serde_json::to_vec_pretty(profiles).map_err(|source| WriteError::Serialize {
         what: "ProfilesV1",
+        source,
+    })?;
+    atomic_write(path, &bytes)
+}
+
+/// Reads `pins.json` from `path`, applying the same §5.4 fallback chain the
+/// other four files get. A missing file is [`ReadReport::NotFound`] and is the
+/// ordinary case — a machine where nobody has pinned anything yet — while a
+/// damaged one falls back to *an empty table*, which is a menu with no PINNED
+/// section rather than a window that will not start. The caller is expected to
+/// say so out loud and to leave the damaged file alone until the user acts.
+pub fn read_pins(path: &Path) -> (PinsV1, ReadReport) {
+    migrate::read_with_fallback(path, PINS_SCHEMA_VERSION, PINS_MIGRATIONS)
+}
+
+/// Serializes `pins` and writes it to `path` via [`atomic_write`].
+/// Pretty-printed for [`write_settings_atomic`]'s reason: this is a short file
+/// of paths, and the shortest one there is any point opening by hand.
+pub fn write_pins_atomic(path: &Path, pins: &PinsV1) -> Result<(), WriteError> {
+    let bytes = serde_json::to_vec_pretty(pins).map_err(|source| WriteError::Serialize {
+        what: "PinsV1",
         source,
     })?;
     atomic_write(path, &bytes)

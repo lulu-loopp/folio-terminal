@@ -797,7 +797,7 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 - **item B —— 行的动作条在指针底下闪烁,病灶是一份没跟着搬的名单**(用户裁决 2026-08-18)。动作条只在「行被沾上」时画,而「被沾上」曾经是手写的四个目标:`ProfileRow`/`ProfileUp`/`ProfileDown`/**`ProfileDuplicate`**。5b 让 `Edit` 接过明处那一格、`Duplicate` 进了 `⋯`,这份名单没跟着搬——于是指针横穿行文字时动作条出现,**在够到它要去的那个动词的一瞬间消失**,按钮在路上闪、停在它上面时看起来根本不能按。**根治**:「被沾上」改由一条推导得出(`SettingsTarget::profile_row()`),明天往这条动作条上加一个动词,它就**在构造上**也会揭示动作条;几何免费成立,因为这些框本来就都在行自己的 band 里,中间没有缝要跨。**并且一枚变灰的箭头从此答它自己的行而不是 `Panel`**:它站在行自己 band 里的一个按钮上,`Panel` 是在说指针已经离开了这一行——它没有,于是动作条在它底下消失了。`ProfileRow` 说的是实话且不花任何代价:按在行 band 上本来就只挪焦点,而那正是按在一枚灰按钮上该得到的。
 - **留给以后的**:两枚箭头仍没有 tooltip 通道(本片新增的拒绝仍然都是菜单项)。`profiles.json` 不被监视那一条**已由 §7.1.6c-6d 兑现**,这句话写下时它还是账。
 
-**7.1.6c-6d Settings 扩展块 slice 5d:`profiles.json` 的实时跟进(挂账兑现,2026-08-19,已落地;`crates/bt-app/src/{dir_news(新),profile_watch(新),scheme_watch,persist,profiles,i18n,main}.rs`、`crates/bt-persist/src/profiles.rs`)。** 5a 明写「不监视这个文件」并把冲突记了账,5c 的收尾又把这笔账原样抄了一遍。兑现它的理由不是「保存即预览」这条产品承诺长到了档案这边,而是**这份文件的形状自己要求的**:5a 给它做独立文件的头一条理由就是「它是**可以手编的列表**」,而一份会被手编的列表,在「要重启才看得见」的那一版里,等于对话框有权把别人刚写的东西无声盖掉。本片只做跟进,一个新表面、一条新文案枚举都没有。
+**7.1.6c-6d Settings 扩展块 slice 5d:`profiles.json` 的实时跟进(挂账兑现,2026-08-19,已落地;`crates/bt-app/src/{dir_news(新),profile_watch(新,后于 §7.5 改名 storage_watch),scheme_watch,persist,profiles,i18n,main}.rs`、`crates/bt-persist/src/profiles.rs`)。** 5a 明写「不监视这个文件」并把冲突记了账,5c 的收尾又把这笔账原样抄了一遍。兑现它的理由不是「保存即预览」这条产品承诺长到了档案这边,而是**这份文件的形状自己要求的**:5a 给它做独立文件的头一条理由就是「它是**可以手编的列表**」,而一份会被手编的列表,在「要重启才看得见」的那一版里,等于对话框有权把别人刚写的东西无声盖掉。本片只做跟进,一个新表面、一条新文案枚举都没有。
 
 - **抄的是 4c 那一套,一个字都没有另发明**:`bt_platform::DirWatch`(`ReadDirectoryChangesW`,非轮询)、`WatchClock` 的 300ms 静默窗与 2s 地板、事件只唤醒不干活、真正的决定在 `about_to_wait` 里做。**共享的那一半提了出来**(`dir_news::DirNews` = 一把句柄 + 一格信箱 + 一口钟):`watch_clock` 当年正是在第二个目录出现时从 `git_watch` 里提出来的,理由写在它自己的头上——「两份 debounce 就是两个表面对『它不动了』各执一词的由来」;第三个目录到场时,还写着两遍的就剩句柄和信箱。`SchemeWatch` 与 `ProfileWatch` 于是各自只剩下**属于自己那个文件夹的政策**:监听哪里、唤醒哪个事件、什么时候武装、开不开得了值不值得说一句。
 
@@ -982,7 +982,32 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 
 **Windows 11 顶层菜单：调研结论，本片不做。** 经典 `shell\<verb>` 注册在 Win11 上一律落在「显示更多选项」（Shift+F10 的那份经典菜单），primary 菜单里那些第三方项（Windows Terminal 的「在终端中打开」、VS Code、TortoiseSVN）**每一个都是通过 sparse MSIX 包注册的 `IExplorerCommand`**——spike §4 在这台机器上逐张截图确认过。上顶层的代价是完整的一套包身份：一个 `AppxManifest.xml` 声明 `<Extension Category="windows.fileExplorerContextMenus">`、一个实现 `IExplorerCommand` 的进程内 COM DLL（不能是 exe：Explorer 要在自己进程里加载它）、**一张代码签名证书**（sparse 包必须签名才能注册，自签名证书要求用户先信任它，等于把一步安装换成三步）、以及 `Add-AppxPackage -ExternalLocation` 的注册／注销流程。也就是说它不是「再写一个注册表键」，而是「这个产品从此有了包身份」——那是一个应当为通知（slice 3 的 AUMID 其实不需要它）、为商店分发、为自动更新一起决定的事，不该由一条右键菜单单独推动。**裁决：本片走经典路线，与 Git 的放置一致；顶层留到 Folio 因别的理由需要包身份的那一天，届时 `IExplorerCommand` 与这两棵经典树可以并存（包在时 Windows 用包的，不在时用经典的）。**
 
-**顺带修掉的一处：`bt_platform::win32_io_error` 建错了错误。** 它把 `windows::core::Error` 的 `HRESULT` 原样交给 `std::io::Error::from_raw_os_error`，而 Windows 上 `std` 是按 **Win32 码**分类的：`ERROR_FILE_NOT_FOUND` 经 `HRESULT_FROM_WIN32` 到达时是 `0x8007_0002`，`std` 认得 `2` 而完全不认得 `0x8007_0002`，于是每一个这样的错误都答 `ErrorKind::Uncategorized`。后果是 `DirWatch::start` 对不存在的文件夹**永远不可能**返回 `NotFound`，`scheme_watch` 那条为「fresh install 上 `%APPDATA%\Folio\schemes` 本来就不存在」写的静默臂**从来没有被命中过**，每一次全新安装都在 stderr 上打一行关于「本该不存在的文件夹不存在」的话。修法是把 `FACILITY_WIN32`（`0x8007_xxxx`）的低 16 位取回来，其余 `HRESULT` 原样透传（它们不是穿着 HRESULT 外衣的 Win32 码，截 16 位得到的不是任何错误码）。红测两层：`win32_code` 的纯映射，与 `DirWatch::start` 对缺失文件夹／缺失父目录都答 `NotFound`；`scheme_watch` 那条臂的测试**不构造错误**，用的就是 `DirWatch::start` 真给出来的那一个——构造出来的 `NotFound` 在过去七周里每一天都会通过。`profile_watch` 故意**没有**这条臂：`%APPDATA%\Folio\` 由第一个打开的 store 建出来，它不在才是值得说的那一半。
+**顺带修掉的一处：`bt_platform::win32_io_error` 建错了错误。** 它把 `windows::core::Error` 的 `HRESULT` 原样交给 `std::io::Error::from_raw_os_error`，而 Windows 上 `std` 是按 **Win32 码**分类的：`ERROR_FILE_NOT_FOUND` 经 `HRESULT_FROM_WIN32` 到达时是 `0x8007_0002`，`std` 认得 `2` 而完全不认得 `0x8007_0002`，于是每一个这样的错误都答 `ErrorKind::Uncategorized`。后果是 `DirWatch::start` 对不存在的文件夹**永远不可能**返回 `NotFound`，`scheme_watch` 那条为「fresh install 上 `%APPDATA%\Folio\schemes` 本来就不存在」写的静默臂**从来没有被命中过**，每一次全新安装都在 stderr 上打一行关于「本该不存在的文件夹不存在」的话。修法是把 `FACILITY_WIN32`（`0x8007_xxxx`）的低 16 位取回来，其余 `HRESULT` 原样透传（它们不是穿着 HRESULT 外衣的 Win32 码，截 16 位得到的不是任何错误码）。红测两层：`win32_code` 的纯映射，与 `DirWatch::start` 对缺失文件夹／缺失父目录都答 `NotFound`；`scheme_watch` 那条臂的测试**不构造错误**，用的就是 `DirWatch::start` 真给出来的那一个——构造出来的 `NotFound` 在过去七周里每一天都会通过。`storage_watch`（本片改名前叫 `profile_watch`，见 §7.5）故意**没有**这条臂：`%APPDATA%\Folio\` 由第一个打开的 store 建出来，它不在才是值得说的那一半。
+
+### 7.5 files 列的「进去」与「钉住」（files 小单，2026-08-19，已落地）
+
+三件事一片：文件夹行的第二次按下是**进去**，root 菜单一行可以佩**两个徽标**，以及产品第一次有了一张**用户说要留着**的表（`pins.json`）。
+
+**双击文件夹＝换根，不是新开一列。** `press_files_row` 里 K156 的那句「文件夹行故意不计次」被这条裁决推翻：原型的 `dblclick` 处理器对 `dir === "1"` 立刻 return（7847），于是一棵树只能靠展开三角往下走，**唯一的「进去」是 root 菜单**。现在两种节点都计次（`files_row_counts_clicks`），第二次按下按行的种类分岔——文件行开预览（`files_row_activation`），文件夹行让**这一列**站到那个文件夹里（`files_row_entry`，与前者同形：一个 root、一个稳定 id、一个答案，未指向任何地方的列两者都答「哪儿也不去」）。走的门是 `reroot_files_column`——root 菜单自己的门、文件夹拖放自己的门——所以展开集清空、两份缓存丢弃、会话置脏一件都不用再记一遍。
+
+* **第二次按下不再折一次三角。** 折叠是**第一次**按下的意思，已经发生了；再折一次是在一棵马上要被丢掉的树上转一个三角，并且把动画欠给一个新根从没听说过的 key。所以进去这条路在 `press_files_node` 之前 return。
+* **`Cycle` 行不是入口。** 解析到自己祖先的文件夹，进去等于站在原地。
+* **浮动树（`RowHost::Float`）仍不计文件夹。** 裁决写的是「本**列**新根」，而浮窗不是列——它是在某个地方打开的一扇窗，脚上写着是哪个地方。把裁决读到它身上等于替「浮窗的根是什么意思」做决定，而没有人做过这个决定。
+
+**一行两身份佩双徽标。** `root_choices` 原本同路径去重**保首个** note，于是最常见的那一格塌了：你 cd 进项目、把列 root 在它的子目录上——父目录**正好**是某个 shell 的 cwd——于是那一行以 "a terminal is here" 入列，`parent` 徽标被丢掉。**「上一级」在菜单里，但认不出来**，这与它不在没有区别。改法是 `RootNote` 变成可组合的 `RootNotes`（三个理由、七种徽标），同路径**保位置、并徽标**，渲染成 `home · a terminal is here · parent`（中点是标点不是句子，与 `PreviewTruncated` 的 `Read-only · 64 KB` 同一个字符，两种语言同形，不进字符串表）。位置保**首个**理由的：搬到后一个理由的位置上，菜单就会因为一个 shell 动了而重排，而固定的「最恒久→最本地」顺序正是为了防这件事。宽度预留改为量**七种组合**的最宽者而不是三个理由的最宽者——预留的是**可能**出现的最宽，不是**此刻**出现的最宽，否则菜单会在指针底下变宽。
+
+**`pins.json`：一张表，三个类目，两个 PINNED 段。**「收藏＝钉」（用户 2026-08-19）：不引入书签管理器，控件就是 tab 已经在用的那枚钉（`ChromeMark::Pin`，**状态骑在 `filled` 上而不是换一个字形**：常规＝你可以钉，实心＝已经钉住），hover 出现，已钉常显——因为已钉是关于这一行的**事实**，未钉是一个**邀约**。
+
+* **存储在 `bt-persist::pins`，schema v1，`{kind, target}` 一行。** 原子写（临时文件＋rename，与另外四个文件同一个 `atomic_write`）；坏档在启动时落到空表并出一张卡，在运行中**不取**、保留正在生效的表并出另一张卡（`ProfilesStore::reread` 那三条答案原样搬过来，包括最不显然的第三条：因为读者打错一个逗号就清空他的 PINNED 段，是一个可手改文件唯一不能有的结局）。
+* **类目是字符串，不是 `#[serde(other)]`。** `LeafNodeV1::Unknown` 那个模式在**那里**是对的——画不出的 leaf 是一块占位 pane，而它所在的树本来每次都从活窗口重写。在这里它会丢数据：这张表每钉一次就整份重写，而 `#[serde(other)]` 只记得「类目不认识」不记得它**说的是什么**，于是旧版本里点一下就会把新版本写的每一行悄悄改名。所以类目按文件里的原字符串搬运，`PinKind` 是对它的一次**读**而不是它的存储；行内未知字段同理（`extra`）。`url` 类**解析但本片不画**——W2 消费同一个 store，而不是另起一份存储。
+* **一个文件夹的 watcher，不是两个。** `profile_watch` 从来不是在看 `profiles.json`，它在看那个文件所在的**文件夹**，然后靠「重读＋比较」回答一次通知——所以第二个可手改文件到来时，正确的动作是**改名**（`storage_watch` / `AppEvent::StorageChanged`）而不是在同一个目录上开第二个 `ReadDirectoryChangesW` 句柄和第二个线程。`dir_news` 的头一句就是为防这件事写的：「一份 debounce 抄两遍，就是两个表面对『它不动了』产生分歧的方式」。一条通知重读两个小文件，其中一个几乎永远与内存里的一致。
+* **两个 PINNED 段是同一条规则的两次实例。** 一份列表、一个索引空间、已钉的排在前面（`apply_pins` / `lift_pinned`），段头一行 `PINNED`，与下面之间一条既有 hairline。**已钉的是被「抬上来」而不是「抄上去」**：一个既被钉住又被本窗口找到的文件夹带着它挣来的每一个徽标出现**一次**；一个既被钉住又已打开的文件同样只有一行——这就是裁决点名的「PINNED 与最近列表不留双副本」。反过来，一个被钉住而没有 buffer 的文件也是一行（`pool: None`），按下它是**打开**而不是切视图——这正是重启后第一帧、池是空的而列表不是空的时候，这个段值钱的地方。
+* **钉不关菜单。** 这里每一次别的按下都是一个答案，而答案把问题收起来；钉是对**你正在看的这份列表**的修改，刚钉住的那一行必须被看见搬到顶上去。
+* **钉的框是一次推导、两个调用者。** `row_pin_rect` 同时喂命中测试和画笔——第二次推导就是一个控件离它画出来的东西半个像素的方式。它占的宽度在**有钉的菜单的每一行**上预留，画不画都占：否则名字会在指针下面因为一枚钉淡入而变短。
+* **不能钉的行没有钉，也不为它让宽度。** `Browse…` 命名的是「问题」不是文件夹；diff 与 `git show` 是本窗口**算出来的文档**不是盘上的文件，钉住它等于钉住一个提问。
+* **切换器的 ⌄ 跟着「列表」而不是「池」（实机发现）。** 那枚 chevron 是进这份列表的唯一的门，而它原本的条件是 `pool > 1`——于是重启后第一帧、池里只有一个 buffer 而列表里还有一个钉住的文件时，**门不存在**，那一段一次也打不开。改成 `preview_switcher_rows(seat) > 1`（＝列表自己的长度）。旁边那个**数字徽标仍然数 buffer**：它的意思是 P19 的「隐藏状态的诚实清单」，而一个通往没人打开过的文件的快捷方式不是隐藏状态。
+* **空段的段头和空段下的横线一起消失。** 把本窗口找到的地方全钉上，`OPEN FOLDER` 就会站在一条横线上方什么也不领；把两个 buffer 全钉上，PINNED 下面那条横线就贴着盒子底。两处同一条规则：段头之于空段、横线之于空段，都是「告诉读者下面有东西」而下面没有东西。root 菜单里它还顺手避掉两条紧挨着的横线（PINNED 的那条和 `Browse…` 的那条）。
+* **挂账一条：第一枚文件钉的入口。** 文件钉只长在切换器的行上，而切换器要两行才有门——所以一个只开着一个文件、且什么都还没钉过的窗口，**没有办法钉住那个文件**（开第二个文件即可）。裁决把钉放在切换器行上，另开一个表面是新的设计决定，不由本片做；记在这里等裁。
 
 ## 8. 依赖策略
 
