@@ -1289,28 +1289,22 @@ pub enum Text {
 
     // ── focus mode (§7.1.6b′, slice F1, 2026-08-19) ────────────────────────
     //
-    // One contiguous block at the end, per this table's standing rule. Five
-    // entries for five surfaces, and **only** five: the mode has five doors and
-    // four of them borrow words that already exist here. The Appearance row's
-    // name is also the column's heading and also the shortcut table's row title,
-    // because they name one bit — the precedent is `RailNewTab`, which titles
-    // both the rail's `+` and the `new-tab` binding.
-    /// `Appearance ▸ Focus mode` — door 1, and the name of the thing itself.
+    // One contiguous block at the end, per this table's standing rule. **Three
+    // entries, and only three**: the mode's surfaces are the `Appearance` row,
+    // the column's own heading and the `Exit` button on it, and the first two
+    // share one string because they name one bit — the precedent is `RailNewTab`,
+    // which titles both the rail's `+` and the `new-tab` binding. It was five
+    // entries for one day; the two that named the pane menu's row left with that
+    // door on 2026-08-19, because a string table that still holds the words of a
+    // withdrawn surface is how a withdrawn surface comes back by accident.
+    /// `Appearance ▸ Focus mode` — the row, and the name of the thing itself.
     RowFocusMode,
-    /// Its sentence. Says what the column *is* and names the fast doors, because
-    /// a row that only said "On/Off" would leave a reader who found it here with
-    /// no way to guess that a double-click on a pane header does the same thing.
+    /// Its sentence. Says what the column *is* and names the chord, because this
+    /// row and that chord are now the only two ways in (user ruling 2026-08-19,
+    /// which withdrew the pane-header double-click and the pane menu's row).
     DescFocusMode,
-    /// The word on door 5, at the head of the card column.
+    /// The word on the way out, at the head of the card column.
     FocusExit,
-    /// The pane `⌄` menu's row while focus mode is off — door 4, reading the
-    /// verb it will perform.
-    PaneMenuEnterFocusMode,
-    /// The same row while focus mode is on. **Two entries and not one label with
-    /// a bool in it**: the menu measures its own width from the words, and a row
-    /// whose text is chosen at the call site has to be chosen the same way in
-    /// both places or the menu is sized for a string it does not draw.
-    PaneMenuExitFocusMode,
 }
 
 impl Text {
@@ -2332,20 +2326,21 @@ impl Text {
             // do-not-disturb mode this is not.
             Self::RowFocusMode => pick(lang, "Focus mode", "聚焦模式"),
             // Three clauses, in the order a reader meets them: what replaces the
-            // tab strip, what happens to the tab you pick, and where else the
-            // same switch is. It states facts and names doors — no persuasion,
-            // and no "we".
+            // tab strip, what happens to the tab you pick, and the other door.
+            // It states facts and names the chord — no persuasion, and no "we".
+            // The two pane-level doors it used to name were withdrawn on
+            // 2026-08-19, and the sentence lost them the same day: a row that
+            // advertises a gesture the build does not have is worse than a row
+            // that says less.
             Self::DescFocusMode => pick(
                 lang,
-                "The tab strip becomes a column of cards, one per tab; the tab you pick fills the window whole, splits and all. Ctrl+Shift+Z, a double-click on a pane's header and its ⌄ menu turn this same setting",
-                "标签条变成一列卡片,一张卡一个标签;点中的那个标签整个占满窗口,分屏原样。Ctrl+Shift+Z、双击窗格标题栏和它的 ⌄ 菜单拨的是同一个开关",
+                "The tab strip becomes a column of cards, one per tab; the tab you pick fills the window whole, splits and all. Ctrl+Shift+Z turns this same setting",
+                "标签条变成一列卡片,一张卡一个标签;点中的那个标签整个占满窗口,分屏原样。Ctrl+Shift+Z 拨的是同一个开关",
             ),
             // The button's whole caption. One word, because the button also
             // wears the `×` and the heading beside it already says which mode is
             // being left.
             Self::FocusExit => pick(lang, "Exit", "退出"),
-            Self::PaneMenuEnterFocusMode => pick(lang, "Enter focus mode", "进入聚焦模式"),
-            Self::PaneMenuExitFocusMode => pick(lang, "Exit focus mode", "退出聚焦模式"),
         }
     }
 
@@ -2361,7 +2356,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 416] = [
+    pub const ALL: [Self; 414] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -2776,8 +2771,6 @@ impl Text {
         Self::RowFocusMode,
         Self::DescFocusMode,
         Self::FocusExit,
-        Self::PaneMenuEnterFocusMode,
-        Self::PaneMenuExitFocusMode,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
@@ -4226,6 +4219,39 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), Text::ALL.len());
+    }
+
+    /// PIN (§7.1.6b′, user ruling 2026-08-19) — **the focus-mode row advertises
+    /// the doors that exist, and no others.**
+    ///
+    /// The mode shipped with five doors and two of them were withdrawn the same
+    /// day: a double-click on a pane header (it reads as "make this pane bigger",
+    /// which is the opposite of what the mode does) and that pane's `⌄` menu (a
+    /// list whose every other line acts on the pane under it is no place for a
+    /// verb about the window). What is left is the chord and this row itself —
+    /// and this sentence is the one place in the product that *tells* a reader
+    /// where the doors are, so it is the one place a withdrawn door can go on
+    /// being promised after the code that answered it is gone.
+    ///
+    /// Red gate: put either gesture's name back into the sentence without
+    /// building the gesture, and this goes red in whichever language it was added
+    /// to.
+    #[test]
+    fn the_focus_mode_row_names_the_chord_and_no_gesture_this_build_withdrew() {
+        for lang in [Lang::English, Lang::Chinese] {
+            let sentence = Text::DescFocusMode.in_lang(lang);
+            assert!(
+                sentence.contains("Ctrl+Shift+Z"),
+                "{lang:?}: the row names the one chord that turns it"
+            );
+            for withdrawn in ["double-click", "双击", "⌄", "pane's header", "窗格标题栏"] {
+                assert!(
+                    !sentence.contains(withdrawn),
+                    "{lang:?}: the sentence still promises `{withdrawn}`, a door this \
+                     build does not have"
+                );
+            }
+        }
     }
 
     /// PIN — **the front door's table has two columns too**, and the same three

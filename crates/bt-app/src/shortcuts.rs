@@ -1811,8 +1811,11 @@ mod tests {
             press(character("p"), CTRL_SHIFT),
             Some(Action::CommandPalette)
         );
-        // Door 2 (§7.1.6b′ ②), and the row below it is half the assertion: the
-        // chord this one deliberately did **not** take is still Find's.
+        // **Focus mode's one chord** (§7.1.6b′ ②), and since the 2026-08-19
+        // ruling withdrew the pane-header double-click and the pane menu's row,
+        // one of only two ways in — the other is the `Appearance` row that
+        // carries this same name. The row below is half the assertion: the chord
+        // this one deliberately did **not** take is still Find's.
         assert_eq!(
             press(character("z"), CTRL_SHIFT),
             Some(Action::ToggleFocusMode)

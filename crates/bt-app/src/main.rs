@@ -4380,7 +4380,7 @@ struct WindowRuntime {
     /// cannot measure, and "the button you can press is the button you can see"
     /// has to be true by one number rather than by two functions agreeing.
     preview_button_width: f32,
-    /// How wide the word `Exit` on door 5's button is drawn (§7.1.6b′ ⑤).
+    /// How wide the word `Exit` on the visible way out is drawn (§7.1.6b′).
     ///
     /// Here for the field above's reason exactly, and it is the reason stated
     /// there: the hit test cannot measure, so the box the button is drawn in and
@@ -4892,6 +4892,18 @@ struct WindowRuntime {
     /// dialog is now the only door; anything that opens a second one commits
     /// through the *same* [`Self::set_rail_state`], because a preference cannot
     /// mean two things depending on which door it came through.
+    ///
+    /// **This is the preference, not the posture, and no geometry may be asked of
+    /// it** (§7.1.6b′). [`Self::focus_mode`] is the window's other half and lives
+    /// a field away, so the `focus` in here is `false` for the whole life of the
+    /// window — `rail_state_for` writes it and nothing else ever does. Every
+    /// question about *what is on screen* — how much width the panel takes, which
+    /// panel is drawn, what the title bar owns — goes through
+    /// [`Runtime::rail_posture`] or [`Runtime::sampled_rail`], which are the two
+    /// places the two halves are joined. Handing this field to the solver is
+    /// exactly the bug the card column shipped with: the panel drew itself 220
+    /// wide and the stage was solved as though nothing were there, so the column
+    /// stood on top of the panes.
     rail: seats::RailState,
     /// **What shape this window is in right now: focus mode, or not**
     /// (`docs/DESIGN.md` §7.1.6b′).
@@ -4899,16 +4911,20 @@ struct WindowRuntime {
     /// §2.4 rule three, and the `dwm_dark_mode` shape exactly: the setting is
     /// about every window and this is what *this* one is currently doing, so the
     /// two live a layer apart. `settings.focus_mode` says what a new window opens
-    /// as; this says what the window in front of you is, and five doors can turn
-    /// it — the Appearance row, `Ctrl+Shift+Z`, a double-click on a pane header,
-    /// that pane's `⌄` menu, and the `Exit` button at the head of the card
-    /// column. Every one of them goes through [`Self::set_focus_mode`], because a
-    /// mode cannot mean two things depending on which door it came through.
+    /// as; this says what the window in front of you is. **Two doors lead in and
+    /// four lead out** (user ruling 2026-08-19): the `Appearance` row and
+    /// `Ctrl+Shift+Z` both ways, plus the `Exit` button at the head of the card
+    /// column and the `Esc` rung on the way out. The pane-header double-click and
+    /// the pane menu's row were withdrawn the day they landed — a gesture that
+    /// promises "bigger" while doing the opposite, and a window verb in a menu of
+    /// pane verbs. Every remaining door goes through [`Self::set_focus_mode`],
+    /// because a mode cannot mean two things depending on which door it came
+    /// through.
     ///
     /// **Beside [`Self::rail`] rather than inside it**, though the bit is
     /// sampled into `RailState::focus` every frame. The two are different kinds
     /// of fact: `rail` is a *preference* the reader set and the session carries,
-    /// while this is a posture the window is holding — and the five doors that
+    /// while this is a posture the window is holding — and the doors that
     /// turn it are emphatically not doors onto `Tab layout` or `Sidebar`. Folding
     /// it in would put the mode inside the very settings §7.1.6b′ rules it must
     /// neither read nor write.
@@ -4984,18 +5000,6 @@ struct WindowRuntime {
     /// they cannot both exist: `chrome_mouse_input` routes one press to one
     /// target, and the one it did not choose is cleared.
     pane_press: Option<PanePress>,
-    /// **Door 3 of five** (§7.1.6b′ ③) — two presses on one pane head paired
-    /// into a double click.
-    ///
-    /// [`Self::tab_clicks`]'s counterpart, keyed by seat and for that field's
-    /// stated reason: identity is the pane, not a pixel neighbourhood, so the
-    /// chain survives a layout that reflowed between the two presses.
-    ///
-    /// The gesture's meaning is restated by the same ruling: it used to read
-    /// "make this pane bigger" and now reads "step back and look at all my
-    /// tabs" — and, while the mode is on, "come back". One gesture, both
-    /// directions, because it writes the one bit every other door writes.
-    pane_head_clicks: MultiClicks<SeatId>,
     /// The left press being held on a **files tree row** (P81).
     ///
     /// A third field for [`Self::pane_press`]'s reason, and a fourth thing it
@@ -16116,7 +16120,6 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         // (settings.focus_mode, §7.1.6b′ ①) sets the bit right after assembly.
         focus_mode: false,
         focus_exit_width: 0.0,
-        pane_head_clicks: MultiClicks::default(),
         table_paints: HashMap::new(),
         preview_button_width: 0.0,
         preview_opened_at: None,
@@ -16688,12 +16691,18 @@ impl Runtime<'_> {
                 default_profile,
                 // Startup: the opening rectangle is the program's own.
                 SizePolicy::Lawful,
-                // And so is the opening layout. The rail is not persisted — a
-                // window always comes back with its tabs across the top,
-                // because the only thing that can currently ask for the other
-                // axis is a dev chord, and a preference a scaffold wrote is a
-                // preference nobody chose.
-                seats::RailState::default(),
+                // **The panel this window is opening with, both halves of it.**
+                // `RailState::default()` stood here and was a horizontal window
+                // with no panel at all, which every later solve corrected on the
+                // first resize — so the cost was one frame, and with §7.1.6b′ that
+                // frame is a card column standing on top of the panes. The stage's
+                // left edge is a fact about the window, and it is known here: the
+                // restored `Tab layout`/`Sidebar` pair, joined to the focus bit
+                // `settings.json` opens the window in.
+                seats::RailState {
+                    focus: focus_mode,
+                    ..rail
+                },
                 FormulaSwitches::from_settings(settings_store.loaded()),
                 scrollback_quota(settings_store.loaded().scrollback_lines),
             )?;
@@ -16715,7 +16724,13 @@ impl Runtime<'_> {
             &renderer,
             render_physical,
             SizePolicy::Lawful,
-            seats::RailState::default(),
+            // The same opening posture the tabs above were built against — two
+            // readings of one window's panel is how the seat viewport and the
+            // tabs' own layouts would come to disagree for a frame.
+            seats::RailState {
+                focus: focus_mode,
+                ..rail
+            },
         );
         renderer.set_seat_viewport(terminal_seat);
         if trace_startup || trace_resize {
@@ -16964,6 +16979,13 @@ impl Runtime<'_> {
             render_tab_layout(app.session_store.loaded().tab_layout),
             render_sidebar_mode(app.session_store.loaded().sidebar_mode),
         );
+        // The posture this window opens in, which is that pair joined to the focus
+        // bit — the state the two solves below are entitled to, for the reason the
+        // first window's own opening solve states.
+        let opening_rail = seats::RailState {
+            focus: app.settings_store.loaded().focus_mode,
+            ..rail
+        };
         let (tab, _) = create_tab_state(
             TabId(1),
             seats::Seats::lone_terminal(),
@@ -16981,7 +17003,7 @@ impl Runtime<'_> {
             // window's is: nobody has taken hold of a frame that has not been
             // shown yet.
             SizePolicy::Lawful,
-            seats::RailState::default(),
+            opening_rail,
             FormulaSwitches::from_settings(app.settings_store.loaded()),
             scrollback_quota(app.settings_store.loaded().scrollback_lines),
         )?;
@@ -16991,7 +17013,7 @@ impl Runtime<'_> {
             &renderer,
             render_physical,
             SizePolicy::Lawful,
-            seats::RailState::default(),
+            opening_rail,
         );
         renderer.set_seat_viewport(terminal_seat);
         let id = window.id();
@@ -17177,7 +17199,10 @@ impl Runtime<'_> {
             &self.app.profile_programs,
             self.default_profile(),
             self.window.size_policy,
-            self.window.rail,
+            // The posture and not the stored preference, for
+            // [`Self::resolve_seat_layout`]'s reason: a tab born while the card
+            // column is up is born into a stage that starts 220 further in.
+            self.rail_posture(),
             FormulaSwitches::from_settings(self.app.settings_store.loaded()),
             scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
         )?;
@@ -17388,7 +17413,8 @@ impl Runtime<'_> {
             &self.app.profile_programs,
             self.default_profile(),
             self.window.size_policy,
-            self.window.rail,
+            // The posture, for [`Self::resolve_seat_layout`]'s reason.
+            self.rail_posture(),
             FormulaSwitches::from_settings(self.app.settings_store.loaded()),
             scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
         )?;
@@ -17512,7 +17538,8 @@ impl Runtime<'_> {
                 &self.app.profile_programs,
                 self.default_profile(),
                 self.window.size_policy,
-                self.window.rail,
+                // The posture, for [`Self::resolve_seat_layout`]'s reason.
+                self.rail_posture(),
                 FormulaSwitches::from_settings(self.app.settings_store.loaded()),
                 scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
             )?;
@@ -17649,7 +17676,38 @@ impl Runtime<'_> {
             &self.window.renderer,
             render_physical,
             self.window.size_policy,
-            self.window.rail,
+            // **The posture, never the stored preference** (§7.1.6b′). The card
+            // column stands in the panel's own place and costs the stage 220
+            // logical pixels exactly as an expanded rail does, and that width is
+            // `RailState::terminal_inset_logical_px` reading `focus`. The bit
+            // lives on the window rather than in `window.rail`, so a solve handed
+            // the stored preference is a solve told the mode is off — which is
+            // the whole of "the column floated over the panes".
+            self.rail_posture(),
+        );
+        // **The one gate the type system cannot hold: the stage was solved against
+        // the panel this window is actually wearing.**
+        //
+        // Every geometry question in this file is supposed to go through
+        // [`Self::rail_posture`], and nothing but a reader's care makes that true —
+        // `WindowRuntime::rail` is the same type and compiles just as well, which
+        // is how the card column came to be drawn floating over the panes on the
+        // day it landed. So the agreement is checked where the answer lands: it
+        // re-solves the viewport from
+        // the posture, and a solve handed anything else stops the debug build on
+        // the first frame of the mode rather than showing it to a reader.
+        debug_assert_eq!(
+            viewport,
+            seats::logical_viewport(
+                render_physical.width,
+                render_physical.height,
+                seats::scale_ppm(self.window.renderer.metrics().dpi_milli().get()),
+                seats::rail_inset_device_px(
+                    self.rail_posture(),
+                    seats::scale_ppm(self.window.renderer.metrics().dpi_milli().get()),
+                ),
+            ),
+            "the stage was laid out against a panel this window is not wearing"
         );
         self.window.seat_viewport = viewport;
         // T230, and the reason the diff is taken *here*: this is the one place a
@@ -17822,13 +17880,18 @@ impl Runtime<'_> {
         // none of it belongs to the app — asking the horizontal strip's geometry
         // regardless is what left the whole top bar answering `HTCLIENT`, so the
         // window could not be dragged by it (R3).
+        //
+        // The posture and not the preference, for the same reason one layout
+        // further on: focus mode takes the strip away in *either* tab layout, so
+        // a bar asked about the stored preference would go on reserving the run
+        // of a strip nobody is drawing.
         self.window
             .custom_window_frame
             .set_tab_strip_right_px(seats::title_bar_app_run_right_px(
                 width as f32,
                 scale,
                 self.window.tabs.len(),
-                self.window.rail,
+                self.rail_posture(),
             ));
         // The badge's box is a function of the number in it, and only the font
         // knows how wide a number is — so the measuring happens here, where the
@@ -17897,7 +17960,7 @@ impl Runtime<'_> {
                 )
             })
             .collect::<Vec<_>>();
-        // Door 5's caption, measured on the same beat as the badges (§7.1.6b′ ⑤).
+        // The `Exit` caption, measured on the same beat as the badges (§7.1.6b′).
         // Unconditional rather than only in focus mode: it is one short word, and
         // a number that existed only while the mode was on would be a number the
         // first frame of the mode had to do without.
@@ -21391,12 +21454,25 @@ impl Runtime<'_> {
     /// fade the rail already runs (Q183): they are two declarations on two
     /// elements, and CSS multiplies them exactly once each.
     fn rail_overlay_layers(&self) -> Vec<marks::OverlayLayer> {
+        // **The fold belongs to the ordinary rail, and to nothing else**
+        // (§7.1.6b′: the `Sidebar` row's three rest states govern the *ordinary*
+        // panel, and the card column is card-width whatever they say). A window
+        // whose sidebar was folded away and then entered focus mode kept the
+        // fold's `opacity: 0` on the panel layer: the column was solved at 220,
+        // the stage started after it, the hit test answered its cards — and
+        // nothing was drawn there. A 220-pixel hole with live buttons in it,
+        // which is worse than either of the two states it was between.
+        //
+        // `width_logical_px` already refuses the fold for the same reason; this
+        // is that refusal on the paint side, which is where it was missing.
+        let fold = self
+            .window
+            .rail_fold
+            .sample(Instant::now(), self.app.motion)
+            .0;
         rail_overlay_layer(
             &self.window.rail_chrome,
-            self.window
-                .rail_fold
-                .sample(Instant::now(), self.app.motion)
-                .0,
+            panel_opacity(self.rail_posture(), fold),
         )
     }
 
@@ -36363,14 +36439,7 @@ impl Runtime<'_> {
         let programs = &self.app.profile_programs;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
-        profiles::pane_menu_build(
-            &layout,
-            hover,
-            current,
-            programs,
-            self.window.focus_mode,
-            &mut measure,
-        )
+        profiles::pane_menu_build(&layout, hover, current, programs, &mut measure)
     }
 
     fn close_pane_menu(&mut self) -> Result<bool> {
@@ -37380,10 +37449,6 @@ impl Runtime<'_> {
                 // so the match is exhaustive over a closed set rather than over
                 // a wildcard that would silently swallow a row added later.
                 profiles::PaneMenuRow::Picker | profiles::PaneMenuRow::SplitWith => Ok(()),
-                // **Door 4 of five** (§7.1.6b′ ④). One row, both directions,
-                // reading out the verb it is about to perform — so the same line
-                // is the way in and, while the mode is on, the way out.
-                profiles::PaneMenuRow::FocusMode => self.toggle_focus_mode(),
                 profiles::PaneMenuRow::NewInFolder => {
                     self.browse_for_split_root(seat);
                     Ok(())
@@ -43689,7 +43754,10 @@ impl Runtime<'_> {
             width,
             height,
             scale_ppm,
-            seats::rail_inset_device_px(self.window.rail, scale_ppm),
+            // The posture, because the solver is handed the posture: a rim
+            // measured against the stored preference would aim its left-edge drop
+            // zone at the 220 pixels the card column is standing on.
+            seats::rail_inset_device_px(self.rail_posture(), scale_ppm),
         )
     }
 
@@ -44155,7 +44223,7 @@ impl Runtime<'_> {
         // same window, so it answers to whoever owns this window's size — and to
         // whatever the window's rail is currently keeping clear.
         let policy = self.window.size_policy;
-        let rail = self.window.rail;
+        let rail = self.rail_posture();
         let (from, into) = two_tabs_mut(&mut self.window.tabs, index, self.window.active_tab);
         let ejected =
             absorb_tab_into_layout(from, into, arrived, displaced.as_ref(), id, |seats| {
@@ -44225,7 +44293,7 @@ impl Runtime<'_> {
         let source = self.window.active_tab;
         let motion = self.app.motion;
         let policy = self.window.size_policy;
-        let rail = self.window.rail;
+        let rail = self.rail_posture();
         let torn = tear_pane_into_tab(
             &mut self.window.tabs[source],
             &metrics,
@@ -44550,18 +44618,22 @@ impl Runtime<'_> {
             // ever meant. Dropping it is the whole of letting go.
             let held_pane =
                 self.window.pane_press.take().is_some() | self.window.row_press.take().is_some();
-            // **Door 3** (§7.1.6b′ ③). Paired on the release, where the browser's
-            // `dblclick` fires, and only when the release lands on the head the
-            // press began on — a press that travelled to another head is two
-            // gestures, not one repeated. The focus move the ruling mentions has
-            // already happened: `focus_pane_at` ran on the way down, which is
-            // what leaves the caret where the hand already was.
-            if let Some(seats::ChromeTarget::PaneHeader(seat)) = target
-                && self.window.pane_head_clicks.register(seat, Instant::now()) == TabClick::Double
-            {
-                self.toggle_focus_mode()?;
-                return Ok(true);
-            }
+            // **A double-click on a pane head does nothing, and that is a
+            // decision** (user ruling 2026-08-19, withdrawing §7.1.6b′ ③).
+            //
+            // It carried focus mode for one day. The argument against it: the
+            // gesture reads as "make this pane bigger" — that is what a
+            // double-click on a title bar means everywhere in this operating
+            // system — while focus mode makes the pane *smaller* and puts a
+            // column of tabs beside it. A gesture that does the opposite of what
+            // its shape promises is worse than no gesture, and worse still when
+            // nothing on screen says it exists.
+            //
+            // **The gesture is left free on purpose**: single-pane zoom is the
+            // verb whose shape it is, and that feature already has its layout
+            // primitives waiting for it (`bt-layout`'s `LayoutMode::Focus` /
+            // `solve_focused`, kept unused for exactly this). When it lands, this
+            // is where it goes.
             if let Some(press) = self.window.tab_press.take() {
                 self.release_tab_press(press, target)?;
                 return Ok(true);
@@ -44581,13 +44653,6 @@ impl Runtime<'_> {
         // A press that lands on something other than a row leaves no row press
         // behind. The arms below that *are* rows arm their own, after this.
         self.window.row_press = None;
-        // Door 3's chain breaks on anything that is not a press on a head —
-        // `MultiClicks::interrupt`'s own rule, applied once here rather than in
-        // every arm below: a press on the head's `×`, on a divider, on the
-        // terminal's body is not the first half of a double click on a header.
-        if !matches!(target, Some(seats::ChromeTarget::PaneHeader(_))) {
-            self.window.pane_head_clicks.interrupt();
-        }
         // D40, above the router and consuming nothing: every press inside a pane
         // moves the layout focus there, whatever else the press goes on to mean.
         // Above the rename guard too — clicking into another pane is a blur, and
@@ -45056,9 +45121,9 @@ impl Runtime<'_> {
             // *taken*, so it does not fall through to a pane the rail is drawn
             // on top of. See [`seats::ChromeTarget::RailBody`].
             seats::ChromeTarget::RailBody => {}
-            // **Door 5 of five** (§7.1.6b′ ⑤) — the one way out you can see.
-            // Four of the other doors are gestures, and a mode you can leave only
-            // by remembering one is a mode that traps people.
+            // **The one way out you can see** (§7.1.6b′). The other three are a
+            // chord, a settings row and `Esc`, and a mode you can leave only by
+            // remembering one of those is a mode that traps people.
             seats::ChromeTarget::FocusExit => {
                 self.window.tab_clicks.interrupt();
                 self.set_focus_mode(false)?;
@@ -45818,20 +45883,17 @@ impl Runtime<'_> {
     /// snapping.
     fn sampled_rail(&self, now: Instant) -> seats::RailState {
         let fold = Some(self.window.rail_fold.sample(now, self.app.motion).0);
-        // **The window's posture, joined to the reader's preference here and
-        // only here** (§7.1.6b′). `seats` is a pure function of the numbers it is
-        // handed and holds no clock and no window; `RailState::focus` is one more
-        // sampled input beside `open`, `text_opacity` and `fold`, and this is the
-        // one place any of them is read off the runtime.
-        let focus = self.window.focus_mode;
+        // **The window's posture, and the clocks on top of it.** The join of the
+        // two halves is [`Self::rail_posture`]'s one line and is taken from there
+        // rather than written a second time here: two spellings of "the rail as
+        // this window wears it" is how the paint and the solver came to disagree
+        // about whether a card column was on screen.
+        //
         // Asked of the state as it *will be* rather than of the stored one: a
         // window in focus mode draws no icon rail whatever `Sidebar` says, so
         // asking the stored rail would sample the opening tween of a panel that
         // is not on screen.
-        let resting = seats::RailState {
-            focus,
-            ..self.window.rail
-        };
+        let resting = self.rail_posture();
         if !resting.draws_icon_rail() {
             return seats::RailState {
                 open: 1.0,
@@ -45856,6 +45918,15 @@ impl Runtime<'_> {
     /// panel cost". Those must answer to the posture and not to the preference,
     /// or a window in focus mode goes on reasoning about a rail nobody is
     /// drawing.
+    ///
+    /// **The solver is one of those callers, and that is the whole of the fix
+    /// this branch carries.** The card column is in the flow exactly as an
+    /// expanded rail is: `terminal_inset_logical_px` answers 220 for it, and the
+    /// viewport `solve_seats` is handed begins there. Passing
+    /// [`WindowRuntime::rail`] instead — which it did — is asking the solver to
+    /// lay the stage out as though the panel were not on screen, and a panel
+    /// drawn over a stage that was never told about it is the occlusion the
+    /// screenshots showed.
     fn rail_posture(&self) -> seats::RailState {
         seats::RailState {
             focus: self.window.focus_mode,
@@ -45863,7 +45934,7 @@ impl Runtime<'_> {
         }
     }
 
-    /// How wide the word on door 5's button is drawn (§7.1.6b′ ⑤).
+    /// How wide the word on the `Exit` button is drawn (§7.1.6b′).
     ///
     /// Read out of the runtime rather than measured here, and that is
     /// [`WindowRuntime::preview_button_width`]'s own reason repeated: the hit
@@ -45891,20 +45962,19 @@ impl Runtime<'_> {
         )
     }
 
-    /// **The one door behind all five** (§7.1.6b′: "five doors, one bit, one
-    /// face").
+    /// **The one door behind every door** (§7.1.6b′: "one bit, one face").
     ///
-    /// The Appearance row, `Ctrl+Shift+Z`, a double-click on a pane header, that
-    /// pane's `⌄` menu and the `Exit` button all arrive here, for
-    /// [`Self::set_rail_state`]'s reason one feature over: a mode cannot mean two
-    /// things depending on which door it came through, and the row in Appearance
-    /// has to show what is true however the bit was last turned.
+    /// The `Appearance` row, `Ctrl+Shift+Z`, the `Exit` button and the `Esc` rung
+    /// all arrive here, for [`Self::set_rail_state`]'s reason one feature over: a
+    /// mode cannot mean two things depending on which door it came through, and
+    /// the row in Appearance has to show what is true however the bit was last
+    /// turned.
     ///
     /// It writes **both halves** of §2.4 rule three: the window's own posture,
     /// and the file that says what the next window opens as. That second write is
     /// what the ruling asks the row to buy — a window closed in focus mode
     /// reopens in it — and it is here rather than in the row's own handler
-    /// because all five doors are the same decision.
+    /// because every door is the same decision.
     ///
     /// **There is nothing to restore and nothing to save.** The stage is the
     /// active tab's own tree, untouched on the way in; what changes is the width
@@ -45930,6 +46000,10 @@ impl Runtime<'_> {
         // they are solved into begins 220 logical pixels further in (or stops
         // doing so). There is no branch anywhere below this for what is being
         // drawn — only a different number for where it starts.
+        eprintln!(
+            "BT_FOCUS on={on} inset={}px",
+            self.rail_posture().terminal_inset_logical_px()
+        );
         self.commit_seat_geometry()?;
         self.apply_window_min_inner_size()?;
         if let Some(position) = self.window.pointer_position {
@@ -46101,10 +46175,14 @@ impl Runtime<'_> {
         }
         self.window.rail = state;
         eprintln!(
-            "BT_RAIL layout={:?} mode={:?} inset={}px",
+            "BT_RAIL layout={:?} mode={:?} focus={} inset={}px",
             self.window.rail.layout,
             self.window.rail.mode,
-            self.window.rail.terminal_inset_logical_px()
+            self.window.focus_mode,
+            // The inset the stage will actually be solved with, which is the
+            // posture's — a trace printed off the preference would report 0 for a
+            // window whose panes had just moved 220px.
+            self.rail_posture().terminal_inset_logical_px()
         );
         // An icon rail is born parked, whatever the last one was doing, and its
         // words are away with it. A pointer already standing inside it opens it
@@ -51098,6 +51176,22 @@ fn rail_zone_wants_open(
 /// Red gate: send the grounds through the quad channel as this used to and the
 /// pin below finds the rail's panel among the fills; drop the fold and a
 /// collapsing rail pops instead of fading.
+/// **How opaque the panel on the left is drawn** — the fold's own number, and a
+/// flat `1.0` while the card column is up (§7.1.6b′).
+///
+/// Its own function because it is a *rule* and not a reading: the fold is the
+/// `Sidebar` row's business, the card column is not wired to that row, and the
+/// place those two facts meet has to be somewhere a test can stand.
+///
+/// Red gate: return `fold` unconditionally — which is what this used to do — and
+/// [`the_card_column_is_never_faded_by_a_fold_that_is_not_its_own`] goes red, as
+/// the screen did: a window whose sidebar was folded away entered focus mode and
+/// drew nothing in a 220-pixel column that was nevertheless solved for, hit-
+/// tested and clickable.
+fn panel_opacity(state: seats::RailState, fold: f32) -> f32 {
+    if state.draws_focus_rail() { 1.0 } else { fold }
+}
+
 fn rail_overlay_layer(rail: &seats::ChromeGroup, fold: f32) -> Vec<marks::OverlayLayer> {
     if rail.quads.is_empty() && rail.labels.is_empty() && rail.sprites.is_empty() {
         return Vec::new();
@@ -60383,6 +60477,57 @@ mod tests {
         // An empty rail is no layer at all, which is what a horizontal layout
         // and a collapsed rail both hand this function.
         assert!(rail_overlay_layer(&seats::ChromeGroup::default(), 1.0).is_empty());
+    }
+
+    /// PIN (§7.1.6b′, user report on the real machine 2026-08-19) — **the card
+    /// column is never faded by a fold that is not its own.**
+    ///
+    /// `Sidebar`'s three rest states govern the *ordinary* rail; the column is
+    /// card-width and fully drawn whatever they say, and [`panel_opacity`] is
+    /// where those two facts meet. The failure this closes was photographed:
+    /// fold the sidebar away, then enter focus mode, and the window solved a
+    /// 220-pixel column, started the stage after it, hit-tested its cards — and
+    /// painted the layer at `opacity: 0`. A live, invisible panel.
+    ///
+    /// Red gate: return the fold unconditionally and the first loop goes red at
+    /// every folded value; drop the `else` and a *collapsing ordinary* rail pops
+    /// instead of fading, which the second half asserts.
+    #[test]
+    fn the_card_column_is_never_faded_by_a_fold_that_is_not_its_own() {
+        for layout in [
+            seats::TabLayoutMode::Horizontal,
+            seats::TabLayoutMode::Vertical,
+        ] {
+            for mode in [seats::RailMode::Expanded, seats::RailMode::Icons] {
+                for collapsed in [false, true] {
+                    let ordinary = seats::RailState {
+                        layout,
+                        mode,
+                        collapsed,
+                        ..seats::RailState::default()
+                    };
+                    let focused = seats::RailState {
+                        focus: true,
+                        ..ordinary
+                    };
+                    for fold in [0.0, 0.4, 1.0] {
+                        assert_eq!(
+                            panel_opacity(focused, fold),
+                            1.0,
+                            "{layout:?}/{mode:?}/collapsed={collapsed}: the column is \
+                             drawn whole however far the sidebar's own fold has \
+                             travelled"
+                        );
+                        assert_eq!(
+                            panel_opacity(ordinary, fold),
+                            fold,
+                            "{layout:?}/{mode:?}/collapsed={collapsed}: while the \
+                             ordinary rail still travels on its own clock"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// **Red gate (user report, 2026-08-15): a peek summoned from a pane head

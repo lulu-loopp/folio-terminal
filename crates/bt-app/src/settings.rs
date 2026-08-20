@@ -3042,8 +3042,8 @@ impl SettingsRow {
                 .iter()
                 .position(|it| *it == values.tab_layout),
             // **The window's own bit, not the file's.** The row shows what this
-            // window is doing right now, because that is what all five doors
-            // turn; the file is what a *new* window is born as. They agree
+            // window is doing right now, because that is what every door
+            // turns; the file is what a *new* window is born as. They agree
             // except in the seconds after a chord in another window, and the
             // dialog is in this one.
             Self::FocusMode => FORMULA_OPTIONS
@@ -3425,7 +3425,8 @@ pub struct SettingsValues {
     /// **Whether this window is in focus mode right now** (§7.1.6b′).
     ///
     /// The window's bit and not the file's, for the reason the row's own tick
-    /// gives: five doors turn it, and the row has to show what is true of the
+    /// gives: this row is one of the two doors and not the only one, and it has
+    /// to show what is true of the
     /// window the dialog is standing in. The file is what a *new* window opens
     /// as, and the two are kept in step by the one applier that writes both.
     pub focus_mode: bool,
