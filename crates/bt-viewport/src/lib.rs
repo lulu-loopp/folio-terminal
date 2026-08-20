@@ -1839,12 +1839,12 @@ impl ViewportProjection {
         // read as the single sequence they are presented as. Over the **complete** sequence, not
         // the window about to be cut from it: a URL whose tail falls below the viewport must not
         // become a link to the shorter address its visible half spells.
-        let implicit_live_base = if primary { staged_rows.len() } else { 0 };
+        let staged_sequence: &[StagedRow] = if primary { staged_rows } else { &[] };
+        let implicit_live_base = staged_sequence.len();
         let implicit = implicit_hyperlinks(
-            &staged_rows
+            &staged_sequence
                 .iter()
                 .map(|staged| &staged.row)
-                .take(implicit_live_base)
                 .chain(live_rows.iter())
                 .collect::<Vec<_>>(),
         );
