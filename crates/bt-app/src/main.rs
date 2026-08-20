@@ -43,6 +43,7 @@ mod highlight;
 mod i18n;
 mod input;
 mod marks;
+mod mouse_trace;
 mod notify;
 mod peek_strip;
 mod persist;
@@ -8052,7 +8053,7 @@ struct SelectionDrag {
     local_image_activation: LocalImageActivation,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum SelectionDragMode {
     Linear,
     Word,
@@ -28827,10 +28828,32 @@ impl Runtime<'_> {
     fn preview_landing_surface(&mut self) -> Option<PreviewSurface> {
         let metrics = self.seat_metrics();
         let existed = self.seats.landing_preview().is_some();
-        let seat = self.seats.add_preview(&metrics)?;
-        if !existed {
-            self.settle_seat_set_change().ok()?;
+        // **Both `None`s are traced, separately, and neither is the same
+        // finding** (`BT_MOUSE_TRACE`). The first is the layout refusing to mint
+        // a leaf; the second is a leaf that *was* minted and then filed under a
+        // settle that failed — which leaves the tree holding a pane the caller
+        // is about to be told does not exist.
+        let Some(seat) = self.seats.add_preview(&metrics) else {
+            self.mouse_trace(|| {
+                format!(
+                    "preview_landing_surface none=add_preview reused={}",
+                    u8::from(existed)
+                )
+            });
+            return None;
+        };
+        if !existed && let Err(error) = self.settle_seat_set_change() {
+            self.mouse_trace(|| {
+                format!("preview_landing_surface none=settle_seat_set_change seat={seat:?} error={error:#}")
+            });
+            return None;
         }
+        self.mouse_trace(|| {
+            format!(
+                "preview_landing_surface seat={seat:?} reused={}",
+                u8::from(existed)
+            )
+        });
         Some(PreviewSurface::Seat(seat))
     }
 
@@ -28946,12 +28969,17 @@ impl Runtime<'_> {
     /// Land a picture on the surface a newly opened file goes to, then ask the shared
     /// worker/cache pipeline for it. Keyboard focus deliberately remains on the terminal.
     fn open_preview_image(&mut self, path: PathBuf) -> Result<()> {
+        self.mouse_trace(|| format!("open_preview_image enter path={}", path.display()));
         // Where it lands, before anything is written: `preview_landing_surface`
         // may have to mint a leaf, and a picture filed against a pane that then
         // failed to open is a picture nothing will ever draw.
         let Some(surface) = self.preview_landing_surface() else {
+            // The silent door (`BT_MOUSE_TRACE`): from the outside this `Ok(())`
+            // and a click that never happened are the same event.
+            self.mouse_trace(|| "open_preview_image leave=no-landing-surface".to_owned());
             return Ok(());
         };
+        self.mouse_trace(|| format!("open_preview_image leave=opened surface={surface:?}"));
         self.open_preview_image_on(surface, path)
     }
 
@@ -29007,6 +29035,7 @@ impl Runtime<'_> {
     /// edits intact, whichever pane showed it — so this is a *lookup* that
     /// sometimes reads a disk, never a read that sometimes finds a cache.
     fn open_preview_file(&mut self, path: PathBuf) -> Result<()> {
+        self.mouse_trace(|| format!("open_preview_file enter path={}", path.display()));
         // **The reuse target is `landing_preview()`** — the un-pinned preview
         // pane, and a fresh leaf beside the pinned one when there is no such
         // pane. That is the whole of what the pin has meant since slice 4 (P95:
@@ -29020,8 +29049,12 @@ impl Runtime<'_> {
         // a leaf and a buffer filed against a pane that never opened is a buffer
         // nothing will ever draw.
         let Some(surface) = self.preview_landing_surface() else {
+            // The silent door (`BT_MOUSE_TRACE`): from the outside this `Ok(())`
+            // and a click that never happened are the same event.
+            self.mouse_trace(|| "open_preview_file leave=no-landing-surface".to_owned());
             return Ok(());
         };
+        self.mouse_trace(|| format!("open_preview_file leave=opened surface={surface:?}"));
         self.open_preview_file_on(surface, path)
     }
 
@@ -45807,7 +45840,45 @@ impl Runtime<'_> {
     /// It stays in the signature so the table can be tested with it false, which
     /// is what pins "a drag is only ever a selection".
     fn activate_hyperlink(&mut self, hyperlink: HyperlinkHit, control: bool) -> Result<()> {
-        match hyperlink_activation(control, true, &hyperlink.uri, &|path| path.is_dir()) {
+        let activation = hyperlink_activation(control, true, &hyperlink.uri, &|path| path.is_dir());
+        // Which arm of the routing table this address fell into, the address it
+        // fell there with, and — for a `file:` — what the address actually named
+        // on this disk (`BT_MOUSE_TRACE`).
+        //
+        // The whole hit goes in, anchors included, because a link an application
+        // broke across three printed rows is a link whose *identity* is the
+        // question: a `uri` that arrives here truncated at a row boundary parses
+        // to a path that is not there, and the arm it then takes is `None` —
+        // which from outside the window is indistinguishable from the click
+        // never having arrived at all.
+        //
+        // The disk questions are asked only inside the closure, so an unset gate
+        // asks none of them, and never of a share: §7.1.3 does not read one
+        // unasked and a diagnostic must not be the thing that stalls the loop on
+        // a cold `\\server`.
+        self.mouse_trace(|| {
+            let named = bt_platform::file_uri_to_path(&hyperlink.uri).map_or_else(
+                || "path=unparsed".to_owned(),
+                |path| {
+                    if preview::is_network_path(&path) {
+                        format!("path={} share=1", path.display())
+                    } else {
+                        format!(
+                            "path={} exists={} dir={}",
+                            path.display(),
+                            u8::from(path.exists()),
+                            u8::from(path.is_dir()),
+                        )
+                    }
+                },
+            );
+            format!(
+                "activate_hyperlink control={} uri={:?} arm={activation:?} {named} hit={hyperlink:?}",
+                u8::from(control),
+                hyperlink.uri,
+            )
+        });
+        match activation {
             HyperlinkActivation::None => {}
             HyperlinkActivation::Browser => {
                 let result = window_hwnd(&self.window.window).and_then(|hwnd| {
@@ -46228,6 +46299,24 @@ impl Runtime<'_> {
             hyperlink_control,
             local_image_activation,
         })));
+        // The route the press armed, and what it promised (`BT_MOUSE_TRACE`).
+        // Read back out of the route rather than off the locals, so what the
+        // trace reports is what the release will actually find.
+        self.mouse_trace(|| {
+            let Some(MouseRoute::Local(drag)) = self.window.mouse_route.as_ref() else {
+                return "begin_local_selection route=missing".to_owned();
+            };
+            format!(
+                "begin_local_selection route=local seat={:?} origin={},{} mode={:?} control={} hyperlink={:?} image={:?}",
+                drag.origin_seat,
+                drag.origin_row,
+                drag.origin_column,
+                drag.mode,
+                u8::from(drag.hyperlink_control),
+                drag.hyperlink,
+                drag.local_image_activation,
+            )
+        });
         self.publish_interaction_frame()
     }
 
@@ -48619,6 +48708,12 @@ impl Runtime<'_> {
         button: MouseButton,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
+        // `BT_MOUSE_TRACE`: the chrome's own answer about this point, read once
+        // and only when a trace is open. Reported at every exit that *takes* the
+        // event, because "the chrome ate the release" and "which of its twenty
+        // arms ate it" are two different findings and only the second one names
+        // a place to look.
+        let traced_target = mouse_trace::is_on().then(|| self.chrome_target_at(position));
         if button == MouseButton::Middle {
             if state == ElementState::Pressed
                 && let Some(seats::ChromeTarget::Tab(index)) = self.chrome_target_at(position)
@@ -48626,12 +48721,15 @@ impl Runtime<'_> {
                 // Closing a tab with the wheel is not the first half of anything.
                 self.window.tab_clicks.interrupt();
                 self.close_tab(index)?;
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=middle-close-tab state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
-            return Ok(matches!(
+            let taken = matches!(
                 self.chrome_target_at(position),
                 Some(seats::ChromeTarget::Tab(_))
-            ));
+            );
+            self.mouse_trace(|| format!("chrome_mouse_input taken={} at=middle-on-tab state={state:?} button={button:?} target={traced_target:?}", u8::from(taken)));
+            return Ok(taken);
         }
         if button != MouseButton::Left {
             return Ok(false);
@@ -48644,6 +48742,7 @@ impl Runtime<'_> {
             if self.preview_body_drag.take().is_some() {
                 self.note_preview_body_hover(Some(position))?;
                 self.repaint_preview()?;
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-preview-body-thumb state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
             // The terminal's own thumb, on the same terms: the offset it wrote
@@ -48653,11 +48752,13 @@ impl Runtime<'_> {
                 self.wake_terminal_thumb(drag.seat);
                 self.note_terminal_thumb_hover(Some(position))?;
                 self.repaint_pane_change(drag.seat)?;
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-terminal-thumb state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
             if self.preview_block_drag.take().is_some() {
                 self.note_preview_block_hover(Some(position))?;
                 self.repaint_preview()?;
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-preview-block-thumb state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
             // A carried picture is let go wherever the hand lets go of it, and
@@ -48665,17 +48766,20 @@ impl Runtime<'_> {
             // the closed hand away.
             if self.preview_image_drag.take().is_some() {
                 self.apply_pointer_cursor();
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-preview-image-drag state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
             // A selection drawn across the edit surface ends wherever the button
             // comes up. The release is consumed because the press was: a gesture
             // belongs to the surface it began on, whatever it is let go over.
             if self.preview_selecting.take().is_some() {
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-preview-selecting state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
             // Ahead of the press: a gesture that has become a drag answers with
             // its drop, and the press that started it is no longer a click.
             if self.release_drag()? {
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-drag-drop state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
             if self.window.divider_drag.take().is_some() {
@@ -48687,6 +48791,7 @@ impl Runtime<'_> {
                 // The end of a drag is a meaningful change (§5.1): the ratio that
                 // was being explored is now the ratio the user chose.
                 self.mark_session_dirty(Instant::now());
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-divider-drag state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
             let target = self.chrome_target_at(position);
@@ -48713,12 +48818,16 @@ impl Runtime<'_> {
             // is where it goes.
             if let Some(press) = self.window.tab_press.take() {
                 self.release_tab_press(press, target)?;
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-tab-press state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
             if held_pane {
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-held-pane state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
-            return Ok(target.is_some());
+            let taken = target.is_some();
+            self.mouse_trace(|| format!("chrome_mouse_input taken={} at=release-target-is-some state={state:?} button={button:?} target={target:?}", u8::from(taken)));
+            return Ok(taken);
         }
         let target = self.chrome_target_at(position);
         // **P149 — the glance is gone on press**, whatever the press turns out to
@@ -48780,6 +48889,7 @@ impl Runtime<'_> {
                 // is consumed whole — no promise armed, no click recorded.
                 self.window.tab_clicks.interrupt();
                 self.window.preview_name_clicks.interrupt();
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-in-rename-editor state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
             self.finish_rename(true)?;
@@ -48809,6 +48919,7 @@ impl Runtime<'_> {
             // block in it and over every link in those — and a press on it was
             // never a press on what it is standing over.
             if self.press_preview_body_thumb(position)? {
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-preview-body-thumb state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
             // **And a terminal pane's, on exactly those terms** (P2-9 slice 1).
@@ -48821,23 +48932,27 @@ impl Runtime<'_> {
             // does not swallow the bar (§7.1.5f's own ordering: a target this
             // window recognises comes before the program's tracking).
             if self.press_terminal_thumb(position)? {
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-terminal-thumb state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
             // A link is a control standing in the prose and answers before the
             // prose does.
             if self.press_preview_link(position)? {
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-preview-link state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
             // The bar under a wide block is a scrollbar and answers first: it
             // stands over the block it scrolls, so a press on it was never a
             // press in the content beneath.
             if self.press_preview_block_thumb(position)? {
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-preview-block-thumb state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
             // A picture answers before the edit surface does, and answers
             // instead of it: the two are alternatives on one body, and a body
             // showing a picture has nothing to put a caret in.
             if self.press_preview_image(position)? {
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-preview-image state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
             // A press inside the edit surface puts the caret where the pointer
@@ -48845,6 +48960,7 @@ impl Runtime<'_> {
             // the only way into `InputOwner::PreviewEdit` that does not need a
             // chord.
             if self.press_preview_body(position)? {
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-preview-body state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
             return Ok(press_reaches_no_grid(
@@ -48862,6 +48978,7 @@ impl Runtime<'_> {
                     .into_iter()
                     .find(|slot| slot.id == split)
                 else {
+                    self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-divider-no-slot state={state:?} button={button:?} target={traced_target:?}"));
                     return Ok(true);
                 };
                 // **Which seam this is, decided once and from the tree** (F66).
@@ -48891,6 +49008,7 @@ impl Runtime<'_> {
                             .into_iter()
                             .find_map(|(id, ratio)| (id == split).then_some(ratio))
                         else {
+                            self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-divider-no-ratio state={state:?} button={button:?} target={traced_target:?}"));
                             return Ok(true);
                         };
                         DividerGrip::Ratio(origin)
@@ -49117,6 +49235,7 @@ impl Runtime<'_> {
                 {
                     self.close_preview_menu()?;
                     self.open_preview_rename(seat)?;
+                    self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-preview-name-double state={state:?} button={button:?} target={traced_target:?}"));
                     return Ok(true);
                 }
                 self.window.pane_press = Some(PanePress {
@@ -49206,10 +49325,64 @@ impl Runtime<'_> {
                 self.set_focus_mode(false)?;
             }
         }
+        self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-routed state={state:?} button={button:?} target={target:?}"));
         Ok(true)
     }
 
+    /// **One line into `BT_MOUSE_TRACE`, stamped with this window** — the door
+    /// every station of a click's road writes through.
+    ///
+    /// Behaviourally inert by construction: it takes `&self`, it returns nothing,
+    /// and the closure it is handed is never called when the gate is shut (see
+    /// [`mouse_trace`]). The window id is part of the prefix rather than of every
+    /// caller's format string because a two-window session interleaves two
+    /// gestures into one file and there would otherwise be no way to unpick them.
+    fn mouse_trace(&self, message: impl FnOnce() -> String) {
+        let Some(trace) = mouse_trace::global() else {
+            return;
+        };
+        let window = u64::from(self.window.window.id());
+        mouse_trace::emit(Some(trace), || format!("window={window} {}", message()));
+    }
+
+    /// What the mouse route is, for a trace line that must not need `Debug` on a
+    /// boxed selection drag. The kind is the whole of what the forensics ask:
+    /// "was a route armed at all, and is it still there when the button comes
+    /// up".
+    fn mouse_route_name(&self) -> &'static str {
+        match self.window.mouse_route {
+            None => "none",
+            Some(MouseRoute::Local(_)) => "local",
+            Some(MouseRoute::Forward(_)) => "forward",
+            Some(MouseRoute::MathBlock) => "math",
+        }
+    }
+
     fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {
+        // The road's first station (`BT_MOUSE_TRACE`). Everything a cross-monitor
+        // report needs to be settled about the *frame* the click landed in is
+        // read here, once, before any router has had the chance to move it: the
+        // pointer in physical pixels, the scale the metrics believe, and the two
+        // sizes that must agree with each other for a chrome hit rectangle to sit
+        // where it is drawn.
+        self.mouse_trace(|| {
+            let presentation = self.window.renderer.presentation_geometry();
+            let inner = self.window.window.inner_size();
+            let pointer = self
+                .window
+                .pointer_position
+                .map_or_else(|| "none".to_owned(), |at| format!("{},{}", at.x, at.y));
+            format!(
+                "mouse_input state={state:?} button={button:?} pointer={pointer} \
+                 metrics_scale={} swapchain_size={}x{} inner_size={}x{} route={}",
+                self.window.renderer.metrics().scale_factor,
+                presentation.swapchain_size.0,
+                presentation.swapchain_size.1,
+                inner.width,
+                inner.height,
+                self.mouse_route_name(),
+            )
+        });
         // M142, and ahead of everything: any press at all takes the tip down.
         // Unconditional — not "a press that hits something", not "a left press" —
         // because a tooltip answers "what is this?" and the act of pressing is
@@ -49857,6 +50030,9 @@ impl Runtime<'_> {
             return self.finish_local_selection(*drag);
         }
         let Some((hit_seat, hit)) = self.pane_frame_hit() else {
+            // No cell under the pointer at all — the router is out of surfaces
+            // and the event ends here (`BT_MOUSE_TRACE`).
+            self.mouse_trace(|| "pane_press seat=none".to_owned());
             return Ok(());
         };
         // **The terminal's own context menu** (ticket #62), above the forwarding
@@ -49901,6 +50077,27 @@ impl Runtime<'_> {
         // child's benefit. The mark and the verb must be read off the same map or
         // a press one row from the underline could claim it.
         let target = self.pressed_cell_target(hit);
+        // **The fork the second half of the report turns on** (`BT_MOUSE_TRACE`).
+        //
+        // Claude Code prints its links with 1000/1002/1003/1006 on, so a press in
+        // one of its panes belongs to the child *unless* the cell carries a
+        // target this window verified — and a link the application broke across
+        // three printed rows is exactly a link the cell scan may fail to name.
+        // When that happens the press is forwarded and nothing opens, which is
+        // the same nothing every other suspect produces. The cell's own answer
+        // and the pressed-cell verdict are both written here so the two can be
+        // told apart.
+        self.mouse_trace(|| {
+            format!(
+                "pane_press seat={hit_seat:?} cell={},{} forwarded_cell={},{} pressed_target={target:?} link={:?} image={:?}",
+                hit.row,
+                hit.column,
+                forwarded_hit.row,
+                forwarded_hit.column,
+                self.hyperlink_hit(hit),
+                self.local_image_path_hit(hit),
+            )
+        });
         if let Some(bytes) = route_forwarded_mouse_button(
             &mut self.window.mouse_route,
             state,
@@ -49910,6 +50107,13 @@ impl Runtime<'_> {
             self.window.modifiers,
             target,
         ) {
+            self.mouse_trace(|| {
+                format!(
+                    "pane_press forwarded=1 bytes={} route={}",
+                    bytes.len(),
+                    self.mouse_route_name()
+                )
+            });
             return self.send_user_input(
                 &bytes,
                 "forward mouse button event to PTY",
@@ -49958,7 +50162,14 @@ impl Runtime<'_> {
             {
                 (
                     true,
-                    hyperlink.filter(|pressed| release_hyperlink.as_ref() == Some(pressed)),
+                    // Borrowed and then cloned on the way out, rather than moved
+                    // in: the press's own hit stays readable below, where
+                    // `BT_MOUSE_TRACE` reports it beside the release's. The
+                    // clone happens only where a link is actually opening.
+                    hyperlink
+                        .as_ref()
+                        .filter(|pressed| release_hyperlink.as_ref() == Some(*pressed))
+                        .cloned(),
                     local_image_activation
                         .path()
                         .is_some_and(|pressed| release_local_image_path.as_deref() == Some(pressed))
@@ -49967,6 +50178,31 @@ impl Runtime<'_> {
             } else {
                 (false, None, None)
             };
+        // **The station the cross-monitor report is really about**
+        // (`BT_MOUSE_TRACE`). Three separate things can turn a click on a link
+        // into nothing here, and until this line they were indistinguishable
+        // from the outside: the release landing in another pane (`release=none`),
+        // the release landing on a different cell (`single_click=0`), and the
+        // two hyperlink hits not comparing equal (`same_link=0`) — the last of
+        // which includes a re-scan between press and release having minted new
+        // anchors for the same address.
+        self.mouse_trace(|| {
+            format!(
+                "finish_local_selection seat={seat:?} origin={origin_row},{origin_column} release={} \
+                 single_click={} press_link={:?} release_link={:?} same_link={} opens_link={} control={} image={:?}",
+                release_hit.map_or_else(
+                    || "none".to_owned(),
+                    |hit| format!("{},{}", hit.row, hit.column)
+                ),
+                u8::from(single_click),
+                hyperlink,
+                release_hyperlink,
+                u8::from(hyperlink.as_ref() == release_hyperlink.as_ref()),
+                u8::from(hyperlink_to_open.is_some()),
+                u8::from(hyperlink_control),
+                local_image_action,
+            )
+        });
         let copy_on_select =
             should_copy_on_select_release(self.window.mouse_route.as_ref(), single_click);
         self.window.mouse_route = None;
@@ -53439,6 +53675,111 @@ impl<K: Copy + Eq + std::hash::Hash, W> Windows<K, W> {
     }
 }
 
+/// **The stations of a click's road are still wired to `BT_MOUSE_TRACE`.**
+///
+/// This apparatus exists because a click on a link can be declined by six
+/// surfaces in a row and — before it — every one of those refusals was silent.
+/// The failure mode of the fix is exactly the failure mode it was built to end:
+/// a seventh `return` added beside the six, without a line beside it, puts the
+/// silence back one arm at a time and nothing fails while it happens.
+///
+/// So the pins read this file as text, which is the only witness that can answer
+/// "is there a `return` here with nothing written next to it". They assert
+/// nothing about *what* is traced — the format is free to change — only that no
+/// exit of these functions is unaccompanied.
+#[cfg(test)]
+mod mouse_trace_station_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// How far back a trace call may stand from the `return` it belongs to.
+    ///
+    /// A window rather than "the line immediately above", because a station whose
+    /// fields need a `match` is a multi-line call and its last line is `});` — a
+    /// pin that demanded adjacency would be a pin against formatting.
+    const LOOKBACK: usize = 10;
+
+    /// Every line whose whole content is `needle`, with the handful of non-blank
+    /// lines that precede it.
+    fn returns_and_what_precedes(text: &str, needle: &str) -> Vec<(String, String)> {
+        let lines: Vec<&str> = text.lines().collect();
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.trim() == needle)
+            .map(|(at, line)| {
+                let before = lines[at.saturating_sub(LOOKBACK)..at].join("\n");
+                ((*line).to_owned(), before)
+            })
+            .collect()
+    }
+
+    fn assert_every_return_is_traced(signature: &str, needle: &str, expected: usize) {
+        let found = returns_and_what_precedes(body(signature), needle);
+        assert_eq!(
+            found.len(),
+            expected,
+            "{signature} has {} exits spelled `{needle}`, the pin was written for {expected} — \
+             count them again and trace the new one",
+            found.len()
+        );
+        for (line, before) in found {
+            assert!(
+                before.contains("self.mouse_trace("),
+                "{signature}: `{}` has no BT_MOUSE_TRACE line within {LOOKBACK} lines above it:\n{before}",
+                line.trim(),
+            );
+        }
+    }
+
+    /// The chrome swallowing a release is suspect ① of the cross-monitor report,
+    /// and "which of its arms swallowed it" is the only form of that finding that
+    /// names a place to look.
+    #[test]
+    fn every_chrome_exit_that_takes_the_event_writes_a_line() {
+        assert_every_return_is_traced("    fn chrome_mouse_input(", "return Ok(true);", 20);
+    }
+
+    /// Both `None`s here are silent by construction — the callers turn them into
+    /// `Ok(())` — and they are two different findings, so they carry two labels.
+    #[test]
+    fn both_landing_refusals_write_a_line() {
+        let text = body("    fn preview_landing_surface(");
+        assert_every_return_is_traced("    fn preview_landing_surface(", "return None;", 2);
+        assert!(
+            text.contains("none=add_preview") && text.contains("none=settle_seat_set_change"),
+            "the two landing refusals are told apart by label, not merely counted"
+        );
+    }
+
+    /// The doors a hyperlink's `Preview` arm ends at. Their `Ok(())` is the exact
+    /// shape of "the click did nothing", so it is the one that must speak.
+    #[test]
+    fn both_preview_openers_write_a_line_when_nothing_opens() {
+        for signature in ["    fn open_preview_image(", "    fn open_preview_file("] {
+            let text = body(signature);
+            assert!(
+                text.contains("leave=no-landing-surface"),
+                "{signature} returns `Ok(())` without saying so"
+            );
+            assert!(
+                text.contains("enter path="),
+                "{signature} does not record that it was reached at all"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod window_registry_tests {
     use super::Windows;
@@ -55491,6 +55832,25 @@ fn log_dpi_snapshot(
         inner_size.width,
         inner_size.height,
     );
+    // **The same four numbers, into the mouse trace** (`BT_MOUSE_TRACE`).
+    //
+    // The `eprintln!` above is untouched and stays the permanent record; this is
+    // a second copy in the one file that also holds the clicks, because the whole
+    // question a cross-monitor report asks is *what the scale was doing between
+    // two presses* — and two logs with two clocks cannot be laid over each other
+    // to answer it. No window id: this is a free function reached from the
+    // window's own reconciliation points, and the stage names them well enough
+    // for a single-window reproduction.
+    mouse_trace::line(|| {
+        format!(
+            "dpi stage={stage} metrics_scale={metrics_scale} authoritative_scale={} swapchain_size={}x{} inner_size={}x{}",
+            display_scale_factor(snapshot.authoritative_scale),
+            presentation.swapchain_size.0,
+            presentation.swapchain_size.1,
+            inner_size.width,
+            inner_size.height,
+        )
+    });
 }
 
 fn ensure_swapchain_matches_inner(
