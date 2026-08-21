@@ -24415,6 +24415,150 @@ mod tests {
             "the alternate screen is not ordered against the primary document at all"
         );
     }
+
+    /// **The prompt is the shell speaking, and the shell has no use for the mouse.**
+    ///
+    /// User report, 2026-08-20, the second time it cost a window: Claude Code —
+    /// alternate screen with `1000`/`1002`/`1003`/`1006` all on — was killed while
+    /// it sat on "Waiting for 7 background agents to finish", so it never reached
+    /// its own reset. Nobody sends `?1003l` on a dead child's behalf; ConPTY least
+    /// of all. The modes therefore outlived the program that asked for them, and
+    /// the thing standing at the front by then was PowerShell: every pointer
+    /// twitch arrived as `\e[<35;16;38M`, PSReadLine echoed it into the input line
+    /// as keystrokes, and the only way out was closing the window.
+    ///
+    /// `OSC 133;A` is the one byte-level fact that says *the shell is speaking
+    /// now*, and a shell never reads mouse reports. A tracking mode still on at
+    /// that instant is therefore a dead program's leftovers by construction —
+    /// not a guess about what the bytes look like.
+    #[test]
+    fn a_prompt_start_retires_the_mouse_modes_a_dead_program_left_behind() {
+        let mut session = DualPlaneSession::new(nz(80), nz(8));
+        session
+            .feed(b"\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h")
+            .unwrap();
+        // The program is gone, and took only the screen with it.
+        session.feed(b"\x1b[?1049l").unwrap();
+        let orphaned = session.terminal_modes();
+        assert!(!orphaned.alternate_screen);
+        assert_eq!(
+            orphaned.mouse_tracking,
+            crate::adapter::MouseTracking::Motion,
+            "the disease itself: 1003 is still on with nobody left to read it"
+        );
+        assert!(orphaned.sgr_mouse);
+
+        session.feed(b"\x1b]133;A\x1b\\").unwrap();
+        let modes = session.terminal_modes();
+        assert_eq!(
+            modes.mouse_tracking,
+            crate::adapter::MouseTracking::Off,
+            "the prompt retires all three tracking levels at once"
+        );
+        assert!(
+            !modes.sgr_mouse,
+            "and the encoding with them: a mode that encodes reports nobody will \
+             make is the same leftover"
+        );
+        assert!(!modes.focus_reporting);
+    }
+
+    /// The same disease with a different symptom: a leftover `1004` types `\e[I` /
+    /// `\e[O` into the prompt every time the window is clicked into and away from.
+    /// One rule covers both because it is one rule — *would the shell itself ever
+    /// use this?*
+    #[test]
+    fn a_prompt_start_retires_focus_reporting_a_dead_program_left_behind() {
+        let mut session = DualPlaneSession::new(nz(80), nz(8));
+        session.feed(b"\x1b[?1004h").unwrap();
+        assert!(session.terminal_modes().focus_reporting);
+        session.feed(b"\x1b]133;A\x1b\\").unwrap();
+        assert!(!session.terminal_modes().focus_reporting);
+    }
+
+    /// The other half of the criterion, and the half that keeps it a rule rather
+    /// than a sweep: the modes the shell *does* use are not touched.
+    ///
+    /// `2004` is PSReadLine's own — it turns bracketed paste on for itself and
+    /// would be broken by a prompt that cleared it. `1049` belongs to whoever put
+    /// the alternate screen up, and a prompt is not evidence that they left.
+    /// `1007` only means anything on the alternate screen and is inert on a
+    /// prompt. `DECCKM` is a keyboard mode a line editor may well have set.
+    #[test]
+    fn a_prompt_start_leaves_the_modes_the_shell_itself_uses_alone() {
+        let mut session = DualPlaneSession::new(nz(80), nz(8));
+        session
+            .feed(b"\x1b[?2004h\x1b[?1049h\x1b[?1007h\x1b[?1h")
+            .unwrap();
+        session.feed(b"\x1b]133;A\x1b\\").unwrap();
+        assert!(
+            session.bracketed_paste_mode(),
+            "2004 is the shell's own; retiring it would break paste at the prompt"
+        );
+        assert!(
+            session.terminal_modes().alternate_screen,
+            "a program that draws its own prompt on the alternate screen is still \
+             a program, and this window does not evict it"
+        );
+        assert!(session.terminal_modes().alternate_scroll);
+        assert!(session.application_cursor_mode());
+    }
+
+    /// **Only `A`.** `B` is the command line being typed, `C` is a command
+    /// starting — the instant a program is most likely to be turning tracking
+    /// *on* — and `D` is one finishing, which says nothing about what the next
+    /// thing wants. Retiring at any of them would be a terminal that switches the
+    /// mouse off underneath a program that just asked for it.
+    #[test]
+    fn only_the_prompt_start_marker_retires_program_input_modes() {
+        for marker in [
+            &b"\x1b]133;B\x1b\\"[..],
+            &b"\x1b]133;C\x1b\\"[..],
+            &b"\x1b]133;D;0\x1b\\"[..],
+        ] {
+            let mut session = DualPlaneSession::new(nz(80), nz(8));
+            session.feed(b"\x1b[?1003h\x1b[?1006h\x1b[?1004h").unwrap();
+            session.feed(marker).unwrap();
+            let modes = session.terminal_modes();
+            assert_eq!(
+                modes.mouse_tracking,
+                crate::adapter::MouseTracking::Motion,
+                "{marker:?} is not the shell taking the floor"
+            );
+            assert!(modes.sgr_mouse, "{marker:?}");
+            assert!(modes.focus_reporting, "{marker:?}");
+        }
+    }
+
+    /// **The premise, spelled out: `A` retires nothing on the alternate screen.**
+    ///
+    /// The rule reads "the prompt is the shell speaking", and on the alternate
+    /// screen it is not: the only thing that can write there is the full-screen
+    /// program itself, and there are programs that emit their own `133;A` while
+    /// tracking the mouse on purpose. Switching their mouse off would be this
+    /// window breaking a program that is very much alive — the exact opposite of
+    /// the complaint. It is the same "alt-screen 一律不记" this state machine
+    /// already applies to prompt state (DESIGN §7.1.5b), for the same reason.
+    #[test]
+    fn a_prompt_start_on_the_alternate_screen_retires_nothing_and_evicts_nobody() {
+        let mut session = DualPlaneSession::new(nz(80), nz(8));
+        session
+            .feed(b"\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[?1004h")
+            .unwrap();
+        session.feed(b"\x1b]133;A\x1b\\").unwrap();
+        let modes = session.terminal_modes();
+        assert!(
+            modes.alternate_screen,
+            "1049 is not on the list at either screen"
+        );
+        assert_eq!(
+            modes.mouse_tracking,
+            crate::adapter::MouseTracking::Motion,
+            "the program drawing this prompt is the one that asked for the mouse"
+        );
+        assert!(modes.sgr_mouse);
+        assert!(modes.focus_reporting);
+    }
 }
 
 #[cfg(test)]

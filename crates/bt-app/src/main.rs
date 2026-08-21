@@ -60510,6 +60510,7 @@ mod tests {
                                     alternate_scroll,
                                     sgr_mouse: true,
                                     mouse_tracking,
+                                    focus_reporting: false,
                                 },
                                 scrolled,
                             )
@@ -60602,6 +60603,7 @@ mod tests {
             alternate_scroll: false,
             sgr_mouse: true,
             mouse_tracking: MouseTracking::Drag,
+            focus_reporting: false,
         };
         assert_eq!(
             wheel_route(false, plain, false),

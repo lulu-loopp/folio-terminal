@@ -104,6 +104,11 @@ pub struct TerminalModes {
     pub alternate_scroll: bool,
     pub sgr_mouse: bool,
     pub mouse_tracking: MouseTracking,
+    /// DECSET 1004: the child asked to be told when this window gains and loses
+    /// focus. Reported here for the same reason the mouse bits are — it is a
+    /// mode a *program* turns on, and something has to be able to see that it is
+    /// still on after the program that wanted it is gone.
+    pub focus_reporting: bool,
 }
 
 /// Facts emitted by the alacritty compatibility seam. DESIGN.md §3.1 policy is intentionally
@@ -1013,6 +1018,7 @@ impl TerminalAdapter {
             alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
             sgr_mouse: mode.contains(TermMode::SGR_MOUSE),
             mouse_tracking,
+            focus_reporting: mode.contains(TermMode::FOCUS_IN_OUT),
         }
     }
 
@@ -1824,8 +1830,13 @@ mod tests {
                 alternate_scroll: true,
                 sgr_mouse: true,
                 mouse_tracking: MouseTracking::Drag,
+                focus_reporting: false,
             }
         );
+        terminal.feed(b"\x1b[?1004h");
+        assert!(terminal.modes().focus_reporting);
+        terminal.feed(b"\x1b[?1004l");
+        assert!(!terminal.modes().focus_reporting);
         terminal.feed(b"\x1b[?1003h");
         assert_eq!(terminal.modes().mouse_tracking, MouseTracking::Motion);
         terminal.feed(b"\x1b[?1049l\x1b[?1007l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
