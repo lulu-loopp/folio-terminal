@@ -183,11 +183,10 @@ const LIGHT_SHADE_SOURCE: [u8; 3] = [0x00, 0x00, 0x00];
 const MENU_DARK: [u8; 3] = [0x2a, 0x2a, 0x2a];
 /// `--menu #FFFFFF` on the light canvas.
 const MENU_LIGHT: [u8; 3] = [0xff, 0xff, 0xff];
-/// `--win #202020` on the dark canvas — the window's own face, which a control
-/// inset in a panel stands on (`.focus-exit { background: var(--win) }`).
-const WIN_DARK: [u8; 3] = [0x20, 0x20, 0x20];
-/// `--win #FFFFFF` on the light canvas.
-const WIN_LIGHT: [u8; 3] = [0xff, 0xff, 0xff];
+// `--win` had exactly one reader in this table — the face of the `Exit` button
+// at the head of the focus column — and it left with the button on 2026-08-20
+// (§7.1.6b′). The scheme generator still derives the same value for its own
+// canvases; nothing here needs a constant for it any more.
 
 /// `--border` over `--panel`, dark — the hairline worn by everything struck on
 /// the rail's own ground.
@@ -227,11 +226,6 @@ const FOCUS_CARD_PILL_STAGED_DARK: [u8; 3] = ink_over(FOCUS_CARD_STAGED_DARK, DA
 /// The same on light.
 const FOCUS_CARD_PILL_STAGED_LIGHT: [u8; 3] =
     ink_over(FOCUS_CARD_STAGED_LIGHT, LIGHT_INK_SOURCE, 90);
-/// The Exit button under the pointer, dark — `--hover` over `--win`.
-const FOCUS_EXIT_HOVER_DARK: [u8; 3] = ink_over(WIN_DARK, DARK_INK_SOURCE, 55);
-/// The same on light.
-const FOCUS_EXIT_HOVER_LIGHT: [u8; 3] = ink_over(WIN_LIGHT, LIGHT_INK_SOURCE, 55);
-
 /// `.gsec` under `.grow:hover`, dark: `--hover rgba(255,255,255,.055)`.
 const GIT_ROW_HOVER_DARK: [u8; 3] = ink_over(PANEL_DARK, DARK_INK_SOURCE, 55);
 /// The same on light: `--hover rgba(55,53,47,.055)`.
@@ -1341,15 +1335,6 @@ pub struct ChromePalette {
     pub ring_track_on_focus_card: [u8; 3],
     /// The same on a staged card.
     pub ring_track_on_focus_card_staged: [u8; 3],
-    /// `.focus-exit { background: var(--win) }` — door 5's face. Opaque on both
-    /// canvases, so there is nothing to composite.
-    pub focus_exit: [u8; 3],
-    /// `.focus-exit { color: var(--ink2) }` over [`Self::focus_exit`].
-    pub focus_exit_text: [u8; 3],
-    /// `.focus-exit:hover { background: var(--hover) }` over the same face.
-    pub focus_exit_hover: [u8; 3],
-    /// `.focus-exit:hover { color: var(--ink) }` over [`Self::focus_exit_hover`].
-    pub focus_exit_text_hover: [u8; 3],
     /// `.fc-mini { color: var(--ink2) }` over [`Self::seat_body`] — the ink a
     /// card's mini rows are set in, terminal tail and files row alike.
     ///
@@ -1646,10 +1631,6 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     // same ladder `ring_track_on_active_tab` and its two siblings ride.
     ring_track_on_focus_card: ink_over_bp(FOCUS_CARD_DARK, DARK_SHADE_SOURCE, 658),
     ring_track_on_focus_card_staged: ink_over_bp(FOCUS_CARD_STAGED_DARK, DARK_SHADE_SOURCE, 658),
-    focus_exit: WIN_DARK,
-    focus_exit_text: ink_over(WIN_DARK, DARK_INK_SOURCE, 550),
-    focus_exit_hover: FOCUS_EXIT_HOVER_DARK,
-    focus_exit_text_hover: ink_over(FOCUS_EXIT_HOVER_DARK, DARK_INK_SOURCE, 870),
     // The card's body stands on `--termbg`, so all three of these are composited
     // over it. Each is numerically equal to a field that already exists — a
     // files row's ink and muted ink, and the preview grid's line — and, as with
@@ -1913,10 +1894,6 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     // `--border` at `opacity: .7` — `.088 × .7 = .0616`, in ten-thousandths.
     ring_track_on_focus_card: ink_over_bp(FOCUS_CARD_LIGHT, LIGHT_SHADE_SOURCE, 616),
     ring_track_on_focus_card_staged: ink_over_bp(FOCUS_CARD_STAGED_LIGHT, LIGHT_SHADE_SOURCE, 616),
-    focus_exit: WIN_LIGHT,
-    focus_exit_text: ink_over(WIN_LIGHT, LIGHT_INK_SOURCE, 650),
-    focus_exit_hover: FOCUS_EXIT_HOVER_LIGHT,
-    focus_exit_text_hover: ink_over(FOCUS_EXIT_HOVER_LIGHT, LIGHT_INK_SOURCE, 1000),
     // The dark canvas's three, on paper — see the note there.
     focus_mini_text: ink_over(TERMBG_LIGHT, LIGHT_INK_SOURCE, 650),
     focus_mini_edge: ink_over(TERMBG_LIGHT, LIGHT_SHADE_SOURCE, 55),
@@ -2481,25 +2458,11 @@ pub const FOCUS_CARD_PIN_BOX_LOGICAL_PX: f32 = 11.0;
 /// `.fc-head .fc-close svg { width: 8px; height: 8px }` — the `×` inside its
 /// box, the same glyph the strip's own `×` is drawn at.
 pub const FOCUS_CARD_CLOSE_GLYPH_LOGICAL_PX: f32 = WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX;
-/// `.focus-bar { padding: 4px 2px 6px }` — the bar that stands where the rail's
-/// "Tabs" heading stands the rest of the time.
-pub const FOCUS_BAR_PADDING_TOP_LOGICAL_PX: f32 = 4.0;
-pub const FOCUS_BAR_PADDING_X_LOGICAL_PX: f32 = 2.0;
-pub const FOCUS_BAR_PADDING_BOTTOM_LOGICAL_PX: f32 = 6.0;
-/// `.focus-bar { gap: 6px }` — between the label and the way out.
-pub const FOCUS_BAR_GAP_LOGICAL_PX: f32 = 6.0;
-/// `.focus-exit { height: 22px }` — door 5.
-pub const FOCUS_EXIT_HEIGHT_LOGICAL_PX: f32 = 22.0;
-/// `.focus-exit { padding: 0 8px }`.
-pub const FOCUS_EXIT_PADDING_X_LOGICAL_PX: f32 = 8.0;
-/// `.focus-exit { border-radius: 6px }`.
-pub const FOCUS_EXIT_RADIUS_LOGICAL_PX: f32 = 6.0;
-/// `.focus-exit { gap: 5px }` — between the glyph and the word.
-pub const FOCUS_EXIT_GAP_LOGICAL_PX: f32 = 5.0;
-/// `.focus-exit svg { width: 10px; height: 10px }`.
-pub const FOCUS_EXIT_GLYPH_LOGICAL_PX: f32 = 10.0;
-/// `.focus-exit { font-size: 11px }` — the word `Exit`.
-pub const FOCUS_EXIT_FONT_LOGICAL_PX: f32 = 11.0;
+// The column has no heading row: the `.focus-bar` that carried the words
+// `Focus mode` and a visible `Exit` was withdrawn on 2026-08-20 (§7.1.6b′), and
+// its band went back to the cards. Nothing measures it any more, so nothing here
+// names it — the first card starts at [`RAIL_PADDING_TOP_LOGICAL_PX`], exactly
+// where the rail's first row starts.
 
 // ---------------------------------------------------------------------------
 // §7.1.6b′ F2 — the card's body: the whole tab's split tree in miniature.

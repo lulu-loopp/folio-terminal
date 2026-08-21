@@ -4751,20 +4751,11 @@ struct WindowRuntime {
     /// cannot measure, and "the button you can press is the button you can see"
     /// has to be true by one number rather than by two functions agreeing.
     preview_button_width: f32,
-    /// How wide the word `Exit` on the visible way out is drawn (§7.1.6b′).
-    ///
-    /// Here for the field above's reason exactly, and it is the reason stated
-    /// there: the hit test cannot measure, so the box the button is drawn in and
-    /// the box the pointer is tested against have to come from one number. It is
-    /// re-measured on every chrome build, which is what carries it across a DPI
-    /// change and across a language change without either needing to know it
-    /// exists.
-    focus_exit_width: f32,
     /// How wide one character of the mini transcript's face is drawn, in physical
     /// pixels (§7.1.6b′ F2).
     ///
-    /// Measured beside [`Self::focus_exit_width`] and for exactly its reason —
-    /// only the font knows how wide a character is, and measuring needs `&mut`
+    /// Measured beside [`Self::preview_button_width`] and for exactly its reason
+    /// — only the font knows how wide a character is, and measuring needs `&mut`
     /// all the way to the glyph cache — but what it buys is a *cut* rather than
     /// a box: it turns a mini seat's rectangle into the number of characters that
     /// fit across it, which is what a session's tail is shortened to before it is
@@ -5315,15 +5306,18 @@ struct WindowRuntime {
     /// §2.4 rule three, and the `dwm_dark_mode` shape exactly: the setting is
     /// about every window and this is what *this* one is currently doing, so the
     /// two live a layer apart. `settings.focus_mode` says what a new window opens
-    /// as; this says what the window in front of you is. **Two doors lead in and
-    /// four lead out** (user ruling 2026-08-19): the `Appearance` row and
-    /// `Ctrl+Shift+Z` both ways, plus the `Exit` button at the head of the card
-    /// column and the `Esc` rung on the way out. The pane-header double-click and
-    /// the pane menu's row were withdrawn the day they landed — a gesture that
+    /// as; this says what the window in front of you is. **Two doors, and you
+    /// leave through the one you came in by** (user ruling 2026-08-20): the
+    /// `Appearance` row and `Ctrl+Shift+Z`, each working both ways. 「它是设置里
+    /// 的一个设置，怎么这么容易就退出」—— the ruling withdrew the `Exit` button,
+    /// the whole heading row it stood in and the `Esc` rung together, because a
+    /// mode that is a line in a settings page should not be knocked over by a key
+    /// pressed at a prompt. The pane-header double-click and the pane menu's row
+    /// had already gone the day they landed (2026-08-19) — a gesture that
     /// promises "bigger" while doing the opposite, and a window verb in a menu of
-    /// pane verbs. Every remaining door goes through [`Self::set_focus_mode`],
+    /// pane verbs. Both remaining doors go through [`Self::set_focus_mode`],
     /// because a mode cannot mean two things depending on which door it came
-    /// through.
+    /// through, and `focus_mode_door_tests` counts them.
     ///
     /// **Beside [`Self::rail`] rather than inside it**, though the bit is
     /// sampled into `RailState::focus` every frame. The two are different kinds
@@ -17909,7 +17903,6 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         // that opens *in* focus mode has not animated into it, it was born there.
         focus_reveal: RevealTween::resting(0.0, RAIL_TRANSITION),
         attention_next_ticket: 0,
-        focus_exit_width: 0.0,
         focus_mini_advance: 0.0,
         focus_mini_face_advance: 0.0,
         focus_thumbs: focus_thumb::FocusThumbnails::default(),
@@ -20039,21 +20032,8 @@ impl Runtime<'_> {
                 )
             })
             .collect::<Vec<_>>();
-        // The `Exit` caption, measured on the same beat as the badges (§7.1.6b′).
-        // Unconditional rather than only in focus mode: it is one short word, and
-        // a number that existed only while the mode was on would be a number the
-        // first frame of the mode had to do without.
-        let focus_exit_width = {
-            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
-            renderer.measure_chrome_text(
-                gpu,
-                i18n::Text::FocusExit.text(),
-                bt_render::FOCUS_EXIT_FONT_LOGICAL_PX * scale,
-            )
-        };
-        self.window.focus_exit_width = focus_exit_width;
-        // One character of the mini transcript's face, on the same beat and for
-        // the same reason — see [`WindowRuntime::focus_mini_advance`].
+        // One character of the mini transcript's face, measured on the same beat
+        // as the badges — see [`WindowRuntime::focus_mini_advance`].
         let focus_mini_advance = {
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             renderer.measure_chrome_mono_text(
@@ -20413,7 +20393,6 @@ impl Runtime<'_> {
                 // and `seats` holds no clock to work them out for itself.
                 rail: self.sampled_rail(now),
                 rail_scroll: self.window.rail_scroll,
-                exit_caption_width: self.window.focus_exit_width,
                 focus_reveal: self.window.focus_reveal.sample(now, self.app.motion).0,
                 focus_thumbnails: &focus_thumbnails,
                 preview_titles: &preview_titles,
@@ -24510,7 +24489,7 @@ impl Runtime<'_> {
         if let Some(layout) = settings::tab_layout_requested(target) {
             self.set_rail_state(rail_state_for(layout, self.window.rail.mode))?;
         }
-        // **Door 1 of five** (§7.1.6b′ ①). Deliberately *not* through
+        // **Door 1 of two** (§7.1.6b′ ①). Deliberately *not* through
         // `rail_state_for`: focus mode is orthogonal to both rail rows, so a
         // press here must leave `Tab layout` and `Sidebar` exactly where they
         // stand — which is what makes leaving the mode need no restoring code.
@@ -28470,7 +28449,7 @@ impl Runtime<'_> {
             // both get the same silence.
             shortcuts::Action::GitPage => self.toggle_git_page(),
             shortcuts::Action::OpenSettings => self.toggle_settings_panel(),
-            // **Door 2 of five** (§7.1.6b′ ②): one chord, both directions,
+            // **Door 2 of two** (§7.1.6b′ ②): one chord, both directions,
             // because the mode is one bit and the Appearance row shows which way
             // it is set. A separate "leave" key would be a second truth about the
             // same bit.
@@ -47405,7 +47384,6 @@ impl Runtime<'_> {
                 height,
                 scale,
                 &trailers,
-                self.focus_exit_caption_width(),
                 self.window.rail_scroll,
                 rail,
                 position.x,
@@ -49599,13 +49577,6 @@ impl Runtime<'_> {
             // *taken*, so it does not fall through to a pane the rail is drawn
             // on top of. See [`seats::ChromeTarget::RailBody`].
             seats::ChromeTarget::RailBody => {}
-            // **The one way out you can see** (§7.1.6b′). The other three are a
-            // chord, a settings row and `Esc`, and a mode you can leave only by
-            // remembering one of those is a mode that traps people.
-            seats::ChromeTarget::FocusExit => {
-                self.window.tab_clicks.interrupt();
-                self.set_focus_mode(false)?;
-            }
         }
         self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-routed state={state:?} button={button:?} target={target:?}"));
         Ok(true)
@@ -50582,19 +50553,6 @@ impl Runtime<'_> {
         }
     }
 
-    /// How wide the word on the `Exit` button is drawn (§7.1.6b′).
-    ///
-    /// Read out of the runtime rather than measured here, and that is
-    /// [`WindowRuntime::preview_button_width`]'s own reason repeated: the hit
-    /// test is `&self` by construction and cannot measure, while measuring needs
-    /// `&mut` all the way down to the glyph cache. So the number is taken once
-    /// where the picture is built and read everywhere else, which is also what
-    /// makes "the button you can press is the button you can see" true by one
-    /// number rather than by two functions agreeing.
-    fn focus_exit_caption_width(&self) -> f32 {
-        self.window.focus_exit_width
-    }
-
     /// The focus column's live geometry — [`Self::rail_geometry_now`]'s opposite
     /// number, and `None` in exactly the case that one is `Some`.
     fn focus_rail_geometry_now(&self, now: Instant) -> Option<seats::FocusRailGeometry> {
@@ -50604,7 +50562,6 @@ impl Runtime<'_> {
             height as f32,
             scale,
             self.window.tabs.len(),
-            self.focus_exit_caption_width(),
             self.window.rail_scroll,
             self.sampled_rail(now),
         )
@@ -50758,8 +50715,7 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// Door 2's verb, and the pane menu's and the double-click's: one chord, both
-    /// directions, because the mode is one bit.
+    /// Door 2's verb: one chord, both directions, because the mode is one bit.
     fn toggle_focus_mode(&mut self) -> Result<()> {
         self.set_focus_mode(!self.window.focus_mode)
     }
@@ -52243,25 +52199,14 @@ impl Runtime<'_> {
         {
             return Ok(());
         }
-        // **Focus mode's rung, and it is the bottom one** — the rung the comment
-        // above has been naming all along (`… pv-float, flyout, SEARCH,
-        // focus-mode`), now that there is a mode to leave (§7.1.6b′).
-        //
-        // Last because it is the biggest and quietest thing an Escape can undo:
-        // every transient above it is something that appeared in the last few
-        // seconds, while this is a layout somebody may have been living in. A
-        // press that closed the mode *and* a flyout would take away something the
-        // hand was not asking about.
-        //
-        // Below it there is nothing but the pane, so a window not in focus mode
-        // passes the key straight to the shell exactly as it did before.
-        if matches!(event.logical_key, Key::Named(NamedKey::Escape))
-            && !event.repeat
-            && self.window.focus_mode
-        {
-            self.set_focus_mode(false)?;
-            return Ok(());
-        }
+        // **The ladder ends with the capsule** (user ruling 2026-08-20). Focus
+        // mode used to hold one more rung below it, and the ruling took that rung
+        // out: 「它是设置里的一个设置，怎么这么容易就退出」. Every rung above is a
+        // transient that appeared in the last few seconds; the mode is a line in
+        // `Appearance` that somebody may have been living in for a week, and it
+        // is not something a key pressed at a `vim` prompt should be able to
+        // knock over. So an Escape inside focus mode means what it means outside
+        // it, all the way down to the `0x1b` the shell gets.
 
         // A non-empty winit Preedit is the composition authority. Editing/navigation keys are
         // intentionally left to the IME here even if it also exposes a physical named key; no PTY
@@ -54081,6 +54026,76 @@ mod mouse_trace_station_tests {
                 "{signature} does not record that it was reached at all"
             );
         }
+    }
+}
+
+/// **Focus mode has two doors, and they are the same two in both directions**
+/// (§7.1.6b′, user ruling 2026-08-20).
+///
+/// 「它是设置里的一个设置，怎么这么容易就退出」—— the mode is a line in
+/// `Appearance`, not a transient a stray key should be able to knock over. The
+/// ruling withdrew the visible `Exit` button, the whole heading row it stood in,
+/// and the `Esc` rung, leaving `Ctrl+Shift+Z` and the settings row: **you leave
+/// through the door you came in by.**
+///
+/// These pins read this file as text for [`mouse_trace_station_tests`]'s reason,
+/// and it is the same failure mode: a third door added later is one more call to
+/// one method, and nothing about it would fail. A count over the whole file is
+/// the only witness that can say "there are two".
+#[cfg(test)]
+mod focus_mode_door_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's —
+    /// [`mouse_trace_station_tests`]' own reader.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// **Every write of the bit, and there are two.**
+    ///
+    /// Both the needle **and the two lines it expects** are assembled at run
+    /// time rather than written out, because a pin that scans the file it lives
+    /// in must not be able to match its own text — spelled-out literals here
+    /// would count as extra doors and the pin would end up describing itself.
+    #[test]
+    fn only_the_chord_and_the_settings_row_write_the_bit() {
+        let needle = ["self", ".", "set_focus_mode", "("].concat();
+        let doors: Vec<&str> = SOURCE
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains(needle.as_str()))
+            .collect();
+        let expected = [
+            // `Appearance ▸ Focus mode: On/Off`, through `focus_mode_requested`.
+            format!("{needle}on)?;"),
+            // `Ctrl+Shift+Z`, through `toggle_focus_mode`.
+            format!("{needle}!self.window.focus_mode)"),
+        ];
+        assert_eq!(
+            doors, expected,
+            "focus mode is entered and left through two doors and no others"
+        );
+    }
+
+    /// **The key ladder does not know the mode exists.**
+    ///
+    /// `Esc` used to hold the bottom rung of §7.1.5's ladder and leave focus
+    /// mode from it. The ruling took that rung out, so what `Esc` means inside
+    /// the mode is exactly what it means outside it — dismiss the top-most
+    /// transient, and failing that, hand `0x1b` to the shell.
+    #[test]
+    fn the_key_ladder_has_no_rung_for_the_mode() {
+        assert!(
+            !body("    fn keyboard_input(").contains("focus_mode"),
+            "the escape ladder mentions focus mode, so some key still leaves it"
+        );
     }
 }
 
@@ -66755,7 +66770,6 @@ mod tests {
             600.0,
             scale,
             trailers.len(),
-            40.0,
             0.0,
             seats::RailState {
                 focus: true,
@@ -69385,10 +69399,6 @@ mod tests {
             618.0,
             1.0,
             tabs,
-            // A plausible measured width for the word `Exit`. Nothing below is
-            // pinned to it: the bar is above the list and the cards are solved
-            // from the panel's own box.
-            22.0,
             0.0,
             seats::RailState {
                 layout: seats::TabLayoutMode::Vertical,
@@ -69524,13 +69534,13 @@ mod tests {
     ///
     /// `grabbed_offset` has never known which surface it is on — it clamps a
     /// leading edge against a `[start, end]` pair — so what is new is only what
-    /// the column hands it. The bounds are asserted strictly inside the window
-    /// because the heading with `Exit` in it is above the first and the `+` row
-    /// is below the second: a card that could reach either would be drawn over
-    /// the one way out of the mode.
+    /// the column hands it. The clip is the *list's* box and not the panel's: the
+    /// panel's top margin is above it and the sticky `+` row is below it, and a
+    /// card that could reach either would be drawn over furniture that does not
+    /// scroll.
     ///
     /// Red gate: hand the run the panel's box instead of the list's clip and the
-    /// card carried up covers the `Exit` button.
+    /// card carried down covers the `+` row.
     #[test]
     fn a_grabbed_card_is_held_inside_the_columns_own_viewport() {
         // Enough cards that the list actually overflows: a column with room to
@@ -69543,8 +69553,8 @@ mod tests {
         let run = seats::focus_rail_run(&column);
         let [top, foot] = run.viewport;
         assert!(
-            top > column.bar[3] && foot < 618.0,
-            "the clip is the list's own box, under the bar: {:?}",
+            top == column.cards[0].body[1] && foot < 618.0,
+            "the clip is the list's own box, opening on the first card: {:?}",
             run.viewport
         );
         // A card partway down rather than the first: the head card's own top
@@ -69560,7 +69570,7 @@ mod tests {
         assert_eq!(
             drawn(grabbed_offset(start, height, run.viewport, -5_000.0)),
             [top, top + height],
-            "carried up past the heading it stops with its top edge on the list's"
+            "carried up past the head it stops with its top edge on the list's"
         );
         assert_eq!(
             drawn(grabbed_offset(start, height, run.viewport, 5_000.0)),
