@@ -1844,7 +1844,7 @@
   }
   .tab.landing, .vtab.landing { animation: tab-land .2s cubic-bezier(.2, 0, 0, 1); }
   @media (prefers-reduced-motion: reduce) { .tab.landing, .vtab.landing { animation: none; } }
-  /* SPRING-LOADED (§7.1.6f, user ruling 2026-08-20): the tab a carried pane is
+  /* SPRING-LOADED (§7.1.6k, user ruling 2026-08-20): the tab a carried pane is
      resting on, while it is being aimed at. It wears the SAME two declarations
      `.drop-preview` and `tab-land`'s `from` wear, and deliberately so �� the slot
      a drop will fill, the tab that has just been filled and the tab that is
@@ -7355,7 +7355,7 @@
   }
   /* pane dropped on the strip → leaves the layout, becomes its own tab at that slot */
   function extractPaneToTab(leafId, index, homeWs) {
-    /* The pane's OWN tab and not the one on screen (§7.1.6f): the spring can have
+    /* The pane's OWN tab and not the one on screen (§7.1.6k): the spring can have
        moved the view since the hand closed, and a tear-out reaches into the tree
        the pane is actually standing in. */
     const w = (homeWs != null && tabById(homeWs)) || activeTab();
@@ -7382,7 +7382,7 @@
       setTimeout(() => landed.classList.remove("landing"), 240);
     }
   }
-  /* SPRING-LOADED, the drop half (§7.1.6f, user ruling 2026-08-20): a pane let go
+  /* SPRING-LOADED, the drop half (§7.1.6k, user ruling 2026-08-20): a pane let go
      ON a tab — not in the gap between two — leaves its own tab's tree and joins
      that tab's, APPENDED AT THE END.
 
@@ -10516,7 +10516,7 @@
            no verb. The old `return` belonged to a stage that was a PROJECTION of
            one pane: editing the tree from behind that lens changed something you
            could not see until you left. There is no lens now. */
-        /* `homeWs` beside `leafId` since §7.1.6f: a pane drag can outlive its tab
+        /* `homeWs` beside `leafId` since §7.1.6k: a pane drag can outlive its tab
            being on screen now — resting on another tab springs the view over and
            leaves the pane where it was picked up — so "which pane" has to be a
            TAB and a leaf, recorded at the moment the hand closed. A leaf id alone
@@ -11302,7 +11302,7 @@
         ph.innerHTML = `<span class="ticon-wrap">${folderMark()}</span>
           <span class="${titleCls}">${esc(drag.name)}</span>`;
       } else {
-        /* through the pane's own tab (§7.1.6f) — after a spring the view has
+        /* through the pane's own tab (§7.1.6k) — after a spring the view has
            moved and the pane has not, and a stand-in dressed out of the tab now
            on screen would be wearing a stranger's name, or nothing at all */
         const leaf = findLeafIn(tabById(drag.homeWs) || activeTab(), drag.leafId);
@@ -11321,7 +11321,7 @@
   function clearDropPreview() {
     document.querySelectorAll(".drop-preview").forEach(el => el.remove());
   }
-  /* §7.1.6f — the tab a carried pane is resting on, marked. One helper and not a
+  /* §7.1.6k — the tab a carried pane is resting on, marked. One helper and not a
      class toggled at five call sites: the mark is a fact about the drag, so
      exactly one element in the window may wear it and every path that stops
      aiming has to take it off. */
@@ -11576,13 +11576,13 @@
          paths form A kept here (tab joins the column, card reorders, file joins
          as a preview card, folder denied): all four belonged to the standby
          pool, and the pool is two forms dead. */
-      /* §7.1.6f rides on this same guard and needs no second one: ② is a refusal
+      /* §7.1.6k rides on this same guard and needs no second one: ② is a refusal
          of the pane SOURCE, so a card column takes neither of the two offers a
          pane has here — it does not mint a new tab out of one, and it does not
          hand one to a card's tab or spring the column over to it. */
       if (state.focusMode) { hidePreview(); clearDropPreview(); clearAimed(); drag.target = null; return; }
       if (drag.kind === "pane") {
-        /* ── SPRING-LOADED (§7.1.6f, user ruling 2026-08-20) ──
+        /* ── SPRING-LOADED (§7.1.6k, user ruling 2026-08-20) ──
            TWO offers, read off two different questions about one pointer:
              · whose tab is under my hand    → put the pane in THAT tab
              · between which two would it go → make a new tab there (K124)
@@ -11661,7 +11661,7 @@
           && drag.homeWs !== drag.wsId && tabById(drag.homeWs)) selectTab(drag.homeWs);
     }
 
-    /* §7.1.6f — A PANE AWAY FROM HOME HAS NO LANDING IN THIS LAYOUT, and that is
+    /* §7.1.6k — A PANE AWAY FROM HOME HAS NO LANDING IN THIS LAYOUT, and that is
        a policy record rather than a wall (§7.0 rule 8). The spring puts another
        tab's layout under a pointer that is still holding a pane of the tab it set
        out from. The ruling grants exactly one cross-tab door and names where it
@@ -11937,7 +11937,7 @@
        see rather than a hand-off. render() rebuilds the strip and takes the
        preview with it, so the tab lands in the slot the preview was already
        keeping warm and nothing else moves at all. */
-    /* §7.1.6f — let go ON a tab: the pane joins that tab's tree at its end. Its
+    /* §7.1.6k — let go ON a tab: the pane joins that tab's tree at its end. Its
        own row in the commit table rather than a reading of `strip`, because the
        two edit different things: a tear-out edits the RUN (a new entry at a
        slot), and this edits two TREES that may both be off screen. */

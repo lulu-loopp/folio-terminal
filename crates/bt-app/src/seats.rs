@@ -5538,7 +5538,7 @@ pub struct TabRun {
     /// **One bit for the two offers a pane has here, and that is the ruling's
     /// own shape rather than a shortcut.** A pane over a tab list can mint a
     /// *new* tab out of itself (K124, the tear-out) or be handed to one of the
-    /// entries already in the list (§7.1.6f, the spring-loaded drop of
+    /// entries already in the list (§7.1.6k, the spring-loaded drop of
     /// 2026-08-20). Both are "a pane that is not in this list joining it", both
     /// are refused by the card column and offered by the other two, and the
     /// ruling behind the refusal is one sentence about the source rather than
@@ -5628,7 +5628,7 @@ impl TabRun {
     /// the run's padding, the gap above a strip tab, the empty tail past the
     /// last one.
     ///
-    /// The distinction [`Self::mids`] cannot make and §7.1.6f needs. A midpoint
+    /// The distinction [`Self::mids`] cannot make and §7.1.6k needs. A midpoint
     /// walk answers "between which two entries would this land", which is the
     /// only question an *insertion* has and is total over the whole band — every
     /// pointer gets a slot, including one in the empty tail. Spring-loading asks
@@ -5698,7 +5698,7 @@ pub fn rail_run(geometry: &RailGeometry) -> TabRun {
 ///
 /// * **②, a pane source:** [`TabRun::hosts_pane_drop`], `false` here. A pane
 ///   dragged out of the stage may not become a new tab by landing on the card
-///   list — and since §7.1.6f (2026-08-20) it may not be handed to a card's tab
+///   list — and since §7.1.6k (2026-08-20) it may not be handed to a card's tab
 ///   either, nor spring the column over to it. ② is a refusal of the *source*,
 ///   so it refuses both of the offers a pane has on the other two surfaces, and
 ///   it refuses them through one bit rather than at each verb.
@@ -29082,7 +29082,7 @@ mod tests {",
     ///
     /// * **② a card list refuses a pane source outright.** A pane dragged out of
     ///   the stage may not become a new tab by being dropped on the column, and
-    ///   since §7.1.6f (2026-08-20) may not be handed to a card's tab or spring
+    ///   since §7.1.6k (2026-08-20) may not be handed to a card's tab or spring
     ///   the column over to it either — so this run takes no pane drop at all,
     ///   while both surfaces that *are* a whole window's tab list do.
     /// * **③ it refuses file drops** — *"一份 tab 清单没有一个非任意的 tab 可以
@@ -29125,7 +29125,7 @@ mod tests {",
         assert!(
             !run.hosts_pane_drop,
             "②: a pane taken out of the stage has no new tab to become here, \
-             and no card's tab to be handed to either (§7.1.6f)"
+             and no card's tab to be handed to either (§7.1.6k)"
         );
         assert_eq!(run.band, column.body, "and it claims its own rectangle");
         for card in &column.cards {
@@ -31218,7 +31218,7 @@ mod tests {",
         assert_eq!(run.pos(37.0, 412.0), 37.0, "and reads the pointer's x");
     }
 
-    /// **§7.1.6f — "which tab is under my hand" is not "between which two would
+    /// **§7.1.6k — "which tab is under my hand" is not "between which two would
     /// this land", and the run has to be able to say both.**
     ///
     /// [`TabRun::mids`] is total over the band: every pointer inside the surface

@@ -14047,7 +14047,7 @@ enum DragSource {
     Tab(TabId),
     /// A pane, taken by its head (J118, mock-up 5835-5840).
     ///
-    /// **A [`LeafId`] and not a bare [`SeatId`], since §7.1.6f.** A seat number
+    /// **A [`LeafId`] and not a bare [`SeatId`], since §7.1.6k.** A seat number
     /// is only an address while the tab holding it is the tab on screen, and a
     /// spring-loaded drag is precisely the gesture that breaks that: dwell over
     /// another tab and the *view* moves while the pane stays where it was
@@ -14184,7 +14184,7 @@ enum DropLanding {
     /// emptied), so the mock-up asks `paneCount > 1` before it will draw
     /// anything at all (6789).
     StripExtract { slot: usize },
-    /// **§7.1.6f (user ruling, 2026-08-20)** — a *pane* over one of the run's own
+    /// **§7.1.6k (user ruling, 2026-08-20)** — a *pane* over one of the run's own
     /// entries: it leaves its tab's tree and joins **that** tab's, appended at
     /// the end.
     ///
@@ -14522,7 +14522,7 @@ struct Drag {
     /// the thing up, and where you picked it up does not move just because the
     /// list did.
     home: Option<[f32; 4]>,
-    /// **§7.1.6f — the spring's clock**, which is a fact about *this gesture* and
+    /// **§7.1.6k — the spring's clock**, which is a fact about *this gesture* and
     /// dies with it.
     ///
     /// On the drag rather than on the window, and pointedly not sharing state
@@ -14535,7 +14535,7 @@ struct Drag {
     spring: SpringGate,
 }
 
-/// **The spring-loaded switch's clock** (§7.1.6f, user ruling 2026-08-20): rest a
+/// **The spring-loaded switch's clock** (§7.1.6k, user ruling 2026-08-20): rest a
 /// carried pane on another tab and the window goes there, with the pane still in
 /// the air.
 ///
@@ -14739,7 +14739,7 @@ enum DragRelease {
     /// ([`DropLanding::layout_aim`] answers `None`). The tree edit it runs is
     /// `close_seat` on the tab it left, which is the *other* tab's business.
     Extract { slot: usize },
-    /// **§7.1.6f** — a pane let go over one of the run's own entries: it leaves
+    /// **§7.1.6k** — a pane let go over one of the run's own entries: it leaves
     /// its tab's tree and is appended to that tab's.
     ///
     /// Its own verdict rather than a second reading of [`Self::Extract`] for the
@@ -14786,7 +14786,7 @@ enum DragRelease {
 /// window: it is the sentence "who may land on what", and separating it from
 /// "what is under the pointer" is what lets each be tested against its own
 /// inputs.
-/// The `showing` argument is what §7.1.6f added and it is K135 read exactly:
+/// The `showing` argument is what §7.1.6k added and it is K135 read exactly:
 /// the identity being compared is a *pane*, and a pane is a tab and a seat. A
 /// spring-loaded drag can put the pointer over another tab's layout while the
 /// hand still holds a pane of the tab it set out from, and comparing seat
@@ -14807,7 +14807,7 @@ fn landing_for_aim(
     (source.pane_here(showing) != Some(target)).then_some(landing)
 }
 
-/// **What a tab list offers a pane, stated once** — §7.1.6f's whole decision, as
+/// **What a tab list offers a pane, stated once** — §7.1.6k's whole decision, as
 /// five plain facts and no window.
 ///
 /// The two offers a run makes a pane are read off two different questions about
@@ -14858,7 +14858,7 @@ fn pane_strip_landing(
     extract_slot.map(|slot| DropLanding::StripExtract { slot })
 }
 
-/// **Which end of a tree an arriving pane joins** — §7.1.6f's "追加为树末尾分屏".
+/// **Which end of a tree an arriving pane joins** — §7.1.6k's "追加为树末尾分屏".
 ///
 /// The direction is [`split_axis`]'s answer and never a second one: a user who
 /// set `Split direction` to `Right` in the settings dialog is entitled to have
@@ -17763,7 +17763,7 @@ fn tear_pane_into_tab(
 /// **Everything one seat's content plane holds, moved into another tab under the
 /// id it now answers to.**
 ///
-/// The body of [`absorb_tab_sessions`]' loop, lifted out when §7.1.6f gave a
+/// The body of [`absorb_tab_sessions`]' loop, lifted out when §7.1.6k gave a
 /// *single* pane the same journey a merged tab's whole fleet takes. Two callers,
 /// one sentence — "the pane is moving, not being rebuilt" — and the whole point
 /// of writing it once is that a table added to one of them cannot be forgotten
@@ -17868,7 +17868,7 @@ fn move_seat_content(
     }
 }
 
-/// **§7.1.6f (user ruling, 2026-08-20) — move one pane into another tab,
+/// **§7.1.6k (user ruling, 2026-08-20) — move one pane into another tab,
 /// appended at the end of that tab's tree.**
 ///
 /// A free function over two [`TabState`]s for the reason [`tear_pane_into_tab`]
@@ -18079,7 +18079,7 @@ fn absorb_tab_sessions(source: &mut TabState, target: &mut TabState, arrived: &[
     for (was, now) in arrived {
         // **N159 — every migrated leaf has just become part of the tab on
         // screen**, which is the event `mark_seen` answers, so a merge is always
-        // a `watched` move. §7.1.6f's pane drop is the one that is not: a pane
+        // a `watched` move. §7.1.6k's pane drop is the one that is not: a pane
         // handed to a *background* tab has not been seen, and its ledger keeps
         // whatever it was owed.
         move_seat_content(source, target, *was, *now, true);
@@ -20812,7 +20812,7 @@ impl Runtime<'_> {
                 .iter()
                 .position(|candidate| candidate.id == tab)
         });
-        // **§7.1.6f — the tab a carried pane is aimed at wears the landing wash.**
+        // **§7.1.6k — the tab a carried pane is aimed at wears the landing wash.**
         //
         // The very drawing [`Runtime::strip_stand_in`] dresses its stand-in in
         // (`.drop-preview` and `@keyframes tab-land`'s `from` are one pair of
@@ -24772,7 +24772,7 @@ impl Runtime<'_> {
         let DragSource::Pane(leaf) = drag.source else {
             return None;
         };
-        // **Through the pane's own tab** (§7.1.6f): the spring may have moved the
+        // **Through the pane's own tab** (§7.1.6k): the spring may have moved the
         // view, and a stand-in dressed out of the tab now on screen would be
         // wearing a stranger's name — or, more likely, nothing at all.
         let tab = self.tab_state(leaf.tab)?;
@@ -24977,7 +24977,7 @@ impl Runtime<'_> {
             // M156② — a pane arrives as the seat it already is, fixed column and
             // all. It is a seat of *this* tree by construction: `survey_drop`
             // offers no layout landing at all to a pane whose tab is not the one
-            // on screen (§7.1.6f), so `layout_aim` above has already refused
+            // on screen (§7.1.6k), so `layout_aim` above has already refused
             // every pointer that could ask this with a foreign seat.
             (None, None, DragSource::Pane(leaf)) => seats::DropCargo::Pane(leaf.seat),
             (None, None, DragSource::Tab(_) | DragSource::Row(_)) => return None,
@@ -25141,7 +25141,7 @@ impl Runtime<'_> {
                 ))
             }
             DragSource::Pane(leaf) => {
-                // Through the pane's own tab (§7.1.6f) — after a spring the view
+                // Through the pane's own tab (§7.1.6k) — after a spring the view
                 // has moved and the pane has not, and a ghost that went blank at
                 // that moment would be the hand emptying halfway through the
                 // gesture.
@@ -41044,7 +41044,7 @@ impl Runtime<'_> {
         self.window.pane_menu.as_ref()?.submenu_hold_until
     }
 
-    /// **§7.1.6f — the spring, matured: the window goes to the tab the pane has
+    /// **§7.1.6k — the spring, matured: the window goes to the tab the pane has
     /// been resting on, and the pane stays in the air.**
     ///
     /// It has to fire under a pointer that is not moving at all, which is the
@@ -42151,7 +42151,7 @@ impl Runtime<'_> {
     /// here for the same reason it is right for the drag: the gesture was "put
     /// this over there", not "take me there".
     ///
-    /// **§7.1.6f left this row alone, and the ruling says so in as many words**
+    /// **§7.1.6k left this row alone, and the ruling says so in as many words**
     /// (*"「Move pane to new tab」两步路保留"*). The spring-loaded drop is a
     /// second door onto *moving a pane*, not a replacement for the menu's — a
     /// hand that would rather point twice than carry something across the window
@@ -49257,7 +49257,7 @@ impl Runtime<'_> {
         // a pane held over its own rectangle has no landing however that
         // rectangle has moved since the press. A home rectangle here would be
         // the same rule stated worse.
-        // **The tab is recorded here and never re-read** (§7.1.6f). A pane drag
+        // **The tab is recorded here and never re-read** (§7.1.6k). A pane drag
         // can outlive its tab being on screen now — the spring switches the view
         // and leaves the pane where it was picked up — so "which pane" has to be
         // answered once, at the moment the hand closed, rather than by asking
@@ -49396,7 +49396,7 @@ impl Runtime<'_> {
         if *source == DragSource::Tab(showing) {
             return None;
         }
-        // **§7.1.6f — a pane away from home has no landing in this layout, and
+        // **§7.1.6k — a pane away from home has no landing in this layout, and
         // that is a policy record rather than a structural wall** (§7.0 rule 8).
         //
         // The spring puts another tab's layout under a pointer that is still
@@ -49501,7 +49501,7 @@ impl Runtime<'_> {
             // the column has slots.
             //
             // **Two offers now, and which one this pointer is asking for is
-            // [`pane_strip_landing`]'s** (§7.1.6f). The run answers both questions
+            // [`pane_strip_landing`]'s** (§7.1.6k). The run answers both questions
             // off the slots it already carries: `slot_at` for "whose tab is under
             // my hand", `insert_index_at` for "between which two would a new one
             // land".
@@ -49590,7 +49590,7 @@ impl Runtime<'_> {
     /// today, so the honest question is no longer about the trees at all but
     /// about the one seat that is moving.
     ///
-    /// **Asked of the pane's own tab and never of the tab on screen** (§7.1.6f).
+    /// **Asked of the pane's own tab and never of the tab on screen** (§7.1.6k).
     /// The spring can leave those two apart for the rest of a gesture, and the
     /// question "may this pane become a tab" is about the tree it is standing in
     /// rather than about the tree being drawn.
@@ -49608,7 +49608,7 @@ impl Runtime<'_> {
                 .is_some_and(|seat| pane_can_become_a_tab(seat.kind))
     }
 
-    /// **H93 for §7.1.6f's landing** — whether `target`'s tree can actually take
+    /// **H93 for §7.1.6k's landing** — whether `target`'s tree can actually take
     /// this pane at its end.
     ///
     /// The same [`seats::Seats::plan_drop`] the release will run, on the same
@@ -49730,7 +49730,7 @@ impl Runtime<'_> {
         drag.pointer = position;
         self.leave_strip(&mut drag, position)?;
         drag.landing = self.survey_drop(&drag.source, drag.home, position);
-        // **§7.1.6f — the spring is told what the survey answered, not where the
+        // **§7.1.6k — the spring is told what the survey answered, not where the
         // pointer is.** One reading of the geometry per move, and the dwell then
         // agrees with the drop by construction: a tab the strip would not hand
         // this pane to is a tab the hand cannot spring to either, and the card
@@ -49769,7 +49769,7 @@ impl Runtime<'_> {
                 .tabs
                 .iter()
                 .any(|candidate| candidate.id == *tab),
-            // Asked of the pane's **own** tab (§7.1.6f). Reading the tab on
+            // Asked of the pane's **own** tab (§7.1.6k). Reading the tab on
             // screen was right while a pane drag could not outlive its tab being
             // drawn; with the spring it is the bug that ends the gesture on the
             // first pointer move after a switch, because the seat is of course
@@ -50021,7 +50021,7 @@ impl Runtime<'_> {
             // tree was never touched — which is why this can be tried and
             // abandoned safely.
             DragRelease::Extract { slot } if self.commit_pane_extract(&drag, slot)? => {}
-            // §7.1.6f, and the same "one outcome, reached two ways" a third time:
+            // §7.1.6k, and the same "one outcome, reached two ways" a third time:
             // a tab that stopped existing under a still hand, or a tree that
             // stopped fitting, has been landed on by nobody.
             DragRelease::Adopt { tab } if self.commit_pane_adopt(&drag, tab)? => {}
@@ -50240,7 +50240,7 @@ impl Runtime<'_> {
         self.extract_pane_into_new_tab(leaf, slot)
     }
 
-    /// **§7.1.6f — let go of a pane over one of the strip's own tabs.**
+    /// **§7.1.6k — let go of a pane over one of the strip's own tabs.**
     ///
     /// [`pane_into_tab`] does the whole of the move and is a free function so
     /// that a test can run it over two constructed `TabState`s. What is left here
@@ -50298,7 +50298,7 @@ impl Runtime<'_> {
         };
         debug_assert!(
             self.window.tabs[into].seats.tree().contains(moved.landed),
-            "§7.1.6f: the pane landed under an id its new tree does not have"
+            "§7.1.6k: the pane landed under an id its new tree does not have"
         );
         if moved.source_emptied {
             // The tab did not close — it was emptied by a move, and `close_tab`
@@ -50341,7 +50341,7 @@ impl Runtime<'_> {
         let render_physical =
             presentation_physical_size(self.window.renderer.presentation_geometry());
         let renderer = &self.window.renderer;
-        // **The pane's own tab and not the one on screen** (§7.1.6f): the spring
+        // **The pane's own tab and not the one on screen** (§7.1.6k): the spring
         // can have moved the view since the hand closed, and a tear-out reaches
         // into the tree the pane is actually standing in.
         let Some(source) = self.tab_slot_of(leaf.tab) else {
@@ -55251,7 +55251,7 @@ impl Runtime<'_> {
         self.advance_chevrons(now)?;
         self.advance_pane_menu(now)?;
         // And the drag's own rest, beside them because it is the same shape and
-        // the same quarter second (§7.1.6f). Below them rather than above: a
+        // the same quarter second (§7.1.6k). Below them rather than above: a
         // spring takes a whole tab off the screen, and the two menus above have
         // already been retired by the drag that armed this one.
         self.advance_drag_spring(now)?;
@@ -55422,7 +55422,7 @@ impl Runtime<'_> {
             // And the pane menu's own clock: the heading's rest while the
             // submenu is shut, the safety triangle's cap while it is open.
             self.pane_menu_deadline(),
-            // And the spring's 250 (§7.1.6f) — the one clock in this window that
+            // And the spring's 250 (§7.1.6k) — the one clock in this window that
             // fires under a hand that has deliberately stopped moving. Absent for
             // every drag that is not resting a pane on somebody else's tab, which
             // is every drag most of the time.
@@ -74862,9 +74862,9 @@ mod tests {
         }
     }
 
-    // ── §7.1.6f: spring-loaded, a pane carried over the tab list ──
+    // ── §7.1.6k: spring-loaded, a pane carried over the tab list ──
 
-    /// **K135 is about a *pane*, and a pane is a tab and a seat** (§7.1.6f).
+    /// **K135 is about a *pane*, and a pane is a tab and a seat** (§7.1.6k).
     ///
     /// The spring can leave the tab in the hand and the tab on the screen apart
     /// for the rest of a gesture, and seat ids are minted per tab out of each
@@ -74873,7 +74873,7 @@ mod tests {
     /// another room.
     ///
     /// Red gate: let `pane_here` ignore the tab and answer on the seat alone —
-    /// which is what this file did until §7.1.6f — and the second assertion goes
+    /// which is what this file did until §7.1.6k — and the second assertion goes
     /// `None`: a perfectly good neighbour in the tab you sprang to is refused
     /// because the pane you are carrying happens to share its number.
     #[test]
@@ -74902,7 +74902,7 @@ mod tests {
         );
     }
 
-    /// **§7.1.6f — the two offers a tab list makes a pane, and which pointer gets
+    /// **§7.1.6k — the two offers a tab list makes a pane, and which pointer gets
     /// which.**
     ///
     /// The ruling: *"拖着 pane 悬在 tab 上 … 直接松在 tab 上 = 移入该 tab"*, with
@@ -74911,7 +74911,7 @@ mod tests {
     /// would a new tab land — and the four rows below are the whole table.
     ///
     /// Red gate: answer `StripExtract` for a pointer over a foreign tab (which is
-    /// what this file did until §7.1.6f) and the first row fails; let the pane's
+    /// what this file did until §7.1.6k) and the first row fails; let the pane's
     /// **own** tab answer `StripAdopt` and the second does; drop the
     /// `hosts` guard and the card column's row does; fall back to the tear-out
     /// when the target will not fit and the last one does.
@@ -75048,7 +75048,7 @@ mod tests {
         );
     }
 
-    /// **§7.1.6f — letting go on a tab is its own verdict.**
+    /// **§7.1.6k — letting go on a tab is its own verdict.**
     ///
     /// Three landings the strip can answer and three different things a release
     /// does with them: a reorder was applied live and is kept, a tear-out edits
@@ -75085,7 +75085,7 @@ mod tests {
         );
     }
 
-    /// **§7.1.6f — the end of a tree is the trailing side, on the axis the
+    /// **§7.1.6k — the end of a tree is the trailing side, on the axis the
     /// settings dialog names.**
     ///
     /// Red gate: read the setting a second time here instead of going through
@@ -81318,7 +81318,7 @@ mod tests {
         );
     }
 
-    // ── §7.1.6f: a pane moved into another tab, over real tabs ──────────────
+    // ── §7.1.6k: a pane moved into another tab, over real tabs ──────────────
 
     /// The window's contribution to [`pane_into_tab`], supplied by hand — the
     /// same shape [`cross_solve`] has, and the same viewport.
@@ -81344,7 +81344,7 @@ mod tests {
         )
     }
 
-    /// **§7.1.6f — the pane moves into the tab you let go on, appended at the end
+    /// **§7.1.6k — the pane moves into the tab you let go on, appended at the end
     /// of its tree, and the shell goes with it.**
     ///
     /// The ruling: *"直接松在 tab 上 = 移入该 tab(追加为树末尾分屏)"*. Three
@@ -81422,7 +81422,7 @@ mod tests {
         );
     }
 
-    /// **§7.1.6f — the tab whose last pane leaves does not close; it is emptied
+    /// **§7.1.6k — the tab whose last pane leaves does not close; it is emptied
     /// by a move, and the window takes its entry out.**
     ///
     /// *"原 tab 若因此空了,按现有「关最后一个座位 = 关 tab」的既有规矩走"* — and
@@ -81469,7 +81469,7 @@ mod tests {
         );
     }
 
-    /// **§7.1.6f — a target that cannot take another pane is refused before
+    /// **§7.1.6k — a target that cannot take another pane is refused before
     /// anything moves.**
     ///
     /// H93/M147: the survey does not light such a tab up, and the commit must
@@ -81509,7 +81509,7 @@ mod tests {
         assert!(into.sessions_match_terminals());
     }
 
-    /// **PIN — 「Move pane to new tab」两步路保留** (§7.1.6f's own sentence).
+    /// **PIN — 「Move pane to new tab」两步路保留** (§7.1.6k's own sentence).
     ///
     /// The spring-loaded drop is a second door onto moving a pane, never a
     /// replacement for the menu row, and the row is what a hand that would rather
