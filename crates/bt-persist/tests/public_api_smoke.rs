@@ -58,6 +58,7 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         focus_mode: true,
         terminal_notifications: false,
         powershell_integration_offer: false,
+        focus_card_height: 240,
     };
     write_settings_atomic(&path, &settings).unwrap();
 

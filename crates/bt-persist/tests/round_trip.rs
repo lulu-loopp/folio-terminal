@@ -543,6 +543,7 @@ fn a_tab_with_no_preview_writes_no_content_section() {
                     profile_id: "pwsh".to_owned(),
                     cwd: r"C:\work".to_owned(),
                     manual_name: None,
+                    card_skip: 0,
                 })),
                 pinned: false,
                 focused_leaf: "leaf-0".to_owned(),
@@ -750,6 +751,7 @@ fn multi_tab_trees_and_active_index_round_trip_together() {
                 profile_id: "pwsh.exe".to_owned(),
                 cwd: format!(r"C:\work\tab-{index}"),
                 manual_name: Some(format!("tab {index}")),
+                card_skip: 0,
             })),
             pinned: index == 0,
             focused_leaf: "leaf-0".to_owned(),
@@ -841,7 +843,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 18,
+        SETTINGS_SCHEMA_VERSION, 19,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -861,8 +863,9 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          own Scrollback the v13-to-v14, and the Appearance page's own Focus mode \
          the v14-to-v15, and the Appearance page's own Minimum contrast the \
          v15-to-v16, and the Terminal page's own Notifications the v16-to-v17, \
-         and the Terminal page's own Offer PowerShell integration the v17-to-v18 — \
-         one key on one day, eight times running"
+         and the Terminal page's own Offer PowerShell integration the v17-to-v18, \
+         and the Appearance page's own Focus card height the v18-to-v19 — one key \
+         on one day, nine times running"
     );
     assert_eq!(
         defaults.minimum_contrast,
@@ -1714,6 +1717,62 @@ fn settings_v17_migrates_with_the_offer_on_and_v18_keeps_the_silence_it_was_aske
     let (round_tripped, report) = read_settings(&path);
     assert_eq!(report, ReadReport::Loaded);
     assert_eq!(round_tripped, quiet);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// PIN (§7.1.6b′, 2026-08-21) — a v18 settings file migrates to v19 with focus cards **the height
+/// they already were**, and a v19 file that names a taller rung gets it back through a write and a
+/// read.
+///
+/// The first half is this step's judgement and it is the *opposite* of the step before it, which
+/// is worth a suite entry rather than only a comment: `v17→v18` writes the product's default
+/// because nothing before it could offer an integration at all, and this one writes 160 because
+/// the thing it is a setting for has been on screen since 2026-08-20 at exactly that height. A
+/// migration that made every card taller would change the shape of a column somebody has been
+/// living in, on the strength of a row they have never seen.
+///
+/// The second half is the row being a row. A height that did not survive the file would be a
+/// setting that works until the next launch — and the reader finds out by opening the window they
+/// resized and finding it back to thirteen rows.
+#[test]
+fn settings_v18_migrates_to_the_height_cards_already_had_and_v19_keeps_a_taller_one() {
+    let (migrated, report) = read_settings(&fixture_path("settings_v18_powershell_offer_off.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(migrated.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        migrated.focus_card_height,
+        bt_persist::DEFAULT_FOCUS_CARD_HEIGHT,
+        "a v18 build drew every card 160 tall, so that is the behaviour being carried forward \
+         rather than a new default being chosen"
+    );
+    assert!(
+        !migrated.powershell_integration_offer,
+        "one key crosses; every sibling crosses untouched"
+    );
+
+    let (tall, report) = read_settings(&fixture_path("settings_v19_focus_card_height.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(tall.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        tall.focus_card_height, 320,
+        "a reader who asked for the tallest rung is heard"
+    );
+
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-settings-v19-focus-card-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    write_settings_atomic(&path, &tall).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains(r#""focus_card_height": 320"#),
+        "the height is written as its own key, in logical pixels: {on_disk}"
+    );
+    let (round_tripped, report) = read_settings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, tall);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

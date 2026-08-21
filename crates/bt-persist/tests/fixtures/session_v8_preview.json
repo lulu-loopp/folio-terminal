@@ -1,5 +1,5 @@
 {
-  "schema_version": 9,
+  "schema_version": 10,
   "theme": "light",
   "cursor_style": "block",
   "windows": [
@@ -27,7 +27,8 @@
                 "kind": "term",
                 "profile_id": "pwsh",
                 "cwd": "C:\\Users\\dev\\project",
-                "manual_name": "build"
+                "manual_name": "build",
+                "card_skip": 0
               },
               {
                 "dir": "col",
@@ -75,7 +76,8 @@
             "kind": "term",
             "profile_id": "winps",
             "cwd": "C:\\Users\\dev",
-            "manual_name": null
+            "manual_name": null,
+            "card_skip": 0
           },
           "pinned": false,
           "focused_leaf": "leaf-0"

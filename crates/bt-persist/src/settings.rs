@@ -102,7 +102,21 @@ use serde::{Deserialize, Serialize};
 /// `false` would freeze an absence. What is being defaulted on here is an *offer* and not a
 /// change — a pane that already loads the script is never asked, and a reader who is asked has
 /// one press that ends the asking for good.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 18;
+///
+/// **v19 carries `focus_card_height`**, the Appearance page's own `Focus card height` row
+/// (`docs/DESIGN.md` §7.1.6b′), and it is the shape v13–v16 share: one key, its own day, and a
+/// migration that writes the answer every build before it gave — 160, the body a focus card has
+/// stood on since F2. The row exists because 2026-08-20 turned that number once for everybody and
+/// could not have known whose pane spends its bottom thirteen rows on an agent's status bar.
+///
+/// **The number it stamps is the one it was handed second.** A line adding
+/// `powershell_integration_offer` reached `main` first and took v18, and this table is
+/// walked one step at a time (`crate::migrate::migrate_value`), so a branch cannot reserve
+/// a number whose step it does not also build. The standing rule
+/// (`docs/HANDOFF-2026-08-21.md` §2) settles it the way it was written for: whichever
+/// merges second yields, and yielding is renaming the step rather than renumbering a file
+/// anybody already has.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 19;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -220,10 +234,20 @@ pub const DEFAULT_BLOCK_MAX_HEIGHT: u32 = 0;
 /// sentence [`DEFAULT_BLOCK_MAX_HEIGHT`] is written under.
 pub const DEFAULT_SCROLLBACK_LINES: u32 = 100_000;
 
-/// `settings.json` v18 — docs/M2-persistence-schema-v1.md §2:
+/// How tall a focus card's body stands when the file has never named a number: **160** logical
+/// pixels.
+///
+/// Not a new answer. It is `bt_render`'s `DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX`, the height every
+/// card has had since F2 (2026-08-20), moved to the place a reader can now reach it from — so the
+/// row ships without changing what anybody's column looks like. The number is spelled here rather
+/// than imported for [`DEFAULT_SCROLLBACK_LINES`]'s reason: this crate is the file format and does
+/// not depend on the renderer, and the two are held together by the test that reads them both.
+pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
+
+/// `settings.json` v19 — docs/M2-persistence-schema-v1.md §2:
 /// ```json
 /// {
-///   "schema_version": 18,
+///   "schema_version": 19,
 ///   "theme_mode": "System" | "Light" | "Dark",
 ///   "display_formulas": true | false,
 ///   "inline_formulas": true | false,
@@ -250,6 +274,7 @@ pub const DEFAULT_SCROLLBACK_LINES: u32 = 100_000;
 ///   "minimum_contrast": "Off" | "Ratio2" | "Ratio3" | "Ratio45",
 ///   "terminal_notifications": true | false,
 ///   "powershell_integration_offer": true | false
+///   "focus_card_height": 160 | 240 | 320
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -619,6 +644,19 @@ pub struct SettingsV1 {
     /// open, and a table of dismissed panes would ask again tomorrow from a new one.
     #[serde(default = "default_powershell_integration_offer")]
     pub powershell_integration_offer: bool,
+    /// **How tall a focus card's body stands**, in logical pixels — the Appearance page's
+    /// `Focus card height` row (`docs/DESIGN.md` §7.1.6b′, user ruling 2026-08-21).
+    ///
+    /// A quantity and not a name, so it is written as the number: 160, 240 or 320 are the rungs
+    /// this build's picker offers, and 160 is what every card was before the row existed.
+    ///
+    /// **Carried through unclamped**, on [`SettingsV1::block_max_height`]'s footing and for its
+    /// reason: every positive value is a real height, this crate has no picker to check against,
+    /// and a reader that snapped a file's number to the nearest rung would be reporting a value
+    /// the file does not contain. A height this build's list does not offer simply shows no tick
+    /// — see `settings::SettingsRow::selected_index`.
+    #[serde(default = "default_focus_card_height")]
+    pub focus_card_height: u32,
 }
 
 /// `serde`'s door for a v14 key that is missing from a file this build is reading.
@@ -647,6 +685,12 @@ fn default_terminal_notifications() -> bool {
 /// had pressed `Don't show again` — the one answer this product must not put in somebody's mouth.
 fn default_powershell_integration_offer() -> bool {
     true
+}
+
+/// [`default_scrollback_lines`]'s reason exactly: a `u32`'s own default is `0`, and a card with
+/// no body at all is not a height anybody chose — it is the field having been dropped.
+fn default_focus_card_height() -> u32 {
+    DEFAULT_FOCUS_CARD_HEIGHT
 }
 
 impl Default for SettingsV1 {
@@ -686,6 +730,9 @@ impl Default for SettingsV1 {
             terminal_notifications: true,
             // A PowerShell with no integration is told so, once, in its own pane.
             powershell_integration_offer: true,
+            // The body every card has stood on since F2 — see
+            // `DEFAULT_FOCUS_CARD_HEIGHT`.
+            focus_card_height: DEFAULT_FOCUS_CARD_HEIGHT,
         }
     }
 }

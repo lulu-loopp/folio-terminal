@@ -1375,6 +1375,21 @@ pub enum Text {
     /// Its sentence. Says the two things the row's four words cannot: which
     /// panes are ever asked, and that the asking is all this does.
     DescPowerShellOffer,
+    // ── the focus card's height (§7.1.6b′, user ruling 2026-08-21) ──────────
+    //
+    // One contiguous block at the end, per this table's standing rule. **Two
+    // entries**, the row and its sentence, because the three items are
+    // quantities — `160 px` / `240 px` / `320 px` — and this table's own header
+    // excludes those: a pixel count written in Chinese is the same three
+    // characters it is in English. The same arithmetic `Scrollback` came in on.
+    /// `Appearance ▸ Focus card height` — the row.
+    RowFocusCardHeight,
+    /// Its sentence. Says the one thing a picker of pixels cannot: that what a
+    /// reader is choosing is **rows**, and how many each rung buys. It names no
+    /// program — the case that produced the ruling was an agent whose status bar
+    /// filled the card, and a settings row that named somebody's tool would be a
+    /// row that goes stale the day they change tools.
+    DescFocusCardHeight,
 }
 
 impl Text {
@@ -2468,6 +2483,19 @@ impl Text {
                 "A PowerShell pane whose $PROFILE does not load folio.ps1 shows one line offering to add it. Off stops the offer; a $PROFILE that already loads it is never asked about",
                 "PowerShell 窗格的 $PROFILE 没有加载 folio.ps1 时,在那个窗格里显示一行,提供加入的动作。关闭后不再提示;已经加载的 $PROFILE 本来就不会被问",
             ),
+            // 「卡片高度」rather than 「卡片身高」: the column's own word for the
+            // thing is 卡片 and 高度 is what a settings row measures, which is the
+            // pair every other quantity row here is built out of.
+            Self::RowFocusCardHeight => pick(lang, "Focus card height", "聚焦卡片高度"),
+            // Two clauses and no third: what the number is spent on, and how
+            // many rows each rung buys at the default face. The second is the
+            // one that earns its place — the reader is choosing pixels and
+            // counting rows, and no picker of pixels can say the conversion.
+            Self::DescFocusCardHeight => pick(
+                lang,
+                "How tall each card's picture of its tab stands. At the default face a lone pane's seat holds 12 rows at 160, 20 at 240 and 27 at 320",
+                "每张卡片里那幅 tab 缩图的高度。默认字面下,单 pane 的格子在 160 装得下 12 行、240 装 20 行、320 装 27 行",
+            ),
         }
     }
 
@@ -2483,7 +2511,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 424] = [
+    pub const ALL: [Self; 426] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -2908,6 +2936,8 @@ impl Text {
         Self::PowerShellNoticeAdded,
         Self::RowPowerShellOffer,
         Self::DescPowerShellOffer,
+        Self::RowFocusCardHeight,
+        Self::DescFocusCardHeight,
     ];
 
     /// The entries whose two columns are allowed to be the same string.

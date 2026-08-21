@@ -27,7 +27,8 @@ use bt_layout::{
 };
 use bt_persist::{LayoutNodeV1, LeafNodeV1, SplitDirV1, SplitNodeV1, TermLeafV1};
 use bt_render::{
-    ChromeLabel, ChromeLabelWeight, ChromePalette, ChromeQuad, FOCUS_CARD_BORDER_LOGICAL_PX,
+    ChromeLabel, ChromeLabelWeight, ChromePalette, ChromeQuad,
+    DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX, FOCUS_CARD_BORDER_LOGICAL_PX,
     FOCUS_CARD_CLOSE_BOX_LOGICAL_PX, FOCUS_CARD_CLOSE_GLYPH_LOGICAL_PX,
     FOCUS_CARD_CLOSE_RADIUS_LOGICAL_PX, FOCUS_CARD_FONT_LOGICAL_PX, FOCUS_CARD_GAP_LOGICAL_PX,
     FOCUS_CARD_HEAD_GAP_LOGICAL_PX, FOCUS_CARD_HEAD_PADDING_X_LOGICAL_PX,
@@ -35,10 +36,10 @@ use bt_render::{
     FOCUS_CARD_RADIUS_LOGICAL_PX, FOCUS_CARD_WAIT_HALO_LOGICAL_PX, FOCUS_CARD_WAIT_HALO_OPACITY,
     FOCUS_COLUMN_WIDTH_LOGICAL_PX, FOCUS_MINI_BORDER_LOGICAL_PX, FOCUS_MINI_FILES_FONT_LOGICAL_PX,
     FOCUS_MINI_FILES_ICON_LOGICAL_PX, FOCUS_MINI_FILES_INDENT_LOGICAL_PX,
-    FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX, FOCUS_MINI_GAP_LOGICAL_PX, FOCUS_MINI_HEIGHT_LOGICAL_PX,
-    FOCUS_MINI_PADDING_LOGICAL_PX, FOCUS_MINI_RADIUS_LOGICAL_PX,
-    FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX,
-    FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX, OverlayQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX,
+    FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX, FOCUS_MINI_GAP_LOGICAL_PX, FOCUS_MINI_PADDING_LOGICAL_PX,
+    FOCUS_MINI_RADIUS_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX,
+    FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX,
+    FOCUS_MINI_SEAM_LOGICAL_PX, OverlayQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX,
     PANE_HEAD_FOLDER_MARK_LOGICAL_PX, PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX,
     RAIL_GAP_LOGICAL_PX, RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX,
     RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX, RAIL_LABEL_PADDING_TOP_LOGICAL_PX,
@@ -3240,6 +3241,29 @@ pub struct RailState {
     /// never wrote `layout`, `mode` or `collapsed`, so turning this bit off puts
     /// back exactly the chrome those three already described.
     pub focus: bool,
+    /// **How tall a card's body is**, in logical pixels — `Appearance ▸ Focus
+    /// card height` (user ruling 2026-08-21).
+    ///
+    /// Here for [`Self::focus`]'s reason and by its route: this module is a pure
+    /// function of the numbers it is handed, and "what shape is this window" is
+    /// already assembled in one place (`Runtime::rail_posture`), where the
+    /// window's own bit meets the stored preferences. A second parameter on
+    /// [`focus_rail_geometry`] would have had to be threaded through
+    /// [`hit_focus_rail`] and `focus_rail_chrome` as well, which is three places
+    /// that can be handed different numbers on the same frame — and a hit test
+    /// measuring cards of one height over a paint of another is a column where
+    /// clicking the third card opens the fourth.
+    ///
+    /// **Every box that follows the height follows it from here**: the card's
+    /// own rectangle, the mini cell inside it, the entrance FLIP's start and end
+    /// (both solved from that rectangle), the hit boxes and the column's scroll
+    /// range are all derived from [`focus_rail_geometry`]'s output, so there is
+    /// no second place holding 160.
+    ///
+    /// Read fresh on the frame clock like every other field here, which is the
+    /// whole of "changing the setting takes effect at once": nothing caches a
+    /// card height, so the next frame solves the column at the new one.
+    pub focus_card_body_logical_px: f32,
 }
 
 impl Default for RailState {
@@ -3252,6 +3276,7 @@ impl Default for RailState {
             text_opacity: 1.0,
             fold: None,
             focus: false,
+            focus_card_body_logical_px: DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX,
         }
     }
 }
@@ -4068,8 +4093,8 @@ fn focus_card_head_height(scale: f32) -> f32 {
         .round()
 }
 
-/// How tall one card is, in physical pixels: its head, and the 160px body under
-/// it (§7.1.6b′ F2).
+/// How tall one card is, in physical pixels: its head, and the body under it
+/// (§7.1.6b′ F2).
 ///
 /// **Unconditional, and that is the ruling and not a simplification.** The body
 /// is not a thing a card grows when it has something to show — it is what a card
@@ -4077,8 +4102,13 @@ fn focus_card_head_height(scale: f32) -> f32 {
 /// seats rather than a short card. Making the height depend on the content would
 /// make the column's own geometry depend on the projection budget, and a list
 /// whose rows change height as sessions wake up is a list you cannot click into.
-fn focus_card_height(scale: f32) -> f32 {
-    focus_card_head_height(scale) + (FOCUS_MINI_HEIGHT_LOGICAL_PX * scale).round()
+///
+/// `body_logical_px` is the reader's answer to `Appearance ▸ Focus card height`
+/// (user ruling 2026-08-21) and arrives on [`RailState`]; it was the constant
+/// `FOCUS_MINI_HEIGHT_LOGICAL_PX` until that row existed, and 160 — the first
+/// rung — is still what a window that has never been asked opens at.
+fn focus_card_height(scale: f32, body_logical_px: f32) -> f32 {
+    focus_card_head_height(scale) + (body_logical_px * scale).round()
 }
 
 /// The focus column's cards and furniture, scrolled by `scroll` physical pixels.
@@ -4128,7 +4158,7 @@ pub fn focus_rail_geometry(
 
     // The list scrolls under the `+`; only the cards move.
     let list_top = cursor;
-    let card_height = focus_card_height(scale);
+    let card_height = focus_card_height(scale, state.focus_card_body_logical_px);
     let card_gap = FOCUS_CARD_GAP_LOGICAL_PX * scale;
     let card_border = (FOCUS_CARD_BORDER_LOGICAL_PX * scale).round().max(1.0);
     let head_pad_x = FOCUS_CARD_HEAD_PADDING_X_LOGICAL_PX * scale;
@@ -4433,9 +4463,26 @@ pub struct MiniFilesRow {
 /// this file cannot spend a millisecond it was not handed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MiniSeatContent {
-    /// A terminal seat: the tail of what stands on its screen, oldest first, cut
-    /// to the card's own column count and set in the terminal's face.
-    Transcript(Vec<String>),
+    /// A terminal seat: a window onto what stands on its screen, oldest first,
+    /// cut to the card's own column count and set in the terminal's face.
+    ///
+    /// The window is the **tail** unless the reader has aimed it higher — see
+    /// [`focus_thumb::SeatSource::Terminal`]'s `skip` (user ruling 2026-08-21).
+    ///
+    /// [`focus_thumb::SeatSource::Terminal`]: crate::focus_thumb::SeatSource::Terminal
+    Transcript {
+        lines: Vec<String>,
+        /// **Whether rows the card is not showing stand between this window and
+        /// the screen's own floor**, which is the one thing the rows themselves
+        /// cannot say.
+        ///
+        /// Carried rather than re-derived, for the reason `Document::mono` is:
+        /// this file does not know what a grid is, and the projection has
+        /// already answered the question on the way past — including the clamp,
+        /// so a window driven past the top of a short screen answers `false`
+        /// here and not "there are rows below that there are not".
+        more_below: bool,
+    },
     /// A files column: the top of the rows it is currently showing.
     Files(Vec<MiniFilesRow>),
     /// **A preview seat's document, quoted** (user ruling, 2026-08-20): the
@@ -4864,6 +4911,17 @@ pub fn window_caption_boxes(width: f32, scale: f32) -> [(ChromeTarget, [f32; 4])
 /// edges so two rectangles sharing a border cannot both claim the same point.
 fn contains(rect: [f32; 4], x: f32, y: f32) -> bool {
     x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3]
+}
+
+/// [`contains`] for callers outside this module.
+///
+/// One test for "is this point in this box" and not two: the wheel's own reader
+/// (`Runtime::aim_focus_card_window`) walks rectangles this module solved, and a
+/// second predicate with its own half-open convention would disagree with the
+/// hit test on the seam between two mini seats.
+#[must_use]
+pub fn rect_holds(rect: [f32; 4], x: f32, y: f32) -> bool {
+    contains(rect, x, y)
 }
 
 /// A box put on whole physical pixels, for the fills whose *edges* are the
@@ -10512,7 +10570,7 @@ fn focus_card_mini_chrome(
         &mut Vec<ChromeSprite>,
     ),
 ) {
-    let (_quads, labels, sprites) = output;
+    let (quads, labels, sprites) = output;
     let [list_top, list_bottom] = viewport;
     let in_list = |rect: [f32; 4]| rect[3] > list_top && rect[1] < list_bottom;
     let clip_to_list = |rect: [f32; 4]| {
@@ -10578,12 +10636,69 @@ fn focus_card_mini_chrome(
         // the tree and the hairline, everything below is what the seat is
         // showing, and the two have no state in common but the rectangle.
         if let Some(content) = thumbnail.seats.get(&seat.id) {
+            // **The one new mark this column has grown** (user ruling
+            // 2026-08-21): a dotted seam along the cell's floor when the rows
+            // being shown are not the last rows on the screen. It is drawn here
+            // rather than inside the content painter because it belongs to the
+            // *cell* — it is on the hairline's line, not on a row's — and
+            // because there is no text to say it with: the ruling asks for one
+            // mark and no words.
+            if matches!(
+                content,
+                MiniSeatContent::Transcript {
+                    more_below: true,
+                    ..
+                }
+            ) {
+                for run in focus_mini_seam_quads(seat.rect, seat_stroke, scale) {
+                    if !in_list(run) {
+                        continue;
+                    }
+                    quads.push(ChromeQuad {
+                        rect: clip_to_list(run),
+                        color: palette.focus_mini_seam,
+                        surface: bt_render::ChromeSurface::Ink,
+                    });
+                }
+            }
             focus_mini_seat_content(content, inner, viewport, scale, palette, labels, sprites);
         }
         // A seat the projection has nothing for: its hairline is drawn and its
         // inside is left empty, which is the honest picture of a pane that has
         // said nothing yet.
     }
+}
+
+/// **The dotted seam along a cell's floor**, as the rectangles it is made of
+/// (user ruling 2026-08-21, §7.1.6b′ 「卡片窗口瞄准」).
+///
+/// It says the one thing the rows above it cannot: *there are more rows below
+/// this edge than the card is drawing*. A seat whose window is the tail draws
+/// none of these, so the mark's presence **is** the statement and there is
+/// nothing to read when nothing is hidden.
+///
+/// **A dash and not a rule, on the same reasoning `dashed_outline` gives**: a
+/// solid line at this weight reads as a boundary between two things, and this
+/// edge is not a boundary — it is the cell's own floor with something behind
+/// it. The pattern comes from [`dash_runs`], which is the house's one dash
+/// fitter, so the seam and the dock outline cannot disagree about what a dash
+/// looks like.
+///
+/// Inside the cell's own hairline on all three sides it touches, so the seam is
+/// a mark *in* the seat rather than a second border around it.
+fn focus_mini_seam_quads(seat: [f32; 4], stroke: f32, scale: f32) -> Vec<[f32; 4]> {
+    let thickness = (FOCUS_MINI_SEAM_LOGICAL_PX * scale).round().max(1.0);
+    let bottom = seat[3] - stroke;
+    let top = bottom - thickness;
+    let left = seat[0] + stroke;
+    let right = seat[2] - stroke;
+    if top <= seat[1] || right <= left {
+        return Vec::new();
+    }
+    dash_runs(left, right, thickness)
+        .into_iter()
+        .map(|(from, to)| [from, top, to, bottom])
+        .collect()
 }
 
 /// **What one mini seat is showing**, drawn inside the rectangle its hairline and
@@ -10619,26 +10734,40 @@ fn focus_mini_seat_content(
         ]
     };
     match content {
-        MiniSeatContent::Transcript(lines) => {
-            // `.fc-mini { justify-content: flex-end }` — a shell's tail is
-            // read from the bottom, so the last line sits on the seat's floor
-            // and the ones before it stack upwards out of the box. A tail
-            // laid from the top would put the newest line in a different
-            // place on every card, which is the one thing that stops a column
-            // of thumbnails being scannable.
+        MiniSeatContent::Transcript { lines, .. } => {
+            // **`.fc-tab-mini .fc-mini { justify-content: flex-start }` — laid
+            // from the seat's own top** (user ruling 2026-08-21), which
+            // **overturns** the 2026-08-20 shape that stacked the tail up from
+            // the floor so the newest line stood in the same place on every
+            // card.
+            //
+            // The ruling is the sentence this whole projection was rebuilt on:
+            // 「左侧就是一个还在跑的终端,只是字小一点」. A shell that has printed
+            // two lines shows them at the *top* of its pane with blank under
+            // them, so a picture of that shell showing them at the bottom is a
+            // different arrangement rather than the same terminal set smaller —
+            // and the files rows and document lines below have been laid from
+            // the top since they were written, which left one card reading its
+            // kinds of rows from two opposite ends.
+            //
+            // **What is projected did not change**: still the tail, still the
+            // last rows this seat holds ([`focus_thumb::transcript_tail`]), so a
+            // seat whose tail fills it draws exactly the picture it drew before.
+            // Only a tail with fewer rows than the seat holds moves, and it
+            // moves to where the pane it is a picture of puts it.
             let metrics = MiniMetrics::TERM;
             let line = metrics.line_px(scale);
-            for (offset, text) in lines.iter().rev().enumerate() {
-                let bottom = inner[3] - offset as f32 * line;
-                let row = [inner[0], bottom - line, inner[2], bottom];
-                if row[3] <= inner[1] {
+            for (offset, text) in lines.iter().enumerate() {
+                let top = inner[1] + offset as f32 * line;
+                let row = [inner[0], top, inner[2], top + line];
+                if row[1] >= inner[3] {
                     break;
                 }
                 mini_row_label(
                     labels,
                     text.clone(),
                     row,
-                    clip_to_list([row[0], row[1].max(inner[1]), row[2], row[3]]),
+                    clip_to_list([row[0], row[1], row[2], row[3].min(inner[3])]),
                     metrics.font_logical_px * scale,
                     palette.focus_mini_text,
                     metrics.mono,
@@ -17152,6 +17281,7 @@ mod tests {",
                     profile_id: "pwsh".to_owned(),
                     cwd: String::new(),
                     manual_name: None,
+                    card_skip: 0,
                 }))),
             ],
         }));
@@ -17203,6 +17333,7 @@ mod tests {",
                             profile_id: "pwsh".to_owned(),
                             cwd: String::new(),
                             manual_name: None,
+                            card_skip: 0,
                         },
                         &|_| FilesLeafState::default(),
                     ),
@@ -17506,6 +17637,7 @@ mod tests {",
                     profile_id: "pwsh.exe".to_owned(),
                     cwd: String::new(),
                     manual_name: None,
+                    card_skip: 0,
                 }))),
                 Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Unknown)),
             ],
@@ -22615,6 +22747,7 @@ mod tests {",
                     profile_id: "pwsh".to_owned(),
                     cwd: String::new(),
                     manual_name: None,
+                    card_skip: 0,
                 }))),
                 Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Files(
                     bt_persist::FilesLeafV1 {
@@ -22635,6 +22768,7 @@ mod tests {",
             profile_id: "pwsh".to_owned(),
             cwd: String::new(),
             manual_name: None,
+            card_skip: 0,
         })))
     }
 
@@ -25689,6 +25823,7 @@ mod tests {",
                     profile_id: "pwsh.exe".to_owned(),
                     cwd: String::new(),
                     manual_name: None,
+                    card_skip: 0,
                 }))),
                 Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Unknown)),
             ],
@@ -27599,6 +27734,7 @@ mod tests {",
             text_opacity: 1.0,
             fold: None,
             focus: false,
+            focus_card_body_logical_px: DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX,
         }
     }
 
@@ -27612,6 +27748,7 @@ mod tests {",
             text_opacity: open,
             fold: None,
             focus: false,
+            focus_card_body_logical_px: DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX,
         }
     }
 
@@ -27621,12 +27758,22 @@ mod tests {",
 
     // ── §7.1.6b′: focus mode, slice F1 ──────────────────────────────────────
 
-    /// A window in focus mode, on whichever tab layout the caller names.
+    /// A window in focus mode, on whichever tab layout the caller names, with
+    /// the card height every window that has never been asked opens at.
     fn focus_rail(layout: TabLayoutMode) -> RailState {
         RailState {
             layout,
             focus: true,
             ..RailState::default()
+        }
+    }
+
+    /// The same window with the reader's answer to `Appearance ▸ Focus card
+    /// height` set to a stated rung (user ruling 2026-08-21).
+    fn focus_rail_at(layout: TabLayoutMode, body_logical_px: u32) -> RailState {
+        RailState {
+            focus_card_body_logical_px: body_logical_px as f32,
+            ..focus_rail(layout)
         }
     }
 
@@ -29160,11 +29307,185 @@ mod tests {",
                 );
                 assert_eq!(
                     (card.mini[3] - card.mini[1]).round(),
-                    ((FOCUS_MINI_HEIGHT_LOGICAL_PX * scale).round() - border).round(),
+                    ((DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX * scale).round() - border).round(),
                     "which is the mock-up's 160px less the foot's own hairline"
                 );
             }
         }
+    }
+
+    /// **`Appearance ▸ Focus card height` moves every box that hangs off the
+    /// body, and nothing else** (user ruling, 2026-08-21).
+    ///
+    /// The row exists because 2026-08-20 turned this knob once for everybody on
+    /// a machine that did not have the case that needed it: a pane whose bottom
+    /// thirteen rows are an agent's status bar and input box spends every row of
+    /// a 160px card on furniture. Which number is right is not something the
+    /// product can know, so it is a row.
+    ///
+    /// **What is asserted is the derivation and not three numbers.** The card's
+    /// own rectangle, the mini cell inside it, the pitch between two cards, the
+    /// hit box and the column's scroll range all come out of
+    /// [`focus_rail_geometry`], so the claim worth pinning is that they come out
+    /// of it *at the height the setting names* — which is also the claim that
+    /// there is no second place still holding 160.
+    ///
+    /// Red gate: put `FOCUS_MINI_HEIGHT_LOGICAL_PX` back inside
+    /// [`focus_card_height`] and every rung but the first goes red at once, on
+    /// the card's own height.
+    #[test]
+    fn the_card_height_row_moves_every_box_that_hangs_off_the_body() {
+        for rung in bt_render::FOCUS_CARD_HEIGHT_OPTIONS_LOGICAL_PX {
+            for scale in [1.0_f32, 1.5, 2.0] {
+                let state = focus_rail_at(TabLayoutMode::Vertical, rung);
+                let geometry = focus_rail_geometry(2_400.0, scale, 3, 0.0, state)
+                    .expect("focus mode puts a column on screen");
+                let head = focus_card_head_height(scale);
+                let border = (FOCUS_CARD_BORDER_LOGICAL_PX * scale).round().max(1.0);
+                let body = (rung as f32 * scale).round();
+                for card in &geometry.cards {
+                    assert_eq!(
+                        card.body[3] - card.body[1],
+                        head + body,
+                        "a card is its head plus the body the row names ({rung}px \
+                         at scale {scale})"
+                    );
+                    assert_eq!(
+                        card.head[3] - card.head[1],
+                        head,
+                        "and the head did not move under it — the row turns one \
+                         of the two boxes §7.1.6b′ F2 split the card into"
+                    );
+                    assert_eq!(
+                        (card.mini[3] - card.mini[1]).round(),
+                        (body - border).round(),
+                        "the mini cell is that body, inside the card's own foot"
+                    );
+                }
+                assert_eq!(
+                    geometry.cards[1].body[1] - geometry.cards[0].body[1],
+                    head + body + (FOCUS_CARD_GAP_LOGICAL_PX * scale),
+                    "the pitch between two cards is the card plus the column's \
+                     own gap, so a taller card scrolls the list rather than \
+                     overlapping its neighbour"
+                );
+            }
+        }
+
+        // **The first rung is the picture that shipped, to the pixel.** The row
+        // is a choice offered, not a redesign: a reader who never opens it must
+        // get back exactly the column 2026-08-20 left them.
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let shipped =
+                focus_rail_geometry(2_400.0, scale, 3, 0.0, focus_rail(TabLayoutMode::Vertical))
+                    .expect("focus mode puts a column on screen");
+            let chosen = focus_rail_geometry(
+                2_400.0,
+                scale,
+                3,
+                0.0,
+                focus_rail_at(TabLayoutMode::Vertical, 160),
+            )
+            .expect("focus mode puts a column on screen");
+            assert_eq!(
+                shipped
+                    .cards
+                    .iter()
+                    .map(|card| card.body)
+                    .collect::<Vec<_>>(),
+                chosen
+                    .cards
+                    .iter()
+                    .map(|card| card.body)
+                    .collect::<Vec<_>>(),
+                "the default rung and the untouched window are one column"
+            );
+            assert_eq!(shipped.viewport, chosen.viewport);
+            assert_eq!(shipped.max_scroll, chosen.max_scroll);
+        }
+    }
+
+    /// **A taller card holds more rows, and the hit test and the scroll range go
+    /// with it** (user ruling, 2026-08-21) — the second half of the row, stated
+    /// where a reader would look for the *consequences* rather than the boxes.
+    ///
+    /// Twelve rows was the number the ruling was arguing with, and the two rungs
+    /// above it are the reason the row exists: **20 and 27** are what a lone
+    /// pane's seat holds at 240 and 320 in the default face, and the top one is
+    /// what the ruling asked for by name — an agent's last words *and* the box
+    /// it is waiting in, on the same card.
+    ///
+    /// Red gate: leave the hit test measuring a 160px card while the paint uses
+    /// the setting and the third assertion answers `Tab(0)` for a point that is
+    /// visibly inside the second card.
+    #[test]
+    fn a_taller_card_holds_more_rows_and_answers_over_all_of_itself() {
+        let mut held = Vec::new();
+        for rung in bt_render::FOCUS_CARD_HEIGHT_OPTIONS_LOGICAL_PX {
+            let state = focus_rail_at(TabLayoutMode::Vertical, rung);
+            let geometry = focus_rail_geometry(2_400.0, 1.0, 3, 0.0, state)
+                .expect("focus mode puts a column on screen");
+            let cell = lone_terminal_cell(&geometry.cards[0]);
+            held.push(crate::focus_thumb::mini_rows(
+                focus_mini_seats(
+                    &lone_seat_tree(SeatKind::Terminal),
+                    geometry.cards[0].mini,
+                    1.0,
+                )[0]
+                .rect,
+                crate::focus_thumb::MiniMetrics::TERM.line_px(1.0),
+                1.0,
+            ));
+            assert!(cell[3] > cell[1], "every rung leaves a cell to draw in");
+
+            // The whole of the taller card answers for its own tab, foot
+            // included — the hit test reads the same geometry the paint does.
+            let trailers = vec![TabTrailer::default(); 3];
+            let second = geometry.cards[1];
+            for y in [
+                second.body[1] + 1.0,
+                (second.body[1] + second.body[3]) / 2.0,
+                second.body[3] - 1.0,
+            ] {
+                assert_eq!(
+                    hit_focus_rail(
+                        2_400.0,
+                        1.0,
+                        &trailers,
+                        0.0,
+                        state,
+                        f64::from((second.body[0] + second.body[2]) / 2.0),
+                        f64::from(y),
+                    ),
+                    Some(ChromeTarget::Tab(1)),
+                    "a press anywhere down the second card is that tab, at {rung}px"
+                );
+            }
+        }
+        assert_eq!(
+            held,
+            vec![12, 20, 27],
+            "the three rungs are 12 / 20 / 27 rows to a lone pane's seat in the \
+             default face, which is what the ladder was chosen for"
+        );
+
+        // A short window: the taller the card, the sooner the list runs past the
+        // fold, and `max_scroll` is what says so.
+        let short = |rung| {
+            focus_rail_geometry(
+                618.0,
+                1.0,
+                6,
+                0.0,
+                focus_rail_at(TabLayoutMode::Vertical, rung),
+            )
+            .expect("focus mode puts a column on screen")
+            .max_scroll
+        };
+        assert!(
+            short(320) > short(240) && short(240) > short(160),
+            "the column's scroll range follows the row rather than a constant"
+        );
     }
 
     /// The mini tree is the tab's tree at the tab's own ratios — not a solve, and
@@ -29208,6 +29529,202 @@ mod tests {",
         );
     }
 
+    /// The inside of a lone terminal seat's cell at scale 1 — the rectangle the
+    /// rows are actually laid in, past the hairline and the cell's own padding.
+    ///
+    /// Written once here because three tests measure against it and the whole
+    /// point of each of them is *where the first row is*: a helper that computed
+    /// it a second way would be able to agree with a painter that had drifted.
+    fn lone_terminal_cell(card: &FocusCardGeometry) -> [f32; 4] {
+        let seat = focus_mini_seats(&lone_seat_tree(SeatKind::Terminal), card.mini, 1.0)
+            .into_iter()
+            .next()
+            .expect("a lone terminal tab has one mini seat");
+        let stroke = (FOCUS_MINI_BORDER_LOGICAL_PX).round().max(1.0);
+        [
+            seat.rect[0] + stroke + FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX,
+            seat.rect[1] + stroke + FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX,
+            seat.rect[2] - stroke - FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX,
+            seat.rect[3] - stroke - FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX,
+        ]
+    }
+
+    /// One card carrying one terminal seat with exactly these lines on it, and
+    /// the labels that land inside its body, top to bottom.
+    fn transcript_rows_of(lines: Vec<String>) -> (Vec<ChromeLabel>, [f32; 4]) {
+        let (rows, cell, _) = transcript_paint_of(lines, false);
+        (rows, cell)
+    }
+
+    /// The same card, with the seat's window said to be aimed above the tail or
+    /// not, and the seam quads that land inside the body handed back beside the
+    /// rows (user ruling 2026-08-21).
+    fn transcript_paint_of(
+        lines: Vec<String>,
+        more_below: bool,
+    ) -> (Vec<ChromeLabel>, [f32; 4], Vec<ChromeQuad>) {
+        let tabs = vec![card_tab("shell", 1, TabMarkState::default(), false)];
+        let tree = lone_seat_tree(SeatKind::Terminal);
+        let seats =
+            BTreeMap::from([(SeatId(1), MiniSeatContent::Transcript { lines, more_below })]);
+        let thumbnails = vec![Some(FocusThumbnail {
+            tree: &tree,
+            focused: SeatId(1),
+            seats: &seats,
+        })];
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let column = window_chrome_with_thumbnails_in(
+            TALL_FIXTURE_HEIGHT,
+            &tabs,
+            0,
+            state,
+            None,
+            &thumbnails,
+            1.0,
+        )
+        .rail;
+        let geometry = focus_of_in(TALL_FIXTURE_HEIGHT, state, tabs.len());
+        let card = geometry.cards[0];
+        let mut rows: Vec<ChromeLabel> = column
+            .labels
+            .into_iter()
+            .filter(|label| label.rect[1] >= card.mini[1] && label.rect[3] <= card.mini[3])
+            .collect();
+        rows.sort_by(|a, b| a.rect[1].total_cmp(&b.rect[1]));
+        let seam: Vec<ChromeQuad> = column
+            .quads
+            .into_iter()
+            .filter(|quad| quad.rect[1] >= card.mini[1] && quad.rect[3] <= card.mini[3])
+            .collect();
+        (rows, lone_terminal_cell(&card), seam)
+    }
+
+    /// **A tail too short to fill its cell starts at the cell's own top** (user
+    /// ruling, 2026-08-21).
+    ///
+    /// This **overturns** the 2026-08-20 shape, which laid every tail up from
+    /// the seat's floor so that "the newest line" stood in the same place on
+    /// every card. The ruling that replaced it is the one the whole projection
+    /// was rebuilt on — 「左侧就是一个还在跑的终端,只是字小一点」: a shell that
+    /// has printed two lines shows them at the *top* of its pane with blank
+    /// under them, so a picture of that shell showing them at the bottom is a
+    /// different arrangement rather than the same terminal set smaller. The
+    /// files seat in the same card has been laid from the top since F2, and one
+    /// card reading its two kinds of rows from opposite ends is the second
+    /// vocabulary §7.1.6b′ forbids in the same breath as a second aggregation.
+    ///
+    /// Red gate: put `lines.iter().rev()` and the seat's floor back and the
+    /// first row lands eleven row-heights lower than this asserts.
+    #[test]
+    fn a_tail_shorter_than_its_cell_starts_at_the_cells_top() {
+        let (rows, cell) =
+            transcript_rows_of(vec!["> cargo build".to_owned(), "  Compiling".to_owned()]);
+        let line = crate::focus_thumb::MiniMetrics::TERM.line_px(1.0);
+        assert_eq!(
+            rows.iter()
+                .map(|label| label.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["> cargo build", "  Compiling"],
+            "oldest first, which is the order they were printed in"
+        );
+        assert_eq!(
+            rows[0].rect[1], cell[1],
+            "and the first of them starts at the top of the cell, exactly as a \
+             two-line shell does in the pane this is a picture of"
+        );
+        assert_eq!(
+            rows[1].rect[1],
+            cell[1] + line,
+            "the second is one row down, and nothing is pushed to the floor"
+        );
+    }
+
+    /// **A tail that fills its cell still fills it** — the other half of the
+    /// 2026-08-21 ruling, and the half that says the change is an *alignment*
+    /// and not a new window: what is projected is still the last N rows of the
+    /// screen, and once there are N of them the picture is what it was.
+    ///
+    /// Red gate: lay the rows from the top and then stop at the *first* one that
+    /// does not fit whole, and the count falls by one.
+    #[test]
+    fn a_tail_that_fills_its_cell_is_the_picture_it_always_was() {
+        let geometry = focus_of_in(TALL_FIXTURE_HEIGHT, focus_rail(TabLayoutMode::Vertical), 1);
+        let cell = lone_terminal_cell(&geometry.cards[0]);
+        let line = crate::focus_thumb::MiniMetrics::TERM.line_px(1.0);
+        let held = ((cell[3] - cell[1]) / line) as usize;
+        assert!(held > 6, "a 160px card holds more than F2's old constant");
+        let (rows, cell) = transcript_rows_of((0..held).map(|row| format!("line {row}")).collect());
+        assert_eq!(rows.len(), held, "every row the cell holds is drawn");
+        assert_eq!(rows[0].rect[1], cell[1], "beginning at the cell's top");
+        assert!(
+            rows[held - 1].rect[3] <= cell[3],
+            "and the last of them still stands inside the cell's own floor"
+        );
+        assert!(
+            cell[3] - rows[held - 1].rect[3] < line,
+            "with less than a whole row of slack under it, which is what \
+             『填满』 means when the count is floored"
+        );
+    }
+
+    /// **A seat whose window is aimed above the tail wears a dotted seam along
+    /// its floor, and one on the tail wears nothing** (user ruling 2026-08-21,
+    /// §7.1.6b′ 「卡片窗口瞄准」).
+    ///
+    /// The mark's *presence* is the whole statement — there are rows below this
+    /// edge that the card is not drawing — so the pair has to be pinned
+    /// together: a seam that was always there would say nothing at all.
+    ///
+    /// It is a run of dashes and not a rule, and it stands on the cell's own
+    /// floor inside its hairline, which is what makes it a mark *in* the seat
+    /// rather than a second border around it.
+    ///
+    /// Red gate: draw the seam unconditionally and the second half goes red on
+    /// a card that is looking at the tail.
+    #[test]
+    fn a_seat_aimed_above_the_tail_wears_a_seam_and_one_on_the_tail_does_not() {
+        let lines: Vec<String> = (0..4).map(|row| format!("line {row}")).collect();
+        let (_, _, resting) = transcript_paint_of(lines.clone(), false);
+        assert!(
+            resting.is_empty(),
+            "a card showing the last rows of its screen has nothing to say about \
+             rows below them"
+        );
+
+        let (_, _, seam) = transcript_paint_of(lines, true);
+        assert!(seam.len() > 1, "a run of dashes and not one rule");
+        let card =
+            focus_of_in(TALL_FIXTURE_HEIGHT, focus_rail(TabLayoutMode::Vertical), 1).cards[0];
+        let seat = focus_mini_seats(&lone_seat_tree(SeatKind::Terminal), card.mini, 1.0)[0].rect;
+        let stroke = FOCUS_MINI_BORDER_LOGICAL_PX.round().max(1.0);
+        let palette = chrome_palette();
+        for dash in &seam {
+            assert_eq!(
+                dash.rect[3],
+                seat[3] - stroke,
+                "it stands on the cell's own floor, inside the hairline"
+            );
+            assert_eq!(
+                dash.rect[3] - dash.rect[1],
+                (FOCUS_MINI_SEAM_LOGICAL_PX).round().max(1.0),
+                "one pixel, like every hairline in this column"
+            );
+            assert!(
+                dash.rect[0] >= seat[0] + stroke && dash.rect[2] <= seat[2] - stroke,
+                "and inside it on the two sides it touches"
+            );
+            assert_eq!(
+                dash.color, palette.focus_mini_seam,
+                "in the row's own ink, washed — not a colour of its own"
+            );
+        }
+        assert!(
+            seam.windows(2)
+                .all(|pair| pair[1].rect[0] > pair[0].rect[2]),
+            "with a gap between every pair, which is what makes it a dash"
+        );
+    }
+
     /// **A tab with no shell in it still has a body, and each kind of seat says
     /// its own thing** (§7.1.6b′ F2, and §7.1.6h's sessionless tabs).
     ///
@@ -29234,7 +29751,10 @@ mod tests {",
         let preview = lone_seat_tree(SeatKind::Preview);
         let tail = BTreeMap::from([(
             SeatId(1),
-            MiniSeatContent::Transcript(vec!["> cargo build".to_owned(), "  Compiling".to_owned()]),
+            MiniSeatContent::Transcript {
+                lines: vec!["> cargo build".to_owned(), "  Compiling".to_owned()],
+                more_below: false,
+            },
         )]);
         let rows = BTreeMap::from([(
             SeatId(1),
@@ -29305,8 +29825,9 @@ mod tests {",
                 .iter()
                 .map(|label| label.text.as_str())
                 .collect::<Vec<_>>(),
-            vec!["  Compiling", "> cargo build"],
-            "a terminal seat carries its tail, laid up from the floor"
+            vec!["> cargo build", "  Compiling"],
+            "a terminal seat carries its tail, laid down from the cell's top \
+             (user ruling 2026-08-21; it read up from the floor for one day)"
         );
         assert!(
             shell.iter().all(|label| label.mono),
@@ -29616,7 +30137,10 @@ mod tests {",
         let tree = lone_seat_tree(SeatKind::Terminal);
         let content = BTreeMap::from([(
             SeatId(1),
-            MiniSeatContent::Transcript(vec!["something".to_owned()]),
+            MiniSeatContent::Transcript {
+                lines: vec!["something".to_owned()],
+                more_below: false,
+            },
         )]);
         let thumbnails = vec![
             Some(FocusThumbnail {
@@ -31214,6 +31738,7 @@ mod tests {",
                 profile_id: "pwsh".to_owned(),
                 cwd: String::new(),
                 manual_name: None,
+                card_skip: 0,
             },
             &|seat| FilesLeafState {
                 root: r"D:\repo".to_owned(),
@@ -31330,6 +31855,7 @@ mod tests {",
                         profile_id: "pwsh.exe".to_owned(),
                         cwd: r"D:\work".to_owned(),
                         manual_name: None,
+                        card_skip: 0,
                     },
                 ))),
             ],
@@ -32952,6 +33478,7 @@ mod drop_plan_tests {
             profile_id: "pwsh".to_owned(),
             cwd: r"C:\Users".to_owned(),
             manual_name: None,
+            card_skip: 0,
         };
         let mut revived = Seats::from_persisted(
             &seats.to_persisted(&|_| seed.clone(), &|_| FilesLeafState::default()),

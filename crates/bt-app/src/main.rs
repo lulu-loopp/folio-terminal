@@ -3254,6 +3254,8 @@ fn restart_seed(profile: usize, last_reported_cwd: Option<&Path>) -> LeafSeed {
         // A running pane's profile is one this build has, by construction — it
         // started a process from it.
         unknown_profile_id: None,
+        // A restart keeps the pane, so it keeps the pane's aim.
+        card_skip: 0,
     }
 }
 
@@ -3933,6 +3935,24 @@ struct LeafSession {
     /// Set to the leaf's own birth, which costs nothing: a pane with no
     /// scrollback yet draws no bar whatever this says.
     thumb_awake: Instant,
+    /// **Where this pane's focus card aims its window**, in rows above the tail
+    /// (user ruling 2026-08-21, §7.1.6b′ 「卡片窗口瞄准」).
+    ///
+    /// `0` is the tail, which is what every card showed before the ruling and
+    /// what every seat is born at. Anything above lifts the card's window that
+    /// many rows off the floor of the screen — the answer to a program whose
+    /// bottom rows are fixed furniture, arrived at by aiming rather than by
+    /// recognising the program.
+    ///
+    /// **On the leaf, beside [`Self::profile`] and for its reason**: it is a
+    /// fact about *this pane*, so it travels whole through a tear-out into a new
+    /// tab and a merge into another tab's layout, rather than being re-derived
+    /// from whichever tab the pane landed in. It is also why the number survives
+    /// `Move pane to new tab` without that path knowing it exists.
+    ///
+    /// Written to `session.json` on the leaf that owns it (`TermLeafV1`), so a
+    /// window reopened tomorrow is aimed where it was left.
+    card_skip: usize,
     grid: GridSize,
     conpty_grid: GridSize,
     pending_pty_resize: Option<PendingPtyResize>,
@@ -6505,6 +6525,13 @@ impl TabState {
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             manual_name: self.manual_name.clone(),
+            // **Read off the pane, like the two above it** (§7.1.6b′, user
+            // ruling 2026-08-21): the aim belongs to the shell that was standing
+            // in this seat, so a two-pane tab writes two aims and not one twice.
+            card_skip: self
+                .sessions
+                .get(&seat)
+                .map_or(0, |leaf| leaf.card_skip as u32),
         }
     }
 
@@ -6965,9 +6992,17 @@ impl TabState {
     /// the one frame between a seat being minted and its content being created.
     fn mini_source(&self, seat: SeatId, kind: SeatKind) -> Option<focus_thumb::SeatSource<'_>> {
         match kind {
-            SeatKind::Terminal => Some(focus_thumb::SeatSource::Terminal(
-                &self.sessions.get(&seat)?.session,
-            )),
+            SeatKind::Terminal => {
+                let leaf = self.sessions.get(&seat)?;
+                Some(focus_thumb::SeatSource::Terminal {
+                    session: &leaf.session,
+                    // **The reader's aim, handed over unread** (user ruling
+                    // 2026-08-21): this file does not know what a row is, and
+                    // the projection is where the clamp against a short screen
+                    // belongs — it is the only place that has walked the grid.
+                    skip: leaf.card_skip,
+                })
+            }
             SeatKind::Files => Some(focus_thumb::SeatSource::Files {
                 state: self.files.get(&seat)?,
                 // A column nobody has looked into yet has no cache, and
@@ -15785,6 +15820,11 @@ fn revive_plan(
                         .and_then(|cwd| {
                             profiles::revived_cwd(profiles::index_of_id(&leaf.profile_id), cwd)
                         }),
+                    // The third fact read out of the same saved leaf in the same
+                    // pass, for the reason the two above it are: a pane revived
+                    // with somebody else's aim is a card pointed at the wrong
+                    // part of the wrong shell.
+                    card_skip: leaf.card_skip as usize,
                 },
             )
         })
@@ -16072,6 +16112,7 @@ fn seeded_tab(seed: &seed::Seed) -> TabV1 {
                 profile_id: profile_id.clone(),
                 cwd: cwd.clone(),
                 manual_name: manual_name.clone(),
+                card_skip: 0,
             })),
             None,
         ),
@@ -16207,6 +16248,10 @@ struct LeafSeed {
     /// absence rather than a path, so that "the saved folder is gone" and "no
     /// folder was ever saved" arrive as one case instead of two.
     cwd: Option<PathBuf>,
+    /// **Where this pane's focus card was aimed** when the session was written
+    /// (§7.1.6b′, user ruling 2026-08-21). `0` for every seed that was not
+    /// revived from disk, which is what a shell born now is aimed at.
+    card_skip: usize,
 }
 
 /// **Every popup this window can raise** — E61's "one at a time" written as a
@@ -16512,11 +16557,16 @@ impl SplitSeed {
                 cwd: source_cwd.map(Path::to_path_buf),
                 // A running pane's profile is one this build has, by construction.
                 unknown_profile_id: None,
+                // **A new pane is aimed at the tail**, whichever of the three
+                // ways it was made. Inheriting the neighbour's aim would be a
+                // pane born looking somewhere its own shell has never printed.
+                card_skip: 0,
             },
             Self::Profile(profile) => LeafSeed {
                 profile: *profile,
                 cwd: profiles::cwd_for_spawn(source_profile, *profile, source_cwd),
                 unknown_profile_id: None,
+                card_skip: 0,
             },
             // The chooser answers with a Windows path, because
             // `FOS_FORCEFILESYSTEM` is what makes it answer with a path at all —
@@ -16531,6 +16581,7 @@ impl SplitSeed {
                     path,
                 ),
                 unknown_profile_id: None,
+                card_skip: 0,
             },
         }
     }
@@ -16858,6 +16909,10 @@ fn create_leaf_session(
         session,
         // Nobody has asked for anything yet.
         attention_ticket: None,
+        // Aimed at the tail, which is where a card looks until somebody turns a
+        // wheel over it — a shell that has just started has no furniture on its
+        // floor to be aimed past.
+        card_skip: seed.card_skip,
         projection,
         thumb_awake: Instant::now(),
         grid,
@@ -16973,6 +17028,7 @@ fn create_tab_state(
                 profile: default_profile,
                 cwd: None,
                 unknown_profile_id: None,
+                card_skip: 0,
             }),
             programs,
             formulas,
@@ -18739,6 +18795,7 @@ impl Runtime<'_> {
                             // whose shell has gone, and a launch argument has a
                             // reader standing right there.
                             unknown_profile_id: None,
+                            card_skip: 0,
                         },
                     )
                 })
@@ -19471,6 +19528,7 @@ impl Runtime<'_> {
                 profile,
                 cwd,
                 unknown_profile_id: None,
+                card_skip: 0,
             },
         )]);
         let (tab, _) = create_tab_state(
@@ -19661,6 +19719,7 @@ impl Runtime<'_> {
                         ),
                         unknown_profile_id: (!profiles::has_id(&profile_id))
                             .then(|| profile_id.clone()),
+                        card_skip: 0,
                     },
                 )]);
                 (seats, manual_name, leaves, BTreeMap::new())
@@ -23813,6 +23872,7 @@ impl Runtime<'_> {
             inline_formulas: self.app.settings_store.loaded().inline_formulas,
             tables: self.app.settings_store.loaded().tables,
             block_max_height: self.app.settings_store.loaded().block_max_height,
+            focus_card_height: self.app.settings_store.loaded().focus_card_height,
             scrollback_lines: self.app.settings_store.loaded().scrollback_lines,
             terminal_notifications: self.app.settings_store.loaded().terminal_notifications,
             powershell_integration_offer: self
@@ -25028,6 +25088,9 @@ impl Runtime<'_> {
         if let Some(lines) = settings::scrollback_lines_requested(target) {
             self.apply_scrollback_lines(lines)?;
         }
+        if let Some(height) = settings::focus_card_height_requested(target) {
+            self.apply_focus_card_height(height)?;
+        }
         if let Some(enabled) = settings::inline_formulas_requested(target) {
             self.apply_inline_formulas(enabled)?;
         }
@@ -25269,6 +25332,7 @@ impl Runtime<'_> {
             | Row::Cursor
             | Row::TabLayout
             | Row::FocusMode
+            | Row::FocusCardHeight
             | Row::Formulas
             | Row::InlineFormulas
             | Row::Tables
@@ -28736,6 +28800,33 @@ impl Runtime<'_> {
             return Ok(());
         }
         self.settle_pane_notices()
+    }
+
+    /// Point the `Focus card height` row at `height` logical pixels of card body
+    /// (user ruling 2026-08-21, §7.1.6b′).
+    ///
+    /// **One write and no fan-out**, which is the shape the setting was given
+    /// rather than a shortcut taken here: nothing in this process holds a card
+    /// height. `rail_posture` reads the file every time it is asked what shape
+    /// this window is, and every box that follows the body — the card, the mini
+    /// cell, the entrance's start and end, the hit boxes, the scroll range — is
+    /// derived from the column `focus_rail_geometry` solves out of that posture.
+    /// So the row takes effect on the next frame, in **every** window, and there
+    /// is nothing to invalidate; compare [`Self::apply_block_max_height`], which
+    /// has to walk every pane because `bt_term` really does keep a copy.
+    ///
+    /// The frame is asked for anyway, because a setting that took effect on the
+    /// next thing that happened to repaint would look like it had not worked.
+    fn apply_focus_card_height(&mut self, height: u32) -> Result<bool> {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.focus_card_height = height;
+        if !self.app.settings_store.store(settings) {
+            return Ok(false);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
     }
 
     fn apply_git_panel(&mut self, enabled: bool) -> Result<bool> {
@@ -51305,9 +51396,19 @@ impl Runtime<'_> {
     /// lay the stage out as though the panel were not on screen, and a panel
     /// drawn over a stage that was never told about it is the occlusion the
     /// screenshots showed.
+    /// **And the card height joins here too** (user ruling 2026-08-21).
+    ///
+    /// `Appearance ▸ Focus card height` is a *file* preference, like the mode's
+    /// own bit — one answer for every window — while `window.rail` holds the two
+    /// preferences this window happens to be wearing. Joining it at the one
+    /// place the posture is assembled is what makes the row take effect at once
+    /// and in every window: nothing caches a card height, so the next frame
+    /// solves the column at whatever the file now says. A copy kept on
+    /// `WindowRuntime` would be a second answer to re-sync on every door.
     fn rail_posture(&self) -> seats::RailState {
         seats::RailState {
             focus: self.window.focus_mode,
+            focus_card_body_logical_px: self.app.settings_store.loaded().focus_card_height as f32,
             ..self.window.rail
         }
     }
@@ -51779,8 +51880,116 @@ impl Runtime<'_> {
     /// what it was over is a distance the hand has to relearn at every surface".
     /// What it does not need is that function's axis translation — the rail is a
     /// vertical scroller and a vertical wheel already says what it means.
+    /// **Aim one card's terminal seat**, if the pointer is over one (user ruling
+    /// 2026-08-21, §7.1.6b′ 「卡片窗口瞄准」). Reports whether the notch was
+    /// spent here.
+    ///
+    /// # Why the wheel, and why no menu
+    ///
+    /// The thing being set is *where down a screen a window is pointed*, and a
+    /// wheel is what this desktop uses to point a window down a screen. A menu
+    /// row would have to name a number, and the number a reader wants is the one
+    /// where the furniture stops — which they find by watching the card, not by
+    /// counting rows in a dialog. So the gesture is the direct one: turn the
+    /// wheel over the seat and watch the picture move.
+    ///
+    /// **Up lifts the window and down lowers it, stopping at the tail.** That is
+    /// the same direction the wheel means over any document: away from you is
+    /// back through what has already gone past. Zero is a floor and not a wrap —
+    /// a reader who keeps turning down lands on the tail and stays there.
+    ///
+    /// **One notch is one row, and there is no modifier.** This house already
+    /// spends `Shift`+wheel on the *other axis* (`scroll_preview_body`), and a
+    /// mini seat has no other axis to be turned onto; giving it a magnitude here
+    /// would make one key mean two things on two surfaces. A flick of the wheel
+    /// already arrives as a merged burst of notches (`queue_wheel`), so crossing
+    /// a dozen rows of status bar is one flick rather than a dozen gestures.
+    ///
+    /// **Only a terminal seat answers.** A files column, a preview and a face
+    /// have no tail to be lifted off — what they draw is read from the top
+    /// already — so a notch over one of them falls through to the column, which
+    /// is what the reader will read it as: they were scrolling the list and the
+    /// pointer happened to be over a card.
+    ///
+    /// **The click table did not change by a character.** `hit_focus_rail` still
+    /// answers `Tab(i)` over the whole card and `TabClose(i)` over the ×, and
+    /// this function is not on that path: a mini seat is still not a click
+    /// target, and the ruling that says so ("clicking a card is clicking that
+    /// tab") is about presses, not about notches.
+    fn aim_focus_card_window(&mut self, now: Instant, delta: MouseScrollDelta) -> Result<bool> {
+        let notches = wheel_zoom_notches(delta);
+        let steps = notches.round() as i32;
+        if steps == 0 {
+            return Ok(false);
+        }
+        let Some(position) = self.window.pointer_position else {
+            return Ok(false);
+        };
+        let Some(geometry) = self.focus_rail_geometry_now(now) else {
+            return Ok(false);
+        };
+        let [list_top, list_bottom] = geometry.viewport;
+        let point = [position.x as f32, position.y as f32];
+        if point[1] < list_top || point[1] >= list_bottom {
+            return Ok(false);
+        }
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let Some((index, card)) = geometry
+            .cards
+            .iter()
+            .enumerate()
+            .find(|(_, card)| seats::rect_holds(card.body, point[0], point[1]))
+        else {
+            return Ok(false);
+        };
+        let Some(tab) = self.window.tabs.get_mut(index) else {
+            return Ok(false);
+        };
+        let Some(seat) = seats::focus_mini_seats(tab.seats.tree(), card.mini, scale)
+            .into_iter()
+            .find(|seat| {
+                seat.kind == SeatKind::Terminal && seats::rect_holds(seat.rect, point[0], point[1])
+            })
+        else {
+            return Ok(false);
+        };
+        let Some(leaf) = tab.sessions.get_mut(&seat.id) else {
+            return Ok(false);
+        };
+        // Wheel-up is a positive notch and lifts the window; wheel-down lowers
+        // it and stops at the tail.
+        let aimed = if steps > 0 {
+            leaf.card_skip.saturating_add(steps.unsigned_abs() as usize)
+        } else {
+            leaf.card_skip.saturating_sub(steps.unsigned_abs() as usize)
+        };
+        if aimed == leaf.card_skip {
+            return Ok(true);
+        }
+        leaf.card_skip = aimed;
+        // The picture is behind the number, so the projection is spent again
+        // before the chrome is built — the order every frame already uses.
+        self.refresh_focus_thumbnails(now, scale);
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        // An aim outlives the window, so it goes into `session.json` on the
+        // ordinary debounce rather than once per notch.
+        self.mark_session_dirty(now);
+        Ok(true)
+    }
+
     fn scroll_rail(&mut self, delta: MouseScrollDelta) -> Result<()> {
         let now = Instant::now();
+        // **A notch over a card's terminal seat aims that seat's window** (user
+        // ruling 2026-08-21), and it is asked before the list scrolls for the
+        // sentence this house answers everywhere else: the innermost scroller
+        // under the pointer takes the notch. It is also the only surface where
+        // the two readings can be told apart — a seat is a rectangle inside a
+        // card, so a notch over it is unambiguous.
+        if self.aim_focus_card_window(now, delta)? {
+            return Ok(());
+        }
         // The two lists share `rail_scroll` because they share the panel; what
         // differs between them is only how long the content is, which is exactly
         // what `viewport` and `max_scroll` carry.
@@ -54998,6 +55207,7 @@ mod multiwindow_session_tests {
                 profile_id: "pwsh".to_owned(),
                 cwd: cwd.to_owned(),
                 manual_name: None,
+                card_skip: 0,
             })),
             pinned,
             focused_leaf: "leaf-0".to_owned(),
@@ -57722,6 +57932,12 @@ fn rail_state_for(layout: seats::TabLayoutMode, mode: seats::RailMode) -> seats:
         // off. `sampled_rail` is where the window's own bit joins the state, on
         // the frame clock, beside every other sampled scalar here.
         focus: false,
+        // **Not a rail preference either, and so not read here** — the row that
+        // owns it lives in the same file as the mode's own bit and joins the
+        // state at the same one place (`rail_posture`). What is written is the
+        // default, which is what a state built out of `Tab layout` and `Sidebar`
+        // alone has always described.
+        focus_card_body_logical_px: bt_render::DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX,
     }
 }
 
@@ -59522,6 +59738,7 @@ mod tests {
                 profile_id: profile_id.to_owned(),
                 cwd: cwd.to_owned(),
                 manual_name: name.map(str::to_owned),
+                card_skip: 0,
             })),
             pinned,
             focused_leaf: "leaf-0".to_owned(),
@@ -59809,6 +60026,7 @@ mod tests {
                     profile_id: "pwsh".to_owned(),
                     cwd: "C:\\repo\\src".to_owned(),
                     manual_name: Some("build".to_owned()),
+                    card_skip: 0,
                 }))),
             ],
         });
@@ -59858,6 +60076,7 @@ mod tests {
                 profile_id: profile_id.to_owned(),
                 cwd: cwd.to_owned(),
                 manual_name: None,
+                card_skip: 0,
             })))
         };
         let here = std::env::current_dir().expect("a test runs somewhere");
@@ -59880,6 +60099,7 @@ mod tests {
                 profile: profiles::index_of_id("pwsh"),
                 cwd: Some(here),
                 unknown_profile_id: None,
+                card_skip: 0,
             }
         );
         assert_eq!(
@@ -59888,6 +60108,7 @@ mod tests {
                 profile: profiles::index_of_id("cmd"),
                 cwd: None,
                 unknown_profile_id: None,
+                card_skip: 0,
             }
         );
         assert_ne!(
@@ -59903,6 +60124,7 @@ mod tests {
                 profile_id: "pwsh".to_owned(),
                 cwd: cwd.to_owned(),
                 manual_name: None,
+                card_skip: 0,
             })))
         };
         TabV1 {
@@ -59970,6 +60192,7 @@ mod tests {
                     other => panic!("only the tree's own terminal seats are asked, not {other:?}"),
                 },
                 manual_name: None,
+                card_skip: 0,
             },
             &|seat| panic!("a tree of two terminals has no files leaf to ask about ({seat:?})"),
         );
@@ -60026,6 +60249,7 @@ mod tests {
                         profile_id: "pwsh".to_owned(),
                         cwd: String::new(),
                         manual_name: None,
+                        card_skip: 0,
                     }))),
                 ],
             }),
@@ -60108,6 +60332,7 @@ mod tests {
                 profile_id: "pwsh".to_owned(),
                 cwd: String::new(),
                 manual_name: None,
+                card_skip: 0,
             },
             &|seat| files.get(&seat).cloned().unwrap_or_default(),
         );
@@ -60147,6 +60372,7 @@ mod tests {
                 profile_id: "pwsh".to_owned(),
                 cwd: String::new(),
                 manual_name: None,
+                card_skip: 0,
             },
             &|seat| files.get(&seat).cloned().unwrap_or_default(),
         );
@@ -60199,6 +60425,7 @@ mod tests {
                                 profile_id: "pwsh".to_owned(),
                                 cwd: String::new(),
                                 manual_name: None,
+                                card_skip: 0,
                             }))),
                             files(r"D:\right", 300),
                         ],
@@ -69226,6 +69453,7 @@ mod tests {
                         profile_id: "pwsh.exe".to_owned(),
                         cwd: String::new(),
                         manual_name: None,
+                        card_skip: 0,
                     }),
                 )),
                 Box::new(bt_persist::LayoutNodeV1::Leaf(
@@ -69321,6 +69549,7 @@ mod tests {
                     profile_id: "pwsh.exe".to_owned(),
                     cwd: String::new(),
                     manual_name: None,
+                    card_skip: 0,
                 }),
             ))
         };
@@ -71090,6 +71319,7 @@ mod tests {
                 text_opacity: 1.0,
                 fold: None,
                 focus: false,
+                focus_card_body_logical_px: bt_render::DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX,
             },
         )
         .expect("an expanded rail is on screen");
@@ -71150,6 +71380,7 @@ mod tests {
                 text_opacity: 1.0,
                 fold: None,
                 focus: true,
+                focus_card_body_logical_px: bt_render::DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX,
             },
         )
         .expect("focus mode puts a column on screen")
@@ -77834,6 +78065,7 @@ mod tests {
                     profile_id: "pwsh".to_owned(),
                     cwd: r"C:\repo\crates".to_owned(),
                     manual_name: None,
+                    card_skip: 0,
                 }))),
             ],
         });
@@ -79435,6 +79667,8 @@ mod tests {
         };
         LeafSession {
             pty: None,
+            // Aimed at the tail, like every shell that has not been aimed.
+            card_skip: 0,
             // A shell-less fixture is not a shell of some other kind: these
             // panes exist to carry scrollback, and the default profile is what
             // the pane they stand in for would have been started as.

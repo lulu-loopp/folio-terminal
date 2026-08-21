@@ -15,8 +15,11 @@ use crate::layout::LayoutNodeV1;
 /// `docs/M2-persistence-schema-v1.md` §3.1 has been promising since v1**: `window` becomes
 /// `windows[]`, and the four keys that were about "the window" — its placement, its tab strip's
 /// layout, its sidebar's width and its tabs — move inside a [`SessionWindowV1`] so a document can
-/// hold more than one of them (`docs/DESIGN.md` §2.4 D 段).
-pub const SESSION_SCHEMA_VERSION: u32 = 9;
+/// hold more than one of them (`docs/DESIGN.md` §2.4 D 段). **v10 adds `card_skip` to a `term`
+/// leaf** — where that pane's focus card aims its window, in rows above the tail (§7.1.6b′, user
+/// ruling 2026-08-21), which is v7's shape on the other kind of leaf: a fact about the pane's
+/// *shape* rather than its content, and one a reader sets once and expects to find again.
+pub const SESSION_SCHEMA_VERSION: u32 = 10;
 
 /// Persisted theme mode restored with the session. `System` is resolved by the app against winit's
 /// OS theme; `BT_BG` remains a process diagnostic override and is never persisted as a mode.
@@ -490,6 +493,7 @@ mod tests {
                         profile_id: "pwsh.exe".to_string(),
                         cwd: "C:\\".to_string(),
                         manual_name: None,
+                        card_skip: 0,
                     },
                 )),
                 pinned: false,

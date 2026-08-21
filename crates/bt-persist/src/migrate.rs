@@ -53,6 +53,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (15, migrate_settings_v15_to_v16),
     (16, migrate_settings_v16_to_v17),
     (17, migrate_settings_v17_to_v18),
+    (18, migrate_settings_v18_to_v19),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -392,6 +393,28 @@ fn migrate_settings_v17_to_v18(mut value: Value) -> Value {
     value
 }
 
+/// v18 -> v19: how tall a focus card's body stands, defaulted to **the height it already was**.
+///
+/// One key a ninth time, and it lands the way v13–v16 did rather than the way v17 and v18 did: this
+/// feature does not arrive with the row, it has been on screen since 2026-08-20 at exactly one
+/// height, so `160` is a behaviour being carried forward and not a product default being chosen.
+/// A migration that wrote a taller card here would change the shape of a column somebody has been
+/// living in, on the strength of a row they have never seen — `migrate_settings_v15_to_v16`'s
+/// sentence, on a surface instead of a colour.
+///
+/// See `SettingsV1::focus_card_height`, and that field's note on why this step stamps the number
+/// it does: it is the one it was handed second.
+fn migrate_settings_v18_to_v19(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(19));
+        object.insert(
+            "focus_card_height".to_owned(),
+            Value::from(crate::settings::DEFAULT_FOCUS_CARD_HEIGHT),
+        );
+    }
+    value
+}
+
 /// Migration table for `keybindings.json`. Empty, and it will stay empty for as
 /// long as the file's *shape* holds: a schema step is owed when the document
 /// changes, and adding, renaming or retiring a shortcut row does not change this
@@ -428,6 +451,7 @@ pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (6, migrate_session_v6_to_v7),
     (7, migrate_session_v7_to_v8),
     (8, migrate_session_v8_to_v9),
+    (9, migrate_session_v9_to_v10),
 ];
 
 fn migrate_session_v1_to_v2(mut value: Value) -> Value {
@@ -618,6 +642,65 @@ fn migrate_session_v8_to_v9(mut value: Value) -> Value {
         );
     }
     value
+}
+
+/// v9 -> v10: where each pane's focus card aims its window (§7.1.6b′, user ruling 2026-08-21).
+///
+/// `v6_to_v7`'s shape on the other kind of leaf, and it walks the same two places for the same
+/// reason: **the tabs' trees and not `recent`**. A vault entry's seed for a shell is
+/// `{ profile_id, cwd, manual_name }` — the whole of what a closed tab can be rebuilt from — and a
+/// card's aim is not part of rebuilding one; inserting a key there would write a field the schema
+/// does not have.
+///
+/// It walks `windows[]` rather than a top-level `tabs`, which is the one difference from
+/// `v6_to_v7`: v9 moved the tab list inside a window object, and a step written against the older
+/// shape would silently touch nothing at all.
+///
+/// The answer written is `0` — the tail — because that is where every card has looked since F2.
+fn migrate_session_v9_to_v10(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(10));
+        if let Some(windows) = object.get_mut("windows").and_then(Value::as_array_mut) {
+            for window in windows {
+                let Some(tabs) = window.get_mut("tabs").and_then(Value::as_array_mut) else {
+                    continue;
+                };
+                for tab in tabs {
+                    if let Some(root) = tab.get_mut("root") {
+                        migrate_card_skips_in_tree(root);
+                    }
+                }
+            }
+        }
+    }
+    value
+}
+
+/// Walks a persisted layout tree, giving every `term` leaf its aim.
+///
+/// Structurally recursive over `children` for [`migrate_profile_ids_in_tree`]'s reason.
+fn migrate_card_skips_in_tree(node: &mut Value) {
+    if let Some(children) = node.get_mut("children").and_then(Value::as_array_mut) {
+        for child in children {
+            migrate_card_skips_in_tree(child);
+        }
+    }
+    migrate_card_skip_in_leaf(node);
+}
+
+/// The insert itself, on one `term`-shaped object. Gated on `kind` for
+/// [`migrate_profile_id_in_leaf`]'s reason, and it leaves a `card_skip` that is somehow already
+/// there alone: a key this step did not write is a key some other writer meant.
+fn migrate_card_skip_in_leaf(leaf: &mut Value) {
+    let Some(object) = leaf.as_object_mut() else {
+        return;
+    };
+    if object.get("kind").and_then(Value::as_str) != Some("term") {
+        return;
+    }
+    if !object.contains_key("card_skip") {
+        object.insert("card_skip".to_owned(), Value::from(0));
+    }
 }
 
 /// Walks a persisted layout tree, giving every `files` leaf its page.

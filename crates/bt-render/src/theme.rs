@@ -1357,6 +1357,16 @@ pub struct ChromePalette {
     /// where its cursor is standing. A card that marked no seat would be a
     /// picture of a tab with the one fact you look for taken out.
     pub focus_mini_edge_focused: [u8; 3],
+    /// **The dotted seam along the floor of a seat whose window is aimed above
+    /// the tail** (user ruling 2026-08-21) — the mini row's own ink at
+    /// [`FOCUS_MINI_SEAM_OPACITY`] over [`Self::seat_body`].
+    ///
+    /// A wash of the ink already in the cell rather than a colour of its own,
+    /// because the mark is a *statement about the rows*: there are more of them
+    /// below this edge than the card is drawing. `.45` is the rest opacity the
+    /// command rail's ticks and the column's pin seam already wear, which is
+    /// this house's level for "an instrument that is there and is not shouting".
+    pub focus_mini_seam: [u8; 3],
 }
 
 /// Chrome over a dark canvas — `design/ui-mockup.html` `body.dark`, with its
@@ -1641,6 +1651,14 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     focus_mini_text: ink_over(TERMBG_DARK, DARK_INK_SOURCE, 550),
     focus_mini_edge: ink_over(TERMBG_DARK, DARK_SHADE_SOURCE, 60),
     focus_mini_edge_focused: ink_over(TERMBG_DARK, DARK_INK_SOURCE, 380),
+    // The row's own ink, washed to `FOCUS_MINI_SEAM_ALPHA` over the same ground
+    // it stands on — the mix written as the two calls it is rather than as a
+    // byte triple nobody can check.
+    focus_mini_seam: ink_over(
+        TERMBG_DARK,
+        ink_over(TERMBG_DARK, DARK_INK_SOURCE, 550),
+        FOCUS_MINI_SEAM_ALPHA,
+    ),
 };
 
 /// Chrome over a light canvas — the mock-up's `:root` defaults, composited the
@@ -1898,6 +1916,11 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     focus_mini_text: ink_over(TERMBG_LIGHT, LIGHT_INK_SOURCE, 650),
     focus_mini_edge: ink_over(TERMBG_LIGHT, LIGHT_SHADE_SOURCE, 55),
     focus_mini_edge_focused: ink_over(TERMBG_LIGHT, LIGHT_INK_SOURCE, 450),
+    focus_mini_seam: ink_over(
+        TERMBG_LIGHT,
+        ink_over(TERMBG_LIGHT, LIGHT_INK_SOURCE, 650),
+        FOCUS_MINI_SEAM_ALPHA,
+    ),
 };
 
 /// The palette in force, decided by the same background-luma threshold that
@@ -2515,7 +2538,44 @@ pub const FOCUS_CARD_CLOSE_GLYPH_LOGICAL_PX: f32 = WINDOW_TAB_CLOSE_GLYPH_LOGICA
 /// first of those two turned: a lone pane's seat now holds thirteen or fourteen
 /// rows instead of six, which is the difference between a sample of a shell and
 /// a picture of one.
-pub const FOCUS_MINI_HEIGHT_LOGICAL_PX: f32 = 160.0;
+///
+/// **It stopped being the only answer on 2026-08-21** (user ruling): the knob
+/// this constant *is* was handed to the reader as `Appearance ▸ Focus card
+/// height`, with three rungs ([`FOCUS_CARD_HEIGHT_OPTIONS_LOGICAL_PX`]) of which
+/// this is the first. So what is left here is the **default** — the number every
+/// card was before the row existed — and the live value travels on
+/// `seats::RailState`, which is where the rest of "what shape is this window"
+/// already lives. Nothing else in this file reads it: every box that follows the
+/// body's height is derived from the rectangle the column solves, so there is
+/// exactly one place the setting has to be joined.
+pub const DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX: f32 = 160.0;
+
+/// **The three heights `Appearance ▸ Focus card height` offers** (user ruling
+/// 2026-08-21), in logical pixels.
+///
+/// The row exists because the 2026-08-20 ruling turned this knob once, for
+/// everybody, on a machine that did not have the case that needed it: a pane
+/// running an agent with a ten-row status bar and a three-row input box under it
+/// spends every one of a 160px card's thirteen rows on furniture, so the card
+/// shows the HUD and never the conversation. Thirteen rows is the right number
+/// for a shell and the wrong number for that pane, and which one a reader has is
+/// not something this file can know.
+///
+/// **Three rungs and not a slider.** They are the row counts a lone pane's seat
+/// buys at the default face: **13 / 20 / 26**. Thirteen is the shipped picture
+/// and stays first for [`DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX`]'s reason; twenty
+/// is a card that holds a short exchange whole; twenty-six is the one the ruling
+/// was actually asked for — enough for an agent's last words *and* the box it is
+/// waiting in. Past that a card stops being a card: four of them would not fit
+/// a 1200px column, and a list whose rows are a third of the window is a list
+/// nobody can scan, which is the same argument that keeps this a ladder rather
+/// than a free number.
+///
+/// **`u32`, because it is a settings value before it is a measurement.** It is
+/// written to `settings.json` as a whole number of logical pixels
+/// (`bt_persist::DEFAULT_FOCUS_CARD_HEIGHT`) and read back as one; the `f32` the
+/// geometry wants is a cast at the one place the two meet.
+pub const FOCUS_CARD_HEIGHT_OPTIONS_LOGICAL_PX: [u32; 3] = [160, 240, 320];
 /// `.fc-tab-mini { padding: 5px }` — the inset between the card's edge and the
 /// mini tree's outermost seat.
 pub const FOCUS_MINI_PADDING_LOGICAL_PX: f32 = 5.0;
@@ -2556,6 +2616,23 @@ pub const FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX: f32 = 3.0;
 /// down with the font the way the two sizes above are: a tree that loses its
 /// indent stops being a tree, and ten pixels is what says "inside".
 pub const FOCUS_MINI_FILES_INDENT_LOGICAL_PX: f32 = 10.0;
+
+/// How much of a mini row's ink the seam under an aimed window is drawn in, in
+/// thousandths (user ruling 2026-08-21) — see [`ChromePalette::focus_mini_seam`].
+///
+/// `.45`, which is `cmdrail::TICK_REST_OPACITY` and the column's pin seam: this
+/// house has one level for "an instrument that is there and is not shouting",
+/// and a fourth number for a fourth mark would make it four levels. Thousandths
+/// rather than a fraction because that is [`ink_over`]'s unit and this number
+/// has exactly one use.
+pub const FOCUS_MINI_SEAM_ALPHA: i32 = 450;
+
+/// The seam's own thickness, in logical pixels.
+///
+/// One, like every hairline in this column. A seam that was thicker than the
+/// cell's own border would read as a division between two seats rather than as
+/// an edge inside one.
+pub const FOCUS_MINI_SEAM_LOGICAL_PX: f32 = 1.0;
 
 // **There is no row count here any more** (user ruling, 2026-08-20). There used
 // to be two — `FOCUS_MINI_TERM_ROWS = 6` and `FOCUS_MINI_FILES_ROWS = 4` — and
