@@ -5226,6 +5226,11 @@ struct WindowRuntime {
     /// Which strip's control the pointer is on. One, because there is one
     /// pointer.
     notice_hover: Option<(SeatId, notice::NoticeElement)>,
+    /// **The strip each pane showed last time this was settled** — the content
+    /// half of the projection, kept so that a change from `Offer` to `Added`
+    /// repaints even though it adds and removes no seat (§7.1.6j). The presence
+    /// half lives on `Seats`, because that is the half a body's height reads.
+    notice_states: std::collections::BTreeMap<SeatId, notice::Notice>,
     /// What the last scan was of, so the next one can skip the part that has not
     /// moved. See [`SearchScanCache`].
     search_scan: Option<SearchScanCache>,
@@ -18069,6 +18074,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         search_layout: None,
         notice_layouts: std::collections::BTreeMap::new(),
         notice_hover: None,
+        notice_states: std::collections::BTreeMap::new(),
         search_hover: None,
         search_scan: None,
         search_revision: 0,
@@ -22479,7 +22485,9 @@ impl Runtime<'_> {
             .settings_store
             .loaded()
             .powershell_integration_offer;
-        let mut notices = std::collections::BTreeSet::new();
+        let mut presence = std::collections::BTreeSet::new();
+        let mut states: std::collections::BTreeMap<SeatId, notice::Notice> =
+            std::collections::BTreeMap::new();
         for (seat, leaf) in &mut self.sessions {
             if leaf.integration_offer.is_none() {
                 // Not a PowerShell at all, or the machine has not answered where
@@ -22496,24 +22504,40 @@ impl Runtime<'_> {
                 }
             }
             let showing = offering
-                && leaf.integration_offer.as_ref().is_some_and(|offer| {
-                    offer
-                        .showing(
-                            leaf.output_revision > 0,
-                            leaf.session.shell_integration_seen(),
-                        )
-                        .is_some()
+                .then_some(leaf.integration_offer.as_ref())
+                .flatten()
+                .and_then(|offer| {
+                    offer.showing(
+                        leaf.output_revision > 0,
+                        leaf.session.shell_integration_seen(),
+                    )
                 });
-            if showing {
-                notices.insert(*seat);
+            if let Some(state) = showing {
+                presence.insert(*seat);
+                states.insert(*seat, state);
             }
         }
-        if !self.seats.set_notices(notices) {
-            return Ok(());
+        // **Two changes, not one, and they gate different work.** Whether a seat
+        // *wears* a strip decides the pane's height, so a change to that set is a
+        // layout change and re-solves. Which strip it wears — `Offer` before the
+        // write, `Added` after it — changes only what is drawn in a row that is
+        // already there, so a change to the *content* repaints the overlay and
+        // moves no rectangle. Folding the two into one set was the bug the live
+        // run caught: pressing `Add` turned `Offer` into `Added` without adding
+        // or removing a seat, the set was equal, and the strip went on saying
+        // "not installed" over a profile it had just written to.
+        let geometry_moved = self.seats.set_notices(presence);
+        let content_changed = self.window.notice_states != states;
+        self.window.notice_states = states;
+        if geometry_moved {
+            self.commit_seat_geometry()?;
+            self.refresh_chrome();
+            return self.present_chrome_change();
         }
-        self.commit_seat_geometry()?;
-        self.refresh_chrome();
-        self.present_chrome_change()
+        if content_changed && self.refresh_overlay() {
+            return self.present_chrome_change();
+        }
+        Ok(())
     }
 
     /// What one pane's strip is saying, or nothing when it wears none.
