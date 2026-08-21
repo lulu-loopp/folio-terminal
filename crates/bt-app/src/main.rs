@@ -22926,11 +22926,15 @@ impl Runtime<'_> {
             self.window.active_tab,
             self.window.tab_scroll,
         );
+        // The posture the three geometries above were measured against, not the
+        // stored preference: `rail_geometry_now` and `focus_rail_geometry_now`
+        // both read `sampled_rail(now)`, so anything else here would be asking
+        // the walk to choose between boxes solved for a different window.
         let (anchor, side) = profile_menu_anchor(
             column.as_ref(),
             rail.as_ref(),
             strip.new_tab_menu,
-            self.window.rail.layout,
+            self.sampled_rail(now),
         )?;
         // The menu is content-sized, so laying it out is a measuring job — the
         // same renderer, the same font, the same call `build` makes when it
@@ -24378,9 +24382,13 @@ impl Runtime<'_> {
     /// turn that has begun is finished by `advance_strip_animation` off the
     /// deadline `strip_animation_deadline` asks for.
     fn start_chevron_turn(&mut self) {
+        let now = Instant::now();
         self.window.chevron_turn.retarget(
-            self.window.profile_menu.is_open(),
-            Instant::now(),
+            chevron_turn_target(
+                self.window.profile_menu.is_open(),
+                self.sampled_rail(now).profile_menu_side(),
+            ),
+            now,
             self.app.motion,
         );
     }
@@ -55586,28 +55594,48 @@ fn profile_menu_anchor(
     focus_column: Option<&seats::FocusRailGeometry>,
     rail: Option<&seats::RailGeometry>,
     strip_new_tab_menu: [f32; 4],
-    layout: seats::TabLayoutMode,
+    state: seats::RailState,
 ) -> Option<([f32; 4], profiles::MenuSide)> {
+    // **The side is not decided here** (§7.1.6e, 2026-08-20). Which way the
+    // picker hangs is a fact about the posture and is answered by
+    // `RailState::profile_menu_side`, because the `˅` itself and the tween that
+    // turns it need that same fact without needing a rectangle — and three
+    // spellings of one precedence is how the chevron came to point at a menu
+    // that was somewhere else. What is left here is the half only this function
+    // wants: *which box*.
+    let side = state.profile_menu_side()?;
     // §7.1.6b′: the focus column keeps the panel's `+` and its `˅`, and
     // `hit_focus_rail` answers `NewTabMenu` for it — so in focus mode the button
     // that opened this menu is not the one either arm below describes.
     if let Some(column) = focus_column {
-        return Some((column.new_tab_menu, profiles::MenuSide::Beside));
+        return Some((column.new_tab_menu, side));
     }
-    match layout {
+    match state.layout {
         seats::TabLayoutMode::Vertical => {
             // Q181: a parked rail has no chevron — 28px of it would leave the
             // `+` nothing — so the `+` is what the menu hangs off there. The two
             // share a right edge and a top, so the menu does not jump when the
             // panel slides open and the chevron reappears.
             let rail = rail?;
-            Some((
-                rail.new_tab_menu.unwrap_or(rail.new_tab),
-                profiles::MenuSide::Beside,
-            ))
+            Some((rail.new_tab_menu.unwrap_or(rail.new_tab), side))
         }
-        seats::TabLayoutMode::Horizontal => Some((strip_new_tab_menu, profiles::MenuSide::Below)),
+        seats::TabLayoutMode::Horizontal => Some((strip_new_tab_menu, side)),
     }
+}
+
+/// **Where the `˅`'s turn is aimed** — `true` for "all the way over".
+///
+/// §7.1.6e's criterion applied to the *clock* rather than to the picture, and
+/// read from the one place that states it
+/// ([`profiles::MenuSide::turns_the_chevron`]). Hiding the angle at paint time
+/// would be enough to stop the lie, and would still leave a tween running for
+/// 140ms, asking for a repaint on each of its frames, on its way to a number no
+/// surface is going to draw.
+///
+/// `None` is not a third rule: a window with no new-tab button on screen has no
+/// arrow to aim.
+fn chevron_turn_target(open: bool, side: Option<profiles::MenuSide>) -> bool {
+    open && side.is_some_and(profiles::MenuSide::turns_the_chevron)
 }
 
 /// Every tippable box of the **tab surface** that is actually on screen, in
@@ -66751,40 +66779,29 @@ mod tests {
             ..seats::TabTrailer::default()
         }];
         let strip = seats::tab_strip_geometry(960.0, scale, &trailers, 0, 0.0);
-        let column = seats::focus_rail_geometry(
-            600.0,
-            scale,
-            trailers.len(),
-            40.0,
-            0.0,
-            seats::RailState {
-                focus: true,
-                ..rail_state_for(seats::TabLayoutMode::Vertical, seats::RailMode::Expanded)
-            },
-        )
-        .expect("a focus-mode window draws its card column");
-        let rail = seats::rail_geometry(
-            600.0,
-            scale,
-            &trailers,
-            0,
-            0.0,
-            seats::RailState {
-                open: 1.0,
-                ..rail_state_for(seats::TabLayoutMode::Vertical, seats::RailMode::Expanded)
-            },
-        )
-        .expect("an expanded rail holding one tab is on screen");
+        // The three postures, named once and then used both to *measure* the
+        // surfaces and to *ask* about them — a state that disagreed with the
+        // geometry beside it would be a fixture no window can be in.
+        let focus_state = seats::RailState {
+            focus: true,
+            ..rail_state_for(seats::TabLayoutMode::Vertical, seats::RailMode::Expanded)
+        };
+        let rail_state = seats::RailState {
+            open: 1.0,
+            ..rail_state_for(seats::TabLayoutMode::Vertical, seats::RailMode::Expanded)
+        };
+        let strip_state =
+            rail_state_for(seats::TabLayoutMode::Horizontal, seats::RailMode::Expanded);
+        let column =
+            seats::focus_rail_geometry(600.0, scale, trailers.len(), 40.0, 0.0, focus_state)
+                .expect("a focus-mode window draws its card column");
+        let rail = seats::rail_geometry(600.0, scale, &trailers, 0, 0.0, rail_state)
+            .expect("an expanded rail holding one tab is on screen");
 
         // The bug, stated: focus mode over a vertical layout has a card column
         // and **no** ordinary rail, and the menu still has a button to hang off.
         assert_eq!(
-            profile_menu_anchor(
-                Some(&column),
-                None,
-                strip.new_tab_menu,
-                seats::TabLayoutMode::Vertical,
-            ),
+            profile_menu_anchor(Some(&column), None, strip.new_tab_menu, focus_state),
             Some((column.new_tab_menu, profiles::MenuSide::Beside)),
             "the column answers first, and a rail that is not drawn is not a \
              reason to answer nothing"
@@ -66797,7 +66814,10 @@ mod tests {
                 Some(&column),
                 None,
                 strip.new_tab_menu,
-                seats::TabLayoutMode::Horizontal,
+                seats::RailState {
+                    focus: true,
+                    ..strip_state
+                },
             ),
             Some((column.new_tab_menu, profiles::MenuSide::Beside)),
         );
@@ -66805,36 +66825,65 @@ mod tests {
         // And with no column, the two ordinary surfaces answer as they always
         // did — including the vertical layout's honest `None`.
         assert_eq!(
-            profile_menu_anchor(
-                None,
-                Some(&rail),
-                strip.new_tab_menu,
-                seats::TabLayoutMode::Vertical
-            ),
+            profile_menu_anchor(None, Some(&rail), strip.new_tab_menu, rail_state),
             Some((
                 rail.new_tab_menu.expect("an open rail draws its chevron"),
                 profiles::MenuSide::Beside
             )),
         );
         assert_eq!(
-            profile_menu_anchor(
-                None,
-                None,
-                strip.new_tab_menu,
-                seats::TabLayoutMode::Vertical
-            ),
+            profile_menu_anchor(None, None, strip.new_tab_menu, rail_state),
             None,
             "a vertical window with no rail on screen has no button to hang it off"
         );
+        // The same `None`, reached from the posture rather than from a missing
+        // geometry: a folded rail has no width, so there is no button in it.
         assert_eq!(
-            profile_menu_anchor(
-                None,
-                Some(&rail),
-                strip.new_tab_menu,
-                seats::TabLayoutMode::Horizontal,
-            ),
+            seats::RailState {
+                collapsed: true,
+                ..rail_state
+            }
+            .profile_menu_side(),
+            None,
+        );
+        assert_eq!(
+            profile_menu_anchor(None, Some(&rail), strip.new_tab_menu, strip_state),
             Some((strip.new_tab_menu, profiles::MenuSide::Below)),
             "and a horizontal one reads the strip, whatever a rail geometry says"
+        );
+    }
+
+    /// PIN — **§7.1.6e (2026-08-20): the turn is not merely hidden where it says
+    /// something false, it is never started.**
+    ///
+    /// The angle the `˅` is drawn at is one half of the ruling and `seats` owns
+    /// it; this is the other half. A tween aimed at 180° under
+    /// [`profiles::MenuSide::Beside`] would run a clock for 140ms, ask for a
+    /// repaint on every frame of it, and arrive at a number no surface is going
+    /// to draw — a whole animation whose only observable effect is the work it
+    /// costs. So the criterion is applied to the *target*, and it is the same one
+    /// statement of it the arrow reads: the side decides, and nothing else does.
+    ///
+    /// `None` — a vertical window whose rail is folded away — is not a third
+    /// rule. There is no button on screen, so there is no arrow to aim.
+    #[test]
+    fn the_chevron_s_turn_is_only_aimed_where_the_picker_hangs_below() {
+        assert!(
+            chevron_turn_target(true, Some(profiles::MenuSide::Below)),
+            "the strip's arrow turns over, and the ruling kept that arm"
+        );
+        assert!(
+            !chevron_turn_target(true, Some(profiles::MenuSide::Beside)),
+            "a rail's picker opens to the side, so its arrow has nowhere true to \
+             turn — and no clock to run getting there"
+        );
+        assert!(
+            !chevron_turn_target(false, Some(profiles::MenuSide::Below)),
+            "a shut menu aims the arrow back down wherever it hangs"
+        );
+        assert!(
+            !chevron_turn_target(true, None),
+            "and a window with no new-tab button on screen has no arrow to aim"
         );
     }
 
