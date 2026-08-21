@@ -1239,53 +1239,49 @@
   @media (prefers-reduced-motion: reduce) { .panehead .pane-split { transition: none; } }
 
   /* ============================================================================
-     THE LONE PANE'S VERB SURFACE — TWO VARIANTS FOR THE CHOOSING (2026-08-20)
+     THE LONE PANE'S VERB SURFACE — THE CORNER GHOST (ruled 2026-08-20)
      ============================================================================
-     Read with `?lonehead=a` or `?lonehead=b`. Default is `a`. ON THE DAY ONE IS
-     CHOSEN THE LOSING BLOCK AND THE `?lonehead=` READER GO WITH IT — the same
-     discipline the `?icons=` exercise runs under, and the same one the Advanced
-     header's three treatments left by.
+     One `⌄` in a headless pane's top-right, floating over the content, opening
+     the very same `openPaneMenu` the split head's chevron opens — one menu, one
+     place it is built, no second list to drift. The user chose it on 2026-08-20
+     over a second candidate (a real head parked off-screen and slid in on a
+     dwell at the top edge); that variant and the query-string reader that let
+     the two be read side by side left with the choosing, and the argument for
+     both is kept where arguments belong — `docs/DESIGN.md` §7.1.6i.
 
-     ---- THE HOLE ------------------------------------------------------------
+     ---- THE HOLE IT FILLS ---------------------------------------------------
      `renderNode`'s `multi` is the whole rule: a pane wears a header only when it
      has a sibling. That ruling stands and is not under review — the user's
      objection to an unconditional head ("常驻头丑") was about a 30px grey band
      that never earns its pixels in the picture you look at 90% of the day.
 
-     But that picture is EVERY NEW TAB, and in it the pane has no verb surface at
+     But that picture is EVERY NEW TAB, and in it the pane had no verb surface at
      all. Gone with the head: the `⌄` menu (split either way, `Split with ▸`,
      `New terminal in folder…`, `Duplicate pane`, `Move pane to new tab`, `Close
      pane`), the files-peek trigger, and the cwd — the pane's own answer to
      "where am I standing", which the tab's title only sometimes repeats. Three
-     chords reach some of that; a hand on the mouse reaches none of it. This is
+     chords reach some of that; a hand on the mouse reached none of it. This is
      the same shape of hole that §7.1.6e's `⊞` was cut to fill, one layout down.
 
      ---- THE CONSTRAINT ------------------------------------------------------
      Head not always there. Verbs always reachable. Neither ugly. So the surface
-     has to be summoned, and this house already speaks two summoning idioms:
-     furniture that fades in when its container is hovered (`.pane-files`,
-     `.tab-files`, `.pane-close` — 0 → .6/.7 → 1) and a thing that slides out of
-     an edge on a dwell (the rail peek, the file peek, the tip host). A is the
-     first idiom, B is the second. That is the actual axis under test: A moves
-     ONE BUTTON into the content and keeps the head gone forever; B keeps the
-     head and moves it OFF-SCREEN. Whatever else differs between the two is a bug
-     in this block.
+     has to be summoned, and this house speaks two summoning idioms: furniture
+     that fades in when its container is hovered (`.pane-files`, `.tab-files`,
+     `.pane-close` — 0 → .6/.7 → 1) and a thing that slides out of an edge on a
+     dwell (the rail peek, the file peek, the tip host). This is the first idiom
+     with one deliberate departure, below: ONE BUTTON moves into the content and
+     the head stays gone.
 
-     ---- WHAT IS COMMON, AND NOT A VARIANT -----------------------------------
+     ---- THE FLOOR UNDER IT, WHICH IS NOT PART OF THE BUTTON -----------------
      The terminal's right-click menu grows a pane-verb segment when the pane is
-     alone (see `openTermMenu`). That is not one of the two candidates and does
-     not switch with the reader: it is the KEYBOARD-AND-MOUSE FLOOR under both,
-     the one door that needs no discovery because every terminal on this OS has
-     taught the hand to right-click. Whichever variant wins, the segment stays;
-     if NEITHER wins, the segment alone is still a defensible ship.
+     alone (see `openTermMenu`). It is not an alternative to this mark and never
+     was: it is the KEYBOARD-AND-MOUSE FLOOR, the one door that needs no
+     discovery because every terminal on this OS has taught the hand to
+     right-click. The mark is what makes the door VISIBLE.
 
-     ---- A. THE CORNER GHOST -------------------------------------------------
-     One `⌄` in the pane's top-right, floating over the content, opening the very
-     same `openPaneMenu` the split head's right-click opens — one menu, one place
-     it is built, no second list to drift.
-
-     REST STATE — MEASURED, AND THE MEASUREMENT MOVED THE ANSWER. Four rest inks
-     were drawn and compared at 1440×900 against the pane's own right edge:
+     ---- REST STATE — MEASURED, AND THE MEASUREMENT MOVED THE ANSWER ---------
+     Four rest inks were drawn and compared at 1440×900 against the pane's own
+     right edge:
        · nothing at rest, fading in on pane-hover. This is the house's own
          idiom (`.pane-files`, `.tab-files`), and it is the idiom's one bad
          case: those live in a head that is itself visible, so the head does
@@ -1310,51 +1306,20 @@
      The one-line stance: A BUTTON NOBODY CAN SEE IS THE HOLE, NOT THE FIX — and
      the floor for "seen" is already on this edge, drawn by the rail.
 
-     GEOMETRY. `right: 11px` is not a taste: it is `.cmdrail`'s own lane rule
-     (inboard of the ~8px scrollbar gutter, because a rail and a thumb may not
-     share a lane — user report 2026-07-18), and the ghost joins that lane rather
-     than opening a third one. The rail is vertically centred and the ghost is
-     pinned to the top, so they never meet. `top: 10px` puts 10px of dead band
-     between this hit rect and the caption buttons' — thin on paper, and the
-     reason it is enough is that the ghost only brightens once the pointer is
-     ALREADY inside the pane: a hand travelling to Close from the tab strip never
-     crosses it lit, and a hand aiming at the ghost is travelling downward, away
-     from the caption. An open search capsule takes the corner outright and the
-     ghost stands down (`:has(> .srchbar)`) — two instruments, one lane, and the
-     one you explicitly opened wins.
-
-     ---- B. THE SLIDING HEAD -------------------------------------------------
-     The pane's real head — the split view's markup, class for class — parked at
-     `translateY(-100%)` and slid in when the pointer rests in the top 8px. It
-     FLOATS over the content (absolute, shadowed) rather than pushing it: a head
-     that reflowed the terminal would move every line under the pointer on a
-     hover, and a re-wrap is not a hover response.
-
-     WHAT IT COVERS, AND WHY THAT EDGE. It lands on the pane's top 30px, which
-     holds the OLDEST line on screen. A terminal writes downward and its cursor
-     lives at the bottom; of the four edges, the top is the one whose content the
-     reader has already finished with. That is the whole defence of the overlay,
-     and it is why the head must never be translucent — a half-visible band over
-     text reads as a rendering fault. It is opaque `--panel` with a hairline and
-     a soft drop shadow: unmistakably a shelf slid ABOVE the text, never a
-     replacement for it.
-
-     THE TAB STRIP IS 1px ABOVE THIS HOT ZONE, so the guard cannot be geometry.
-     It is a DWELL: `LONEHEAD_IN_MS` (250ms — the same hover-rest every `⌄` in
-     this window opens on) and `LONEHEAD_OUT_MS` (150ms — the same grace they
-     close on). A pointer diving from the tabs into the terminal body crosses 8px
-     in about ten milliseconds and never arms it; a pointer that stops there
-     meant to stop there. The 150ms out is what lets the hand leave the hot strip
-     for the head's own buttons without the head fleeing under it.
-
-     The slide is 140ms on the house's disclosure curve — under the 150ms cap,
-     and it is `transform` only, so nothing in the pane re-lays-out while it
-     moves. `prefers-reduced-motion` deletes the transition and keeps the head:
-     the motion was never the message.
-
-     The one-line stance: THE HEAD WAS NEVER THE PROBLEM, ITS PERMANENCE WAS —
-     so keep it whole and charge one deliberate dwell for it. */
-  /* ── A. the corner ghost ── */
+     ---- GEOMETRY ------------------------------------------------------------
+     `right: 11px` is not a taste: it is `.cmdrail`'s own lane rule (inboard of
+     the ~8px scrollbar gutter, because a rail and a thumb may not share a lane —
+     user report 2026-07-18), and the ghost joins that lane rather than opening a
+     third one. The rail is vertically centred and the ghost is pinned to the
+     top, so they never meet. `top: 10px` puts 10px of dead band between this hit
+     rect and the caption buttons' — thin on paper, and the reason it is enough
+     is that the ghost only brightens once the pointer is ALREADY inside the
+     pane: a hand travelling to Close from the tab strip never crosses it lit,
+     and a hand aiming at the ghost is travelling downward, away from the
+     caption. An open search capsule takes the corner outright and the ghost
+     stands down (`:has(> .srchbar)`) — two instruments, one lane, and the one
+     you explicitly opened wins. */
+  /* ── the corner ghost ── */
   .pane-ghost {
     position: absolute; top: 10px; right: 11px; z-index: 20;
     width: 22px; height: 22px; border-radius: 6px; flex: none;
@@ -1374,48 +1339,9 @@
   }
   body.dark .pane .pane-ghost:hover, body.dark .pane .pane-ghost.open { box-shadow: 0 2px 10px rgba(0, 0, 0, .45); }
   @media (prefers-reduced-motion: reduce) { .pane-ghost { transition: none; } }
-  /* Inside B's head the same element is a member of the `⌄ 🗀 ×` run, not a
-     floating mark: it drops out of the corner and takes the run's own metrics.
-     This is §7.1.6e's `⊞ → ⌄` read literally — the head's first slot is the
-     house's chevron. The SPLIT head still draws `⊞`; that swap is its own
-     ticket, and the day it lands these two heads become one string of markup. */
-  .panehead .pane-ghost {
-    position: static; top: auto; right: auto; z-index: auto;
-    width: 19px; height: 19px; border-radius: 5px; opacity: 0;
-  }
-  .panehead > .pane-ghost { margin-left: auto; }
-  .panehead .pane-ghost + .pane-files { margin-left: 0; }
-  .pane:hover .panehead .pane-ghost { opacity: .7; }
-  .pane:hover .panehead .pane-ghost:hover, .panehead .pane-ghost.open {
-    opacity: 1; background: var(--hover); color: var(--accent); box-shadow: none;
-  }
-  /* ── B. the sliding head ──
-     There is no hot-zone element: the 8px band is measured by the pointer
-     handler (`LONEHEAD_HOT_PX`), never drawn. See `loneVerbHtml`. */
-  /* `--termbg`, NOT `--panel`. Drawn on panel it was legible and WRONG: panel is
-     the title bar's own colour, the seam between the two vanished, and the head
-     read as a second row of window chrome that had grown downward — the exact
-     thing the ruling against a permanent head was about. The split head has no
-     background of its own and therefore stands on `--termbg`; this one paints
-     that same colour explicitly (it has to be opaque to float) and lets the
-     hairline and the shadow do all the separating. `--border` rather than the
-     split head's `--border-soft` is the one deliberate difference: an in-flow
-     head's bottom edge is a boundary between two panes, and this one's is the
-     only thing between a shelf and the text under it. */
-  .panehead.lonehead {
-    position: absolute; top: 0; left: 0; right: 0; z-index: 20;
-    background: var(--termbg); border-bottom: 1px solid var(--border);
-    box-shadow: 0 6px 14px rgba(0, 0, 0, .16);
-    transform: translateY(-100%);
-    transition: transform .14s cubic-bezier(.2, 0, 0, 1);
-  }
-  .panehead.lonehead.show { transform: translateY(0); }
-  body.dark .panehead.lonehead { box-shadow: 0 6px 14px rgba(0, 0, 0, .45); }
-  @media (prefers-reduced-motion: reduce) { .panehead.lonehead { transition: none; } }
-  /* An open search capsule owns this corner and this edge — it was asked for out
-     loud, and neither summoned surface may stand on top of an explicit one. */
-  .pane-inner:has(> .srchbar) > .pane-ghost,
-  .pane-inner:has(> .srchbar) > .panehead.lonehead { display: none; }
+  /* An open search capsule owns this corner — it was asked for out loud, and a
+     summoned mark may not stand on top of an explicit surface. */
+  .pane-inner:has(> .srchbar) > .pane-ghost { display: none; }
   /* the `▸` of a row that has a submenu: `#i-chev` turned a quarter, never a
      second glyph — this window has one shape for "there is a list behind me" */
   .term-menu .tm-item .sub-chev {
@@ -6653,11 +6579,10 @@
   /* ── THE `?web=` READER ──
      `?web=ok|runtime|load|crash|blocked|download` puts the demo window's web
      seat into one of the six states this ticket had to draw. It is the same kind
-     of reader `?lonehead=` and `?icons=` already are, and it exists for the same
-     reason: five of these six are moments the engine produces and a drawing
-     cannot, so without a door they could only ever be read in a description.
-     Unlike those two it is NOT temporary and picks no winner — every state here
-     ships. `blocked` also takes the scheme it should refuse, so both spellings
+     of reader `?icons=` already is, and it exists for the same reason: five of
+     these six are moments the engine produces and a drawing cannot, so without a
+     door they could only ever be read in a description. Unlike that one it is
+     NOT temporary and picks no winner — every state here ships. `blocked` also takes the scheme it should refuse, so both spellings
      of that one card can be read: `?web=blocked&scheme=javascript`. */
   const WEB_DEMO = (() => {
     const q = new URLSearchParams(location.search);
@@ -8375,42 +8300,18 @@
     if (at < 0) return;
     jumpToPromptLine(term, idx[at]);
   }
-  /* THE `?lonehead=` READER — TEMPORARY, AND IT LEAVES WITH THE LOSER.
-     `?lonehead=a|b` picks which of the two lone-pane verb surfaces a headless
-     pane draws; the whole rationale, both stances and the rest-state experiment
-     are in the CSS block beside `.pane-ghost`. Default is `a`, and A at rest is
-     one chevron carrying the command rail's own rest ink in the command rail's
-     own lane, so every other demo on this page opens within a hair of how it
-     always has. On the day one is chosen, this reader,
-     the branch in `loneVerbHtml`, and the losing block all go together. */
-  const LONEHEAD = (() => {
-    const v = (new URLSearchParams(location.search).get("lonehead") || "").toLowerCase();
-    return v === "b" ? "b" : "a";
-  })();
-  document.body.dataset.lonehead = LONEHEAD;
-  /* 250ms in / 150ms out are not new numbers: they are the hover-rest and the
-     close grace every `⌄` in this window already runs on (§7.1.6e). A surface
-     that appears on a dwell and a menu that opens on a dwell must not disagree
-     about how long a dwell is. 8px is the hot strip; the tab strip's bottom edge
-     is the pixel above it, which is why the dwell exists at all. */
-  const LONEHEAD_IN_MS = 250, LONEHEAD_OUT_MS = 150, LONEHEAD_HOT_PX = 8;
-  /* The verb surface a pane with no sibling wears. One `⌄` either way — the same
-     element, the same click, the same `openPaneMenu` — so the two variants argue
-     about WHERE the door is and never about what is behind it. */
-  function loneVerbHtml(node, s) {
-    const chev = `<span class="pane-ghost" data-ghost-leaf="${node.id}" title="Pane actions"><svg><use href="#i-chev"/></svg></span>`;
-    if (LONEHEAD !== "b") return chev;
-    /* B's head is the split head's markup, class for class, plus `.lonehead` —
-       it inherits the drag handle, the right-click menu, the hover-revealed run
-       and the cwd caption by BEING that head rather than by copying it. */
-    /* NO HOT-ZONE ELEMENT. The 8px band is a MEASUREMENT the pointer handler
-       makes, not an invisible widget lying on the terminal — a transparent div
-       over the top of the scrollback is how a text surface ends up with a strip
-       you cannot select from, and nobody would ever guess why. */
-    return `<div class="panehead lonehead" data-leaf="${node.id}">${stateIcon(s, s.busy, s.unread)}<span class="ptitle">${s.cwd}</span>
-        ${chev}
-        <span class="pane-files" data-flyout-leaf="${node.id}" title="Peek files here">${folderSvg}</span>
-        <span class="pane-close" title="Close pane">${closeSvg}</span></div>`;
+  /* 250ms in / 150ms out are the hover-rest and the close grace every `⌄` in
+     this window runs on (§7.1.6e). Named for the chevron and not for any one of
+     its users, because that is what they are: the pane menu's own child list
+     below opens and closes on them, and a second pair of numbers is how two
+     dwells in one window come to disagree about how long a dwell is. */
+  const CHEV_REST_MS = 250, CHEV_GRACE_MS = 150;
+  /* The verb surface a pane with no sibling wears (§7.1.6i, ruled 2026-08-20):
+     one `⌄` in the corner, floating over the content, opening the same
+     `openPaneMenu` the split head's own chevron opens. The whole rationale and
+     the rest-state experiment are in the CSS block beside `.pane-ghost`. */
+  function loneVerbHtml(node) {
+    return `<span class="pane-ghost" data-ghost-leaf="${node.id}" title="Pane actions"><svg><use href="#i-chev"/></svg></span>`;
   }
   function renderNode(node, w) {
     if (node.type === "leaf") {
@@ -8448,7 +8349,7 @@
           ${multi ? `<div class="panehead" data-leaf="${node.id}">${stateIcon(s, s.busy, s.unread)}<span class="ptitle">${s.cwd}</span>
             <span class="pane-split" data-split-leaf="${node.id}" title="Split pane">${splitSvg}</span>
             <span class="pane-files" data-flyout-leaf="${node.id}" title="Peek files here">${folderSvg}</span>
-            <span class="pane-close" title="Close pane">${closeSvg}</span></div>` : loneVerbHtml(node, s)}
+            <span class="pane-close" title="Close pane">${closeSvg}</span></div>` : loneVerbHtml(node)}
           <div class="term" data-leaf="${node.id}" data-uid="${s.uid}">${termHtml(s, focused)}</div>
           ${cmdRailHtml(s, node.id)}
         </div>
@@ -12941,8 +12842,9 @@
      confirm. "Restart shell…" is the honest name for what Refresh did: the
      process is killed and replaced — running work dies, so busy confirms. */
   /* ── 2026-08-20 — THE LONE PANE'S PANE-VERB SEGMENT ──
-     Common to both `?lonehead=` variants and switched by NEITHER: this is the
-     floor under them. When the pane has a sibling the head is on screen and the
+     The floor under the corner ghost, written before the ghost was chosen and
+     unchanged by the choosing: it was common to both candidates and it survives
+     whichever one won. When the pane has a sibling the head is on screen and the
      verbs are 18 pixels away, so the segment is not drawn — a menu that repeats
      what is already visible beside it is how two lists come to disagree.
 
@@ -13038,8 +12940,8 @@
     menu.querySelectorAll(".tm-item").forEach(el => {
       el.addEventListener("pointerenter", () => {
         clearTimeout(subT);
-        if (el.dataset.act === "splitwith") subT = setTimeout(() => openSplitWithMenu(el, leafId), LONEHEAD_IN_MS);
-        else subT = setTimeout(closeSplitWithMenu, LONEHEAD_OUT_MS);
+        if (el.dataset.act === "splitwith") subT = setTimeout(() => openSplitWithMenu(el, leafId), CHEV_REST_MS);
+        else subT = setTimeout(closeSplitWithMenu, CHEV_GRACE_MS);
       });
     });
     /* ASSIGNMENT, not addEventListener: `#term-menu` is a permanent element that
@@ -13048,7 +12950,7 @@
        subscribe freely — innerHTML just replaced them. */
     menu.onpointerleave = () => {
       clearTimeout(subT);
-      subT = setTimeout(() => { if (!$("split-with-menu").matches(":hover")) closeSplitWithMenu(); }, LONEHEAD_OUT_MS);
+      subT = setTimeout(() => { if (!$("split-with-menu").matches(":hover")) closeSplitWithMenu(); }, CHEV_GRACE_MS);
     };
     menu.querySelectorAll(".tm-item").forEach(el => el.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -13307,53 +13209,6 @@
     e.preventDefault();
     openTermMenu(+term.dataset.leaf, e.clientX, e.clientY);
   });
-  /* ── B's dwell (`?lonehead=b`) ──
-     Delegated on `#termhost` and driven off pointer GEOMETRY rather than off
-     `pointerenter` on the strip, for one reason: the head, once in, covers the
-     strip that summoned it, so an enter/leave pair on the strip would fire the
-     moment the head arrived and the head would chase itself off screen. One
-     question asked of every move — "is the pointer inside the top band of this
-     pane" — where the band is the 8px hot strip at rest and the head's own 30px
-     while it stands. That is also what makes leaving downward feel right: the
-     boundary the hand crosses to dismiss is the bottom of the thing it can see. */
-  let loneHeadT = 0, loneHeadWant = null;
-  /* A DWELL, NOT A STILLNESS. The timer is armed once, on the frame the pointer
-     CROSSES into or out of the band, and is left alone while it stays on the same
-     side — re-arming on every move would make the head answer only a hand that
-     stops dead, and a slow deliberate approach that never quite stops would never
-     open it. Crossing back the other way inside the window cancels, which is what
-     makes a pointer passing through from the tab strip cost nothing. */
-  function loneHeadSet(head, on) {
-    if (on === head.classList.contains("show")) {
-      if (loneHeadWant !== null && loneHeadWant !== on) { clearTimeout(loneHeadT); loneHeadWant = null; }
-      return;
-    }
-    if (loneHeadWant === on) return;   /* already on its way — let it run out */
-    clearTimeout(loneHeadT);
-    loneHeadWant = on;
-    loneHeadT = setTimeout(() => { loneHeadWant = null; head.classList.toggle("show", on); },
-                           on ? LONEHEAD_IN_MS : LONEHEAD_OUT_MS);
-  }
-  function loneHeadDrop() {
-    clearTimeout(loneHeadT); loneHeadWant = null;
-    document.querySelectorAll(".lonehead.show").forEach(h => h.classList.remove("show"));
-  }
-  $("termhost").addEventListener("pointermove", (e) => {
-    if (LONEHEAD !== "b") return;
-    const pane = e.target.closest(".pane");
-    const head = pane && pane.querySelector(":scope > .pane-inner > .lonehead");
-    /* `offsetParent` is null while an open search capsule has stood the head
-       down: a surface that is not allowed on screen must not be armed to arrive */
-    if (!head || !head.offsetParent) { loneHeadDrop(); return; }
-    /* a menu raised OFF this head is the head still being used — it may not slide
-       out from under its own open list */
-    if (head.querySelector(".pane-ghost.open")) { clearTimeout(loneHeadT); loneHeadWant = null; return; }
-    const r = pane.getBoundingClientRect();
-    const band = head.classList.contains("show") ? head.offsetHeight : LONEHEAD_HOT_PX;
-    loneHeadSet(head, e.clientY - r.top <= band);
-  });
-  $("termhost").addEventListener("pointerleave", () => { if (LONEHEAD === "b") loneHeadDrop(); });
-
   /* ══════ A WEB SEAT'S FOOT IS ITS HOVER LINE (§7.1.5g, ruled 2026-08-20) ══════
      A browser writes the link under the pointer in a bubble at the bottom of the
      page; this pane already has a band at the bottom that says where its content
@@ -13731,11 +13586,11 @@
     const pane = srchPaneEl();
     if (!srchHostEl(pane)) { srch.leaf = null; srch.marks = []; srch.cur = -1; return; }
     const bar = document.createElement("div");
-    /* `:not(.lonehead)` — B's head is an OVERLAY that is usually not there, so it
-       must not buy the capsule a permanent 28px of clearance for a band the eye
-       cannot see. The two never collide anyway: an open capsule stands the whole
-       lone surface down (the `:has(> .srchbar)` rule beside `.pane-ghost`). */
-    bar.className = "srchbar" + (pane.querySelector(".panehead:not(.lonehead)") ? " with-head" : "");
+    /* A head, when there is one, buys the capsule 28px of clearance; a lone
+       pane has none and the capsule hangs at the pane's own top. The corner
+       ghost is not a head and needs no clearance — an open capsule stands it
+       down outright (the `:has(> .srchbar)` rule beside `.pane-ghost`). */
+    bar.className = "srchbar" + (pane.querySelector(".panehead") ? " with-head" : "");
     bar.innerHTML = `
       <input type="text" placeholder="Find" spellcheck="false">
       <span class="sb-cnt"></span>
