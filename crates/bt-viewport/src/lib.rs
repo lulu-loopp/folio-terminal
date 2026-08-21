@@ -5628,6 +5628,68 @@ mod tests {
         }
     }
 
+    /// PIN (user report 2026-08-20) — **an address with Chinese pressed against its tail is still
+    /// a link, and the link is the address alone.**
+    ///
+    /// Claude Code listed three bare addresses. The two with a line break after them were links;
+    /// the third had `（带图片和表格，内容更复杂）` immediately behind it and was not a link at
+    /// all — the scan ran through the prose to the end of the line and the whole candidate was
+    /// then discarded for not being ASCII. On screen the full-width prose stands on lead/spacer
+    /// pairs, so this also holds the claim to the columns the address actually occupies.
+    ///
+    /// MUTATIONS: let a byte `>= 0x80` keep the scan going and the `uri` assertion goes red with
+    /// no link found at all; make the scan stop on a hand-listed set of full-width punctuation
+    /// instead of on every non-ASCII byte and the `带` case goes red the same way.
+    #[test]
+    fn a_bare_url_ends_where_full_width_prose_begins() {
+        const URI: &str = "https://a.test/README.md";
+        let wide = |text: &str| {
+            let mut lead = CapturedCell::plain(text);
+            lead.style.flags.insert(CellFlags::WIDE_CHAR);
+            let spacer = CapturedCell {
+                wide_spacer: true,
+                ..CapturedCell::default()
+            };
+            [lead, spacer]
+        };
+        let mut cells = CapturedRow::plain(URI, false).cells;
+        for word in ["（", "带", "图", "片"] {
+            cells.extend(wide(word));
+        }
+        assert_eq!(cells.len(), URI.len() + 8);
+        let mut frame = live_frame_of(vec![CapturedRow {
+            cells,
+            continues: false,
+            shell_mark: None,
+        }]);
+
+        let hit = frame.hyperlink_at(0, 3).expect("the address is a link");
+        assert_eq!(
+            hit.uri, URI,
+            "the prose behind the address is not part of it"
+        );
+        assert!(frame.underline_hyperlink(&hit));
+        for column in 0..URI.len() {
+            assert!(
+                solid_at(&frame, 0, column),
+                "the address is underlined whole, column {column}"
+            );
+        }
+        for column in URI.len()..URI.len() + 8 {
+            assert_eq!(
+                frame.cells[column].hyperlink, None,
+                "the prose carries no link, column {column}"
+            );
+            assert!(
+                !frame.cells[column]
+                    .style
+                    .flags
+                    .intersects(CellFlags::UNDERLINE | CellFlags::DOTTED_UNDERLINE),
+                "nor any underline, column {column}"
+            );
+        }
+    }
+
     /// A logical line can have its head in staging and its tail still on the live grid
     /// (`FreezeCandidate::live_tail`), so the two planes are read as the one sequence the frame
     /// presents them as. Reading them apart truncates the address at the seam — the same wrong

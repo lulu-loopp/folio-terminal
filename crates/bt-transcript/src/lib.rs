@@ -21,7 +21,9 @@ pub struct HyperlinkRange {
 ///
 /// Candidates must begin at a conservative prose boundary, use `http://` or `https://`, and
 /// contain an unambiguous host. In particular, single-label hosts are rejected except for the
-/// explicitly supported `localhost` development case.
+/// explicitly supported `localhost` development case. A candidate ends at the first byte that
+/// cannot be part of an address ([`is_url_terminator`]), and trailing prose punctuation is then
+/// released.
 pub fn detect_http_urls(text: &str) -> Vec<HyperlinkRange> {
     let bytes = text.as_bytes();
     let mut ranges = Vec::new();
@@ -71,15 +73,24 @@ fn is_url_leading_boundary(byte: u8) -> bool {
     byte.is_ascii_whitespace() || matches!(byte, b'"' | b'\'' | b'(' | b'[' | b'{' | b'<')
 }
 
+/// Where a bare URL stops: at the first byte that cannot belong to one.
+///
+/// An address we are willing to offer is pure ASCII — [`bare_http_url_is_valid`] reads nothing
+/// else, and a host it would accept cannot be spelled with anything else — so a byte belonging to
+/// a UTF-8 sequence (any byte `>= 0x80`) ends the candidate exactly as a space does. Saying it
+/// here rather than only at the validator is what keeps prose pressed against an address from
+/// swallowing it: the scan reaches such a byte only from ASCII, so it is a lead byte and the range
+/// always ends on a character boundary.
 fn is_url_terminator(byte: u8) -> bool {
-    byte.is_ascii_whitespace() || matches!(byte, b'"' | b'\'' | b'`' | b'<' | b'>')
+    !byte.is_ascii()
+        || byte.is_ascii_whitespace()
+        || matches!(byte, b'"' | b'\'' | b'`' | b'<' | b'>')
 }
 
 fn bare_http_url_is_valid(candidate: &str, scheme_len: usize) -> bool {
-    if !candidate.is_ascii()
-        || candidate
-            .bytes()
-            .any(|byte| byte.is_ascii_control() || byte == b'\\')
+    if candidate
+        .bytes()
+        .any(|byte| byte.is_ascii_control() || byte == b'\\')
     {
         return false;
     }
@@ -1414,6 +1425,56 @@ mod tests {
             &text[ranges[0].byte_start..ranges[0].byte_end],
             "https://good.example"
         );
+    }
+
+    /// PIN (user report 2026-08-20) — **a bare URL ends at the first byte that cannot belong to
+    /// it, and every non-ASCII byte is such a byte.**
+    ///
+    /// Claude Code printed three bare addresses in a row. The two with a line break after them
+    /// were links; the third, followed immediately by `（带图片和表格，内容更复杂）`, was not a
+    /// link at all — the scan ran on through the prose to the end of the line, and the validator
+    /// then threw the entire candidate away for not being ASCII. The validator's demand that a
+    /// candidate be pure ASCII and the scanner's idea of where a candidate stops must say the
+    /// same sentence, so a byte `>= 0x80` terminates exactly like a space does.
+    #[test]
+    fn a_bare_url_ends_at_the_first_non_ascii_byte() {
+        for (text, expected) in [
+            (
+                "https://raw.githubusercontent.com/microsoft/terminal/main/README.md（带图片和表",
+                Some("https://raw.githubusercontent.com/microsoft/terminal/main/README.md"),
+            ),
+            (
+                "https://example.test/a.md（中文）",
+                Some("https://example.test/a.md"),
+            ),
+            (
+                "https://example.test/a.md。",
+                Some("https://example.test/a.md"),
+            ),
+            (
+                "https://example.test/a.md，下一句",
+                Some("https://example.test/a.md"),
+            ),
+            // The leading boundary is unchanged: prose pressed against the scheme is still no
+            // address at all, because a boundary we cannot read is not a boundary.
+            ("中文https://example.test/x", None),
+        ] {
+            let ranges = detect_http_urls(text);
+            assert_eq!(
+                ranges
+                    .iter()
+                    .map(|range| &text[range.byte_start..range.byte_end])
+                    .collect::<Vec<_>>(),
+                expected.into_iter().collect::<Vec<_>>(),
+                "reading `{text}`"
+            );
+            if expected.is_some() {
+                assert!(
+                    !text.as_bytes()[ranges[0].byte_end].is_ascii(),
+                    "the byte the address stops before is the non-ASCII one, in `{text}`"
+                );
+            }
+        }
     }
 
     #[test]
