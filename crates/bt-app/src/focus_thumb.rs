@@ -204,6 +204,11 @@ enum Damage {
 struct Entry {
     damage: Damage,
     at: Instant,
+    /// **A gesture is owed this seat a picture** — see
+    /// [`FocusThumbnails::unthrottle`]. Set by a hand, cleared by the very next
+    /// pass that looks at this seat, so it buys exactly one projection and never
+    /// takes the seat off the clock.
+    unthrottled: bool,
 }
 
 /// Where one seat's content comes from, handed in **unevaluated**.
@@ -365,6 +370,45 @@ impl FocusThumbnails {
         }
     }
 
+    /// **The gesture channel** — one seat, one picture, now (user report
+    /// 2026-08-21).
+    ///
+    /// Gate 4's argument, written at the top of this file, is entirely about a
+    /// *shell*: "a shell writing at 10 000 lines a second and a shell writing at
+    /// ten cost the same, because a card 160 pixels tall cannot show the
+    /// difference". Every word of that is true and none of it is about a
+    /// **hand**. When the reader turns the wheel over a mini seat and moves that
+    /// seat's window (`§7.1.6b′` ③ `card_skip`), the picture *is* the answer to
+    /// the gesture, and a tenth of a second of not answering is the surface
+    /// feeling stuck — which is exactly what the report said it felt like.
+    ///
+    /// So the clock is spent rather than lowered, and the exception is drawn as
+    /// narrowly as the reason allows:
+    ///
+    /// * **The clock only.** Gate 3 is untouched: an aim that left the seat
+    ///   saying the same thing — a window driven past the top of a short screen,
+    ///   say — still rebuilds nothing, because there is nothing new to draw.
+    /// * **One seat.** The credit is granted to the seat the pointer was over,
+    ///   never to a pass, so a wheel spun over one card cannot pull twenty other
+    ///   seats through the clock alongside it.
+    /// * **Once.** The next pass that looks at this seat clears it, so a gesture
+    ///   buys one projection and the shell behind that seat goes back to 10 Hz
+    ///   immediately.
+    ///
+    /// The rate this opens is a hand's: one row per detent
+    /// ([`crate::CardAim`] sees to it that a run of sub-detent reports is one
+    /// row and not six), which is tens per second at the arm's limit against the
+    /// hundreds per second [`MIN_INTERVAL`] is sized to refuse — and one seat's
+    /// worth of them, not twenty.
+    ///
+    /// A seat with no entry is a seat the clock is not refusing anyway, so this
+    /// is a no-op there rather than a booking made in advance.
+    pub fn unthrottle(&mut self, tab: TabId, seat: SeatId) {
+        if let Some(entry) = self.entries.get_mut(&(tab, seat)) {
+            entry.unthrottled = true;
+        }
+    }
+
     /// **Gates 3 and 4** — bring one visible card's seats up to date.
     ///
     /// `demands` is the tab's seats in tree order, already carrying their own
@@ -379,9 +423,17 @@ impl FocusThumbnails {
         for demand in demands {
             let damage = demand.damage();
             let key = (tab, demand.id);
+            // The credit a gesture left on this seat, taken as it is read: it
+            // buys the one pass it is looked at by, whichever way that pass then
+            // goes. See [`Self::unthrottle`].
+            let mut unthrottled = false;
+            if let Some(entry) = self.entries.get_mut(&key) {
+                unthrottled = std::mem::take(&mut entry.unthrottled);
+            }
             match self.entries.get(&key) {
                 // Gate 3: nothing behind this seat has moved. The one comparison
-                // that makes an idle window free.
+                // that makes an idle window free. **Asked of a gesture too** —
+                // an aim that changed nothing has nothing to draw.
                 Some(entry) if entry.damage == damage => {
                     self.stats.skipped_unchanged += 1;
                     continue;
@@ -389,15 +441,23 @@ impl FocusThumbnails {
                 // Gate 4: it has moved, but not long enough ago to be worth
                 // redrawing. The old content stands, which is why this is a skip
                 // and not a deferral — there is nothing queued and nothing to
-                // flush.
-                Some(entry) if now.duration_since(entry.at) < MIN_INTERVAL => {
+                // flush. A hand that just moved this seat's own window is the
+                // one thing this gate has no argument against.
+                Some(entry) if !unthrottled && now.duration_since(entry.at) < MIN_INTERVAL => {
                     self.stats.skipped_throttled += 1;
                     continue;
                 }
                 _ => {}
             }
             content.insert(demand.id, demand.project());
-            self.entries.insert(key, Entry { damage, at: now });
+            self.entries.insert(
+                key,
+                Entry {
+                    damage,
+                    at: now,
+                    unthrottled: false,
+                },
+            );
             self.stats.projections += 1;
         }
     }
@@ -1099,6 +1159,77 @@ mod tests {
             stats.skipped_unchanged, 0,
             "every frame really did carry something new"
         );
+    }
+
+    /// **The gesture channel** — a seat the hand has just re-aimed rebuilds on
+    /// the spot, however recently the clock last let it through.
+    ///
+    /// Gate 4's whole argument is written against a *shell* writing faster than
+    /// a 160px card can show; it says nothing about a hand, and a hand turning
+    /// the wheel twice inside a tenth of a second is a hand that is owed two
+    /// pictures. Ten aims in a hundred milliseconds is ten projections of **one**
+    /// seat, which is what makes this an exception and not a hole: the credit is
+    /// spent per seat, by the seat the pointer was over.
+    #[test]
+    fn a_seat_the_hand_just_re_aimed_rebuilds_inside_the_clock() {
+        let mut thumbs = FocusThumbnails::default();
+        let start = Instant::now();
+        thumbs.project(tab(1), &[face(1, "aim 0")], start);
+        for tick in 1..=10 {
+            thumbs.unthrottle(tab(1), seat(1));
+            thumbs.project(
+                tab(1),
+                &[face(1, &format!("aim {tick}"))],
+                start + Duration::from_millis(10 * tick),
+            );
+        }
+        let stats = thumbs.stats();
+        assert_eq!(
+            stats.projections, 11,
+            "every turn of the wheel got the picture it asked for"
+        );
+        assert_eq!(
+            stats.skipped_throttled, 0,
+            "the clock never refused a gesture"
+        );
+        assert_eq!(
+            thumbs.seats(tab(1)).and_then(|seats| seats.get(&seat(1))),
+            Some(&MiniSeatContent::Face {
+                name: "aim 10".to_owned(),
+                kind: "TXT".to_owned(),
+            }),
+            "and the card is showing where it was last aimed, not where it was aimed first"
+        );
+    }
+
+    /// The gesture channel is **the clock's exception and not damage's**: an aim
+    /// that changed nothing behind the seat still rebuilds nothing.
+    #[test]
+    fn a_gesture_that_left_the_seat_saying_the_same_thing_rebuilds_nothing() {
+        let mut thumbs = FocusThumbnails::default();
+        let start = Instant::now();
+        thumbs.project(tab(1), &[face(1, "a")], start);
+        thumbs.unthrottle(tab(1), seat(1));
+        thumbs.project(tab(1), &[face(1, "a")], start + Duration::from_millis(10));
+        let stats = thumbs.stats();
+        assert_eq!(stats.projections, 1);
+        assert_eq!(stats.skipped_unchanged, 1, "gate 3 still refused it");
+        assert_eq!(stats.skipped_throttled, 0);
+    }
+
+    /// And the credit is spent when it is looked at: one aim buys one projection,
+    /// not a seat that has stopped answering to the clock at all.
+    #[test]
+    fn the_gesture_credit_is_spent_by_the_pass_that_uses_it() {
+        let mut thumbs = FocusThumbnails::default();
+        let start = Instant::now();
+        thumbs.project(tab(1), &[face(1, "a")], start);
+        thumbs.unthrottle(tab(1), seat(1));
+        thumbs.project(tab(1), &[face(1, "b")], start + Duration::from_millis(10));
+        thumbs.project(tab(1), &[face(1, "c")], start + Duration::from_millis(20));
+        let stats = thumbs.stats();
+        assert_eq!(stats.projections, 2, "the shell's next line waited its turn");
+        assert_eq!(stats.skipped_throttled, 1);
     }
 
     /// The throttle refuses; it does not queue. What the card shows in between is

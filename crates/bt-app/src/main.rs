@@ -4851,6 +4851,13 @@ struct WindowRuntime {
     /// ever projects its own tabs, so a second window costs the first nothing and
     /// closing one takes its projections with it.
     focus_thumbs: focus_thumb::FocusThumbnails,
+    /// The fraction of a wheel detent the card aim is holding, if any — see
+    /// [`CardAim`].
+    ///
+    /// One slot and not a map, because there is one pointer: the fraction
+    /// belongs to the seat the hand is turning the wheel over, and moving to
+    /// another seat is exactly the event that ends the turn.
+    card_aim: Option<CardAim>,
     /// When "Open in default app" was last pressed, if it still has something to
     /// say about it.
     preview_opened_at: Option<Instant>,
@@ -10096,6 +10103,27 @@ impl WheelBurst {
             Self::Pixels { x, y } => MouseScrollDelta::PixelDelta(PhysicalPosition::new(x, y)),
         }
     }
+
+    /// The same travel with `steps` whole detents taken out of it.
+    ///
+    /// Subtracted **in the currency the driver reported**, which is the whole
+    /// reason [`CardAim`] carries a burst rather than a count of notches: six
+    /// reports of 20 pixels are the integers 20…120, and 120 − 1×120 is exactly
+    /// zero, so a wheel turned one whole detent leaves nothing behind to drift.
+    /// Take the same subtraction over in notches and it is `0.1666…×6 − 1`,
+    /// which is a number nobody can promise the sign of.
+    fn less_notches(self, steps: i32) -> Self {
+        match self {
+            Self::Lines { x, y } => Self::Lines {
+                x,
+                y: y - steps as f32,
+            },
+            Self::Pixels { x, y } => Self::Pixels {
+                x,
+                y: y - f64::from(steps) * f64::from(WHEEL_PIXELS_PER_NOTCH),
+            },
+        }
+    }
 }
 
 /// The travel one wheel detent reports when a driver speaks in pixels instead of
@@ -10114,6 +10142,78 @@ fn wheel_zoom_notches(delta: MouseScrollDelta) -> f32 {
     match delta {
         MouseScrollDelta::LineDelta(_, y) => y,
         MouseScrollDelta::PixelDelta(position) => position.y as f32 / WHEEL_PIXELS_PER_NOTCH,
+    }
+}
+
+/// **The travel a card aim has been handed and not yet spent** (user report
+/// 2026-08-21: "turning up works, but I have to turn for ages").
+///
+/// §7.1.6b′ ③ says *one detent is one row*, and the first landing read that as
+/// "round each wheel event to the nearest whole detent". That is true of the
+/// mouse it was written on and false of every other pointing device on the
+/// desk: a high-resolution wheel and a precision touchpad deliver one detent as
+/// a **run** of small reports — Win32's `WHEEL_DELTA` of 120 arriving twenty or
+/// forty at a time — and each of those, rounded on its own, is zero rows. The
+/// turn was not slow; it was being thrown away six pieces at a time.
+///
+/// So the fraction is *carried* to the next report instead, and the row falls on
+/// the piece that completes the detent. What the reader feels is the ruling they
+/// were given: one detent, one row, whatever the driver's idea of a detent's
+/// shape.
+///
+/// # What clears it, and why those two
+///
+/// The carry is a promise about **one hand turning one way at one seat**, so it
+/// is dropped when either half of that stops being true:
+///
+/// * **A change of direction.** Half a detent upward is a promise about *up*;
+///   letting it pay for the way down would make the first row down arrive early
+///   — off a gesture the reader made before and can no longer see. A hand that
+///   changes its mind starts again from nothing.
+/// * **A change of seat.** The window being aimed is a fact about one terminal
+///   seat, so the fraction lives with the seat and not with the window. Move to
+///   the seat next door — or to the same-numbered seat on another card — and it
+///   starts from nothing, because a carry that followed the pointer would move a
+///   window nobody turned the wheel over.
+///
+/// There is deliberately **no clock**: a carry does not go stale, because
+/// nothing about it decays. A reader who nudged the wheel a third of a detent
+/// and came back to it still meant *up*, and a timeout would be a number in the
+/// way of that with nothing to justify it.
+///
+/// It carries a [`WheelBurst`] rather than a count of notches for two reasons
+/// that are really one. The currencies are not addable — that ruling is already
+/// written on `WheelBurst::plus` and is not worth a second implementation — and
+/// keeping the driver's own units is what makes [`WheelBurst::less_notches`]
+/// exact where the driver is exact.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CardAim {
+    /// The seat this fraction was turned at.
+    at: LeafId,
+    /// What has been turned and not yet spent, in the driver's own currency.
+    carried: WheelBurst,
+}
+
+impl CardAim {
+    /// This notch, plus whatever the same seat has already been turned in the
+    /// same direction, **in whole detents** — the remainder stays in `slot`.
+    fn spend(slot: &mut Option<Self>, at: LeafId, delta: MouseScrollDelta) -> i32 {
+        let arriving = wheel_zoom_notches(delta);
+        let total = (*slot)
+            .filter(|aim| {
+                aim.at == at && (wheel_zoom_notches(aim.carried.delta()) > 0.0) == (arriving > 0.0)
+            })
+            .and_then(|aim| aim.carried.plus(delta))
+            .unwrap_or_else(|| WheelBurst::of(delta));
+        // `trunc` and not `round`: a half detent is half a row, and half a row
+        // is not a row. Rounding here is what made a 60-pixel nudge move a whole
+        // one while six 20-pixel nudges moved none.
+        let steps = wheel_zoom_notches(total.delta()).trunc() as i32;
+        *slot = Some(Self {
+            at,
+            carried: total.less_notches(steps),
+        });
+        steps
     }
 }
 
@@ -18260,6 +18360,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         focus_mini_advance: 0.0,
         focus_mini_face_advance: 0.0,
         focus_thumbs: focus_thumb::FocusThumbnails::default(),
+        card_aim: None,
         table_paints: HashMap::new(),
         preview_button_width: 0.0,
         preview_opened_at: None,
@@ -51898,7 +51999,17 @@ impl Runtime<'_> {
     /// back through what has already gone past. Zero is a floor and not a wrap —
     /// a reader who keeps turning down lands on the tail and stays there.
     ///
-    /// **One notch is one row, and there is no modifier.** This house already
+    /// **One detent is one row — and a detent is what the driver adds up to,
+    /// not what one report of it says** (user report 2026-08-21). A
+    /// high-resolution wheel and a precision touchpad deliver one detent as a
+    /// run of small travels, so the fraction is carried between reports in
+    /// [`CardAim`] and the row falls on the piece that completes it. The
+    /// consequence for *this* function is the order below: the seat is found
+    /// **before** the notch is measured, because a report too small to be a
+    /// whole row is still this seat's report and must be kept rather than
+    /// dropped through to the column's own scrolling.
+    ///
+    /// **There is no modifier.** This house already
     /// spends `Shift`+wheel on the *other axis* (`scroll_preview_body`), and a
     /// mini seat has no other axis to be turned onto; giving it a magnitude here
     /// would make one key mean two things on two surfaces. A flick of the wheel
@@ -51917,9 +52028,9 @@ impl Runtime<'_> {
     /// target, and the ruling that says so ("clicking a card is clicking that
     /// tab") is about presses, not about notches.
     fn aim_focus_card_window(&mut self, now: Instant, delta: MouseScrollDelta) -> Result<bool> {
-        let notches = wheel_zoom_notches(delta);
-        let steps = notches.round() as i32;
-        if steps == 0 {
+        // A report with no vertical travel in it is not an aim and has nothing
+        // to carry — a horizontal wheel over a card is still the column's.
+        if wheel_zoom_notches(delta) == 0.0 {
             return Ok(false);
         }
         let Some(position) = self.window.pointer_position else {
@@ -51945,6 +52056,7 @@ impl Runtime<'_> {
         let Some(tab) = self.window.tabs.get_mut(index) else {
             return Ok(false);
         };
+        let tab_id = tab.id;
         let Some(seat) = seats::focus_mini_seats(tab.seats.tree(), card.mini, scale)
             .into_iter()
             .find(|seat| {
@@ -51956,6 +52068,18 @@ impl Runtime<'_> {
         let Some(leaf) = tab.sessions.get_mut(&seat.id) else {
             return Ok(false);
         };
+        let target = LeafId {
+            tab: tab_id,
+            seat: seat.id,
+        };
+        // Whole detents, once whatever this seat is already holding is added in.
+        // A report that does not complete one is **spent here anyway** — it is
+        // being carried, and handing it on to the column as well would scroll
+        // the list with the same turn of the wheel that is aiming a window in it.
+        let steps = CardAim::spend(&mut self.window.card_aim, target, delta);
+        if steps == 0 {
+            return Ok(true);
+        }
         // Wheel-up is a positive notch and lifts the window; wheel-down lowers
         // it and stops at the tail.
         let aimed = if steps > 0 {
@@ -51967,6 +52091,13 @@ impl Runtime<'_> {
             return Ok(true);
         }
         leaf.card_skip = aimed;
+        // **The gesture channel** (`focus_thumb`, 2026-08-21): the hand moved
+        // this seat's window, so this seat re-projects on the pass below
+        // whatever the 10Hz clock would otherwise have said. The credit is one
+        // seat's and it is spent by the pass that uses it — the budget gate 4
+        // exists to defend is about a *shell* outrunning a 160px card, and it
+        // has nothing to say about a wheel a hand is turning.
+        self.window.focus_thumbs.unthrottle(tab_id, seat.id);
         // The picture is behind the number, so the projection is spent again
         // before the chrome is built — the order every frame already uses.
         self.refresh_focus_thumbnails(now, scale);
@@ -67320,6 +67451,115 @@ mod tests {
             ))),
             1.0
         );
+    }
+
+    /// One seat, named the way a card aim names one.
+    fn aim_seat(tab: u64, seat: u64) -> LeafId {
+        LeafId {
+            tab: TabId(tab),
+            seat: SeatId(seat),
+        }
+    }
+
+    /// A driver that reports travel rather than detents, `y` pixels of it.
+    fn wheel_pixels(y: f64) -> MouseScrollDelta {
+        MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, y))
+    }
+
+    /// **A sixth of a detent, six times, is one row** (user report 2026-08-21:
+    /// "turning up works, but I have to turn for ages before it moves").
+    ///
+    /// A high-resolution wheel and a precision touchpad both report one detent
+    /// as a run of small travels — 20 pixels at a time against Win32's 120 —
+    /// and each of those on its own rounds to no rows at all. Rounding each
+    /// event in isolation throws the whole turn away, which is what the report
+    /// is describing; the fraction is *carried* instead, and the row falls the
+    /// moment the sixth nudge completes the detent.
+    #[test]
+    fn six_sixths_of_a_detent_add_up_to_one_row() {
+        let mut aim = None;
+        let seat = aim_seat(1, 1);
+        let steps: Vec<i32> = (0..6)
+            .map(|_| CardAim::spend(&mut aim, seat, wheel_pixels(20.0)))
+            .collect();
+        assert_eq!(
+            steps,
+            vec![0, 0, 0, 0, 0, 1],
+            "a detent delivered in six pieces moves exactly one row, on the piece that completes it"
+        );
+    }
+
+    /// The standard mouse is not made slower by the carry: a detent that arrives
+    /// whole is one row on arrival, and a merged burst is worth its own count.
+    #[test]
+    fn a_whole_detent_is_one_row_the_moment_it_lands() {
+        let mut aim = None;
+        let seat = aim_seat(1, 1);
+        assert_eq!(
+            CardAim::spend(&mut aim, seat, MouseScrollDelta::LineDelta(0.0, 1.0)),
+            1
+        );
+        assert_eq!(
+            CardAim::spend(&mut aim, seat, MouseScrollDelta::LineDelta(0.0, 1.0)),
+            1
+        );
+        assert_eq!(
+            CardAim::spend(&mut aim, seat, MouseScrollDelta::LineDelta(0.0, 3.0)),
+            3,
+            "a flick merged into one burst is worth every detent in it"
+        );
+        assert_eq!(
+            CardAim::spend(&mut aim, seat, wheel_pixels(120.0)),
+            1,
+            "and a driver reporting travel says the same thing in its own currency"
+        );
+    }
+
+    /// **A hand that changes its mind does not get the fraction it was owed.**
+    ///
+    /// Half a detent upward is a promise about *up*; spending it on the way down
+    /// would make the first row down arrive early or late depending on something
+    /// the reader did before and cannot see.
+    #[test]
+    fn turning_the_other_way_forgets_the_fraction_it_was_owed() {
+        let mut aim = None;
+        let seat = aim_seat(1, 1);
+        assert_eq!(CardAim::spend(&mut aim, seat, wheel_pixels(60.0)), 0);
+        assert_eq!(
+            CardAim::spend(&mut aim, seat, wheel_pixels(-120.0)),
+            -1,
+            "a whole detent down is one row down, not half of one"
+        );
+        assert_eq!(CardAim::spend(&mut aim, seat, wheel_pixels(-60.0)), 0);
+        assert_eq!(
+            CardAim::spend(&mut aim, seat, wheel_pixels(-60.0)),
+            -1,
+            "and the downward halves add up among themselves"
+        );
+    }
+
+    /// **The fraction belongs to the seat it was turned at**, not to the window.
+    ///
+    /// Moving the pointer to another seat — or to another card — starts that
+    /// seat's aim from nothing, because a carry that followed the pointer would
+    /// move a window the reader never turned the wheel over.
+    #[test]
+    fn the_fraction_belongs_to_the_seat_it_was_turned_at() {
+        let mut aim = None;
+        let half = wheel_pixels(60.0);
+        assert_eq!(CardAim::spend(&mut aim, aim_seat(1, 1), half), 0);
+        assert_eq!(
+            CardAim::spend(&mut aim, aim_seat(1, 2), half),
+            0,
+            "the seat next door did not inherit the half detent"
+        );
+        assert_eq!(CardAim::spend(&mut aim, aim_seat(1, 2), half), 1);
+        assert_eq!(
+            CardAim::spend(&mut aim, aim_seat(2, 1), half),
+            0,
+            "and neither did the same-numbered seat on another card"
+        );
+        assert_eq!(CardAim::spend(&mut aim, aim_seat(2, 1), half), 1);
     }
 
     #[test]
