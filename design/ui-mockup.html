@@ -505,7 +505,24 @@
     width: 9px; height: 6px;
     transition: transform 140ms cubic-bezier(.2,0,0,1);
   }
-  .chevbtn.open svg { transform: rotate(180deg); }
+  /* 2026-08-20 (user ruling, §7.1.6e) — the turn is scoped to the STRIP, because
+     the sentence it speaks is only true there. A turned arrow says "the list is
+     DOWN THERE", and in the product that is true of the strip's button alone:
+     the rail keeps its free space to the SIDE, so the picker opens beside its ˅
+     rather than under it (below-and-left of a rail button is the rail's own
+     column). The focus card column paints `railNewHtml()` too and inherits that.
+     An arrow turned over there points past its own menu, which is the judgement
+     that took the turn off the pane head's ⌄ and is the same judgement here.
+     `openProfileMenu` below still writes `top: a.bottom + 4` for every anchor —
+     a DOCUMENT has room to drop a popup anywhere, which is why this prototype
+     never needed the choice the product's `profiles::MenuSide` makes. So these
+     two selectors are the ruling written down, not a consequence of the
+     prototype's own geometry.
+     What replaces the turn is not a new colour: it is `.newtab:hover`'s own two
+     declarations, held while the list is up. "This control is not at rest" is
+     what that pill already means everywhere else in this bar. */
+  .tabs-inline .chevbtn.open svg { transform: rotate(180deg); }
+  .rail .chevbtn.open { background: var(--hover); color: var(--ink); }
   @media (prefers-reduced-motion: reduce) { .chevbtn svg { transition: none; } }
   .tabs-inline .newtab { margin: 0 0 3px 6px; }
   /* same box as the + it sits beside: two buttons of the same kind, side by side,

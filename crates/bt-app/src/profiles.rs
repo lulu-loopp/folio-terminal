@@ -3577,6 +3577,29 @@ pub enum MenuSide {
     Beside,
 }
 
+impl MenuSide {
+    /// **Whether the `˅` that opened a menu on this side turns over while it is
+    /// up** (§7.1.6e, extended to the new-tab button by user ruling
+    /// 2026-08-20).
+    ///
+    /// The judgement is one sentence about geometry and it was first written for
+    /// the pane head's `⌄`: *"翻到 180° 的箭头指向自己菜单之外"* — a turned
+    /// arrow claims the list is **down there**, and that claim is true of
+    /// [`Self::Below`] and of nothing else. Beside its button, an arrow rotated
+    /// 180° points away from the very thing it is announcing, which is worse
+    /// than saying nothing: it is a control lying about where its own menu went.
+    ///
+    /// So the turn is not a property of the strip, of the rail or of the card
+    /// column — it is a property of *this* enum, which is why it is written here
+    /// and read from here by all four of the places that care: the three
+    /// surfaces that draw the arrow, and the tween that would otherwise spend
+    /// 140ms of frames arriving at an angle nobody draws.
+    #[must_use]
+    pub fn turns_the_chevron(self) -> bool {
+        matches!(self, Self::Below)
+    }
+}
+
 /// The menu hung off `anchor` — the `˅`'s own box, in physical pixels — inside
 /// a surface this big, showing `recent` under the profiles.
 ///
