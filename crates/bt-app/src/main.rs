@@ -10389,6 +10389,9 @@ enum HyperlinkActivation {
     Preview(PathBuf),
     /// A local folder, which is Explorer's.
     Reveal(PathBuf),
+    /// A local folder, opened the way this window opens every other folder — the
+    /// files column, pointed at it.
+    FilesColumn(PathBuf),
     /// A target this window will not hand to the shell. The hover line says so
     /// and nothing else happens.
     Blocked,
@@ -10404,14 +10407,24 @@ enum HyperlinkActivation {
 /// letter for letter what [`local_image_activation`] has always done with an
 /// inline picture.
 ///
-/// **Where the plain half is empty, a plain click does nothing** — a web address,
-/// a folder, and (until W2) a local `.html` page have no destination inside this
-/// window, and their `Ctrl` half starts a *program*: a browser, Explorer, or
-/// whatever is registered. A plain click must never start one. That is not
-/// caution, it is the same judgement the picture arm was written with: a click is
-/// what a hand does while reading, and a misplaced one that opens a browser
-/// window is a much larger interruption than one that opens a pane in the window
-/// already in front of you. `Ctrl` is the user saying *leave*.
+/// **Where the plain half is empty, a plain click does nothing** — a web address
+/// and (until W2) a local `.html` page have no destination inside this window,
+/// and their `Ctrl` half starts a *program*: a browser or whatever is registered.
+/// A plain click must never start one. That is not caution, it is the same
+/// judgement the picture arm was written with: a click is what a hand does while
+/// reading, and a misplaced one that opens a browser window is a much larger
+/// interruption than one that opens a pane in the window already in front of you.
+/// `Ctrl` is the user saying *leave*.
+///
+/// **A folder is no longer one of them** (user ruling 2026-08-21). It reads like
+/// the rows above — its `Ctrl` half is Explorer, a program — but it is the one
+/// row that *does* have somewhere inside the window to go, because showing
+/// folders is what the files column is. It was left empty only for as long as
+/// nothing printed a folder: §7.1.5j then gave every prompt's own cwd a verified
+/// dotted rest, and a mark that says "there is a link here" over something that
+/// answers nothing is the same lie 7.1.5f was written about, one row further
+/// down. So the plain half is [`HyperlinkActivation::FilesColumn`] and the rule stays whole:
+/// plainly, this window; under `Ctrl`, the system.
 ///
 /// # Why the directory question is a parameter
 ///
@@ -10484,7 +10497,15 @@ fn hyperlink_activation(
         // Explorer's arm was settled before the page arm existed.
         if is_directory(&path) {
             return match intent {
-                ClickIntent::Here => HyperlinkActivation::None,
+                // The files column, pointed at it (user ruling 2026-08-21). A
+                // folder is the one row that leaves this half empty and yet has
+                // somewhere inside the window to go: this window shows folders
+                // for a living. The dotted rest under every prompt's own cwd is
+                // what forced the question — a mark that says "there is a link
+                // here" over something that answered nothing was the window
+                // half-lying, which is 7.1.5f's complaint reaching the row it had
+                // not yet reached.
+                ClickIntent::Here => HyperlinkActivation::FilesColumn(path),
                 ClickIntent::System => HyperlinkActivation::Reveal(path),
             };
         }
@@ -13709,10 +13730,12 @@ fn pointer_cursor(
 ///
 /// **So it is not a fact about `Ctrl`; it is the routing table asked** (user
 /// ruling 2026-08-20). A plain hover over a link to a readable file wears the
-/// hand, because a plain press opens it. A plain hover over a web address, a
-/// folder or a page does not, because a plain press on those does nothing — and
-/// holding `Ctrl` lights exactly them up, which is how a reader discovers that
-/// the modifier is what those rows want.
+/// hand, because a plain press opens it — and, since the folder ruling of
+/// 2026-08-21, so does a plain hover over a folder, because a plain press points
+/// the files column at it. A plain hover over a web address or a page does not,
+/// because a plain press on those does nothing — and holding `Ctrl` lights
+/// exactly them up, which is how a reader discovers that the modifier is what
+/// those rows want.
 ///
 /// One expression rather than two agreeing ones, for the reason 7.1.5f wrote
 /// down: a pointer that promises a press the release then declines is this window
@@ -28274,7 +28297,6 @@ impl Runtime<'_> {
     /// giving a column the *keyboard* is a separate act from opening one, and
     /// opening one from a chord does not perform it.)
     fn toggle_files_pane(&mut self) -> Result<()> {
-        let metrics = self.seat_metrics();
         if let Some(open) = self.seats.files_seat() {
             // Closing a files pane is closing a pane: the same verb, so the
             // state teardown, the tab-closes-with-its-last-pane rule and the
@@ -28282,10 +28304,30 @@ impl Runtime<'_> {
             return self.close_pane(open);
         }
         let root = self.files_root_for_new_pane();
-        // No width to bring: a column opened from the keyboard has no history, so
-        // it takes the kind's own opening width (F62's 240).
+        self.seat_a_files_column(root)?;
+        Ok(())
+    }
+
+    /// Seat a files column in this tab, rooted where the caller says.
+    ///
+    /// Split out of [`Self::toggle_files_pane`] rather than written a second
+    /// time, because "where does a column arrive and how wide is it" is one
+    /// answer and not one per door: the root rim, leading side, and the kind's
+    /// own opening width (F62's 240), because a column arriving with no history
+    /// has no width to bring.
+    ///
+    /// The *root* is the only thing a caller gets to say, and that is the whole
+    /// difference between the two doors: the chord captures the focused shell's
+    /// cwd ([`Self::files_root_for_new_pane`]), and a click on a printed folder
+    /// captures the folder it was printed on.
+    ///
+    /// `None` is the solver refusing — this window has no room for another pane —
+    /// and it leaves the tree untouched, so the caller has nothing to undo and
+    /// only something to report.
+    fn seat_a_files_column(&mut self, root: String) -> Result<Option<SeatId>> {
+        let metrics = self.seat_metrics();
         let Some(seat) = self.seats.add_files_pane(&metrics, None) else {
-            return Ok(());
+            return Ok(None);
         };
         self.files.insert(
             seat,
@@ -28300,7 +28342,65 @@ impl Runtime<'_> {
         );
         // The tree changed, so everything downstream of its shape follows —
         // through the one door every seat-set change goes through.
-        self.settle_seat_set_change()
+        self.settle_seat_set_change()?;
+        Ok(Some(seat))
+    }
+
+    /// **Show this folder in the files column** (§7.1.5g, user ruling
+    /// 2026-08-21) — the plain half of the folder row.
+    ///
+    /// Two sentences, and each is a verb this window already has. A tab that has
+    /// a column **re-roots it** ([`Self::reroot_files_column`]), which is the
+    /// same door the root menu's rows, `Browse…` and a folder dropped on a column
+    /// all commit; a tab with no column **gets one**
+    /// ([`Self::seat_a_files_column`]), arriving where and as wide as
+    /// `Ctrl+Shift+B` puts one. Neither is re-implemented here, so "clicking a
+    /// printed folder is the same as pointing the column at it" is true rather
+    /// than nearly true — the expansion set is cleared, the width is kept, and
+    /// the read caches keyed on the old root are dropped without any of that
+    /// being remembered a second time.
+    ///
+    /// **Re-root rather than add a second column**, and the reason is the one
+    /// [`Seats::files_seat`] has always encoded: the chord toggles *the* column,
+    /// so a window that answered a click by stacking a second one would hand the
+    /// user a tab whose `Ctrl+Shift+B` closes a column they were not looking at.
+    /// A tab can still hold two — a restored layout does, and so does a split —
+    /// and the one that answers is the one first in seat order, which is the same
+    /// one every other door in this file means by "the files column".
+    ///
+    /// **The keyboard does not move**, for [`Self::toggle_files_pane`]'s own
+    /// reason: giving a column the keyboard is a separate act from opening one,
+    /// and a click that was reading a printed line has not asked to stop reading
+    /// it.
+    ///
+    /// Both roads and the refusal write a `BT_MOUSE_TRACE` line, for
+    /// [`Self::open_preview_file`]'s reason: the whole of what this verb does is
+    /// somewhere else on the screen, so "the click did nothing" and "the click
+    /// re-rooted the column you were not looking at" are the same picture from
+    /// the outside.
+    fn show_folder_in_files_column(&mut self, folder: &Path) -> Result<()> {
+        let existing = self.seats.files_seat();
+        self.mouse_trace(|| {
+            format!(
+                "show_folder_in_files_column enter path={} column={existing:?}",
+                folder.display()
+            )
+        });
+        let root = folder.display().to_string();
+        match existing {
+            Some(seat) => {
+                self.reroot_files_column(seat, &root)?;
+                self.mouse_trace(|| format!("show_folder_in_files_column leave=rerooted {seat:?}"));
+            }
+            None => match self.seat_a_files_column(root)? {
+                Some(seat) => self
+                    .mouse_trace(|| format!("show_folder_in_files_column leave=seated {seat:?}")),
+                None => self.mouse_trace(|| {
+                    "show_folder_in_files_column leave=no-room-for-a-pane".to_owned()
+                }),
+            },
+        }
+        Ok(())
     }
 
     /// Where a files pane opened right now would be rooted (H115).
@@ -46250,6 +46350,10 @@ impl Runtime<'_> {
             HyperlinkActivation::Reveal(path) => {
                 self.reveal_in_explorer(&path);
             }
+            // The folder's own road, and the one that stays in this window: the
+            // column this tab already has is pointed at it, and a tab without one
+            // gets the column `Ctrl+Shift+B` would have opened.
+            HyperlinkActivation::FilesColumn(path) => self.show_folder_in_files_column(&path)?,
             HyperlinkActivation::Blocked => {
                 self.window.hyperlink_hover.show_blocked(hyperlink);
                 self.publish_interaction_frame()?;
@@ -54133,6 +54237,29 @@ mod mouse_trace_station_tests {
             assert!(
                 text.contains("enter path="),
                 "{signature} does not record that it was reached at all"
+            );
+        }
+    }
+
+    /// The door a hyperlink's `FilesColumn` arm ends at (§7.1.5g, user ruling
+    /// 2026-08-21).
+    ///
+    /// Every one of its outcomes is a change *somewhere else on the screen* —
+    /// a column re-rooted, a column seated, or a solver that had no room — and
+    /// from a log with only `arm=FilesColumn(…)` in it all three look alike. So
+    /// each names itself, which is the same reason the two preview openers
+    /// above do.
+    #[test]
+    fn the_folder_door_says_which_of_its_outcomes_happened() {
+        let text = body("    fn show_folder_in_files_column(");
+        assert!(
+            text.contains("enter path="),
+            "the folder door does not record that it was reached at all"
+        );
+        for label in ["leave=rerooted", "leave=seated", "leave=no-room-for-a-pane"] {
+            assert!(
+                text.contains(label),
+                "the folder door has an outcome that does not say `{label}`"
             );
         }
     }
@@ -63257,10 +63384,13 @@ mod tests {
         // outside this window is silent without the modifier — which is the
         // picture arm's own judgement (`local_image_activation` keeps `External`
         // for `Ctrl`) applied to the rows that leave.
+        //
+        // A folder is no longer one of them: since the folder ruling of
+        // 2026-08-21 its plain half names a pane *inside* this window, so it
+        // leaves this list the way a readable file was never in it.
         for uri in [
             "https://example.test/path",
             "file:///C:/page.html",
-            "file:///C:/some/folder",
             "mailto:person@example.test",
         ] {
             assert_eq!(
@@ -63270,6 +63400,12 @@ mod tests {
                 "a plain click on a target that leaves this window: {uri:?}"
             );
         }
+        assert_eq!(
+            hyperlink_activation(false, true, "file:///C:/some/folder", &|path| path
+                == Path::new(r"C:\some\folder")),
+            HyperlinkActivation::FilesColumn(PathBuf::from(r"C:\some\folder")),
+            "and the folder that left it starts no program either — it opens a column"
+        );
     }
 
     /// PIN — **one clicking rule, two kinds of reference** (§7.1.5g, user ruling
@@ -63340,7 +63476,11 @@ mod tests {
     ///    UNC cells go red, which is the event loop being handed a cold network
     ///    round trip;
     /// ④ let the plain half answer `Browser`/`Reveal`/`External` and a stray
-    ///    click on a printed line starts a program.
+    ///    click on a printed line starts a program;
+    /// ⑤ send the folder's plain half back to `None` — the shape it had until
+    ///    2026-08-21 — and every prompt in the window wears a dotted cwd that
+    ///    answers nothing, which is the promise the underline is not allowed to
+    ///    break.
     #[test]
     fn a_click_routes_web_files_pages_folders_shares_and_unknown_schemes() {
         assert_eq!(
@@ -63404,8 +63544,8 @@ mod tests {
         assert_eq!(
             hyperlink_activation(false, true, "file:///C:/repo/docs", &|path| path
                 == Path::new(r"C:\repo\docs")),
-            HyperlinkActivation::None,
-            "and a plain click does not open an Explorer window"
+            HyperlinkActivation::FilesColumn(PathBuf::from(r"C:\repo\docs")),
+            "and a plain click opens no Explorer window: it points this window's own column at it"
         );
         for control in [false, true] {
             assert_eq!(
@@ -64044,10 +64184,14 @@ mod tests {
                 HyperlinkActivation::None,
                 HyperlinkActivation::External(page.clone()),
             ),
+            // The prompt's own cwd is a directory that is really there, so it
+            // earns the dotted rest — and a dotted rest is a promise. Plainly it
+            // is the files column's (user ruling 2026-08-21); `Ctrl` still hands
+            // it to Explorer.
             (
                 directory_column,
                 directory.clone(),
-                HyperlinkActivation::None,
+                HyperlinkActivation::FilesColumn(directory.clone()),
                 HyperlinkActivation::Reveal(directory.clone()),
             ),
         ] {
@@ -72216,10 +72360,11 @@ mod tests {
     /// The underline is a fact about the output and is already there without any
     /// modifier; the hand is the narrower sentence, and after the plain-click
     /// ruling it is no longer a fact about `Ctrl` at all. A link to a readable
-    /// file wears it plainly, because a plain press opens it. A web address, a
-    /// folder and a page do not, because a plain press on those does nothing —
-    /// and holding `Ctrl` lights exactly those up, which is how the rule is
-    /// discovered. It must be the *same* expression the verb is spent from: a
+    /// file wears it plainly, because a plain press opens it — and since
+    /// 2026-08-21 so does a folder, because a plain press points the files column
+    /// at it. A web address and a page do not, because a plain press on those
+    /// does nothing — and holding `Ctrl` lights exactly those up, which is how
+    /// the rule is discovered. It must be the *same* expression the verb is spent from: a
     /// pointer promising a press the release then declines is 7.1.5f's complaint
     /// wearing a different shape.
     ///
@@ -72235,7 +72380,7 @@ mod tests {
         for (uri, plainly, under_control) in [
             ("file:///C:/notes.md", true, true),
             ("https://example.test/path", false, true),
-            ("file:///C:/repo/docs", false, true),
+            ("file:///C:/repo/docs", true, true),
             ("file:///C:/page.html", false, true),
         ] {
             for (control, expected) in [(false, plainly), (true, under_control)] {
