@@ -60543,6 +60543,7 @@ mod tests {
                                     alternate_scroll,
                                     sgr_mouse: true,
                                     mouse_tracking,
+                                    focus_reporting: false,
                                 },
                                 scrolled,
                             )
@@ -60635,6 +60636,7 @@ mod tests {
             alternate_scroll: false,
             sgr_mouse: true,
             mouse_tracking: MouseTracking::Drag,
+            focus_reporting: false,
         };
         assert_eq!(
             wheel_route(false, plain, false),
@@ -68723,6 +68725,112 @@ mod tests {
             Some(b"\x1b[<0;3;2M".to_vec())
         );
         assert!(matches!(route, Some(MouseRoute::Forward(_))));
+    }
+
+    /// The window half of the prompt-start retirement (DESIGN §7.1.5i): nothing
+    /// here learns anything new, because `route_forwarded_mouse_button` has always
+    /// asked `session.terminal_modes()` afresh for every press. The mode going off
+    /// in `bt-term` *is* the whole delivery mechanism — this pins that the router
+    /// really does read it that late, and that the press the user makes on the
+    /// recovered prompt writes not one byte to the shell.
+    #[test]
+    fn a_prompt_start_that_retires_tracking_takes_the_next_press_back_from_the_child() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+        // A program comes up, turns the set on, and dies without resetting it.
+        session
+            .feed(b"\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h")
+            .unwrap();
+        session.feed(b"\x1b[?1049l").unwrap();
+        let hit = bt_render::GridHit { row: 1, column: 2 };
+        let mut route = None;
+        assert_eq!(
+            route_forwarded_mouse_button(
+                &mut route,
+                ElementState::Pressed,
+                input::MouseProtocolButton::Left,
+                hit,
+                session.terminal_modes(),
+                ModifiersState::empty(),
+                PressedCellTarget::Ordinary,
+            ),
+            Some(b"\x1b[<0;3;2M".to_vec()),
+            "the leftover mode is still routing presses at a program that is gone"
+        );
+
+        // PSReadLine draws the next prompt.
+        session.feed(b"\x1b]133;A\x1b\\").unwrap();
+        assert_eq!(session.terminal_modes().mouse_tracking, MouseTracking::Off);
+        let mut recovered = None;
+        assert!(
+            route_forwarded_mouse_button(
+                &mut recovered,
+                ElementState::Pressed,
+                input::MouseProtocolButton::Left,
+                hit,
+                session.terminal_modes(),
+                ModifiersState::empty(),
+                PressedCellTarget::Ordinary,
+            )
+            .is_none(),
+            "and afterwards the press is this window's, to select with"
+        );
+        assert!(recovered.is_none());
+    }
+
+    /// **The press that was in the air when the prompt arrived.** A forward is a
+    /// latch: press sets `MouseRoute::Forward`, release clears it. The retirement
+    /// can land between the two, and the question is only whether the latch can be
+    /// left stuck — a route that never cleared would send every later release to a
+    /// program, and swallow every local drag, for as long as the pane lived.
+    ///
+    /// It cannot: the `Released` arm keys off the latch itself, not off the modes,
+    /// so it fires and clears whatever the modes now say. What it emits on the way
+    /// out is the release owed to the press that was already forwarded — encoded
+    /// X10 rather than SGR, because `1006` went with the rest. Six bytes, once,
+    /// only for a button physically held across the prompt; the flood the ticket
+    /// is about is motion, and motion is gone by then.
+    #[test]
+    fn a_press_already_forwarded_when_the_prompt_arrives_still_finds_its_release() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+        session.feed(b"\x1b[?1003h\x1b[?1006h").unwrap();
+        let hit = bt_render::GridHit { row: 1, column: 2 };
+        let mut route = None;
+        assert!(
+            route_forwarded_mouse_button(
+                &mut route,
+                ElementState::Pressed,
+                input::MouseProtocolButton::Left,
+                hit,
+                session.terminal_modes(),
+                ModifiersState::empty(),
+                PressedCellTarget::Ordinary,
+            )
+            .is_some()
+        );
+        assert!(matches!(route, Some(MouseRoute::Forward(_))));
+
+        session.feed(b"\x1b]133;A\x1b\\").unwrap();
+        assert_eq!(session.terminal_modes().mouse_tracking, MouseTracking::Off);
+
+        assert_eq!(
+            route_forwarded_mouse_button(
+                &mut route,
+                ElementState::Released,
+                input::MouseProtocolButton::Left,
+                hit,
+                session.terminal_modes(),
+                ModifiersState::empty(),
+                PressedCellTarget::Ordinary,
+            ),
+            Some(vec![0x1b, b'[', b'M', b'#', b'#', b'"']),
+            "the release the forwarded press is owed, in the encoding that is left"
+        );
+        assert!(
+            route.is_none(),
+            "and the latch is open again — the one thing that must not survive"
+        );
     }
 
     /// PIN (user ruling, 2026-08-20 — the repeal §7.1.5f wrote its own warrant
