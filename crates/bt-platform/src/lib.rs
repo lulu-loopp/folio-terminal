@@ -4306,6 +4306,137 @@ mod windows_impl {
             | FILE_NOTIFY_CHANGE_ATTRIBUTES.0,
     );
 
+    /// **Test-only: a place to hold the watcher thread just short of a read.**
+    ///
+    /// The defect this exists to pin is a *window*, not a value. `DirWatch::start`
+    /// used to return the moment the watcher thread had been **spawned**, and the
+    /// first `ReadDirectoryChangesW` was issued by that thread whenever it got
+    /// round to it. Anything that moved in the directory in between reached
+    /// nobody: Windows reports what happens while a read is outstanding and does
+    /// not keep a log for a subscriber who was not yet listening. The window is
+    /// microseconds wide and a busy machine is what widens it, so a test that
+    /// tried to open it by loading the box would be rolling dice — and the dice
+    /// were rolled: five-second budgets went 1/3 green under load, and raising
+    /// the budget six-fold produced 8/8 failures at the new ceiling, which is
+    /// what "the notification is never coming" looks like and not what a starved
+    /// machine looks like.
+    ///
+    /// So the watcher thread is given a place to be held instead, and the test
+    /// holds it there while it makes its change. **The gate can only ever
+    /// delay**: it is waited on before a read is issued, and `start` — once it
+    /// keeps its promise — is on the far side of that read. That is the whole
+    /// proof. Holding the gate holds `start` itself, so the change a test makes
+    /// after `start` returns cannot land in a window that no longer exists,
+    /// while the same test against the old code drops the change every time
+    /// rather than one time in three.
+    #[cfg(test)]
+    pub(crate) mod first_read_gate {
+        use std::{
+            sync::{Condvar, Mutex, MutexGuard, PoisonError},
+            time::Duration,
+        };
+
+        /// How long the watcher thread waits to be let through before going on
+        /// regardless.
+        ///
+        /// **It breaks a deadlock and decides nothing.** `start` waits for the
+        /// read this gate holds up, so a test that held the gate and then waited
+        /// for `start` would be waiting for itself; the cap is what lets the
+        /// green arm finish. It bounds how long that arm *takes* and has no say
+        /// in what it *concludes* — the read is outstanding before `start`
+        /// returns whether the gate opened by release or by cap.
+        ///
+        /// What it must not be is shorter than the single `fs::write` a test
+        /// makes while the gate is held, or the window this exists to hold open
+        /// would close early. That only ever costs the red arm its second piece
+        /// of evidence: the first — that `start` returned with no read
+        /// outstanding at all — is a flag, not a clock.
+        const HELD_AT_MOST: Duration = Duration::from_millis(250);
+
+        struct Gate {
+            /// Set by a test that wants the next read held back.
+            held: bool,
+            /// Set by the watcher thread the moment a read is outstanding.
+            read_issued: bool,
+        }
+
+        static GATE: Mutex<Gate> = Mutex::new(Gate {
+            held: false,
+            read_issued: false,
+        });
+        static RELEASED: Condvar = Condvar::new();
+
+        /// The suite's own turn-taking.
+        ///
+        /// The gate is one flag for the whole process, so a second watcher
+        /// thread running at the same time would trip it — and a `read_issued`
+        /// set by somebody else's watcher is exactly the false green this test
+        /// exists to make impossible. Every test in this crate that starts a
+        /// watcher takes this turn first.
+        static ONE_WATCHER_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+        /// The turn itself, for a test that only needs to not collide.
+        pub(crate) fn watchers_take_turns() -> MutexGuard<'static, ()> {
+            ONE_WATCHER_AT_A_TIME
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+        }
+
+        /// A held gate, and the turn that comes with it.
+        pub(crate) struct Held(#[allow(dead_code)] MutexGuard<'static, ()>);
+
+        /// Hold the watcher thread's next read back until the returned guard is
+        /// released or dropped.
+        pub(crate) fn hold() -> Held {
+            let turn = watchers_take_turns();
+            *GATE.lock().unwrap_or_else(PoisonError::into_inner) = Gate {
+                held: true,
+                read_issued: false,
+            };
+            Held(turn)
+        }
+
+        impl Held {
+            /// Whether a read is outstanding *right now* — which is the whole of
+            /// the promise the word `start` makes.
+            pub(crate) fn a_read_is_outstanding(&self) -> bool {
+                GATE.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .read_issued
+            }
+
+            /// Let the watcher thread through.
+            pub(crate) fn release(&self) {
+                GATE.lock().unwrap_or_else(PoisonError::into_inner).held = false;
+                RELEASED.notify_all();
+            }
+        }
+
+        impl Drop for Held {
+            fn drop(&mut self) {
+                let mut gate = GATE.lock().unwrap_or_else(PoisonError::into_inner);
+                *gate = Gate {
+                    held: false,
+                    read_issued: false,
+                };
+                RELEASED.notify_all();
+            }
+        }
+
+        /// Called by the watcher thread immediately before it issues a read.
+        pub(crate) fn wait_if_held() {
+            let gate = GATE.lock().unwrap_or_else(PoisonError::into_inner);
+            let _ = RELEASED.wait_timeout_while(gate, HELD_AT_MOST, |gate| gate.held);
+        }
+
+        /// Called by the watcher thread the moment a read is outstanding.
+        pub(crate) fn note_read_issued() {
+            GATE.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .read_issued = true;
+        }
+    }
+
     impl DirWatch {
         /// Start watching `path` and everything under it.
         ///
@@ -4315,11 +4446,26 @@ mod windows_impl {
         /// nudge: this thread is the only thing standing between the kernel's
         /// buffer and an overflow.
         ///
+        /// **It returns already listening.** Not "a thread has been started that
+        /// will begin listening": when this function hands back a `DirWatch`, a
+        /// `ReadDirectoryChangesW` is outstanding on the directory, and every
+        /// change from that instant onwards is news the caller will be told
+        /// about. The contract has to be that strong because Windows keeps no
+        /// log for a subscriber who was not yet listening — a change that
+        /// happens while no read is outstanding is not late, it is gone — and
+        /// because every caller's next move is to touch or to list the very
+        /// directory it has just armed. The first read is therefore issued
+        /// before this returns: the watcher thread issues it and says so, and
+        /// this waits for that word.
+        ///
         /// **Failure is quiet and final.** A path on a network share, a `\\wsl$`
         /// mount, a directory the process may not open — all of them come back as
         /// an error here and the caller's answer is to have no watcher for that
         /// repository, not to try again in a moment. Retrying is a timer, and a
-        /// timer is the thing this whole mechanism exists to avoid.
+        /// timer is the thing this whole mechanism exists to avoid. A first read
+        /// that is refused is one of these: it comes back from here as an `Err`
+        /// with a thread already joined behind it, not as a thread that quietly
+        /// stops after the caller has been told it has a watcher.
         pub fn start(
             path: &Path,
             wake: impl Fn() + Send + 'static,
@@ -4374,23 +4520,51 @@ mod windows_impl {
                 }
             };
             let (dir, change, stop) = (SendHandle(dir), SendHandle(change), SendHandle(stop));
+            // The word that makes `start` mean what it says. The thread sends it
+            // once, the instant its first read is outstanding — or sends the
+            // refusal instead, which is this function's error and not a thread
+            // that dies in private after the caller has been told it has a
+            // watcher.
+            let (armed, listening) = std::sync::mpsc::channel::<Result<(), std::io::Error>>();
             let thread = std::thread::Builder::new()
                 .name("bt-dir-watch".to_owned())
-                .spawn(move || watch_loop(dir, change, stop, wake));
-            match thread {
-                Ok(thread) => Ok(Self {
-                    dir,
-                    stop,
-                    change,
-                    thread: Some(thread),
-                }),
+                .spawn(move || watch_loop(dir, change, stop, armed, wake));
+            let thread = match thread {
+                Ok(thread) => thread,
                 Err(error) => {
                     unsafe { close(dir.0) };
                     unsafe { close(change.0) };
                     unsafe { close(stop.0) };
-                    Err(error)
+                    return Err(error);
                 }
+            };
+            // A `RecvError` is the thread ending without a word, which is a
+            // panic between the spawn and the read — there is no return path
+            // there that does not send. It is still an answer and not an
+            // unreachable: this is a terminal, and a panic taken as a panic
+            // takes somebody's scrollback with it.
+            let refused = match listening.recv() {
+                Ok(Ok(())) => {
+                    return Ok(Self {
+                        dir,
+                        stop,
+                        change,
+                        thread: Some(thread),
+                    });
+                }
+                Ok(Err(error)) => error,
+                Err(_) => std::io::Error::other("the directory watcher ended before it listened"),
+            };
+            // Join first, close after — the same order `drop` keeps, and for the
+            // same reason: a handle closed while that thread still held it is a
+            // handle reused for something else by the time it gets to it.
+            let _ = thread.join();
+            unsafe {
+                close(dir.0);
+                close(change.0);
+                close(stop.0);
             }
+            Err(refused)
         }
     }
 
@@ -4419,7 +4593,17 @@ mod windows_impl {
     }
 
     /// The watcher thread: issue a read, wait for it or for the stop, repeat.
-    fn watch_loop(dir: SendHandle, change: SendHandle, stop: SendHandle, wake: impl Fn()) {
+    ///
+    /// `armed` carries the outcome of the *first* read back to [`DirWatch::start`],
+    /// which is blocked on it — see the promise that function makes. Every pass
+    /// after that one is this thread's own business.
+    fn watch_loop(
+        dir: SendHandle,
+        change: SendHandle,
+        stop: SendHandle,
+        armed: std::sync::mpsc::Sender<Result<(), std::io::Error>>,
+        wake: impl Fn(),
+    ) {
         // `u32` and not `u8`: the kernel writes `FILE_NOTIFY_INFORMATION` records
         // into this and requires DWORD alignment, which a `Vec<u8>` does not
         // promise. Nothing reads the records — see [`DirWatch`] — but the
@@ -4431,30 +4615,44 @@ mod windows_impl {
         // second read would otherwise inherit. The read is always awaited or
         // cancelled before the next iteration reuses it.
         let mut overlapped;
+        // Taken by the first pass and never seen again: `start` is waiting for
+        // exactly one word, and after it has had it this thread is on its own.
+        let mut armed = Some(armed);
         loop {
             overlapped = OVERLAPPED {
                 hEvent: change.0,
                 ..OVERLAPPED::default()
             };
-            unsafe {
-                if ResetEvent(change.0).is_err() {
-                    return;
-                }
-            }
-            let issued = unsafe {
-                ReadDirectoryChangesW(
-                    dir.0,
-                    buffer.as_mut_ptr().cast::<std::ffi::c_void>(),
-                    u32::try_from(DIR_WATCH_BUFFER_BYTES).unwrap_or(u32::MAX),
-                    // Recursively. A repository is a tree and a commit touches
-                    // any depth of it.
-                    true,
-                    DIR_WATCH_FILTER,
-                    None,
-                    Some(std::ptr::from_mut(&mut overlapped)),
-                    None,
-                )
+            let reset = unsafe { ResetEvent(change.0) };
+            #[cfg(test)]
+            first_read_gate::wait_if_held();
+            let issued = match reset {
+                Ok(()) => unsafe {
+                    ReadDirectoryChangesW(
+                        dir.0,
+                        buffer.as_mut_ptr().cast::<std::ffi::c_void>(),
+                        u32::try_from(DIR_WATCH_BUFFER_BYTES).unwrap_or(u32::MAX),
+                        // Recursively. A repository is a tree and a commit
+                        // touches any depth of it.
+                        true,
+                        DIR_WATCH_FILTER,
+                        None,
+                        Some(std::ptr::from_mut(&mut overlapped)),
+                        None,
+                    )
+                },
+                // The event could not be cleared, so a read issued now would be
+                // answered by a stale signal. It is the same failure as a read
+                // that was refused, and on the first pass it is `start`'s error.
+                Err(error) => Err(error),
             };
+            #[cfg(test)]
+            if issued.is_ok() {
+                first_read_gate::note_read_issued();
+            }
+            if let Some(armed) = armed.take() {
+                let _ = armed.send(issued.clone().map_err(win32_io_error));
+            }
             if issued.is_err() {
                 // The directory went away, or the handle did. There is nothing
                 // left to watch and nothing to report: the caller keeps whatever
@@ -4933,7 +5131,7 @@ mod thread_priority_tests {
 /// (`bt_app::git_watch`).
 #[cfg(all(test, windows))]
 mod dir_watch_tests {
-    use super::DirWatch;
+    use super::{DirWatch, windows_impl::first_read_gate};
     use std::{
         sync::mpsc,
         time::{Duration, Instant},
@@ -4979,6 +5177,8 @@ mod dir_watch_tests {
     /// evidence of a cancellation rather than of a mistake in the setup.
     #[test]
     fn a_watched_directory_reports_a_change_and_stops_when_dropped() {
+        // One watcher at a time in this process — see `first_read_gate`.
+        let _turn = first_read_gate::watchers_take_turns();
         let scratch = Scratch::new("basic");
         let (tx, rx) = mpsc::channel::<()>();
         let watch = DirWatch::start(&scratch.0, move || {
@@ -5011,6 +5211,57 @@ mod dir_watch_tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// PIN — **`start` returns already listening.**
+    ///
+    /// The word is a promise about *when*: every caller in this workspace opens
+    /// a folder and then goes on to do something to it or to show it, and the
+    /// files column's own first move after arming is to list the directory the
+    /// user has just opened — so anything that moves between the two has to be
+    /// news, not a change that fell down the gap. Windows keeps no log for a
+    /// subscriber who was not yet listening: a change made while no read is
+    /// outstanding is not late, it is *gone*, and no budget however generous
+    /// brings it back.
+    ///
+    /// The gap was real and it was a whole thread-spawn wide: `start` returned
+    /// on `thread::spawn` and the first `ReadDirectoryChangesW` was issued by
+    /// the new thread whenever it was scheduled.
+    ///
+    /// MUTATIONS: put the first read back on the far side of the spawn — hand
+    /// the thread no way to report that it is listening and return as soon as it
+    /// exists — and both halves of this go red: the flag says `start` returned
+    /// with nothing outstanding, and the file written immediately afterwards
+    /// reaches the callback never rather than in milliseconds.
+    #[test]
+    fn a_change_made_after_start_returns_is_never_missed() {
+        let scratch = Scratch::new("armed");
+        let (tx, rx) = mpsc::channel::<()>();
+        // Held from before `start` until after the change: the watcher thread
+        // cannot get a read out under its own steam, so "a read is outstanding"
+        // can only mean `start` waited for one.
+        let gate = first_read_gate::hold();
+        let watch = DirWatch::start(&scratch.0, move || {
+            let _ = tx.send(());
+        })
+        .expect("watch a directory this process just made");
+        let outstanding_when_start_returned = gate.a_read_is_outstanding();
+
+        // Strictly after `start` returned, and strictly before the gate opens:
+        // the release below is what lets a read be issued, so this write
+        // *happens before* any read the old code was going to get round to.
+        std::fs::write(scratch.0.join("appeared.txt"), b"hello").expect("write a file");
+        gate.release();
+
+        rx.recv_timeout(ARRIVES_WITHIN).expect(
+            "a change made after `start` returned reaches the callback: it returned listening",
+        );
+        assert!(
+            outstanding_when_start_returned,
+            "`start` returned with no read outstanding — everything that moved in that window \
+             reached nobody, and Windows does not send it again"
+        );
+        drop(watch);
     }
 
     /// PIN — **a path that cannot be watched fails quietly and finally.**
