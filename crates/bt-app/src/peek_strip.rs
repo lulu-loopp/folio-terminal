@@ -237,14 +237,35 @@ pub const PEEK_MIN_PANES: usize = 2;
 /// and the popup would sit on top of it". This window has no card rail, so the
 /// tab whose layout is already on screen is the active one, and its layout is
 /// not a card stack under the strip but the whole window behind it.
+///
+/// **`cards_unfolded` is that same clause, finally given its subject** (user
+/// ruling, 2026-08-21). Focus mode (§7.1.6b′) builds precisely the thing the
+/// sentence above says this window does not have: a column of cards, one per
+/// tab, each of them a live projection of that tab's own layout. So while it is
+/// up, *every* card is "a tab whose cards are already unfolded beneath it" — the
+/// real thing is on screen for all of them at once — and the popup does not
+/// merely duplicate one card, it stands on top of the two below it. The refusal
+/// is the same shape as `renaming_this_tab`'s and rests on the same sentence:
+/// **the card itself is the answer.**
+///
+/// It is a separate argument rather than folded into `is_active_tab` because
+/// they are two different facts that happen to share a verdict — one is about
+/// *this* tab, the other about the window — and a caller that could only say
+/// "active" would have to lie about which tab it was looking at to say the
+/// other.
 #[must_use]
 pub fn eligible(
     pane_count: usize,
     is_active_tab: bool,
+    cards_unfolded: bool,
     dragging: bool,
     renaming_this_tab: bool,
 ) -> bool {
-    !dragging && !renaming_this_tab && !is_active_tab && pane_count >= PEEK_MIN_PANES
+    !dragging
+        && !renaming_this_tab
+        && !cards_unfolded
+        && !is_active_tab
+        && pane_count >= PEEK_MIN_PANES
 }
 
 /// Whether a showing peek has already answered for this tooltip anchor (§6).
@@ -2175,27 +2196,73 @@ mod tests {
     /// "there is a terminal here" — what the tab already said.
     #[test]
     fn a_tab_needs_two_panes_before_it_has_a_layout_to_show() {
-        assert!(!eligible(1, false, false, false));
-        assert!(eligible(2, false, false, false));
-        assert!(eligible(7, false, false, false));
+        assert!(!eligible(1, false, false, false, false));
+        assert!(eligible(2, false, false, false, false));
+        assert!(eligible(7, false, false, false, false));
         // A tab with no panes at all is not a special case, it is fewer than two.
-        assert!(!eligible(0, false, false, false));
+        assert!(!eligible(0, false, false, false, false));
     }
 
     /// The active tab's layout is not a schematic away — it is the window behind
     /// the strip. The mock-up's rail clause, translated (6233-6236).
     #[test]
     fn the_active_tab_never_peeks_however_many_panes_it_holds() {
-        assert!(!eligible(4, true, false, false));
-        assert!(eligible(4, false, false, false), "…but its neighbour does");
+        assert!(!eligible(4, true, false, false, false));
+        assert!(
+            eligible(4, false, false, false, false),
+            "…but its neighbour does"
+        );
+    }
+
+    /// PIN — **a column of unfolded cards refuses every peek** (user ruling and
+    /// report with screenshot, 2026-08-21).
+    ///
+    /// [`eligible`]'s own doc has said since it was written that the clause
+    /// refuses a tab "whose cards are already unfolded beneath it — the real
+    /// thing is on screen, and the popup would sit on top of it", and then that
+    /// "this window has no card rail". Focus mode is that card rail. Every card
+    /// in the column is a live projection of one tab's layout, so the schematic
+    /// has nothing to add to the card the pointer is resting on — and it has
+    /// something to *take*, because it is drawn over the two cards below it,
+    /// which is the screenshot.
+    ///
+    /// Driven across every pane count and both tabs, because the claim is that
+    /// the column answers for the whole window rather than for one row: there is
+    /// no card, active or not, wide or narrow, that a peek may stand on.
+    ///
+    /// Red gate: drop `&& !cards_unfolded` from [`eligible`] and every assertion
+    /// in the first loop fails; make it govern only the active tab and the
+    /// `false` neighbours come back.
+    #[test]
+    fn a_column_of_unfolded_cards_refuses_every_peek() {
+        for panes in [0_usize, 1, 2, 7, 40] {
+            for is_active in [false, true] {
+                assert!(
+                    !eligible(panes, is_active, true, false, false),
+                    "{panes} panes, active={is_active}: the card *is* the layout, \
+                     and the popup would cover the cards below it"
+                );
+            }
+        }
+        // And the ordinary window is untouched, which is the other half: the new
+        // clause is a fact about the column and not a new opinion about panes.
+        for panes in [2_usize, 7, 40] {
+            assert!(
+                eligible(panes, false, false, false, false),
+                "{panes} panes in a window with no card column still peeks"
+            );
+        }
     }
 
     /// A drag owns the pointer outright (T5), and a rename owns the tab (T4).
     #[test]
     fn a_drag_or_a_rename_refuses_every_tab() {
-        assert!(!eligible(3, false, true, false), "a drag in flight");
-        assert!(!eligible(3, false, false, true), "the tab being renamed");
-        assert!(eligible(3, false, false, false));
+        assert!(!eligible(3, false, false, true, false), "a drag in flight");
+        assert!(
+            !eligible(3, false, false, false, true),
+            "the tab being renamed"
+        );
+        assert!(eligible(3, false, false, false, false));
     }
 
     // ── L131 / L135: the clock ─────────────────────────────────────────────

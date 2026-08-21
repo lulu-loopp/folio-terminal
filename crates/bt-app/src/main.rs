@@ -23074,6 +23074,20 @@ impl Runtime<'_> {
         peek_strip::eligible(
             state.seats.pane_count(),
             tab == self.window.active_tab,
+            // **The card column is the card rail `eligible`'s own doc says this
+            // window does not have** (user ruling, 2026-08-21). Read off the
+            // posture rather than off `window.focus_mode`, from the same
+            // [`Self::rail_posture`] the solver and every geometry are handed,
+            // so "is a card column on screen" has one author here as well.
+            //
+            // Fed in rather than tested at the call sites: `layout_peek_eligible`
+            // is the one predicate both the arming path and the retiring one
+            // read (that is this function's whole reason), and a second `if
+            // focus` in `layout_peek_target_at` would be exactly the pair of
+            // paths asking different questions that this function exists to
+            // prevent — a peek settled a frame before the mode came on would
+            // then have nobody to retire it.
+            self.rail_posture().draws_focus_rail(),
             // A drag owns the pointer outright — the rule the tip, the hyperlink
             // underline and the terminal's own selection already live by.
             self.window.drag.is_some(),
@@ -24959,7 +24973,7 @@ impl Runtime<'_> {
         let Some(position) = self.window.pointer_position else {
             return Ok(());
         };
-        self.observe_chevrons(position, now);
+        self.observe_chevrons(Some(position), now);
         let trigger = self
             .hover_float_free(HoverFloat::Flyout)
             .then(|| self.float_trigger_at(position))
@@ -40573,7 +40587,22 @@ impl Runtime<'_> {
     /// Where the pointer is, for each chevron, is three questions asked of three
     /// geometries and answered once here rather than at each gate: the button's
     /// own box, the menu's frame (and its submenu's), and everything else.
-    fn observe_chevrons(&mut self, position: PhysicalPosition<f64>, now: Instant) {
+    ///
+    /// **`None` is a place, and it is `Away`** (user report, 2026-08-21). The
+    /// title bar's drag band — everything right of the `⌄` and left of the
+    /// caption run — is `HTCAPTION`, which is to say Win32's and not this
+    /// window's: `bt_platform::custom_frame_hit_test` answers `Caption` there,
+    /// so the pointer moving into it produces one `WindowEvent::CursorLeft` and
+    /// then **no motion at all** for as long as the hand rests there. A gate
+    /// that only ever hears about the pointer through `CursorMoved` is a gate
+    /// that never learns the hand has gone, and the menu it opened stands until
+    /// something else takes it down. So the *absence* of a position is fed in as
+    /// the answer it is — nothing app-owned lies outside the client rect, so the
+    /// pointer is on neither button and on neither menu — and the same 150ms
+    /// grace runs from it as from any other departure. Nothing here special-cases
+    /// leaving: `None` simply fails both hit tests, exactly as a point in the
+    /// middle of a pane does.
+    fn observe_chevrons(&mut self, position: Option<PhysicalPosition<f64>>, now: Instant) {
         // **A drag owns the pointer outright**, and a gesture in flight is not a
         // hover — the same rule the tip, the layout peek and the float's own
         // intent already live by (`rebuild_tooltip_anchors` empties its whole
@@ -40602,7 +40631,7 @@ impl Runtime<'_> {
         }
         let profile_open = self.window.profile_menu.is_open();
         let pane_open = self.window.pane_menu.is_some();
-        let target = self.chrome_target_at(position);
+        let target = position.and_then(|position| self.chrome_target_at(position));
         let on_profile_button = matches!(target, Some(seats::ChromeTarget::NewTabMenu));
         let pane_seat = self.window.pane_menu.as_ref().map(|menu| menu.seat);
         // A rest on *any* pane head's chevron arms that head's menu — including
@@ -40617,9 +40646,10 @@ impl Runtime<'_> {
         let profile_where = if on_profile_button {
             profiles::ChevronPointer::Button
         } else if profile_open
-            && self
-                .profile_menu_layout()
-                .is_some_and(|layout| layout.contains(position.x as f32, position.y as f32))
+            && position.is_some_and(|position| {
+                self.profile_menu_layout()
+                    .is_some_and(|layout| layout.contains(position.x as f32, position.y as f32))
+            })
         {
             profiles::ChevronPointer::Surface
         } else {
@@ -40643,11 +40673,12 @@ impl Runtime<'_> {
             .pane_menu
             .as_ref()
             .and_then(|menu| menu.pointer_was);
-        let pane_at = [position.x as f32, position.y as f32];
+        let pane_at = position.map(|position| [position.x as f32, position.y as f32]);
         let pane_on_surface = pane_open
-            && self
-                .pane_menu_layout()
-                .is_some_and(|layout| layout.holds(pane_was, pane_at));
+            && pane_at.is_some_and(|pane_at| {
+                self.pane_menu_layout()
+                    .is_some_and(|layout| layout.holds(pane_was, pane_at))
+            });
         let (pane_where, pane_owner_open) = match (on_pane_button, pane_on_surface) {
             (Some(seat), _) => (
                 profiles::ChevronPointer::Button,
@@ -46840,6 +46871,18 @@ impl Runtime<'_> {
 
     fn pointer_left(&mut self) -> Result<()> {
         self.window.pointer_position = None;
+        // **Both `⌄` clocks, told the pointer is nowhere** (user report,
+        // 2026-08-21) — through the same function every pointer move goes
+        // through, handed the same `None` the field above now holds, so the two
+        // doors cannot come to two different answers about where a hand that has
+        // left is. Owed here for `drive_rail_zone`'s reason one line down and
+        // more sharply: the band this window is most often left *for* is the
+        // title bar's own drag strip, which is `HTCAPTION` and therefore sends
+        // no motion at all, so without this the menu a `⌄` opened would stand
+        // over the terminal until something else took it down. The grace is not
+        // skipped — a hand that clips the corner of the bar on its way back to
+        // the menu is inside 150ms and keeps it.
+        self.observe_chevrons(None, Instant::now());
         // R2: a pointer that has left the window is not in the rail, and the rail
         // has to be told — nothing else will move the pointer again to tell it,
         // so an open panel would simply stay open over the terminal forever.
@@ -47458,7 +47501,7 @@ impl Runtime<'_> {
         // somewhere else, so it has to be told about moves that every branch
         // below consumes — including the ones inside the menu it opened, which
         // is the state the grace exists to tell apart from having left.
-        self.observe_chevrons(position, Instant::now());
+        self.observe_chevrons(Some(position), Instant::now());
         // The glance card's thumb, ahead of everything: it is the topmost thing
         // on the glass, and a gesture in flight is not a hover. It owns the
         // pointer outside the card too — a drag that let go the moment it left
@@ -80309,6 +80352,135 @@ mod tests {
         // And a press — every door that is not a pointer move — stops both.
         leaving.clear();
         assert_eq!(leaving.deadline(), None);
+    }
+
+    /// PIN (**the pointer has two doors and both reach the `⌄` clocks**) — user
+    /// report, 2026-08-21.
+    ///
+    /// A hover-opened profile menu would not close once the pointer came to rest
+    /// in the title bar's empty band, the stretch between the `⌄` and the gear.
+    /// That band is `HTCAPTION` — `seats`'s
+    /// `the_title_bar_band_right_of_the_chevron_is_win32s_and_not_the_chevrons`
+    /// pins both halves of why — so winit reports the hand arriving there as one
+    /// `CursorLeft` and then nothing at all. `pointer_moved` was the only door
+    /// that told the gates anything, so the grace was never started, and a grace
+    /// that is never started never runs out: the menu stood over the terminal
+    /// until a click or an Esc took it down.
+    ///
+    /// The fix is that `pointer_left` asks the same question, with the position
+    /// it has just cleared — `None`, which fails both hit tests and is therefore
+    /// `Away` for both chevrons without a single special case.
+    ///
+    /// Read as **text**, for `mouse_trace_station_tests`' reason and only that
+    /// reason: what went wrong is *a door that says nothing*, and no state
+    /// machine can be driven into a state that nobody ever puts it in. What the
+    /// absence then means is asserted below against the machine itself.
+    ///
+    /// Red gate: delete the call from `pointer_left` and this fails by name;
+    /// hand either door a bare position again and the `Some`/`None` assertion
+    /// for that door fails.
+    #[test]
+    fn both_pointer_doors_tell_the_chevron_clocks_where_the_hand_is() {
+        const SOURCE: &str = include_str!("main.rs");
+        let body = |signature: &str| -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        };
+        assert!(
+            body("    fn pointer_moved(").contains("self.observe_chevrons(Some(position)"),
+            "the move door hands the gates the position it was handed"
+        );
+        assert!(
+            body("    fn pointer_left(").contains("self.observe_chevrons(None,"),
+            "the leave door hands them the absence — without it a menu opened \
+             from the strip's `⌄` never closes over the title bar's drag band"
+        );
+        assert!(
+            body("    fn turn(").contains("self.window.chevrons.deadline(),"),
+            "and the loop is woken for the grace: a clock nobody calls `due` on \
+             is a menu that closes on the next thing to twitch"
+        );
+
+        // What the absence means once it reaches the gates: both menus up, the
+        // hand on neither, and one grace — the same 150ms a hand that merely
+        // stepped off the button gets. This is why the fix is not "close the
+        // menu when the cursor leaves the window": the leave is reported as a
+        // *position*, and the policy that reads it is the one policy.
+        let start = Instant::now();
+        let mut left = ChevronGates::default();
+        left.observe(
+            (profiles::ChevronPointer::Away, true),
+            (profiles::ChevronPointer::Away, true),
+            start,
+        );
+        assert_eq!(left.deadline(), Some(start + profiles::CHEVRON_LEAVE_GRACE));
+        assert_eq!(
+            left.profile
+                .due(start + profiles::CHEVRON_LEAVE_GRACE - Duration::from_millis(1)),
+            None,
+            "the grace is not skipped for a hand that has left the client rect"
+        );
+        for gate in [left.profile, left.pane] {
+            assert_eq!(
+                gate.due(start + profiles::CHEVRON_LEAVE_GRACE),
+                Some(profiles::ChevronAction::Close),
+                "both `⌄` answer a departure with the same verb at the same instant"
+            );
+        }
+    }
+
+    /// PIN (**the card column reaches the peek's one predicate, and only it**) —
+    /// user ruling and report with screenshot, 2026-08-21.
+    ///
+    /// A layout peek was dropping over the focus column, covering the two cards
+    /// below the one under the pointer. `peek_strip::eligible` now refuses a
+    /// window whose cards are unfolded — `a_column_of_unfolded_cards_refuses_
+    /// every_peek` is that policy driven directly — and what is left to pin here
+    /// is the *wiring*, which has two halves and can only be read as text:
+    ///
+    /// * the posture reaches the predicate, from `rail_posture()` — the same
+    ///   join the solver and every geometry are handed — rather than from
+    ///   `window.focus_mode`, so nothing in this window has a second opinion
+    ///   about whether a column is on screen;
+    /// * and `layout_peek_target_at` adds **no** judgment of its own. It is the
+    ///   arming path; `hide_layout_peek`'s side is the retiring one; and
+    ///   `layout_peek_eligible`'s own doc says why one predicate serves both —
+    ///   "the two asking different questions is exactly how a popup survives the
+    ///   death of its own subject". A peek that settled a frame before focus
+    ///   mode came on would, with a second `if focus` at the arming site only,
+    ///   have nobody left to retire it.
+    ///
+    /// Red gate: pass `self.window.focus_mode` instead and the first assertion
+    /// fails by name; add the second author at the call site and the third does.
+    #[test]
+    fn the_focus_column_refuses_the_layout_peek_through_one_predicate() {
+        const SOURCE: &str = include_str!("main.rs");
+        let body = |signature: &str| -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        };
+        let predicate = body("    fn layout_peek_eligible(");
+        assert!(
+            predicate.contains("self.rail_posture().draws_focus_rail(),"),
+            "the peek's one predicate is told whether this window's cards are \
+             unfolded, and told it by the posture every other geometry reads"
+        );
+        let arming = body("    fn layout_peek_target_at(");
+        assert!(
+            arming.contains("self.layout_peek_eligible(tab)"),
+            "the arming path asks the one predicate"
+        );
+        assert!(
+            !arming.contains("focus"),
+            "and asks nothing else: a second author here is a peek the retiring \
+             path can no longer take down"
+        );
     }
 
     /// PIN (**E61 — one popup at a time**, now including both `⌄` menus).
