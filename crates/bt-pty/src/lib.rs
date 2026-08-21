@@ -905,8 +905,103 @@ mod tests {
         "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
         " ",
     );
+    /// How long a probe waits on a child that has gone **silent**, as opposed to one that is
+    /// merely slow.
+    ///
+    /// The two waits this governs used to be five-second *totals*, which quietly made them a
+    /// measurement of the machine rather than of ConPTY. The load experiment of 2026-08-20
+    /// (recorded in `docs/DESIGN.md`) put twenty-four spinners on this twenty-four-thread host and
+    /// ran the resize oracle sixteen times: **twelve of its thirteen failures were these two waits
+    /// expiring**, every one of them while `powershell.exe` was still starting up and printing its
+    /// eighty-line flood — ordinary work on a busy host, and nothing to do with anything under
+    /// test. The same sixteen runs on the same host at rest failed none.
+    ///
+    /// Restarting the budget on every byte the child produces asks the question the probe actually
+    /// means — *has the child stopped?* — and the difference from a total is not cosmetic. A total
+    /// grows with how much work the child still has to do, so no value of it is ever right on a
+    /// machine whose speed is not known in advance; enlarging one only buys green runs by making
+    /// every genuine hang cost that much more to notice. A silence budget does not grow with the
+    /// work, because a starved machine delivers the same bytes with the same content, only further
+    /// apart. It is a single judgement, and only one: **how long may a live process be denied the
+    /// CPU before we are entitled to call it dead?**
+    ///
+    /// Thirty seconds is that judgement, measured rather than guessed. At the condition the flake
+    /// was reported under — this host saturated, twenty-four spinners against twenty-four threads —
+    /// the child never once fell quiet for as long as five seconds across eight paired runs. At
+    /// sixty-four spinners, two and a half times past that, `powershell.exe`'s own startup was
+    /// starved past five seconds in every run (`bt-app`'s twin probe, on a ten-second budget, was
+    /// starved past ten). Thirty clears that, and thirty seconds is also the entire price of a
+    /// genuinely wedged child — paid once, in a suite where these are the only probes that wait on
+    /// a live shell at all.
+    const PROBE_SILENCE_BUDGET: Duration = Duration::from_secs(30);
+
+    /// The backstop for the one shape [`PROBE_SILENCE_BUDGET`] cannot catch: a child that talks
+    /// forever without ever producing what the probe is waiting for. Deliberately far above any
+    /// honest cost, because reaching it means a defect and never a busy afternoon.
+    const PROBE_CEILING: Duration = Duration::from_secs(180);
+
     const ORACLE_HISTORY_COMMAND: &str = "echo BTHT";
     const ORACLE_HISTORY_OUTPUT: &[u8] = b"BTHT";
+
+    /// What `BTHOLD` prints on the way in, so that "the child is now held" is something the probe
+    /// **reads** rather than something it assumes after a fixed pause.
+    ///
+    /// Deliberately not the spelling of the command itself: the typed line is echoed back
+    /// keystroke by keystroke, so waiting for `BTHOLD` in the output would match the child
+    /// repeating the request rather than the child obeying it.
+    const ORACLE_HELD_MARKER: &str = "BTHELD";
+
+    /// A hold on the child that the probe opens itself, standing where a clock used to.
+    ///
+    /// `Start-Sleep -Seconds 2` used to keep the child busy across the resize storm, and that made
+    /// the storm a race against the machine. The sleep is not decoration: it is what stops the line
+    /// editor drawing a prompt between the resizes, and every row of the evidence gathered
+    /// afterwards is about resizes that arrived with nothing to repaint. But the storm's own cost
+    /// is thirty-eight paced pumps — a nominal 152ms that, on the loaded host of 2026-08-20,
+    /// dilated past two seconds in **4 runs out of 6**: the child woke mid-storm, answered the rest
+    /// of it with a redraw, and the probe went on to measure something it does not mean.
+    ///
+    /// The window the storm needs was never "two seconds". It is "until the storm is finished", and
+    /// the storm is the only thing that knows when that is. So the child spins on a file this
+    /// process has deliberately not created, and the probe creates it once the last resize is in:
+    /// the same child, held for exactly as long as this machine turns out to need, and released by
+    /// an event rather than by a guess about how fast the afternoon is.
+    struct ProbeLatch {
+        path: PathBuf,
+    }
+
+    impl ProbeLatch {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "bt-probe-latch-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            // The filesystem is the boundary here and a run that was killed between `release` and
+            // `drop` really does leave this name behind. An inherited latch is already open, which
+            // would let the child out before the storm had started — the exact failure this type
+            // exists to remove, arriving silently.
+            let _ = std::fs::remove_file(&path);
+            Self { path }
+        }
+
+        /// The path as a PowerShell single-quoted literal, for embedding in the startup script.
+        fn powershell_literal(&self) -> String {
+            format!("'{}'", self.path.display().to_string().replace('\'', "''"))
+        }
+
+        /// Let the child out of `BTHOLD`.
+        fn release(&self) {
+            std::fs::write(&self.path, b"").unwrap();
+        }
+    }
+
+    impl Drop for ProbeLatch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
     const ORACLE_EDITING_PREFIX: &str = "typed_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
     const ORACLE_POST_RESIZE_INPUT: &str = "Z";
 
@@ -939,9 +1034,18 @@ mod tests {
     }
 
     impl InteractiveOracle {
-        fn spawn() -> Self {
-            let startup = r#"Set-PSReadLineOption -HistorySaveStyle SaveNothing; function global:prompt { Write-Host ('Q' * 110); (('P' * 81) + ' ') }"#;
-            Self::spawn_with(startup, 100, 18)
+        /// The resize oracle's child: the tall prompt every row of its evidence is addressed
+        /// against, plus the `BTHOLD` latch described on [`ProbeLatch`].
+        fn spawn_holding(latch: &ProbeLatch) -> Self {
+            let startup = format!(
+                "Set-PSReadLineOption -HistorySaveStyle SaveNothing; \
+                 function global:prompt {{ Write-Host ('Q' * 110); (('P' * 81) + ' ') }}; \
+                 function global:BTHOLD {{ Write-Host '{}'; \
+                 while (-not (Test-Path -LiteralPath {})) {{ Start-Sleep -Milliseconds 20 }} }}",
+                ORACLE_HELD_MARKER,
+                latch.powershell_literal()
+            );
+            Self::spawn_with(&startup, 100, 18)
         }
 
         /// Same live child, but with a caller-chosen startup script and geometry. Probes that care
@@ -1034,40 +1138,132 @@ mod tests {
             );
         }
 
-        fn wait_for_current_line(&mut self, expected: &str) {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline {
-                self.pump_once();
-                if self.current_line() == expected {
+        /// Whether [`ORACLE_POST_RESIZE_INPUT`] is anywhere on the screen — the one character that
+        /// tells the edited line apart from the recalled one.
+        fn showing_edited_input(&self) -> bool {
+            self.terminal
+                .visible_text()
+                .iter()
+                .any(|row| row.contains(ORACLE_POST_RESIZE_INPUT))
+        }
+
+        /// Wait until the edited input has appeared on the child's screen, or gone from it, and
+        /// then let the redraw finish.
+        ///
+        /// This stands where a flat 300ms pause used to, before each of the three screens the
+        /// resize evidence is read from — the last place on that path where a busy host could
+        /// change what the probe **measures** rather than merely how long it takes. Sampled early,
+        /// the screen holds a half-drawn echo, and the outcome assertions then fail on a difference
+        /// that belongs to the machine and not to ConPTY.
+        ///
+        /// Waiting for the child to fall quiet was tried first and is not enough: the committed
+        /// ConPTY resize just above is still repainting when the input is written, so "the child
+        /// said something, then paused" was satisfied by the tail of that repaint, and on a starved
+        /// host the pause before the echo even started was longer than the quiet window. What the
+        /// child was asked for has to be the thing waited for.
+        ///
+        /// It is deliberately **weaker than the assertions it precedes**, and that is what keeps it
+        /// from begging the question: this asks only whether the edited line has taken the input on
+        /// or shed it, while the evidence is about *which row* it landed on, where the cursor
+        /// finished, and what became of the rows above — none of which this waits for.
+        /// [`ORACLE_POST_RESIZE_INPUT`] is the discriminator because it is the one character that
+        /// tells the edited line apart from the recalled one.
+        fn wait_for_edited_input(&mut self, present: bool) {
+            let started = Instant::now();
+            let mut last_output = Instant::now();
+            loop {
+                if self.pump_once() {
+                    last_output = Instant::now();
+                }
+                let silent_for = last_output.elapsed();
+                // Reaching the state once is not the same as settling in it. The line editor
+                // redraws the whole line more than once for a single edit, so a screen sampled
+                // the instant the character first appears can still be mid-repaint. The state
+                // therefore has to survive a pause — the same hundred milliseconds
+                // [`pump_until_quiet`](Self::pump_until_quiet) calls quiet — before it is the end
+                // of the answer. Expressed as a condition on this loop rather than as a nested
+                // wait with a deadline of its own, because a deadline here would be exactly the
+                // wall-clock total the rest of this probe just stopped using.
+                if silent_for >= Duration::from_millis(100)
+                    && self.showing_edited_input() == present
+                {
                     return;
+                }
+                if silent_for >= PROBE_SILENCE_BUDGET || started.elapsed() >= PROBE_CEILING {
+                    panic!(
+                        "the edited line never settled with {:?} {}: gave up after {:?}, the last \
+                         {:?} of it with the child silent; current line {:?}, screen {:?}",
+                        ORACLE_POST_RESIZE_INPUT,
+                        if present { "on it" } else { "gone from it" },
+                        started.elapsed(),
+                        silent_for,
+                        self.current_line(),
+                        self.terminal.visible_text()
+                    );
                 }
                 std::thread::sleep(Duration::from_millis(2));
             }
-            panic!(
-                "timed out waiting for current line {expected:?}; got {:?}, screen {:?}",
-                self.current_line(),
-                self.terminal.visible_text()
-            );
         }
 
+        /// Pump until the child's cursor line reads `expected`, giving up only once the child has
+        /// stopped talking for [`PROBE_SILENCE_BUDGET`] — see there for why this is not a total.
+        fn wait_for_current_line(&mut self, expected: &str) {
+            let started = Instant::now();
+            let mut last_output = Instant::now();
+            loop {
+                if self.pump_once() {
+                    last_output = Instant::now();
+                }
+                if self.current_line() == expected {
+                    return;
+                }
+                let silent_for = last_output.elapsed();
+                if silent_for >= PROBE_SILENCE_BUDGET || started.elapsed() >= PROBE_CEILING {
+                    panic!(
+                        "gave up waiting for current line {expected:?} after {:?}, the last {:?} \
+                         of it with the child silent and {} bytes read in all; got {:?}, screen {:?}",
+                        started.elapsed(),
+                        silent_for,
+                        self.raw_output.len(),
+                        self.current_line(),
+                        self.terminal.visible_text()
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        /// Pump until `expected` appears in everything the child has written since `start`, on the
+        /// same silence budget as [`wait_for_current_line`](Self::wait_for_current_line).
         fn wait_for_output_since(&mut self, start: usize, expected: &[u8]) {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline {
-                self.pump_once();
+            let started = Instant::now();
+            let mut last_output = Instant::now();
+            loop {
+                if self.pump_once() {
+                    last_output = Instant::now();
+                }
                 if self.raw_output[start..]
                     .windows(expected.len())
                     .any(|window| window == expected)
                 {
                     return;
                 }
+                let silent_for = last_output.elapsed();
+                if silent_for >= PROBE_SILENCE_BUDGET || started.elapsed() >= PROBE_CEILING {
+                    panic!(
+                        "gave up waiting for output marker {:?} after {:?}, the last {:?} of it \
+                         with the child silent and {} bytes read since the wait began; current \
+                         line {:?}, screen {:?}",
+                        String::from_utf8_lossy(expected),
+                        started.elapsed(),
+                        silent_for,
+                        self.raw_output.len() - start,
+                        self.current_line(),
+                        self.terminal.visible_text()
+                    );
+                }
                 std::thread::sleep(Duration::from_millis(2));
             }
-            panic!(
-                "timed out waiting for output marker {:?}; current line {:?}, screen {:?}",
-                String::from_utf8_lossy(expected),
-                self.current_line(),
-                self.terminal.visible_text()
-            );
         }
 
         fn current_line(&self) -> String {
@@ -1158,11 +1354,22 @@ mod tests {
     /// to be installed on the machine running it.
     ///
     /// It has to be a declaration on the command rather than an exported variable, and that is the
-    /// whole reason it exists: `portable_pty`'s `CommandBuilder` rebuilds every variable that the
-    /// machine or user registry defines from the registry, discarding this process's value, and
-    /// `PSModulePath` is one of those. Exporting it changes nothing and says nothing, which is the
-    /// worst shape a probe's lever can have — an A/B where both arms silently read the same
-    /// module and agree. An explicit declaration outranks the rebuilt value.
+    /// whole reason it exists: `portable_pty`'s `CommandBuilder` seeds a spawn from this process's
+    /// environment and then overlays every variable the machine or user registry defines *from the
+    /// registry*, discarding the inherited value, and `PSModulePath` is one of those on a stock
+    /// Windows install. Exporting it changes nothing here and says nothing, which is the worst
+    /// shape a probe's lever can have — an A/B where both arms silently read the same module and
+    /// agree. An explicit declaration outranks the rebuilt value.
+    ///
+    /// **That sentence is about the spawned child and only about it**, and it was read too widely
+    /// once: a run of flaky afternoons was blamed on `PSModulePath` leaking into these probes, and
+    /// the interleaved experiment of 2026-08-20 found no such leak — sixteen paired runs, arms
+    /// indistinguishable, at rest and under load alike (`docs/DESIGN.md`). Where the variable does
+    /// bite is one level up, in `build.rs`: that launches **Windows PowerShell 5.1** as an
+    /// ordinary child process, with no registry rebuild in front of it, so a caller running under
+    /// PowerShell 7 handed 5.1 a module path whose first entries are 7's, and 5.1 could not
+    /// autoload its own `Microsoft.PowerShell.Utility`. See `crates/bt-pty/build.rs`, which now
+    /// names the module path it needs instead of inheriting one.
     fn declare_probe_module_path(command: PtyCommand) -> PtyCommand {
         match std::env::var("BT_PSREADLINE_MODULE_PATH") {
             Ok(module_path) => command.env("PSModulePath", module_path),
@@ -1171,7 +1378,8 @@ mod tests {
     }
 
     fn run_resize_cursor_oracle() -> CursorOracleEvidence {
-        let mut oracle = InteractiveOracle::spawn();
+        let latch = ProbeLatch::new();
+        let mut oracle = InteractiveOracle::spawn_holding(&latch);
         oracle.wait_for_current_line(ORACLE_EMPTY_PROMPT_LINE);
         let flood_start = oracle.raw_output.len();
         oracle.write_line(
@@ -1182,8 +1390,15 @@ mod tests {
         oracle.wait_for_current_line(ORACLE_EMPTY_PROMPT_LINE);
         let synchronization_output_start = oracle.raw_output.len();
         let synchronization_reply_start = oracle.pty_replies.len();
-        oracle.write_line("Start-Sleep -Seconds 2");
-        oracle.pump_for(Duration::from_millis(100));
+        // Wait for the child to say it is held, rather than pausing and assuming so. The pause
+        // this replaces was 100ms, and on a loaded host that was not always long enough for the
+        // request to be echoed, submitted and started: the storm then ran against a child still
+        // sitting at its prompt, and every resize in it was answered by the redraw the hold exists
+        // to prevent. Two clocks stood between this write and the first resize — this pause and the
+        // `Start-Sleep` that [`ProbeLatch`] replaced — and neither of them was ever measuring the
+        // thing it was standing in for.
+        oracle.write_line("BTHOLD");
+        oracle.wait_for_output_since(synchronization_output_start, ORACLE_HELD_MARKER.as_bytes());
         let prior_resize_storm = [
             (101, 19),
             (109, 21),
@@ -1229,8 +1444,22 @@ mod tests {
             oracle.resize_terminal(columns, rows);
             oracle.pump_for(Duration::from_millis(4));
         }
+        // The storm is only the storm this probe means if every resize in it landed with no prompt
+        // to repaint, so the precondition [`ProbeLatch`] exists to hold is checked rather than
+        // assumed — and checked *here*, where it is still recognisable, instead of surfacing three
+        // screens later as evidence nobody can read.
+        assert_ne!(
+            oracle.current_line(),
+            ORACLE_EMPTY_PROMPT_LINE,
+            "the child left BTHOLD before the storm was over, so the resizes below were answered \
+             by a prompt redraw; the latch is the only thing that ends that wait, so this is a \
+             broken latch and not a slow machine. Screen {:?}",
+            oracle.terminal.visible_text()
+        );
         oracle.resize_conpty(119, 23);
         oracle.terminal.reconcile_resize_transaction_to_viewport();
+        // The last resize is in; the child may have its prompt back now.
+        latch.release();
         oracle.pump_for(Duration::from_millis(500));
         oracle.pump_until_quiet(Duration::from_secs(3));
         oracle.terminal.finish_resize_transaction();
@@ -1307,19 +1536,21 @@ mod tests {
             .session
             .write(format!("{ORACLE_EDITING_PREFIX}{ORACLE_POST_RESIZE_INPUT}").as_bytes())
             .unwrap();
-        oracle.pump_for(Duration::from_millis(300));
+        oracle.wait_for_edited_input(true);
         let typed_cursor = oracle.terminal.cursor();
         let typed_line = oracle.current_prompt_text();
         let typed_screen = oracle.terminal.visible_text();
 
+        // History recall replaces the edited line, so the input character leaves the screen.
         oracle.session.write(b"\x1b[A").unwrap();
-        oracle.pump_for(Duration::from_millis(300));
+        oracle.wait_for_edited_input(false);
         let recalled_cursor = oracle.terminal.cursor();
         let recalled_line = oracle.current_prompt_text();
         let recalled_screen = oracle.terminal.visible_text();
 
+        // And stepping back down restores it.
         oracle.session.write(b"\x1b[B").unwrap();
-        oracle.pump_for(Duration::from_millis(300));
+        oracle.wait_for_edited_input(true);
         let cleared_line = oracle.current_prompt_text();
         let cleared_screen = oracle.terminal.visible_text();
         let synchronization_dsr_requests = oracle.raw_output[synchronization_output_start..]
@@ -1569,7 +1800,26 @@ mod tests {
         let producer = std::thread::spawn(move || {
             done_tx.send(producer_ring.push(vec![5])).unwrap();
         });
-        assert!(done_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        // Wait for the producer to *say* it is blocked instead of pausing and assuming it got
+        // there. `push` counts the block inside the lock before it waits on the condvar, so
+        // `blocked_pushes` reaching 1 is the producer's own report; a 20ms pause that expires says
+        // only that this thread slept, which a producer the scheduler has not run at all satisfies
+        // equally well. That is not a distinction without a difference — it decides what the test
+        // measures. Draining the ring before the producer ever reached `push` leaves it pushing
+        // into an empty ring, so it never blocks, and the count asserted at the end stays 0. On
+        // this host under load that is exactly what happened, in two runs out of three of this
+        // test on its own.
+        let blocked_since = Instant::now();
+        while ring.stats().blocked_pushes == 0 {
+            assert!(
+                blocked_since.elapsed() < PROBE_CEILING,
+                "the producer never blocked on a ring it cannot fit into: {:?}",
+                ring.stats()
+            );
+            std::thread::yield_now();
+        }
+        // Blocked is the whole claim, so the push must not have returned.
+        assert!(done_rx.try_recv().is_err());
         assert_eq!(
             ring.try_pop(NonZeroUsize::new(4).unwrap()),
             vec![1, 2, 3, 4]
