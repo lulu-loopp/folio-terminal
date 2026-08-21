@@ -7304,7 +7304,9 @@ pub fn build_chrome_for_tabs(
                         ));
                     }
                     let glyph_width = (PANE_GHOST_GLYPH_WIDTH_LOGICAL_PX * scale).round().max(1.0);
-                    let glyph_height = (PANE_GHOST_GLYPH_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
+                    let glyph_height = (PANE_GHOST_GLYPH_HEIGHT_LOGICAL_PX * scale)
+                        .round()
+                        .max(1.0);
                     let glyph_left = ((ghost[0] + ghost[2] - glyph_width) / 2.0).round();
                     let glyph_top = ((ghost[1] + ghost[3] - glyph_height) / 2.0).round();
                     let mut mark = ChromeSprite::new(
@@ -23024,7 +23026,11 @@ mod tests {",
             let ghost = pane_ghost_geometry(rect, scale).expect("a 600px pane seats a 22px mark");
             let box_px = (22.0 * scale).round();
 
-            assert_eq!(ghost[2] - ghost[0], box_px, "22 logical pixels wide at {scale}x");
+            assert_eq!(
+                ghost[2] - ghost[0],
+                box_px,
+                "22 logical pixels wide at {scale}x"
+            );
             assert_eq!(ghost[3] - ghost[1], box_px, "and square at {scale}x");
             assert_eq!(
                 ghost[2],
@@ -23078,7 +23084,14 @@ mod tests {",
         );
         // Half-open on its leading edge, like every other target in this window.
         assert_eq!(
-            hit_pane_ghost(&lone, &lone_layout, 1.0, None, f64::from(ghost[0]), centre.1),
+            hit_pane_ghost(
+                &lone,
+                &lone_layout,
+                1.0,
+                None,
+                f64::from(ghost[0]),
+                centre.1
+            ),
             Some(ChromeTarget::PaneMenu(seat)),
         );
         assert_eq!(
@@ -23268,7 +23281,10 @@ mod tests {",
             hit_pane_ghost(&seats, &layout, 1.0, Some(seat), centre.0, centre.1),
             None,
         );
-        assert_eq!(pane_chevron_box(&seats, &layout, seat, 1.0, Some(seat)), None);
+        assert_eq!(
+            pane_chevron_box(&seats, &layout, seat, 1.0, Some(seat)),
+            None
+        );
         let (_, _, sprites) = pane_chrome(
             &seats,
             &layout,

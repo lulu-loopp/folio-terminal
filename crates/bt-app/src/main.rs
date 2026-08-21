@@ -21990,7 +21990,19 @@ impl Runtime<'_> {
         } else {
             self.publish_interaction_frame()?;
         }
-        if self.refresh_overlay() {
+        // **The chrome as well as the overlay, since §7.1.6i.** Which seat the
+        // capsule stands on is a *chrome* fact now: a lone pane's corner ghost
+        // shares the capsule's corner and its lane and stands down whole while
+        // one is up, so the pass that draws it has to be re-run on both edges of
+        // the capsule's life. Before this the chrome was untouched here, and a
+        // ghost would have sat under an open capsule until some unrelated event
+        // happened to rebuild the layer.
+        //
+        // Both rebuilds run, and then one present: `||` would skip the overlay
+        // on every frame the chrome happened to move.
+        let chrome_changed = self.refresh_chrome();
+        let overlay_changed = self.refresh_overlay();
+        if chrome_changed || overlay_changed {
             self.present_chrome_change()?;
         }
         Ok(())
