@@ -8030,42 +8030,45 @@ enum PressedCellTarget {
 }
 
 /// Whether a press in a mouse-tracking pane is the window's rather than the
-/// program's (user ruling, 2026-08-16 — ticket #59).
+/// program's (user ruling, 2026-08-16 — ticket #59; gate ③ repealed by the user
+/// on 2026-08-20, see §7.1.5f).
 ///
 /// **The underline is a promise.** Claude Code turns on 1000/1002/1003/1006 and
-/// then keeps printing paths on the *primary* screen; a file path it printed
-/// wears our solid underline the moment the pointer crosses it, hover-peeks a
-/// picture, and — until this ruling — swallowed the click that underline just
-/// promised, because the pane reported tracking and every left press went to the
-/// child. A mark that answers a hover and not a click is the window lying about
-/// what it can do, so the mark decides: where there is a verified target of ours,
-/// the press and its release are ours; everywhere else the program keeps the
-/// whole mouse.
+/// then keeps printing paths and links; a file path it printed wears our solid
+/// underline the moment the pointer crosses it, hover-peeks a picture, and —
+/// until this ruling — swallowed the click that underline just promised, because
+/// the pane reported tracking and every left press went to the child. A mark that
+/// answers a hover and not a click is the window lying about what it can do, so
+/// the mark decides: where there is a verified target of ours, the press and its
+/// release are ours; everywhere else the program keeps the whole mouse.
 ///
-/// **Three guards, and each of them is the ruling's own wording.**
+/// **Two guards, and each of them is the ruling's own wording.**
 ///
 /// * *A verified target of ours.* Not "the text looks like a path" — the same
 ///   `verified` bit the underline is painted from, so the promise and the verb
 ///   are one fact rather than two agreeing lists.
 /// * *Left only.* Right and middle carry no local verb, so taking them would be
 ///   a hole in the program's mouse bought for nothing.
-/// * *Primary screen only.* vim, yazi and lazygit live on the alternate screen
-///   and want the mouse whole; there is no detection there to argue with anyway
-///   (nothing scans an alt screen for image references), but the rule is written
-///   rather than left to fall out of an absence, because an absence is not a
-///   decision and the next slice that teaches the scanner about alt screens
-///   would silently repeal it.
+///
+/// **Which screen is up is not one of them, and the screen is not a parameter.**
+/// The 2026-08-16 ruling had a third guard, *primary screen only*, resting on
+/// the fact that nothing scanned an alternate screen and so there was no promise
+/// there to keep. It wrote itself down rather than falling out of that absence
+/// precisely because "there is nothing there" is not a decision and the slice
+/// that taught the scanner about alt screens would repeal it silently. That
+/// slice arrived: OSC 8 spans and bare URLs are found on the alternate screen
+/// and underlined there, Claude Code prints them there, and the user repealed
+/// gate ③ on 2026-08-20 on the ruling's own argument. The price is written down
+/// with it — a full-screen program never sees the press that landed on a link,
+/// and `Shift` cannot hand that one back the other way.
 ///
 /// Shift is untouched above all of this: it has always meant "this press is the
 /// window's", and it still does on every cell and on both screens.
 fn press_belongs_to_the_window(
     button: input::MouseProtocolButton,
     target: PressedCellTarget,
-    modes: TerminalModes,
 ) -> bool {
-    button == input::MouseProtocolButton::Left
-        && target == PressedCellTarget::Ours
-        && !modes.alternate_screen
+    button == input::MouseProtocolButton::Left && target == PressedCellTarget::Ours
 }
 
 /// Whether a right press inside a pane raises this window's own menu, or belongs
@@ -8085,11 +8088,11 @@ fn press_belongs_to_the_window(
 /// same modifier that hands a selection drag back from a tracking program
 /// ([`route_forwarded_mouse_button`]), so nothing new has to be learned.
 ///
-/// **The alternate screen needs no line of its own here**, unlike
-/// [`press_belongs_to_the_window`]: a full-screen program that wants the mouse
-/// turns tracking on, and one that has not is a program with no use for a press
-/// this window could give it. The rule is about who asked for the mouse, not
-/// about which screen is up.
+/// **The alternate screen needs no line of its own here** — as, since the
+/// 2026-08-20 repeal, it needs none in [`press_belongs_to_the_window`] either: a
+/// full-screen program that wants the mouse turns tracking on, and one that has
+/// not is a program with no use for a press this window could give it. The rule
+/// is about who asked for the mouse, not about which screen is up.
 ///
 /// This is deliberately the exact complement of the forward test above for the
 /// right button, so the two can never both claim one press: `forward` is
@@ -8109,7 +8112,7 @@ fn route_forwarded_mouse_button(
 ) -> Option<Vec<u8>> {
     let forward = !modifiers.shift_key()
         && modes.mouse_tracking != MouseTracking::Off
-        && !press_belongs_to_the_window(button, target, modes);
+        && !press_belongs_to_the_window(button, target);
     match state {
         ElementState::Pressed if forward => {
             *route = Some(MouseRoute::Forward(button));
@@ -68671,8 +68674,25 @@ mod tests {
         assert!(matches!(route, Some(MouseRoute::Forward(_))));
     }
 
+    /// PIN (user ruling, 2026-08-20 — the repeal §7.1.5f wrote its own warrant
+    /// for) — **the same verified target on the alternate screen is ours too.**
+    ///
+    /// This test is the 2026-08-16 one turned around, kept rather than replaced
+    /// so the reversal is legible in one place. Gate ③ read "primary screen
+    /// only", and its stated reason was that there was nothing to argue about on
+    /// an alternate screen because nothing scanned one. That premise is gone:
+    /// OSC 8 spans and bare URLs are found on the alternate screen and wear this
+    /// window's underline there, so §7.1.5f's own core sentence — *a mark that
+    /// answers a hover and not a click is the window lying about what it drew* —
+    /// now holds on both screens. The ruling that wrote gate ③ said in the same
+    /// breath that the next slice teaching the scanner about alt screens would
+    /// repeal it; this is that slice.
+    ///
+    /// MUTATION: put `!modes.alternate_screen` back into
+    /// [`press_belongs_to_the_window`] and this goes red on both modifiers and
+    /// on both edges of the click.
     #[test]
-    fn the_same_verified_target_on_the_alternate_screen_belongs_to_the_program() {
+    fn the_same_verified_target_on_the_alternate_screen_is_the_windows_too() {
         let mut session =
             DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
         session
@@ -68680,8 +68700,60 @@ mod tests {
             .unwrap();
         let modes = session.terminal_modes();
         assert!(modes.alternate_screen);
+        assert_ne!(modes.mouse_tracking, MouseTracking::Off);
+        let hit = bt_render::GridHit { row: 1, column: 2 };
+
+        for modifiers in [ModifiersState::empty(), ModifiersState::CONTROL] {
+            let mut route = None;
+            assert!(
+                route_forwarded_mouse_button(
+                    &mut route,
+                    ElementState::Pressed,
+                    input::MouseProtocolButton::Left,
+                    hit,
+                    modes,
+                    modifiers,
+                    PressedCellTarget::Ours,
+                )
+                .is_none(),
+                "a press on a mark this window painted writes nothing to the child, \
+                 on the alternate screen as on the primary one"
+            );
+            assert!(
+                route.is_none(),
+                "and leaves the route for `begin_local_selection` to claim"
+            );
+            assert!(
+                route_forwarded_mouse_button(
+                    &mut route,
+                    ElementState::Released,
+                    input::MouseProtocolButton::Left,
+                    hit,
+                    modes,
+                    modifiers,
+                    PressedCellTarget::Ours,
+                )
+                .is_none(),
+                "and the release of that pair finds no forward latched to answer"
+            );
+        }
+    }
+
+    /// The other half of the repeal, and the half that keeps it narrow: an
+    /// *ordinary* cell on the alternate screen is still the program's whole
+    /// mouse. vim, yazi and lazygit lose nothing but the cells this window has
+    /// drawn a promise on.
+    #[test]
+    fn a_tracked_press_on_a_plain_cell_is_still_the_programs_on_the_alternate_screen() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+        session
+            .feed(b"\x1b[?1049h\x1b[?1003h\x1b[?1006h")
+            .unwrap();
+        let modes = session.terminal_modes();
+        assert!(modes.alternate_screen);
         let mut route = None;
-        assert!(
+        assert_eq!(
             route_forwarded_mouse_button(
                 &mut route,
                 ElementState::Pressed,
@@ -68689,12 +68761,67 @@ mod tests {
                 bt_render::GridHit { row: 1, column: 2 },
                 modes,
                 ModifiersState::empty(),
-                PressedCellTarget::Ours,
-            )
-            .is_some(),
-            "vim and yazi keep the whole mouse whatever a scan thinks it sees"
+                PressedCellTarget::Ordinary,
+            ),
+            Some(b"\x1b[<0;3;2M".to_vec())
         );
         assert!(matches!(route, Some(MouseRoute::Forward(_))));
+    }
+
+    /// PIN — **an OSC 8 link printed on the alternate screen really is found
+    /// there**, which is the fact that repealed gate ③ and the fact the route
+    /// test above can only assume.
+    ///
+    /// Driven from bytes through a real session rather than from a hand-made
+    /// `PressedCellTarget`, because the claim being pinned is about detection,
+    /// not about an enum: `Runtime::pressed_cell_target` answers `Ours` for
+    /// exactly what `ViewportFrame::hyperlink_at` finds here (plus the verified
+    /// image list, which needs a decode worker and so cannot be reached from a
+    /// unit test). If a future slice stopped scanning the alternate screen this
+    /// goes red *here*, at the premise, instead of leaving the ruling above
+    /// standing on nothing.
+    #[test]
+    fn an_osc_8_link_on_the_alternate_screen_is_found_and_keeps_its_press() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(24).unwrap(), NonZeroU32::new(3).unwrap());
+        // Claude Code's own shape: alternate screen, the four tracking modes it
+        // turns on, and a link printed into it.
+        session
+            .feed(b"\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h")
+            .unwrap();
+        session
+            .feed(b"\x1b]8;;file:///D:/Developer/BetterTerminal/test.md\x1b\\test.md\x1b]8;;\x1b\\")
+            .unwrap();
+        let modes = session.terminal_modes();
+        assert!(modes.alternate_screen);
+        assert_ne!(modes.mouse_tracking, MouseTracking::Off);
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let hit = bt_render::GridHit { row: 0, column: 3 };
+        let link = frame
+            .hyperlink_at(hit.row, hit.column)
+            .expect("the alternate screen is scanned, so the label is a link there");
+        assert_eq!(link.uri, "file:///D:/Developer/BetterTerminal/test.md");
+
+        // Same reading `pressed_cell_target` makes of that cell, and the press
+        // that follows from it.
+        let target = PressedCellTarget::Ours;
+        let mut route = None;
+        assert!(
+            route_forwarded_mouse_button(
+                &mut route,
+                ElementState::Pressed,
+                input::MouseProtocolButton::Left,
+                hit,
+                modes,
+                ModifiersState::empty(),
+                target,
+            )
+            .is_none(),
+            "the press stays here, so `begin_local_selection` gets to arm the link"
+        );
+        assert!(route.is_none());
     }
 
     #[test]
@@ -68723,29 +68850,35 @@ mod tests {
         }
     }
 
+    /// Gate ② of §7.1.5f, on both screens since 2026-08-20 — the repeal took the
+    /// screen out of the rule, so the *button* is now the only thing still
+    /// narrowing it and it is asked on the alternate screen too.
     #[test]
-    fn only_a_left_press_can_be_taken_from_a_tracking_program() {
-        let mut session =
-            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
-        session.feed(b"\x1b[?1003h\x1b[?1006h").unwrap();
-        for button in [
-            input::MouseProtocolButton::Right,
-            input::MouseProtocolButton::Middle,
-        ] {
-            let mut route = None;
-            assert!(
-                route_forwarded_mouse_button(
-                    &mut route,
-                    ElementState::Pressed,
-                    button,
-                    bt_render::GridHit { row: 1, column: 2 },
-                    session.terminal_modes(),
-                    ModifiersState::empty(),
-                    PressedCellTarget::Ours,
-                )
-                .is_some(),
-                "there is no local verb on the other two buttons to trade the hole for"
-            );
+    fn only_a_left_press_can_be_taken_from_a_tracking_program_on_either_screen() {
+        for enter_alt in [b"".as_slice(), b"\x1b[?1049h"] {
+            let mut session =
+                DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+            session.feed(enter_alt).unwrap();
+            session.feed(b"\x1b[?1003h\x1b[?1006h").unwrap();
+            for button in [
+                input::MouseProtocolButton::Right,
+                input::MouseProtocolButton::Middle,
+            ] {
+                let mut route = None;
+                assert!(
+                    route_forwarded_mouse_button(
+                        &mut route,
+                        ElementState::Pressed,
+                        button,
+                        bt_render::GridHit { row: 1, column: 2 },
+                        session.terminal_modes(),
+                        ModifiersState::empty(),
+                        PressedCellTarget::Ours,
+                    )
+                    .is_some(),
+                    "there is no local verb on the other two buttons to trade the hole for"
+                );
+            }
         }
     }
 
