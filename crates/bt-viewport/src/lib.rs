@@ -5551,7 +5551,7 @@ mod tests {
             SourceGeneration(1),
             GridGeneration(1),
         );
-        projection.set_printed_path_links(verified(&["D:\\src\\a.md"]));
+        projection.set_printed_path_links(&verified(&["D:\\src\\a.md"]));
         let frame = projection
             .continuous_frame(
                 &document,

@@ -1922,7 +1922,8 @@ impl DualPlaneSession {
             self.reference_directory().map(Path::to_path_buf),
             self.path_verdicts
                 .iter()
-                .filter_map(|(path, exists)| exists.then(|| path.clone()))
+                .filter(|(_, exists)| **exists)
+                .map(|(path, _)| path.clone())
                 .collect(),
         );
     }
