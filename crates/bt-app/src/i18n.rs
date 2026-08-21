@@ -1342,6 +1342,39 @@ pub enum Text {
     /// the sequence), and **nothing arrives while you are looking at the pane** —
     /// which is the answer to "will this interrupt me while I work".
     DescNotifications,
+
+    // ── the PowerShell integration notice (§7.1.6j, ruled 2026-08-21) ──────
+    //
+    // One contiguous block at the end, per this table's standing rule. **Four
+    // entries and not five**: the strip's second state offers `Restart shell…`,
+    // and that verb already has a string — the pane menu's
+    // [`Self::TermMenuShellAgain`] — which both surfaces spend on the same
+    // function. A second spelling of one verb is two places to translate and one
+    // of them eventually different.
+    /// The sentence a PowerShell pane wears when its `$PROFILE` does not
+    /// dot-source the script: what is missing, and what this terminal uses it
+    /// for. `$PROFILE`, `Folio` and `folio.ps1` are names and stay in Latin in
+    /// both columns.
+    PowerShellNoticeBody,
+    /// The verb that writes the line. It names the file it writes into, because
+    /// the one thing a reader must know before pressing it is *which* file
+    /// changes.
+    PowerShellNoticeAdd,
+    /// The verb that answers the question for good. Not "never" and not "no
+    /// thanks": it says what pressing it stops, which is the asking.
+    PowerShellNoticeNever,
+    /// What the strip says after the write. **Two facts and no thanks**: the
+    /// line is in the file, and the shell already running was started before it
+    /// and cannot see it.
+    PowerShellNoticeAdded,
+
+    // ── its settings row (Terminal page) ───────────────────────────────────
+    /// `Terminal ▸ Offer PowerShell integration` — the row that turns the offer
+    /// back on after `Don't show again`.
+    RowPowerShellOffer,
+    /// Its sentence. Says the two things the row's four words cannot: which
+    /// panes are ever asked, and that the asking is all this does.
+    DescPowerShellOffer,
 }
 
 impl Text {
@@ -2405,6 +2438,36 @@ impl Text {
                 "Programs that ask can put a message on the desktop. Nothing arrives while the pane is on screen in a focused window",
                 "程序主动要求时,可以在桌面上放一条消息。窗格正在这扇窗里显示、而这扇窗又是聚焦的,就什么都不弹",
             ),
+            // ── the PowerShell integration notice ──────────────────────────
+            // Two sentences and no third: what is missing, and what it is used
+            // for. Not why it is opt-in, not what the reader is being asked to
+            // trust us with — the strip has two verbs and they say the rest.
+            Self::PowerShellNoticeBody => pick(
+                lang,
+                "PowerShell integration is not installed. Folio uses it for command marks and status.",
+                "PowerShell 整合未安装。Folio 用它来标记命令与显示状态。",
+            ),
+            Self::PowerShellNoticeAdd => pick(lang, "Add to $PROFILE", "加进 $PROFILE"),
+            Self::PowerShellNoticeNever => pick(lang, "Don't show again", "不再提示"),
+            // "Takes effect in a new shell" and not "restart to apply": the
+            // second is an instruction, and there is a verb beside this sentence
+            // that carries out the instruction. This states when the line starts
+            // working, which is also true of the shell the reader opens tomorrow.
+            Self::PowerShellNoticeAdded => pick(
+                lang,
+                "Added to $PROFILE. Takes effect in a new shell.",
+                "已加进 $PROFILE。新开的 shell 生效。",
+            ),
+            Self::RowPowerShellOffer => pick(
+                lang,
+                "Offer PowerShell integration",
+                "提示安装 PowerShell 整合",
+            ),
+            Self::DescPowerShellOffer => pick(
+                lang,
+                "A PowerShell pane whose $PROFILE does not load folio.ps1 shows one line offering to add it. Off stops the offer; a $PROFILE that already loads it is never asked about",
+                "PowerShell 窗格的 $PROFILE 没有加载 folio.ps1 时,在那个窗格里显示一行,提供加入的动作。关闭后不再提示;已经加载的 $PROFILE 本来就不会被问",
+            ),
         }
     }
 
@@ -2420,7 +2483,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 418] = [
+    pub const ALL: [Self; 424] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -2839,6 +2902,12 @@ impl Text {
         Self::DescMinimumContrast,
         Self::RowNotifications,
         Self::DescNotifications,
+        Self::PowerShellNoticeBody,
+        Self::PowerShellNoticeAdd,
+        Self::PowerShellNoticeNever,
+        Self::PowerShellNoticeAdded,
+        Self::RowPowerShellOffer,
+        Self::DescPowerShellOffer,
     ];
 
     /// The entries whose two columns are allowed to be the same string.

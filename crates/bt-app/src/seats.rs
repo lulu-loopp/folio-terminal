@@ -258,6 +258,24 @@ pub struct Seats {
     /// How many times a leaf has been added, removed, moved or replaced — see
     /// [`Seats::structure_revision`].
     structure_revision: u64,
+    /// **Which seats wear a notice strip this frame** (§7.1.6j) — the seats
+    /// [`pane_body_viewport`] takes a bar's height from.
+    ///
+    /// **A projection and not a second source of truth.** What decides whether a
+    /// pane owes a notice is a fact about the *shell* — which PowerShell it is,
+    /// what its `$PROFILE` says, whether it has spoken, whether markers have
+    /// arrived — and those live on the leaf, where they travel with the process
+    /// through a tear-out. This set is that answer, recomputed from the leaves
+    /// by `Runtime::settle_pane_notices` and written here for one reason: the
+    /// pane's body is the one rectangle allowed to derive terminal rows, forty-
+    /// odd callers ask for it, and the only two arguments every one of them
+    /// already holds are this tree and a seat. A parameter would have to be
+    /// threaded through free functions that have no session in scope at all.
+    ///
+    /// It is beside [`Self::focus`] rather than in the layout crate for the same
+    /// reason `focus` is: it is bt-app's answer about bt-app's panes, and L1
+    /// keeps the *tree* ignorant of what runs inside a seat, not this struct.
+    notices: std::collections::BTreeSet<SeatId>,
 }
 
 impl Seats {
@@ -312,6 +330,10 @@ impl Seats {
                 // from, so it starts where a caller that has never animated
                 // anything also starts. See [`Self::structure_revision`].
                 structure_revision: 0,
+                // Recomputed from the leaves before the first frame this tree is
+                // laid out for; a tree that has just been stood up has no leaf
+                // that has spoken yet.
+                notices: std::collections::BTreeSet::new(),
             },
             id,
         )
@@ -522,6 +544,31 @@ impl Seats {
     #[must_use]
     pub fn seat_wears_ghost(&self, kind: SeatKind, seat: SeatId, capsule: Option<SeatId>) -> bool {
         kind == SeatKind::Terminal && !self.seat_wears_head(kind) && capsule != Some(seat)
+    }
+
+    /// Whether this seat wears the notice strip (§7.1.6j).
+    ///
+    /// One predicate for the painter, the hit test and the body's own height —
+    /// the rule [`Self::seat_wears_ghost`] is written under, and here it has a
+    /// third reader that makes it load-bearing rather than tidy: a pane whose
+    /// body was measured a bar short while nothing was drawn in the bar would be
+    /// a pane with a stripe of window in it.
+    #[must_use]
+    pub fn seat_wears_notice(&self, seat: SeatId) -> bool {
+        self.notices.contains(&seat)
+    }
+
+    /// Record which seats wear one, and answer whether that changed.
+    ///
+    /// The whole set at once rather than one seat at a time, because the caller
+    /// recomputes the whole answer from the leaves and a set built by
+    /// insert/remove is a set that keeps a seat whose pane has gone. The
+    /// `bool` is the caller's gate on a re-solve: the strip changes what a
+    /// terminal's rows are, so a change here is a layout change.
+    pub fn set_notices(&mut self, notices: std::collections::BTreeSet<SeatId>) -> bool {
+        let changed = self.notices != notices;
+        self.notices = notices;
+        changed
     }
 
     /// How many panes this tab holds — `paneCount = leavesOf(w.tree).length`
@@ -1942,7 +1989,33 @@ pub fn seat_viewport(layout: &SeatLayout, seat: SeatId) -> Option<SeatViewport> 
 /// A pane's content rectangle. A multi-pane tree excludes the common 30px pane
 /// head; a lone terminal leaf consumes its whole seat. This is the only
 /// rectangle allowed to derive terminal rows.
+///
+/// **Less its notice strip, since §7.1.6j**, and that second subtraction is made
+/// here for the reason [`preview_body_viewport`]'s note gives about the foot:
+/// the day a band appears, every reader of "the seat less its head" is wrong by
+/// thirty pixels at once — the shell would be told it has a row it cannot draw
+/// into, a click at the top would land one row off, and the strip would be
+/// painted over the text it displaced. The fact is asked of `seats` rather than
+/// passed in so that the forty-odd callers of this function — several of them
+/// free functions with no session in scope — are unchanged; see
+/// [`Seats::set_notices`].
 pub fn pane_body_viewport(
+    seats: &Seats,
+    layout: &SeatLayout,
+    seat: SeatId,
+    scale: f32,
+) -> Option<SeatViewport> {
+    let mut viewport = pane_body_below_head(seats, layout, seat, scale)?;
+    if seats.seat_wears_notice(seat) {
+        let consumed = notice_consumed(viewport.height, scale);
+        viewport.y = viewport.y.saturating_add(consumed);
+        viewport.height = viewport.height.saturating_sub(consumed).max(1);
+    }
+    Some(viewport)
+}
+
+/// The seat, less its head and nothing else.
+fn pane_body_below_head(
     seats: &Seats,
     layout: &SeatLayout,
     seat: SeatId,
@@ -1958,6 +2031,46 @@ pub fn pane_body_viewport(
     viewport.y = viewport.y.saturating_add(consumed);
     viewport.height = viewport.height.saturating_sub(consumed).max(1);
     Some(viewport)
+}
+
+/// How much of `height` the strip takes.
+///
+/// The bar keeps its whole height and the body is what gives way, down to a
+/// single row — the rule a files column's foot already follows, and for its
+/// reason: a pane squeezed to a sliver is more use with the sentence in it than
+/// with one line of a shell and no way to answer the question.
+fn notice_consumed(height: u32, scale: f32) -> u32 {
+    let bar = (crate::notice::BAR_HEIGHT_LOGICAL_PX * scale)
+        .round()
+        .max(1.0) as u32;
+    bar.min(height.saturating_sub(1))
+}
+
+/// The row the notice strip is drawn in, in physical pixels, or `None` when this
+/// seat wears none.
+///
+/// **The exact complement of the subtraction above**, computed from the same two
+/// steps rather than from the answer: a strip derived by adding a bar back onto
+/// the body would disagree with the body by a pixel wherever the clamp bit, and
+/// the disagreement would show as a seam.
+#[must_use]
+pub fn pane_notice_strip(
+    seats: &Seats,
+    layout: &SeatLayout,
+    seat: SeatId,
+    scale: f32,
+) -> Option<[f32; 4]> {
+    if !seats.seat_wears_notice(seat) {
+        return None;
+    }
+    let viewport = pane_body_below_head(seats, layout, seat, scale)?;
+    let consumed = notice_consumed(viewport.height, scale);
+    Some([
+        viewport.x as f32,
+        viewport.y as f32,
+        (viewport.x + viewport.width) as f32,
+        (viewport.y + consumed) as f32,
+    ])
 }
 
 /// The drawable body of a preview seat: its rectangle, less its head **and less
@@ -14485,6 +14598,7 @@ impl Seats {
             next_seat,
             next_split,
             structure_revision: 0,
+            notices: std::collections::BTreeSet::new(),
         }
     }
 }
@@ -24899,6 +25013,7 @@ mod tests {",
             next_seat: count + 1,
             next_split: count,
             structure_revision: 0,
+            notices: std::collections::BTreeSet::new(),
         }
     }
 
@@ -25605,6 +25720,7 @@ mod tests {",
             next_seat: 2,
             next_split: 1,
             structure_revision: 0,
+            notices: std::collections::BTreeSet::new(),
         };
         let lone_layout = solved(&lone, viewport_of(1600, 900, 1_000), &metrics);
         let lone_parts = chrome_of(&lone, &lone_layout, None);
@@ -31677,6 +31793,7 @@ mod drop_plan_tests {
         let next_split = tree.ratios().iter().map(|(id, _)| id.0).max().unwrap_or(0) + 1;
         Seats {
             structure_revision: 0,
+            notices: std::collections::BTreeSet::new(),
             identity: SeatId(1),
             focus: SeatId(1),
             tree,

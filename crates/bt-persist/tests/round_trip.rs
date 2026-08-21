@@ -841,7 +841,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 17,
+        SETTINGS_SCHEMA_VERSION, 18,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -860,7 +860,9 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          blocks page's own Maximum height the v12-to-v13, and the Terminal page's \
          own Scrollback the v13-to-v14, and the Appearance page's own Focus mode \
          the v14-to-v15, and the Appearance page's own Minimum contrast the \
-         v15-to-v16, and the Terminal page's own Notifications the v16-to-v17 —          one key on one day, seven times running"
+         v15-to-v16, and the Terminal page's own Notifications the v16-to-v17, \
+         and the Terminal page's own Offer PowerShell integration the v17-to-v18 — \
+         one key on one day, eight times running"
     );
     assert_eq!(
         defaults.minimum_contrast,
@@ -883,6 +885,13 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          because it changes nothing anybody can see until a program asks for it, \
          and a switch that has to be found before it works once is a feature most \
          of its users never learn they have"
+    );
+    assert!(
+        defaults.powershell_integration_offer,
+        "the offer is the only way the fact reaches anybody: a PowerShell whose \
+         $PROFILE does not load the script emits no markers and says nothing \
+         about it, so a default of `false` would be this product keeping the one \
+         thing it knows and the reader does not"
     );
     assert_eq!(
         defaults.scrollback_lines, 100_000,
@@ -1650,6 +1659,61 @@ fn settings_v16_migrates_with_notifications_on_and_v17_keeps_the_silence_it_was_
     let (round_tripped, report) = read_settings(&path);
     assert_eq!(report, ReadReport::Loaded);
     assert_eq!(round_tripped, silent);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// PIN (§7.1.6j, 2026-08-21) — a v17 settings file migrates to v18 with the offer **on**, and a
+/// v18 file that has said `Don't show again` keeps that answer through a write and a read.
+///
+/// The first half is the eighth one-key step landing where the seventh landed and not where the
+/// fifth did: no v17 build offered anything, so `false` freezes an absence rather than preserving
+/// a choice.
+///
+/// The second half is the one that would bite. `Don't show again` is a press somebody makes to
+/// end a conversation, and a `false` that did not survive the file would restart that
+/// conversation at the next launch, in a pane, about a thing they have already said they do not
+/// want to hear about. That is the failure mode a per-pane dismissal would have had anyway, which
+/// is why this is a setting and not a per-pane record — and the setting is only worth being one
+/// if it is on disk.
+#[test]
+fn settings_v17_migrates_with_the_offer_on_and_v18_keeps_the_silence_it_was_asked_for() {
+    let (migrated, report) = read_settings(&fixture_path("settings_v17_notifications_off.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(migrated.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(
+        migrated.powershell_integration_offer,
+        "no build that could write a v17 file offered anything, so `false` would freeze an \
+         absence rather than preserve a choice"
+    );
+    assert!(
+        !migrated.terminal_notifications,
+        "one key crosses; every sibling crosses untouched"
+    );
+
+    let (quiet, report) = read_settings(&fixture_path("settings_v18_powershell_offer_off.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(quiet.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(
+        !quiet.powershell_integration_offer,
+        "a reader who ended the conversation is not asked again"
+    );
+    assert_eq!(quiet.minimum_contrast, MinimumContrastV1::Ratio3);
+
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-settings-v18-powershell-offer-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    write_settings_atomic(&path, &quiet).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains(r#""powershell_integration_offer": false"#),
+        "the answer is written as its own key: {on_disk}"
+    );
+    let (round_tripped, report) = read_settings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, quiet);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

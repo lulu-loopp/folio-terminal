@@ -3057,6 +3057,26 @@ impl DualPlaneSession {
         self.shell_phases.contains_key(&screen)
     }
 
+    /// Has this session ever reported an OSC 133 marker on its **primary**
+    /// screen?
+    ///
+    /// The public reading of the private predicate above, and the honest answer
+    /// to "is the shell integration installed in this pane" — the only answer
+    /// there is, because nothing else about a running shell says so. The app
+    /// asks it for one thing: an offer to install the integration retracts
+    /// itself the moment the integration speaks, whoever installed it and
+    /// however (`bt_app::shell_integration::Offer::showing`).
+    ///
+    /// **Primary and not the live screen**, which is `retire_program_input_modes`'
+    /// own argument two hundred lines down said about a different consequence of
+    /// the same marker: a `133` on the alternate screen is a full-screen program
+    /// writing it, and it is evidence about that program rather than about the
+    /// shell underneath.
+    #[must_use]
+    pub fn shell_integration_seen(&self) -> bool {
+        self.shell_integration_is_authoritative(ScreenId::Primary)
+    }
+
     /// Is the live screen sitting inside the open OSC 133 input region begun by `B`?
     ///
     /// Unlike `typed_shell_input_live`, this deliberately includes an empty prompt. The app uses

@@ -2210,6 +2210,22 @@ pub enum SettingsRow {
     /// what one shell is patched with, and this is the only row here whose
     /// answer is visible **outside this window**.
     Notifications,
+    /// **Whether a PowerShell pane with no integration is offered one** — the
+    /// notice strip's `Don't show again`, said as a row (§7.1.6j, ruled
+    /// 2026-08-21).
+    ///
+    /// **Directly under [`Self::PsReadLine`]**, because the two are the same
+    /// page's two PowerShell rows and they answer the same reader's two
+    /// questions in the order they arrive: what is wrong with the module this
+    /// shell already loads, and what this shell is not loading at all. Filing
+    /// this one below `Scrollback` would put a row about capacity between two
+    /// rows about one shell.
+    ///
+    /// **Not an Advanced row**, and the test is `Explorer context menu`'s: this
+    /// is where a reader who dismissed the strip comes to undo that, and a
+    /// switch that can only be found behind a disclosure is a switch that
+    /// dismissing was permanent for.
+    PowerShellOffer,
 
     // ── the profile editor's own rows (§7.1.6c-6b) ─────────────────────────
     //
@@ -2303,9 +2319,10 @@ impl SettingsRow {
             // about the machine: what a terminal keeps of what it has already
             // shown is the plainest reading of "how ONE pane behaves once
             // something is running" this dialog has.
-            Self::PsReadLine | Self::Scrollback | Self::Notifications => {
-                SettingsCategory::Terminal
-            }
+            Self::PsReadLine
+            | Self::PowerShellOffer
+            | Self::Scrollback
+            | Self::Notifications => SettingsCategory::Terminal,
             // The mock-up files what typesetting does to a block under "Rendered
             // blocks" (2570), beside that page's own Maximum height row.
             Self::Formulas | Self::InlineFormulas | Self::Tables | Self::BlockMaxHeight => {
@@ -2368,6 +2385,7 @@ impl SettingsRow {
             Self::BlockMaxHeight => Text::RowBlockMaxHeight.text(),
             Self::Scrollback => Text::RowScrollback.text(),
             Self::Notifications => Text::RowNotifications.text(),
+            Self::PowerShellOffer => Text::RowPowerShellOffer.text(),
             Self::GitPanel => Text::RowGitPanel.text(),
             Self::ContextMenu => Text::RowContextMenu.text(),
             // Mock-up 2360.
@@ -2462,6 +2480,7 @@ impl SettingsRow {
             // and that a smaller one is paid for out of the oldest lines.
             Self::Scrollback => Text::DescScrollback.text(),
             Self::Notifications => Text::DescNotifications.text(),
+            Self::PowerShellOffer => Text::DescPowerShellOffer.text(),
             // Says what Off *does* rather than what it hides, because what it
             // does is the reason to reach for it: no page, no chord, and no `git`
             // process started on your behalf.
@@ -2660,6 +2679,7 @@ impl SettingsRow {
             // guess that the answer is behind a disclosure.
             | Self::ContextMenu
             | Self::PsReadLine
+            | Self::PowerShellOffer
             | Self::Scrollback
             | Self::Notifications
             // The everyday half of the editor, in the order somebody decides a
@@ -2753,7 +2773,8 @@ impl SettingsRow {
             | Self::GitPanel
             | Self::ContextMenu
             | Self::PsReadLine
-            | Self::Notifications => FORMULA_OPTIONS.len(),
+            | Self::Notifications
+            | Self::PowerShellOffer => FORMULA_OPTIONS.len(),
             Self::BlockMaxHeight => BLOCK_MAX_HEIGHT_OPTIONS.len(),
             Self::Scrollback => SCROLLBACK_OPTIONS.len(),
             Self::TerminalFont => monospace_families().len(),
@@ -2813,7 +2834,8 @@ impl SettingsRow {
             | Self::GitPanel
             | Self::ContextMenu
             | Self::PsReadLine
-            | Self::Notifications => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
+            | Self::Notifications
+            | Self::PowerShellOffer => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
             // The one item that is a word goes through the i18n table and the
             // three that are quantities do not — the table's own header lists
             // quantities among the things that stay put in both languages. The
@@ -3107,6 +3129,9 @@ impl SettingsRow {
             Self::Notifications => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.terminal_notifications),
+            Self::PowerShellOffer => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.powershell_integration_offer),
             // The *state of the machine*, like `PsReadLine` below and for the
             // same reason: what is ticked is whether Explorer's menu carries the
             // verb, which is a question only the registry can answer.
@@ -3276,6 +3301,11 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // this one says what another program's menu contains.
     rows.push(SettingsRow::ContextMenu);
     rows.push(SettingsRow::PsReadLine);
+    // **Beside it**, because the two are this page's two PowerShell rows and
+    // they answer one reader's two questions in the order they arrive: what is
+    // wrong with the module this shell already loads, and what this shell is not
+    // loading at all (§7.1.6j).
+    rows.push(SettingsRow::PowerShellOffer);
     // **Under the PSReadLine row**, which is the mock-up's own order for this page
     // (4838, then 4862): the row that reports a fact about the machine stands
     // first and the row that changes what a pane does stands under it. The
@@ -3530,6 +3560,9 @@ pub struct SettingsValues {
     pub scrollback_lines: u32,
     /// Whether a program may put a message on the desktop (§7.6).
     pub terminal_notifications: bool,
+    /// Whether a PowerShell pane with no integration is offered one — the row
+    /// the notice strip's `Don't show again` writes (§7.1.6j).
+    pub powershell_integration_offer: bool,
     /// Whether the Files column offers its Git page at all.
     pub git_panel: bool,
     /// Whether Explorer's right-click menu carries Folio's verb — **read off the
@@ -3674,6 +3707,7 @@ impl SettingsValues {
             block_max_height: bt_persist::DEFAULT_BLOCK_MAX_HEIGHT,
             scrollback_lines: bt_persist::DEFAULT_SCROLLBACK_LINES,
             terminal_notifications: true,
+            powershell_integration_offer: true,
             git_panel: true,
             // A machine that never installed the verb, which is what a fresh
             // one is.
@@ -6355,6 +6389,18 @@ pub fn always_on_top_requested(target: SettingsTarget) -> Option<bool> {
 pub fn terminal_notifications_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::Notifications, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// Whether a PowerShell pane with no integration is offered one, as a press on
+/// its picker (§7.1.6j).
+#[must_use]
+pub fn powershell_integration_offer_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::PowerShellOffer, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
@@ -15845,10 +15891,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 SettingsRow::PsReadLine,
+                SettingsRow::PowerShellOffer,
                 SettingsRow::Scrollback,
                 SettingsRow::Notifications
             ],
-            "the mock-up's order for this page: the row that reports a fact about              the machine first, the row that changes what a pane does under it, and              last the only row on this page whose answer shows up outside this              window"
+            "the mock-up's order for this page, with the two PowerShell rows \n             together at the top: the row that reports a fact about the machine, \n             the row that offers what this one is missing, then the row that \n             changes what a pane keeps, and last the only row on this page whose \n             answer shows up outside this window"
         );
     }
 
@@ -16752,6 +16799,7 @@ mod tests {
                 SettingsRow::DefaultProfile,
                 SettingsRow::ContextMenu,
                 SettingsRow::PsReadLine,
+                SettingsRow::PowerShellOffer,
                 SettingsRow::Scrollback,
                 SettingsRow::Notifications
             ]
@@ -16785,6 +16833,7 @@ mod tests {
                 SettingsRow::DefaultProfile,
                 SettingsRow::ContextMenu,
                 SettingsRow::PsReadLine,
+                SettingsRow::PowerShellOffer,
                 SettingsRow::Scrollback,
                 SettingsRow::Notifications
             ],

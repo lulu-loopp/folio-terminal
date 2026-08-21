@@ -1,0 +1,31 @@
+{
+  "theme_mode": "Light",
+  "display_formulas": true,
+  "inline_formulas": false,
+  "default_profile": "winps",
+  "git_panel": true,
+  "split_direction": "Down",
+  "language": "Chinese",
+  "terminal_font_family": "Cascadia Mono",
+  "terminal_font_size": 13,
+  "psreadline_invite": "Dismissed",
+  "light_scheme": "Solarized Light",
+  "dark_scheme": "Nord",
+  "background_image": "",
+  "background_fit": "Tile",
+  "background_image_opacity": 90,
+  "background_opacity": 70,
+  "acrylic": false,
+  "always_on_top": true,
+  "schema_version": 18,
+  "tables": true,
+  "advanced_open": [
+    "terminal"
+  ],
+  "block_max_height": 240,
+  "scrollback_lines": 200000,
+  "focus_mode": false,
+  "minimum_contrast": "Ratio3",
+  "terminal_notifications": true,
+  "powershell_integration_offer": false
+}

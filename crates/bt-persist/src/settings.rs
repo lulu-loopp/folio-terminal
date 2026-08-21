@@ -93,7 +93,16 @@ use serde::{Deserialize, Serialize};
 /// no build before this one could raise a desktop notification, so there is no behaviour to carry
 /// forward and `false` would freeze an absence rather than preserve a status quo. That is
 /// `migrate_settings_v2_to_v3`'s distinction, drawn a second time.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 17;
+///
+/// **v18 carries `powershell_integration_offer`**, the Terminal page's `Offer PowerShell
+/// integration` row and the switch the notice strip's `Don't show again` writes (DESIGN
+/// §7.1.6j). One key, its own day, an eighth time. The migration writes `true` for
+/// `migrate_settings_v16_to_v17`'s reason and not `migrate_settings_v14_to_v15`'s: no build that
+/// could write a v17 file ever offered anything, so there is no answer to carry forward and
+/// `false` would freeze an absence. What is being defaulted on here is an *offer* and not a
+/// change — a pane that already loads the script is never asked, and a reader who is asked has
+/// one press that ends the asking for good.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 18;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -211,10 +220,10 @@ pub const DEFAULT_BLOCK_MAX_HEIGHT: u32 = 0;
 /// sentence [`DEFAULT_BLOCK_MAX_HEIGHT`] is written under.
 pub const DEFAULT_SCROLLBACK_LINES: u32 = 100_000;
 
-/// `settings.json` v16 — docs/M2-persistence-schema-v1.md §2:
+/// `settings.json` v18 — docs/M2-persistence-schema-v1.md §2:
 /// ```json
 /// {
-///   "schema_version": 16,
+///   "schema_version": 18,
 ///   "theme_mode": "System" | "Light" | "Dark",
 ///   "display_formulas": true | false,
 ///   "inline_formulas": true | false,
@@ -239,7 +248,8 @@ pub const DEFAULT_SCROLLBACK_LINES: u32 = 100_000;
 ///   "scrollback_lines": 25000 | 50000 | 100000 | 200000,
 ///   "focus_mode": true | false,
 ///   "minimum_contrast": "Off" | "Ratio2" | "Ratio3" | "Ratio45",
-///   "terminal_notifications": true | false
+///   "terminal_notifications": true | false,
+///   "powershell_integration_offer": true | false
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -591,6 +601,24 @@ pub struct SettingsV1 {
     /// of its users never learn they have.
     #[serde(default = "default_terminal_notifications")]
     pub terminal_notifications: bool,
+
+    /// **Whether a PowerShell pane with no integration is offered one** — the Terminal page's
+    /// `Offer PowerShell integration` row, and what the notice strip's `Don't show again` writes
+    /// (DESIGN §7.1.6j).
+    ///
+    /// `true` is the default because the offer is the only way the fact reaches anybody. Folio's
+    /// PowerShell integration is opt-in by necessity — `pwsh` has one startup file and no
+    /// argument that would source a second one after it — so a reader whose `$PROFILE` does not
+    /// dot-source `folio.ps1` gets no prompt marks, no exit-code dots and no busy breathing, and
+    /// nothing anywhere says so. The strip is the saying.
+    ///
+    /// Off is silence about the whole subject and nothing else: no pane is changed, no file is
+    /// read, and a `$PROFILE` that already loads the script was never going to be asked about
+    /// anyway. It is a switch on the asking, which is why it is one boolean and not a per-pane
+    /// record — a reader who says "stop asking" has answered for every PowerShell they will ever
+    /// open, and a table of dismissed panes would ask again tomorrow from a new one.
+    #[serde(default = "default_powershell_integration_offer")]
+    pub powershell_integration_offer: bool,
 }
 
 /// `serde`'s door for a v14 key that is missing from a file this build is reading.
@@ -609,6 +637,15 @@ fn default_scrollback_lines() -> u32 {
 /// the key would otherwise come back silent, which is the one answer its owner cannot be assumed
 /// to have given.
 fn default_terminal_notifications() -> bool {
+    true
+}
+
+/// `serde`'s door for a v18 key missing from a file this build is reading.
+///
+/// [`default_terminal_notifications`]'s twin and for its reason: the default is `true` and a
+/// `bool`'s own default is `false`, so a file that lost the key would come back as a reader who
+/// had pressed `Don't show again` — the one answer this product must not put in somebody's mouth.
+fn default_powershell_integration_offer() -> bool {
     true
 }
 
@@ -647,6 +684,8 @@ impl Default for SettingsV1 {
             minimum_contrast: MinimumContrastV1::Off,
 
             terminal_notifications: true,
+            // A PowerShell with no integration is told so, once, in its own pane.
+            powershell_integration_offer: true,
         }
     }
 }

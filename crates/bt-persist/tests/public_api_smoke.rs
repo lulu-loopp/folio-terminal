@@ -57,6 +57,7 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         scrollback_lines: 50_000,
         focus_mode: true,
         terminal_notifications: false,
+        powershell_integration_offer: false,
     };
     write_settings_atomic(&path, &settings).unwrap();
 
