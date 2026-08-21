@@ -2343,6 +2343,60 @@
   .sb-nav svg, .sb-x svg { width: 10px; height: 10px; }
   .sb-nav[data-d="-1"] svg { transform: rotate(180deg); }
   .sb-sep { width: 1px; height: 16px; background: var(--border); margin: 0 3px; }
+  /* ── the PowerShell integration notice (user ruling 2026-08-21) ──
+     A PowerShell pane whose $PROFILE does not dot-source folio.ps1 gets one
+     sentence and two words, once, at the top of its own body.
+
+     IT TAKES A ROW AND THE BODY YIELDS, which is the one thing that separates
+     it from the search capsule two rules up. The capsule OVERLAYS the corner
+     because search is a state you entered on purpose and left in seconds; this
+     is a notice nobody asked for that stays until it is answered, and a strip
+     parked on top of the terminal's first line would hide output for as long
+     as it is up. So it sits in the pane's flex column between the head (when
+     there is one) and `.term`, exactly where a second head would go, and the
+     terminal is that many pixels shorter while it is there.
+
+     IT IS NOT A DIALOG AND IT DOES NOT DIM. The pane behind it is a working
+     shell — the shell it is about — and this product's restore prompt already
+     settled that a question over a working app is not a gate in front of one.
+
+     THE VERBS ARE WORDS. `.toast-act`'s register: no border, no fill at rest,
+     the surface's own ink against the sentence's muted one, `--hover`'s pill
+     under the pointer. A filled button here would make the strip a dialog that
+     forgot to say so — the card's own argument at 2234, unchanged.
+
+     ITS GROUND IS `--panel` AND NOT `--menu`. It is a bar in the pane's column,
+     not a thing floating over the text, so it takes the surface the pane head
+     takes and closes with the same hairline. A `--menu` face with a shadow
+     would be the capsule wearing a bar's shape. */
+  .pnotice {
+    flex: none; display: flex; align-items: center; gap: 8px;
+    padding: 0 8px 0 11px; height: 30px; min-width: 0;
+    background: var(--panel); border-bottom: 1px solid var(--border-soft);
+    font-size: 12px; color: var(--ink2); white-space: nowrap;
+  }
+  .pnotice .pn-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  /* The verbs and the × keep their whole size; the sentence is what gives way
+     in a narrow pane — a strip whose verbs had been squeezed out would be a
+     strip with nothing to press. */
+  .pnotice .pn-act {
+    flex: none; border: none; background: none; cursor: pointer;
+    font-family: inherit; font-size: 12px; font-weight: 500; color: var(--ink);
+    padding: 3px 7px; border-radius: 5px; line-height: 1.4;
+  }
+  .pnotice .pn-act:hover { background: var(--hover); }
+  .pnotice .pn-act:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .pnotice .pn-x {
+    flex: none; margin-left: auto; width: 22px; height: 22px; padding: 0;
+    border: none; background: none; color: var(--ink3); cursor: pointer;
+    border-radius: 6px; display: grid; place-items: center;
+  }
+  .pnotice .pn-x:hover { background: var(--hover); color: var(--ink); }
+  .pnotice .pn-x svg { width: 10px; height: 10px; }
+  /* The × keeps the trailing column to itself, so the last verb and the close
+     can never share a pixel however long the word gets — the card's rule at
+     2250, said in a row instead of a column. */
+  .pnotice .pn-act:last-of-type { margin-right: 2px; }
   /* hits stay readable in place; the CURRENT one is unmistakable. --termbg as
      the current hit's ink works in both themes: dark text on the light-theme
      indigo would fail, white text on the dark-theme periwinkle would fail —
@@ -6049,7 +6103,13 @@
     const s = { uid: uidSeq++, title, icon, cwd: cwd || HOME, prompt: c.prompt,
                 lines: c.lines, input: "", busy: !!busy, unread: false,
                 progress: null, awaiting: false, bell: false, lastExit: "ok", dead: false,
-                name: null, progTitle: progTitle || null, make: make || null };
+                name: null, progTitle: progTitle || null, make: make || null,
+                /* null · "offer" · "added" — the PowerShell integration notice
+                   (user ruling 2026-08-21). Only a PowerShell session whose
+                   $PROFILE does not dot-source folio.ps1 ever holds "offer";
+                   pressing the verb moves it to "added" and pressing either the
+                   × or Esc puts it back to null for this pane alone. */
+                psNotice: null };
     state.sessions.push(s);
     return s;
   }
@@ -6806,6 +6866,13 @@
     mkWs(mkSession("claude", mark("claude"), claude(), true, "C:\\Users\\Weiyi\\Developer\\BetterTerminal", claude, "Adam 公式推导")),
     mkWs(mkSession("wsl", mark("ubuntu"), wsl(), false, "~/src/bt-corpus", wsl)),
   ];
+  /* The first tab is the PowerShell one, and it is the pane the integration
+     notice is drawn on: on a machine whose $PROFILE does not dot-source
+     folio.ps1 that is exactly which pane wears it. `psNoticeOffered` is the
+     setting `Don't show again` writes — on by default, off for good once
+     pressed. */
+  state.psNoticeOffered = true;
+  state.sessions[0].psNotice = "offer";
   /* state-taxonomy demo: the wsl session "downloads" forever (determinate ring
      cycling into a brief indeterminate spin), and the claude session is BLOCKED
      ON YOU (awaiting, not busy) — the two states the user named first */
@@ -8334,6 +8401,79 @@
   function loneVerbHtml(node) {
     return `<span class="pane-ghost" data-ghost-leaf="${node.id}" title="Pane actions"><svg><use href="#i-chev"/></svg></span>`;
   }
+  /* ── the PowerShell integration notice (user ruling 2026-08-21) ──
+     Folio's PowerShell integration is opt-in: there is no argument that would
+     hand `pwsh` a second startup file, so the script is dot-sourced from
+     $PROFILE by the person who owns that file. A pane that started a PowerShell
+     whose $PROFILE does not mention `folio.ps1` therefore emits no OSC 133 at
+     all — no prompt marks, no exit-code dots, no busy breathing — and the
+     terminal is the only party that knows it.
+
+     SO IT SAYS SO, ONCE, IN THAT PANE. Not a dialog at launch (the offer is
+     about one shell, and a window-wide question would be asked in front of the
+     Git Bash pane beside it), not an injection into the command line (that is
+     ruled: the startup line is settled and injecting would change what the
+     reader's own profile means).
+
+     THE SENTENCE STATES THE FACT AND STOPS. What is missing, and what it is
+     for. No first person, no apology, no explanation of why we cannot do it
+     ourselves — the copy ruling of 2026-08-17.
+
+     TWO VERBS AND A ×, WHICH IS THE WHOLE INTERFACE. `Add to $PROFILE` writes
+     one line and keeps a dated copy of the file first; `Don't show again` is a
+     setting, not a per-pane dismissal, and the Terminal page can turn it back
+     on. The × (and Esc) close this one strip and answer nothing — the offer
+     comes back the next time a PowerShell starts, because nothing was decided.
+
+     AFTER THE WRITE the same strip says what happened and offers the one verb
+     that makes it true now. A profile is read at startup, so the line does
+     nothing to the shell that is already running. */
+  const PS_NOTICE_TEXT = "PowerShell integration is not installed. Folio uses it for command marks and status.";
+  const PS_NOTICE_ADDED = "Added to $PROFILE. Takes effect in a new shell.";
+  function psNoticeHtml(s, leafId) {
+    if (!s.psNotice) return "";
+    const added = s.psNotice === "added";
+    const verbs = added
+      ? `<button class="pn-act" data-pn="restart" data-pn-leaf="${leafId}">Restart shell</button>`
+      : `<button class="pn-act" data-pn="add" data-pn-leaf="${leafId}">Add to $PROFILE</button>
+         <button class="pn-act" data-pn="never" data-pn-leaf="${leafId}">Don't show again</button>`;
+    return `<div class="pnotice" data-pn-leaf="${leafId}">
+      <span class="pn-text">${added ? PS_NOTICE_ADDED : PS_NOTICE_TEXT}</span>
+      ${verbs}
+      <button class="pn-x" data-pn="close" data-pn-leaf="${leafId}" title="Close (Esc)"><svg><use href="#i-close"/></svg></button>
+    </div>`;
+  }
+  /* `Don't show again` is a SETTING and not a per-pane dismissal, so it takes
+     down every strip in the window at once and no pane raises another. The ×
+     takes down one strip and decides nothing. */
+  function psNoticePress(verb, leafId) {
+    const w = activeTab();
+    const leaf = w && findLeafIn(w, leafId);
+    const s = leaf && session(leaf.uid);
+    if (!s) return;
+    if (verb === "add") { s.psNotice = "added"; render(); return; }
+    if (verb === "restart") { s.psNotice = null; refreshTerminal(leafId); return; }
+    if (verb === "never") {
+      state.psNoticeOffered = false;
+      state.sessions.forEach(other => { other.psNotice = null; });
+      render();
+      return;
+    }
+    s.psNotice = null;
+    render();
+  }
+  /* Esc takes the strip down, one pane at a time and only in the focused one —
+     the rung sits under the search capsule's, because the capsule is the
+     instrument the reader asked for and this is the one they did not. */
+  function closePsNotice() {
+    const w = activeTab();
+    const leaf = w && focusedLeaf(w);
+    const s = leaf && !isFilesLeaf(leaf) && !isPreviewLeaf(leaf) && session(leaf.uid);
+    if (!s || !s.psNotice) return false;
+    s.psNotice = null;
+    render();
+    return true;
+  }
   function renderNode(node, w) {
     if (node.type === "leaf") {
       const focused = node.id === w.focus;
@@ -8371,6 +8511,7 @@
             <span class="pane-split" data-split-leaf="${node.id}" title="Split pane">${splitSvg}</span>
             <span class="pane-files" data-flyout-leaf="${node.id}" title="Peek files here">${folderSvg}</span>
             <span class="pane-close" title="Close pane">${closeSvg}</span></div>` : loneVerbHtml(node)}
+          ${psNoticeHtml(s, node.id)}
           <div class="term" data-leaf="${node.id}" data-uid="${s.uid}">${termHtml(s, focused)}</div>
           ${cmdRailHtml(s, node.id)}
         </div>
@@ -10177,6 +10318,11 @@
           pinFlyout(findLeafIn(aw, +pf.dataset.flyoutLeaf), aw, rect);   /* click = pinned window */
           return;
         }
+        /* 2026-08-21 — the integration notice's two verbs and its ×. Pressed
+           inside the pane, so this is the pane's own listener; a press on the
+           strip's empty width focuses the pane like any other press on it. */
+        const pn = e.target.closest(".pn-act, .pn-x");
+        if (pn) { e.stopPropagation(); psNoticePress(pn.dataset.pn, +pn.dataset.pnLeaf); return; }
         const id = +el.dataset.leaf;
         if (aw.focus !== id) { aw.focus = id; render(); }
       }));
@@ -10545,6 +10691,12 @@
          (「它是设置里的一个设置,怎么这么容易就退出」), so Esc inside the mode
          means what it means outside it */
       if (srch.leaf != null) { closeSearch(); return; }
+      /* and below the capsule, the integration notice — the capsule is the
+         instrument the reader asked for and this is the one they did not, so
+         the press that means "put this away" reaches the asked-for one first.
+         It closes the strip and answers nothing: the offer comes back the next
+         time a PowerShell starts, because nothing was decided. */
+      if (closePsNotice()) return;
       return;
     }
     /* Nothing is typing into a terminal that is not on screen. Found the moment
