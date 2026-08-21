@@ -18,7 +18,7 @@ use alacritty_terminal::{
     },
     vte::{
         Params, Parser, Perform,
-        ansi::{Processor, Rgb},
+        ansi::{Handler, NamedPrivateMode, PrivateMode, Processor, Rgb},
     },
 };
 use bt_transcript::CapturedRow;
@@ -1019,6 +1019,48 @@ impl TerminalAdapter {
             sgr_mouse: mode.contains(TermMode::SGR_MOUSE),
             mouse_tracking,
             focus_reporting: mode.contains(TermMode::FOCUS_IN_OUT),
+        }
+    }
+
+    /// Turn off the input modes that only a *program* ever asks for, and leave
+    /// every mode the shell itself uses exactly where it is.
+    ///
+    /// A mouse-tracking mode is switched on by the program that wants to read
+    /// mouse reports, and switched off by that same program on its way out. When
+    /// the program never gets out — killed, crashed, or an exit path that did not
+    /// run to the end — nobody switches it off: ConPTY does not send `?1003l` on
+    /// a dead child's behalf, and there is no other party to the protocol who
+    /// could. The mode then outlives its owner, and whoever is standing at the
+    /// front afterwards inherits it (see [`DualPlaneSession`]'s prompt-start
+    /// handler, the one caller, for when that inheritance is provably wrong).
+    ///
+    /// The list is exactly the modes a shell has no use for: the three mouse
+    /// tracking levels (`1000`/`1002`/`1003`), the two report encodings the
+    /// vendor terminal knows (`1005`/`1006` — `1015` is not a mode this terminal
+    /// can be in, so there is nothing of it to retire), and focus reporting
+    /// (`1004`, the same illness with `\e[I`/`\e[O` for a symptom). Bracketed
+    /// paste, the alternate screen, alternate scroll and the keyboard modes are
+    /// deliberately absent: a shell and its line editor use those themselves.
+    ///
+    /// It goes through the vendor's own [`Handler`] entry point rather than at
+    /// the mode bits, so this is the same state change the escape sequence would
+    /// have made, down to the `MouseCursorDirty` the vendor emits with it. The
+    /// resize oracle is stepped alongside for the reason it is stepped alongside
+    /// every other byte: a shadow terminal that disagreed about the modes would
+    /// answer a resize as a different terminal.
+    pub fn retire_program_input_modes(&mut self) {
+        for mode in [
+            NamedPrivateMode::ReportMouseClicks,
+            NamedPrivateMode::ReportCellMouseMotion,
+            NamedPrivateMode::ReportAllMouseMotion,
+            NamedPrivateMode::ReportFocusInOut,
+            NamedPrivateMode::Utf8Mouse,
+            NamedPrivateMode::SgrMouse,
+        ] {
+            self.term.unset_private_mode(PrivateMode::Named(mode));
+            if let Some(canonical) = self.resize_canonical.as_mut() {
+                canonical.term.unset_private_mode(PrivateMode::Named(mode));
+            }
         }
     }
 

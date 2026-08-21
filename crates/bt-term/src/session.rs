@@ -3087,6 +3087,27 @@ impl DualPlaneSession {
                     self.command_marks.release_open_command();
                     let prompt = self.register_command_mark_anchor(screen, point);
                     self.command_marks.note_prompt(prompt);
+                    // **A prompt is the shell speaking, and the shell has no use
+                    // for the mouse.** User report, twice, the second time with a
+                    // screenshot: a program that owned 1000/1002/1003/1006 was
+                    // killed before its own reset ran, and nothing on this side of
+                    // the pipe switches those off for a dead child — so every
+                    // pointer twitch afterwards arrived as `\e[<35;16;38M`, which
+                    // PSReadLine dutifully echoed into the input line until the
+                    // window had to be closed.
+                    //
+                    // `A` is the only marker that carries the premise. `B`/`C`/`D`
+                    // are the command line, the command starting, and the command
+                    // ending — `C` in particular is the instant a program is most
+                    // likely to be turning tracking *on*. And the premise is only
+                    // true on the primary screen: on the alternate one the party
+                    // writing this marker is the full-screen program itself, and
+                    // there are programs that emit `133;A` while tracking the
+                    // mouse on purpose. That is the same "alt-screen 一律不记" the
+                    // rest of this machine already applies (DESIGN §7.1.5b), for
+                    // the same reason — off this screen the marker is not evidence
+                    // about the shell.
+                    self.terminal.retire_program_input_modes();
                 }
                 self.shell_phases
                     .insert(screen, ShellIntegrationPhase::Prompt);
