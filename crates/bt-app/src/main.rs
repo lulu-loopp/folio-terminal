@@ -69224,12 +69224,39 @@ mod tests {
             DEFAULT_FROZEN_LINE_QUOTA,
             std::num::NonZeroI64::new(22 * bt_viewport::SUBPIXELS_PER_PX).unwrap(),
         );
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // The child here is a real PowerShell starting a real profile, so *how long* it needs to
+        // reach a prompt and echo a command back is a fact about the machine, not about this
+        // terminal. A total wall-clock budget therefore made this test a load meter: at rest it
+        // finished in six seconds, but with twenty-four spinners on this twenty-four-thread host
+        // the 2026-08-20 experiment failed it **16 times out of 16**, always on the same ten-second
+        // ceiling, always with the child working normally on the other side of it.
+        //
+        // What the test wants to know is whether the child has *stopped*, and that question
+        // survives a busy host: a starved machine delivers the same bytes, only further apart. So
+        // the budget restarts on every byte read, and a separate ceiling catches the one shape
+        // silence cannot — a child that talks forever without ever saying this.
+        //
+        // Enlarging the old ten-second *total* was the option not taken, and the distinction is
+        // the point: a total grows with the work the child has left, so no value of it is right on
+        // a machine of unknown speed, while a silence budget is one judgement about how long a
+        // live process may be denied the CPU before we call it dead. Thirty seconds is that
+        // judgement, and it is `bt-pty`'s `PROBE_SILENCE_BUDGET` to the second — same question,
+        // same host, and the two probes should not answer it differently. See there for the
+        // measurements it was chosen from.
+        const SILENCE_BUDGET: Duration = Duration::from_secs(30);
+        const CEILING: Duration = Duration::from_secs(180);
+        const MARKER: &str = "BT_APP_INPUT_OK";
+
+        let started = Instant::now();
+        let mut last_output = Instant::now();
+        let mut bytes_read = 0usize;
         let mut command_sent = false;
         let mut output_seen = false;
-        while Instant::now() < deadline {
+        while !output_seen {
             let bytes = pty.read_output();
             if !bytes.is_empty() {
+                last_output = Instant::now();
+                bytes_read += bytes.len();
                 session.feed(&bytes).unwrap();
                 let replies = session.take_pty_writes();
                 for reply in &replies {
@@ -69244,19 +69271,26 @@ mod tests {
                     .terminal()
                     .visible_text()
                     .iter()
-                    .any(|line| line.contains("BT_APP_INPUT_OK"));
-                if output_seen {
-                    break;
-                }
+                    .any(|line| line.contains(MARKER));
+                continue;
+            }
+            let silent_for = last_output.elapsed();
+            if silent_for >= SILENCE_BUDGET || started.elapsed() >= CEILING {
+                panic!(
+                    "{MARKER} never reached Term: gave up after {:?}, the last {:?} of it with the \
+                     child silent, having read {bytes_read} bytes; the handshake {}. Screen {:?}",
+                    started.elapsed(),
+                    silent_for,
+                    if command_sent {
+                        "completed and the command was sent"
+                    } else {
+                        "never completed, so the command was never sent"
+                    },
+                    session.terminal().visible_text()
+                );
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-
-        assert!(
-            command_sent,
-            "PowerShell never completed its terminal handshake"
-        );
-        assert!(output_seen, "PowerShell command output never reached Term");
         let mut projection = session.new_projection(session.layout_key());
         let frame = session.viewport_frame(&mut projection).unwrap();
         let rendered_text = frame
