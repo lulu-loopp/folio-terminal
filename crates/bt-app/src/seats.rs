@@ -17971,6 +17971,88 @@ mod tests {",
         }
     }
 
+    /// PIN — **the band between the `⌄` and the gear sends this window nothing
+    /// at all** (user report, 2026-08-21).
+    ///
+    /// The report was a profile menu a hover had opened that would not close
+    /// once the pointer came to rest in the empty stretch of the title bar. Two
+    /// readings of that had to be told apart before it could be fixed, and this
+    /// is where both are written down:
+    ///
+    /// * it is **not** the `⌄` claiming the space. [`hit_tab_chrome`] answers
+    ///   `None` for every pixel of the band, so nothing in the strip ever
+    ///   reports [`ChromeTarget::NewTabMenu`] for a point out there;
+    /// * it is that the band is **Win32's**. [`title_bar_app_run_right_px`] ends
+    ///   the app's run at the `⌄`'s right edge and
+    ///   `bt_platform::custom_frame_hit_test` turns everything from there to the
+    ///   caption run into `HTCAPTION` — a region winit reports no `CursorMoved`
+    ///   for at all, because its Windows backend handles `WM_MOUSEMOVE` and
+    ///   `WM_MOUSELEAVE` and not `WM_NCMOUSEMOVE`.
+    ///
+    /// So a hand resting in the band produces exactly one `CursorLeft` and then
+    /// silence, and "the pointer is away" can only reach the `⌄` clocks through
+    /// the leave door — which is what `Runtime::pointer_left` now says.
+    ///
+    /// Red gate: widen `new_tab_menu` to the caption run and the first
+    /// assertion fails; hand `title_bar_app_run_right_px` the window's width
+    /// and the second does.
+    #[test]
+    fn the_title_bar_band_right_of_the_chevron_is_win32s_and_not_the_chevrons() {
+        use bt_platform::{CustomFrameHit, CustomFrameMetrics, custom_frame_hit_test};
+        let (width, scale, tabs) = (1920.0_f32, 1.0_f32, 1_usize);
+        let rail = RailState::default();
+        let trailers = resting(tabs);
+        let chevron = tab_strip_geometry(width, scale, &trailers, 0, 0.0).new_tab_menu;
+        let run_right = title_bar_app_run_right_px(width, scale, tabs, rail);
+        assert_eq!(
+            run_right,
+            chevron[2].ceil() as i32,
+            "the app's run in the bar ends at the `⌄`, which is the whole of \
+             what the WM_NCHITTEST bridge is told"
+        );
+        let frame = CustomFrameMetrics {
+            width: width as i32,
+            height: 1080,
+            title_bar_height: 40,
+            tab_strip_right_px: run_right,
+            caption_button_width: 46,
+            caption_button_count: 4,
+            resize_border: 8,
+            resizable: true,
+        };
+        let y = ((chevron[1] + chevron[3]) / 2.0).round() as i32;
+
+        // The button itself is the app's, and the gate hears `Button` there.
+        let on = ((chevron[0] + chevron[2]) / 2.0).round() as i32;
+        assert_eq!(
+            hit_tab_chrome(width, scale, &trailers, 0, 0.0, f64::from(on), f64::from(y)),
+            Some(ChromeTarget::NewTabMenu),
+            "the `⌄` answers at its own centre"
+        );
+        assert_eq!(
+            custom_frame_hit_test(frame, on, y),
+            CustomFrameHit::Client,
+            "and Win32 hands the button's pixels to the client, so it gets moves"
+        );
+
+        // And the band the report is about — the whole of it, every 17th pixel.
+        let buttons_left = frame.width - frame.caption_button_width * frame.caption_button_count;
+        assert!(buttons_left > run_right, "there is a band to test");
+        for x in (run_right..buttons_left).step_by(17) {
+            assert_eq!(
+                hit_tab_chrome(width, scale, &trailers, 0, 0.0, f64::from(x), f64::from(y)),
+                None,
+                "x={x} lies outside the `⌄`'s box, so nothing in the strip claims it"
+            );
+            assert_eq!(
+                custom_frame_hit_test(frame, x, y),
+                CustomFrameHit::Caption,
+                "x={x} is the window's own drag handle, and no pointer move is \
+                 ever reported from it"
+            );
+        }
+    }
+
     /// The box the tooltip anchors its `NN%` on is the box the strip draws the
     /// mark in — read off the sprite the strip actually emitted, not recomputed.
     #[test]
