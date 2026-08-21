@@ -24999,9 +24999,7 @@ mod tests {
     #[test]
     fn a_prompt_start_on_the_alternate_screen_retires_nothing_and_evicts_nobody() {
         let mut session = DualPlaneSession::new(nz(80), nz(8));
-        session
-            .feed(b"\x1b[?1049h\x1b[?1003h\x1b[?1006h")
-            .unwrap();
+        session.feed(b"\x1b[?1049h\x1b[?1003h\x1b[?1006h").unwrap();
         session.feed(b"\x1b]133;A\x1b\\").unwrap();
         let modes = session.terminal_modes();
         assert!(

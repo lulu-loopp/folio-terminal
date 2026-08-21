@@ -69143,7 +69143,10 @@ mod tests {
             ),
             Some(vec![0x1b, b'[', b'M', b' ', b'#', b'"'])
         );
-        assert!(matches!(route, Some(MouseRoute::Forward { sgr: false, .. })));
+        assert!(matches!(
+            route,
+            Some(MouseRoute::Forward { sgr: false, .. })
+        ));
 
         session.feed(b"\x1b[?1006h").unwrap();
         assert!(session.terminal_modes().sgr_mouse);
