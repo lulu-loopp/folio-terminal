@@ -1844,6 +1844,22 @@
   }
   .tab.landing, .vtab.landing { animation: tab-land .2s cubic-bezier(.2, 0, 0, 1); }
   @media (prefers-reduced-motion: reduce) { .tab.landing, .vtab.landing { animation: none; } }
+  /* SPRING-LOADED (§7.1.6k, user ruling 2026-08-20): the tab a carried pane is
+     resting on, while it is being aimed at. It wears the SAME two declarations
+     `.drop-preview` and `tab-land`'s `from` wear, and deliberately so �� the slot
+     a drop will fill, the tab that has just been filled and the tab that is
+     ABOUT to be handed a pane are one picture of one event seen at three
+     moments. A fourth mark invented here would be a second vocabulary for "this
+     is where it goes".
+     No animation: this is a promise about right now and it must not lag (M148).
+     The ghost stays visible over it, unlike the two strip landings that draw a
+     stand-in �� a bright tab says WHERE and never WHAT, so taking the label out
+     of the hand would leave the hand empty over something that has merely gone
+     bright. */
+  .tab.aimed, .vtab.aimed {
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 45%, transparent);
+  }
 
   /* the tab you are holding rides above the ones getting out of its way */
   .tab.grabbed, .vtab.grabbed { z-index: 20; }
@@ -7338,8 +7354,11 @@
     playStripFlip(beforeStrip);
   }
   /* pane dropped on the strip → leaves the layout, becomes its own tab at that slot */
-  function extractPaneToTab(leafId, index) {
-    const w = activeTab();
+  function extractPaneToTab(leafId, index, homeWs) {
+    /* The pane's OWN tab and not the one on screen (§7.1.6k): the spring can have
+       moved the view since the hand closed, and a tear-out reaches into the tree
+       the pane is actually standing in. */
+    const w = (homeWs != null && tabById(homeWs)) || activeTab();
     const before = snapshotPanes();
     const leaf = detachLeaf(w, leafId);
     if (!leaf) return;
@@ -7362,6 +7381,50 @@
       landed.classList.add("landing");
       setTimeout(() => landed.classList.remove("landing"), 240);
     }
+  }
+  /* SPRING-LOADED, the drop half (§7.1.6k, user ruling 2026-08-20): a pane let go
+     ON a tab — not in the gap between two — leaves its own tab's tree and joins
+     that tab's, APPENDED AT THE END.
+
+     The end is `splitRootOf` and not `splitLeafIn`, and it is `addFilesPane`'s
+     own argument read for a different kind of leaf: however many panes the
+     target already holds, "append" means beside all of them, and only the root
+     has an edge that means that. Which side is the end is the `Split direction`
+     setting's answer in the native build (`Right` → right, `Down` → below,
+     `Auto` → across the stage's longer side); this prototype does not hold that
+     setting, so it takes the "right" every direction-less split here takes.
+
+     THE TAB IT LEFT IS NOT ACTIVATED and neither is the target: you aimed at a
+     tab and said "put this over there", not "take me there" (N157's rule, and
+     the same one). The exception is a tab emptied by the move — the layout you
+     were looking at has stopped existing, so you go with the pane.
+
+     "关最后一个座位 = 关 tab" covers the emptying, and covers it as an EMPTYING
+     rather than as a close: `closeTab` records a tab into Recent and shuts its
+     shells down, and this shell is alive in the tab it just moved to. So the
+     strip entry is simply taken out. */
+  function movePaneToTab(leafId, srcWsId, targetWsId) {
+    const src = tabById(srcWsId), tgt = tabById(targetWsId);
+    if (!src || !tgt || src === tgt) return;
+    const leaf = findLeafIn(src, leafId);
+    if (!leaf) return;
+    const before = snapshotPanes();
+    const beforeStrip = snapshotStrip();
+    /* The last pane of a tab: `detachLeaf` refuses to empty a tree, and the rule
+       above is what answers that rather than a refusal. The tree is left alone
+       and the whole entry goes. */
+    const emptied = paneCount(src) <= 1;
+    if (!emptied) detachLeaf(src, leafId);
+    splitRootOf(tgt, "right", leaf);
+    tgt.focus = leaf.id;              /* the promise was drawn on the arrival */
+    migratePvPool(src, leaf, tgt);    /* a moved preview keeps its buffer(s) */
+    if (emptied) {
+      const wasWatching = state.active === src.id;
+      state.tabs = state.tabs.filter(w => w.id !== src.id);
+      if (wasWatching) { selectTab(tgt.id); return; }
+    }
+    renderWithPaneFlip(before);
+    playStripFlip(beforeStrip);
   }
   /* pane dropped on another pane's edge → rearrange inside the layout */
   function movePane(leafId, targetLeafId, zone) {
@@ -10453,7 +10516,12 @@
            no verb. The old `return` belonged to a stage that was a PROJECTION of
            one pane: editing the tree from behind that lens changed something you
            could not see until you left. There is no lens now. */
-        startDrag(e, { kind: "pane", leafId: +el.dataset.leaf });
+        /* `homeWs` beside `leafId` since §7.1.6k: a pane drag can outlive its tab
+           being on screen now — resting on another tab springs the view over and
+           leaves the pane where it was picked up — so "which pane" has to be a
+           TAB and a leaf, recorded at the moment the hand closed. A leaf id alone
+           would name nothing the moment the spring fires. */
+        startDrag(e, { kind: "pane", leafId: +el.dataset.leaf, homeWs: state.active });
       });
       /* ── DOUBLE-CLICKING A PANE HEADER DOES NOTHING, ON PURPOSE ──
          (user ruling 2026-08-19, second round.) It was focus mode's gesture door
@@ -11234,7 +11302,10 @@
         ph.innerHTML = `<span class="ticon-wrap">${folderMark()}</span>
           <span class="${titleCls}">${esc(drag.name)}</span>`;
       } else {
-        const leaf = findLeafIn(activeTab(), drag.leafId);
+        /* through the pane's own tab (§7.1.6k) — after a spring the view has
+           moved and the pane has not, and a stand-in dressed out of the tab now
+           on screen would be wearing a stranger's name, or nothing at all */
+        const leaf = findLeafIn(tabById(drag.homeWs) || activeTab(), drag.leafId);
         const c = contentOf(leaf);
         const icon = leaf && leaf.kind === "term"
           ? c.status(leaf)
@@ -11249,6 +11320,17 @@
   }
   function clearDropPreview() {
     document.querySelectorAll(".drop-preview").forEach(el => el.remove());
+  }
+  /* §7.1.6k — the tab a carried pane is resting on, marked. One helper and not a
+     class toggled at five call sites: the mark is a fact about the drag, so
+     exactly one element in the window may wear it and every path that stops
+     aiming has to take it off. */
+  function clearAimed() {
+    document.querySelectorAll(".aimed").forEach(el => el.classList.remove("aimed"));
+  }
+  function setAimed(el) {
+    clearAimed();
+    if (el) el.classList.add("aimed");
   }
 
   /* ── layout changes, animated ──
@@ -11442,7 +11524,8 @@
       return `${fileMark()}${esc(d.name)}`;
     }
     if (d.kind === "folder") return `${folderMark()}${esc(d.name)}`;
-    const leaf = d.kind === "tab" ? focusedLeaf(tabById(d.wsId)) : findLeafIn(activeTab(), d.leafId);
+    const leaf = d.kind === "tab" ? focusedLeaf(tabById(d.wsId))
+                                  : findLeafIn(tabById(d.homeWs) || activeTab(), d.leafId);
     const c = contentOf(leaf);
     return `${c.mark(leaf)}${c.title(leaf)}`;
   }
@@ -11465,6 +11548,7 @@
     const pv = $("dock-preview");
     drag.target = null;
     clearDropPreview();
+    clearAimed();
     drag.ghost.style.opacity = "";
 
     /* home ground: a terminal-born image released over ITSELF goes back where
@@ -11492,12 +11576,60 @@
          paths form A kept here (tab joins the column, card reorders, file joins
          as a preview card, folder denied): all four belonged to the standby
          pool, and the pool is two forms dead. */
-      if (state.focusMode) { hidePreview(); clearDropPreview(); drag.target = null; return; }
-      if (drag.kind === "pane" && paneCount(activeTab()) > 1) {
-        const idx = insertIndexAt(e);
-        drag.target = { strip: true, index: idx };
-        showDropPreview(idx);
-        drag.ghost.style.opacity = "0";   /* the preview in the strip is the ghost now */
+      /* §7.1.6k rides on this same guard and needs no second one: ② is a refusal
+         of the pane SOURCE, so a card column takes neither of the two offers a
+         pane has here — it does not mint a new tab out of one, and it does not
+         hand one to a card's tab or spring the column over to it. */
+      if (state.focusMode) { hidePreview(); clearDropPreview(); clearAimed(); drag.target = null; return; }
+      if (drag.kind === "pane") {
+        /* ── SPRING-LOADED (§7.1.6k, user ruling 2026-08-20) ──
+           TWO offers, read off two different questions about one pointer:
+             · whose tab is under my hand    → put the pane in THAT tab
+             · between which two would it go → make a new tab there (K124)
+           A tab's own rectangle answers the first; the strip's padding, the gap
+           above a tab and the empty tail answer only the second. Resting on your
+           OWN tab is not a move, so it falls through to the tear-out — appending
+           a pane to the end of the tree it is already in is K135's sentence one
+           surface up. */
+        const overEl = stripEntries().find(el => {
+          const r = el.getBoundingClientRect();
+          return e.clientX >= r.left && e.clientX <= r.right
+              && e.clientY >= r.top && e.clientY <= r.bottom;
+        });
+        const overWs = overEl ? +overEl.dataset.ws : null;
+        if (overWs !== null && overWs !== drag.homeWs) {
+          clearDropPreview();
+          setAimed(overEl);
+          /* The ghost STAYS. The two strip landings hide it because the strip
+             draws a stand-in — a second picture of the pane, in the slot it is
+             about to take. A tab that has merely gone bright says WHERE and
+             never WHAT, so an empty hand over it would read as a hover. */
+          drag.ghost.style.opacity = "";
+          drag.target = { intoWs: overWs };
+          /* the rest: 250ms, the SAME number every `⌄` in this window opens on,
+             because it is one hand doing one thing — stopping on something to
+             say "this one". Re-armed whenever the aim changes, and SPENT once it
+             has fired, so a hand left resting on the tab it has already sprung
+             to does not switch to it again every quarter second. */
+          if (drag.springWs !== overWs) { drag.springWs = overWs; drag.springAt = e.timeStamp; drag.sprung = false; }
+          else if (!drag.sprung && e.timeStamp - drag.springAt >= CHEV_REST_MS) {
+            drag.sprung = true;
+            selectTab(overWs);            /* the view moves; the pane does not */
+          }
+        } else if (paneCount(tabById(drag.homeWs) || activeTab()) > 1) {
+          clearAimed();
+          drag.springWs = null;
+          const idx = insertIndexAt(e);
+          drag.target = { strip: true, index: idx };
+          showDropPreview(idx);
+          drag.ghost.style.opacity = "0";   /* the preview in the strip is the ghost now */
+        } else {
+          /* K124/G84: the last pane of a tab has no new tab to become, so the
+             strip draws nothing rather than a caret it cannot honour. */
+          clearAimed();
+          drag.springWs = null;
+          drag.target = null;
+        }
       } else if (drag.kind === "tab") {
         /* reordering IS commitment to the strip context: the tab in hand shows
            itself (Edge behaviour), whether or not the press timer had fired */
@@ -11528,6 +11660,16 @@
       if (drag.pressActivated && state.active === drag.wsId
           && drag.homeWs !== drag.wsId && tabById(drag.homeWs)) selectTab(drag.homeWs);
     }
+
+    /* §7.1.6k — A PANE AWAY FROM HOME HAS NO LANDING IN THIS LAYOUT, and that is
+       a policy record rather than a wall (§7.0 rule 8). The spring puts another
+       tab's layout under a pointer that is still holding a pane of the tab it set
+       out from. The ruling grants exactly one cross-tab door and names where it
+       is — "直接松在 tab 上 = 移入该 tab" — the TAB, not the layout under it. So
+       the zones below are not offered, no box is drawn, and letting go over them
+       is J120's clean nothing. Granting the door later is a slice of its own:
+       pluck from one tree, arrive in another. */
+    if (drag.kind === "pane" && drag.homeWs !== state.active) { hidePreview(); drag.target = null; return; }
 
     /* over a pane? zones are relative to THAT pane */
     const host = $("termhost").getBoundingClientRect();
@@ -11760,6 +11902,7 @@
     document.body.classList.remove("dragging");
     hidePreview();
     clearDropPreview();
+    clearAimed();
     const pv = $("dock-preview");
     if (pv) delete pv.dataset.promise;
   }
@@ -11775,6 +11918,7 @@
     if (d.started && d.kind === "file" && d.save) imgClickSquelched = true;
     if (d.ghost) d.ghost.remove();
     document.body.classList.remove("dragging");
+    clearAimed();
     const pv = $("dock-preview");
     if (pv) { pv.classList.remove("show"); delete pv.dataset.promise; }
     if (d.activateT) clearTimeout(d.activateT);
@@ -11793,10 +11937,15 @@
        see rather than a hand-off. render() rebuilds the strip and takes the
        preview with it, so the tab lands in the slot the preview was already
        keeping warm and nothing else moves at all. */
+    /* §7.1.6k — let go ON a tab: the pane joins that tab's tree at its end. Its
+       own row in the commit table rather than a reading of `strip`, because the
+       two edit different things: a tear-out edits the RUN (a new entry at a
+       slot), and this edits two TREES that may both be off screen. */
+    if (d.target.intoWs != null) { movePaneToTab(d.leafId, d.homeWs, d.target.intoWs); return; }
     if (d.target.strip) {
       if (d.kind === "file") { fileToTab(d, d.target.index); return; }
       if (d.kind === "folder") { folderToTab(d, d.target.index); return; }
-      extractPaneToTab(d.leafId, d.target.index);
+      extractPaneToTab(d.leafId, d.target.index, d.homeWs);
       return;
     }
     clearDropPreview();
