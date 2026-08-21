@@ -664,6 +664,14 @@ impl PrintedPathLinks {
         text: &str,
         unknown: &mut BTreeSet<PathBuf>,
     ) -> Vec<(HyperlinkRange, String)> {
+        // Every shape this reads needs a separator: a drive-rooted path by its `X:\`, a relative
+        // reference by definition, a `file://` URI by its own scheme. A line with neither slash in
+        // it cannot hold one, and most lines a program prints are such a line. This is an
+        // equivalence and not a guess — the three scans below would each return empty — and it is
+        // what keeps a screenful of prose from being read three times to find nothing.
+        if !text.contains(['/', '\\']) {
+            return Vec::new();
+        }
         let mut candidates = detect_absolute_path_candidates(text);
         if self.working_directory.is_some() {
             candidates.extend(detect_relative_path_candidates(text, &|_| true));
@@ -902,6 +910,67 @@ mod tests {
              the anchored and drive-rooted spellings both name the one file that is"
         );
         assert_eq!(unknown, BTreeSet::from([PathBuf::from("D:\\src\\gone.md")]));
+    }
+
+    /// §7.1.5j's alternate-screen budget, **measured rather than argued**.
+    ///
+    /// The surface this has to be affordable on is a full-screen program repainting itself: 200×60
+    /// of ordinary TUI prose, every frame. The disk side of the cost is answered elsewhere and by
+    /// construction (the ledger remembers both answers, so a repaint asks nothing — see bt-term's
+    /// `a_repainting_screen_asks_the_disk_nothing_after_the_first_frame`). What is left, and what
+    /// this reads, is the lexer: one pass over text the projection was already walking to find bare
+    /// URLs in.
+    ///
+    /// No assertion beyond completing. A wall clock on a loaded developer machine measures the
+    /// machine; the number is printed so it can be reported and compared.
+    #[test]
+    fn a_full_screenful_is_scanned_in_a_time_worth_printing() {
+        // What Claude Code actually prints: prose, tree-drawing, a couple of names per line.
+        let screen = (0..60u32)
+            .map(|row| {
+                format!(
+                    "  ⎿  Read crates/bt-app/src/main.rs ({row} lines) and D:\\src\\notes-{row}.md \
+                     — updated {row} files, 0 errors, https://example.invalid/{row}"
+                )
+            })
+            .collect::<Vec<_>>();
+        let links = PrintedPathLinks::new(
+            Some(PathBuf::from("D:\\src")),
+            (0..64u32)
+                .map(|index| PathBuf::from(format!("D:\\src\\notes-{index}.md")))
+                .collect(),
+        );
+
+        // And what most of a screen actually is: prose with no separator in it at all, which the
+        // scan proves it can skip whole.
+        let prose = (0..60u32)
+            .map(|row| {
+                format!(
+                    "  I will read the file and then update the section that mentions it, row {row}"
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for (label, corpus) in [("dense", &screen), ("prose", &prose)] {
+            let started = std::time::Instant::now();
+            let mut frames = 0u32;
+            let mut found = 0usize;
+            while started.elapsed() < std::time::Duration::from_millis(200) {
+                let mut unknown = BTreeSet::new();
+                for line in corpus {
+                    found += links.links_in(line, &mut unknown).len();
+                }
+                frames += 1;
+            }
+            let per_frame = started.elapsed() / frames.max(1);
+            println!(
+                "§7.1.5j {label}: 60 rows × {} bytes, {} links per frame -> {:?} per frame \
+                 ({frames} frames)",
+                corpus[0].len(),
+                found / frames.max(1) as usize,
+                per_frame
+            );
+        }
     }
 
     /// A link's range covers the text that was printed, which for a URI is not the path — and no
