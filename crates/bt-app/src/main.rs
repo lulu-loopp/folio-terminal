@@ -20440,6 +20440,14 @@ impl Runtime<'_> {
                 chevron_turn: self.window.chevron_turn.sample(now, self.app.motion).0,
                 pane_motion: seats::PaneMotionFrame::new(&pane_transforms),
                 resizing_cards,
+                // §7.1.6i: the two facts a lone pane's corner ghost is a
+                // function of, and neither of them is `Seats`'s to know — which
+                // pane the search capsule is standing on (it takes the ghost's
+                // corner and its lane, and the instrument that was asked for out
+                // loud wins), and which pane's menu is up (the ghost stays lit
+                // under its own list).
+                search_seat: self.window.search.seat(),
+                pane_menu_seat: self.window.pane_menu.as_ref().map(|menu| menu.seat),
             },
         );
         let seats::WindowChrome { seats, rail } = chrome;
@@ -21986,7 +21994,19 @@ impl Runtime<'_> {
         } else {
             self.publish_interaction_frame()?;
         }
-        if self.refresh_overlay() {
+        // **The chrome as well as the overlay, since §7.1.6i.** Which seat the
+        // capsule stands on is a *chrome* fact now: a lone pane's corner ghost
+        // shares the capsule's corner and its lane and stands down whole while
+        // one is up, so the pass that draws it has to be re-run on both edges of
+        // the capsule's life. Before this the chrome was untouched here, and a
+        // ghost would have sat under an open capsule until some unrelated event
+        // happened to rebuild the layer.
+        //
+        // Both rebuilds run, and then one present: `||` would skip the overlay
+        // on every frame the chrome happened to move.
+        let chrome_changed = self.refresh_chrome();
+        let overlay_changed = self.refresh_overlay();
+        if chrome_changed || overlay_changed {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -39544,8 +39564,12 @@ impl Runtime<'_> {
         )
     }
 
-    /// The `⌄`'s box on one pane head, or `None` when that head has no room for
-    /// one.
+    /// The `⌄`'s box on one pane, or `None` when that pane has no room for one.
+    ///
+    /// **Two layouts, one button** (§7.1.6i): a pane with a head answers with
+    /// the chevron in its run, and a lone terminal answers with the corner
+    /// ghost. Everything downstream — the menu's anchor, the tooltip's anchor,
+    /// the toggle — is written once and works in both.
     ///
     /// Re-derived from the frame the seat is standing in rather than remembered,
     /// which is the `&self`-hit-test discipline every other control in this
@@ -39553,7 +39577,13 @@ impl Runtime<'_> {
     /// button was drawn in, by one derivation and not by two that agree today.
     fn pane_chevron_box(&self, seat: SeatId) -> Option<[f32; 4]> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
-        seats::pane_chevron_box(&self.seats, &self.seat_layout, seat, scale)
+        seats::pane_chevron_box(
+            &self.seats,
+            &self.seat_layout,
+            seat,
+            scale,
+            self.window.search.seat(),
+        )
     }
 
     /// The pane menu's own level of the overlay stack, or nothing when none is
@@ -47472,6 +47502,21 @@ impl Runtime<'_> {
                 .map(|seat| (seat, self.preview_head_tools(seat)))
                 .collect();
             seats::hit_preview_head(&self.seat_layout, scale, &tools, position.x, position.y)
+        })
+        // The lone pane's corner ghost (§7.1.6i), before the pane heads for the
+        // same smallest-target-first reason everything above it is asked first:
+        // it floats *over* the terminal's own body, and the body is not chrome,
+        // so nothing below would ever return it to the head's arm to be
+        // out-ranked.
+        .or_else(|| {
+            seats::hit_pane_ghost(
+                &self.seats,
+                &self.seat_layout,
+                scale,
+                self.window.search.seat(),
+                position.x,
+                position.y,
+            )
         })
         .or_else(|| {
             seats::hit_chrome(
