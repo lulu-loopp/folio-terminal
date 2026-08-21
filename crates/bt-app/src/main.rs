@@ -68747,9 +68747,7 @@ mod tests {
     fn a_tracked_press_on_a_plain_cell_is_still_the_programs_on_the_alternate_screen() {
         let mut session =
             DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
-        session
-            .feed(b"\x1b[?1049h\x1b[?1003h\x1b[?1006h")
-            .unwrap();
+        session.feed(b"\x1b[?1049h\x1b[?1003h\x1b[?1006h").unwrap();
         let modes = session.terminal_modes();
         assert!(modes.alternate_screen);
         let mut route = None;
