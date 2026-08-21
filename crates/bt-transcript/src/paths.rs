@@ -85,7 +85,8 @@ pub fn detect_absolute_path_candidates(text: &str) -> Vec<PrintedPathCandidate> 
         } else {
             cursor
         };
-        if !is_drive_prefix_at(bytes, start) || (!quoted && !candidate_start_boundary(text, start)) {
+        if !is_drive_prefix_at(bytes, start) || (!quoted && !candidate_start_boundary(text, start))
+        {
             cursor += 1;
             continue;
         }
@@ -872,7 +873,11 @@ mod tests {
     fn a_relative_reference_without_a_working_directory_is_neither_link_nor_question() {
         let links = PrintedPathLinks::new(None, BTreeSet::new());
         let mut unknown = BTreeSet::new();
-        assert!(links.links_in("./test.md docs/a.md", &mut unknown).is_empty());
+        assert!(
+            links
+                .links_in("./test.md docs/a.md", &mut unknown)
+                .is_empty()
+        );
         assert!(unknown.is_empty());
     }
 

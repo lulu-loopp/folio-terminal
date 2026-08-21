@@ -8,6 +8,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use bt_transcript::paths::is_local_absolute_path;
 use image::{
     ImageBuffer, ImageFormat, ImageReader, Limits, Rgba, codecs::png::PngDecoder,
     imageops::FilterType,
@@ -598,17 +599,6 @@ fn is_admissible_local_image_path(path: &Path) -> bool {
     is_local_absolute_path(path) && has_admissible_image_extension(path)
 }
 
-/// The shape gate every local reference shares: drive-rooted and nameable by this filesystem.
-///
-/// It says nothing about *what* the path names, which is the point — a working directory reported
-/// over OSC 7 is a directory and has no extension to allow, while an image must additionally clear
-/// `has_admissible_image_extension`. Keeping the two halves apart is what lets one URI decoder
-/// serve both without either shape inheriting the other's privileges.
-fn is_local_absolute_path(path: &Path) -> bool {
-    let text = path.as_os_str().to_string_lossy();
-    is_windows_drive_absolute(&text) && !text.contains('\0')
-}
-
 /// Whether a name is spelled like a picture this build can show.
 ///
 /// Public because it is the *routing* question as well as the detection one: a
@@ -624,14 +614,6 @@ pub fn has_admissible_image_extension(path: &Path) -> bool {
                 "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg"
             )
         })
-}
-
-fn is_windows_drive_absolute(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && matches!(bytes[2], b'\\' | b'/')
 }
 
 /// How a reference is *spelled* on the line — the one property that decides whether it may ever
@@ -657,211 +639,53 @@ pub struct LocalImagePathCandidate {
     pub shape: ImageReferenceShape,
 }
 
-/// Allocation-light lexical candidate scan for the event thread. It recognizes only drive-rooted
-/// Windows paths. Unquoted paths open at a token boundary (`candidate_start_boundary`) and close
-/// at whitespace or a closing delimiter (`is_path_terminator_char`); quoted paths may contain
-/// whitespace and any delimiter, and must have a closing quote. Existence, size, content format,
-/// and decode remain worker-only.
+/// The drive-rooted printed paths of one line that name a picture this build can show.
+///
+/// Where a path begins and ends is not asked here — that question belongs to one table
+/// ([`bt_transcript::paths::detect_absolute_path_candidates`]) shared with everything else in this
+/// window that reads a printed path, because two copies of a boundary rule are two opinions about
+/// what the pointer is standing on. What is asked here, and only here, is the **extension
+/// allowlist**: this is the scan that decides what may become a picture, and admitting a `.txt`
+/// would put a text file in front of an image decoder. Existence, size, content format and decode
+/// remain worker-only.
 pub fn detect_local_image_path_candidates(text: &str) -> Vec<LocalImagePathCandidate> {
-    let bytes = text.as_bytes();
-    let mut candidates = Vec::new();
-    let mut cursor = 0usize;
-    while cursor < bytes.len() {
-        let quoted = bytes[cursor] == b'"';
-        let start = if quoted {
-            cursor.saturating_add(1)
-        } else {
-            cursor
-        };
-        if !is_drive_prefix_at(bytes, start) || (!quoted && !candidate_start_boundary(text, start))
-        {
-            cursor += 1;
-            continue;
-        }
-        let end = if quoted {
-            bytes[start..]
-                .iter()
-                .position(|byte| *byte == b'"')
-                .map(|offset| start + offset)
-        } else {
-            Some(token_end(text, start))
-        };
-        let Some(end) = end.filter(|end| *end > start) else {
-            cursor += 1;
-            continue;
-        };
-        let path = &text[start..end];
-        if is_admissible_local_image_path(Path::new(path)) {
-            candidates.push(LocalImagePathCandidate {
+    bt_transcript::paths::detect_absolute_path_candidates(text)
+        .into_iter()
+        .filter_map(|candidate| {
+            let path = candidate.text(text);
+            is_admissible_local_image_path(Path::new(path)).then(|| LocalImagePathCandidate {
                 path: path.to_owned(),
-                byte_start: start,
-                byte_end: end,
+                byte_start: candidate.byte_start,
+                byte_end: candidate.byte_end,
                 shape: ImageReferenceShape::Native,
-            });
-        }
-        cursor = if quoted {
-            end.saturating_add(1)
-        } else {
-            end.max(cursor.saturating_add(1))
-        };
-    }
-    candidates
+            })
+        })
+        .collect()
 }
 
-/// Allocation-light lexical scan for relative image references.
+/// The relative references of one line that name a picture this build can show, each still spelled
+/// **exactly as printed**: a relative reference names nothing until it is joined to a directory, and
+/// this terminal only ever learns a directory by being told one (OSC 7).
+/// `resolve_relative_image_path` is the join; `detect_inline_image_candidates` is where the two meet.
 ///
-/// The returned `path` is the candidate text **exactly as printed** and is deliberately *not* a
-/// path yet: a relative reference names nothing until it is joined to a directory, and this
-/// terminal only ever learns a directory by being told one (OSC 7). `resolve_relative_image_path`
-/// is the join; `detect_inline_image_candidates` is where the two meet.
-///
-/// Scope (user ruling 2026-08-03, widened the same day): `./`- and `../`-**anchored** references,
-/// and **bare** ones that carry at least one separator — `local-images/sunset.svg`,
-/// `.tmp-a85-parent/docs/spikes/artifacts/03-visual/c-fraction.svg`. A single-segment bare name
-/// (`readme.png`) stays out: one word with a dot in it is prose until something says otherwise,
-/// and nothing in the text ever says so. The separator *is* that boundary — it is the only mark a
-/// bare reference carries that ordinary prose does not — and it is why the widening is affordable
-/// at all: the worker's existence gate makes every prose false positive silent (no file, no band),
-/// so what the boundary buys is a bounded number of `stat` calls, not a wrong picture.
-///
-/// Boundaries are the absolute scan's boundaries, unchanged: an unquoted candidate opens at a
-/// token boundary (`candidate_start_boundary`) and closes at whitespace or a closing delimiter
-/// (`is_path_terminator_char`); a quoted one may contain both and must close its quote. The
-/// extension allowlist is applied here, before any join, so a `./notes.txt` never becomes a
-/// resolution question at all. What a bare reference adds on top is `bare_candidate_opens_at`:
-/// having no anchor to pin its start, it must be a run of path characters and nothing else.
+/// Which text is a relative reference at all — anchored `./`, `../`, or bare with a separator, and
+/// where it stops — is [`bt_transcript::paths::detect_relative_path_candidates`]'s answer, shared
+/// with every other reader of a printed path in this window. The **extension allowlist** is what
+/// this scan adds, and it is passed *into* the scan rather than applied to its result because
+/// admission decides how far the cursor moves: a candidate this reading refuses gives up a single
+/// character, so a reference may still begin one character later inside the same token.
 pub fn detect_relative_image_path_candidates(text: &str) -> Vec<LocalImagePathCandidate> {
-    let bytes = text.as_bytes();
-    let mut candidates = Vec::new();
-    let mut cursor = 0usize;
-    // The first terminator at or after some earlier opening — which is therefore the first
-    // terminator at or after *every* opening before it, since no terminator lies in between. The
-    // absolute scan can afford to find a token's end once per drive prefix because drive prefixes
-    // are rare; a bare reference has no prefix, so every character in `{"a":1,"b":2,…}` opens a
-    // candidate, and finding the same token's end once per opening would read the line once per
-    // character. Reusing it reads each token once, whatever opens inside it.
-    let mut token_end_seen = 0usize;
-    while cursor < bytes.len() {
-        // A candidate opens on a character, so a cursor resting mid-character opens nothing. The
-        // absolute scan is spared this test by its drive prefix, which is ASCII and proves the
-        // boundary; a bare relative reference has no such prefix to be proved by.
-        if !text.is_char_boundary(cursor) {
-            cursor += 1;
-            continue;
-        }
-        let quoted = bytes[cursor] == b'"';
-        let start = if quoted {
-            cursor.saturating_add(1)
-        } else {
-            cursor
-        };
-        if !quoted && !candidate_start_boundary(text, start) {
-            cursor += 1;
-            continue;
-        }
-        let end = if quoted {
-            bytes[start..]
-                .iter()
-                .position(|byte| *byte == b'"')
-                .map(|offset| start + offset)
-        } else {
-            if start >= token_end_seen {
-                token_end_seen = token_end(text, start);
-            }
-            Some(token_end_seen)
-        };
-        let Some(end) = end.filter(|end| *end > start) else {
-            cursor += 1;
-            continue;
-        };
-        let candidate = &text[start..end];
-        // What opened the candidate is asked before what it says, because the bare opening is the
-        // one test whose cost this loop can bound: it stops at the first character that is not a
-        // path character, and every opening has such a character in front of it, so no two
-        // openings can read the same stretch twice. Asking the whole candidate first — extension,
-        // separators, colon — would read one long line without terminators once per character.
-        //
-        // Quoting is a declaration of extent: it says where the reference begins and ends, so it
-        // needs neither an anchor nor a pure run to be read as one.
-        let admitted = (quoted
-            || is_relative_prefix_at(bytes, start)
-            || bare_candidate_opens_at(text, start, candidate))
-            && is_relative_image_reference(candidate);
-        if admitted {
-            candidates.push(LocalImagePathCandidate {
-                path: candidate.to_owned(),
-                byte_start: start,
-                byte_end: end,
-                shape: ImageReferenceShape::Native,
-            });
-        }
-        // An admitted candidate consumes its text, so nothing is read out of the middle of one. A
-        // refused one consumes a single character: whatever it was, the reference may still begin
-        // one character later — behind the `：` in `路径：dir/a.png`, or at the quote in
-        // `path="./a.png"` — and a refusal is never evidence about the text that follows it.
-        cursor = if admitted {
-            if quoted {
-                end.saturating_add(1)
-            } else {
-                end.max(cursor.saturating_add(1))
-            }
-        } else {
-            cursor.saturating_add(1)
-        };
-    }
-    candidates
-}
-
-/// The shape a relative image reference must have, whatever opened it.
-///
-/// Three refusals and one allowlist. A candidate with no separator is a single bare name, which is
-/// out of scope. One that *opens* with a separator names a place from the drive root rather than
-/// from here — `/usr/share/x.png` in a log line, or the `//host/x.png` a scheme leaves behind —
-/// and joining it to a working directory would invent a location nobody named. One containing `:`
-/// is not relative at all: the colon is exactly the character that makes text absolute (`D:\…`) or
-/// schemed (`file:…`, `https:…`), both of which are other scans' business and must never be
-/// claimed twice.
-fn is_relative_image_reference(candidate: &str) -> bool {
-    !candidate.starts_with(['/', '\\'])
-        && candidate.contains(['/', '\\'])
-        && !candidate.contains(':')
-        && has_admissible_image_extension(Path::new(candidate))
-}
-
-/// Whether a bare (unanchored, unquoted) candidate may open where it does.
-///
-/// An anchored reference declares where it begins — `./` and `../` are marks, not prose. A bare
-/// one declares nothing, so the character class must speak for it: the candidate is a run of path
-/// characters and nothing else, and the character before it is not `:`.
-///
-/// Both halves are what keep a bare reference out of a URL without anyone sniffing for URLs. The
-/// run rule is why `路径：local-images/sunset.svg` is read as the reference after the colon rather
-/// than as one long candidate starting at `路` — and why `x(dir/a.png` is not read from `x`. The
-/// preceding-`:` rule is why `https://host:8080/img/x.png` offers nothing: `//host` opens with a
-/// separator, and the `8080/img/x.png` behind the port colon would otherwise be a perfectly
-/// well-formed relative name. A colon binds leftward; what follows it belongs to whatever the
-/// colon already made absolute or schemed.
-fn bare_candidate_opens_at(text: &str, start: usize, candidate: &str) -> bool {
-    candidate.chars().all(is_path_tail_char)
-        && text[..start]
-            .chars()
-            .next_back()
-            .is_none_or(|character| character != ':')
-}
-
-/// A `.` or `..` component followed by a separator, and nothing else.
-fn is_relative_prefix_at(bytes: &[u8], start: usize) -> bool {
-    if bytes.get(start) != Some(&b'.') {
-        return false;
-    }
-    let after_dots = if bytes.get(start + 1) == Some(&b'.') {
-        start + 2
-    } else {
-        start + 1
-    };
-    bytes
-        .get(after_dots)
-        .is_some_and(|byte| matches!(*byte, b'/' | b'\\'))
+    bt_transcript::paths::detect_relative_path_candidates(text, &|candidate| {
+        has_admissible_image_extension(Path::new(candidate))
+    })
+    .into_iter()
+    .map(|candidate| LocalImagePathCandidate {
+        path: candidate.text(text).to_owned(),
+        byte_start: candidate.byte_start,
+        byte_end: candidate.byte_end,
+        shape: ImageReferenceShape::Native,
+    })
+    .collect()
 }
 
 /// Join a relative candidate onto an authoritative working directory and normalize it lexically.
@@ -876,31 +700,8 @@ fn is_relative_prefix_at(bytes: &[u8], start: usize) -> bool {
 /// lands on the bare drive root names a directory rather than a file; both are simply not
 /// candidates.
 pub fn resolve_relative_image_path(working_directory: &Path, relative: &str) -> Option<PathBuf> {
-    if !is_local_absolute_path(working_directory) {
-        return None;
-    }
-    let base = working_directory.as_os_str().to_str()?;
-    let (drive, rest) = base.split_at(2);
-    let mut components = Vec::new();
-    for component in rest.split(['/', '\\']).chain(relative.split(['/', '\\'])) {
-        match component {
-            "" | "." => {}
-            ".." => {
-                components.pop()?;
-            }
-            named => components.push(named),
-        }
-    }
-    if components.is_empty() {
-        return None;
-    }
-    let mut native = String::from(drive);
-    for component in components {
-        native.push('\\');
-        native.push_str(component);
-    }
-    let path = PathBuf::from(native);
-    is_admissible_local_image_path(&path).then_some(path)
+    bt_transcript::paths::resolve_relative_reference(working_directory, relative)
+        .filter(|path| is_admissible_local_image_path(path))
 }
 
 /// Every image reference one line of text offers **inline admission**: native drive-rooted paths,
@@ -942,94 +743,7 @@ fn resolved_relative_image_candidates(
         .collect()
 }
 
-fn is_drive_prefix_at(bytes: &[u8], start: usize) -> bool {
-    bytes.get(start).is_some_and(u8::is_ascii_alphabetic)
-        && bytes.get(start + 1) == Some(&b':')
-        && bytes
-            .get(start + 2)
-            .is_some_and(|byte| matches!(*byte, b'\\' | b'/'))
-}
-
-/// Characters that could legitimately be the tail of a longer token, so a drive prefix that
-/// follows one is a suffix of that token rather than a path of its own: alphanumerics of **any**
-/// script (`prefixXC:\a.png`, `图片D:\a.png`) plus the path-structure characters that continue a
-/// path or a filename stem (`sub\D:\a.png`, `file:///D:/a.png`, `v1.2D:\a.png`, `x-D:\a.png`).
-///
-/// `/` and `\` are on this list for one load-bearing reason: it is what keeps the `D:/…` embedded
-/// in a `file:///D:/…` URI from being read as a native path. URIs reach the peek through
-/// `detect_local_image_uri_candidates`, which decodes them properly; they must never be half-read
-/// here. The same clause serves the bare relative scan, where it does double duty: it refuses
-/// every mid-URL opening (`a.b/x.png` inside `https://a.b/x.png` is preceded by `/`), and, read as
-/// a class rather than a boundary, it is the run a bare candidate must consist of.
-///
-/// Everything else opens a path — whitespace of any width, opening brackets and quotes of any
-/// script (`(`、`（`、`「`、`“`), separators (`:`、`：`、`=`、`,`), and the rest of punctuation.
-/// That generality is the point: a path is no less a path for sitting in CJK prose.
-fn is_path_tail_char(character: char) -> bool {
-    character.is_alphanumeric() || matches!(character, '/' | '\\' | '.' | '-' | '_')
-}
-
-/// Closing delimiters that end an unquoted path token. Unicode General_Category Pe
-/// (Close_Punctuation) as it appears in terminal prose, plus ASCII `>` and its full-width form —
-/// `<>` is a bracket pair everywhere and neither character is legal in a Windows path anyway.
-///
-/// Final_Punctuation (Pf) is deliberately split: `»`、`›`、`”` are admitted because they only ever
-/// close, while `’` is not, because it doubles as an apostrophe inside ordinary filenames
-/// (`Bob’s photo.png`). A filename that really ends in a closing delimiter can still be quoted.
-fn is_closing_delimiter(character: char) -> bool {
-    matches!(
-        character,
-        ')' | ']'
-            | '}'
-            | '>'
-            | '\u{ff09}' // ）
-            | '\u{ff3d}' // ］
-            | '\u{ff5d}' // ｝
-            | '\u{ff60}' // ｠
-            | '\u{ff63}' // ｣
-            | '\u{ff1e}' // ＞
-            | '\u{3009}' // 〉
-            | '\u{300b}' // 》
-            | '\u{300d}' // 」
-            | '\u{300f}' // 』
-            | '\u{3011}' // 】
-            | '\u{3015}' // 〕
-            | '\u{3017}' // 〗
-            | '\u{3019}' // 〙
-            | '\u{301b}' // 〛
-            | '\u{27e9}' // ⟩
-            | '\u{27eb}' // ⟫
-            | '\u{00bb}' // »
-            | '\u{203a}' // ›
-            | '\u{201d}' // ”
-    )
-}
-
-fn is_path_terminator_char(character: char) -> bool {
-    character.is_whitespace() || is_closing_delimiter(character)
-}
-
-/// End of the unquoted token starting at `start` (a byte offset on a character boundary).
-fn token_end(text: &str, start: usize) -> usize {
-    text[start..]
-        .char_indices()
-        .find(|(_, character)| is_path_terminator_char(*character))
-        .map_or(text.len(), |(offset, _)| start + offset)
-}
-
-/// Whether a candidate at byte offset `start` opens a token rather than continuing one. The
-/// decision is per *character*: the byte before a candidate is the last byte of a multi-byte
-/// character in every CJK-adjacent line, so a byte test would reject `（D:\a.png）` and
-/// `路径：D:\a.png` on the strength of a UTF-8 continuation byte alone.
-fn candidate_start_boundary(text: &str, start: usize) -> bool {
-    start == 0
-        || text[..start]
-            .chars()
-            .next_back()
-            .is_none_or(|character| !is_path_tail_char(character))
-}
-
-/// Peek-only lexical scan for `file://` URIs that name an admissible local image.
+/// The `file://` URIs of one line that name an admissible local image, spelled as URIs.
 ///
 /// Kept apart from `detect_local_image_path_candidates` because the two shapes earn different
 /// presentations: a printed native path grows an inline band on the primary screen, a URI never
@@ -1037,32 +751,18 @@ fn candidate_start_boundary(text: &str, start: usize) -> bool {
 /// nothing else. `path` on the returned candidate is therefore the **resolved** local path, while
 /// the byte span covers the URI text that must be hovered to reach it.
 pub fn detect_local_image_uri_candidates(text: &str) -> Vec<LocalImagePathCandidate> {
-    const SCHEME: &str = "file://";
-    let bytes = text.as_bytes();
-    let mut candidates = Vec::new();
-    let mut cursor = 0usize;
-    while cursor < bytes.len() {
-        // The scheme is ASCII, so a byte match proves `cursor` is a character boundary before
-        // `candidate_start_boundary` decodes the character preceding it.
-        let scheme_matches = bytes
-            .get(cursor..cursor + SCHEME.len())
-            .is_some_and(|head| head.eq_ignore_ascii_case(SCHEME.as_bytes()));
-        if !scheme_matches || !candidate_start_boundary(text, cursor) {
-            cursor += 1;
-            continue;
-        }
-        let end = uri_token_end(text, cursor + SCHEME.len());
-        if let Some(path) = file_uri_to_local_image_path(&text[cursor..end]) {
-            candidates.push(LocalImagePathCandidate {
+    bt_transcript::paths::detect_file_uri_candidates(text)
+        .into_iter()
+        .filter_map(|candidate| {
+            let path = file_uri_to_local_image_path(candidate.text(text))?;
+            Some(LocalImagePathCandidate {
                 path: path.to_string_lossy().into_owned(),
-                byte_start: cursor,
-                byte_end: end,
+                byte_start: candidate.byte_start,
+                byte_end: candidate.byte_end,
                 shape: ImageReferenceShape::Uri,
-            });
-        }
-        cursor = end.max(cursor + 1);
-    }
-    candidates
+            })
+        })
+        .collect()
 }
 
 /// Every image one line of text offers the hover peek: everything inline admission reads
@@ -1084,58 +784,6 @@ pub fn detect_peek_image_candidates(
     candidates
 }
 
-/// End of a URI token that starts at `scheme_end`. A URI is ASCII by construction (RFC 3986 —
-/// anything else must be percent-encoded), so any character outside the allowed set ends it,
-/// which is what lets a full-width `）` close a URI that ASCII `)` cannot. Trailing sentence
-/// punctuation is then released, matching `bt_transcript::detect_http_urls`, whose prose-boundary
-/// problem is the same one.
-fn uri_token_end(text: &str, scheme_end: usize) -> usize {
-    let bytes = text.as_bytes();
-    let mut end = scheme_end;
-    while end < bytes.len() && is_uri_byte(bytes[end]) {
-        end += 1;
-    }
-    while end > scheme_end
-        && matches!(
-            bytes[end - 1],
-            b')' | b'.' | b',' | b';' | b':' | b'!' | b'?'
-        )
-    {
-        end -= 1;
-    }
-    end
-}
-
-/// RFC 3986 unreserved + reserved + the percent sign.
-fn is_uri_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric()
-        || matches!(
-            byte,
-            b'-' | b'.'
-                | b'_'
-                | b'~'
-                | b'%'
-                | b':'
-                | b'/'
-                | b'?'
-                | b'#'
-                | b'['
-                | b']'
-                | b'@'
-                | b'!'
-                | b'$'
-                | b'&'
-                | b'\''
-                | b'('
-                | b')'
-                | b'*'
-                | b'+'
-                | b','
-                | b';'
-                | b'='
-        )
-}
-
 /// Resolve a `file://` URI to the local image path it names, or `None` when it names something
 /// this terminal will not preview.
 ///
@@ -1147,7 +795,7 @@ fn is_uri_byte(byte: u8) -> bool {
 /// or `localhost` and nothing else — this machine's hostname is deliberately not consulted here.
 /// A trailing slash names a directory, which is never an image.
 pub fn file_uri_to_local_image_path(uri: &str) -> Option<PathBuf> {
-    decode_file_uri(uri, None, TrailingSlash::Reject, Rooting::DriveOnly)
+    bt_transcript::paths::file_uri_to_local_reference(uri)
         .filter(|path| has_admissible_image_extension(path))
 }
 
@@ -1184,89 +832,12 @@ pub fn file_uri_to_local_image_path(uri: &str) -> Option<PathBuf> {
 /// terminal cannot vouch for (`docs/shell-integration.md` §34-35) rather than a new exception. The
 /// image peek keeps the strict reading too — see [`file_uri_to_local_image_path`].
 pub fn file_uri_to_local_path(uri: &str, local_host: Option<&str>) -> Option<PathBuf> {
-    decode_file_uri(
+    bt_transcript::paths::decode_file_uri(
         uri,
         local_host,
-        TrailingSlash::Directory,
-        Rooting::DriveOrPosixRoot,
+        bt_transcript::paths::TrailingSlash::Directory,
+        bt_transcript::paths::Rooting::DriveOrPosixRoot,
     )
-}
-
-/// Whether a trailing `/` is a directory's own slash or an empty final name.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TrailingSlash {
-    Directory,
-    Reject,
-}
-
-/// Which spellings of "absolute" a decoded URI is allowed to name.
-///
-/// Two, because the two callers are asking about two different things. A file URI printed into the
-/// flow is a **reference this terminal may open**, and opening happens through Windows, so it has
-/// to be drive-rooted or it is nothing. An OSC 7 report is a **statement about where the shell that
-/// sent it is standing**, and that shell may not be a Windows process at all — the same window can
-/// hold a `pwsh` in `D:\src` and a WSL `bash` in `/home/weiyi/src`, and only one of those two
-/// sentences can be spelled with a drive letter.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Rooting {
-    /// `D:\…` and nothing else.
-    DriveOnly,
-    /// `D:\…`, or a POSIX absolute path (`/home/weiyi`, `/mnt/d/src`).
-    DriveOrPosixRoot,
-}
-
-fn decode_file_uri(
-    uri: &str,
-    local_host: Option<&str>,
-    trailing_slash: TrailingSlash,
-    rooting: Rooting,
-) -> Option<PathBuf> {
-    let rest = uri
-        .get(..7)
-        .filter(|scheme| scheme.eq_ignore_ascii_case("file://"))
-        .map(|scheme| &uri[scheme.len()..])?;
-    let (authority, path) = rest.split_at(rest.find('/')?);
-    let authority_is_this_host = authority.is_empty()
-        || authority.eq_ignore_ascii_case("localhost")
-        || local_host.is_some_and(|host| authority.eq_ignore_ascii_case(host));
-    if !authority_is_this_host {
-        return None;
-    }
-    // Query and fragment are not part of the path; a filename containing `?` or `#` must have
-    // percent-encoded them.
-    let path = &path[..path.find(['?', '#']).unwrap_or(path.len())];
-    let mut segments = path.split('/').skip(1).collect::<Vec<_>>();
-    if trailing_slash == TrailingSlash::Directory
-        && segments.len() > 1
-        && segments.last() == Some(&"")
-    {
-        segments.pop();
-    }
-    let mut decoded_segments = Vec::with_capacity(segments.len());
-    for segment in segments {
-        let decoded = percent_decode(segment)?;
-        if decoded.is_empty() {
-            return None;
-        }
-        decoded_segments.push(decoded);
-    }
-    let mut native = decoded_segments.join("\\");
-    // `file:///D:/` names the drive root: the separator that makes it a root belongs to the path.
-    if native.len() == 2 && native.ends_with(':') {
-        native.push('\\');
-    }
-    if is_local_absolute_path(Path::new(&native)) {
-        return Some(PathBuf::from(native));
-    }
-    // Not a drive letter. The same segments spell a POSIX absolute path, and whether that is a path
-    // at all is the caller's question — see [`Rooting`]. The separator is the one the shell that
-    // sent it uses: `\mnt\d\src` would name the same place to `std::path`, and would be read back
-    // by a person as a Windows path that has lost its drive.
-    if rooting == Rooting::DriveOnly {
-        return None;
-    }
-    let posix = format!("/{}", decoded_segments.join("/"));
-    (!posix.contains('\0')).then(|| PathBuf::from(posix))
 }
 
 /// This machine's name — the one authority a `file://` URI may carry besides none and `localhost`.
@@ -1282,28 +853,6 @@ pub fn local_host_name() -> Option<&'static str> {
                 .filter(|name| !name.is_empty())
         })
         .as_deref()
-}
-
-/// Percent-decode one URI segment. `None` when an escape is malformed, the result is not UTF-8,
-/// or it carries a control character — each of which means the text was never a path we may read.
-fn percent_decode(segment: &str) -> Option<String> {
-    let bytes = segment.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0usize;
-    while index < bytes.len() {
-        if bytes[index] == b'%' {
-            let hex = segment
-                .get(index + 1..index + 3)
-                .filter(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit()))?;
-            decoded.push(u8::from_str_radix(hex, 16).ok()?);
-            index += 3;
-        } else {
-            decoded.push(bytes[index]);
-            index += 1;
-        }
-    }
-    let decoded = String::from_utf8(decoded).ok()?;
-    (!decoded.chars().any(char::is_control)).then_some(decoded)
 }
 
 #[derive(Debug, Eq, PartialEq)]
