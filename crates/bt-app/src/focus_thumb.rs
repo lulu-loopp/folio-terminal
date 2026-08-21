@@ -140,6 +140,11 @@ enum Damage {
         revision: u64,
         columns: usize,
         rows: usize,
+        /// **Where the window is aimed**, in rows above the tail — see
+        /// [`SeatSource::Terminal`]. A fourth thing that changes the strings on
+        /// its own: nothing behind the seat has to move for a reader who has
+        /// just turned the wheel to be looking at different rows.
+        skip: usize,
     },
     /// A files column: the cache's write counter, and the state that decides
     /// **which page it is on** and which of that page's rows are visible.
@@ -209,7 +214,26 @@ struct Entry {
 /// happens only on the far side of the gates. Passing the rows in already
 /// gathered would move the cost above the budget, where no gate can refuse it.
 pub enum SeatSource<'a> {
-    Terminal(&'a DualPlaneSession),
+    /// A terminal seat, and **where down its screen the card's window is
+    /// aimed** (user ruling 2026-08-21, §7.1.6b′ 「卡片窗口瞄准」).
+    ///
+    /// `skip` is a count of rows *above the tail*: `0` is the tail itself, which
+    /// is what every card showed before the ruling and what every seat still
+    /// opens at. Anything above zero lifts the window that many rows off the
+    /// bottom of the screen, which is the whole of the feature: a program with
+    /// fixed furniture along its floor — an agent's status block, `vim`'s status
+    /// line, `lazygit`'s footer — puts its newest real output a *constant*
+    /// distance above that floor, so one number aimed once keeps pointing at it.
+    ///
+    /// **It recognises no program**, and that is the ruling rather than an
+    /// omission: a build that detected status bars would be a build that has to
+    /// be taught each new one, would be wrong about the ones it had not met, and
+    /// would move a reader's card without being asked. A number the reader sets
+    /// with the wheel is right for whatever is actually running.
+    Terminal {
+        session: &'a DualPlaneSession,
+        skip: usize,
+    },
     Files {
         state: &'a FilesLeafState,
         cache: &'a DirCache,
@@ -251,10 +275,7 @@ pub enum SeatSource<'a> {
     /// to defer reading. Both are short and there are never many preview seats on
     /// screen at once, which is what makes it cheap enough to be the honest
     /// shape.
-    Face {
-        name: String,
-        kind: String,
-    },
+    Face { name: String, kind: String },
 }
 
 /// One seat of one visible card, and how wide its own rectangle is in characters.
@@ -391,10 +412,11 @@ impl SeatDemand<'_> {
     /// grid, which is the property that makes gate 3 worth having at all.
     fn damage(&self) -> Damage {
         match &self.source {
-            SeatSource::Terminal(session) => Damage::Grid {
+            SeatSource::Terminal { session, skip } => Damage::Grid {
                 revision: session.screen_revision(),
                 columns: self.columns,
                 rows: self.rows,
+                skip: *skip,
             },
             SeatSource::Files { state, cache } => Damage::Files {
                 revision: cache.revision(),
@@ -419,8 +441,9 @@ impl SeatDemand<'_> {
     /// gates.
     fn project(&self) -> MiniSeatContent {
         match &self.source {
-            SeatSource::Terminal(session) => {
-                MiniSeatContent::Transcript(transcript_tail(session, self.columns, self.rows))
+            SeatSource::Terminal { session, skip } => {
+                let (lines, more_below) = transcript_tail(session, self.columns, self.rows, *skip);
+                MiniSeatContent::Transcript { lines, more_below }
             }
             SeatSource::Document { buffer, mono } => MiniSeatContent::Document {
                 lines: document_head(buffer, self.columns, self.rows),
@@ -487,7 +510,7 @@ impl SeatSource<'_> {
     #[must_use]
     pub fn metrics(&self) -> MiniMetrics {
         match self {
-            Self::Terminal(_) | Self::Document { mono: true, .. } => MiniMetrics::TERM,
+            Self::Terminal { .. } | Self::Document { mono: true, .. } => MiniMetrics::TERM,
             Self::Files { .. } | Self::Document { mono: false, .. } | Self::Face { .. } => {
                 MiniMetrics::FACE
             }
@@ -580,12 +603,18 @@ pub fn mini_columns(rect: [f32; 4], advance: f32, scale: f32) -> usize {
 /// moved, so a session with nothing happening in it does not walk at all — and a
 /// session busy enough to walk far is, by the time it is, a session whose screen
 /// has filled and whose walk is one row long.
-fn transcript_tail(session: &DualPlaneSession, columns: usize, rows: usize) -> Vec<String> {
+fn transcript_tail(
+    session: &DualPlaneSession,
+    columns: usize,
+    rows: usize,
+    skip: usize,
+) -> (Vec<String>, bool) {
     if rows == 0 {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     let (_, grid_rows) = session.live_dimensions();
-    let mut tail: Vec<String> = Vec::with_capacity(rows);
+    let wanted = rows.saturating_add(skip);
+    let mut climb: Vec<String> = Vec::with_capacity(wanted);
     for row in (0..grid_rows.get()).rev() {
         let Some(captured) = session.live_row(row) else {
             continue;
@@ -603,16 +632,25 @@ fn transcript_tail(session: &DualPlaneSession, columns: usize, rows: usize) -> V
         let text = text.trim_end();
         // Still climbing past the blank floor: nothing has been kept yet, so an
         // empty row is not a blank line inside the tail, it is the floor.
-        if text.is_empty() && tail.is_empty() {
+        if text.is_empty() && climb.is_empty() {
             continue;
         }
-        tail.push(cut_to(text, columns));
-        if tail.len() == rows {
+        climb.push(cut_to(text, columns));
+        if climb.len() == wanted {
             break;
         }
     }
-    tail.reverse();
-    tail
+    // **Clamped to what is there**, which is the whole of "a window driven past
+    // the top stops at the top". A seat holding fewer rows than the reader asked
+    // to skip would otherwise hand back an empty picture, and an empty card is
+    // the one answer a reader turning a wheel cannot tell from a broken one.
+    // Note that this is also what keeps the two rulings of 2026-08-21 from
+    // meeting: a screen with less on it than the seat holds clamps `skip` to
+    // zero, so the top-aligned short tail is exactly the `skip == 0` case and
+    // nothing here can produce a short list with rows hidden under it.
+    let aimed = skip.min(climb.len().saturating_sub(rows));
+    let window: Vec<String> = climb.into_iter().skip(aimed).take(rows).rev().collect();
+    (window, aimed > 0)
 }
 
 /// `text`, cut to `columns` **drawn columns** — leading whitespace and all.
@@ -1165,7 +1203,10 @@ mod tests {
                 id: seat(1),
                 columns: 40,
                 rows: 6,
-                source: SeatSource::Terminal(shell),
+                source: SeatSource::Terminal {
+                    session: shell,
+                    skip: 0,
+                },
             }
         }
         thumbs.project(tab(1), &[demand(&shell)], start);
@@ -1199,7 +1240,10 @@ mod tests {
             id: seat(1),
             columns,
             rows: 6,
-            source: SeatSource::Terminal(&shell),
+            source: SeatSource::Terminal {
+                session: &shell,
+                skip: 0,
+            },
         };
         thumbs.project(tab(1), &[demand(40)], start);
         thumbs.project(tab(1), &[demand(40)], start + MIN_INTERVAL);
@@ -1218,7 +1262,7 @@ mod tests {
             .feed(b"one\r\ntwo\r\nthree\r\n")
             .expect("a shell takes its own output");
         assert_eq!(
-            transcript_tail(&shell, 40, 6),
+            transcript_tail(&shell, 40, 6, 0).0,
             vec!["one".to_owned(), "two".to_owned(), "three".to_owned()]
         );
     }
@@ -1234,7 +1278,7 @@ mod tests {
                 .expect("a shell takes its own output");
         }
         assert_eq!(
-            transcript_tail(&shell, 40, 6),
+            transcript_tail(&shell, 40, 6, 0).0,
             (4..=9)
                 .map(|line| format!("line {line}"))
                 .collect::<Vec<_>>()
@@ -1249,7 +1293,10 @@ mod tests {
         shell
             .feed(b"abcdefghijklmnopqrstuvwxyz\r\n")
             .expect("a shell takes its own output");
-        assert_eq!(transcript_tail(&shell, 8, 6), vec!["abcdefgh".to_owned()]);
+        assert_eq!(
+            transcript_tail(&shell, 8, 6, 0).0,
+            vec!["abcdefgh".to_owned()]
+        );
     }
 
     /// A cut that landed inside a character would not be a string at all — and,
@@ -1304,7 +1351,7 @@ mod tests {
             .feed(b"    indented\r\n")
             .expect("a shell takes its own output");
         assert_eq!(
-            transcript_tail(&shell, 40, 6),
+            transcript_tail(&shell, 40, 6, 0).0,
             vec!["    indented".to_owned()]
         );
     }
@@ -1325,7 +1372,7 @@ mod tests {
             .feed(b"one\r\n\r\ntwo\r\n")
             .expect("a shell takes its own output");
         assert_eq!(
-            transcript_tail(&shell, 40, 6),
+            transcript_tail(&shell, 40, 6, 0).0,
             vec!["one".to_owned(), String::new(), "two".to_owned()]
         );
     }
@@ -1351,7 +1398,7 @@ mod tests {
             let pad = (bt_render::FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX * scale).round()
                 + (bt_render::FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX * scale).round();
             // A lone pane's seat: the whole card body less the body's own inset.
-            let height = (bt_render::FOCUS_MINI_HEIGHT_LOGICAL_PX * scale).round()
+            let height = (bt_render::DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX * scale).round()
                 - 2.0 * (bt_render::FOCUS_MINI_PADDING_LOGICAL_PX * scale).round();
             let rect = [0.0, 0.0, 263.0 * scale, height];
             let held = mini_rows(rect, line, scale);
@@ -1377,12 +1424,172 @@ mod tests {
                 .feed(format!("line {line}\r\n").as_bytes())
                 .expect("a shell takes its own output");
         }
-        assert_eq!(transcript_tail(&shell, 60, 13).len(), 13);
+        assert_eq!(transcript_tail(&shell, 60, 13, 0).0.len(), 13);
         assert_eq!(
-            transcript_tail(&shell, 60, 13).first().map(String::as_str),
+            transcript_tail(&shell, 60, 13, 0)
+                .0
+                .first()
+                .map(String::as_str),
             Some("line 18"),
             "and they are the LAST thirteen, in reading order"
         );
+    }
+
+    /// A shell with `lines` numbered lines printed onto a forty-row screen, which
+    /// is what an aimed window is measured against: enough behind the tail for
+    /// the window to be lifted off it, and a real floor to run out of.
+    fn talking_shell(lines: u32) -> DualPlaneSession {
+        let mut shell = DualPlaneSession::new(
+            NonZeroU32::new(80).expect("80 is not zero"),
+            NonZeroU32::new(40).expect("40 is not zero"),
+        );
+        for line in 1..=lines {
+            shell
+                .feed(format!("line {line}\r\n").as_bytes())
+                .expect("a shell takes its own output");
+        }
+        shell
+    }
+
+    /// **An aimed window is the tail lifted by exactly the rows it was given**
+    /// (user ruling, 2026-08-21 — §7.1.6b′ 「卡片窗口瞄准」).
+    ///
+    /// The case that produced the ruling, in the smallest form that shows it: a
+    /// program whose bottom thirteen rows are furniture puts its newest real
+    /// output thirteen rows above the floor, so a window lifted thirteen rows is
+    /// pointed at it and stays pointed at it as the program goes on printing.
+    ///
+    /// **Zero is the tail and is the same picture it always was**, which is what
+    /// makes this a window and not a rewrite: the first half of the assertion is
+    /// the shipped behaviour, unchanged.
+    ///
+    /// Red gate: ignore `skip` in `transcript_tail` and the aimed half comes back
+    /// showing the last thirteen lines — the furniture — while the unaimed half
+    /// goes on passing.
+    #[test]
+    fn an_aimed_window_is_the_tail_lifted_by_the_rows_it_was_given() {
+        let shell = talking_shell(40);
+
+        let (tail, more_below) = transcript_tail(&shell, 60, 13, 0);
+        assert_eq!(tail.first().map(String::as_str), Some("line 28"));
+        assert_eq!(tail.last().map(String::as_str), Some("line 40"));
+        assert!(
+            !more_below,
+            "a window on the tail has nothing under it, and says so"
+        );
+
+        let (aimed, more_below) = transcript_tail(&shell, 60, 13, 13);
+        assert_eq!(
+            aimed.first().map(String::as_str),
+            Some("line 15"),
+            "lifted thirteen rows, the window begins thirteen rows higher"
+        );
+        assert_eq!(
+            aimed.last().map(String::as_str),
+            Some("line 27"),
+            "and ends thirteen rows above where the tail ended"
+        );
+        assert_eq!(aimed.len(), 13, "the seat is as full as it ever was");
+        assert!(
+            more_below,
+            "with the thirteen rows it lifted off still under it"
+        );
+    }
+
+    /// A window driven past the top of what is on the screen **stops at the
+    /// top** rather than running off it (user ruling, 2026-08-21).
+    ///
+    /// An empty card is the one answer a reader turning a wheel cannot tell from
+    /// a broken one, so the aim is clamped to what there is and the picture goes
+    /// on being a picture.
+    ///
+    /// Red gate: drop the `min` in `transcript_tail` and this comes back empty.
+    #[test]
+    fn a_window_driven_past_the_top_stops_at_the_top() {
+        let shell = talking_shell(20);
+        let (window, more_below) = transcript_tail(&shell, 60, 13, 1_000);
+        assert_eq!(window.len(), 13, "the seat is still full");
+        assert_eq!(
+            window.first().map(String::as_str),
+            Some("line 1"),
+            "and what it holds is the top of what the screen has on it"
+        );
+        assert!(
+            more_below,
+            "with the seven it is not showing still underneath"
+        );
+    }
+
+    /// **The two rulings of 2026-08-21 cannot meet** — aiming a seat whose screen
+    /// holds less than the seat does changes nothing, so the top-aligned short
+    /// tail is always the unaimed case.
+    ///
+    /// Stated here rather than left to follow from the clamp because it is the
+    /// question a reader of either ruling asks about the other: what does a
+    /// two-line shell do when somebody turns the wheel over it? It stays put,
+    /// and it reports nothing hidden — so the painter draws two rows at the top
+    /// of the cell and no seam.
+    #[test]
+    fn aiming_a_screen_with_less_on_it_than_the_seat_holds_changes_nothing() {
+        let shell = talking_shell(2);
+        let resting = transcript_tail(&shell, 60, 13, 0);
+        let aimed = transcript_tail(&shell, 60, 13, 5);
+        assert_eq!(
+            aimed.0,
+            vec!["line 1".to_owned(), "line 2".to_owned()],
+            "both lines, in reading order"
+        );
+        assert_eq!(aimed, resting, "and aiming it did not move a thing");
+        assert!(!aimed.1, "there is nothing below to draw a seam for");
+    }
+
+    /// **The aim is in the damage key**, so turning the wheel re-projects the
+    /// seat it was turned over (user ruling, 2026-08-21).
+    ///
+    /// Gate 3 is what makes an idle window free, and it refuses on "nothing
+    /// behind this seat has moved" — which is true of a seat whose reader has
+    /// just aimed it somewhere else. Without the aim in the key the card would
+    /// go on showing the furniture until the shell happened to print.
+    ///
+    /// Red gate: take `skip` out of `Damage::Grid` and the second projection is
+    /// skipped as unchanged.
+    #[test]
+    fn aiming_a_seat_re_projects_it() {
+        let shell = talking_shell(40);
+        let mut thumbs = FocusThumbnails::default();
+        let now = Instant::now();
+        let demand = |skip| SeatDemand {
+            id: SeatId(1),
+            columns: 60,
+            rows: 13,
+            source: SeatSource::Terminal {
+                session: &shell,
+                skip,
+            },
+        };
+        thumbs.project(TabId(1), &[demand(0)], now);
+        assert_eq!(thumbs.stats().projections, 1);
+        thumbs.project(TabId(1), &[demand(0)], now + MIN_INTERVAL);
+        assert_eq!(
+            thumbs.stats().skipped_unchanged,
+            1,
+            "the same aim over the same screen is the same picture"
+        );
+        thumbs.project(TabId(1), &[demand(13)], now + MIN_INTERVAL * 2);
+        assert_eq!(
+            thumbs.stats().projections,
+            2,
+            "and a new aim is new work, however still the shell is"
+        );
+        assert!(matches!(
+            thumbs
+                .seats(TabId(1))
+                .and_then(|seats| seats.get(&SeatId(1))),
+            Some(MiniSeatContent::Transcript {
+                more_below: true,
+                ..
+            })
+        ));
     }
 
     /// A seat with no room for a whole row asks for none, rather than for one it
@@ -1531,7 +1738,10 @@ mod tests {
             id: seat(1),
             columns: 40,
             rows,
-            source: SeatSource::Terminal(&shell),
+            source: SeatSource::Terminal {
+                session: &shell,
+                skip: 0,
+            },
         };
         thumbs.project(tab(1), &[demand(6)], start);
         thumbs.project(tab(1), &[demand(6)], start + MIN_INTERVAL);
@@ -1569,12 +1779,20 @@ mod tests {
     /// ruling more than doubled, and therefore the one the budget has to be
     /// measured against again.
     ///
-    /// Thirteen: what a **lone** pane's seat holds in a 160px card, spent on
-    /// *both* seats of all ten tabs. That is deliberately worse than the shape
-    /// it stands for — two seats sharing one body each hold about six — so the
-    /// ceiling below is being defended against more work than the mode can
-    /// actually be asked for.
-    const BUDGET_ROWS: usize = 13;
+    /// **Twenty-seven**: what a lone pane's seat holds at the **tallest rung the
+    /// `Focus card height` row offers** (320px, user ruling 2026-08-21), spent
+    /// on *both* seats of all ten tabs. That is deliberately worse than the
+    /// shape it stands for twice over — two seats sharing one body hold about
+    /// half each, and a reader who never opens the row is on 160, where a lone
+    /// seat holds twelve — so the ceiling below is defended against more than
+    /// four times the work the default can be asked for.
+    ///
+    /// It was thirteen while 160 was the only height, and the number the doc
+    /// beside it claimed rather than the number the arithmetic gives: a 160px
+    /// card's lone seat holds **twelve** rows at the default face, which
+    /// `seats::tests::a_taller_card_holds_more_rows_and_answers_over_all_of_itself`
+    /// now asserts against the geometry instead of against a memory of it.
+    const BUDGET_ROWS: usize = 27;
     /// **How many columns each of those seats is cut to** — the horizontal twin
     /// of [`BUDGET_ROWS`], and the number the 2026-08-20 re-strike of the
     /// column's width moved.
@@ -1649,7 +1867,10 @@ mod tests {
                         id: SeatId(seat_index as u64),
                         columns: BUDGET_COLUMNS,
                         rows: BUDGET_ROWS,
-                        source: SeatSource::Terminal(shell),
+                        source: SeatSource::Terminal {
+                            session: shell,
+                            skip: 0,
+                        },
                     })
                     .collect();
                 thumbs.project(TabId(index as u64), &demands, now);
@@ -1693,7 +1914,10 @@ mod tests {
                         id: SeatId(seat_index as u64),
                         columns: BUDGET_COLUMNS,
                         rows: BUDGET_ROWS,
-                        source: SeatSource::Terminal(shell),
+                        source: SeatSource::Terminal {
+                            session: shell,
+                            skip: 0,
+                        },
                     })
                     .collect();
                 thumbs.project(TabId(index as u64), &demands, now);

@@ -554,6 +554,12 @@ impl ChromePalette {
             focus_mini_text: ink2(termbg),
             focus_mini_edge: border_soft(termbg),
             focus_mini_edge_focused: ink3(termbg),
+            // The same ink the rows are set in, at the seam's own opacity, so a
+            // Solarized card's seam is Solarized too. `ink_over` twice rather
+            // than a single blended alpha because the first call is what makes
+            // `focus_mini_text` the colour it is, and the seam is a wash of
+            // *that* colour and not of the source.
+            focus_mini_seam: ink_over(termbg, ink2(termbg), crate::theme::FOCUS_MINI_SEAM_ALPHA),
         }
     }
 }

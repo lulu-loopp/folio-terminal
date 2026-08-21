@@ -109,6 +109,21 @@ pub struct TermLeafV1 {
     pub profile_id: String,
     pub cwd: String,
     pub manual_name: Option<String>,
+    /// **Where this pane's focus card aims its window**, in rows above the tail
+    /// (`docs/DESIGN.md` §7.1.6b′, user ruling 2026-08-21). `0` is the tail.
+    ///
+    /// Durable on [`FilesLeafV1::view`]'s own footing and for its reason: this
+    /// is a shape of the *pane* rather than a piece of its content, so red line
+    /// L1 lets it in, and a reader who aims a card past an agent's status block
+    /// every morning is being told the product did not notice.
+    ///
+    /// Defaulted, so every document written before v10 still reads. It is
+    /// **not** skipped when zero, unlike `remotes_open`: the v9 → v10 step
+    /// writes the key into every `term` leaf, and a writer that then dropped it
+    /// again would make the migration's own output differ from what the next
+    /// save produces.
+    #[serde(default)]
+    pub card_skip: u32,
 }
 
 /// `preview { "kind": "preview", "pinned": bool }` — see [`LeafNodeV1::Preview`]
@@ -221,6 +236,7 @@ mod tests {
             profile_id: "pwsh.exe".to_string(),
             cwd: "C:\\Users\\test".to_string(),
             manual_name: None,
+            card_skip: 0,
         })
     }
 

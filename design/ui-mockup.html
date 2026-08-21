@@ -2946,8 +2946,15 @@
      160 in the same breath: the type size is a floor (7.5px is as small as a
      line can be read) and the width is a constraint (a card is 203 wide, about
      45 columns), so the only knob left that buys legibility is height. */
+  /* THE HEIGHT IS THE READER'S (user ruling 2026-08-21): `--fcard-body` is what
+     `Appearance ▸ Focus card height` writes, and 160px is the fallback because
+     160 is what every card was before the row existed. Everything that follows
+     the body — the card's own height, the cells inside it, where the next card
+     starts — falls out of this one declaration, which is the same property the
+     native side has: `focus_rail_geometry` solves the column out of one number
+     and every box downstream is derived from what it hands back. */
   .fc-tab-mini {
-    height: 160px; padding: 5px; display: flex;
+    height: var(--fcard-body, 160px); padding: 5px; display: flex;
     background: var(--termbg); overflow: hidden;
   }
   .fc-tab-mini > .mini-split, .fc-tab-mini > .fc-cell { flex: 1; min-width: 0; min-height: 0; }
@@ -2959,13 +2966,45 @@
   /* which seat the tab is standing in, carried in the picture the same neutral
      way `.mini-leaf.focused` carries it in the hover schematic */
   .fc-cell.focused { border-color: var(--ink3); }
+  /* A SEAT'S ROWS START AT ITS TOP (user ruling 2026-08-21), which OVERTURNS
+     `.fc-mini { justify-content: flex-end }` for the seats inside a tab card.
+     The 2026-08-20 shape stacked a tail up from the seat's floor so the newest
+     line stood in the same place on every card; the ruling that replaced it is
+     the one this whole projection was rebuilt on — 「左侧就是一个还在跑的终端,
+     只是字小一点」. A shell that has printed two lines shows them at the TOP of
+     its pane with blank under them, so a picture of that shell showing them at
+     the bottom is a different arrangement rather than the same terminal made
+     small; and the files seat two rules down has been `flex-start` since it was
+     drawn, which made one card read its two kinds of rows from opposite ends.
+     What is projected is unchanged — still the last N rows of the screen — so a
+     seat whose tail fills it looks exactly as it did. The 72px MONITOR card
+     keeps `flex-end`: that is other furniture (§7.1.6b ③), not this column. */
   .fc-tab-mini .fc-mini {
-    height: auto; flex: 1; min-height: 0;
+    height: auto; flex: 1; min-height: 0; justify-content: flex-start;
     padding: 3px 4px 4px; font-size: 7.5px; line-height: 1.45;
   }
   .fc-tab-mini .fc-mini.fc-files { font-size: 8px; line-height: 1.5; }
   .fc-tab-mini .fc-mini .fcm-row { gap: 3px; }
   .fc-tab-mini .fc-mini .fico { width: 8px; height: 8px; }
+  /* THE ONE NEW MARK THIS COLUMN GREW (user ruling 2026-08-21). A seat whose
+     window is aimed ABOVE the tail wears a dotted seam along its floor, and that
+     is the whole of the notation: it says "there are rows below this edge that
+     the card is not drawing", and a seat looking at the tail wears nothing, so
+     the mark's presence IS the statement. No number, no caption - a card is a
+     picture and a caption on it would be the column starting to talk.
+     A DASH AND NOT A RULE, for `dashed_outline`'s reason: a solid line at this
+     weight reads as a boundary between two things, and this edge is the cell's
+     own floor with something behind it. `.45` is the rest ink the command rail's
+     ticks and the pin seam already wear - this house has one level for "an
+     instrument that is there and is not shouting".
+     Native: `ChromePalette::focus_mini_seam`, `seats::focus_mini_seam_quads`. */
+  .fc-cell.aimed { position: relative; }
+  .fc-cell.aimed::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1px;
+    background: repeating-linear-gradient(to right,
+      currentColor 0 3px, transparent 3px 6px);
+    color: var(--ink2); opacity: .45; pointer-events: none;
+  }
   /* A THUMBNAIL'S TAIL IS TEXT — the rich blocks that a monitor card scales in
      place are not drawn here, and the reason is the native model rather than a
      size judgement: `MiniSeatContent::Transcript` is the grid's own ROWS, and the
@@ -4833,6 +4872,40 @@
             <div class="combo-menu" role="listbox">
               <div class="combo-item" data-v="on" role="option"><span class="tick">✓</span>On</div>
               <div class="combo-item selected" data-v="off" role="option"><span class="tick">✓</span>Off</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- THE FIRST PREFERENCE *ABOUT* THE MODE (user ruling 2026-08-21), and
+             the row the note above predicted in as many words. It sits directly
+             under the row that turns the mode on and carries no condition beside
+             it: a height for a card is only a sentence once you know what a card
+             is, and this is the only place in the dialog where that sentence can
+             be read.
+             WHY IT EXISTS. 2026-08-20 set every card 160 tall, which is twelve
+             rows of the default face. Twelve rows is the right picture of a
+             shell and the wrong picture of a pane whose bottom ten rows are an
+             agent's status bar and whose next three are its input box: that card
+             shows the furniture and never the conversation. Which case a reader
+             has is not something the product can know, so it is a row rather
+             than a better constant.
+             THREE RUNGS AND NOT A SLIDER, and they are named in pixels because a
+             card is measured in pixels - the sentence carries the conversion to
+             rows, which is the one thing a picker of pixels cannot say. Past 320
+             a card stops being a card: four of them would not fit a tall column,
+             and a list whose rows are a third of the window is a list nobody can
+             scan. Native: `settings.json` v18 `focus_card_height`. -->
+        <div class="row">
+          <div class="text">
+            <div class="title">Focus card height</div>
+            <div class="desc" id="fcardheight-desc">How tall each card&rsquo;s picture of its tab stands. At the default face a lone pane&rsquo;s seat holds 12 rows at 160, 20 at 240 and 27 at 320</div>
+          </div>
+          <div class="combo" data-combo="fcardheight">
+            <button aria-haspopup="listbox"><span class="value">160 px</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="160" role="option"><span class="tick">✓</span>160 px</div>
+              <div class="combo-item" data-v="240" role="option"><span class="tick">✓</span>240 px</div>
+              <div class="combo-item" data-v="320" role="option"><span class="tick">✓</span>320 px</div>
             </div>
           </div>
         </div>
@@ -6733,6 +6806,16 @@
        closed in focus mode reopens in it. `settings.json` v14 → v15 carries one
        new key; the doors are accelerators, never a second source of truth. */
     focusMode: false,
+    /* HOW TALL A FOCUS CARD'S BODY STANDS (user ruling 2026-08-21) — the second
+       row `Appearance` carries about the mode, and the first preference ABOUT it
+       the 2026-08-19 note said would come. 2026-08-20 turned this knob once for
+       everybody at 160, which is twelve rows of the default face; twelve rows is
+       the right picture of a shell and the wrong picture of a pane whose bottom
+       ten rows are an agent's status bar and whose next three are its input box.
+       Three rungs, 160 / 240 / 320, buying 12 / 20 / 27 rows to a lone pane's
+       seat. Native: `settings.json` `focus_card_height`, carried on
+       `seats::RailState` beside the mode's own bit. */
+    fcardHeight: 160,
     defaultProfile: 0,       // index into PROFILES: new tabs, and startup
     blockMax: 0,             // px ceiling on a rendered block; 0 means none
     wrap: true,              // fold long lines (P2-9); rendered blocks follow it
@@ -6980,7 +7063,11 @@
       status: (l) => { const s = leafSession(l); return s ? stateIcon(s, s.busy, s.unread) : `<span class="ticon"></span>`; },
       title: (l) => { const s = leafSession(l); return s ? cwdLeaf(s) : "…"; },
       card: (l, w, cls) => { const s = session(l.uid); return s ? termCardHtml(s, cardAttrs(l, w), cls) : ""; },
-      mini: (l, rows) => { const s = session(l.uid); return s ? termCardMini(s, rows) : ""; },
+      /* the aim rides on the LEAF and not on the session, for the reason the
+         native side puts it on `LeafSession` beside the profile: it is a fact
+         about this pane, so it travels with a tear-out into a new tab rather
+         than being re-derived from whichever tab the pane landed in */
+      mini: (l, rows) => { const s = session(l.uid); return s ? termCardMini(s, rows, l.cardSkip || 0) : ""; },
     },
     files: {
       mark: folderMark,
@@ -9691,8 +9778,31 @@
   /* the prototype stand-in for the native read-only mini projection (§3.3): the
      transcript's tail, re-projected at card width. Real content on the terminal's
      own dark ground, rich blocks scaled down in place. */
-  const termCardMini = (s, rows) =>
-    (rows > 0 ? s.lines.slice(-rows) : []).map(l => `<div>${l}</div>`).join("");
+  /* WHERE DOWN THE SCREEN THIS CARD IS AIMED (user ruling 2026-08-21). `skip`
+     is a count of rows ABOVE the tail: 0 is the tail, which is what every card
+     showed before the ruling and where every seat starts. Anything above lifts
+     the window off the floor of the screen, which is what makes a card of a pane
+     with fixed furniture along its bottom - an agent's status block, `vim`'s
+     status line, `lazygit`'s footer - show the conversation instead of the
+     furniture. IT RECOGNISES NO PROGRAM: a build that detected status bars would
+     have to be taught each new one and would be wrong about the ones it had not
+     met. A number the reader aims is right for whatever is actually running.
+     CLAMPED TO WHAT IS THERE, which is "driven past the top, it stops at the
+     top": a window that ran off the end would hand back an empty card, and an
+     empty card is the one answer a reader turning a wheel cannot tell from a
+     broken one. The clamp is also what keeps this ruling and the top-alignment
+     one from meeting - a screen with less on it than the seat holds clamps the
+     aim to zero, so a short tail is always the `skip === 0` case.
+     Native: `focus_thumb::transcript_tail`, whose return carries the same two
+     answers - the rows, and whether any are hidden below them. */
+  const termCardWindow = (s, rows, skip) => {
+    if (rows <= 0) return { lines: [], moreBelow: false };
+    const aim = Math.min(Math.max(skip | 0, 0), Math.max(s.lines.length - rows, 0));
+    const end = s.lines.length - aim;
+    return { lines: s.lines.slice(Math.max(end - rows, 0), end), moreBelow: aim > 0 };
+  };
+  const termCardMini = (s, rows, skip) =>
+    termCardWindow(s, rows, skip).lines.map(l => `<div>${l}</div>`).join("");
 
   /* ── the column, painted ──
      Structure, selection and content are three passes with three costs. The
@@ -9872,6 +9982,13 @@
       if (!on) { if (body.innerHTML !== "") body.innerHTML = ""; return; }
       const c = contentOf(l);
       body.innerHTML = (c.thumb || c.mini)(l, miniRowsIn(body));
+      /* the seam is the CELL's and not the body's: it stands on the hairline's
+         own line, which is the cell's floor */
+      const cell = body.closest(".fc-cell");
+      if (cell) {
+        cell.classList.toggle("aimed", l.kind === "term" && !!leafSession(l)
+          && termCardWindow(leafSession(l), miniRowsIn(body), l.cardSkip || 0).moreBelow);
+      }
     });
   }
 
@@ -9958,6 +10075,7 @@
     if ($("settings-overlay").classList.contains("show")) lockSettingsHeight();
     $("win").classList.toggle("block-capped", state.blockMax > 0);
     $("win").style.setProperty("--blockmax", state.blockMax + "px");
+    $("win").style.setProperty("--fcard-body", state.fcardHeight + "px");
     $("win").dataset.wrap = state.wrap ? "on" : "off";
     const aw = activeTab();
     /* The app is shut: no tabs, nothing to draw. Never a state anyone SEES — the
@@ -12186,6 +12304,14 @@
           if (item.dataset.v === "on") enterFocus(); else exitFocus();
           combo.querySelector(".value").textContent = state.focusMode ? "On" : "Off";
         }
+        /* THE HEIGHT ROW (user ruling 2026-08-21). `blockmax`'s shape: a
+           quantity picker whose button prints the number with its unit, and a
+           `render()` because the column's geometry is downstream of it. */
+        if (kind === "fcardheight") {
+          state.fcardHeight = +item.dataset.v;
+          combo.querySelector(".value").textContent = state.fcardHeight + " px";
+          render();
+        }
         if (kind === "attnchip") {
           state.attnChip = item.dataset.v === "on";
           combo.querySelector(".value").textContent = state.attnChip ? "On" : "Off";
@@ -13711,6 +13837,34 @@
      `.fcard.grabbed` note in the stylesheet.
      Delegated, because the column rebuilds its DOM whenever its structure
      changes — per-element wiring would evaporate with it. */
+  /* A NOTCH OVER A CARD'S TERMINAL SEAT AIMS THAT SEAT (user ruling
+     2026-08-21). Asked before the column scrolls, which is the sentence this
+     product answers everywhere else: the innermost scroller under the pointer
+     takes the notch.
+     ONE NOTCH IS ONE ROW AND THERE IS NO MODIFIER. `Shift`+wheel already means
+     "the other axis" here (`scrollPreviewBody`), and a mini seat has no other
+     axis to be turned onto; giving it a magnitude would make one key mean two
+     things on two surfaces. Up lifts the window, down lowers it, and zero is a
+     floor rather than a wrap.
+     ONLY A TERMINAL SEAT ANSWERS: a files column, a preview and a face have no
+     tail to be lifted off - they are read from the top already - so a notch over
+     one of them falls through to the column, which is what the reader will read
+     it as.
+     THE CLICK TABLE DID NOT CHANGE: a mini seat is still not a click target, and
+     "clicking a card is clicking that tab" is about presses, not notches. */
+  $("rail").addEventListener("wheel", (e) => {
+    const body = e.target.closest(".fc-tab-mini [data-leaf]");
+    if (!body) return;
+    const card = body.closest(".fcard");
+    const w = card && tabById(+card.dataset.ws);
+    if (!w) return;
+    const l = findLeafIn(w, +body.dataset.leaf);
+    if (!l || l.kind !== "term") return;
+    e.preventDefault();
+    const step = e.deltaY < 0 ? 1 : -1;
+    l.cardSkip = Math.max((l.cardSkip || 0) + step, 0);
+    paintCards($("rail"));
+  }, { passive: false });
   $("rail").addEventListener("click", (e) => {
     const card = e.target.closest(".fcard");
     if (!card) return;

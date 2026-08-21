@@ -93,7 +93,20 @@ use serde::{Deserialize, Serialize};
 /// no build before this one could raise a desktop notification, so there is no behaviour to carry
 /// forward and `false` would freeze an absence rather than preserve a status quo. That is
 /// `migrate_settings_v2_to_v3`'s distinction, drawn a second time.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 17;
+///
+/// **v18 carries `focus_card_height`**, the Appearance page's own `Focus card height` row
+/// (`docs/DESIGN.md` §7.1.6b′), and it is the shape v13–v16 share: one key, its own day, and a
+/// migration that writes the answer every build before it gave — 160, the body a focus card has
+/// stood on since F2. The row exists because 2026-08-20 turned that number once for everybody and
+/// could not have known whose pane spends its bottom thirteen rows on an agent's status bar.
+///
+/// **The number itself is provisional until this branch merges.** A second line in flight on the
+/// same day is also adding a key, and the standing rule (`docs/HANDOFF-2026-08-21.md` §2) is that
+/// whichever merges second yields its version. This one is written as v18 rather than as the v19
+/// it was handed because the migration table is walked **one step at a time**
+/// (`crate::migrate::migrate_value`): a table with 17→18 missing makes every v17 file on disk
+/// unreadable, so a branch cannot reserve a number it does not also build the step for.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 18;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -211,6 +224,16 @@ pub const DEFAULT_BLOCK_MAX_HEIGHT: u32 = 0;
 /// sentence [`DEFAULT_BLOCK_MAX_HEIGHT`] is written under.
 pub const DEFAULT_SCROLLBACK_LINES: u32 = 100_000;
 
+/// How tall a focus card's body stands when the file has never named a number: **160** logical
+/// pixels.
+///
+/// Not a new answer. It is `bt_render`'s `DEFAULT_FOCUS_MINI_HEIGHT_LOGICAL_PX`, the height every
+/// card has had since F2 (2026-08-20), moved to the place a reader can now reach it from — so the
+/// row ships without changing what anybody's column looks like. The number is spelled here rather
+/// than imported for [`DEFAULT_SCROLLBACK_LINES`]'s reason: this crate is the file format and does
+/// not depend on the renderer, and the two are held together by the test that reads them both.
+pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
+
 /// `settings.json` v16 — docs/M2-persistence-schema-v1.md §2:
 /// ```json
 /// {
@@ -239,7 +262,8 @@ pub const DEFAULT_SCROLLBACK_LINES: u32 = 100_000;
 ///   "scrollback_lines": 25000 | 50000 | 100000 | 200000,
 ///   "focus_mode": true | false,
 ///   "minimum_contrast": "Off" | "Ratio2" | "Ratio3" | "Ratio45",
-///   "terminal_notifications": true | false
+///   "terminal_notifications": true | false,
+///   "focus_card_height": 160 | 240 | 320
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -591,6 +615,20 @@ pub struct SettingsV1 {
     /// of its users never learn they have.
     #[serde(default = "default_terminal_notifications")]
     pub terminal_notifications: bool,
+
+    /// **How tall a focus card's body stands**, in logical pixels — the Appearance page's
+    /// `Focus card height` row (`docs/DESIGN.md` §7.1.6b′, user ruling 2026-08-21).
+    ///
+    /// A quantity and not a name, so it is written as the number: 160, 240 or 320 are the rungs
+    /// this build's picker offers, and 160 is what every card was before the row existed.
+    ///
+    /// **Carried through unclamped**, on [`SettingsV1::block_max_height`]'s footing and for its
+    /// reason: every positive value is a real height, this crate has no picker to check against,
+    /// and a reader that snapped a file's number to the nearest rung would be reporting a value
+    /// the file does not contain. A height this build's list does not offer simply shows no tick
+    /// — see `settings::SettingsRow::selected_index`.
+    #[serde(default = "default_focus_card_height")]
+    pub focus_card_height: u32,
 }
 
 /// `serde`'s door for a v14 key that is missing from a file this build is reading.
@@ -610,6 +648,14 @@ fn default_scrollback_lines() -> u32 {
 /// to have given.
 fn default_terminal_notifications() -> bool {
     true
+}
+
+/// `serde`'s door for a v18 key missing from a file this build is reading.
+///
+/// [`default_scrollback_lines`]'s reason exactly: a `u32`'s own default is `0`, and a card with
+/// no body at all is not a height anybody chose — it is the field having been dropped.
+fn default_focus_card_height() -> u32 {
+    DEFAULT_FOCUS_CARD_HEIGHT
 }
 
 impl Default for SettingsV1 {
@@ -647,6 +693,9 @@ impl Default for SettingsV1 {
             minimum_contrast: MinimumContrastV1::Off,
 
             terminal_notifications: true,
+            // The body every card has stood on since F2 — see
+            // `DEFAULT_FOCUS_CARD_HEIGHT`.
+            focus_card_height: DEFAULT_FOCUS_CARD_HEIGHT,
         }
     }
 }

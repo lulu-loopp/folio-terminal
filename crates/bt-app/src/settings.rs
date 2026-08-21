@@ -835,6 +835,22 @@ pub const BLOCK_MAX_HEIGHT_OPTIONS: [u32; 4] = [0, 120, 240, 480];
 /// items is comparing two labelled quantities.
 const BLOCK_MAX_HEIGHT_LABELS: [&str; BLOCK_MAX_HEIGHT_OPTIONS.len()] =
     ["", "120 px", "240 px", "480 px"];
+/// **The `Focus card height` row's three answers**, in logical pixels of card body
+/// (user ruling 2026-08-21, `docs/DESIGN.md` §7.1.6b′).
+///
+/// Taken from `bt_render` rather than written again here, because they are the
+/// same numbers the column is solved with and a second list would be a second
+/// answer to "which heights exist". See
+/// [`bt_render::FOCUS_CARD_HEIGHT_OPTIONS_LOGICAL_PX`] for why there are three
+/// of them and why they stop at 320.
+pub const FOCUS_CARD_HEIGHT_OPTIONS: [u32; 3] = bt_render::FOCUS_CARD_HEIGHT_OPTIONS_LOGICAL_PX;
+/// The words those three wear.
+///
+/// [`SCROLLBACK_LABELS`]' shape and not [`BLOCK_MAX_HEIGHT_LABELS`]': three
+/// quantities and not a word among them, so none of the three goes through the
+/// i18n table — a pixel count is the same string in both columns.
+const FOCUS_CARD_HEIGHT_LABELS: [&str; FOCUS_CARD_HEIGHT_OPTIONS.len()] =
+    ["160 px", "240 px", "320 px"];
 /// **The `Scrollback` row's four answers**, in lines of past output kept per pane
 /// (P2-9 slice 2).
 ///
@@ -2024,6 +2040,27 @@ pub enum SettingsRow {
     /// as well, so a window closed with the card column up opens with it up. A
     /// layout somebody may live in has to be a place they can come back to.
     FocusMode,
+    /// **`Focus card height`** — how tall a card's body stands, in logical
+    /// pixels (user ruling 2026-08-21, §7.1.6b′).
+    ///
+    /// Directly under the row that turns the mode on, because it is the one
+    /// preference *about* the mode this build has and it is unreadable anywhere
+    /// else: a height for a card is only a sentence once you know what a card
+    /// is. The 2026-08-19 note on `FocusMode` predicted exactly this row —
+    /// "preferences ABOUT the mode … are candidates for later rows" — and this
+    /// is the first of them to be asked for.
+    ///
+    /// **It exists because one number could not answer for two panes.** The
+    /// 2026-08-20 ruling set every card 160 tall, which is twelve rows of the
+    /// default face, and twelve rows is the right picture of a shell and the
+    /// wrong picture of a pane whose bottom ten rows are an agent's status bar
+    /// and whose next three are its input box: that card shows the furniture and
+    /// never the conversation. Which case a reader has is not something the
+    /// product can know, so it is a row rather than a better constant.
+    ///
+    /// A quantity row like `Maximum height` and `Scrollback`, and its three
+    /// rungs come from `bt_render` — see [`FOCUS_CARD_HEIGHT_OPTIONS`].
+    FocusCardHeight,
     Sidebar,
     /// User ruling 2026-08-10. Last, because it is the only row of the second
     /// group; it used to sit above the conditional Tab layout/Sidebar pair to
@@ -2280,6 +2317,7 @@ impl SettingsRow {
             | Self::Cursor
             | Self::TabLayout
             | Self::FocusMode
+            | Self::FocusCardHeight
             | Self::Sidebar
             | Self::SplitDirection
             | Self::MinimumContrast
@@ -2374,6 +2412,7 @@ impl SettingsRow {
             Self::TabLayout => Text::RowTabLayout.text(),
             // Mock-up 4154.
             Self::FocusMode => Text::RowFocusMode.text(),
+            Self::FocusCardHeight => Text::RowFocusCardHeight.text(),
             // Mock-up 2374.
             Self::Sidebar => Text::RowSidebar.text(),
             Self::SplitDirection => Text::RowSplitDirection.text(),
@@ -2475,6 +2514,12 @@ impl SettingsRow {
             Self::TabLayout => Text::DescTabLayout.text(),
             // Mock-up 4155.
             Self::FocusMode => Text::DescFocusMode.text(),
+            // `DescBlockMaxHeight`'s constraint again: a `&'static str` that does
+            // not read its own value, so it says what the number buys rather
+            // than what this reader picked. The one fact a picker of pixels
+            // cannot carry is that pixels are what a *card* is measured in and
+            // rows are what a reader counts, so the sentence names the rows.
+            Self::FocusCardHeight => Text::DescFocusCardHeight.text(),
             // Mock-up 2375.
             Self::Sidebar => Text::DescSidebar.text(),
             // Says *which* splits, because the scope is the setting. A line
@@ -2637,6 +2682,7 @@ impl SettingsRow {
             | Self::Cursor
             | Self::TabLayout
             | Self::FocusMode
+            | Self::FocusCardHeight
             // **Out again** (user ruling 2026-08-18). The 2026-08-17 ruling
             // filed it under the disclosure and broke its adjacency to
             // `Tab layout` on the ground that the *condition* carries the
@@ -2762,6 +2808,7 @@ impl SettingsRow {
             Self::DarkScheme => scheme_labels(false).len(),
             Self::TabLayout => TAB_LAYOUT_OPTIONS.len(),
             Self::FocusMode => FORMULA_OPTIONS.len(),
+            Self::FocusCardHeight => FOCUS_CARD_HEIGHT_OPTIONS.len(),
             Self::Sidebar => SIDEBAR_OPTIONS.len(),
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS.len(),
             Self::MinimumContrast => MINIMUM_CONTRAST_OPTIONS.len(),
@@ -2845,6 +2892,9 @@ impl SettingsRow {
             // `On` / `Off`, in that order — the two-state picker every other
             // boolean row on the dialog is drawn from.
             Self::FocusMode => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
+            // Three quantities and not one word among them — see
+            // [`FOCUS_CARD_HEIGHT_LABELS`].
+            Self::FocusCardHeight => FOCUS_CARD_HEIGHT_LABELS.get(index).copied(),
             Self::Sidebar => SIDEBAR_OPTIONS.get(index).copied().map(sidebar_label),
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS
                 .get(index)
@@ -3124,6 +3174,14 @@ impl SettingsRow {
             Self::FocusMode => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.focus_mode),
+            // **`None` for a height this build's list does not offer**, which is
+            // [`Self::BlockMaxHeight`]'s ruling on the third numeric row:
+            // `bt_persist` deliberately does not clamp the key, every positive
+            // value of it is a real height, and a picker that ticked the nearest
+            // rung would be claiming the file says a number it does not.
+            Self::FocusCardHeight => FOCUS_CARD_HEIGHT_OPTIONS
+                .iter()
+                .position(|it| *it == values.focus_card_height),
             Self::Sidebar => SIDEBAR_OPTIONS.iter().position(|it| *it == values.sidebar),
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS
                 .iter()
@@ -3236,6 +3294,14 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
         // one appear underneath it, or the permanent one moves whenever the
         // conditional one does.
         SettingsRow::FocusMode,
+        // **Directly under the row that turns the mode on** (user ruling
+        // 2026-08-21), and unconditional beside it: a height for a card is only
+        // a sentence once you know what a card is, and this row is the only
+        // place in the dialog that sentence can be read. It is *not* behind the
+        // disclosure — the reader it exists for is one who has already looked at
+        // the column and found it showing the wrong thirteen rows, which is
+        // `PsReadLine`'s own measure for what does not belong under Advanced.
+        SettingsRow::FocusCardHeight,
     ];
     // **Directly under the row it depends on** (user ruling 2026-08-18, which
     // returns it here from the Advanced group 2026-08-17 had filed it in). It
@@ -3514,6 +3580,12 @@ pub struct SettingsValues {
     /// window the dialog is standing in. The file is what a *new* window opens
     /// as, and the two are kept in step by the one applier that writes both.
     pub focus_mode: bool,
+    /// **How tall a focus card's body stands**, in logical pixels — the file's
+    /// answer and not the window's, which is the opposite of the field above it
+    /// and for the same reason read the other way: there is one door to this
+    /// row, so what the picker ticks is what `settings.json` says, and every
+    /// window is wearing it already.
+    pub focus_card_height: u32,
     pub display_formulas: bool,
     pub inline_formulas: bool,
     /// Whether a proven markdown table in command output is drawn as a block.
@@ -3667,6 +3739,7 @@ impl SettingsValues {
             cursor: CursorStyle::Bar,
             tab_layout: TabLayoutMode::Horizontal,
             focus_mode: false,
+            focus_card_height: bt_persist::DEFAULT_FOCUS_CARD_HEIGHT,
             sidebar: RailMode::Expanded,
             display_formulas: true,
             inline_formulas: true,
@@ -6184,6 +6257,18 @@ pub fn block_max_height_requested(target: SettingsTarget) -> Option<u32> {
     match target {
         SettingsTarget::Choice(SettingsRow::BlockMaxHeight, index) => {
             BLOCK_MAX_HEIGHT_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// The "Focus card height" row's answer in logical pixels of card body, if this
+/// target is one of its items (user ruling 2026-08-21).
+#[must_use]
+pub fn focus_card_height_requested(target: SettingsTarget) -> Option<u32> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::FocusCardHeight, index) => {
+            FOCUS_CARD_HEIGHT_OPTIONS.get(index).copied()
         }
         _ => None,
     }
@@ -12318,10 +12403,15 @@ mod tests {
         // and it is what this now asserts: the conditional row may not be two
         // headings away or behind a disclosure from the row that switches it on.
         assert_eq!(
-            &railed[at.saturating_sub(2)..=at],
+            &railed[at.saturating_sub(3)..=at],
             &[
                 SettingsRow::TabLayout,
                 SettingsRow::FocusMode,
+                // Focus card height joined the run on 2026-08-21: it is the one
+                // preference *about* focus mode, so it stands directly under the
+                // row that turns the mode on — and the "what shape is this
+                // window" group grew by one without Sidebar leaving its foot.
+                SettingsRow::FocusCardHeight,
                 SettingsRow::Sidebar
             ],
             "and it stands in the run the row that conditions it opens"
@@ -12425,11 +12515,23 @@ mod tests {
                 "{absent:?} is drawn inside a group that is shut"
             );
         }
+        // **The heading itself is drawn — scrolled to, since 2026-08-21.** The
+        // everyday Appearance rows now fill the capped dialog on their own (the
+        // card-height row carried the page over 600), so the folded heading sits
+        // just below the fold: the way back is a scroll away rather than in view,
+        // which is exactly the case `DIALOG_MAX_HEIGHT_LOGICAL_PX` rules for.
+        let at_heading = shaped_scrolled(
+            SettingsCategory::Appearance,
+            AdvancedOpen::default(),
+            None,
+            scroll_showing(&shut, group.band),
+        );
         assert!(
-            labels
+            labels_of(&at_heading, None, &values())
                 .iter()
                 .any(|label| label.text == Text::AdvancedGroup.text()),
-            "but the heading itself is drawn, or there would be no way back"
+            "but the heading itself is drawn once scrolled to, or there would be \
+             no way back"
         );
 
         // Opened: the rows are there, the verb is there, and the triangle says so.
@@ -12448,8 +12550,9 @@ mod tests {
         );
         // The two hit tests are asked where the two boxes are on screen: opening
         // the group takes the page past the dialog's 600px cap, so the verb that
-        // closes it is below the fold until a reader scrolls down to it — while
-        // the heading is still up at the top, and stays there.
+        // closes it is below the fold until a reader scrolls down to it — and
+        // since 2026-08-21 the folded heading is a scroll away too, because the
+        // everyday rows above it now fill the capped dialog on their own.
         let at_foot = shaped_scrolled(
             SettingsCategory::Appearance,
             every_group_open(),
@@ -12466,17 +12569,36 @@ mod tests {
             SettingsTarget::ResetAdvanced(SettingsCategory::Appearance),
             "which answers for the page it closes"
         );
-        let (x, y) = centre(group.band);
+        // Scrolled to the heading (see `at_heading` above): its whole band turns
+        // the group, not the 10×6 chevron alone.
+        let heading = at_heading
+            .advanced()
+            .expect("the folded page still has its disclosure")
+            .band;
+        let (x, y) = centre(heading);
         assert_eq!(
-            hit(&open, &values(), x, y),
+            hit(&at_heading, &values(), x, y),
             SettingsTarget::Advanced(SettingsCategory::Appearance),
             "and the heading's whole band turns it, not the 10×6 chevron alone"
         );
         // **A chevron and no longer a triangle** (user ruling 2026-08-19, the
         // hybrid): the mark left the head of the row for its foot, and it turns
         // over rather than swapping glyphs — this file's own ruling for the
-        // preview head's chevron and the tab strip's.
-        let sprites = sprites_of(&open, None, &values());
+        // preview head's chevron and the tab strip's. Scrolled to the heading
+        // since 2026-08-21, because its chevron sits below the fold now that the
+        // everyday rows fill the capped dialog on their own.
+        let open_at_heading = shaped_scrolled(
+            SettingsCategory::Appearance,
+            every_group_open(),
+            None,
+            scroll_showing(
+                &open,
+                open.advanced()
+                    .expect("the open page has its disclosure")
+                    .band,
+            ),
+        );
+        let sprites = sprites_of(&open_at_heading, None, &values());
         let turned: Vec<ChromeMark> = sprites
             .iter()
             .map(|sprite| sprite.mark)
@@ -12494,7 +12616,7 @@ mod tests {
             "the files tree's triangle is the files tree's, and this dialog no \
              longer borrows it"
         );
-        let shut_sprites = sprites_of(&shut, None, &values());
+        let shut_sprites = sprites_of(&at_heading, None, &values());
         assert!(
             shut_sprites
                 .iter()
@@ -13216,17 +13338,21 @@ mod tests {
     /// the two things the cap deliberately leaves to scroll.
     #[test]
     fn a_stack_that_fits_reports_nowhere_to_scroll() {
-        // **The page the app opens on**, which is the horizontal one. It read
-        // `Vertical` until §7.1.6b′ added focus mode's row: under the rail the
-        // Appearance page now holds nine everyday rows and is 32px past the 600
-        // ceiling, so it is no longer an example of a stack that fits — it is
-        // the example of one that does not, and it is pinned as that below.
-        let rows = visible_rows(TabLayoutMode::Horizontal);
-        let placed = scrolled_with(&rows, AdvancedOpen::default(), 0.0);
+        // **A page that genuinely fits**, which the Appearance page stopped being
+        // in either layout. It read the horizontal Appearance page until
+        // 2026-08-21: §7.1.6b′ had already pushed the vertical one 32px past 600
+        // with focus mode's row, and the card-height row added that day carried
+        // the horizontal one over too, so the fits example moved to a short page.
+        // Rendered blocks holds four everyday rows and sits well under the cap.
+        let fits = shaped(
+            SettingsCategory::RenderedBlocks,
+            AdvancedOpen::default(),
+            None,
+        );
         assert_eq!(
-            placed.max_scroll(),
+            fits.max_scroll(),
             0.0,
-            "the everyday Appearance page fits a {}px dialog with room to spare",
+            "a four-row everyday page fits a {}px dialog with room to spare",
             DIALOG_MAX_HEIGHT_LOGICAL_PX
         );
         // **And the one that no longer fits says so by exactly its overflow.**
@@ -13244,9 +13370,14 @@ mod tests {
                 .round(),
             "the Appearance page under the rail scrolls by what it stands over the ceiling"
         );
-        let shoved = scrolled_with(&rows, AdvancedOpen::default(), 4_000.0);
+        let shoved = shaped_scrolled(
+            SettingsCategory::RenderedBlocks,
+            AdvancedOpen::default(),
+            None,
+            4_000.0,
+        );
         assert_eq!(
-            shoved.rows[0].combo, placed.rows[0].combo,
+            shoved.rows[0].combo, fits.rows[0].combo,
             "an offset a list this short cannot honour is clamped away, not applied"
         );
     }
@@ -14421,9 +14552,16 @@ mod tests {
     /// the other way.
     #[test]
     fn the_capped_dialog_holds_every_everyday_page_and_only_the_long_ones_scroll() {
+        // **`Appearance` is no longer in this list** (2026-08-21). `shaped`
+        // builds the page with the tabs across the top, where `Appearance` held
+        // eight everyday rows and fit; §7.1.6b′ made nine under the rail and this
+        // day's card-height row made nine across the top too, so even the
+        // horizontal page now overflows the cap and joins the two things below
+        // the fold. The pages that still fit are the three short ones, and the
+        // cap itself is still derived from `Appearance` — the tallest — so the
+        // frame is 600 for every page including the ones that overflow it.
         for category in [
             SettingsCategory::General,
-            SettingsCategory::Appearance,
             SettingsCategory::Terminal,
             SettingsCategory::RenderedBlocks,
         ] {
@@ -14434,12 +14572,6 @@ mod tests {
                 "{category:?}: a {}px window still gets a dialog and not a surface",
                 SURFACE.1
             );
-            // Every one of them, still — `shaped` builds the page the app opens
-            // on, with the tabs across the top, and there `Appearance` holds
-            // eight everyday rows and fits. The ninth is `Sidebar`, which only
-            // exists under the vertical rail, and it is that page the cap is
-            // derived from and that page which now overflows: see
-            // `a_stack_that_fits_reports_nowhere_to_scroll`.
             assert_eq!(
                 placed.max_scroll(),
                 0.0,
@@ -14463,8 +14595,14 @@ mod tests {
                 );
             }
         }
-        // And the two things that scroll, which is exactly what the cap was
-        // chosen to leave outside: the shortcut table, and a group opened.
+        // And the things that scroll, which is exactly what the cap was chosen
+        // to leave outside: the shortcut table, a group opened — and, since
+        // 2026-08-21, the everyday `Appearance` page itself, which the
+        // card-height row carried over the ceiling in both layouts.
+        assert!(
+            shaped(SettingsCategory::Appearance, AdvancedOpen::default(), None).max_scroll() > 0.0,
+            "the everyday Appearance page now stands over the cap it derives"
+        );
         assert!(
             shaped(SettingsCategory::Shortcuts, AdvancedOpen::default(), None).max_scroll() > 0.0,
             "the shortcut table is longer than any dialog this build opens"
@@ -16539,7 +16677,17 @@ mod tests {
     /// one ellipsised from the right shows the half nobody needs.
     #[test]
     fn the_background_image_button_carries_the_pictures_name() {
-        let placed = open(1.0, false);
+        // **Scrolled to the row** (since 2026-08-21): `Background image` opens the
+        // Advanced group and the everyday rows above it now fill the capped
+        // dialog on their own — the card-height row carried the horizontal
+        // Appearance page over 600 — so the ground rows only draw once the page
+        // is scrolled down to them.
+        let base = open(1.0, false);
+        let placed = open_scrolled(
+            1.0,
+            false,
+            scroll_to_row(&base, SettingsRow::BackgroundImage),
+        );
         let box_of = combo_value_box(combo_of(&placed, SettingsRow::BackgroundImage));
 
         let empty = labels_of(&placed, None, &values());
@@ -16706,8 +16854,8 @@ mod tests {
         assert_eq!(&page[start..start + ground.len()], &ground);
         assert_eq!(
             page[start - 1],
-            SettingsRow::FocusMode,
-            "the ground opens the Advanced group, and the everyday row above it              is the last of the ones the ruling kept on top. It used to follow              `Dark scheme` directly; §7.1.6c-5 moved the two font rows up into              that gap and the whole ground down under the disclosure, and              §7.1.6b′ then added focus mode's own row to the end of that run"
+            SettingsRow::FocusCardHeight,
+            "the ground opens the Advanced group, and the everyday row above it              is the last of the ones the ruling kept on top. It used to follow              `Dark scheme` directly; §7.1.6c-5 moved the two font rows up into              that gap and the whole ground down under the disclosure, §7.1.6b′              then added focus mode's own row to the end of that run, and              2026-08-21 added the card-height row directly under it"
         );
         assert!(
             ground.iter().all(|row| row.advanced()),
@@ -16735,6 +16883,9 @@ mod tests {
                 // works from either tab layout (§7.1.6b′), so it is on the page
                 // whichever one is in force.
                 SettingsRow::FocusMode,
+                // Directly under it since 2026-08-21 — the one preference about
+                // the mode, unconditional like the row above it.
+                SettingsRow::FocusCardHeight,
                 SettingsRow::BackgroundImage,
                 SettingsRow::ImageFit,
                 SettingsRow::ImageOpacity,
@@ -16767,6 +16918,7 @@ mod tests {
                 SettingsRow::Cursor,
                 SettingsRow::TabLayout,
                 SettingsRow::FocusMode,
+                SettingsRow::FocusCardHeight,
                 SettingsRow::Sidebar,
                 SettingsRow::BackgroundImage,
                 SettingsRow::ImageFit,
