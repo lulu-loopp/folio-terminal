@@ -574,74 +574,174 @@ const SCRIPT_FILE_PS1: &str = "folio.ps1";
 /// The sub-directory of `%APPDATA%\Folio\` both scripts live in.
 const SCRIPT_DIRECTORY: &str = "shell-integration";
 
-/// The file name both PowerShells give their CurrentUserCurrentHost profile.
-///
-/// One name and two folders — see [`PowerShellHost`]. It is the *current host's*
-/// profile rather than `profile.ps1` (the all-hosts one) because that is the
-/// file `$PROFILE` names when a reader prints it, so a line written here is a
-/// line they can find by asking the shell where it is.
-const PROFILE_FILE: &str = "Microsoft.PowerShell_profile.ps1";
-
-/// Which PowerShell a pane is running, because the two keep their profile in
-/// two different folders under one Documents.
-///
-/// Read off the program the spawn actually resolved, which is the same evidence
-/// [`profiles::derive_integration`] reads and the only evidence available
-/// without starting the shell and asking it. A build that wrote into one
-/// generation's file for a session of the other would report success beside a
-/// shell that goes on seeing nothing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PowerShellHost {
-    /// Windows PowerShell 5.1 — `Documents\WindowsPowerShell\`.
-    WindowsPowerShell,
-    /// PowerShell 7 — `Documents\PowerShell\`.
-    PowerShellSeven,
-}
-
-impl PowerShellHost {
-    /// The folder this generation keeps its profile in.
-    const fn folder(self) -> &'static str {
-        match self {
-            Self::WindowsPowerShell => "WindowsPowerShell",
-            Self::PowerShellSeven => "PowerShell",
-        }
-    }
-}
-
-/// Which PowerShell this program is, or `None` for anything that is not one.
+/// Whether this program is a PowerShell at all.
 ///
 /// The stem rather than the whole leaf, for [`profiles::derive_integration`]'s
 /// reason, and the same two names it recognises — so a pane this function
-/// answers for is exactly a pane [`Integration::PowerShellOptIn`] serves.
+/// answers `true` for is exactly a pane [`Integration::PowerShellOptIn`] serves.
+/// It is the *gate* and not the answer: where that shell's `$PROFILE` is comes
+/// from the shell itself ([`profile_probe`]).
 #[must_use]
-pub fn powershell_host(program: &Path) -> Option<PowerShellHost> {
-    let leaf = program.file_name()?.to_string_lossy();
+pub fn is_powershell(program: &Path) -> bool {
+    let Some(leaf) = program.file_name() else {
+        return false;
+    };
+    let leaf = leaf.to_string_lossy();
     let stem = leaf
         .rsplit_once('.')
         .map_or(leaf.as_ref(), |(stem, _)| stem)
         .to_ascii_lowercase();
-    match stem.as_str() {
-        "pwsh" => Some(PowerShellHost::PowerShellSeven),
-        "powershell" => Some(PowerShellHost::WindowsPowerShell),
-        _ => None,
-    }
+    matches!(stem.as_str(), "pwsh" | "powershell")
 }
 
-/// Where this generation's profile is, under a Documents folder.
+// ── where the file is: asked of the shell, never composed ───────────────────
+
+/// The one command: what this PowerShell calls its own `$PROFILE`.
 ///
-/// **A Documents folder that is asked of Windows and never assumed.** Measured
-/// on the machine this was written on: `[Environment]::GetFolderPath`
-/// answers `D:\Documents` there while `%USERPROFILE%\Documents` exists too and
-/// holds two stale, empty profiles that no PowerShell has ever read. Both
-/// generations resolve `$PROFILE` through the known folder, so a build that
-/// spelled it from `%USERPROFILE%` would read the wrong file, report "not
-/// installed" about a machine where it is installed, and write its line
-/// somewhere no shell looks. [`crate::psreadline::documents_directory`] is the
-/// one place that asks, and it is shared rather than copied for exactly this
-/// reason.
+/// `CurrentUserCurrentHost` because that is the file `$PROFILE` names when a
+/// reader prints it — the same one every "add this to your `$PROFILE`"
+/// instruction on the internet means — rather than `profile.ps1`, the all-hosts
+/// file nobody is told about.
+///
+/// `-NoProfile` because a profile is exactly what must not run: it may print, it
+/// may take seconds, and running the reader's startup file in order to find out
+/// where their startup file is would be absurd. `-NonInteractive` so nothing can
+/// stop for a prompt on a thread with no console.
+const PROFILE_COMMAND: &str = "$PROFILE.CurrentUserCurrentHost";
+
+/// **The path is asked of the shell and never composed**, and the machine this
+/// was written on is why.
+///
+/// Its Documents folder is redirected to `D:\Documents`, and both PowerShells
+/// answer `D:\Documents\…\Microsoft.PowerShell_profile.ps1`. `%USERPROFILE%\
+/// Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1` also exists
+/// there, two bytes long, and no PowerShell has ever read it. A build that
+/// spelled the path itself would have read that file, reported "not installed"
+/// about a machine where the integration has been installed since 2026-08-14,
+/// and written its line into a file no shell opens — the exact failure the
+/// PSReadLine slice already ruled about (`psreadline::documents_directory`),
+/// arrived at from the other end. Reading the known folder instead of
+/// `%USERPROFILE%` fixes the common case and still leaves this build composing a
+/// path on somebody else's behalf; the shell is the only party that knows, and
+/// asking it costs one process per generation per launch.
+///
+/// The answer per program, because the two generations answer differently and a
+/// reader's own profile row may name a third `pwsh` entirely.
+type ProfileAnswers = std::collections::BTreeMap<PathBuf, Option<PathBuf>>;
+static PROFILE_ANSWERS: OnceLock<std::sync::Mutex<ProfileAnswers>> = OnceLock::new();
+static PROFILE_ASKED: OnceLock<std::sync::Mutex<std::collections::BTreeSet<PathBuf>>> =
+    OnceLock::new();
+
+/// Every answer this module publishes out of band is published on a thread with
+/// no window, so the window has to be told to come and read it.
+static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// Teach the probe how to bring the event loop round when an answer lands.
+///
+/// [`crate::psreadline::install_wake`]'s twin and for its reason: a pane that
+/// has started, printed its prompt and gone quiet produces no further frame on
+/// its own, so an answer that landed after that frame would sit unread until the
+/// reader typed something.
+pub fn install_wake(wake: impl Fn() + Send + Sync + 'static) {
+    let _ = WAKE.set(Box::new(wake));
+}
+
+/// Where `program` keeps its `$PROFILE`, or `None` while it is still being
+/// asked.
+///
+/// The outer `Option` is "has the machine answered"; the inner one is the
+/// answer, which is `None` for a shell that could not be started or said
+/// nothing. Asking is started by the first call and never repeated: a
+/// `$PROFILE` path is a property of an installation, and a build that re-asked
+/// per pane would start a process every time somebody split a window.
 #[must_use]
-pub fn profile_path(documents: &Path, host: PowerShellHost) -> PathBuf {
-    documents.join(host.folder()).join(PROFILE_FILE)
+pub fn profile_probe(program: &Path) -> Option<Option<PathBuf>> {
+    // **The diagnostics door**, in the family of `BT_PSREADLINE_DOCUMENTS` and
+    // for exactly its reason: the two verbs below write into a file that belongs
+    // to the reader's shell, and exercising them on a development machine must
+    // not mean editing that developer's own `$PROFILE`. `BT_POWERSHELL_PROFILE=
+    // <file>` moves the whole path — read and write together, so a run cannot
+    // report "installed" about one file while writing another.
+    if let Some(sandbox) = std::env::var_os("BT_POWERSHELL_PROFILE") {
+        let sandbox = PathBuf::from(sandbox);
+        if !sandbox.as_os_str().is_empty() {
+            return Some(Some(sandbox));
+        }
+    }
+    if let Some(answer) = PROFILE_ANSWERS
+        .get_or_init(Default::default)
+        .lock()
+        .ok()?
+        .get(program)
+    {
+        return Some(answer.clone());
+    }
+    begin_profile_probe(program);
+    None
+}
+
+/// Start one program's probe, once per process.
+fn begin_profile_probe(program: &Path) {
+    let Ok(mut asked) = PROFILE_ASKED.get_or_init(Default::default).lock() else {
+        return;
+    };
+    if !asked.insert(program.to_path_buf()) {
+        return;
+    }
+    drop(asked);
+    let program = program.to_path_buf();
+    // In the workers' band, beside the PSReadLine probe: this starts a
+    // PowerShell to ask it a question, and it must never be the reason a frame
+    // was late.
+    bt_platform::spawn_at_priority(
+        "powershell-profile-probe",
+        bt_platform::ThreadPriority::BelowNormal,
+        move || {
+            let answer = run_profile_probe(&program);
+            if let Ok(mut answers) = PROFILE_ANSWERS.get_or_init(Default::default).lock() {
+                answers.insert(program, answer);
+            }
+            // After the answer is published, never before.
+            if let Some(wake) = WAKE.get() {
+                wake();
+            }
+        },
+    )
+    .ok();
+}
+
+#[cfg(windows)]
+fn run_profile_probe(program: &Path) -> Option<PathBuf> {
+    use std::os::windows::process::CommandExt;
+    // `CREATE_NO_WINDOW`, for the PSReadLine probe's reason: without it a
+    // console flashes on screen the first time a PowerShell pane is opened.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let output = std::process::Command::new(program)
+        .args(["-NoProfile", "-NonInteractive", "-Command", PROFILE_COMMAND])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    parse_profile_answer(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(not(windows))]
+fn run_profile_probe(_program: &Path) -> Option<PathBuf> {
+    None
+}
+
+/// Read the one line the probe command writes.
+///
+/// Split out so the reading is testable without a PowerShell, and taken
+/// **verbatim**: whatever the shell said is the path, whichever drive it is on
+/// and whichever folder — there is no shape this function is entitled to expect,
+/// because the answer is exactly the thing this build must not think it knows.
+#[must_use]
+pub fn parse_profile_answer(stdout: &str) -> Option<PathBuf> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Whether this profile's text already dot-sources the script.
@@ -815,6 +915,108 @@ fn backup_path(profile: &Path, at: std::time::SystemTime) -> PathBuf {
     let mut name = profile.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".bak-{year:04}{month:02}{day:02}"));
     profile.with_file_name(name)
+}
+
+/// What one pane owes the reader about its shell integration, and what has been
+/// done about it (§7.1.6j).
+///
+/// **On the leaf**, beside the profile and the program, for their reason: it is
+/// a fact about *this process* — which PowerShell it is and what its startup
+/// file says — so a tear-out carries it with the shell rather than re-deriving
+/// it from whichever tab the pane lands in. The strip drawn from it is a
+/// projection ([`crate::seats::Seats::set_notices`]); this is the record.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Offer {
+    /// Nothing to say. This pane is not a PowerShell, or its `$PROFILE` already
+    /// dot-sources the script, or the reader has ended the asking.
+    #[default]
+    Silent,
+    /// Owed, and this is the file it is about. Shown once the shell has spoken —
+    /// see [`Offer::showing`].
+    Owed(PathBuf),
+    /// The line has been written into that file.
+    Added,
+    /// Dismissed with the `×` or with Esc. **Not** the same as [`Self::Silent`]:
+    /// nothing was decided, so the next PowerShell is asked again.
+    Closed,
+}
+
+impl Offer {
+    /// Whether a pane holding this offer draws a strip, and which one.
+    ///
+    /// `spoken` is whether the shell has put anything on its screen at all,
+    /// which is the honest reading of "the first prompt has been drawn" for the
+    /// one pane that cannot report a prompt: a shell with no integration sends
+    /// no `OSC 133;A`, so waiting for one would be waiting forever in exactly
+    /// the case the offer exists for.
+    ///
+    /// `markers_seen` retracts it outright. A `133` on the primary screen is the
+    /// integration answering for itself, and it can arrive in a pane this
+    /// function said was owed one — a reader who installed the script some other
+    /// way, a `$PROFILE` that sources a copy under a name this build does not
+    /// recognise, a shell that was restarted after the line was written. The
+    /// offer is a claim about what is missing, and evidence that nothing is
+    /// missing ends it without anybody pressing anything.
+    #[must_use]
+    pub fn showing(&self, spoken: bool, markers_seen: bool) -> Option<crate::notice::Notice> {
+        if markers_seen {
+            return None;
+        }
+        match self {
+            Self::Owed(_) if spoken => Some(crate::notice::Notice::Offer),
+            Self::Added => Some(crate::notice::Notice::Added),
+            Self::Silent | Self::Owed(_) | Self::Closed => None,
+        }
+    }
+
+    /// The `$PROFILE` this offer is about, while it is still an offer.
+    #[must_use]
+    pub fn profile(&self) -> Option<&Path> {
+        match self {
+            Self::Owed(profile) => Some(profile.as_path()),
+            Self::Silent | Self::Added | Self::Closed => None,
+        }
+    }
+}
+
+/// What a pane whose `$PROFILE` is `profile` owes.
+///
+/// **The file is read here and once.** A `$PROFILE` is read by the shell at
+/// startup and by nothing afterwards, so its contents at the moment this pane
+/// started are the contents this pane is running under; re-reading it every
+/// frame would be asking the disk a question whose answer cannot change what the
+/// running shell does. The one thing that *can* change — somebody installing the
+/// integration elsewhere — is caught by the marker instead ([`Offer::showing`]),
+/// which is evidence rather than a guess.
+///
+/// The path is passed rather than derived, and that is the whole seam: it comes
+/// from [`profile_probe`], which asks the shell, and a test can put any path in
+/// front of this function including one on a drive the Documents known folder
+/// has never heard of.
+#[must_use]
+pub fn offer_for(profile: &Path) -> Offer {
+    match std::fs::read_to_string(profile) {
+        Ok(text) if profile_declares_integration(&text) => Offer::Silent,
+        // A profile that is not there is a profile with no line in it, which is
+        // the case this offer was written for: a reader who has never had one.
+        Ok(_) | Err(_) => Offer::Owed(profile.to_path_buf()),
+    }
+}
+
+/// Write the line into `profile`, installing the script first if it is not on
+/// disk yet.
+///
+/// Returns what was written and what was copied, or the reason nothing was.
+pub fn install_into_profile(
+    profile: &Path,
+    at: std::time::SystemTime,
+) -> std::io::Result<ProfileWrite> {
+    let script = script_path_ps1().ok_or_else(|| {
+        std::io::Error::other("the integration script could not be written to %APPDATA%")
+    })?;
+    let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
+    let line = integration_line(&script, appdata.as_deref());
+    add_to_profile(profile, &line, at)
 }
 
 /// The script's own text, for the tests that check what ships.
@@ -1573,50 +1775,101 @@ mod tests {
     fn temp_dir(tag: &str) -> PathBuf {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "folio-ps-profile-{tag}-{}-{n}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("folio-ps-profile-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
-    /// The two PowerShells keep their profile in two folders, and a build that
-    /// wrote into one of them for a session of the other would report success
-    /// beside a shell that goes on seeing nothing.
+    /// **The path is whatever the shell says, and this test is the whole of that
+    /// rule.** A build that composed `<Documents>\PowerShell\…` would pass every
+    /// other test in this file and fail here, because on the machine this was
+    /// written on the Documents known folder and the answer PowerShell gives sit
+    /// on two different drives — and the file the shell names is the one with
+    /// the integration in it while the composed one is two bytes of nothing.
     #[test]
-    fn each_powershell_generation_has_its_own_profile_file() {
-        let documents = Path::new(r"D:\Documents");
+    fn the_profile_is_the_file_the_shell_names_and_never_one_this_build_composed() {
+        let composed_root = Path::new(r"C:\Users\me\Documents");
+        let answer =
+            parse_profile_answer("D:\\Documents\\PowerShell\\Microsoft.PowerShell_profile.ps1\r\n")
+                .expect("the shell answered");
         assert_eq!(
-            profile_path(documents, PowerShellHost::WindowsPowerShell),
-            PathBuf::from(r"D:\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1")
-        );
-        assert_eq!(
-            profile_path(documents, PowerShellHost::PowerShellSeven),
+            answer,
             PathBuf::from(r"D:\Documents\PowerShell\Microsoft.PowerShell_profile.ps1")
+        );
+        assert!(
+            !answer.starts_with(composed_root),
+            "the answer is not under the folder a composing build would have used"
+        );
+        assert_eq!(parse_profile_answer("   \r\n"), None);
+        assert_eq!(parse_profile_answer(""), None);
+    }
+
+    /// A shell whose file already carries the line is asked nothing. This is the
+    /// state the machine this was written on is in, and a build that offered
+    /// here would be offering to install something that is installed.
+    #[test]
+    fn a_profile_that_already_loads_the_script_owes_nothing() {
+        let documents = temp_dir("installed");
+        let profile = documents.join(PROFILE_LEAF);
+        std::fs::write(
+            &profile,
+            "\n# Folio OSC 133 shell integration (opt-in)\n. \
+             'D:\\Developer\\BetterTerminal\\scripts\\shell-integration\\folio.ps1'\n",
+        )
+        .unwrap();
+        assert_eq!(offer_for(&profile), Offer::Silent);
+        let absent = documents.join("never-written.ps1");
+        assert_eq!(
+            offer_for(&absent),
+            Offer::Owed(absent.clone()),
+            "a profile that is not there is a profile with no line in it"
         );
     }
 
-    /// Which generation a running pane is, read off the program the spawn
-    /// actually resolved — the same evidence `derive_integration` reads, and the
-    /// only one available without asking the shell.
+    /// A strip is drawn once the shell has spoken, and it takes itself down the
+    /// moment the integration speaks for itself — however it came to be
+    /// installed.
     #[test]
-    fn the_program_name_says_which_powershell_is_running() {
+    fn the_offer_waits_for_the_shell_and_retires_when_a_marker_arrives() {
+        let owed = Offer::Owed(PathBuf::from(r"D:\Documents\PowerShell\p.ps1"));
         assert_eq!(
-            powershell_host(Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe")),
-            Some(PowerShellHost::PowerShellSeven)
+            owed.showing(false, false),
+            None,
+            "nothing is said over a pane that has not drawn a prompt yet"
         );
         assert_eq!(
-            powershell_host(Path::new(
-                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-            )),
-            Some(PowerShellHost::WindowsPowerShell)
+            owed.showing(true, false),
+            Some(crate::notice::Notice::Offer)
         );
         assert_eq!(
-            powershell_host(Path::new(r"C:\Program Files\Git\bin\bash.exe")),
-            None
+            owed.showing(true, true),
+            None,
+            "a 133 on the primary screen is the integration answering for itself"
         );
+        assert_eq!(
+            Offer::Added.showing(false, false),
+            Some(crate::notice::Notice::Added)
+        );
+        assert_eq!(Offer::Added.showing(true, true), None);
+        assert_eq!(Offer::Closed.showing(true, false), None);
+        assert_eq!(Offer::Silent.showing(true, false), None);
+    }
+
+    /// Which programs are asked about at all.
+    #[test]
+    fn the_program_name_says_whether_this_is_a_powershell() {
+        assert!(is_powershell(Path::new(
+            r"C:\Program Files\PowerShell\7\pwsh.exe"
+        )));
+        assert!(is_powershell(Path::new(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        )));
+        assert!(!is_powershell(Path::new(
+            r"C:\Program Files\Git\bin\bash.exe"
+        )));
+        assert!(!is_powershell(Path::new(r"C:\Windows\System32\cmd.exe")));
     }
 
     /// The criterion, and the whole of it: a line that dot-sources the script.
@@ -1665,7 +1918,7 @@ mod tests {
     #[test]
     fn a_profile_that_does_not_exist_is_created_holding_only_the_line() {
         let documents = temp_dir("absent");
-        let profile = profile_path(&documents, PowerShellHost::PowerShellSeven);
+        let profile = documents.join("PowerShell").join(PROFILE_LEAF);
         let written = add_to_profile(&profile, LINE, EPOCH_DAY).expect("the write");
         assert_eq!(written.backup, None, "there was nothing to back up");
         assert_eq!(
@@ -1679,7 +1932,7 @@ mod tests {
     #[test]
     fn an_empty_profile_gets_the_line_with_no_blank_line_above_it() {
         let documents = temp_dir("empty");
-        let profile = profile_path(&documents, PowerShellHost::WindowsPowerShell);
+        let profile = documents.join("WindowsPowerShell").join(PROFILE_LEAF);
         std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
         std::fs::write(&profile, b"\r\n").unwrap();
         let written = add_to_profile(&profile, LINE, EPOCH_DAY).expect("the write");
@@ -1698,7 +1951,7 @@ mod tests {
     #[test]
     fn a_profile_with_content_is_backed_up_byte_for_byte_before_the_append() {
         let documents = temp_dir("content");
-        let profile = profile_path(&documents, PowerShellHost::PowerShellSeven);
+        let profile = documents.join("PowerShell").join(PROFILE_LEAF);
         std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
         let before = "# mine\nfunction prompt { 'PS> ' }\n";
         std::fs::write(&profile, before).unwrap();
@@ -1727,7 +1980,7 @@ mod tests {
     #[test]
     fn a_profile_that_does_not_end_in_a_newline_is_closed_before_the_append() {
         let documents = temp_dir("unterminated");
-        let profile = profile_path(&documents, PowerShellHost::PowerShellSeven);
+        let profile = documents.join("PowerShell").join(PROFILE_LEAF);
         std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
         std::fs::write(&profile, "Set-Alias ll Get-ChildItem").unwrap();
         add_to_profile(&profile, LINE, EPOCH_DAY).expect("the write");
@@ -1743,7 +1996,7 @@ mod tests {
     #[test]
     fn a_utf16_profile_is_refused_rather_than_corrupted() {
         let documents = temp_dir("utf16");
-        let profile = profile_path(&documents, PowerShellHost::PowerShellSeven);
+        let profile = documents.join("PowerShell").join(PROFILE_LEAF);
         std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
         let mut bytes = vec![0xFF, 0xFE];
         bytes.extend_from_slice(b"#\0 \0m\0i\0n\0e\0");
@@ -1761,7 +2014,7 @@ mod tests {
     #[test]
     fn a_backup_already_taken_today_is_not_overwritten() {
         let documents = temp_dir("twice");
-        let profile = profile_path(&documents, PowerShellHost::PowerShellSeven);
+        let profile = documents.join("PowerShell").join(PROFILE_LEAF);
         std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
         std::fs::write(&profile, "# mine\n").unwrap();
         let first = add_to_profile(&profile, LINE, EPOCH_DAY)
@@ -1775,4 +2028,7 @@ mod tests {
     /// What the two constants above stand for: one day, and one line.
     const EPOCH_DAY: std::time::SystemTime = std::time::UNIX_EPOCH;
     const LINE: &str = r#". "$env:APPDATA\Folio\shell-integration\folio.ps1""#;
+    /// The name both PowerShells give the file, for the tests that stand one up
+    /// rather than asking a shell where it is.
+    const PROFILE_LEAF: &str = "Microsoft.PowerShell_profile.ps1";
 }

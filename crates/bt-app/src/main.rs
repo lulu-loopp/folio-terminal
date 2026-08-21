@@ -44,6 +44,7 @@ mod i18n;
 mod input;
 mod marks;
 mod mouse_trace;
+mod notice;
 mod notify;
 mod peek_strip;
 mod persist;
@@ -265,6 +266,16 @@ enum AppEvent {
     /// shell output, no hover and no keystroke to produce the frame that would
     /// replace that line — so the probe has to ask for one itself.
     PsReadLineProbed,
+    /// **A PowerShell has said where its own `$PROFILE` is** (§7.1.6j).
+    ///
+    /// The sixth of the same family, and separate from `PsReadLineProbed` for
+    /// the reason that one is separate from `GitReady`: the answers arrive from
+    /// two different processes at two different moments, and one variant would
+    /// mean a probe that finished first waking the window a second time when the
+    /// other did. Its own wake is owed for the reason that one's is: a pane that
+    /// has printed its prompt and gone quiet produces no further frame, so an
+    /// answer landing after that frame would sit unread until somebody typed.
+    PowerShellProfileProbed,
     /// **The kernel says a file in the schemes folder moved** (§7.1.6c-4c,
     /// `scheme_watch`).
     ///
@@ -3980,6 +3991,21 @@ struct LeafSession {
     /// could only ever be one pane's, which is how a hover over the pane you are not typing in
     /// came to be answered from the cells of the pane you are.
     frame_image_references: FrameImageReferences,
+    /// **What this pane owes the reader about its shell integration**
+    /// (§7.1.6j) — `None` until the machine has been asked.
+    ///
+    /// Here rather than beside the tab for [`Self::profile`]'s reason exactly:
+    /// it is an answer about *this process* — which PowerShell it is and what
+    /// its own startup file says — so a tear-out carries it with the shell
+    /// rather than re-deriving it from whichever tab the pane landed in.
+    ///
+    /// **Decided late and once.** The `$PROFILE` path comes from the shell
+    /// itself, on a thread, so it is not available at the moment this struct is
+    /// built; `Runtime::settle_pane_notices` fills it the first turn the answer
+    /// exists. Filling it at spawn would have meant either blocking the spawn on
+    /// a second PowerShell starting, or composing the path — and composing it is
+    /// the bug this whole slice was opened by.
+    integration_offer: Option<shell_integration::Offer>,
 }
 
 struct TabState {
@@ -5188,6 +5214,18 @@ struct WindowRuntime {
     search_layout: Option<search::Capsule>,
     /// Which of the capsule's controls the pointer is on.
     search_hover: Option<search::SearchElement>,
+    /// **Where each pane's integration notice was drawn last frame** — what a
+    /// press is tested against (§7.1.6j).
+    ///
+    /// Beside [`Self::search_layout`] and for its reason: this is a function of
+    /// the *rectangle*, and the rectangle belongs to the solve. Keyed by seat and
+    /// not a singleton, because two PowerShell panes in one tab each owe their
+    /// own — the offer is about one shell's startup file, and the pane is the
+    /// only place a sentence about one shell can honestly be put.
+    notice_layouts: std::collections::BTreeMap<SeatId, notice::NoticeBar>,
+    /// Which strip's control the pointer is on. One, because there is one
+    /// pointer.
+    notice_hover: Option<(SeatId, notice::NoticeElement)>,
     /// What the last scan was of, so the next one can skip the part that has not
     /// moved. See [`SearchScanCache`].
     search_scan: Option<SearchScanCache>,
@@ -13134,6 +13172,18 @@ struct OverlayStack {
     /// dialog and tip is entitled to cover it, because it is a control that
     /// lives inside a pane rather than one that floats over the window.
     ///
+    /// **A pane's integration notice strip** (7.1.6j), beside the capsule.
+    ///
+    /// Above it in this list and never over it on the glass: the capsule floats
+    /// over the pane's own text and the strip stands in a row the text was moved
+    /// out of (`seats::pane_body_viewport` takes it), so the two cannot share a
+    /// pixel. The order is a statement rather than a fix — if the arithmetic
+    /// were ever broken, the surface that says what is *missing* should be the
+    /// one seen to survive.
+    ///
+    /// One per pane and not a singleton: the offer is about one shell's startup
+    /// file, and two PowerShell panes in one tab each owe their own.
+    pane_notices: Vec<marks::OverlayLayer>,
     /// One layer, and there is at most one of it — the singleton (mock 8515)
     /// showing up in the z-order. Two capsules would need an order between them,
     /// and there is no order because there is one search.
@@ -13234,6 +13284,7 @@ impl OverlayStack {
             rail,
             ground,
             search,
+            pane_notices,
             layout_peek,
             float,
             modal,
@@ -13253,6 +13304,7 @@ impl OverlayStack {
             rail,
             ground,
             search,
+            pane_notices,
             layout_peek,
             float,
             modal,
@@ -16599,6 +16651,8 @@ fn create_leaf_session(
         last_seen_revision: 0,
         last_presented_frame: None,
         frame_image_references: FrameImageReferences::default(),
+        // Nobody has asked the machine where this shell's `$PROFILE` is yet.
+        integration_offer: None,
     })
 }
 
@@ -18013,6 +18067,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         command_flash: None,
         search: search::SearchState::default(),
         search_layout: None,
+        notice_layouts: std::collections::BTreeMap::new(),
+        notice_hover: None,
         search_hover: None,
         search_scan: None,
         search_revision: 0,
@@ -18158,6 +18214,13 @@ impl Runtime<'_> {
             let proxy = proxy.clone();
             psreadline::install_wake(move || {
                 let _ = proxy.send_event(AppEvent::PsReadLineProbed);
+            });
+        }
+        // And the second probe's, beside it and for its argument (§7.1.6j).
+        {
+            let proxy = proxy.clone();
+            shell_integration::install_wake(move || {
+                let _ = proxy.send_event(AppEvent::PowerShellProfileProbed);
             });
         }
         // **The language, before anything is measured.** Every width in this
@@ -22396,6 +22459,233 @@ impl Runtime<'_> {
         Ok(true)
     }
 
+    // -- the PowerShell integration notice (7.1.6j) -------------------------
+
+    /// Decide which panes owe a strip, and give the answer to the tree.
+    ///
+    /// **The one place the projection is written.** The facts live on the leaves
+    /// — which PowerShell this is, what its own `$PROFILE` says, whether it has
+    /// spoken, whether a marker has arrived — and `Seats` holds the answer only
+    /// because the pane's body is measured from it. Recomputed whole rather than
+    /// edited, so a pane that has gone cannot leave a seat behind in the set.
+    ///
+    /// A change here is a **layout** change: a strip takes a row off the
+    /// terminal, so the seats have to be solved again and the shells told what
+    /// they now have. That is why this ends in `commit_seat_geometry` and why
+    /// nothing else has to remember to.
+    fn settle_pane_notices(&mut self) -> Result<()> {
+        let offering = self
+            .app
+            .settings_store
+            .loaded()
+            .powershell_integration_offer;
+        let mut notices = std::collections::BTreeSet::new();
+        for (seat, leaf) in &mut self.sessions {
+            if leaf.integration_offer.is_none() {
+                // Not a PowerShell at all, or the machine has not answered where
+                // this one's `$PROFILE` is yet. Neither is a decision, so neither
+                // is written down: the probe wakes the loop when it lands.
+                let asked = leaf
+                    .program
+                    .as_deref()
+                    .filter(|program| offering && shell_integration::is_powershell(program))
+                    .and_then(shell_integration::profile_probe)
+                    .flatten();
+                if let Some(profile) = asked {
+                    leaf.integration_offer = Some(shell_integration::offer_for(&profile));
+                }
+            }
+            let showing = offering
+                && leaf.integration_offer.as_ref().is_some_and(|offer| {
+                    offer
+                        .showing(
+                            leaf.output_revision > 0,
+                            leaf.session.shell_integration_seen(),
+                        )
+                        .is_some()
+                });
+            if showing {
+                notices.insert(*seat);
+            }
+        }
+        if !self.seats.set_notices(notices) {
+            return Ok(());
+        }
+        self.commit_seat_geometry()?;
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
+    /// What one pane's strip is saying, or nothing when it wears none.
+    fn pane_notice(&self, seat: SeatId) -> Option<notice::Notice> {
+        let leaf = self.sessions.get(&seat)?;
+        leaf.integration_offer.as_ref()?.showing(
+            leaf.output_revision > 0,
+            leaf.session.shell_integration_seen(),
+        )
+    }
+
+    /// Every strip's own level of the overlay stack, and the rectangles a press
+    /// is tested against — stored here for the capsule's reason: the box you can
+    /// press is the box you can see.
+    fn notice_layers(&mut self) -> Vec<marks::OverlayLayer> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let palette = bt_render::chrome_palette();
+        let font = notice::FONT_LOGICAL_PX * scale;
+        let terminals: Vec<SeatId> = self.seats.terminals();
+        let mut layouts = std::collections::BTreeMap::new();
+        let mut layers = Vec::new();
+        for seat in terminals {
+            let Some(showing) = self.pane_notice(seat) else {
+                continue;
+            };
+            let Some(strip) = seats::pane_notice_strip(&self.seats, &self.seat_layout, seat, scale)
+            else {
+                continue;
+            };
+            // Measured against the font that will draw them, which is what keeps
+            // a Chinese verb from being given an English word's box.
+            let widths: Vec<f32> = showing
+                .verbs()
+                .iter()
+                .map(|verb| {
+                    self.window
+                        .renderer
+                        .measure_chrome_text(&mut self.app.gpu, verb.text(), font)
+                })
+                .collect();
+            let bar = notice::lay_out(strip, showing, &widths, scale);
+            let hover = self
+                .window
+                .notice_hover
+                .filter(|(hovered, _)| *hovered == seat)
+                .map(|(_, element)| element);
+            layers.push(notice::build(&bar, showing, hover, &palette, scale));
+            layouts.insert(seat, bar);
+        }
+        self.window.notice_layouts = layouts;
+        layers
+    }
+
+    /// Which strip's control the pointer is on, and whether it is on a strip at
+    /// all.
+    ///
+    /// The `bool` is what the routing above it reads, for
+    /// [`Self::drive_search_hover`]'s reason: a pointer standing on the strip is
+    /// not standing on a cell, and the pane must not be told about it.
+    fn drive_notice_hover(&mut self, position: Option<PhysicalPosition<f64>>) -> Result<bool> {
+        let hover = position.and_then(|at| {
+            self.window.notice_layouts.iter().find_map(|(seat, bar)| {
+                notice::hit(bar, at.x as f32, at.y as f32).map(|element| (*seat, element))
+            })
+        });
+        if self.window.notice_hover != hover {
+            self.window.notice_hover = hover;
+            if self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+        }
+        Ok(hover.is_some())
+    }
+
+    /// A press on a strip.
+    fn press_notice(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let hit = self.window.notice_layouts.iter().find_map(|(seat, bar)| {
+            notice::hit(bar, position.x as f32, position.y as f32).map(|it| (*seat, it))
+        });
+        let Some((seat, element)) = hit else {
+            return Ok(false);
+        };
+        match element {
+            notice::NoticeElement::Close => self.close_pane_notice(seat)?,
+            notice::NoticeElement::Verb(notice::NoticeVerb::Add) => self.add_to_profile(seat)?,
+            notice::NoticeElement::Verb(notice::NoticeVerb::Never) => {
+                self.apply_powershell_integration_offer(false)?;
+            }
+            notice::NoticeElement::Verb(notice::NoticeVerb::Restart) => {
+                // The strip goes first: `restart_shell` builds a whole new leaf
+                // for this seat, and the offer that one carries is decided from
+                // the file as it now stands.
+                self.close_pane_notice(seat)?;
+                self.restart_shell(seat)?;
+            }
+            // The strip's own width. It takes the press and answers nothing — a
+            // bar with a hole in it lets a click through onto a cell that is
+            // nowhere near the pointer.
+            notice::NoticeElement::Body => {}
+        }
+        Ok(true)
+    }
+
+    /// Take one pane's strip down without deciding anything.
+    ///
+    /// [`shell_integration::Offer::Closed`] and not `Silent`: nothing was
+    /// answered, so the next PowerShell that starts is asked again. That is the
+    /// difference between the close and `Don't show again`, and it is the whole
+    /// reason both exist.
+    fn close_pane_notice(&mut self, seat: SeatId) -> Result<()> {
+        let Some(leaf) = self.sessions.get_mut(&seat) else {
+            return Ok(());
+        };
+        if leaf.integration_offer.is_none() {
+            return Ok(());
+        }
+        leaf.integration_offer = Some(shell_integration::Offer::Closed);
+        self.settle_pane_notices()
+    }
+
+    /// Whether the focused pane has a strip up — the Esc ladder's question.
+    fn focused_pane_wears_notice(&self) -> bool {
+        self.pane_notice(self.focused_leaf).is_some()
+    }
+
+    /// Write the line into this pane's `$PROFILE`.
+    ///
+    /// **The one write this product makes into a file that belongs to somebody
+    /// else's shell**, and it happens here and only here: on a press, on the
+    /// pane the offer is about, into the path that pane's own shell named. A
+    /// copy of the file is taken first (`shell_integration::add_to_profile`).
+    ///
+    /// A write that fails leaves the strip exactly as it was, offering the same
+    /// verb. There is nothing else honest to do: the reader pressed a word that
+    /// says it will add a line, and a strip that changed to "added" over a file
+    /// that did not change would be this product lying about a file it had just
+    /// failed to touch.
+    fn add_to_profile(&mut self, seat: SeatId) -> Result<()> {
+        let Some(profile) = self
+            .sessions
+            .get(&seat)
+            .and_then(|leaf| leaf.integration_offer.as_ref())
+            .and_then(shell_integration::Offer::profile)
+            .map(Path::to_path_buf)
+        else {
+            return Ok(());
+        };
+        match shell_integration::install_into_profile(&profile, SystemTime::now()) {
+            Ok(written) => {
+                match &written.backup {
+                    Some(backup) => eprintln!(
+                        "BT_SHELL_INTEGRATION wrote {} (copy kept at {})",
+                        written.profile.display(),
+                        backup.display()
+                    ),
+                    None => eprintln!("BT_SHELL_INTEGRATION wrote {}", written.profile.display()),
+                }
+                if let Some(leaf) = self.sessions.get_mut(&seat) {
+                    leaf.integration_offer = Some(shell_integration::Offer::Added);
+                }
+                self.settle_pane_notices()
+            }
+            Err(error) => {
+                eprintln!(
+                    "BT_SHELL_INTEGRATION could not write {}: {error}",
+                    profile.display()
+                );
+                Ok(())
+            }
+        }
+    }
+
     /// What the field is showing, and where its caret stands.
     ///
     /// The composition opens a space at the caret: what is drawn is the text with the pre-edit
@@ -23288,6 +23578,11 @@ impl Runtime<'_> {
             block_max_height: self.app.settings_store.loaded().block_max_height,
             scrollback_lines: self.app.settings_store.loaded().scrollback_lines,
             terminal_notifications: self.app.settings_store.loaded().terminal_notifications,
+            powershell_integration_offer: self
+                .app
+                .settings_store
+                .loaded()
+                .powershell_integration_offer,
             git_panel: self.app.settings_store.loaded().git_panel,
             // The machine's own answer, cached at the three moments it can
             // change — see `App::context_menu_installed`.
@@ -23445,6 +23740,12 @@ impl Runtime<'_> {
             // schematic. It also stores the capsule's rectangle for the press
             // router, so the box you can press is the box you can see.
             search: self.search_layers(),
+            // Beside the capsule, and above it in the list for the reason it
+            // is above it on the glass: the capsule floats over the pane's
+            // own text and this stands in a row the text was moved out of, so
+            // the two can never overlap and the order between them says which
+            // would win if the arithmetic were ever broken.
+            pane_notices: self.notice_layers(),
             ..OverlayStack::default()
         };
         // **The gate is above the settings dialog**, and that is the one ordering
@@ -24499,6 +24800,9 @@ impl Runtime<'_> {
         if let Some(enabled) = settings::terminal_notifications_requested(target) {
             self.apply_terminal_notifications(enabled);
         }
+        if let Some(enabled) = settings::powershell_integration_offer_requested(target) {
+            self.apply_powershell_integration_offer(enabled)?;
+        }
         if let Some(install) = settings::context_menu_requested(target) {
             self.apply_context_menu(install)?;
         }
@@ -24743,6 +25047,7 @@ impl Runtime<'_> {
             | Row::PsReadLine
             | Row::Scrollback
             | Row::Notifications
+            | Row::PowerShellOffer
             // The editor's own advanced rows are put back by the page's own foot
             // verb — `Restore all defaults` on a built-in — which restores the
             // whole profile rather than four of its fields. A second verb that
@@ -28172,6 +28477,28 @@ impl Runtime<'_> {
         let mut settings = self.app.settings_store.loaded().clone();
         settings.terminal_notifications = enabled;
         self.app.settings_store.store(settings);
+    }
+
+    /// Whether a PowerShell pane with no integration is offered one (§7.1.6j).
+    ///
+    /// **It reaches the panes that are already open**, which is what separates it from
+    /// [`Self::apply_terminal_notifications`] two functions up: that switch is read at the moment
+    /// a toast would be raised, and this one is read by a strip that is on the glass right now.
+    /// Turning it off with a strip up and leaving the strip up would be a row that promises to
+    /// stop asking while the question is still on screen; turning it on wants the offer back in
+    /// the pane the reader is looking at rather than in the next one they open.
+    ///
+    /// [`Offer::Closed`] is not disturbed by either direction. A pane whose strip was dismissed
+    /// with `×` said "not now" about that pane, and this row is about the asking in general —
+    /// re-asking there on an unrelated press would be this switch answering a question it was not
+    /// asked.
+    fn apply_powershell_integration_offer(&mut self, enabled: bool) -> Result<()> {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.powershell_integration_offer = enabled;
+        if !self.app.settings_store.store(settings) {
+            return Ok(());
+        }
+        self.settle_pane_notices()
     }
 
     fn apply_git_panel(&mut self, enabled: bool) -> Result<bool> {
@@ -46137,6 +46464,8 @@ impl Runtime<'_> {
         // still lit after the pointer has left the window is a button claiming
         // to be under a hand that is not there.
         self.drive_search_hover(None)?;
+        // And the strip's, for the identical reason.
+        self.drive_notice_hover(None)?;
         // Deliberately *not* a drag cancel, and the reason is measurable rather
         // than stylistic: winit takes the Win32 mouse capture on button-down
         // (`capture_mouse`, its `WM_LBUTTONDOWN` arm), so a held drag keeps
@@ -47176,8 +47505,13 @@ impl Runtime<'_> {
         // on a toggle must not also be lighting a tick behind it.
         let on_search =
             self.drive_search_hover(self.window.mouse_route.is_none().then_some(position))?;
-        let on_command_rail = self.drive_command_rail_hover(
+        // The strip, beside the capsule: it is a surface inside the pane too, and
+        // a hand on one of its words must not also be lighting a tick behind it.
+        let on_notice = self.drive_notice_hover(
             (self.window.mouse_route.is_none() && !on_search).then_some(position),
+        )?;
+        let on_command_rail = self.drive_command_rail_hover(
+            (self.window.mouse_route.is_none() && !on_search && !on_notice).then_some(position),
         )?;
         // The glance card wins over anything the pane underneath it would say,
         // for the reason the rail takes the pointer at all: it is the surface on
@@ -50313,6 +50647,18 @@ impl Runtime<'_> {
         {
             return Ok(());
         }
+        // **The notice strip takes its own press**, beside the capsule and for
+        // its argument: it stands inside a pane, above the pane's cells, below
+        // every surface that floats over the window. It claims its whole width
+        // for the capsule's reason too — a bar you can click a hole in is a bar
+        // that sometimes types into the shell behind it.
+        if state == ElementState::Pressed
+            && button == MouseButton::Left
+            && let Some(position) = self.window.pointer_position
+            && self.press_notice(position)?
+        {
+            return Ok(());
+        }
         // **The rail takes its own press** — above the pane's cells, below every
         // surface that floats over the window, which is the order it is drawn in.
         //
@@ -52305,7 +52651,27 @@ impl Runtime<'_> {
         {
             return Ok(());
         }
-        // **The ladder ends with the capsule** (user ruling 2026-08-20). Focus
+        // **And one rung below the capsule, the integration notice**
+        // (7.1.6j). Below it and not above, because the two are separated by
+        // exactly the thing this ladder is ordered by: the capsule is an
+        // instrument the reader asked for seconds ago and the strip is one they
+        // did not ask for at all, so the press that means "put this away"
+        // reaches the asked-for one first.
+        //
+        // It closes the strip on the **focused** pane and answers nothing. A
+        // reader who dismisses it has said "not now" about this pane, so the
+        // next PowerShell they open is offered again — `Don't show again` is the
+        // press that ends the asking, and it is a word on the strip rather than
+        // a key, because a setting is not something a key at a `vim` prompt may
+        // write.
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape))
+            && !event.repeat
+            && self.focused_pane_wears_notice()
+        {
+            self.close_pane_notice(self.focused_leaf)?;
+            return Ok(());
+        }
+        // **The ladder ends there** (user ruling 2026-08-20). Focus
         // mode used to hold one more rung below it, and the ruling took that rung
         // out: 「它是设置里的一个设置，怎么这么容易就退出」. Every rung above is a
         // transient that appeared in the last few seconds; the mode is a line in
@@ -53528,6 +53894,12 @@ impl Runtime<'_> {
         self.apply_folder_pick_result()?;
         self.apply_image_pick_result()?;
         self.drain_pty()?;
+        // **Directly after the drain**, because the two facts it reads are what
+        // the drain has just moved: whether a shell has spoken for the first
+        // time, and whether an OSC 133 has landed. Polled here rather than
+        // pushed from the probe's thread for the reason the invitation below is:
+        // this changes a pane's height, and the panes are this thread's.
+        self.settle_pane_notices()?;
         // Polled here rather than pushed from the probe's thread: raising a
         // modal is a change to the window, and the window is this thread's.
         self.raise_psreadline_invite_if_due()?;
@@ -54964,6 +55336,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     Ok(())
                 }
             }),
+            // The answer is already in `shell_integration::profile_probe`; what
+            // is owed is the turn that reads it, decides which panes owe a strip
+            // and re-solves the ones whose bodies just got a row shorter. Every
+            // window, because a `pwsh` is a `pwsh` in all of them.
+            AppEvent::PowerShellProfileProbed => {
+                self.for_each_window(|runtime| runtime.settle_pane_notices())
+            }
             // The texture is already in the slot; what is owed is the ground
             // put in force around it, which is `apply_window_ground`'s one job.
             // Every window: the picture is the application's setting and each
@@ -57699,6 +58078,7 @@ mod tests {
             rail: mark(1),
             ground: mark(2),
             search: mark(14),
+            pane_notices: mark(17),
             layout_peek: mark(3),
             float: mark(4),
             modal: mark(5),
@@ -57718,10 +58098,10 @@ mod tests {
             .collect();
         assert_eq!(
             order,
-            vec![0, 16, 13, 1, 2, 14, 3, 4, 5, 6, 7, 12, 15, 8, 9, 10, 11],
+            vec![0, 16, 13, 1, 2, 14, 17, 3, 4, 5, 6, 7, 12, 15, 8, 9, 10, 11],
             "bottom to top: pane bars, terminal thumbs, command rails, rail, ground, search \
-             capsule, schematic, float, modal, file menu, pane menu, git menu, terminal menu, \
-             notices, tip, glance, ghost"
+             capsule, integration strips, schematic, float, modal, file menu, pane menu, git \
+             menu, terminal menu, notices, tip, glance, ghost"
         );
         let at = |tag: u8| {
             order
@@ -78258,6 +78638,9 @@ mod tests {
             last_seen_revision: 0,
             last_presented_frame: None,
             frame_image_references: FrameImageReferences::default(),
+            // Nothing was started, so there is no `$PROFILE` this fixture could
+            // be owed an answer about.
+            integration_offer: Some(shell_integration::Offer::Silent),
         }
     }
 

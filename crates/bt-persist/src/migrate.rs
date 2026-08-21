@@ -52,6 +52,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (14, migrate_settings_v14_to_v15),
     (15, migrate_settings_v15_to_v16),
     (16, migrate_settings_v16_to_v17),
+    (17, migrate_settings_v17_to_v18),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -369,6 +370,24 @@ fn migrate_settings_v16_to_v17(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(17));
         object.insert("terminal_notifications".to_owned(), Value::from(true));
+    }
+    value
+}
+
+/// v17 -> v18: whether a PowerShell pane with no integration is offered one, defaulted **on**.
+///
+/// One key an eighth time, and the second to take the product's default rather than the answer
+/// earlier builds gave — for `migrate_settings_v16_to_v17`'s reason exactly: no build that could
+/// write a v17 file offered anything, so `false` would freeze an absence rather than preserve a
+/// status quo. What separates this from `migrate_settings_v14_to_v15` is the same test: focus
+/// mode changes the window a reader opens every morning, and this changes nothing at all in a
+/// window whose PowerShell already loads the script — which is most of the ways a reader can
+/// arrive here, because a reader who installed it by hand is exactly the reader the criterion
+/// recognises. See `SettingsV1::powershell_integration_offer`.
+fn migrate_settings_v17_to_v18(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(18));
+        object.insert("powershell_integration_offer".to_owned(), Value::from(true));
     }
     value
 }
