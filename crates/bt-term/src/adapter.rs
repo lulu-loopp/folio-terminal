@@ -1035,12 +1035,24 @@ impl TerminalAdapter {
     /// handler, the one caller, for when that inheritance is provably wrong).
     ///
     /// The list is exactly the modes a shell has no use for: the three mouse
-    /// tracking levels (`1000`/`1002`/`1003`), the two report encodings the
+    /// tracking levels (`1000`/`1002`/`1003`) and the two report encodings the
     /// vendor terminal knows (`1005`/`1006` — `1015` is not a mode this terminal
-    /// can be in, so there is nothing of it to retire), and focus reporting
-    /// (`1004`, the same illness with `\e[I`/`\e[O` for a symptom). Bracketed
-    /// paste, the alternate screen, alternate scroll and the keyboard modes are
-    /// deliberately absent: a shell and its line editor use those themselves.
+    /// can be in, so there is nothing of it to retire). Bracketed paste, the
+    /// alternate screen, alternate scroll and the keyboard modes are deliberately
+    /// absent: a shell and its line editor use those themselves.
+    ///
+    /// **Focus reporting (`1004`) is deliberately absent too, and it is the one
+    /// entry that had to be taken back off** (user ruling, 2026-08-21). It reads
+    /// like the same illness with `\e[I`/`\e[O` for a symptom, and it was on the
+    /// list for a day on that reading. Then the A/B probe against a real
+    /// `pwsh 7.6.5` over a real ConPTY showed **every session receiving
+    /// `\e[?1004h` before any program runs**, right behind ConPTY's own `\e[1t` /
+    /// `\e[c` handshake and `\e[?9001h`: ConPTY wants focus events because ConPTY
+    /// consumes them itself and hands the console app a `FOCUS_EVENT`. A mode
+    /// that has been on since the session's first byte is not evidence of a dead
+    /// program, and switching it off here would be this terminal countermanding
+    /// its own transport. [`TerminalModes::focus_reporting`] keeps reporting it —
+    /// that bit is a true fact either way.
     ///
     /// It goes through the vendor's own [`Handler`] entry point rather than at
     /// the mode bits, so this is the same state change the escape sequence would
@@ -1053,7 +1065,6 @@ impl TerminalAdapter {
             NamedPrivateMode::ReportMouseClicks,
             NamedPrivateMode::ReportCellMouseMotion,
             NamedPrivateMode::ReportAllMouseMotion,
-            NamedPrivateMode::ReportFocusInOut,
             NamedPrivateMode::Utf8Mouse,
             NamedPrivateMode::SgrMouse,
         ] {

@@ -7996,7 +7996,20 @@ fn commit_unfocused_leaf_resize(
 #[derive(Clone)]
 enum MouseRoute {
     Local(Box<SelectionDrag>),
-    Forward(input::MouseProtocolButton),
+    /// A press handed to the program, and **the encoding it was handed over in**
+    /// (DESIGN §7.1.5i).
+    ///
+    /// `sgr` is latched at the press rather than read again at the release
+    /// because the two halves of one click are one message to the program: a
+    /// prompt arriving between them retires `1006` (§7.1.5i), and a release read
+    /// from the modes at that moment would answer an SGR press with an X10
+    /// release the program cannot pair with anything it is holding. The button is
+    /// latched for the same reason it always was — a release reports the button
+    /// that went down.
+    Forward {
+        button: input::MouseProtocolButton,
+        sgr: bool,
+    },
     MathBlock,
 }
 
@@ -8128,7 +8141,10 @@ fn route_forwarded_mouse_button(
         && !press_belongs_to_the_window(button, target);
     match state {
         ElementState::Pressed if forward => {
-            *route = Some(MouseRoute::Forward(button));
+            *route = Some(MouseRoute::Forward {
+                button,
+                sgr: modes.sgr_mouse,
+            });
             Some(input::mouse_bytes(
                 modes.sgr_mouse,
                 button,
@@ -8138,10 +8154,19 @@ fn route_forwarded_mouse_button(
                 modifiers,
             ))
         }
-        ElementState::Released if matches!(route, Some(MouseRoute::Forward(_))) => {
+        // The release is owed to the press that was forwarded, so it is spelled
+        // the way that press was spelled: the latch carries the encoding, and the
+        // modes are not asked again. A prompt landing between the two halves of a
+        // click retires `1006` (§7.1.5i); reading it here would split one click
+        // across two protocols.
+        ElementState::Released => {
+            let Some(MouseRoute::Forward { sgr, .. }) = route else {
+                return None;
+            };
+            let sgr = *sgr;
             *route = None;
             Some(input::mouse_bytes(
-                modes.sgr_mouse,
+                sgr,
                 button,
                 input::MouseProtocolEvent::Release,
                 hit.row,
@@ -47272,7 +47297,13 @@ impl Runtime<'_> {
             return Ok(());
         }
         let button = match self.window.mouse_route {
-            Some(MouseRoute::Forward(button)) if modes.mouse_tracking != MouseTracking::Click => {
+            // Motion reads the *current* encoding rather than the latch's, and is
+            // right to: a retirement puts `mouse_tracking` at `Off`, which the
+            // guard above has already turned into a return. Motion never faces
+            // the split the release arm latches against.
+            Some(MouseRoute::Forward { button, .. })
+                if modes.mouse_tracking != MouseTracking::Click =>
+            {
                 button
             }
             None if modes.mouse_tracking == MouseTracking::Motion => {
@@ -49712,7 +49743,7 @@ impl Runtime<'_> {
         match self.window.mouse_route {
             None => "none",
             Some(MouseRoute::Local(_)) => "local",
-            Some(MouseRoute::Forward(_)) => "forward",
+            Some(MouseRoute::Forward { .. }) => "forward",
             Some(MouseRoute::MathBlock) => "math",
         }
     }
@@ -63211,7 +63242,10 @@ mod tests {
 
         let click = local_selection_route(SelectionDragMode::Linear);
         assert!(!should_copy_on_select_release(Some(&click), true));
-        let forwarded = MouseRoute::Forward(input::MouseProtocolButton::Left);
+        let forwarded = MouseRoute::Forward {
+            button: input::MouseProtocolButton::Left,
+            sgr: true,
+        };
         assert!(!should_copy_on_select_release(Some(&forwarded), false));
         assert!(!should_copy_on_select_release(None, false));
     }
@@ -68873,7 +68907,7 @@ mod tests {
             PressedCellTarget::Ordinary,
         );
         assert!(forwarded.is_some());
-        assert!(matches!(route, Some(MouseRoute::Forward(_))));
+        assert!(matches!(route, Some(MouseRoute::Forward { .. })));
 
         let mut shifted_route = None;
         assert!(
@@ -68958,7 +68992,7 @@ mod tests {
             ),
             Some(b"\x1b[<0;3;2M".to_vec())
         );
-        assert!(matches!(route, Some(MouseRoute::Forward(_))));
+        assert!(matches!(route, Some(MouseRoute::Forward { .. })));
     }
 
     /// The window half of the prompt-start retirement (DESIGN §7.1.5i): nothing
@@ -69019,13 +69053,19 @@ mod tests {
     /// program, and swallow every local drag, for as long as the pane lived.
     ///
     /// It cannot: the `Released` arm keys off the latch itself, not off the modes,
-    /// so it fires and clears whatever the modes now say. What it emits on the way
-    /// out is the release owed to the press that was already forwarded — encoded
-    /// X10 rather than SGR, because `1006` went with the rest. Six bytes, once,
-    /// only for a button physically held across the prompt; the flood the ticket
-    /// is about is motion, and motion is gone by then.
+    /// so it fires and clears whatever the modes now say.
+    ///
+    /// **And what it emits is the release owed to *that* press, in *that* press's
+    /// encoding.** The latch carries the encoding the press went out in, so a
+    /// button held across the prompt comes up as an SGR release (`\e[<0;3;2m`)
+    /// matching the SGR press the program already read. Reading `modes.sgr_mouse`
+    /// again at release time would answer a press the program saw in one protocol
+    /// with a release in another — `1006` is gone by then, so the pair would have
+    /// been split across SGR and X10, six bytes the program cannot match to
+    /// anything it is holding. A half-open button is a worse leftover than the one
+    /// this section is about.
     #[test]
-    fn a_press_already_forwarded_when_the_prompt_arrives_still_finds_its_release() {
+    fn a_press_already_forwarded_when_the_prompt_arrives_is_released_in_its_own_encoding() {
         let mut session =
             DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
         session.feed(b"\x1b[?1003h\x1b[?1006h").unwrap();
@@ -69043,10 +69083,70 @@ mod tests {
             )
             .is_some()
         );
-        assert!(matches!(route, Some(MouseRoute::Forward(_))));
+        assert!(
+            matches!(route, Some(MouseRoute::Forward { sgr: true, .. })),
+            "the latch remembers the press went out in SGR"
+        );
 
         session.feed(b"\x1b]133;A\x1b\\").unwrap();
         assert_eq!(session.terminal_modes().mouse_tracking, MouseTracking::Off);
+        assert!(
+            !session.terminal_modes().sgr_mouse,
+            "and the encoding the modes would answer with is gone"
+        );
+
+        assert_eq!(
+            route_forwarded_mouse_button(
+                &mut route,
+                ElementState::Released,
+                input::MouseProtocolButton::Left,
+                hit,
+                session.terminal_modes(),
+                ModifiersState::empty(),
+                PressedCellTarget::Ordinary,
+            ),
+            Some(b"\x1b[<0;3;2m".to_vec()),
+            "the release the forwarded press is owed, in the encoding that press \
+             went out in"
+        );
+        assert!(
+            route.is_none(),
+            "and the latch is open again — the one thing that must not survive"
+        );
+    }
+
+    /// The same latch in the other direction, which is what makes it a latch and
+    /// not a special case for the prompt: a program that turns `1006` **on**
+    /// while a button is down still gets the X10 release its X10 press is owed.
+    ///
+    /// Nothing on this side knows whether the child would rather have the new
+    /// encoding, and the child cannot be asked mid-click. What it does know is
+    /// which bytes it already sent, and a release that pairs with those is the
+    /// only release that closes the button it opened.
+    #[test]
+    fn a_release_keeps_the_press_encoding_when_the_program_switches_protocol_mid_click() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+        // Tracking without 1006: presses go out X10.
+        session.feed(b"\x1b[?1000h").unwrap();
+        let hit = bt_render::GridHit { row: 1, column: 2 };
+        let mut route = None;
+        assert_eq!(
+            route_forwarded_mouse_button(
+                &mut route,
+                ElementState::Pressed,
+                input::MouseProtocolButton::Left,
+                hit,
+                session.terminal_modes(),
+                ModifiersState::empty(),
+                PressedCellTarget::Ordinary,
+            ),
+            Some(vec![0x1b, b'[', b'M', b' ', b'#', b'"'])
+        );
+        assert!(matches!(route, Some(MouseRoute::Forward { sgr: false, .. })));
+
+        session.feed(b"\x1b[?1006h").unwrap();
+        assert!(session.terminal_modes().sgr_mouse);
 
         assert_eq!(
             route_forwarded_mouse_button(
@@ -69059,12 +69159,9 @@ mod tests {
                 PressedCellTarget::Ordinary,
             ),
             Some(vec![0x1b, b'[', b'M', b'#', b'#', b'"']),
-            "the release the forwarded press is owed, in the encoding that is left"
+            "the release answers the press, not the modes"
         );
-        assert!(
-            route.is_none(),
-            "and the latch is open again — the one thing that must not survive"
-        );
+        assert!(route.is_none());
     }
 
     /// PIN (user ruling, 2026-08-20 — the repeal §7.1.5f wrote its own warrant
@@ -69156,7 +69253,7 @@ mod tests {
             ),
             Some(b"\x1b[<0;3;2M".to_vec())
         );
-        assert!(matches!(route, Some(MouseRoute::Forward(_))));
+        assert!(matches!(route, Some(MouseRoute::Forward { .. })));
     }
 
     /// PIN — **an OSC 8 link printed on the alternate screen really is found
