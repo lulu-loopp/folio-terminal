@@ -5,6 +5,7 @@ use std::{collections::VecDeque, num::NonZeroUsize};
 use bitflags::bitflags;
 use unicode_segmentation::UnicodeSegmentation;
 
+pub mod paths;
 pub mod search;
 
 pub const DEFAULT_STAGING_QUOTA: NonZeroUsize = NonZeroUsize::new(4096).unwrap();
