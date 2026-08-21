@@ -27189,12 +27189,35 @@ mod tests {",
                              but the parked strip — the column was never wired to \
                              that row"
                         ),
-                        (TabLayoutMode::Vertical, RailMode::Expanded, false) => assert_eq!(
-                            left_back, stage[0],
-                            "{case}: while an expanded rail keeps exactly what the \
-                             column kept, which is why the panes do not move when \
-                             this window enters the mode"
-                        ),
+                        // **An expanded rail gives back all but the sixty
+                        // pixels the column is wider than it** (2026-08-20).
+                        // This read `left_back == stage[0]` while the two
+                        // panels shared one constant, and the sentence it
+                        // carried — "the panes do not move when this window
+                        // enters the mode" — was a consequence of that
+                        // sharing rather than a ruling. Re-striking the
+                        // column to 280 spends it: entering the mode over an
+                        // expanded vertical rail now costs the stage exactly
+                        // the difference, which is the honest price of a
+                        // card wide enough to read, and leaving hands that
+                        // difference straight back.
+                        (TabLayoutMode::Vertical, RailMode::Expanded, false) => {
+                            assert!(
+                                left_back < stage[0],
+                                "{case}: the column is the wider of the two panels, \
+                                 so leaving it gives the stage width back"
+                            );
+                            let widened = f64::from(
+                                (FOCUS_COLUMN_WIDTH_LOGICAL_PX - RAIL_WIDTH_LOGICAL_PX) * scale,
+                            );
+                            assert!(
+                                (stage[0] - left_back - widened).abs() <= 1.0,
+                                "{case}: and gives back exactly what the column is \
+                                 wider than the rail ({} vs {widened}), to within the \
+                                 pixel a rounded device inset costs",
+                                stage[0] - left_back
+                            );
+                        }
                     }
                 }
             }
@@ -28181,7 +28204,7 @@ mod tests {",
                     };
                     assert_eq!(
                         focused.terminal_inset_logical_px(),
-                        RAIL_WIDTH_LOGICAL_PX,
+                        FOCUS_COLUMN_WIDTH_LOGICAL_PX,
                         "{layout:?}/{mode:?}/collapsed={collapsed}: the column is \
                          card-width in every one of them — no layout is a gate, \
                          and the sidebar's three states govern the other panel"
