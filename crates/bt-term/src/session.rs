@@ -1860,10 +1860,14 @@ impl DualPlaneSession {
     /// [`Self::viewport_frame`], where it cannot be forgotten. This half cannot live there because
     /// remembering a question changes the session, and a frame is projected from a session that is
     /// only being read.
-    pub fn absorb_printed_path_probes(&mut self, projection: &mut ViewportProjection) {
+    /// Returns how many questions this actually raised, so the caller can hand the worker its work
+    /// on the same pass instead of waiting for whatever moves next.
+    pub fn absorb_printed_path_probes(&mut self, projection: &mut ViewportProjection) -> usize {
+        let before = self.path_verify_tasks.len();
         for path in projection.take_printed_path_probes() {
             self.ask_about_path(path);
         }
+        self.path_verify_tasks.len().saturating_sub(before)
     }
 
     /// Put one printed path in front of the worker, unless it is already answered or already
