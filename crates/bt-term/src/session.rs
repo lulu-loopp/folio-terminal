@@ -24895,20 +24895,43 @@ mod tests {
             "and the encoding with them: a mode that encodes reports nobody will \
              make is the same leftover"
         );
-        assert!(!modes.focus_reporting);
     }
 
-    /// The same disease with a different symptom: a leftover `1004` types `\e[I` /
-    /// `\e[O` into the prompt every time the window is clicked into and away from.
-    /// One rule covers both because it is one rule — *would the shell itself ever
-    /// use this?*
+    /// **`1004` is not on the list, and the reason is a byte-level fact about
+    /// this platform** (user ruling, 2026-08-21, DESIGN §7.1.5i).
+    ///
+    /// Focus reporting looks like the same illness with a different symptom — a
+    /// leftover `1004` would type `\e[I` / `\e[O` into the prompt every time the
+    /// window is clicked into and away from — and it was on the list for one
+    /// day on exactly that reading. The A/B probe against a real `pwsh 7.6.5`
+    /// over a real ConPTY says otherwise: **every session receives `\e[?1004h`
+    /// before any program runs**, right behind ConPTY's own `\e[1t` / `\e[c`
+    /// handshake and `\e[?9001h`. ConPTY asks for focus events because ConPTY
+    /// itself consumes them and hands the console app a `FOCUS_EVENT`.
+    ///
+    /// So "1004 is still on at the prompt" carries no information here: it has
+    /// been on since the session's first byte, with no dead program anywhere in
+    /// the story. By this section's own single criterion — *would the shell
+    /// itself ever use this?* — the answer for `1004` is that the thing using it
+    /// is the pty layer under the shell, which is as much "not a leftover" as a
+    /// mode can be. Retiring it would be this window switching off a mode its
+    /// own transport turned on.
+    ///
+    /// The [`TerminalModes::focus_reporting`] bit stays exactly where it is: it
+    /// is a true fact about the terminal, and the day focus reporting is
+    /// actually implemented it is the bit that will be read.
     #[test]
-    fn a_prompt_start_retires_focus_reporting_a_dead_program_left_behind() {
+    fn a_prompt_start_leaves_focus_reporting_alone_because_conpty_asked_for_it() {
         let mut session = DualPlaneSession::new(nz(80), nz(8));
+        // What ConPTY sends at the head of every session, before a shell exists.
         session.feed(b"\x1b[?1004h").unwrap();
         assert!(session.terminal_modes().focus_reporting);
         session.feed(b"\x1b]133;A\x1b\\").unwrap();
-        assert!(!session.terminal_modes().focus_reporting);
+        assert!(
+            session.terminal_modes().focus_reporting,
+            "1004 is ConPTY's, not a dead program's, and a prompt is not evidence \
+             that ConPTY left"
+        );
     }
 
     /// The other half of the criterion, and the half that keeps it a rule rather
@@ -24952,7 +24975,7 @@ mod tests {
             &b"\x1b]133;D;0\x1b\\"[..],
         ] {
             let mut session = DualPlaneSession::new(nz(80), nz(8));
-            session.feed(b"\x1b[?1003h\x1b[?1006h\x1b[?1004h").unwrap();
+            session.feed(b"\x1b[?1003h\x1b[?1006h").unwrap();
             session.feed(marker).unwrap();
             let modes = session.terminal_modes();
             assert_eq!(
@@ -24961,7 +24984,6 @@ mod tests {
                 "{marker:?} is not the shell taking the floor"
             );
             assert!(modes.sgr_mouse, "{marker:?}");
-            assert!(modes.focus_reporting, "{marker:?}");
         }
     }
 
@@ -24977,9 +24999,7 @@ mod tests {
     #[test]
     fn a_prompt_start_on_the_alternate_screen_retires_nothing_and_evicts_nobody() {
         let mut session = DualPlaneSession::new(nz(80), nz(8));
-        session
-            .feed(b"\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[?1004h")
-            .unwrap();
+        session.feed(b"\x1b[?1049h\x1b[?1003h\x1b[?1006h").unwrap();
         session.feed(b"\x1b]133;A\x1b\\").unwrap();
         let modes = session.terminal_modes();
         assert!(
@@ -24992,7 +25012,6 @@ mod tests {
             "the program drawing this prompt is the one that asked for the mouse"
         );
         assert!(modes.sgr_mouse);
-        assert!(modes.focus_reporting);
     }
 }
 
