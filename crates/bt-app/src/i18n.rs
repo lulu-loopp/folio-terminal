@@ -1307,11 +1307,15 @@ pub enum Text {
     /// `Appearance ▸ Focus mode` — the row, and the name of the thing itself.
     RowFocusMode,
     /// Its sentence. Says what the column *is* and names the chord, because this
-    /// row and that chord are now the only two ways in (user ruling 2026-08-19,
-    /// which withdrew the pane-header double-click and the pane menu's row).
+    /// row and that chord are the only two ways in — and, since 2026-08-20, the
+    /// only two ways out as well (the 08-19 ruling withdrew the pane-header
+    /// double-click and the pane menu's row; the 08-20 one withdrew the `Exit`
+    /// button, its heading row and the `Esc` rung).
     DescFocusMode,
-    /// The word on the way out, at the head of the card column.
-    FocusExit,
+    // `FocusExit` — the word on a button at the head of the card column — left
+    // this table with the button on 2026-08-20, for the same reason the pane
+    // menu's two rows left it on 08-19: a string table that still holds the words
+    // of a withdrawn surface is how a withdrawn surface comes back by accident.
     // **Two entries for a four-item picker**, and the arithmetic is
     // `BlockMaxHeight`'s: the row's name and its sentence are words, `Off` is a
     // word this table already holds ([`Self::OptionOff`]), and `2:1` / `3:1` /
@@ -2373,10 +2377,6 @@ impl Text {
                 "The tab strip becomes a column of cards, one per tab; the tab you pick fills the window whole, splits and all. Ctrl+Shift+Z turns this same setting",
                 "标签条变成一列卡片,一张卡一个标签;点中的那个标签整个占满窗口,分屏原样。Ctrl+Shift+Z 拨的是同一个开关",
             ),
-            // The button's whole caption. One word, because the button also
-            // wears the `×` and the heading beside it already says which mode is
-            // being left.
-            Self::FocusExit => pick(lang, "Exit", "退出"),
             // 「最小对比度」is the term of art both WCAG's Chinese translations
             // and VS Code's own Chinese locale use for this quantity, so the row
             // is findable by the name a reader already has for it.
@@ -2420,7 +2420,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 419] = [
+    pub const ALL: [Self; 418] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -2835,7 +2835,6 @@ impl Text {
         Self::GraphLeaveDetached,
         Self::RowFocusMode,
         Self::DescFocusMode,
-        Self::FocusExit,
         Self::RowMinimumContrast,
         Self::DescMinimumContrast,
         Self::RowNotifications,
@@ -4342,20 +4341,23 @@ mod tests {
         assert_eq!(seen.len(), Text::ALL.len());
     }
 
-    /// PIN (§7.1.6b′, user ruling 2026-08-19) — **the focus-mode row advertises
-    /// the doors that exist, and no others.**
+    /// PIN (§7.1.6b′, user rulings 2026-08-19 and 2026-08-20) — **the focus-mode
+    /// row advertises the doors that exist, and no others.**
     ///
-    /// The mode shipped with five doors and two of them were withdrawn the same
-    /// day: a double-click on a pane header (it reads as "make this pane bigger",
+    /// The mode shipped with five doors and is down to two. Withdrawn on 08-19:
+    /// a double-click on a pane header (it reads as "make this pane bigger",
     /// which is the opposite of what the mode does) and that pane's `⌄` menu (a
     /// list whose every other line acts on the pane under it is no place for a
-    /// verb about the window). What is left is the chord and this row itself —
-    /// and this sentence is the one place in the product that *tells* a reader
-    /// where the doors are, so it is the one place a withdrawn door can go on
-    /// being promised after the code that answered it is gone.
+    /// verb about the window). Withdrawn on 08-20: the column's own `Exit`
+    /// button, the heading row it stood on, and the `Esc` rung —
+    /// 「它是设置里的一个设置，怎么这么容易就退出」. What is left is the chord
+    /// and this row itself — and this sentence is the one place in the product
+    /// that *tells* a reader where the doors are, so it is the one place a
+    /// withdrawn door can go on being promised after the code that answered it
+    /// is gone.
     ///
-    /// Red gate: put either gesture's name back into the sentence without
-    /// building the gesture, and this goes red in whichever language it was added
+    /// Red gate: put any withdrawn door's name back into the sentence without
+    /// building the door, and this goes red in whichever language it was added
     /// to.
     #[test]
     fn the_focus_mode_row_names_the_chord_and_no_gesture_this_build_withdrew() {
@@ -4365,7 +4367,16 @@ mod tests {
                 sentence.contains("Ctrl+Shift+Z"),
                 "{lang:?}: the row names the one chord that turns it"
             );
-            for withdrawn in ["double-click", "双击", "⌄", "pane's header", "窗格标题栏"] {
+            for withdrawn in [
+                "double-click",
+                "双击",
+                "⌄",
+                "pane's header",
+                "窗格标题栏",
+                "Exit",
+                "退出钮",
+                "Esc",
+            ] {
                 assert!(
                     !sentence.contains(withdrawn),
                     "{lang:?}: the sentence still promises `{withdrawn}`, a door this \

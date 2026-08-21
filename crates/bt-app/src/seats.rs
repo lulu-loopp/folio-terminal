@@ -27,35 +27,32 @@ use bt_layout::{
 };
 use bt_persist::{LayoutNodeV1, LeafNodeV1, SplitDirV1, SplitNodeV1, TermLeafV1};
 use bt_render::{
-    ChromeLabel, ChromeLabelWeight, ChromePalette, ChromeQuad, FOCUS_BAR_GAP_LOGICAL_PX,
-    FOCUS_BAR_PADDING_BOTTOM_LOGICAL_PX, FOCUS_BAR_PADDING_TOP_LOGICAL_PX,
-    FOCUS_BAR_PADDING_X_LOGICAL_PX, FOCUS_CARD_BORDER_LOGICAL_PX, FOCUS_CARD_CLOSE_BOX_LOGICAL_PX,
-    FOCUS_CARD_CLOSE_GLYPH_LOGICAL_PX, FOCUS_CARD_CLOSE_RADIUS_LOGICAL_PX,
-    FOCUS_CARD_FONT_LOGICAL_PX, FOCUS_CARD_GAP_LOGICAL_PX, FOCUS_CARD_HEAD_GAP_LOGICAL_PX,
-    FOCUS_CARD_HEAD_PADDING_X_LOGICAL_PX, FOCUS_CARD_HEAD_PADDING_Y_LOGICAL_PX,
-    FOCUS_CARD_PIN_BOX_LOGICAL_PX, FOCUS_CARD_RADIUS_LOGICAL_PX, FOCUS_CARD_WAIT_HALO_LOGICAL_PX,
-    FOCUS_CARD_WAIT_HALO_OPACITY, FOCUS_COLUMN_WIDTH_LOGICAL_PX, FOCUS_EXIT_FONT_LOGICAL_PX,
-    FOCUS_EXIT_GAP_LOGICAL_PX, FOCUS_EXIT_GLYPH_LOGICAL_PX, FOCUS_EXIT_HEIGHT_LOGICAL_PX,
-    FOCUS_EXIT_PADDING_X_LOGICAL_PX, FOCUS_EXIT_RADIUS_LOGICAL_PX, FOCUS_MINI_BORDER_LOGICAL_PX,
-    FOCUS_MINI_FILES_FONT_LOGICAL_PX, FOCUS_MINI_FILES_ICON_LOGICAL_PX,
-    FOCUS_MINI_FILES_INDENT_LOGICAL_PX, FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX,
-    FOCUS_MINI_GAP_LOGICAL_PX, FOCUS_MINI_HEIGHT_LOGICAL_PX, FOCUS_MINI_PADDING_LOGICAL_PX,
-    FOCUS_MINI_RADIUS_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX,
-    FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX, OverlayQuad,
-    PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
-    PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX, RAIL_GAP_LOGICAL_PX,
-    RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX, RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX,
-    RAIL_LABEL_PADDING_TOP_LOGICAL_PX, RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM,
-    RAIL_NEW_CHEVRON_BOX_LOGICAL_PX, RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX,
-    RAIL_NEW_MARGIN_TOP_LOGICAL_PX, RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX,
-    RAIL_PADDING_TOP_LOGICAL_PX, RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX,
-    RAIL_SEAM_INSET_X_LOGICAL_PX, RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX,
-    RAIL_SHADE_WIDTH_LOGICAL_PX, RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX,
-    RAIL_TAB_HEIGHT_LOGICAL_PX, RAIL_TAB_PADDING_LEFT_LOGICAL_PX,
-    RAIL_TAB_PADDING_RIGHT_LOGICAL_PX, RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX,
-    RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_WIDTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX,
-    SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX, SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX,
-    SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_PANE_CLOSE_BOX_LOGICAL_PX, SEAT_PANE_CLOSE_GLYPH_LOGICAL_PX,
+    ChromeLabel, ChromeLabelWeight, ChromePalette, ChromeQuad, FOCUS_CARD_BORDER_LOGICAL_PX,
+    FOCUS_CARD_CLOSE_BOX_LOGICAL_PX, FOCUS_CARD_CLOSE_GLYPH_LOGICAL_PX,
+    FOCUS_CARD_CLOSE_RADIUS_LOGICAL_PX, FOCUS_CARD_FONT_LOGICAL_PX, FOCUS_CARD_GAP_LOGICAL_PX,
+    FOCUS_CARD_HEAD_GAP_LOGICAL_PX, FOCUS_CARD_HEAD_PADDING_X_LOGICAL_PX,
+    FOCUS_CARD_HEAD_PADDING_Y_LOGICAL_PX, FOCUS_CARD_PIN_BOX_LOGICAL_PX,
+    FOCUS_CARD_RADIUS_LOGICAL_PX, FOCUS_CARD_WAIT_HALO_LOGICAL_PX, FOCUS_CARD_WAIT_HALO_OPACITY,
+    FOCUS_COLUMN_WIDTH_LOGICAL_PX, FOCUS_MINI_BORDER_LOGICAL_PX, FOCUS_MINI_FILES_FONT_LOGICAL_PX,
+    FOCUS_MINI_FILES_ICON_LOGICAL_PX, FOCUS_MINI_FILES_INDENT_LOGICAL_PX,
+    FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX, FOCUS_MINI_GAP_LOGICAL_PX, FOCUS_MINI_HEIGHT_LOGICAL_PX,
+    FOCUS_MINI_PADDING_LOGICAL_PX, FOCUS_MINI_RADIUS_LOGICAL_PX,
+    FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX,
+    FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX, OverlayQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX,
+    PANE_HEAD_FOLDER_MARK_LOGICAL_PX, PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX,
+    RAIL_GAP_LOGICAL_PX, RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX,
+    RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX, RAIL_LABEL_PADDING_TOP_LOGICAL_PX,
+    RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM, RAIL_NEW_CHEVRON_BOX_LOGICAL_PX,
+    RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX, RAIL_NEW_MARGIN_TOP_LOGICAL_PX,
+    RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX, RAIL_PADDING_TOP_LOGICAL_PX,
+    RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX, RAIL_SEAM_INSET_X_LOGICAL_PX,
+    RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX, RAIL_SHADE_WIDTH_LOGICAL_PX,
+    RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX, RAIL_TAB_HEIGHT_LOGICAL_PX,
+    RAIL_TAB_PADDING_LEFT_LOGICAL_PX, RAIL_TAB_PADDING_RIGHT_LOGICAL_PX,
+    RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX, RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_WIDTH_LOGICAL_PX,
+    SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX,
+    SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX,
+    SEAT_PANE_CLOSE_BOX_LOGICAL_PX, SEAT_PANE_CLOSE_GLYPH_LOGICAL_PX,
     SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX, SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX,
     SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX, SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX,
     SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
@@ -2184,21 +2181,12 @@ pub enum ChromeTarget {
     /// through the same rectangle: it is the same panel, holding a different
     /// list.
     RailBody,
-    /// **`Exit`, at the head of the focus column — the visible way out**
-    /// (§7.1.6b′).
-    ///
-    /// The one target this feature adds, and it carries no index because the
-    /// mode is one bit for the whole window. Its own target rather than a press
-    /// anywhere on the bar for [`Self::PaneClose`]'s reason: the bar is a
-    /// heading with a button on it, and a heading that turned a layout mode off
-    /// wherever you happened to click it would be a heading you learn to avoid.
-    ///
-    /// It exists at all because the other three ways out cannot be seen — a
-    /// setting behind a modal, a chord and `Esc` — and a mode you can only leave
-    /// by remembering one of those is a trap. That was true when the mode had
-    /// five doors and it is more true now that it has four, two of which were
-    /// withdrawn from the panes themselves (user ruling 2026-08-19).
-    FocusExit,
+    // **The focus column adds no target of its own** (user ruling 2026-08-20).
+    // `FocusExit` stood here while the mode carried a visible way out; the ruling
+    // withdrew the button, the heading row it sat in and the `Esc` rung together
+    // — 「它是设置里的一个设置，怎么这么容易就退出」 — so the column now answers
+    // the strip's own targets and nothing else, and the mode is entered and left
+    // through the two doors that are also the two ways *in*.
 }
 
 /// How much room a tab has, measured the way the mock-up's own
@@ -3819,9 +3807,9 @@ pub fn hit_rail_chrome(
 // boxes are the row's boxes at the card's own padding, the marks are
 // [`TabContent`]'s marks unchanged, and the hit test answers the strip's own
 // [`ChromeTarget::Tab`] / [`ChromeTarget::TabClose`] so that pressing a card runs
-// the verb pressing a tab already runs. The one target this surface adds is
-// [`ChromeTarget::FocusExit`], because a way out is the one thing a tab row has
-// never needed.
+// the verb pressing a tab already runs. **It adds no target of its own**: the
+// heading row that carried a visible `Exit` was withdrawn on 2026-08-20, so the
+// surface is the tab list and nothing besides.
 
 /// One card of the focus column, solved.
 ///
@@ -3912,23 +3900,16 @@ impl FocusCardGeometry {
 }
 
 /// The focus column, solved.
+///
+/// **No heading row** (user ruling 2026-08-20). A `bar`, a `label` and an `exit`
+/// stood at the top of this struct while the mode carried a visible way out; the
+/// ruling withdrew all three — 「它是设置里的一个设置，怎么这么容易就退出」 —
+/// and their band went back to the cards, so the list starts at the panel's own
+/// top margin exactly as the rail's list does.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FocusRailGeometry {
     /// The column's outer box `[left, top, right, bottom]`.
     pub body: [f32; 4],
-    /// The bar at the head of the column: the words `Focus mode` and `Exit`.
-    ///
-    /// It stands where the rail's `Tabs` heading stands, and the list scrolls
-    /// beneath it — which is `position: sticky; top: -6px` expressed the way
-    /// [`RailGeometry::label`] already expresses the same idea. §7.1.6b′ is what
-    /// makes that non-negotiable: every other way out is invisible — a chord, a
-    /// settings row, `Esc` — and a mode you can only leave by remembering one of
-    /// those is a trap, so this one must not be scrollable off the screen.
-    pub bar: [f32; 4],
-    /// The bar's label run as `[left, right]`, ending one gap short of the exit.
-    pub label: [f32; 2],
-    /// The `Exit` button's own box.
-    pub exit: [f32; 4],
     /// One card per tab, in tab order — **the only order there is**. Cards may
     /// be dragged into a new order since 2026-08-20 (§7.1.6b′ ④), and that
     /// changed nothing here: a card reorder moves `window.tabs`, so there is
@@ -3987,29 +3968,16 @@ fn focus_card_height(scale: f32) -> f32 {
     focus_card_head_height(scale) + (FOCUS_MINI_HEIGHT_LOGICAL_PX * scale).round()
 }
 
-/// How wide the `Exit` button is, given the measured width of the word on it.
-///
-/// The caption's width is carried in rather than derived for
-/// [`TabContent::badge_text_width`]'s reason: only the font knows how wide a word
-/// is, and "the button you can press is the button you can see" has to be true by
-/// one number rather than by two functions agreeing.
-fn focus_exit_width(exit_caption_width: f32, scale: f32) -> f32 {
-    (2.0 * FOCUS_EXIT_PADDING_X_LOGICAL_PX * scale
-        + FOCUS_EXIT_GLYPH_LOGICAL_PX * scale
-        + FOCUS_EXIT_GAP_LOGICAL_PX * scale
-        + exit_caption_width)
-        .round()
-}
-
-/// The focus column's cards, bar and furniture, scrolled by `scroll` physical
-/// pixels.
+/// The focus column's cards and furniture, scrolled by `scroll` physical pixels.
 ///
 /// [`rail_geometry`]'s opposite number, and it shares that function's frame
 /// exactly: the same outer box, the same top at the title bar's lower edge, the
 /// same sticky `+` at `min(flow, stuck)`, the same clip box between the two. What
-/// differs is what fills the middle — cards at [`FOCUS_CARD_GAP_LOGICAL_PX`]
-/// instead of rows at [`RAIL_GAP_LOGICAL_PX`] — and that the heading has grown a
-/// button.
+/// differs is only what fills the middle — cards at [`FOCUS_CARD_GAP_LOGICAL_PX`]
+/// instead of rows at [`RAIL_GAP_LOGICAL_PX`]. **Not even a heading differs any
+/// more** (user ruling 2026-08-20): the bar that carried the words `Focus mode`
+/// and a visible `Exit` is gone, and the list begins where the rail's list
+/// begins.
 ///
 /// Returns `None` exactly when focus mode is off, which is the mirror of
 /// [`rail_geometry`]'s own `None`: between them, at most one panel is on screen,
@@ -4019,7 +3987,6 @@ pub fn focus_rail_geometry(
     height: f32,
     scale: f32,
     tab_count: usize,
-    exit_caption_width: f32,
     scroll: f32,
     state: RailState,
 ) -> Option<FocusRailGeometry> {
@@ -4039,31 +4006,14 @@ pub fn focus_rail_geometry(
     let content_right = (width - border - pad_x).max(content_left);
     let gap = RAIL_GAP_LOGICAL_PX * scale;
 
-    let mut cursor = top + RAIL_PADDING_TOP_LOGICAL_PX * scale;
-    let bar_height = ((FOCUS_BAR_PADDING_TOP_LOGICAL_PX
-        + FOCUS_EXIT_HEIGHT_LOGICAL_PX
-        + FOCUS_BAR_PADDING_BOTTOM_LOGICAL_PX)
-        * scale)
-        .round();
-    let bar = [content_left, cursor, content_right, cursor + bar_height];
-    let bar_pad_x = FOCUS_BAR_PADDING_X_LOGICAL_PX * scale;
-    let bar_left = content_left + bar_pad_x;
-    let bar_right = (content_right - bar_pad_x).max(bar_left);
-    let exit_top = (cursor + FOCUS_BAR_PADDING_TOP_LOGICAL_PX * scale).round();
-    let exit_width = focus_exit_width(exit_caption_width, scale).min(bar_right - bar_left);
-    let exit = [
-        bar_right - exit_width,
-        exit_top,
-        bar_right,
-        exit_top + (FOCUS_EXIT_HEIGHT_LOGICAL_PX * scale).round(),
-    ];
-    let label = [
-        bar_left,
-        (exit[0] - FOCUS_BAR_GAP_LOGICAL_PX * scale).max(bar_left),
-    ];
-    cursor += bar_height + gap;
+    // **The list starts at the panel's own top margin** — the rail's first row's
+    // line, unchanged, now that there is no heading between the two (user ruling
+    // 2026-08-20). The band the bar held went back to the cards rather than
+    // being left as padding, which is what the ruling asked for in the same
+    // breath as the button.
+    let cursor = top + RAIL_PADDING_TOP_LOGICAL_PX * scale;
 
-    // The list scrolls under the bar and the `+`; only the cards move.
+    // The list scrolls under the `+`; only the cards move.
     let list_top = cursor;
     let card_height = focus_card_height(scale);
     let card_gap = FOCUS_CARD_GAP_LOGICAL_PX * scale;
@@ -4167,9 +4117,6 @@ pub fn focus_rail_geometry(
 
     Some(FocusRailGeometry {
         body: [0.0, top, width, bottom],
-        bar,
-        label,
-        exit,
         cards,
         new_tab,
         new_tab_menu,
@@ -4424,30 +4371,19 @@ pub struct FocusThumbnail<'a> {
 /// opaque, so a point inside it that hits nothing is [`ChromeTarget::RailBody`]
 /// rather than a fall-through onto the pane underneath.
 #[must_use]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "hit_rail_chrome's own argument list, one surface over: the geometry is a pure function of what is on screen and every one of these is part of that"
-)]
 pub fn hit_focus_rail(
     height: f32,
     scale: f32,
     tabs: &[TabTrailer],
-    exit_caption_width: f32,
     scroll: f32,
     state: RailState,
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
     let (x, y) = (x as f32, y as f32);
-    let geometry =
-        focus_rail_geometry(height, scale, tabs.len(), exit_caption_width, scroll, state)?;
+    let geometry = focus_rail_geometry(height, scale, tabs.len(), scroll, state)?;
     if !contains(geometry.body, x, y) {
         return None;
-    }
-    // `Exit` answers before the bar it sits in, smallest target first — the same
-    // order the `×` is asked in inside a card.
-    if contains(geometry.exit, x, y) {
-        return Some(ChromeTarget::FocusExit);
     }
     if contains(geometry.new_tab_menu, x, y) {
         return Some(ChromeTarget::NewTabMenu);
@@ -5762,7 +5698,6 @@ pub fn build_chrome_with_preview(
             // otherwise is written against.
             rail: RailState::default(),
             rail_scroll: 0.0,
-            exit_caption_width: 0.0,
             // The settled column: every geometry in this module is measured at
             // the end of the entrance, which is where it spends its whole life.
             focus_reveal: 1.0,
@@ -6022,16 +5957,6 @@ pub struct ChromeContent<'a> {
     /// same panel holding a different list, and a second scroll offset would be
     /// a second place for "how far down the tab list am I" to be true.
     pub rail_scroll: f32,
-    /// How wide the word on the `Exit` button is drawn (§7.1.6b′).
-    ///
-    /// Measured by the renderer and carried in for [`TabContent::badge_text_width`]'s
-    /// reason: only the font knows how wide a word is, and the button's box is
-    /// sized from exactly that, so "the button you can press is the button you
-    /// can see" holds by one number rather than by two functions agreeing. It is
-    /// read only while [`RailState::focus`] is set; every other frame it is
-    /// carried and ignored, which is cheaper than making the field optional and
-    /// then having to answer what `None` means to a solver.
-    pub exit_caption_width: f32,
     /// **How far into its entrance the card column is**, `0.0..=1.0` (§7.1.6b′
     /// F3).
     ///
@@ -6427,7 +6352,6 @@ pub fn build_chrome_for_tabs(
         tab_scroll,
         rail,
         rail_scroll,
-        exit_caption_width,
         focus_reveal,
         focus_thumbnails,
         preview_titles,
@@ -7530,7 +7454,6 @@ pub fn build_chrome_for_tabs(
                 grabbed,
                 thumbnails: focus_thumbnails,
                 scroll: rail_scroll,
-                exit_caption_width,
                 state: rail,
                 profile_menu_open,
                 chevron_turn,
@@ -9868,8 +9791,6 @@ struct FocusRail<'a> {
     thumbnails: &'a [Option<FocusThumbnail<'a>>],
     /// How far the column is scrolled, in physical pixels.
     scroll: f32,
-    /// The measured width of the word `Exit`, at [`FOCUS_EXIT_FONT_LOGICAL_PX`].
-    exit_caption_width: f32,
     state: RailState,
     profile_menu_open: bool,
     chevron_turn: f32,
@@ -9931,7 +9852,6 @@ fn focus_rail_chrome(
         grabbed,
         thumbnails,
         scroll,
-        exit_caption_width,
         state,
         profile_menu_open,
         chevron_turn,
@@ -9942,9 +9862,7 @@ fn focus_rail_chrome(
     let (chevron_turn, menu_lit) =
         profile_menu_tell(state.profile_menu_side(), profile_menu_open, chevron_turn);
     let (quads, labels, sprites) = output;
-    let Some(geometry) =
-        focus_rail_geometry(height, scale, tabs.len(), exit_caption_width, scroll, state)
-    else {
+    let Some(geometry) = focus_rail_geometry(height, scale, tabs.len(), scroll, state) else {
         return;
     };
     let ground = palette.title_bar;
@@ -9970,97 +9888,12 @@ fn focus_rail_chrome(
         ]
     };
 
-    // ── the bar: the column's heading, and the way out ──
-    labels.push(ChromeLabel {
-        mono: false,
-        rect: [
-            geometry.label[0],
-            geometry.bar[1],
-            geometry.label[1],
-            geometry.bar[3],
-        ],
-        text: crate::i18n::Text::RowFocusMode.text().to_owned(),
-        font_size_px: RAIL_LABEL_FONT_LOGICAL_PX * scale,
-        color: palette.title_text_muted,
-        align_right: false,
-        align_center: false,
-        // The rail's `Tabs` heading exactly — same size, same tracking, same
-        // weight, same ink. The column is still the tab list, so its heading is
-        // still a heading and not a title.
-        letter_spacing_em: RAIL_LABEL_TRACKING_EM,
-        weight: ChromeLabelWeight::SemiBold,
-        tabular_numerals: false,
-        clip: None,
-    });
-    let exit_hovered = hover == Some(ChromeTarget::FocusExit);
-    let exit_radius = (FOCUS_EXIT_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
-    sprites.push(ChromeSprite::new(
-        ChromeMark::ControlPill {
-            radius_px: exit_radius,
-        },
-        pixel_snapped(geometry.exit),
-        if exit_hovered {
-            palette.focus_exit_hover
-        } else {
-            palette.focus_exit
-        },
-    ));
-    sprites.push(ChromeSprite::new(
-        ChromeMark::ControlPillRing {
-            radius_px: exit_radius,
-            stroke_px: (FOCUS_CARD_BORDER_LOGICAL_PX * scale).round().max(1.0) as u32,
-        },
-        pixel_snapped(geometry.exit),
-        // `.focus-exit:hover { border-color: var(--ink3) }` — the button steps up
-        // to the same muted ink the heading beside it is set in, which is where
-        // the mock-up's hover ladder ends.
-        if exit_hovered {
-            palette.title_text_muted
-        } else {
-            palette.focus_card_edge
-        },
-    ));
-    let exit_ink = if exit_hovered {
-        palette.focus_exit_text_hover
-    } else {
-        palette.focus_exit_text
-    };
-    let exit_glyph = (FOCUS_EXIT_GLYPH_LOGICAL_PX * scale).round().max(1.0);
-    let exit_glyph_left = (geometry.exit[0] + FOCUS_EXIT_PADDING_X_LOGICAL_PX * scale).round();
-    let exit_glyph_top = ((geometry.exit[1] + geometry.exit[3] - exit_glyph) / 2.0).round();
-    sprites.push(ChromeSprite::new(
-        // `#i-close` — the same glyph every `×` in this window is drawn from.
-        // The button says `Exit` in words beside it, so the mark is what makes it
-        // read as *leaving* rather than as a link.
-        ChromeMark::TabClose,
-        [
-            exit_glyph_left,
-            exit_glyph_top,
-            exit_glyph_left + exit_glyph,
-            exit_glyph_top + exit_glyph,
-        ],
-        exit_ink,
-    ));
-    labels.push(ChromeLabel {
-        mono: false,
-        rect: [
-            exit_glyph_left + exit_glyph + FOCUS_EXIT_GAP_LOGICAL_PX * scale,
-            geometry.exit[1],
-            geometry.exit[2],
-            geometry.exit[3],
-        ],
-        text: crate::i18n::Text::FocusExit.text().to_owned(),
-        font_size_px: FOCUS_EXIT_FONT_LOGICAL_PX * scale,
-        color: exit_ink,
-        align_right: false,
-        align_center: false,
-        letter_spacing_em: 0.0,
-        weight: ChromeLabelWeight::Regular,
-        tabular_numerals: false,
-        clip: None,
-    });
-
     // ── the cards ──
+    //
+    // Straight to them: the column has no heading of its own. The bar that stood
+    // here — the words `Focus mode` and a visible `Exit` — was withdrawn on
+    // 2026-08-20, and the panel's top margin is now the first card's own top
+    // edge.
     let card_radius = (FOCUS_CARD_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
     let card_border = (FOCUS_CARD_BORDER_LOGICAL_PX * scale).round().max(1.0) as u32;
     let mark_size = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
@@ -15761,7 +15594,6 @@ mod tests {
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
-                exit_caption_width: 0.0,
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
@@ -15836,7 +15668,6 @@ mod tests {
                     tab_scroll: 0.0,
                     rail: RailState::default(),
                     rail_scroll: 0.0,
-                    exit_caption_width: 0.0,
                     // The settled column: every geometry in this module is measured at
                     // the end of the entrance, which is where it spends its whole life.
                     focus_reveal: 1.0,
@@ -17926,7 +17757,6 @@ mod tests {",
                     tab_scroll: 0.0,
                     rail: RailState::default(),
                     rail_scroll: 0.0,
-                    exit_caption_width: 0.0,
                     // The settled column: every geometry in this module is measured at
                     // the end of the entrance, which is where it spends its whole life.
                     focus_reveal: 1.0,
@@ -18148,7 +17978,6 @@ mod tests {",
                 tab_scroll,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
-                exit_caption_width: 0.0,
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
@@ -18256,7 +18085,6 @@ mod tests {",
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
-                exit_caption_width: 0.0,
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
@@ -19963,7 +19791,6 @@ mod tests {",
                 tab_scroll: 0.0,
                 rail,
                 rail_scroll: 0.0,
-                exit_caption_width: EXIT_CAPTION,
                 focus_reveal: 1.0,
                 focus_thumbnails: &[],
                 preview_titles: &[],
@@ -22255,7 +22082,6 @@ mod tests {",
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
-                exit_caption_width: 0.0,
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
@@ -22459,7 +22285,6 @@ mod tests {",
                     tab_scroll: 0.0,
                     rail: RailState::default(),
                     rail_scroll: 0.0,
-                    exit_caption_width: 0.0,
                     // The settled column: every geometry in this module is measured at
                     // the end of the entrance, which is where it spends its whole life.
                     focus_reveal: 1.0,
@@ -22572,7 +22397,6 @@ mod tests {",
                     tab_scroll: 0.0,
                     rail: RailState::default(),
                     rail_scroll: 0.0,
-                    exit_caption_width: 0.0,
                     // The settled column: every geometry in this module is measured at
                     // the end of the entrance, which is where it spends its whole life.
                     focus_reveal: 1.0,
@@ -22806,7 +22630,6 @@ mod tests {",
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
-                exit_caption_width: 0.0,
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
@@ -25168,7 +24991,6 @@ mod tests {",
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
-                exit_caption_width: 0.0,
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
@@ -25235,7 +25057,6 @@ mod tests {",
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
-                exit_caption_width: 0.0,
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
@@ -26032,7 +25853,6 @@ mod tests {",
                 tab_scroll: 0.0,
                 rail: state,
                 rail_scroll: 0.0,
-                exit_caption_width: 0.0,
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
@@ -26307,7 +26127,6 @@ mod tests {",
                 tab_scroll: 0.0,
                 rail: state,
                 rail_scroll: 0.0,
-                exit_caption_width: 0.0,
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
@@ -26566,7 +26385,6 @@ mod tests {",
                 tab_scroll: 0.0,
                 rail: expanded_rail(),
                 rail_scroll: 0.0,
-                exit_caption_width: 0.0,
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
@@ -26730,7 +26548,6 @@ mod tests {",
                 tab_scroll: 0.0,
                 rail: expanded_rail(),
                 rail_scroll: 0.0,
-                exit_caption_width: 0.0,
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,
@@ -27712,7 +27529,7 @@ mod tests {",
     /// enough for their cards; every test that is genuinely about capacity keeps
     /// [`FIXTURE_HEIGHT`].
     fn focus_of_in(height: f32, state: RailState, tabs: usize) -> FocusRailGeometry {
-        focus_rail_geometry(height, 1.0, tabs, EXIT_CAPTION, 0.0, state)
+        focus_rail_geometry(height, 1.0, tabs, 0.0, state)
             .expect("focus mode puts a column on screen")
     }
 
@@ -27721,10 +27538,6 @@ mod tests {",
     /// A window tall enough for four cards with their bodies — see
     /// [`focus_of_in`].
     const TALL_FIXTURE_HEIGHT: f32 = 1200.0;
-
-    /// A plausible measured width for the word `Exit`, so the button has a
-    /// box. The number is a fixture and nothing is pinned to it.
-    const EXIT_CAPTION: f32 = 22.0;
 
     /// One card's worth of tab, with whatever it has to report.
     fn card_tab(title: &str, pane_count: usize, mark: TabMarkState, pinned: bool) -> TabContent {
@@ -27832,7 +27645,6 @@ mod tests {",
                 tab_scroll: 0.0,
                 rail,
                 rail_scroll: 0.0,
-                exit_caption_width: EXIT_CAPTION,
                 focus_reveal,
                 focus_thumbnails,
                 preview_titles: &[],
@@ -28009,9 +27821,8 @@ mod tests {",
                         ..RailState::default()
                     };
                     let case = format!("{layout:?}/{mode:?}/collapsed={collapsed}/dpi={dpi_milli}");
-                    let column =
-                        focus_rail_geometry(H as f32, scale, 3, EXIT_CAPTION, 0.0, focused)
-                            .expect("focus mode puts a column on screen");
+                    let column = focus_rail_geometry(H as f32, scale, 3, 0.0, focused)
+                        .expect("focus mode puts a column on screen");
                     let stage = device_viewport(W, H, ppm, rail_inset_device_px(focused, ppm));
                     assert!(
                         (stage[0] - f64::from(column.body[2])).abs() <= 0.5,
@@ -28157,7 +27968,7 @@ mod tests {",
                 "{layout:?}: and the stage gives up exactly what the panel takes"
             );
             for scale in [1.0_f32, 1.25, 1.5, 2.0] {
-                let column = focus_rail_geometry(1_200.0, scale, 3, EXIT_CAPTION, 0.0, state)
+                let column = focus_rail_geometry(1_200.0, scale, 3, 0.0, state)
                     .expect("focus mode puts a column on screen");
                 assert_eq!(
                     column.body[2] - column.body[0],
@@ -28303,12 +28114,6 @@ mod tests {",
                 "{layout:?}: no tab name is drawn in the title bar, so the inline \
                  strip is not being drawn"
             );
-            assert!(
-                labels
-                    .iter()
-                    .any(|label| label.text == crate::i18n::Text::RowFocusMode.text()),
-                "{layout:?}: the column carries its own heading"
-            );
             assert_eq!(
                 focus_of(focus_rail(layout), tabs.len()).cards.len(),
                 tabs.len(),
@@ -28341,7 +28146,6 @@ mod tests {",
                     618.0,
                     1.0,
                     &trailers,
-                    EXIT_CAPTION,
                     0.0,
                     state,
                     f64::from((rect[0] + rect[2]) / 2.0),
@@ -28364,54 +28168,103 @@ mod tests {",
         }
     }
 
-    /// PIN (§7.1.6b′) — **the way out is a target of its own, at the head of
-    /// the column, and the list scrolls under it rather than over it.**
+    /// PIN (§7.1.6b′, user ruling 2026-08-20) — **the column opens on its first
+    /// card, and offers no target of its own anywhere in it.**
     ///
-    /// *"一个只能靠记住快捷键才出得来的模式是个陷阱"*. The bar stands where the
-    /// rail's own heading stands, and the cards' clip box begins below it — which
-    /// is `position: sticky` expressed the way this module already expresses it,
-    /// and is what stops a long column scrolling the exit away.
+    /// 「它是设置里的一个设置，怎么这么容易就退出」. The heading row that carried
+    /// the words `Focus mode` and a visible `Exit` is gone, and with it the one
+    /// [`ChromeTarget`] this surface used to add: the column answers the strip's
+    /// own targets and nothing else, so the whole list of ways out is the two
+    /// doors that also let you *in* — the chord and the `Appearance` row.
     ///
-    /// **It carries more weight since 2026-08-19**, when the ruling withdrew the
-    /// pane-header double-click and the pane menu's row: this button, the `Esc`
-    /// rung, the chord and the `Appearance` row are now the whole list of ways
-    /// out, and this is the only one of the four a reader can *see*.
+    /// The second half is where the row's pixels went: the first card starts at
+    /// the panel's own top margin, exactly where the rail's first row starts.
     ///
-    /// Red gate: fold the exit into the bar's own target and the first assertion
-    /// goes red; start the list at the column's top and the second does.
+    /// Red gate: put the heading row back and the first assertion moves the list
+    /// down by its height, while the sweep answers a target the strip has never
+    /// heard of.
     #[test]
-    fn the_visible_way_out_is_its_own_target_and_the_cards_scroll_beneath_it() {
+    fn the_column_opens_on_its_first_card_and_adds_no_target_of_its_own() {
         let state = focus_rail(TabLayoutMode::Vertical);
         let trailers = resting(30);
         let column = focus_of(state, trailers.len());
-        let exit = column.exit;
+        let top = (WINDOW_TITLE_BAR_LOGICAL_PX * 1.0).round() + RAIL_PADDING_TOP_LOGICAL_PX;
         assert_eq!(
-            hit_focus_rail(
-                618.0,
-                1.0,
-                &trailers,
-                EXIT_CAPTION,
-                0.0,
-                state,
-                f64::from((exit[0] + exit[2]) / 2.0),
-                f64::from((exit[1] + exit[3]) / 2.0),
-            ),
-            Some(ChromeTarget::FocusExit)
+            column.viewport[0], top,
+            "the scrolling list begins at the panel's own top margin"
         );
-        assert!(
-            exit[2] > exit[0] && exit[3] > exit[1],
-            "and it is a box somebody can hit: {exit:?}"
-        );
-        assert!(
-            column.viewport[0] >= column.bar[3],
-            "the cards' clip box begins below the bar, so scrolling never takes \
-             the way out off the screen"
+        assert_eq!(
+            column.cards[0].body[1], top,
+            "and so does the first card, which is the same claim from the card's end"
         );
         assert!(
             column.max_scroll > 0.0,
-            "a column of thirty cards outruns this window, which is what makes the \
-             claim above worth making"
+            "a column of thirty cards outruns this window, so the sweep below is \
+             over a list that really scrolls"
         );
+        // Every pixel of the panel, at four-pixel steps across and two down: the
+        // sweep is what makes "no target of its own" a claim about the surface
+        // rather than about one rectangle somebody remembered to look at.
+        let width = column.body[2] as i32;
+        let bottom = column.body[3] as i32;
+        for x in (0..width).step_by(4) {
+            for y in (column.body[1] as i32..bottom).step_by(2) {
+                let hit = hit_focus_rail(
+                    FIXTURE_HEIGHT,
+                    1.0,
+                    &trailers,
+                    0.0,
+                    state,
+                    f64::from(x),
+                    f64::from(y),
+                );
+                assert!(
+                    matches!(
+                        hit,
+                        Some(
+                            ChromeTarget::RailBody
+                                | ChromeTarget::Tab(_)
+                                | ChromeTarget::TabClose(_)
+                                | ChromeTarget::NewTab
+                                | ChromeTarget::NewTabMenu
+                        )
+                    ),
+                    "({x}, {y}) answers {hit:?}, which is not one of the targets a tab \
+                     list already had"
+                );
+            }
+        }
+    }
+
+    /// PIN (§7.1.6b′, user ruling 2026-08-20) — **and the column paints no
+    /// heading row either.**
+    ///
+    /// The geometry pin above says the row holds no target; this one says it
+    /// leaves no ink, which are two different ways for a withdrawn surface to
+    /// survive. The word `Focus mode` still exists — it is the `Appearance`
+    /// row's own label, and that row is one of the two remaining doors — so what
+    /// is asserted is that the *column* does not draw it.
+    ///
+    /// Red gate: draw either the heading or the button and one of the two
+    /// assertions goes red on both tab layouts.
+    #[test]
+    fn the_column_draws_neither_a_heading_nor_a_way_out() {
+        let tabs = three_cards();
+        for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
+            let chrome = window_chrome_with_rail(&tabs, 1, focus_rail(layout), None);
+            let (_, labels, _) = chrome.flattened();
+            assert!(
+                !labels
+                    .iter()
+                    .any(|label| label.text == crate::i18n::Text::RowFocusMode.text()),
+                "{layout:?}: the column names itself nowhere — the settings row is \
+                 where the mode says what it is"
+            );
+            assert!(
+                !labels.iter().any(|label| label.text == "Exit"),
+                "{layout:?}: and it carries no button out"
+            );
+        }
     }
 
     /// PIN (§7.1.6b′, §7.1.5b) — **a card's dot is the tab strip's own, not a
@@ -28766,7 +28619,7 @@ mod tests {",
              assertion worth making"
         );
         assert_eq!(
-            hit_focus_rail(618.0, 1.0, &trailers, EXIT_CAPTION, 0.0, state, x, y),
+            hit_focus_rail(618.0, 1.0, &trailers, 0.0, state, x, y),
             Some(ChromeTarget::Tab(1)),
             "and a press there still chooses the second tab: the target is a fact \
              about the mode, and the card is a picture of it arriving"
@@ -28988,21 +28841,11 @@ mod tests {",
     }
 
     /// The focus column exactly as [`rail_paint_of`] draws it — [`painted_rail`]'s
-    /// opposite number, at the same surface height its 960x600 window works out
-    /// to and at the same measured `Exit`, so a rectangle asserted against this
-    /// geometry is the rectangle the paint had in front of it.
-    /// The settled column in a window of a chosen logical height — the same
-    /// pairing as [`rail_paint_of_in`], so geometry and paint agree.
+    /// opposite number, in a window of a chosen logical height so that geometry
+    /// and paint agree the way [`rail_paint_of_in`] pairs them.
     fn painted_focus_column(height: f32, tabs: usize) -> FocusRailGeometry {
-        focus_rail_geometry(
-            height,
-            1.0,
-            tabs,
-            0.0,
-            0.0,
-            focus_rail(TabLayoutMode::Vertical),
-        )
-        .expect("focus mode puts a column on screen")
+        focus_rail_geometry(height, 1.0, tabs, 0.0, focus_rail(TabLayoutMode::Vertical))
+            .expect("focus mode puts a column on screen")
     }
 
     /// **A card in hand is drawn where the drag put it, and over what it passes**
@@ -29104,7 +28947,7 @@ mod tests {",
                         "{layout:?}/{mode:?}: and no icon rail is drawn beside it"
                     );
                     assert!(
-                        focus_rail_geometry(618.0, 1.0, 3, EXIT_CAPTION, 0.0, focused).is_some()
+                        focus_rail_geometry(618.0, 1.0, 3, 0.0, focused).is_some()
                             && rail_geometry(618.0, 1.0, &resting(3), 0, 0.0, focused).is_none(),
                         "{layout:?}/{mode:?}: exactly one of the two panels is on screen"
                     );
@@ -29171,7 +29014,7 @@ mod tests {",
     fn a_cards_head_is_where_it_was_before_the_body_grew_under_it() {
         for scale in [1.0_f32, 1.5, 2.0] {
             let state = focus_rail(TabLayoutMode::Vertical);
-            let geometry = focus_rail_geometry(618.0, scale, 3, EXIT_CAPTION * scale, 0.0, state)
+            let geometry = focus_rail_geometry(618.0, scale, 3, 0.0, state)
                 .expect("focus mode puts a column on screen");
             for card in &geometry.cards {
                 assert_eq!(
@@ -29599,7 +29442,6 @@ mod tests {",
                         TALL_FIXTURE_HEIGHT,
                         1.0,
                         &tabs,
-                        EXIT_CAPTION,
                         0.0,
                         state,
                         f64::from(middle),
@@ -29619,7 +29461,6 @@ mod tests {",
                     TALL_FIXTURE_HEIGHT,
                     1.0,
                     &tabs,
-                    EXIT_CAPTION,
                     0.0,
                     state,
                     close.0,
@@ -30101,7 +29942,6 @@ mod tests {",
                 // state the report was made in.
                 rail: icon_rail(1.0),
                 rail_scroll: 0.0,
-                exit_caption_width: 0.0,
                 // The settled column: every geometry in this module is measured at
                 // the end of the entrance, which is where it spends its whole life.
                 focus_reveal: 1.0,

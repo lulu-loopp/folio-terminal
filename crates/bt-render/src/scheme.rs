@@ -344,7 +344,6 @@ impl ChromePalette {
         let focus_card_staged = active(menu);
         let focus_card_pill = active(focus_card);
         let focus_card_pill_staged = active(focus_card_staged);
-        let focus_exit_hover_ground = hover(win);
         // `.pring .track { stroke: var(--border); opacity: .7 }`. Ten-thousandths
         // because `.094 × .7` is .0658 and `.088 × .7` is .0616, and a
         // thousandth rounds the second of those onto the wrong level.
@@ -548,10 +547,6 @@ impl ChromePalette {
             focus_card_edge: border(panel),
             ring_track_on_focus_card: ring(focus_card),
             ring_track_on_focus_card_staged: ring(focus_card_staged),
-            focus_exit: win,
-            focus_exit_text: ink2(win),
-            focus_exit_hover: focus_exit_hover_ground,
-            focus_exit_text_hover: ink(focus_exit_hover_ground),
             // The card's body is `--termbg`, so the scheme's own background is
             // what a mini seat's ink and edges are composited over — which is
             // what makes a thumbnail of a Solarized shell look like the Solarized

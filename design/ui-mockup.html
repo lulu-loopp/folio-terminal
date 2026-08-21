@@ -1766,7 +1766,7 @@
     font-size: 11px; font-weight: 600; letter-spacing: .04em;
     color: var(--ink3); padding: 4px 10px 6px; flex: none;
   }
-  .rail-new, #focus-rail, .focus-bar, .tab-cards { flex: none; }   /* nothing in the rail compresses */
+  .rail-new, #focus-rail, .tab-cards { flex: none; }   /* nothing in the rail compresses */
   #focus-rail > .fcard { flex: none; }
   /* monitor expansion: same furniture as the focus column, minus the controls */
   .tab-cards { display: flex; flex-direction: column; gap: 8px; padding: 4px 10px 10px 22px; }
@@ -2846,35 +2846,15 @@
     #focus-rail, .tab-cards { animation: none; transition: none !important; }
     .fcard.attn { animation: none; }
   }
-  /* THE VISIBLE WAY OUT (user ruling 2026-08-19). The other three ways out —
-     a setting you have to open a modal to reach, a chord, and Esc — are all
-     things you have to already know, and a mode you can only leave by
-     remembering something is a mode that traps people. So the column carries
-     its own exit, at the top, where the tab list's own heading stands the rest
-     of the time. It is the only one of the four that is visible, which is
-     exactly why the user insisted on it.
-     It sticks like `.fgroup-head` used to, by the same `top: -6px` that cancels
-     the rail's padding, so scrolling a long column never scrolls the way out
-     off the screen. */
-  .focus-bar {
-    position: sticky; top: -6px; z-index: 6;
-    display: flex; align-items: center; gap: 6px;
-    padding: 4px 2px 6px; background: var(--panel);
-  }
-  .focus-bar .fb-label {
-    flex: 1; min-width: 0;
-    font-size: 11px; font-weight: 600; letter-spacing: .04em; color: var(--ink3);
-  }
-  .focus-exit {
-    display: flex; align-items: center; gap: 5px; flex: none;
-    height: 22px; padding: 0 8px;
-    border: 1px solid var(--border); border-radius: 6px;
-    background: var(--win); color: var(--ink2);
-    font-family: inherit; font-size: 11px; cursor: pointer;
-  }
-  .focus-exit:hover { background: var(--hover); color: var(--ink); border-color: var(--ink3); }
-  .focus-exit:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-  .focus-exit svg { width: 10px; height: 10px; }
+  /* NO HEADING ROW, AND NO WAY OUT ON IT (user ruling 2026-08-20). A
+     `.focus-bar` stood here — the words "Focus mode" and a `.focus-exit` button
+     beside them — and the 2026-08-19 argument for it was "a mode you can only
+     leave by remembering something is a mode that traps people". The user
+     overruled that on seeing it run: 「它是设置里的一个设置,怎么这么容易就退出」.
+     Focus mode is a line in Appearance, not a transient, so it is entered and
+     left through the same two doors — Ctrl+Shift+Z and that row — and Esc no
+     longer leaves it either. The band the bar held went back to the cards: the
+     column now opens on its first card, at the rail's own padding. */
   .fcard {
     background: var(--menu); border: 1px solid var(--border); border-radius: 10px;
     box-shadow: 0 3px 12px rgba(0,0,0,.22); cursor: pointer; overflow: hidden; flex: none;
@@ -4834,10 +4814,12 @@
              three answer one question between them: what shape is this window.
              Unlike those two it carries no condition — it works from either tab
              layout (see the `.window.focusmode` rules).
-             This is DOOR 1 of two ways in; the other is `Ctrl+Shift+Z`. The two
-             doors that hung off a pane — a double-click on its header and a row
-             in its ⌄ menu — were withdrawn on 2026-08-19 (second round), so the
-             description below names the chord and nothing else.
+             This is DOOR 1 of two, and both of them work in both directions; the
+             other is `Ctrl+Shift+Z`. The two doors that hung off a pane — a
+             double-click on its header and a row in its ⌄ menu — were withdrawn
+             on 2026-08-19 (second round), and the column's own `Exit` button and
+             the `Esc` rung on 2026-08-20, so the description below names the
+             chord and nothing else.
              Preferences ABOUT the mode — live tab thumbnails vs names only, as a
              performance choice; a narrower column — are candidates for later
              rows, and are not this one. -->
@@ -6403,9 +6385,15 @@
     ["horizontal", "vertical"].forEach(v => items.push({
       icon: svgIcon("i-panel"), label: `Tabs: ${v[0].toUpperCase()}${v.slice(1)}`,
       run: () => { state.layoutMode = v; render(); syncCombo("layout", v); } }));
-    /* the palette keeps the door it always had; only the semantics under it
+    /* the palette keeps the row it always had; only the semantics under it
        changed. No gate and no leaf argument, because the stage is the tab and
-       the tab is already chosen. It carries the chord now that P2-7 has one. */
+       the tab is already chosen. It carries the chord now that P2-7 has one.
+       THIS SURVIVED THE 2026-08-20 WITHDRAWAL DELIBERATELY, and it is not a
+       third door: the palette is the INDEX OF EVERY VERB, and this row is the
+       chord's own entry in it — it even prints `Ctrl+Shift+Z` beside itself.
+       §7.1.6b′ says the systematic home for a low-frequency verb is the palette
+       rather than some surface hung near the mode, and that sentence is about
+       where a verb is listed, not about how many ways out the mode has. */
     if (state.focusMode || fl)
       items.push({ icon: svgIcon("i-max"),
         label: state.focusMode ? "Exit focus mode" : "Enter focus mode",
@@ -9572,26 +9560,31 @@
           collapsed` governs the NORMAL rail only — the column is always card
           width, because cards are this mode's reason to exist.
 
-     TWO DOORS IN, FOUR WAYS OUT (user ruling 2026-08-19, second round; this
-     paragraph replaced "THE FIVE DOORS" of the same day). One bit, one face:
-     whichever door was used, the Appearance row shows what is true.
-       IN 1. `Appearance ▸ Focus mode` — the row, and the household
-             registration: it is what makes the bit PERSIST (`settings.json`
-             v14 → v15), so a window closed in focus mode reopens in it. It
-             stands beside `Tab layout` and `Sidebar` because the three answer
-             one question between them: what shape is this window.
-       IN 2. `Ctrl+Shift+Z` — the main shutter, one chord both ways. There is no
-             second "exit" chord, because one bit does not need a key for each
-             face of it. The chord is free here, means nothing to a shell, and
-             stays clear of Find (`Ctrl+Shift+F`) and of AltGr's Ctrl+Alt.
-       OUT  — the two above, thrown the other way, plus:
-          3. THE VISIBLE EXIT AT THE TOP OF THE COLUMN — the one the user
-             insisted on, and the only one of the four you can SEE: a mode you
-             can leave only by remembering a chord is a trap. It sticks to the
-             top of the rail so a long column cannot scroll it away.
-          4. Esc, from the bottom rung of the ladder under every float, flyout
-             and search capsule. The command palette carries the verb too.
-     THE TWO DOORS THAT HUNG OFF A PANE WERE WITHDRAWN the same day: the
+     TWO DOORS, AND YOU LEAVE THROUGH THE ONE YOU CAME IN BY (user ruling
+     2026-08-20; this paragraph replaced "TWO DOORS IN, FOUR WAYS OUT" of
+     2026-08-19, which had itself replaced "THE FIVE DOORS" of the same day).
+     One bit, one face: whichever door was used, the Appearance row shows what
+     is true.
+       1. `Appearance ▸ Focus mode` — the row, and the household registration:
+          it is what makes the bit PERSIST (`settings.json` v14 → v15), so a
+          window closed in focus mode reopens in it. It stands beside `Tab
+          layout` and `Sidebar` because the three answer one question between
+          them: what shape is this window.
+       2. `Ctrl+Shift+Z` — the main shutter, one chord both ways. There is no
+          second "exit" chord, because one bit does not need a key for each face
+          of it. The chord is free here, means nothing to a shell, and stays
+          clear of Find (`Ctrl+Shift+F`) and of AltGr's Ctrl+Alt.
+     THE VISIBLE EXIT AND THE Esc RUNG WERE WITHDRAWN ON 2026-08-20, and with
+     them the whole `Focus mode ✕ Exit` heading row the button stood on. The
+     08-19 argument for the button was "a mode you can leave only by remembering
+     a chord is a trap"; the user overruled it after living with the build:
+     「它是设置里的一个设置,怎么这么容易就退出」. Focus mode is not a transient
+     that a hand should be able to wave away — it is a line in Appearance, and a
+     setting is left the way it was set. Esc went with the button for the same
+     reason and one more: the mode is the biggest and quietest thing an Esc could
+     have undone, and Esc is a key people press at a `vim` prompt. The band the
+     heading held went back to the cards.
+     THE TWO DOORS THAT HUNG OFF A PANE WERE WITHDRAWN ON 2026-08-19: the
      double-click on a pane header (a gesture that means "blow this up"
      everywhere else, while this mode makes the pane narrower — and it is left
      empty for single-pane zoom, which is what it is really shaped for), and the
@@ -9649,8 +9642,8 @@
   }
   /* One bit, one face: whichever door was used, the Appearance row shows what is
      true. `syncCombo` moves the tick and the button's word; this is the same
-     contract every other two-state row keeps, it just has two ways in and four
-     ways out instead of one apiece. */
+     contract every other two-state row keeps, and since 2026-08-20 it is that
+     contract exactly — two doors, both of them working in both directions. */
   const syncFocusCombo = () => syncCombo("focusmode", state.focusMode ? "on" : "off");
   /* MONITOR CARDS ONLY, now that the focus column's card is a tab (§7.1.6b′ ③
      sends that click to `selectTab`). A monitor card pictures ONE PANE of one
@@ -9770,14 +9763,11 @@
      not change: a card reorder rewrites the tab list itself, so there is still
      no second order to store. (The gesture itself is this prototype's debt —
      see the `.fcard.grabbed` note in the stylesheet.)
-     THE VISIBLE WAY OUT rides on top of it: the heading the tab list spends on
-     the word "Tabs" is spent here on the word plus the way out. */
+     NO HEADING: where the tab list spends a row on the word "Tabs", this column
+     spends nothing — the heading and the `Exit` button that stood on it were
+     withdrawn on 2026-08-20, and the first card starts at the rail's padding. */
   const focusRailHtml = () =>
-    `<div class="focus-bar">
-       <span class="fb-label">Focus mode</span>
-       <button class="focus-exit" title="Leave focus mode (Ctrl+Shift+Z)"><svg><use href="#i-close"/></svg><span>Exit</span></button>
-     </div>
-     <div id="focus-rail">${state.tabs.map(focusTabCardHtml).join("")}</div>`;
+    `<div id="focus-rail">${state.tabs.map(focusTabCardHtml).join("")}</div>`;
 
   function paintFocusRail(rail) {
     const key = focusRailKey();
@@ -10438,8 +10428,9 @@
       jumpAttention();
       return;
     }
-    /* Ctrl+Shift+Z — focus mode, the second of the two doors in (user ruling
-       2026-08-19; the three that were pane gestures or pane menus are gone). One
+    /* Ctrl+Shift+Z — focus mode, the second of the two doors (user ruling
+       2026-08-20; the pane gesture, the pane-menu row, the column's own `Exit`
+       button and the `Esc` rung are all gone, and these two work both ways). One
        chord, both directions, because the mode is ONE BIT and the row in
        Appearance shows which way it is set — a separate "leave" key would be a
        second truth about the same bit. It is deliberately not `Ctrl+Shift+F`:
@@ -10549,9 +10540,11 @@
       if (pvFloatState) { closePvFloat(); return; }
       if (flyoutState) { closeFlyout(); return; }
       /* the search capsule sits inside a pane — floats and flyouts above it
-         close first; focus mode below it exits after */
+         close first, and below it there is nothing: focus mode used to hold one
+         more rung here and the user ruled it out on 2026-08-20
+         (「它是设置里的一个设置,怎么这么容易就退出」), so Esc inside the mode
+         means what it means outside it */
       if (srch.leaf != null) { closeSearch(); return; }
-      if (state.focusMode) { exitFocus(); return; }
       return;
     }
     /* Nothing is typing into a terminal that is not on screen. Found the moment
@@ -13186,7 +13179,8 @@
     const menu = $("pane-menu");
     /* NO FOCUS-MODE ROW HERE — the door that used to stand at the top was
        withdrawn the day after it shipped (user ruling 2026-08-19, second round;
-       §7.1.6b′ "two doors in, four ways out"). Every other row in this menu acts
+       §7.1.6b′ "two doors, and you leave through the one you came in by").
+       Every other row in this menu acts
        on the pane it hangs off — split it either way, close it — and a verb
        about the WINDOW's posture inside that list is one menu speaking two
        languages. It retired together with the double-click, and the two strings
@@ -13715,12 +13709,9 @@
      partition and FLIP the strip uses). Wiring it here means teaching
      `paintFocusRail` not to rebuild the element in hand — see the
      `.fcard.grabbed` note in the stylesheet.
-     THE VISIBLE EXIT rides the same delegation — the button is a child of the rail,
-     and it is checked first because it sits above the cards, not inside one.
      Delegated, because the column rebuilds its DOM whenever its structure
      changes — per-element wiring would evaporate with it. */
   $("rail").addEventListener("click", (e) => {
-    if (e.target.closest(".focus-exit")) { exitFocus(); return; }
     const card = e.target.closest(".fcard");
     if (!card) return;
     const w = tabById(+card.dataset.ws);
