@@ -555,6 +555,268 @@ fn installed_environment(through_wsl: bool) -> Vec<(OsString, OsString)> {
     environment
 }
 
+// ── PowerShell's own door: the profile, and the one line that opens it ──────
+//
+// The table at the top of this file says PowerShell's mechanism is "none — the
+// user dot-sources it into `$PROFILE` themselves", and that stays true: nothing
+// below runs on its own. What it adds is the ability to *offer* — to read the
+// file, see that the line is not in it, and write the line if the reader asks
+// for it in so many words. The asymmetry with bash is unchanged, because
+// `--init-file` touches no file at all and this touches one that belongs to
+// somebody, which is why it happens only on a press and never on a spawn.
+
+/// PowerShell's script, under the same roof as bash's.
+const SCRIPT_PS1: &str = include_str!("../../../scripts/shell-integration/folio.ps1");
+
+/// The name it is written under, beside [`SCRIPT_FILE`].
+const SCRIPT_FILE_PS1: &str = "folio.ps1";
+
+/// The sub-directory of `%APPDATA%\Folio\` both scripts live in.
+const SCRIPT_DIRECTORY: &str = "shell-integration";
+
+/// The file name both PowerShells give their CurrentUserCurrentHost profile.
+///
+/// One name and two folders — see [`PowerShellHost`]. It is the *current host's*
+/// profile rather than `profile.ps1` (the all-hosts one) because that is the
+/// file `$PROFILE` names when a reader prints it, so a line written here is a
+/// line they can find by asking the shell where it is.
+const PROFILE_FILE: &str = "Microsoft.PowerShell_profile.ps1";
+
+/// Which PowerShell a pane is running, because the two keep their profile in
+/// two different folders under one Documents.
+///
+/// Read off the program the spawn actually resolved, which is the same evidence
+/// [`profiles::derive_integration`] reads and the only evidence available
+/// without starting the shell and asking it. A build that wrote into one
+/// generation's file for a session of the other would report success beside a
+/// shell that goes on seeing nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PowerShellHost {
+    /// Windows PowerShell 5.1 — `Documents\WindowsPowerShell\`.
+    WindowsPowerShell,
+    /// PowerShell 7 — `Documents\PowerShell\`.
+    PowerShellSeven,
+}
+
+impl PowerShellHost {
+    /// The folder this generation keeps its profile in.
+    const fn folder(self) -> &'static str {
+        match self {
+            Self::WindowsPowerShell => "WindowsPowerShell",
+            Self::PowerShellSeven => "PowerShell",
+        }
+    }
+}
+
+/// Which PowerShell this program is, or `None` for anything that is not one.
+///
+/// The stem rather than the whole leaf, for [`profiles::derive_integration`]'s
+/// reason, and the same two names it recognises — so a pane this function
+/// answers for is exactly a pane [`Integration::PowerShellOptIn`] serves.
+#[must_use]
+pub fn powershell_host(program: &Path) -> Option<PowerShellHost> {
+    let leaf = program.file_name()?.to_string_lossy();
+    let stem = leaf
+        .rsplit_once('.')
+        .map_or(leaf.as_ref(), |(stem, _)| stem)
+        .to_ascii_lowercase();
+    match stem.as_str() {
+        "pwsh" => Some(PowerShellHost::PowerShellSeven),
+        "powershell" => Some(PowerShellHost::WindowsPowerShell),
+        _ => None,
+    }
+}
+
+/// Where this generation's profile is, under a Documents folder.
+///
+/// **A Documents folder that is asked of Windows and never assumed.** Measured
+/// on the machine this was written on: `[Environment]::GetFolderPath`
+/// answers `D:\Documents` there while `%USERPROFILE%\Documents` exists too and
+/// holds two stale, empty profiles that no PowerShell has ever read. Both
+/// generations resolve `$PROFILE` through the known folder, so a build that
+/// spelled it from `%USERPROFILE%` would read the wrong file, report "not
+/// installed" about a machine where it is installed, and write its line
+/// somewhere no shell looks. [`crate::psreadline::documents_directory`] is the
+/// one place that asks, and it is shared rather than copied for exactly this
+/// reason.
+#[must_use]
+pub fn profile_path(documents: &Path, host: PowerShellHost) -> PathBuf {
+    documents.join(host.folder()).join(PROFILE_FILE)
+}
+
+/// Whether this profile's text already dot-sources the script.
+///
+/// **A string criterion, and deliberately a loose one**: it recognises the line
+/// this product writes *and* the line a reader wrote themselves, pointing at a
+/// checkout, a copy, or anywhere else — because what the offer must not do is
+/// appear in front of somebody who has already installed the integration their
+/// own way. The file name is the whole of the evidence; the path in front of it
+/// is theirs.
+///
+/// **A commented line is not an installation.** The script's own header carries
+/// a worked example of the line behind a `#`, so a reader who pasted the header
+/// into their profile would otherwise read as installed while their shell went
+/// on emitting nothing — silence about the one machine that needs the offer.
+#[must_use]
+pub fn profile_declares_integration(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim_start();
+        !line.starts_with('#') && line.to_ascii_lowercase().contains(SCRIPT_FILE_PS1)
+    })
+}
+
+/// The line to add, spelled the way the shell can re-derive it.
+///
+/// `$env:APPDATA` when the script really is under it, and the literal path when
+/// it is not. The variable is not decoration: a profile is a file that outlives
+/// the account name it was written under, and a line naming
+/// `C:\Users\<name>\AppData\Roaming\…` is a line that breaks on a rename or a
+/// rebuild while the reader is left looking at a shell with no markers and no
+/// error. Where the script is *not* under `%APPDATA%` — a build run with the
+/// variable redirected — the literal path is the only true thing to write.
+#[must_use]
+pub fn integration_line(script: &Path, appdata: Option<&Path>) -> String {
+    let spelled = appdata
+        .and_then(|appdata| script.strip_prefix(appdata).ok())
+        .map_or_else(
+            || script.display().to_string(),
+            |tail| format!(r"$env:APPDATA\{}", tail.display()),
+        );
+    format!(". \"{spelled}\"")
+}
+
+/// Where PowerShell's script is on this machine, written out on first use.
+///
+/// [`script_path`]'s sibling, down to the compare-before-write: the two scripts
+/// are two halves of one agreement with this build, they ship inside the same
+/// executable, and they land in the same directory. What differs is *when* —
+/// bash's is written because a bash is starting, and this one is written
+/// because somebody pressed the verb that is about to name it.
+pub fn script_path_ps1() -> Option<PathBuf> {
+    let directory = persist::storage_dir().join(SCRIPT_DIRECTORY);
+    let path = directory.join(SCRIPT_FILE_PS1);
+    if std::fs::read_to_string(&path).is_ok_and(|existing| existing == SCRIPT_PS1) {
+        return Some(path);
+    }
+    std::fs::create_dir_all(&directory).ok()?;
+    std::fs::write(&path, SCRIPT_PS1).ok()?;
+    Some(path)
+}
+
+/// What one write into a profile did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileWrite {
+    /// The file that now carries the line.
+    pub profile: PathBuf,
+    /// The copy taken first, or `None` when there was no file to copy.
+    pub backup: Option<PathBuf>,
+}
+
+/// Add `line` to the end of `profile`, keeping a copy of what was there.
+///
+/// **The backup is the whole of the discipline.** This is the one place this
+/// product writes into a file that belongs to the user's shell rather than to
+/// itself, and the answer to "what if I did not want that" has to be a file and
+/// not an apology — the same rule this project already follows when it writes
+/// `~/.claude/settings.json`. It is named `<profile>.bak-<YYYYMMDD>` and it sits
+/// beside the file it copies, so it is found by looking where the change was
+/// made rather than by being told where backups go.
+///
+/// **A backup already taken today is not overwritten.** The copy worth keeping
+/// is the first one — the one from before this product touched the file at all —
+/// and a second write on the same day would otherwise replace it with a copy
+/// that already carries our line.
+///
+/// The line ending is the file's own: a profile written with LF keeps LF, and a
+/// file with neither gets CRLF, which is what every Windows editor puts in a
+/// new `.ps1`. A blank line separates what was theirs from what is ours, unless
+/// the file is empty — nothing needs separating from nothing.
+///
+/// **UTF-16 is refused.** A profile saved by an editor that writes UTF-16 is not
+/// bytes an ASCII line can be appended to, and a file half in one encoding is a
+/// profile that no longer loads. The refusal leaves it exactly as it was, which
+/// is the only outcome better than a corrupted one.
+pub fn add_to_profile(
+    profile: &Path,
+    line: &str,
+    at: std::time::SystemTime,
+) -> std::io::Result<ProfileWrite> {
+    let existing = match std::fs::read(profile) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    if existing
+        .as_deref()
+        .is_some_and(|bytes| matches!(bytes, [0xFF, 0xFE, ..] | [0xFE, 0xFF, ..]))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the profile is UTF-16; a line of ASCII cannot be appended to it",
+        ));
+    }
+    let backup = match existing.as_deref() {
+        Some(bytes) => {
+            let path = backup_path(profile, at);
+            if !path.exists() {
+                std::fs::write(&path, bytes)?;
+            }
+            Some(path)
+        }
+        None => {
+            if let Some(parent) = profile.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            None
+        }
+    };
+    let mut bytes = existing.unwrap_or_default();
+    let newline: &[u8] = if bytes.windows(2).any(|pair| pair == b"\r\n") {
+        b"\r\n"
+    } else if bytes.contains(&b'\n') {
+        b"\n"
+    } else {
+        b"\r\n"
+    };
+    // **Blank is empty**, and the user's own two profiles are why: both are a
+    // bare `\r\n`, which is what an editor leaves behind when a file is created
+    // and never typed into. A blank line separates our line from *theirs*, and
+    // there is nothing there to be separated from — but the bytes stay, because
+    // nothing here is allowed to delete any part of a file it did not write.
+    if bytes.iter().any(|byte| !byte.is_ascii_whitespace()) {
+        if !bytes.ends_with(b"\n") {
+            bytes.extend_from_slice(newline);
+        }
+        bytes.extend_from_slice(newline);
+    } else if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        bytes.extend_from_slice(newline);
+    }
+    bytes.extend_from_slice(line.as_bytes());
+    bytes.extend_from_slice(newline);
+    std::fs::write(profile, &bytes)?;
+    Ok(ProfileWrite {
+        profile: profile.to_path_buf(),
+        backup,
+    })
+}
+
+/// `<profile>.bak-<YYYYMMDD>`, beside the file it copies.
+///
+/// The day in UTC, which is the calendar this workspace already keeps
+/// (`seed::format_iso8601_utc`): it has no time-zone source, and a backup whose
+/// name disagreed with the timestamp beside it in Explorer by a few hours is a
+/// smaller problem than one whose name was invented from a guess.
+fn backup_path(profile: &Path, at: std::time::SystemTime) -> PathBuf {
+    let seconds = match at.duration_since(std::time::UNIX_EPOCH) {
+        Ok(delta) => i64::try_from(delta.as_secs()).unwrap_or(i64::MAX),
+        Err(error) => -i64::try_from(error.duration().as_secs()).unwrap_or(i64::MAX),
+    };
+    let (year, month, day) = crate::seed::civil_from_days(seconds.div_euclid(86_400));
+    let mut name = profile.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".bak-{year:04}{month:02}{day:02}"));
+    profile.with_file_name(name)
+}
+
 /// The script's own text, for the tests that check what ships.
 #[cfg(test)]
 pub(crate) const fn script_source() -> &'static str {
@@ -570,7 +832,7 @@ pub(crate) const fn script_source() -> &'static str {
 /// than a copy of them.
 #[cfg(test)]
 pub(crate) const fn script_source_ps1() -> &'static str {
-    include_str!("../../../scripts/shell-integration/folio.ps1")
+    SCRIPT_PS1
 }
 
 #[cfg(test)]
@@ -1305,4 +1567,212 @@ mod tests {
         assert_eq!(value_of(&command, "PROMPT"), None);
         assert_eq!(value_of(&command, FORCE_HYPERLINK).as_deref(), Some("1"));
     }
+
+    // ── the PowerShell profile (§7.1.6j) ───────────────────────────────────
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "folio-ps-profile-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The two PowerShells keep their profile in two folders, and a build that
+    /// wrote into one of them for a session of the other would report success
+    /// beside a shell that goes on seeing nothing.
+    #[test]
+    fn each_powershell_generation_has_its_own_profile_file() {
+        let documents = Path::new(r"D:\Documents");
+        assert_eq!(
+            profile_path(documents, PowerShellHost::WindowsPowerShell),
+            PathBuf::from(r"D:\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1")
+        );
+        assert_eq!(
+            profile_path(documents, PowerShellHost::PowerShellSeven),
+            PathBuf::from(r"D:\Documents\PowerShell\Microsoft.PowerShell_profile.ps1")
+        );
+    }
+
+    /// Which generation a running pane is, read off the program the spawn
+    /// actually resolved — the same evidence `derive_integration` reads, and the
+    /// only one available without asking the shell.
+    #[test]
+    fn the_program_name_says_which_powershell_is_running() {
+        assert_eq!(
+            powershell_host(Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe")),
+            Some(PowerShellHost::PowerShellSeven)
+        );
+        assert_eq!(
+            powershell_host(Path::new(
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+            )),
+            Some(PowerShellHost::WindowsPowerShell)
+        );
+        assert_eq!(
+            powershell_host(Path::new(r"C:\Program Files\Git\bin\bash.exe")),
+            None
+        );
+    }
+
+    /// The criterion, and the whole of it: a line that dot-sources the script.
+    /// A commented example — the script's own header carries one — is not an
+    /// installation, and a build that read one as an installation would go
+    /// silent about the very machine that needs the offer.
+    #[test]
+    fn only_a_live_line_counts_as_an_installed_integration() {
+        assert!(profile_declares_integration(
+            "Set-Alias ll Get-ChildItem\r\n. \"$env:APPDATA\\Folio\\shell-integration\\folio.ps1\"\r\n"
+        ));
+        assert!(
+            profile_declares_integration(
+                ". 'D:\\Developer\\BetterTerminal\\scripts\\shell-integration\\FOLIO.PS1'\n"
+            ),
+            "the machine is case-insensitive about file names and so is this"
+        );
+        assert!(!profile_declares_integration(
+            "#   . 'D:\\path\\to\\folio\\scripts\\shell-integration\\folio.ps1'\n"
+        ));
+        assert!(!profile_declares_integration("\r\n"));
+        assert!(!profile_declares_integration(""));
+    }
+
+    /// The line names the script through `$env:APPDATA` when that is where it
+    /// is, so the profile keeps working for a user whose account is renamed or
+    /// whose machine is rebuilt.
+    #[test]
+    fn the_line_spells_the_script_the_way_the_shell_can_re_derive_it() {
+        assert_eq!(
+            integration_line(
+                Path::new(r"C:\Users\me\AppData\Roaming\Folio\shell-integration\folio.ps1"),
+                Some(Path::new(r"C:\Users\me\AppData\Roaming"))
+            ),
+            r#". "$env:APPDATA\Folio\shell-integration\folio.ps1""#
+        );
+        assert_eq!(
+            integration_line(Path::new(r"D:\scratch\folio.ps1"), None),
+            r#". "D:\scratch\folio.ps1""#
+        );
+    }
+
+    /// A profile that is not there yet is created, directories and all, and it
+    /// gets the line and nothing else — no blank line above the first thing in
+    /// a file.
+    #[test]
+    fn a_profile_that_does_not_exist_is_created_holding_only_the_line() {
+        let documents = temp_dir("absent");
+        let profile = profile_path(&documents, PowerShellHost::PowerShellSeven);
+        let written = add_to_profile(&profile, LINE, EPOCH_DAY).expect("the write");
+        assert_eq!(written.backup, None, "there was nothing to back up");
+        assert_eq!(
+            std::fs::read_to_string(&profile).unwrap(),
+            format!("{LINE}\r\n")
+        );
+    }
+
+    /// The user's own two profiles are a bare `\r\n` apiece. An empty file has
+    /// nothing to be separated from, so the line goes in at the top.
+    #[test]
+    fn an_empty_profile_gets_the_line_with_no_blank_line_above_it() {
+        let documents = temp_dir("empty");
+        let profile = profile_path(&documents, PowerShellHost::WindowsPowerShell);
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(&profile, b"\r\n").unwrap();
+        let written = add_to_profile(&profile, LINE, EPOCH_DAY).expect("the write");
+        assert_eq!(
+            std::fs::read_to_string(&profile).unwrap(),
+            format!("\r\n{LINE}\r\n"),
+            "what was there stays there; the line follows it"
+        );
+        let backup = written.backup.expect("a file that existed was backed up");
+        assert_eq!(std::fs::read(&backup).unwrap(), b"\r\n");
+    }
+
+    /// A profile with something in it keeps every byte of it, gets a blank line
+    /// and then the line — and the copy taken first is byte for byte what was
+    /// there.
+    #[test]
+    fn a_profile_with_content_is_backed_up_byte_for_byte_before_the_append() {
+        let documents = temp_dir("content");
+        let profile = profile_path(&documents, PowerShellHost::PowerShellSeven);
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        let before = "# mine\nfunction prompt { 'PS> ' }\n";
+        std::fs::write(&profile, before).unwrap();
+        let written = add_to_profile(&profile, LINE, EPOCH_DAY).expect("the write");
+        let backup = written.backup.expect("a backup");
+        assert_eq!(
+            backup.file_name().unwrap().to_string_lossy(),
+            "Microsoft.PowerShell_profile.ps1.bak-19700101",
+            "beside the file it copies, named by the day it was taken"
+        );
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(&profile).unwrap(),
+            format!("{before}\n{LINE}\n"),
+            "one blank line between what was theirs and what is ours, in the \
+             line ending the file already uses"
+        );
+        assert!(profile_declares_integration(
+            &std::fs::read_to_string(&profile).unwrap()
+        ));
+    }
+
+    /// A file with no trailing newline still gets one before the blank line, or
+    /// the last thing the reader wrote and the line we add would be one
+    /// statement.
+    #[test]
+    fn a_profile_that_does_not_end_in_a_newline_is_closed_before_the_append() {
+        let documents = temp_dir("unterminated");
+        let profile = profile_path(&documents, PowerShellHost::PowerShellSeven);
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(&profile, "Set-Alias ll Get-ChildItem").unwrap();
+        add_to_profile(&profile, LINE, EPOCH_DAY).expect("the write");
+        assert_eq!(
+            std::fs::read_to_string(&profile).unwrap(),
+            format!("Set-Alias ll Get-ChildItem\r\n\r\n{LINE}\r\n")
+        );
+    }
+
+    /// A profile in UTF-16 is refused rather than appended to: these bytes are
+    /// not text this function can add a line of ASCII to, and a file half in one
+    /// encoding is a profile that no longer loads.
+    #[test]
+    fn a_utf16_profile_is_refused_rather_than_corrupted() {
+        let documents = temp_dir("utf16");
+        let profile = profile_path(&documents, PowerShellHost::PowerShellSeven);
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend_from_slice(b"#\0 \0m\0i\0n\0e\0");
+        std::fs::write(&profile, &bytes).unwrap();
+        assert!(add_to_profile(&profile, LINE, EPOCH_DAY).is_err());
+        assert_eq!(
+            std::fs::read(&profile).unwrap(),
+            bytes,
+            "a refusal leaves the file exactly as it was"
+        );
+    }
+
+    /// The first backup of a day is the one worth keeping: a second write must
+    /// not overwrite the pristine copy with one that already carries our line.
+    #[test]
+    fn a_backup_already_taken_today_is_not_overwritten() {
+        let documents = temp_dir("twice");
+        let profile = profile_path(&documents, PowerShellHost::PowerShellSeven);
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(&profile, "# mine\n").unwrap();
+        let first = add_to_profile(&profile, LINE, EPOCH_DAY)
+            .expect("the write")
+            .backup
+            .expect("a backup");
+        add_to_profile(&profile, LINE, EPOCH_DAY).expect("the second write");
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "# mine\n");
+    }
+
+    /// What the two constants above stand for: one day, and one line.
+    const EPOCH_DAY: std::time::SystemTime = std::time::UNIX_EPOCH;
+    const LINE: &str = r#". "$env:APPDATA\Folio\shell-integration\folio.ps1""#;
 }
