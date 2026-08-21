@@ -502,6 +502,31 @@ impl Seats {
         matches!(kind, SeatKind::Files | SeatKind::Placeholder) || self.has_pane_headers()
     }
 
+    /// Whether this one seat wears the **corner ghost** — the lone pane's `⌄`
+    /// (user ruling 2026-08-20, `docs/DESIGN.md` §7.1.6i, variant A).
+    ///
+    /// The exact complement of [`Self::seat_wears_head`] on terminals and on
+    /// nothing else: a pane that has its head has its chevron in it, and a files
+    /// column or a placeholder never loses its head to begin with. A preview
+    /// follows the terminal's head rule but has no shell to duplicate and no
+    /// profile to split with, so it does not grow the ghost either — the menu
+    /// this opens is `Runtime::open_pane_menu`'s, and that one is terminals
+    /// only.
+    ///
+    /// **An open search capsule stands it down** (`capsule`), which is the
+    /// mock-up's `.pane-inner:has(> .srchbar) > .pane-ghost { display: none }`:
+    /// the capsule takes the same corner in the same lane, and the instrument
+    /// that was explicitly asked for wins. It is stood down *whole* and not
+    /// merely covered — a button that answers a hit test it is not drawn for is
+    /// an invisible button.
+    ///
+    /// One predicate for the painter and for the hit test both, so the day the
+    /// ghost is refused it is refused to both at once.
+    #[must_use]
+    pub fn seat_wears_ghost(&self, kind: SeatKind, seat: SeatId, capsule: Option<SeatId>) -> bool {
+        kind == SeatKind::Terminal && !self.seat_wears_head(kind) && capsule != Some(seat)
+    }
+
     /// How many panes this tab holds — `paneCount = leavesOf(w.tree).length`
     /// (mock-up line 3222).
     ///
@@ -4622,6 +4647,46 @@ pub fn hit_chrome(
     None
 }
 
+/// What the pointer is over among the **corner ghosts** — the lone pane's `⌄`
+/// (user ruling 2026-08-20, §7.1.6i).
+///
+/// Its own function rather than an arm of [`hit_chrome`], for the reason
+/// `hit_files_root` and `hit_preview_head` are their own: this control's
+/// existence depends on a fact `Seats` does not hold — whether a search capsule
+/// is open on that pane — and threading that through the chrome hit test would
+/// hand the question to eighteen callers that have never had to answer it.
+///
+/// It answers the same [`ChromeTarget::PaneMenu`] the head's chevron answers,
+/// which is the ruling's own sentence: one menu, one target, one place it is
+/// built.
+#[must_use]
+pub fn hit_pane_ghost(
+    seats: &Seats,
+    layout: &SeatLayout,
+    scale: f32,
+    capsule: Option<SeatId>,
+    x: f64,
+    y: f64,
+) -> Option<ChromeTarget> {
+    let (x, y) = (x as f32, y as f32);
+    layout.rects.iter().find_map(|placement| {
+        if !matches!(placement.presentation, Presentation::Full)
+            || !seats.seat_wears_ghost(placement.kind, placement.id, capsule)
+        {
+            return None;
+        }
+        let device = placement.device_rect?;
+        let rect = [
+            device.left as f32,
+            device.top as f32,
+            device.right as f32,
+            device.bottom as f32,
+        ];
+        let ghost = pane_ghost_geometry(rect, scale)?;
+        contains(ghost, x, y).then_some(ChromeTarget::PaneMenu(placement.id))
+    })
+}
+
 /// Hit-test the application-owned boxes of the title bar. The remaining title
 /// area is deliberately absent: Win32 owns it through `HTCAPTION`, not winit
 /// client input.
@@ -4771,6 +4836,88 @@ pub const TAB_FILES_TRIGGER_REVEAL: f32 = 0.6;
 /// quiet surface, while a tab is a lit one, so the same apparent weight costs a
 /// different alpha on each.
 pub const PANE_HEAD_TRIGGER_REVEAL: f32 = 0.7;
+
+// ── the lone pane's corner ghost (user ruling 2026-08-20, DESIGN §7.1.6i A) ──
+//
+// A pane with no sibling wears no head (`Seats::seat_wears_head`), and with the
+// head went every verb a hand on the mouse could reach: the `⌄` menu, the files
+// trigger, the cwd. The ruling puts **one** of them back — a single `⌄` floating
+// in the pane's top-right corner, opening the very menu the head's own chevron
+// opens. One button, one target, one menu: the ghost answers
+// [`ChromeTarget::PaneMenu`] exactly as the head's chevron does, which is what
+// keeps "the same menu" a property of the code rather than of two lists that
+// agree today.
+
+/// `.pane-ghost { top: 10px }` — how far below the pane's own top edge the ghost
+/// hangs.
+///
+/// Ten pixels of dead band between this hit rectangle and the caption buttons'
+/// is thin on paper, and the reason it is enough is in the ink ladder below: the
+/// ghost only brightens once the pointer is already inside the pane, so a hand
+/// travelling from the tab strip to Close never crosses it lit, and a hand
+/// aiming at the ghost is travelling *downward*, away from the caption.
+pub const PANE_GHOST_TOP_LOGICAL_PX: f32 = 10.0;
+/// `.pane-ghost { right: 11px }` — **derived, never written**.
+///
+/// Eleven is [`bt_render::TERMINAL_SCROLL_LANE_LOGICAL_PX`] plus
+/// [`crate::cmdrail::RAIL_LANE_GAP_LOGICAL_PX`], which is the command rail's own
+/// lane rule (a rail and a thumb may not share a lane — user report 2026-07-18).
+/// The ghost joins that lane rather than opening a third one, and taking the sum
+/// rather than the literal is what makes the two instruments move together the
+/// day the scroll lane moves. The rail's block is vertically centred and the
+/// ghost is pinned to the top, so they never meet.
+pub const PANE_GHOST_RIGHT_LOGICAL_PX: f32 =
+    bt_render::TERMINAL_SCROLL_LANE_LOGICAL_PX + crate::cmdrail::RAIL_LANE_GAP_LOGICAL_PX;
+/// `.pane-ghost { width: 22px; height: 22px }`.
+///
+/// Larger than the head run's 19px box, because this one is not in a run: it
+/// stands alone over the terminal's own text with no head to give it a margin,
+/// and 22 is what the mock-up measured it at.
+pub const PANE_GHOST_BOX_LOGICAL_PX: f32 = 22.0;
+/// `.pane-ghost { border-radius: 6px }`.
+pub const PANE_GHOST_RADIUS_LOGICAL_PX: f32 = 6.0;
+/// `.pane-ghost svg { width: 11px }`.
+pub const PANE_GHOST_GLYPH_WIDTH_LOGICAL_PX: f32 = 11.0;
+/// `.pane-ghost svg { height: 7px }` — a chevron is a wide, short arrow, and
+/// this is the one place in the window it is drawn at its own aspect rather than
+/// fitted into the square its neighbours in a run wear.
+pub const PANE_GHOST_GLYPH_HEIGHT_LOGICAL_PX: f32 = 7.0;
+/// `.pane-ghost { opacity: .45 }` — the resting ink, and it is
+/// [`crate::cmdrail::TICK_REST_OPACITY`] **by identity and not by coincidence**.
+///
+/// Four rest inks were drawn and compared (§7.1.6i): nothing-at-rest is the
+/// house's own fade-in idiom and it is this idiom's one bad case (the furniture
+/// that fades in lives in a head that is itself visible, and here there is no
+/// head — nothing on screen would say a lone pane has a menu); `.10` and `.18`
+/// land at 8% effective ink, fainter than the quietest instrument already on
+/// screen, which is a dead pixel rather than a door. `.45` is the command rail's
+/// own rest, on the same right edge and in the same lane, so the corner reads as
+/// one instrument shelf instead of two marks that happen to be near each other —
+/// and writing the rail's constant here is what keeps that true.
+pub const PANE_GHOST_REST_INK: f32 = crate::cmdrail::TICK_REST_OPACITY;
+/// `.pane:hover .pane-ghost { opacity: .75 }` — the middle rung: the mark
+/// answers a hover before it is asked to answer a click.
+pub const PANE_GHOST_HOVER_INK: f32 = 0.75;
+
+/// The corner ghost's box inside one pane rectangle, in physical pixels, or
+/// `None` when the pane is too small to seat it.
+///
+/// Pure, and asked of a *rectangle* rather than of a seat, for the reason
+/// [`pane_head_geometry`] is: the painter asks it of the card a pane rides
+/// mid-resize and the hit test asks it of the solved rectangle, and the box you
+/// can press is the box you can see by one derivation rather than by two.
+#[must_use]
+pub fn pane_ghost_geometry(rect: [f32; 4], scale: f32) -> Option<[f32; 4]> {
+    let box_ = (PANE_GHOST_BOX_LOGICAL_PX * scale).round().max(1.0);
+    let right = (rect[2] - PANE_GHOST_RIGHT_LOGICAL_PX * scale).round();
+    let left = right - box_;
+    let top = (rect[1] + PANE_GHOST_TOP_LOGICAL_PX * scale).round();
+    let bottom = top + box_;
+    // A control half off its own pane is worse than none, which is the rule the
+    // head's own run keeps: below this the pane simply has no ghost, and the
+    // right-click floor under it (§7.1.6i) is what a hand still has.
+    (left > rect[0] && bottom <= rect[3]).then_some([left, top, right, bottom])
+}
 
 /// Where everything inside one pane head stands, in physical pixels.
 ///
@@ -5603,6 +5750,8 @@ pub fn build_chrome_with_preview(
             profile_menu_open: false,
             chevron_turn: 0.0,
             pane_motion: PaneMotionFrame::default(),
+            search_seat: None,
+            pane_menu_seat: None,
             resizing_cards: None,
         },
     )
@@ -6082,6 +6231,24 @@ pub struct ChromeContent<'a> {
     /// ends when the button comes up, whereas the card's 100ms is measured from
     /// the release; so this field would exist even once E52 lands.
     pub resizing_cards: Option<ResizingCards>,
+    /// Which pane has a **search capsule** open on it, if any — the one fact the
+    /// corner ghost's existence depends on and `Seats` cannot answer
+    /// ([`Seats::seat_wears_ghost`]).
+    ///
+    /// A whole seat id rather than a bool because the capsule belongs to *one*
+    /// pane: a split whose left half is being searched must not lose its right
+    /// half's controls. It is nothing at all today for every pane that wears a
+    /// head, because the capsule's corner is the head's corner and the head's
+    /// run is elsewhere.
+    pub search_seat: Option<SeatId>,
+    /// Which pane's own menu is up, if any — `.pane-ghost.open`.
+    ///
+    /// A separate channel from [`ChromePointer::hover`] and it has to be: the
+    /// menu is dropped *under* the ghost and the pointer walks onto it, at which
+    /// point nothing is hovering the button that raised it. A mark that went out
+    /// the instant its list appeared would be the stranded chevron E61 is a list
+    /// of six instances of.
+    pub pane_menu_seat: Option<SeatId>,
 }
 
 /// **B22 — the split whose panes are drawn as inset cards, and how far the
@@ -6247,6 +6414,8 @@ pub fn build_chrome_for_tabs(
         profile_menu_open,
         chevron_turn,
         pane_motion,
+        search_seat,
+        pane_menu_seat,
         resizing_cards: carded,
     } = content;
     // Each seat is asked about *itself*. Written as a closure beside the two
@@ -7096,6 +7265,83 @@ pub fn build_chrome_for_tabs(
                         tabular_numerals: false,
                         clip: None,
                     });
+                }
+            }
+            // **The lone pane's corner ghost** (user ruling 2026-08-20,
+            // §7.1.6i A). The only chrome a headless pane draws, and the whole
+            // of what the head took with it that a hand on the mouse can reach.
+            //
+            // Off the card rather than the solved rectangle, exactly as the head
+            // above is: a pane mid-resize rides its card, and a mark pinned to
+            // the solved corner would float outside the very box its pane had
+            // moved into.
+            Presentation::Full
+                if seats.seat_wears_ghost(placement.kind, placement.id, search_seat) =>
+            {
+                let ghost_box = card_rect_of(placement.id, rect).unwrap_or(rect);
+                if let Some(ghost) = pane_ghost_geometry(ghost_box, scale) {
+                    // Lit by the pointer being on it **or** by its own menu
+                    // standing: the menu is dropped under the button and the
+                    // hand walks onto it, and a chevron that went dark the
+                    // instant its list appeared is E61's stranded mark.
+                    let lit = pointer.hover == Some(ChromeTarget::PaneMenu(placement.id))
+                        || pane_menu_seat == Some(placement.id);
+                    if lit {
+                        // `--menu` and a shadow, **not** the run's `--hover`:
+                        // that one is a 5.5% wash of ink, which is right on a
+                        // head (there is opaque panel under it) and useless
+                        // here, where a line of output may be running under the
+                        // glyph. A button that floats over content has to bring
+                        // its own ground, and the menu's own surface is the
+                        // ground it is about to drop.
+                        pane_sprites.push(ChromeSprite::new(
+                            ChromeMark::ControlPill {
+                                radius_px: (PANE_GHOST_RADIUS_LOGICAL_PX * scale).round().max(1.0)
+                                    as u32,
+                            },
+                            ghost,
+                            palette.menu_surface,
+                        ));
+                    }
+                    let glyph_width = (PANE_GHOST_GLYPH_WIDTH_LOGICAL_PX * scale).round().max(1.0);
+                    let glyph_height = (PANE_GHOST_GLYPH_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
+                    let glyph_left = ((ghost[0] + ghost[2] - glyph_width) / 2.0).round();
+                    let glyph_top = ((ghost[1] + ghost[3] - glyph_height) / 2.0).round();
+                    let mut mark = ChromeSprite::new(
+                        // At rest and turned nowhere, for §7.1.6e's reason read
+                        // honestly rather than copied: this menu is dropped at
+                        // the button and can land above, below or beside it, so
+                        // an arrow swung to 180° would point away from its own
+                        // list as often as at it.
+                        ChromeMark::Chevron { turned_degrees: 0 },
+                        [
+                            glyph_left,
+                            glyph_top,
+                            glyph_left + glyph_width,
+                            glyph_top + glyph_height,
+                        ],
+                        if lit {
+                            palette.accent
+                        } else {
+                            palette.pane_close_glyph
+                        },
+                    );
+                    // The ladder, and it is three rungs rather than the head
+                    // run's two: **the ghost is never absent**. The furniture in
+                    // a head can afford to appear only on a hover because the
+                    // head itself is on screen saying the pane has controls;
+                    // there is no head here, so a mark that rested at nothing
+                    // would leave nothing on screen to say this pane has a menu
+                    // — which is verbatim the testimony that got the head's own
+                    // chevron built.
+                    mark.opacity = if lit {
+                        1.0
+                    } else if pointer.pane_hover == Some(placement.id) {
+                        PANE_GHOST_HOVER_INK
+                    } else {
+                        PANE_GHOST_REST_INK
+                    };
+                    pane_sprites.push(mark);
                 }
             }
             Presentation::Full => {}
@@ -11686,8 +11932,8 @@ pub fn search_capsule_host(
     Some((rect, head))
 }
 
-/// One pane head's `⌄` box, in physical pixels, or `None` when that seat has no
-/// head, is collapsed, or is too narrow to seat the control.
+/// One pane's `⌄` box, in physical pixels, or `None` when that seat is
+/// collapsed, carries no chevron, or is too narrow to seat one.
 ///
 /// The menu the chevron opens has to hang off the rectangle the chevron was
 /// *drawn* in, and that rectangle is [`pane_head_geometry`]'s — so this asks the
@@ -11695,19 +11941,24 @@ pub fn search_capsule_host(
 /// `right - 6px - 3 * 19px` in the window. It is the same D4 discipline
 /// `files_pane_rect` above exists for: the box you can press is the box you can
 /// see, by one derivation.
+///
+/// **Two rectangles, one question** (2026-08-20, §7.1.6i): a pane that wears a
+/// head answers with the chevron in that head, and a lone terminal answers with
+/// the corner ghost. They are the same button in two layouts — the menu hangs
+/// off it, the tooltip registers on it, and the toggle is raised from it — so
+/// making the window ask twice is exactly how the ghost would end up with a menu
+/// dropped where its head is not.
 #[must_use]
 pub fn pane_chevron_box(
     seats: &Seats,
     layout: &SeatLayout,
     seat: SeatId,
     scale: f32,
+    capsule: Option<SeatId>,
 ) -> Option<[f32; 4]> {
     let placement = layout.rects.iter().find(|placement| {
         placement.id == seat && matches!(placement.presentation, Presentation::Full)
     })?;
-    if !seats.seat_wears_head(placement.kind) {
-        return None;
-    }
     let device = placement.device_rect?;
     let rect = [
         device.left as f32,
@@ -11715,7 +11966,13 @@ pub fn pane_chevron_box(
         device.right as f32,
         device.bottom as f32,
     ];
-    pane_head_geometry(rect, placement.kind, scale).chevron
+    if seats.seat_wears_head(placement.kind) {
+        return pane_head_geometry(rect, placement.kind, scale).chevron;
+    }
+    seats
+        .seat_wears_ghost(placement.kind, placement.id, capsule)
+        .then(|| pane_ghost_geometry(rect, scale))
+        .flatten()
 }
 
 /// The tree's own rectangle inside one named files column.
@@ -15451,6 +15708,8 @@ mod tests {
                 profile_menu_open: false,
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
+                search_seat: None,
+                pane_menu_seat: None,
                 resizing_cards: None,
             },
         );
@@ -15524,6 +15783,8 @@ mod tests {
                     profile_menu_open: false,
                     chevron_turn: 0.0,
                     pane_motion: PaneMotionFrame::default(),
+                    search_seat: None,
+                    pane_menu_seat: None,
                     resizing_cards: None,
                 },
             );
@@ -17612,6 +17873,8 @@ mod tests {",
                     profile_menu_open: false,
                     chevron_turn: 0.0,
                     pane_motion: PaneMotionFrame::default(),
+                    search_seat: None,
+                    pane_menu_seat: None,
                     resizing_cards: None,
                 },
             )
@@ -17832,6 +18095,8 @@ mod tests {",
                 profile_menu_open,
                 chevron_turn,
                 pane_motion: PaneMotionFrame::default(),
+                search_seat: None,
+                pane_menu_seat: None,
                 resizing_cards: None,
             },
         )
@@ -17935,6 +18200,8 @@ mod tests {",
                 profile_menu_open: false,
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
+                search_seat: None,
+                pane_menu_seat: None,
                 resizing_cards: None,
             },
         )
@@ -21767,6 +22034,8 @@ mod tests {",
                 profile_menu_open: false,
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
+                search_seat: None,
+                pane_menu_seat: None,
                 resizing_cards: None,
             },
         )
@@ -21969,6 +22238,8 @@ mod tests {",
                     profile_menu_open: false,
                     chevron_turn: 0.0,
                     pane_motion: PaneMotionFrame::default(),
+                    search_seat: None,
+                    pane_menu_seat: None,
                     resizing_cards: None,
                 },
             )
@@ -22080,6 +22351,8 @@ mod tests {",
                     profile_menu_open: false,
                     chevron_turn: 0.0,
                     pane_motion: PaneMotionFrame::default(),
+                    search_seat: None,
+                    pane_menu_seat: None,
                     resizing_cards: None,
                 },
             )
@@ -22248,6 +22521,23 @@ mod tests {",
         pointer: ChromePointer,
         cards: Option<ResizingCards>,
     ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
+        pane_chrome(seats, layout, scale, pointer, cards, (None, None))
+    }
+
+    /// The same build again, with the two facts §7.1.6i's corner ghost is a
+    /// function of said out loud: which pane the search capsule stands on, and
+    /// which pane's menu is up.
+    ///
+    /// Every caller above passes `(None, None)` because none of them is about a
+    /// lone pane — and a lone pane is the only seat either fact can change.
+    fn pane_chrome(
+        seats: &Seats,
+        layout: &SeatLayout,
+        scale: f32,
+        pointer: ChromePointer,
+        cards: Option<ResizingCards>,
+        (search_seat, pane_menu_seat): (Option<SeatId>, Option<SeatId>),
+    ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
         build_chrome_for_tabs(
             seats,
             layout,
@@ -22295,6 +22585,8 @@ mod tests {",
                 profile_menu_open: false,
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
+                search_seat,
+                pane_menu_seat,
                 resizing_cards: cards,
             },
         )
@@ -22691,6 +22983,309 @@ mod tests {",
             pill, head.chevron,
             "the pill is the button's own box, so the lit area is exactly the \
              area that answers the press"
+        );
+    }
+
+    // ── §7.1.6i: the lone pane's corner ghost (user ruling 2026-08-20) ───────
+
+    /// The ghost's box, in the mock-up's own three declarations
+    /// (`.pane-ghost { top: 10px; right: 11px; width: 22px; height: 22px }`) and
+    /// at four scales, because the whole reason this geometry is one function is
+    /// that a second copy rounds differently.
+    ///
+    /// **The eleven is the load-bearing one.** It is not written in
+    /// [`pane_ghost_geometry`]: it is the scroll lane plus the rail's gap, which
+    /// is `.cmdrail`'s own lane rule (a rail and a thumb may not share a lane —
+    /// user report 2026-07-18). Asserting the *sum* against the literal eleven
+    /// is what pins the derivation to the mock-up without making the expectation
+    /// a tautology of the value under test.
+    ///
+    /// Red gate: write `11.0` into the constant instead of the sum and this
+    /// still passes — until the scroll lane moves, which is the day the rail and
+    /// the ghost would part company; change the box to 19 (the head run's size)
+    /// and both dimension assertions go.
+    #[test]
+    fn the_corner_ghost_stands_in_the_command_rails_own_lane() {
+        assert_eq!(PANE_GHOST_TOP_LOGICAL_PX, 10.0);
+        assert_eq!(
+            PANE_GHOST_RIGHT_LOGICAL_PX, 11.0,
+            "`.pane-ghost {{ right: 11px }}`, reached as the scroll lane's 8 plus \
+             the rail's own 3 — one number moves both instruments"
+        );
+        assert_eq!(PANE_GHOST_BOX_LOGICAL_PX, 22.0);
+        assert_eq!(PANE_GHOST_RADIUS_LOGICAL_PX, 6.0);
+        assert_ne!(
+            PANE_GHOST_BOX_LOGICAL_PX, PANE_HEAD_TRIGGER_BOX_LOGICAL_PX,
+            "the ghost is not a member of the head's run and does not wear its box"
+        );
+
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let rect = [100.0_f32, 40.0, 700.0, 500.0];
+            let ghost = pane_ghost_geometry(rect, scale).expect("a 600px pane seats a 22px mark");
+            let box_px = (22.0 * scale).round();
+
+            assert_eq!(ghost[2] - ghost[0], box_px, "22 logical pixels wide at {scale}x");
+            assert_eq!(ghost[3] - ghost[1], box_px, "and square at {scale}x");
+            assert_eq!(
+                ghost[2],
+                (rect[2] - 11.0 * scale).round(),
+                "inboard of the scroll gutter at {scale}x"
+            );
+            assert_eq!(
+                ghost[1],
+                (rect[1] + 10.0 * scale).round(),
+                "ten below the pane's own top edge at {scale}x"
+            );
+        }
+
+        // A pane too small to seat the mark draws none, rather than a box whose
+        // other half belongs to the pane next door — the head run's rule, and
+        // the right-click floor under §7.1.6i is what a hand still has there.
+        assert_eq!(pane_ghost_geometry([0.0, 0.0, 20.0, 400.0], 1.0), None);
+        assert_eq!(pane_ghost_geometry([0.0, 0.0, 400.0, 20.0], 1.0), None);
+    }
+
+    /// **The hole this fills, stated as a hit test**: a lone pane answers
+    /// `PaneMenu` in its top-right corner, and a pane that has a head does not
+    /// grow a second door for the same menu.
+    ///
+    /// The target is [`ChromeTarget::PaneMenu`] and not a new one, which is the
+    /// ruling's own sentence — *"点开 `openPaneMenu` 那个现成的 pane 菜单"*.
+    /// One target means one press arm, one toggle, one hover-rest gate and one
+    /// list of rows; a second target is how two menus come to disagree.
+    ///
+    /// Red gate: drop the `hit_pane_ghost` arm from `chrome_target_at` and the
+    /// first assertion goes; drop the `!seat_wears_head` half of
+    /// [`Seats::seat_wears_ghost`] and the split pane grows a ghost floating over
+    /// its own head's run.
+    #[test]
+    fn a_lone_pane_answers_the_pane_menu_in_its_corner_and_a_split_one_does_not() {
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1200, 800, 1_000);
+
+        let lone = Seats::lone_terminal();
+        let lone_layout = solved(&lone, viewport, &metrics);
+        let seat = lone_layout.rects[0].id;
+        let rect = device_rect_of(&lone_layout, seat);
+        let ghost = pane_ghost_geometry(rect, 1.0).expect("a full-window pane seats the mark");
+        let centre = (
+            f64::from((ghost[0] + ghost[2]) / 2.0),
+            f64::from((ghost[1] + ghost[3]) / 2.0),
+        );
+        assert_eq!(
+            hit_pane_ghost(&lone, &lone_layout, 1.0, None, centre.0, centre.1),
+            Some(ChromeTarget::PaneMenu(seat)),
+        );
+        // Half-open on its leading edge, like every other target in this window.
+        assert_eq!(
+            hit_pane_ghost(&lone, &lone_layout, 1.0, None, f64::from(ghost[0]), centre.1),
+            Some(ChromeTarget::PaneMenu(seat)),
+        );
+        assert_eq!(
+            hit_pane_ghost(
+                &lone,
+                &lone_layout,
+                1.0,
+                None,
+                f64::from(ghost[0]) - 1.0,
+                centre.1
+            ),
+            None,
+            "one pixel left of the box is the terminal's own text, not a button"
+        );
+        // And the menu hangs off the box it was drawn in — the same question
+        // `pane_chevron_box` answers for a head, so the window's toggle and its
+        // tooltip need no second branch.
+        assert_eq!(
+            pane_chevron_box(&lone, &lone_layout, seat, 1.0, None),
+            Some(ghost),
+        );
+
+        let split = term_beside_files();
+        let split_layout = solved(&split, viewport, &metrics);
+        let terminal = split_layout.rects[0].id;
+        for placement in &split_layout.rects {
+            let rect = device_rect_of(&split_layout, placement.id);
+            let corner = pane_ghost_geometry(rect, 1.0).expect("the geometry is pane-agnostic");
+            assert_eq!(
+                hit_pane_ghost(
+                    &split,
+                    &split_layout,
+                    1.0,
+                    None,
+                    f64::from((corner[0] + corner[2]) / 2.0),
+                    f64::from((corner[1] + corner[3]) / 2.0)
+                ),
+                None,
+                "a pane with a head carries its `⌄` in the head's run",
+            );
+        }
+        // The one button, in the other layout: the head's own chevron, raising
+        // the very same target.
+        let head = pane_head_geometry(
+            device_rect_of(&split_layout, terminal),
+            SeatKind::Terminal,
+            1.0,
+        );
+        let chevron = head.chevron.expect("a terminal head carries the chevron");
+        assert_eq!(
+            hit_chrome(
+                &split,
+                &split_layout,
+                1.0,
+                f64::from((chevron[0] + chevron[2]) / 2.0),
+                f64::from((chevron[1] + chevron[3]) / 2.0)
+            ),
+            Some(ChromeTarget::PaneMenu(terminal)),
+            "the same target the ghost answers — one menu, one place it is built",
+        );
+        assert_eq!(
+            pane_chevron_box(&split, &split_layout, terminal, 1.0, None),
+            Some(chevron),
+        );
+    }
+
+    /// **The ink ladder, and the rung that makes this variant what it is.**
+    ///
+    /// Three rungs, not the head run's two, because the ghost is never absent:
+    /// `.45` at rest — [`crate::cmdrail::TICK_REST_OPACITY`] **by identity**, the
+    /// command rail's own rest on the same edge in the same lane — then `.75`
+    /// once the pointer is in the pane, then full ink on a menu-coloured chip.
+    ///
+    /// The ground is `menu_surface` and not the head run's `pane_close_pill`:
+    /// that one is a wash of ink, which is right on a head (there is opaque panel
+    /// under it) and useless here, where a line of output may be running under
+    /// the glyph.
+    ///
+    /// Red gate: rest it at nothing (the house's fade-in idiom) and the first
+    /// rung goes — and with it the only thing on screen saying a lone pane has a
+    /// menu; write `.18` and the equality with the rail's tick breaks; give the
+    /// chip `pane_close_pill` and the ground assertion goes.
+    #[test]
+    fn the_corner_ghost_rests_at_the_command_rails_own_ink() {
+        assert_eq!(
+            PANE_GHOST_REST_INK,
+            crate::cmdrail::TICK_REST_OPACITY,
+            "the ghost borrows the licence the rail already holds"
+        );
+        assert_eq!(PANE_GHOST_REST_INK, 0.45);
+        assert_eq!(PANE_GHOST_HOVER_INK, 0.75);
+
+        let seats = Seats::lone_terminal();
+        let metrics = seat_metrics(1_000);
+        let layout = solved(&seats, viewport_of(1200, 800, 1_000), &metrics);
+        let seat = layout.rects[0].id;
+        let palette = chrome_palette();
+        let ghost = pane_ghost_geometry(device_rect_of(&layout, seat), 1.0)
+            .expect("a full-window pane seats the mark");
+
+        let run = |pointer: ChromePointer, menu: Option<SeatId>| {
+            let (_, _, sprites) = pane_chrome(&seats, &layout, 1.0, pointer, None, (None, menu));
+            let mark = sprites
+                .iter()
+                .find(|sprite| {
+                    sprite.mark == ChromeMark::Chevron { turned_degrees: 0 }
+                        && in_the_pane_layer(sprite.rect, 1.0)
+                })
+                .map(|sprite| (sprite.color, sprite.opacity));
+            let chip = sprites
+                .iter()
+                .find(|sprite| {
+                    matches!(sprite.mark, ChromeMark::ControlPill { .. })
+                        && in_the_pane_layer(sprite.rect, 1.0)
+                })
+                .map(|sprite| (sprite.rect, sprite.color));
+            (mark, chip)
+        };
+
+        // Rung 0 — the pointer is nowhere near. The mark is still there, which is
+        // the whole argument: a button nobody can see is the hole, not the fix.
+        let (mark, chip) = run(ChromePointer::default(), None);
+        assert_eq!(mark, Some((palette.pane_close_glyph, PANE_GHOST_REST_INK)));
+        assert_eq!(chip, None, "no ground until the pointer is on the button");
+
+        // Rung 1 — inside the pane, on nothing.
+        let (mark, chip) = run(
+            ChromePointer {
+                pane_hover: Some(seat),
+                ..ChromePointer::default()
+            },
+            None,
+        );
+        assert_eq!(mark, Some((palette.pane_close_glyph, PANE_GHOST_HOVER_INK)));
+        assert_eq!(chip, None);
+
+        // Rung 2 — on the mark itself.
+        let (mark, chip) = run(
+            ChromePointer {
+                pane_hover: Some(seat),
+                hover: Some(ChromeTarget::PaneMenu(seat)),
+                ..ChromePointer::default()
+            },
+            None,
+        );
+        assert_eq!(mark, Some((palette.accent, 1.0)));
+        assert_eq!(
+            chip,
+            Some((ghost, palette.menu_surface)),
+            "the chip is the button's own box, in the colour of the menu it drops"
+        );
+
+        // And the rung that is not a hover at all: its own menu is up and the
+        // hand has walked onto it. E61's stranded chevron, refused on day one.
+        let (mark, chip) = run(ChromePointer::default(), Some(seat));
+        assert_eq!(mark, Some((palette.accent, 1.0)));
+        assert_eq!(chip, Some((ghost, palette.menu_surface)));
+    }
+
+    /// **An open search capsule stands the ghost down, whole** — the mock-up's
+    /// `.pane-inner:has(> .srchbar) > .pane-ghost { display: none }`.
+    ///
+    /// Two instruments, one lane (`right: 11px` against the capsule's own inset
+    /// off the same rail), and the one you explicitly opened wins. It is stood
+    /// down and not merely covered: the paint stops *and* the hit test stops, out
+    /// of one predicate, because a button that answers a press it is not drawn
+    /// for is an invisible button.
+    ///
+    /// Red gate: drop the `capsule` half of [`Seats::seat_wears_ghost`] and all
+    /// three assertions go — the mark is drawn under the capsule, the corner
+    /// answers `PaneMenu` through it, and a rest there opens a menu on top of the
+    /// field being typed into.
+    #[test]
+    fn an_open_search_capsule_stands_the_corner_ghost_down() {
+        let seats = Seats::lone_terminal();
+        let metrics = seat_metrics(1_000);
+        let layout = solved(&seats, viewport_of(1200, 800, 1_000), &metrics);
+        let seat = layout.rects[0].id;
+        let ghost = pane_ghost_geometry(device_rect_of(&layout, seat), 1.0)
+            .expect("a full-window pane seats the mark");
+        let centre = (
+            f64::from((ghost[0] + ghost[2]) / 2.0),
+            f64::from((ghost[1] + ghost[3]) / 2.0),
+        );
+
+        assert_eq!(
+            hit_pane_ghost(&seats, &layout, 1.0, Some(seat), centre.0, centre.1),
+            None,
+        );
+        assert_eq!(pane_chevron_box(&seats, &layout, seat, 1.0, Some(seat)), None);
+        let (_, _, sprites) = pane_chrome(
+            &seats,
+            &layout,
+            1.0,
+            ChromePointer {
+                pane_hover: Some(seat),
+                ..ChromePointer::default()
+            },
+            None,
+            (Some(seat), None),
+        );
+        assert!(
+            !sprites.iter().any(|sprite| {
+                sprite.mark == ChromeMark::Chevron { turned_degrees: 0 }
+                    && in_the_pane_layer(sprite.rect, 1.0)
+            }),
+            "the capsule owns this corner while it is up",
         );
     }
 
@@ -24338,6 +24933,8 @@ mod tests {",
                 profile_menu_open: false,
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
+                search_seat: None,
+                pane_menu_seat: None,
                 resizing_cards: None,
             },
         )
@@ -24403,6 +25000,8 @@ mod tests {",
                 profile_menu_open: false,
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::new(transforms),
+                search_seat: None,
+                pane_menu_seat: None,
                 resizing_cards: None,
             },
         )
@@ -25198,6 +25797,8 @@ mod tests {",
                 profile_menu_open: false,
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
+                search_seat: None,
+                pane_menu_seat: None,
                 resizing_cards: None,
             },
         )
@@ -25471,6 +26072,8 @@ mod tests {",
                 profile_menu_open: false,
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
+                search_seat: None,
+                pane_menu_seat: None,
                 resizing_cards: None,
             },
         )
@@ -25728,6 +26331,8 @@ mod tests {",
                 profile_menu_open: false,
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
+                search_seat: None,
+                pane_menu_seat: None,
                 resizing_cards: None,
             },
         )
@@ -25890,6 +26495,8 @@ mod tests {",
                 profile_menu_open: false,
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
+                search_seat: None,
+                pane_menu_seat: None,
                 resizing_cards: None,
             },
         )
@@ -26988,6 +27595,8 @@ mod tests {",
                 profile_menu_open: false,
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
+                search_seat: None,
+                pane_menu_seat: None,
                 resizing_cards: None,
             },
         )
@@ -29077,6 +29686,8 @@ mod tests {",
                 profile_menu_open: false,
                 chevron_turn: 0.0,
                 pane_motion: PaneMotionFrame::default(),
+                search_seat: None,
+                pane_menu_seat: None,
                 resizing_cards: None,
             },
         );
