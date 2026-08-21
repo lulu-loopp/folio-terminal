@@ -67,7 +67,29 @@ pub const LIVE_MATH_STABLE_INTERVAL: Duration = Duration::from_millis(200);
 /// It is context, not an inference: an opener older than this tail is unknowable at this layer.
 const LIVE_FENCE_HISTORY_CONTEXT_LINES: usize = 1_024;
 const MAX_OFFSCREEN_RECORDS: usize = 128;
+/// Whether a printed path names anything on this disk — the whole of what `verified` means for a
+/// file this window has no other reason to open (§7.1.5j).
+///
+/// **The only filesystem question this feature asks, and it is asked on a worker.** A folder counts:
+/// the routing table has an arm for one, so "is it there" and "what is it" are two questions and
+/// only the first is asked here.
+///
+/// `metadata` follows links, so a symlink pointing at nothing answers `false` — a name whose target
+/// cannot be opened is not a name this window may promise to open.
+pub fn path_exists(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok()
+}
+
 const INLINE_IMAGE_WORKER_QUEUE_CAP: usize = 4;
+/// How many printed-path verdicts one pane remembers (§7.1.5j).
+///
+/// Four thousand names, which is more than a screenful of output can print in a session's worth of
+/// scrolling and small enough that the set is a rounding error beside one decoded picture. Its job
+/// is not to be big: it is to make the **steady state free**, so that a program repainting the same
+/// screen asks the disk nothing at all after the first frame.
+const PATH_VERDICT_LEDGER_CAP: usize = 4096;
+/// How many unanswered printed paths one pane will hold for its worker.
+const PATH_VERIFY_QUEUE_CAP: usize = 512;
 const LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP: usize = 64;
 /// Two trailing blank rows add at most 36 px at the baseline metrics: enough for common display
 /// math while preventing a single formula from consuming an arbitrarily large blank separator.
@@ -138,6 +160,15 @@ pub enum SessionDecorationTask {
     InlineImage(InlineImageTask),
     /// Resample an already-decoded image into the display box the current layout shows it in.
     ScaleInlineImage(InlineImageScaleTask),
+    /// Ask the disk whether one printed path names anything (§7.1.5j).
+    ///
+    /// It is a worker task and not an inline `metadata` call for the reason every other reading of
+    /// a file in this product is: **the answer costs a syscall, and the frame is being drawn**. A
+    /// path pressed against a sleeping drive, a folder redirected onto a share, an antivirus filter
+    /// on the open — any of them turns "is this real" into milliseconds, and a terminal that paused
+    /// its own repaint to find out would stutter exactly while a full-screen program was printing
+    /// the paths worth asking about.
+    VerifyPath(PathBuf),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -855,6 +886,31 @@ pub struct DualPlaneSession {
     table_bands: bool,
     inline_image_tasks: VecDeque<InlineImageTask>,
     local_image_path_tasks: VecDeque<InlineImageTask>,
+    /// What the disk has answered about the printed paths this pane has drawn (§7.1.5j): `true`
+    /// for a name that is on the disk — file or folder alike — and `false` for one that is not.
+    ///
+    /// Both answers are kept, because a "no" is as much an answer as a "yes" and re-asking it every
+    /// frame is what would make a screenful of prose cost a screenful of syscalls. What is *not*
+    /// kept is any notion of when it was asked: a verdict stands until it is evicted, so a file
+    /// created after this pane asked about it stays unlinked until its name is printed again from a
+    /// pane that has not asked. That is the same honesty the image ledger has and the same
+    /// limitation; see §7.1.5j's own left-out list.
+    path_verdicts: BTreeMap<PathBuf, bool>,
+    /// Insertion order over `path_verdicts`, so the ledger can be held to a size without asking a
+    /// clock. Oldest question out first.
+    path_verdict_order: VecDeque<PathBuf>,
+    /// Paths a frame asked about that no worker has answered yet, in the order they were asked.
+    path_verify_tasks: VecDeque<PathBuf>,
+    /// Paths a worker is holding right now. Kept apart from the queue so that the frames drawn
+    /// while a question is in flight do not ask it again — an unanswered path is re-detected on
+    /// every one of them, and without this a slow drive would collect one task per frame.
+    path_verify_in_flight: BTreeSet<PathBuf>,
+    /// What this pane last told its projection, kept so the telling is free on the frames where
+    /// nothing has changed — which is nearly all of them.
+    printed_path_links: bt_transcript::paths::PrintedPathLinks,
+    /// Where this session's shell was put down (§7.1.4's second rung), pushed in by the app at
+    /// spawn because it is an answer only the spawn knew.
+    spawn_directory: Option<PathBuf>,
     /// At most one outstanding resample per image occurrence, so the queue is bounded by the
     /// record set rather than by how often the layout moves.
     inline_image_scale_tasks: VecDeque<InlineImageScaleTask>,
@@ -1188,6 +1244,12 @@ impl DualPlaneSession {
             inline_math_bands: true,
             table_bands: true,
             inline_image_tasks: VecDeque::new(),
+            path_verdicts: BTreeMap::new(),
+            path_verdict_order: VecDeque::new(),
+            path_verify_tasks: VecDeque::new(),
+            path_verify_in_flight: BTreeSet::new(),
+            printed_path_links: bt_transcript::paths::PrintedPathLinks::default(),
+            spawn_directory: None,
             local_image_path_tasks: VecDeque::new(),
             inline_image_scale_tasks: VecDeque::new(),
             inline_images: BTreeMap::new(),
@@ -1791,6 +1853,85 @@ impl DualPlaneSession {
         None
     }
 
+    /// Take the printed paths this pane's last frame drew and could not answer for, and put them
+    /// in front of the worker (§7.1.5j).
+    ///
+    /// The other direction — telling the projection what is already known — happens inside
+    /// [`Self::viewport_frame`], where it cannot be forgotten. This half cannot live there because
+    /// remembering a question changes the session, and a frame is projected from a session that is
+    /// only being read.
+    /// Returns how many questions this actually raised, so the caller can hand the worker its work
+    /// on the same pass instead of waiting for whatever moves next.
+    pub fn absorb_printed_path_probes(&mut self, projection: &mut ViewportProjection) -> usize {
+        let before = self.path_verify_tasks.len();
+        for path in projection.take_printed_path_probes() {
+            self.ask_about_path(path);
+        }
+        self.path_verify_tasks.len().saturating_sub(before)
+    }
+
+    /// Put one printed path in front of the worker, unless it is already answered or already
+    /// queued.
+    ///
+    /// The queue is bounded because a full-screen program can print new names forever and a
+    /// question nobody asked for is worth less than the one asked after it: past the ceiling the
+    /// **oldest** question is dropped, so a pane that has just scrolled a thousand new paths past
+    /// spends its budget on the ones still on the screen.
+    fn ask_about_path(&mut self, path: PathBuf) {
+        if self.path_verdicts.contains_key(&path)
+            || self.path_verify_in_flight.contains(&path)
+            || self.path_verify_tasks.contains(&path)
+        {
+            return;
+        }
+        if self.path_verify_tasks.len() == PATH_VERIFY_QUEUE_CAP {
+            self.path_verify_tasks.pop_front();
+        }
+        self.path_verify_tasks.push_back(path);
+    }
+
+    /// Record what the disk said about one printed path, and report whether this pane now draws
+    /// something it did not draw before.
+    ///
+    /// `true` is what makes a link appear without the pointer moving: the app republishes on it,
+    /// exactly as it does for a formula or a decode landing.
+    pub fn complete_path_verification(&mut self, path: PathBuf, exists: bool) -> bool {
+        self.path_verify_in_flight.remove(&path);
+        self.path_verify_tasks.retain(|queued| *queued != path);
+        if self.path_verdicts.get(&path) == Some(&exists) {
+            return false;
+        }
+        if self.path_verdicts.insert(path.clone(), exists).is_none() {
+            self.path_verdict_order.push_back(path);
+        }
+        while self.path_verdict_order.len() > PATH_VERDICT_LEDGER_CAP {
+            if let Some(evicted) = self.path_verdict_order.pop_front() {
+                self.path_verdicts.remove(&evicted);
+            }
+        }
+        // A "no" changes the ledger but not the picture: nothing was drawn for that name before
+        // the answer and nothing is drawn after it. Only a "yes" is worth a frame.
+        self.rebuild_printed_path_links();
+        exists
+    }
+
+    /// Whether the disk has told this pane that a printed path is real — the `verified` bit of
+    /// §7.1.5j, and the twin of [`Self::image_path_is_verified`] for every other kind of file.
+    pub fn path_is_verified(&self, path: &Path) -> bool {
+        self.path_verdicts.get(path) == Some(&true)
+    }
+
+    fn rebuild_printed_path_links(&mut self) {
+        self.printed_path_links = bt_transcript::paths::PrintedPathLinks::new(
+            self.reference_directory().map(Path::to_path_buf),
+            self.path_verdicts
+                .iter()
+                .filter(|(_, exists)| **exists)
+                .map(|(path, _)| path.clone())
+                .collect(),
+        );
+    }
+
     /// Whether the decoration worker has **verified** this file: opened it, size-checked it,
     /// format-checked it, and decoded it.
     ///
@@ -2008,7 +2149,7 @@ impl DualPlaneSession {
             });
         };
 
-        for candidate in detect_peek_image_candidates(text, self.working_directory.as_deref()) {
+        for candidate in detect_peek_image_candidates(text, self.reference_directory()) {
             let marked = cells_between(candidate.byte_start, candidate.byte_end);
             push(PathBuf::from(candidate.path), marked, references);
         }
@@ -5366,6 +5507,10 @@ impl DualPlaneSession {
                         let scaled = scale_inline_image(&task);
                         self.complete_inline_image_scale(scaled);
                     }
+                    SessionDecorationTask::VerifyPath(path) => {
+                        let exists = path_exists(&path);
+                        self.complete_path_verification(path, exists);
+                    }
                 }
             }
             if !self.scheduler.has_retry() {
@@ -5422,6 +5567,14 @@ impl DualPlaneSession {
                 self.local_image_path_tasks
                     .pop_front()
                     .map(SessionDecorationTask::InlineImage)
+            })
+            // Last, because it is the cheapest and the most patient: one `metadata` call against a
+            // name the reader can already see, whose only visible consequence is a mark appearing
+            // under it a frame later. A decode somebody is waiting on outranks it.
+            .or_else(|| {
+                let path = self.path_verify_tasks.pop_front()?;
+                self.path_verify_in_flight.insert(path.clone());
+                Some(SessionDecorationTask::VerifyPath(path))
             })
     }
 
@@ -6001,6 +6154,12 @@ impl DualPlaneSession {
         // artifacts at the frame boundary so a ready raster cannot remain stranded in session
         // state merely because history projection did not otherwise change.
         self.sync_live_projection_artifacts(projection);
+        // What this pane knows about the paths it prints, told to the layer that draws them
+        // (§7.1.5j). Here rather than in `refresh_projection` because *every* frame is projected
+        // through this function while the relayout door is only knocked on when geometry moves —
+        // and a verdict landing moves no geometry at all. Free when nothing changed: the
+        // projection compares before it keeps.
+        projection.set_printed_path_links(&self.printed_path_links);
         let (_, rows) = self.terminal.dimensions();
         let visible_rows = (0..rows.get())
             .filter_map(|row| self.terminal.visible_row(row))
@@ -7750,13 +7909,45 @@ impl DualPlaneSession {
     /// thread), the same way a printed absolute path's existence is only ever the worker's
     /// question.
     fn set_reported_working_directory(&mut self, uri: &str) {
-        self.working_directory = file_uri_to_local_path(uri, local_host_name());
+        let reported = file_uri_to_local_path(uri, local_host_name());
+        if self.working_directory != reported {
+            self.working_directory = reported;
+            self.rebuild_printed_path_links();
+        }
     }
 
     /// The shell's last reported working directory, or `None` when this session was never told
-    /// one. The sole resolution authority for relative image path text.
+    /// one.
     pub fn working_directory(&self) -> Option<&Path> {
         self.working_directory.as_deref()
+    }
+
+    /// Tell this session where its shell was *put down* — the second rung of §7.1.4's ladder,
+    /// which only the spawn knows (`profiles::spawn_place`, HOME already folded into it).
+    ///
+    /// The app pushes it once, at spawn, for the same reason `LeafSession::spawn_place` exists at
+    /// all: it is an answer nobody downstream can re-derive, and copying the ladder into a second
+    /// reader is how a tab comes to have two opinions about where its own shell is standing.
+    pub fn set_spawn_directory(&mut self, directory: Option<PathBuf>) {
+        if self.spawn_directory != directory {
+            self.spawn_directory = directory;
+            self.rebuild_printed_path_links();
+        }
+    }
+
+    /// Where relative text printed into this pane is measured from: §7.1.4's ladder read once —
+    /// the last OSC 7 report, else where the shell was put down.
+    ///
+    /// One accessor and not two, because a pane cannot be standing in two places: the ladder that
+    /// answers `Restart shell` and `RECENTLY OPENED` is the ladder that answers `./a.md`, and a
+    /// second reading of it would be a second answer to the one question.
+    ///
+    /// `None` is a real answer and it is the ruling's: with no rung reached, relative text names
+    /// nothing and is not a reference at all. Nothing guesses.
+    pub fn reference_directory(&self) -> Option<&Path> {
+        self.working_directory
+            .as_deref()
+            .or(self.spawn_directory.as_deref())
     }
 
     /// Take delivery of an OSC 1337 payload the adapter already consumed.
@@ -8041,8 +8232,7 @@ impl DualPlaneSession {
             let line_stable = segments
                 .iter()
                 .all(|segment| stable.get(segment.row as usize).copied().unwrap_or(false));
-            for candidate in
-                detect_peek_image_candidates(logical_text, self.working_directory.as_deref())
+            for candidate in detect_peek_image_candidates(logical_text, self.reference_directory())
             {
                 let Some(start) = live_path_point(segments, candidate.byte_start, false) else {
                     continue;
@@ -8176,27 +8366,27 @@ impl DualPlaneSession {
         // The line's own text in the peek's coverage, then the shape its text cannot spell: a
         // `file://` image carried as an OSC 8 link target. Both arrive here as grapheme ranges over
         // this one line, so the registration below does not care which produced them.
-        let references =
-            detect_peek_image_candidates(&line.text, self.working_directory.as_deref())
-                .into_iter()
-                .filter_map(|candidate| {
-                    let start =
-                        grapheme_offset_at_byte(&line.grapheme_boundaries, candidate.byte_start)?;
-                    let end =
-                        grapheme_offset_at_byte(&line.grapheme_boundaries, candidate.byte_end)?;
-                    Some((PathBuf::from(candidate.path), candidate.shape, start, end))
-                })
-                .chain(Self::frozen_image_link_spans(&line).into_iter().map(
-                    |(path, start, end)| {
+        let references = detect_peek_image_candidates(&line.text, self.reference_directory())
+            .into_iter()
+            .filter_map(|candidate| {
+                let start =
+                    grapheme_offset_at_byte(&line.grapheme_boundaries, candidate.byte_start)?;
+                let end = grapheme_offset_at_byte(&line.grapheme_boundaries, candidate.byte_end)?;
+                Some((PathBuf::from(candidate.path), candidate.shape, start, end))
+            })
+            .chain(
+                Self::frozen_image_link_spans(&line)
+                    .into_iter()
+                    .map(|(path, start, end)| {
                         (
                             path,
                             ImageReferenceShape::Uri,
                             GraphemeOffset(start),
                             GraphemeOffset(end),
                         )
-                    },
-                ))
-                .collect::<Vec<_>>();
+                    }),
+            )
+            .collect::<Vec<_>>();
         for (path, shape, start_offset, end_offset) in references {
             let already_registered = self.inline_images.values().any(|record| {
                 let InlineImageRecordKind::LocalPath {
@@ -17909,6 +18099,10 @@ mod tests {
                 SessionDecorationTask::ScaleInlineImage(task) => {
                     assert!(session.complete_inline_image_scale(scale_inline_image(&task)));
                 }
+                SessionDecorationTask::VerifyPath(path) => {
+                    let exists = path_exists(&path);
+                    session.complete_path_verification(path, exists);
+                }
                 SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
             }
         }
@@ -18781,6 +18975,214 @@ mod tests {
         temporary_path_image_named("one pixel.png")
     }
 
+    /// A real directory holding one real file with a name no image scan would ever admit, so the
+    /// pins below can only be answered by the printed-path line and never by the image one.
+    fn temporary_ordinary_file() -> (PathBuf, PathBuf) {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "betterterminal-printed-path-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("notes.md");
+        std::fs::write(&path, b"# notes\n").unwrap();
+        (directory, path)
+    }
+
+    /// One frame of `session`, with the printed-path questions it raises answered against the real
+    /// disk and the frame taken again — which is exactly the two-frame rhythm the app has: a frame
+    /// asks, a worker answers, the next frame draws.
+    fn frame_after_path_verification(
+        session: &mut DualPlaneSession,
+        projection: &mut ViewportProjection,
+    ) -> ViewportFrame {
+        session.viewport_frame(projection).unwrap();
+        session.absorb_printed_path_probes(projection);
+        drain_image_decodes(session);
+        session.viewport_frame(projection).unwrap()
+    }
+
+    /// PIN (§7.1.5j, user report 2026-08-20) — **an ordinary file whose path is printed into the
+    /// terminal is a link, and the promise is the disk's**.
+    ///
+    /// The report was `D:\Developer\BetterTerminal\README.md` and three other spellings of the same
+    /// kind of thing, printed by Claude Code, none of which the pointer could reach while the OSC 8
+    /// link on the next line could. This walks the whole path of that fix inside one session: the
+    /// frame that draws the name asks about it, a worker reads the real disk, and the frame after
+    /// wears the mark and carries the `file:` target.
+    ///
+    /// MUTATIONS: answer from the shape instead of the disk and `missing.md` lights up too; keep
+    /// the question on the event thread and the assertion still passes while the ruling does not.
+    #[test]
+    fn a_printed_path_that_is_really_on_the_disk_becomes_a_verified_file_link() {
+        let (directory, path) = temporary_ordinary_file();
+        let missing = directory.join("missing.md");
+        let printed = path.to_string_lossy().into_owned();
+        let mut session = DualPlaneSession::new(nz(120), nz(6));
+        enable_path_detection(&mut session);
+        session
+            .feed(format!("{printed}\r\n{}\r\n", missing.to_string_lossy()).as_bytes())
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+
+        assert!(
+            session.path_is_verified(&path),
+            "the worker read the real file"
+        );
+        assert!(
+            !session.path_is_verified(&missing),
+            "and the real absence of the other one"
+        );
+        let hit = frame.hyperlink_at(0, 0).expect("the real path is a link");
+        assert_eq!(
+            hit.uri,
+            bt_transcript::paths::local_path_to_file_uri(&path),
+            "the target is the file it names, spelled the way an OSC 8 `file:` link spells one"
+        );
+        let (dotted, _) = underlined_columns(&frame, 0);
+        assert_eq!(
+            dotted,
+            (0..printed.chars().count() as u32).collect::<Vec<_>>(),
+            "the resting mark covers the name and stops where the name stops"
+        );
+        assert!(
+            frame.hyperlink_at(1, 0).is_none(),
+            "a path that is not on the disk is not a link"
+        );
+        assert_eq!(
+            underlined_columns(&frame, 1),
+            (Vec::new(), Vec::new()),
+            "and wears no mark either"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// PIN — **the alternate screen is where the report came from**, so this is the same fact asked
+    /// of the screen Claude Code actually lives on (§7.1.5f gate ③, repealed 2026-08-20).
+    #[test]
+    fn a_printed_path_on_the_alternate_screen_is_a_verified_file_link_too() {
+        let (directory, path) = temporary_ordinary_file();
+        let printed = path.to_string_lossy().into_owned();
+        let mut session = DualPlaneSession::new(nz(120), nz(6));
+        enable_path_detection(&mut session);
+        session
+            .feed(format!("\x1b[?1049h{printed}\r\n").as_bytes())
+            .unwrap();
+        assert!(session.terminal.modes().alternate_screen);
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+
+        let row = frame
+            .row_map
+            .iter()
+            .position(|row| row.live_grid_row == Some(0))
+            .expect("the alternate grid's first row is on screen") as u32;
+        assert_eq!(
+            frame
+                .hyperlink_at(row, 0)
+                .expect("a link on the alternate screen")
+                .uri,
+            bt_transcript::paths::local_path_to_file_uri(&path)
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// PIN — **relative text is measured from §7.1.4's ladder and from nothing else**, and the
+    /// second rung is the one the ladder's own ruling put there: where the shell was put down.
+    ///
+    /// With neither rung reached, the same line offers nothing at all — not a link, and not even a
+    /// question for a worker. That `None` is the ruling, not a gap.
+    #[test]
+    fn a_relative_reference_is_measured_from_the_panes_own_ladder() {
+        let (directory, path) = temporary_ordinary_file();
+        let mut without = DualPlaneSession::new(nz(80), nz(6));
+        enable_path_detection(&mut without);
+        without.feed(b"./notes.md\r\n").unwrap();
+        let mut projection = without.new_projection(without.layout_key());
+        let frame = frame_after_path_verification(&mut without, &mut projection);
+        assert!(
+            frame.hyperlink_at(0, 0).is_none(),
+            "a pane that cannot say where it is standing does not guess"
+        );
+
+        let mut placed = DualPlaneSession::new(nz(80), nz(6));
+        enable_path_detection(&mut placed);
+        placed.set_spawn_directory(Some(directory.clone()));
+        placed.feed(b"./notes.md docs/nowhere.md\r\n").unwrap();
+        let mut projection = placed.new_projection(placed.layout_key());
+        let frame = frame_after_path_verification(&mut placed, &mut projection);
+        assert_eq!(
+            frame
+                .hyperlink_at(0, 0)
+                .expect("the spawn place is the second rung")
+                .uri,
+            bt_transcript::paths::local_path_to_file_uri(&path)
+        );
+        assert!(
+            frame.hyperlink_at(0, 12).is_none(),
+            "and a relative name that resolves to nothing is still nothing"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// PIN (the alternate-screen budget, §7.1.5j) — **a program repainting the same screen asks the
+    /// disk nothing after the first frame.**
+    ///
+    /// This is the whole of what makes the scan affordable on a surface that redraws sixty times a
+    /// second: the ledger remembers both answers, so the cost of frame two onwards is the lexer over
+    /// text the projection was already walking, and zero syscalls. Counting tasks rather than timing
+    /// them is deliberate — a wall clock on a loaded machine measures the machine.
+    #[test]
+    fn a_repainting_screen_asks_the_disk_nothing_after_the_first_frame() {
+        let (directory, path) = temporary_ordinary_file();
+        let printed = path.to_string_lossy().into_owned();
+        let missing = directory.join("missing.md");
+        let mut session = DualPlaneSession::new(nz(200), nz(30));
+        enable_path_detection(&mut session);
+        let mut projection = session.new_projection(session.layout_key());
+        let mut asked = Vec::new();
+        for frame in 0..60u32 {
+            session
+                .feed(
+                    format!(
+                        "\x1b[?1049h\x1b[2J\x1b[H{printed}\r\n{}\r\nframe {frame}\r\n",
+                        missing.to_string_lossy()
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+            session.viewport_frame(&mut projection).unwrap();
+            session.absorb_printed_path_probes(&mut projection);
+            let mut this_frame = 0usize;
+            while let Some(task) = session.take_decoration_worker_task() {
+                if let SessionDecorationTask::VerifyPath(path) = task {
+                    this_frame += 1;
+                    let exists = path_exists(&path);
+                    session.complete_path_verification(path, exists);
+                }
+            }
+            asked.push(this_frame);
+        }
+        assert_eq!(asked[0], 2, "the first frame asks about both names once");
+        assert!(
+            asked[1..].iter().all(|count| *count == 0),
+            "and every repaint after it asks about nothing: {asked:?}"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
     fn temporary_path_image_named(file_name: &str) -> (PathBuf, PathBuf) {
         use base64::Engine as _;
 
@@ -18821,6 +19223,10 @@ mod tests {
                 }
                 SessionDecorationTask::ScaleInlineImage(task) => {
                     session.complete_inline_image_scale(scale_inline_image(&task));
+                }
+                SessionDecorationTask::VerifyPath(path) => {
+                    let exists = path_exists(&path);
+                    session.complete_path_verification(path, exists);
                 }
                 SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
             }
@@ -20828,6 +21234,10 @@ mod tests {
                     SessionDecorationTask::ScaleInlineImage(task) => {
                         assert!(session.complete_inline_image_scale(scale_inline_image(&task)));
                     }
+                    SessionDecorationTask::VerifyPath(path) => {
+                        let exists = path_exists(&path);
+                        session.complete_path_verification(path, exists);
+                    }
                     SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
                 }
             }
@@ -20931,6 +21341,10 @@ mod tests {
                     }
                     SessionDecorationTask::ScaleInlineImage(task) => {
                         assert!(session.complete_inline_image_scale(scale_inline_image(&task)));
+                    }
+                    SessionDecorationTask::VerifyPath(path) => {
+                        let exists = path_exists(&path);
+                        session.complete_path_verification(path, exists);
                     }
                     SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
                 }

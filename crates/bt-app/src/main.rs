@@ -419,6 +419,10 @@ enum MathWorkerRequest {
     /// decoration record. The completion routes only to the app-side peek cache, so the band
     /// creation gates (cursor line, semantic input region) are never bypassed.
     PeekImage { leaf: LeafId, path: PathBuf },
+    /// Ask the disk whether one printed path names anything (§7.1.5j). The cheapest thing this
+    /// worker is ever handed, and it is here rather than on the event thread for the reason every
+    /// other read is: the answer costs a syscall and the frame is being drawn.
+    VerifyPath { leaf: LeafId, path: PathBuf },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -581,6 +585,11 @@ enum DecorationWorkerCompletion {
     PreviewScaledImage {
         scaled: bt_term::ScaledInlineImage,
     },
+    /// What the disk said about one printed path (§7.1.5j).
+    VerifiedPath {
+        path: PathBuf,
+        exists: bool,
+    },
 }
 
 struct MathWorker {
@@ -653,6 +662,13 @@ impl MathWorker {
                             (
                                 leaf,
                                 DecorationWorkerCompletion::InlineImage { task, result },
+                            )
+                        }
+                        MathWorkerRequest::VerifyPath { leaf, path } => {
+                            let exists = bt_term::path_exists(&path);
+                            (
+                                leaf,
+                                DecorationWorkerCompletion::VerifiedPath { path, exists },
                             )
                         }
                         MathWorkerRequest::PeekImage { leaf, path } => {
@@ -3720,6 +3736,9 @@ fn dispatch_decoration_task(
             .is_ok(),
         SessionDecorationTask::ScaleInlineImage(task) => scale_tasks
             .send(ScaleWorkerRequest::InlineImage { leaf, task })
+            .is_ok(),
+        SessionDecorationTask::VerifyPath(path) => tasks
+            .send(MathWorkerRequest::VerifyPath { leaf, path })
             .is_ok(),
     }
 }
@@ -16556,6 +16575,10 @@ fn create_leaf_session(
             .feed(bytes)
             .context("feed BT_PROBE_INPUT bytes directly into terminal")?;
     }
+    // The second rung of §7.1.4's ladder, told to the shell that is standing on it. Only the spawn
+    // knows it (`profiles::spawn_place` has already folded HOME into it), so pushing it here is
+    // what keeps relative text in this pane from being measured by a second copy of the ladder.
+    session.set_spawn_directory(spawn_place.clone());
     let projection = session.new_projection(session.layout_key());
     Ok(LeafSession {
         pty,
@@ -33305,6 +33328,7 @@ impl Runtime<'_> {
         );
         self.window.composed_terminal_frames =
             self.window.composed_terminal_frames.saturating_add(1);
+        let asked_about_paths;
         let mut terminal_frame = {
             // Bound once, to the focused leaf: `session` and `projection` are
             // two fields of one shell, and reaching each through its own deref
@@ -33312,9 +33336,19 @@ impl Runtime<'_> {
             // leaf.
             let leaf = self.window.tabs[active].shell_mut();
             leaf.session.refresh_projection(&mut leaf.projection);
-            leaf.session
+            let frame = leaf
+                .session
                 .viewport_frame(&mut leaf.projection)
-                .context("project terminal grid into viewport frame")?
+                .context("project terminal grid into viewport frame")?;
+            // The frame that drew the names is the frame that discovered which of them nobody has
+            // answered for (§7.1.5j). Taken here, one step after the projection wrote them down,
+            // because the projection is what walks every line and the session is what owns a
+            // worker.
+            asked_about_paths = leaf
+                .session
+                .absorb_printed_path_probes(&mut leaf.projection)
+                != 0;
+            frame
         };
         // State-driven frame hold. Review displacement holds a vanished scroll anchor during a
         // resize reprint. Independently, an unmatched off-band stale-pending DPI record holds the
@@ -33338,6 +33372,7 @@ impl Runtime<'_> {
             .session
             .schedule_visible_artifacts(&terminal_frame)
             != 0
+            || asked_about_paths
         {
             dispatch_tab_decoration_tasks(
                 &mut self.window.tabs[active],
@@ -44246,6 +44281,19 @@ impl Runtime<'_> {
                             self.complete_preview_scale(scaled)?;
                             false
                         }
+                        // A verdict belongs to the seat that asked: the ledger is per pane, because
+                        // the directory relative text is measured from is per pane. Unlike the two
+                        // above it *is* gated on the tab still being on screen — a pane nobody can
+                        // see has no frame to redraw, and the answer is kept either way.
+                        DecorationWorkerCompletion::VerifiedPath { path, exists } => target_index
+                            .is_some_and(|index| {
+                                let drew =
+                                    leaf_session_mut(&mut self.window.tabs, index, leaf.seat)
+                                        .is_some_and(|session| {
+                                            session.complete_path_verification(path, exists)
+                                        });
+                                target_active && drew
+                            }),
                     };
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -53287,6 +53335,9 @@ impl Runtime<'_> {
                 .session
                 .viewport_frame(&mut leaf.projection)
                 .context("project an unfocused pane's grid into a viewport frame")?;
+            // A pane nobody has the keyboard in still draws paths, and still owes them an answer.
+            leaf.session
+                .absorb_printed_path_probes(&mut leaf.projection);
             if hover_pane == Some(pane.seat) {
                 apply_hover_marks(
                     &mut projected,
@@ -63915,6 +63966,130 @@ mod tests {
             "the slot answers the question the hover asked, so a raster for another box is \
              never presented as this one",
         );
+    }
+
+    /// PIN (§7.1.5j, user report 2026-08-20) — **a bare file path printed into the terminal
+    /// reaches the five-armed routing table as a `file:` target, and the press that reaches it is
+    /// this window's.**
+    ///
+    /// This is the whole claim of the slice, asked at the seam where it either holds or does not:
+    /// nothing in [`hyperlink_activation`], [`Runtime::pressed_cell_target`] or
+    /// [`press_belongs_to_the_window`] was written for printed paths, and nothing in them was
+    /// changed for printed paths. The recognition folds a verified name into the one field an OSC 8
+    /// link uses, and everything downstream reads that field.
+    ///
+    /// MUTATIONS: route a printed path anywhere but through the cell's own `hyperlink` and this
+    /// stops being a statement about the shared table; give the link the printed text instead of a
+    /// URI and the `file:` arm never fires.
+    #[test]
+    fn a_verified_bare_path_reaches_the_five_armed_table_as_a_file_target() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "betterterminal-app-printed-path-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let readable = directory.join("notes.md");
+        std::fs::write(&readable, b"# notes\n").unwrap();
+        let page = directory.join("report.html");
+        std::fs::write(&page, b"<p>hi</p>").unwrap();
+
+        let printed = format!(
+            "{} {} {}",
+            readable.to_string_lossy(),
+            page.to_string_lossy(),
+            directory.to_string_lossy()
+        );
+        let mut session = DualPlaneSession::new(
+            NonZeroU32::new(printed.chars().count() as u32 + 8).unwrap(),
+            NonZeroU32::new(4).unwrap(),
+        );
+        session.set_math_layout_options(bt_term::MathLayoutOptions {
+            detect_image_paths: true,
+            ..bt_term::MathLayoutOptions::default()
+        });
+        session.feed(printed.as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        // Frame one asks, the worker answers, frame two draws — the app's own rhythm, run here by
+        // hand because a unit test has no worker thread.
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        while let Some(task) = session.take_decoration_worker_task() {
+            if let bt_term::SessionDecorationTask::VerifyPath(path) = task {
+                let exists = bt_term::path_exists(&path);
+                session.complete_path_verification(path, exists);
+            }
+        }
+        let frame = session.viewport_frame(&mut projection).unwrap();
+
+        // Column by construction rather than by search: the directory's own name is a prefix of
+        // both file names, so looking one up would find the wrong one.
+        let readable_column = 0u32;
+        let page_column = readable.to_string_lossy().chars().count() as u32 + 1;
+        let directory_column = page_column + page.to_string_lossy().chars().count() as u32 + 1;
+        let is_directory = |path: &Path| path.is_dir();
+        for (column, named, plain, control) in [
+            (
+                readable_column,
+                readable.clone(),
+                HyperlinkActivation::Preview(readable.clone()),
+                HyperlinkActivation::External(readable.clone()),
+            ),
+            (
+                page_column,
+                page.clone(),
+                HyperlinkActivation::None,
+                HyperlinkActivation::External(page.clone()),
+            ),
+            (
+                directory_column,
+                directory.clone(),
+                HyperlinkActivation::None,
+                HyperlinkActivation::Reveal(directory.clone()),
+            ),
+        ] {
+            let hit = frame
+                .hyperlink_at(0, column)
+                .unwrap_or_else(|| panic!("{} is a link", named.display()));
+            assert_eq!(
+                hit.uri,
+                bt_transcript::paths::local_path_to_file_uri(&named),
+                "{} carries the target a `file:` link carries",
+                named.display()
+            );
+            assert_eq!(
+                hyperlink_activation(false, true, &hit.uri, &is_directory),
+                plain,
+                "plain click on {}",
+                named.display()
+            );
+            assert_eq!(
+                hyperlink_activation(true, true, &hit.uri, &is_directory),
+                control,
+                "Ctrl+click on {}",
+                named.display()
+            );
+            assert!(
+                press_belongs_to_the_window(
+                    input::MouseProtocolButton::Left,
+                    PressedCellTarget::Ours
+                ),
+                "and the press that spends it is this window's"
+            );
+        }
+        assert!(
+            frame
+                .hyperlink_at(0, printed.chars().count() as u32 + 1)
+                .is_none(),
+            "the blank beyond the names carries nothing"
+        );
+
+        std::fs::remove_file(&readable).unwrap();
+        std::fs::remove_file(&page).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
     }
 
     #[test]
@@ -78224,7 +78399,8 @@ mod tests {
             .map(|request| match request {
                 MathWorkerRequest::Math { leaf, .. }
                 | MathWorkerRequest::InlineImage { leaf, .. }
-                | MathWorkerRequest::PeekImage { leaf, .. } => leaf,
+                | MathWorkerRequest::PeekImage { leaf, .. }
+                | MathWorkerRequest::VerifyPath { leaf, .. } => leaf,
             })
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(

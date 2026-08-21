@@ -601,6 +601,10 @@ impl HeadlessOracle {
                     let scaled = bt_term::scale_inline_image(&task);
                     changed |= self.session.complete_inline_image_scale(scaled);
                 }
+                SessionDecorationTask::VerifyPath(path) => {
+                    let exists = bt_term::path_exists(&path);
+                    changed |= self.session.complete_path_verification(path, exists);
+                }
                 SessionDecorationTask::Math(_) => {
                     unreachable!("math queues were drained before image completion")
                 }

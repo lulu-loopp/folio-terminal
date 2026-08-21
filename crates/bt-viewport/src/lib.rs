@@ -3,10 +3,11 @@
 mod height_tree;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     error::Error,
     fmt,
     num::{NonZeroI64, NonZeroU32},
+    path::PathBuf,
     sync::Arc,
 };
 
@@ -17,6 +18,7 @@ use bt_doc::{
 use bt_transcript::{
     CapturedCell, CapturedRow, CellFlags, CellHyperlink, FrozenLine, GraphemeOffset,
     HyperlinkRange, SourceGeneration, StagedRow, StagingId, TranscriptId, detect_http_urls,
+    paths::PrintedPathLinks,
 };
 use bt_unicode::{cluster_width, graphemes};
 
@@ -1456,6 +1458,45 @@ pub struct ViewportProjection {
     /// Resize/reflow changes visual row counts without appending terminal content.
     suppress_next_growth_compensation: bool,
     projection_dirty: bool,
+    /// What this pane has been told about the printed paths it draws (§7.1.5j).
+    printed_path_links: PrintedPathLinks,
+    /// The paths this pane drew and could not answer for, gathered so that whoever owns a worker
+    /// can go and look. Bounded, because a full-screen program can print new names forever.
+    printed_path_probes: BTreeSet<PathBuf>,
+}
+
+/// How many unanswered printed paths one projection will remember between drains.
+///
+/// The drain happens once per published frame, so this is a ceiling on how far ahead of the worker
+/// one frame may run — not a ceiling on how many paths a pane may ever link. A frame that names
+/// more new files than this gets the first `MAX` of them in path order and asks about the rest on
+/// the frame after, which is the same shape as [`bt_term`]'s bounded decode queue.
+const MAX_PRINTED_PATH_PROBES: usize = 256;
+
+/// One projection pass's share of the printed-path question: what is already known, and where the
+/// unknowns are collected.
+///
+/// It travels as one value because the two halves are never useful apart — a scan that reads the
+/// ledger without reporting its misses would draw a link for a file nobody ever looked at, and one
+/// that reports without reading would ask the same question every frame forever.
+struct PrintedPathPass<'a> {
+    links: &'a PrintedPathLinks,
+    probes: &'a mut BTreeSet<PathBuf>,
+}
+
+impl PrintedPathPass<'_> {
+    /// The `file:` links one logical line offers, with its unknowns recorded on the way past.
+    fn links_in(&mut self, text: &str) -> Vec<(HyperlinkRange, String)> {
+        let mut unknown = BTreeSet::new();
+        let links = self.links.links_in(text, &mut unknown);
+        for path in unknown {
+            if self.probes.len() >= MAX_PRINTED_PATH_PROBES {
+                break;
+            }
+            self.probes.insert(path);
+        }
+        links
+    }
 }
 
 impl ViewportProjection {
@@ -1504,7 +1545,28 @@ impl ViewportProjection {
             last_total_height_subpixels: 0,
             suppress_next_growth_compensation: false,
             projection_dirty: true,
+            printed_path_links: PrintedPathLinks::default(),
+            printed_path_probes: BTreeSet::new(),
         }
+    }
+
+    /// Tell this pane where relative text is measured from and which printed paths are real
+    /// (§7.1.5j). Pushed by the session before every projection, because both halves are facts
+    /// about a shell — the directory it last reported, and what a worker found on the disk.
+    pub fn set_printed_path_links(&mut self, links: &PrintedPathLinks) {
+        if &self.printed_path_links != links {
+            self.printed_path_links = links.clone();
+            self.projection_dirty = true;
+        }
+    }
+
+    /// Take the printed paths this pane drew and could not answer for. Draining is how the question
+    /// reaches a worker, and it empties the set so the next frame asks only about what it itself
+    /// could not answer.
+    pub fn take_printed_path_probes(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.printed_path_probes)
+            .into_iter()
+            .collect()
     }
 
     pub fn heights(&self) -> &HeightTree {
@@ -1711,7 +1773,7 @@ impl ViewportProjection {
 
     /// Compose the live terminal grid into a viewport-owned frame consumed by bt-render.
     pub fn live_frame(
-        &self,
+        &mut self,
         columns: NonZeroU32,
         rows: Vec<CapturedRow>,
         cursor: GridCursor,
@@ -1735,7 +1797,13 @@ impl ViewportProjection {
             })?;
         let presentation_rows = presentation_row_count.get() as usize;
         let mut presented = Vec::with_capacity(presentation_rows);
-        let implicit = implicit_hyperlinks(&rows.iter().collect::<Vec<_>>());
+        let implicit = implicit_hyperlinks(
+            &rows.iter().collect::<Vec<_>>(),
+            Some(&mut PrintedPathPass {
+                links: &self.printed_path_links,
+                probes: &mut self.printed_path_probes,
+            }),
+        );
         for (row_index, row) in rows.into_iter().enumerate() {
             if row.cells.len() != expected_columns {
                 return Err(FrameProjectionError::ColumnCount {
@@ -1869,12 +1937,17 @@ impl ViewportProjection {
         // become a link to the shorter address its visible half spells.
         let staged_sequence: &[StagedRow] = if primary { staged_rows } else { &[] };
         let implicit_live_base = staged_sequence.len();
+        let mut live_path_probes = BTreeSet::new();
         let implicit = implicit_hyperlinks(
             &staged_sequence
                 .iter()
                 .map(|staged| &staged.row)
                 .chain(live_rows.iter())
                 .collect::<Vec<_>>(),
+            Some(&mut PrintedPathPass {
+                links: &self.printed_path_links,
+                probes: &mut live_path_probes,
+            }),
         );
         let live_height = self.live_row_prefix.last().copied().unwrap_or_else(|| {
             i64::from(self.live_rows.get()).saturating_mul(self.cell_height_subpixels.get())
@@ -2144,6 +2217,10 @@ impl ViewportProjection {
         let window_row_top_subpixels = first_row_top_subpixels;
         let mut presented = Vec::with_capacity(presentation_rows);
         let mut math_blocks = Vec::new();
+        // Gathered beside the loop rather than into the projection's own set, because the loop
+        // reads a dozen of this projection's fields and one `&mut` on a thirteenth would end that.
+        // Merged in once the loop is done, under the same ceiling.
+        let mut frozen_path_probes = BTreeSet::new();
 
         // A boundary-split formula owns an exact transcript prefix above the live band that holds
         // its closer. Some prefix rows may still be in staging. Resolve each block once: finalized
@@ -2279,7 +2356,14 @@ impl ViewportProjection {
                             row_heights,
                         )
                     } else {
-                        let mut rows = layout_frozen_line(&entry.line, column_count);
+                        let mut rows = layout_frozen_line(
+                            &entry.line,
+                            column_count,
+                            Some(&mut PrintedPathPass {
+                                links: &self.printed_path_links,
+                                probes: &mut frozen_path_probes,
+                            }),
+                        );
                         let source_rows = rows.len();
                         let mut heights = vec![self.cell_height_subpixels.get(); source_rows];
                         let path_artifacts = self
@@ -2818,10 +2902,22 @@ impl ViewportProjection {
             layout_key: self.layout_key,
             view_generation: self.view_generation,
         };
+        self.remember_path_probes(live_path_probes);
+        self.remember_path_probes(frozen_path_probes);
         frame
             .validate_shape()
             .map_err(FrameProjectionError::FrameShape)?;
         Ok(frame)
+    }
+
+    /// Keep what this frame could not answer for, up to the ceiling one drain may carry.
+    fn remember_path_probes(&mut self, probes: BTreeSet<PathBuf>) {
+        for path in probes {
+            if self.printed_path_probes.len() >= MAX_PRINTED_PATH_PROBES {
+                return;
+            }
+            self.printed_path_probes.insert(path);
+        }
     }
 
     fn history_row_heights(&self, document: &HistoryDocument, index: usize) -> Option<Vec<i64>> {
@@ -2833,8 +2929,12 @@ impl ViewportProjection {
             ));
         }
         let entry = document.entries().get(&id)?;
-        let source_rows =
-            layout_frozen_line(&entry.line, self.layout_key.width_cells.get() as usize).len();
+        let source_rows = layout_frozen_line(
+            &entry.line,
+            self.layout_key.width_cells.get() as usize,
+            None,
+        )
+        .len();
         let mut heights = vec![self.cell_height_subpixels.get(); source_rows];
         for artifact in self.inline_path_artifacts.get(&id).into_iter().flatten() {
             let rows = usize::try_from(
@@ -3005,8 +3105,11 @@ impl ViewportProjection {
                     local_offset: absolute_y.saturating_sub(line_top),
                 });
             }
-            let source_rows =
-                layout_frozen_line(&entry.line, self.layout_key.width_cells.get() as usize);
+            let source_rows = layout_frozen_line(
+                &entry.line,
+                self.layout_key.width_cells.get() as usize,
+                None,
+            );
             let local_row =
                 absolute_row.saturating_sub(self.visual_row_heights.prefix_sum(index) as usize);
             if let Some(row) = source_rows.get(local_row) {
@@ -3711,10 +3814,32 @@ fn mark_osc_8_dotted(cells: &mut [CapturedCell]) {
     }
 }
 
-/// One inferred bare URL's claim on one cell of one row.
+/// One inferred reference's claim on one cell of one row.
 struct ImplicitCellLink {
     column: usize,
     link: CellHyperlink,
+    /// Whether the cell wears the resting dotted mark.
+    ///
+    /// The two inferred kinds answer this differently, and the difference is the ruling's, not an
+    /// accident (§7.1.5h ① and §7.1.5j). A bare **URL** carries no resting mark: nothing was
+    /// verified, so nothing is promised until the pointer arrives. A verified printed **path** is a
+    /// file this window has been to the disk for, which is the same fact a verified image reference
+    /// wears dots for and the same fact an OSC 8 span wears dots for — one vocabulary, one meaning,
+    /// so at rest they must be indistinguishable.
+    resting_dotted: bool,
+}
+
+/// One inferred reference over the text of a logical line: where it stands, what it targets, and
+/// whether it is marked at rest.
+///
+/// The target is carried separately from the range because for a printed path the two are not the
+/// same string: the reader sees `D:\src\a.md` and the link points at `file:///D:/src/a.md`. That is
+/// exactly the relationship an OSC 8 `file:` link has between its label and its target, which is why
+/// [`ViewportFrame::rejoined_across_break`] can already read it.
+struct InferredLink {
+    range: HyperlinkRange,
+    uri: String,
+    resting_dotted: bool,
 }
 
 /// Find the bare URLs in a run of captured rows, **one logical line at a time**, and report them
@@ -3736,7 +3861,10 @@ struct ImplicitCellLink {
 /// the frozen plane knows by construction, so the grouping is read and not guessed. Detection runs
 /// over the **complete** row sequence rather than the visible window, because a URL clipped by the
 /// top or bottom of the viewport would otherwise be truncated into that same wrong target.
-fn implicit_hyperlinks(rows: &[&CapturedRow]) -> Vec<Vec<ImplicitCellLink>> {
+fn implicit_hyperlinks(
+    rows: &[&CapturedRow],
+    mut paths: Option<&mut PrintedPathPass<'_>>,
+) -> Vec<Vec<ImplicitCellLink>> {
     let mut claims: Vec<Vec<ImplicitCellLink>> = rows.iter().map(|_| Vec::new()).collect();
     let mut start = 0usize;
     while start < rows.len() {
@@ -3744,10 +3872,45 @@ fn implicit_hyperlinks(rows: &[&CapturedRow]) -> Vec<Vec<ImplicitCellLink>> {
         while end + 1 < rows.len() && rows[end].continues {
             end += 1;
         }
-        implicit_hyperlinks_in_line(&rows[start..=end], start, &mut claims);
+        implicit_hyperlinks_in_line(&rows[start..=end], start, paths.as_deref_mut(), &mut claims);
         start = end + 1;
     }
     claims
+}
+
+/// Every inferred reference one logical line's text offers, in reading order and never overlapping.
+///
+/// Two kinds share this one seam so that the cell-claiming below has a single list to walk: bare
+/// web addresses, which are decided by their own text, and printed paths, which are decided by what
+/// a worker found. A path range that touches a URL's is dropped rather than allowed to fight over
+/// the cells — the URL was recognized without asking anyone anything, so it is the older claim, and
+/// two links on one cell is not a state this frame can draw.
+fn inferred_links_in(text: &str, paths: Option<&mut PrintedPathPass<'_>>) -> Vec<InferredLink> {
+    let mut links = detect_http_urls(text)
+        .into_iter()
+        .map(|range| InferredLink {
+            uri: text[range.byte_start..range.byte_end].to_owned(),
+            range,
+            resting_dotted: false,
+        })
+        .collect::<Vec<_>>();
+    let Some(paths) = paths else {
+        return links;
+    };
+    for (range, uri) in paths.links_in(text) {
+        if links.iter().any(|link| {
+            link.range.byte_start < range.byte_end && range.byte_start < link.range.byte_end
+        }) {
+            continue;
+        }
+        links.push(InferredLink {
+            range,
+            uri,
+            resting_dotted: true,
+        });
+    }
+    links.sort_by_key(|link| link.range.byte_start);
+    links
 }
 
 /// One logical line's worth of [`implicit_hyperlinks`]. `base` is the index `line[0]` has in the
@@ -3755,6 +3918,7 @@ fn implicit_hyperlinks(rows: &[&CapturedRow]) -> Vec<Vec<ImplicitCellLink>> {
 fn implicit_hyperlinks_in_line(
     line: &[&CapturedRow],
     base: usize,
+    paths: Option<&mut PrintedPathPass<'_>>,
     claims: &mut [Vec<ImplicitCellLink>],
 ) {
     let mut text = String::new();
@@ -3770,7 +3934,8 @@ fn implicit_hyperlinks_in_line(
         }
     }
     let cell_at = |row: usize, column: usize| &line[row - base].cells[column];
-    for range in detect_http_urls(&text) {
+    for inferred in inferred_links_in(&text, paths) {
+        let range = inferred.range;
         let affected = spots
             .iter()
             .enumerate()
@@ -3788,12 +3953,13 @@ fn implicit_hyperlinks_in_line(
         {
             continue;
         }
-        let link = CellHyperlink::implicit(text[range.byte_start..range.byte_end].to_owned());
+        let link = CellHyperlink::implicit(inferred.uri);
         for index in affected {
             let (row, column, _) = spots[index];
             claims[row].push(ImplicitCellLink {
                 column,
                 link: link.clone(),
+                resting_dotted: inferred.resting_dotted,
             });
             // A wide glyph's spacer column belongs to the same on-screen cell as the glyph and
             // must carry its link. It is only ever the column after its own lead, never the first
@@ -3803,6 +3969,7 @@ fn implicit_hyperlinks_in_line(
                 claims[row].push(ImplicitCellLink {
                     column: spacer,
                     link: link.clone(),
+                    resting_dotted: inferred.resting_dotted,
                 });
             }
         }
@@ -3814,6 +3981,11 @@ fn apply_implicit_hyperlinks(cells: &mut [CapturedCell], implicit: &[ImplicitCel
     for claim in implicit {
         if let Some(cell) = cells.get_mut(claim.column) {
             cell.hyperlink = Some(claim.link.clone());
+            if claim.resting_dotted && !cell.style.flags.contains(CellFlags::UNDERLINE) {
+                // A cell already wearing a solid underline keeps it — the application's own SGR 4
+                // outranks an affordance, exactly as it does in `ViewportFrame::underline_cells`.
+                cell.style.flags.insert(CellFlags::DOTTED_UNDERLINE);
+            }
         }
     }
 }
@@ -4025,14 +4197,21 @@ fn word_class(cell: &CapturedCell) -> WordClass {
     }
 }
 
-fn layout_frozen_line(line: &FrozenLine, columns: usize) -> Vec<VisualRow> {
-    let implicit_links = detect_http_urls(&line.text)
+fn layout_frozen_line(
+    line: &FrozenLine,
+    columns: usize,
+    paths: Option<&mut PrintedPathPass<'_>>,
+) -> Vec<VisualRow> {
+    // `None` is a caller that only wants to know how many rows this line takes, and an inferred
+    // link never changes that. Asking the ledger there would run the path lexer once per line of a
+    // hundred-thousand-line transcript to produce an answer nobody reads.
+    let implicit_links = inferred_links_in(&line.text, paths)
         .into_iter()
-        .filter(|range| {
+        .filter(|inferred| {
             !line.styles.iter().any(|span| {
                 span.hyperlink.is_some()
-                    && (span.byte_start as usize) < range.byte_end
-                    && range.byte_start < span.byte_end as usize
+                    && (span.byte_start as usize) < inferred.range.byte_end
+                    && inferred.range.byte_start < span.byte_end as usize
             })
         })
         .collect::<Vec<_>>();
@@ -4077,11 +4256,12 @@ fn layout_frozen_line(line: &FrozenLine, columns: usize) -> Vec<VisualRow> {
             }
         }
         if cell.hyperlink.is_none()
-            && let Some(range) = implicit_link_at(&implicit_links, byte_start as usize)
+            && let Some(inferred) = implicit_link_at(&implicit_links, byte_start as usize)
         {
-            cell.hyperlink = Some(CellHyperlink::implicit(
-                line.text[range.byte_start..range.byte_end].to_owned(),
-            ));
+            cell.hyperlink = Some(CellHyperlink::implicit(inferred.uri.clone()));
+            if inferred.resting_dotted && !cell.style.flags.contains(CellFlags::UNDERLINE) {
+                cell.style.flags.insert(CellFlags::DOTTED_UNDERLINE);
+            }
         }
         if width == 2 {
             cell.style.flags.insert(CellFlags::WIDE_CHAR);
@@ -4127,11 +4307,10 @@ fn layout_frozen_line(line: &FrozenLine, columns: usize) -> Vec<VisualRow> {
     rows
 }
 
-fn implicit_link_at(ranges: &[HyperlinkRange], byte: usize) -> Option<HyperlinkRange> {
-    ranges
+fn implicit_link_at(links: &[InferredLink], byte: usize) -> Option<&InferredLink> {
+    links
         .iter()
-        .copied()
-        .find(|range| range.byte_start <= byte && byte < range.byte_end)
+        .find(|link| link.range.byte_start <= byte && byte < link.range.byte_end)
 }
 
 fn pad_frozen_row(row: &mut VisualRow, line: &FrozenLine, columns: usize, offset: usize) {
@@ -4294,7 +4473,7 @@ mod tests {
     use super::*;
     use bt_doc::{Bias, GridGeneration, GridPoint, ScreenId};
     use bt_transcript::{CapturedRow, GraphemeOffset, StagingId, TranscriptStore};
-    use std::{num::NonZeroU32, num::NonZeroUsize};
+    use std::{num::NonZeroU32, num::NonZeroUsize, path::Path};
 
     fn nz32(value: u32) -> NonZeroU32 {
         NonZeroU32::new(value).unwrap()
@@ -4486,7 +4665,7 @@ mod tests {
 
     #[test]
     fn live_frame_flattens_only_well_formed_viewport_rows() {
-        let projection = ViewportProjection::new(
+        let mut projection = ViewportProjection::new(
             key(2),
             DetectionRevision(1),
             nz32(2),
@@ -4541,7 +4720,7 @@ mod tests {
 
     #[test]
     fn phase_a_presentation_rectangle_carries_one_hidden_overscan_row_and_zero_offset() {
-        let projection = ViewportProjection::new(
+        let mut projection = ViewportProjection::new(
             key(2),
             DetectionRevision(1),
             nz32(2),
@@ -4609,7 +4788,7 @@ mod tests {
     /// is exact and non-destructive, which is the whole of the painter's contract.
     #[test]
     fn the_painter_marks_the_cells_it_is_given_and_never_weakens_a_solid() {
-        let projection = ViewportProjection::new(
+        let mut projection = ViewportProjection::new(
             key(10),
             DetectionRevision(1),
             nz32(2),
@@ -4617,7 +4796,7 @@ mod tests {
             SourceGeneration(1),
             GridGeneration(1),
         );
-        let build = || {
+        let mut build = || {
             let mut frame = projection
                 .live_frame(
                     nz32(10),
@@ -4681,7 +4860,7 @@ mod tests {
 
     #[test]
     fn presentation_contract_can_construct_a_negative_top_partial_first_row() {
-        let projection = ViewportProjection::new(
+        let mut projection = ViewportProjection::new(
             key(2),
             DetectionRevision(1),
             nz32(2),
@@ -4760,7 +4939,7 @@ mod tests {
         for cell in &mut row.cells[..21] {
             cell.hyperlink = Some(CellHyperlink::implicit("file:///real-target"));
         }
-        let implicit = implicit_hyperlinks(&[&row]);
+        let implicit = implicit_hyperlinks(&[&row], None);
         let mut cells = row.cells;
         mark_osc_8_dotted(&mut cells);
         apply_implicit_hyperlinks(&mut cells, &implicit[0]);
@@ -4792,7 +4971,7 @@ mod tests {
             shell_marks: Vec::new(),
             wrap_split: false,
         };
-        let rows = layout_frozen_line(&line, 8);
+        let rows = layout_frozen_line(&line, 8, None);
         let linked_text = rows
             .iter()
             .flat_map(|row| row.cells.iter())
@@ -4827,7 +5006,7 @@ mod tests {
             wrap_split: false,
         };
 
-        let cells = layout_frozen_line(&line, 80)
+        let cells = layout_frozen_line(&line, 80, None)
             .into_iter()
             .flat_map(|row| row.cells)
             .collect::<Vec<_>>();
@@ -4855,7 +5034,7 @@ mod tests {
         for cell in &mut cells {
             cell.hyperlink = Some(CellHyperlink::implicit("https://actual.example/login"));
         }
-        let projection = ViewportProjection::new(
+        let mut projection = ViewportProjection::new(
             key(13),
             DetectionRevision(1),
             nz32(1),
@@ -4917,7 +5096,7 @@ mod tests {
         for cell in &mut second_row[2..6] {
             cell.hyperlink = Some(link.clone());
         }
-        let projection = ViewportProjection::new(
+        let mut projection = ViewportProjection::new(
             key(9),
             DetectionRevision(1),
             nz32(2),
@@ -5016,7 +5195,7 @@ mod tests {
                 shell_mark: None,
             }
         };
-        let projection = ViewportProjection::new(
+        let mut projection = ViewportProjection::new(
             key(12),
             DetectionRevision(1),
             nz32(2),
@@ -5100,7 +5279,7 @@ mod tests {
         for cell in &mut second_row[3..8] {
             cell.hyperlink = Some(link.clone());
         }
-        let projection = ViewportProjection::new(
+        let mut projection = ViewportProjection::new(
             key(9),
             DetectionRevision(1),
             nz32(2),
@@ -5181,6 +5360,259 @@ mod tests {
             .style
             .flags;
         flags.contains(CellFlags::UNDERLINE) && !flags.contains(CellFlags::DOTTED_UNDERLINE)
+    }
+
+    fn dotted_at(frame: &ViewportFrame, row: usize, column: usize) -> bool {
+        frame.cells[row * frame.columns.get() as usize + column]
+            .style
+            .flags
+            .contains(CellFlags::DOTTED_UNDERLINE)
+    }
+
+    /// One live frame of `rows`, projected by a pane that has been told `links` — and the paths that
+    /// frame wanted to know about and could not answer for.
+    fn live_frame_of_paths(
+        rows: Vec<CapturedRow>,
+        links: PrintedPathLinks,
+    ) -> (ViewportFrame, Vec<PathBuf>) {
+        let columns = rows[0].cells.len();
+        let mut projection = ViewportProjection::new(
+            key(columns as u32),
+            DetectionRevision(1),
+            nz32(rows.len() as u32),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        projection.set_printed_path_links(&links);
+        let frame = projection
+            .live_frame(
+                nz32(columns as u32),
+                rows,
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: false,
+                },
+            )
+            .unwrap();
+        let probes = projection.take_printed_path_probes();
+        (frame, probes)
+    }
+
+    /// A ledger holding exactly the files named, measured from `D:\src`.
+    fn verified(paths: &[&str]) -> PrintedPathLinks {
+        PrintedPathLinks::new(
+            Some(PathBuf::from("D:\\src")),
+            paths.iter().map(PathBuf::from).collect(),
+        )
+    }
+
+    /// One live row of `text`, padded to `columns`, plus enough blank rows to make a grid.
+    fn live_rows_of(text: &str, columns: usize, rows: usize) -> Vec<CapturedRow> {
+        let mut grid = vec![CapturedRow::plain(&format!("{text:<columns$}"), false)];
+        grid.extend(vec![
+            CapturedRow::plain(&" ".repeat(columns), false);
+            rows - 1
+        ]);
+        grid
+    }
+
+    /// PIN (§7.1.5j, user report 2026-08-20) — **a printed path this window has been to the disk
+    /// for is a `file:` link, and nothing downstream can tell it from one an application declared
+    /// over OSC 8.**
+    ///
+    /// The report was four lines of Claude Code output — a drive-rooted path, a `file:///` URI, a
+    /// `./` reference and a bare `docs/…` one — none of which the pointer could reach, while the
+    /// OSC 8 `[file]` link printed beside them on the same screen could. This is that complaint
+    /// answered at the one seam where the two shapes become the same object: the cell's own
+    /// `hyperlink`, so the hit, the span, the hover line and the five-armed router read one field
+    /// and cannot disagree.
+    ///
+    /// MUTATIONS: drop the resting dots and the mark stops promising what the click will honour;
+    /// carry the printed text as the target instead of the URI and the router's `file:` arm never
+    /// fires.
+    #[test]
+    fn a_verified_printed_path_is_a_file_link_indistinguishable_from_osc_8() {
+        for (printed, path) in [
+            ("D:\\src\\a.md", "D:\\src\\a.md"),
+            ("D:/src/a.md", "D:\\src\\a.md"),
+            ("file:///D:/src/a.md", "D:\\src\\a.md"),
+            ("./a.md", "D:\\src\\a.md"),
+            ("docs/b.md", "D:\\src\\docs\\b.md"),
+            ("docs\\b.md", "D:\\src\\docs\\b.md"),
+        ] {
+            let (mut frame, probes) =
+                live_frame_of_paths(live_rows_of(printed, 40, 3), verified(&[path]));
+            assert!(
+                probes.is_empty(),
+                "{printed} was already answered for, so there is nothing to ask"
+            );
+            let hit = frame
+                .hyperlink_at(0, 0)
+                .unwrap_or_else(|| panic!("{printed} is a link"));
+            assert_eq!(
+                hit.uri,
+                bt_transcript::paths::local_path_to_file_uri(Path::new(path)),
+                "{printed} targets the file it names, spelled as a URI"
+            );
+            for column in 0..printed.chars().count() {
+                assert!(
+                    dotted_at(&frame, 0, column),
+                    "{printed} wears the resting mark at column {column}"
+                );
+            }
+            assert!(
+                !dotted_at(&frame, 0, printed.chars().count()),
+                "{printed} does not mark the space after it"
+            );
+            assert!(frame.underline_hyperlink(&hit));
+            for column in 0..printed.chars().count() {
+                assert!(solid_at(&frame, 0, column), "{printed} at column {column}");
+            }
+        }
+    }
+
+    /// RED LINE for the pin above — **a path nobody has been to the disk for is not a link**, it is
+    /// a question.
+    ///
+    /// This is the whole of what `verified` means (§7.1.5f gate ①, read for a second content type):
+    /// the underline is a promise, and a promise about a file this window has not opened is a
+    /// guess. What the frame does instead is remember the name, so the layer that owns a worker can
+    /// go and look.
+    #[test]
+    fn an_unverified_printed_path_is_a_question_and_not_a_link() {
+        let (frame, probes) = live_frame_of_paths(
+            live_rows_of("D:\\src\\gone.md and README and docs/b.md", 48, 3),
+            verified(&[]),
+        );
+        assert!(frame.hyperlink_at(0, 0).is_none(), "no link at rest");
+        assert!(
+            (0..48).all(|column| !dotted_at(&frame, 0, column)),
+            "and therefore no mark either"
+        );
+        assert_eq!(
+            probes,
+            [
+                PathBuf::from("D:\\src\\docs\\b.md"),
+                PathBuf::from("D:\\src\\gone.md")
+            ],
+            "the two shapes that name a file are asked about; the bare word `README` is prose"
+        );
+    }
+
+    /// PIN — **a path the terminal wrapped is one link carrying the whole target.**
+    ///
+    /// Written against the shape [`a_file_link_wrapped_mid_path_is_one_link_carrying_the_whole_target`]
+    /// pins for OSC 8: the reader sees two rows, and both of them must open the one file. Reading a
+    /// visual row at a time would give the first row a link to the directory its half happens to
+    /// name and the second row nothing at all — the path-shaped form of the wrong-address defect
+    /// §7.1.5h ① was written for.
+    #[test]
+    fn a_printed_path_the_terminal_wrapped_is_one_link_carrying_the_whole_target() {
+        // Exactly as wide as the pane: a row the terminal soft-wrapped is full by definition, so
+        // there is no padding standing between the two halves of the name.
+        const COLUMNS: usize = 15;
+        let mut rows = vec![
+            CapturedRow::plain("D:\\src\\wrapped\\", true),
+            CapturedRow::plain(&format!("{:<COLUMNS$}", "deep\\a.md"), false),
+        ];
+        rows.push(CapturedRow::plain(&" ".repeat(COLUMNS), false));
+        let (mut frame, _) = live_frame_of_paths(rows, verified(&["D:\\src\\wrapped\\deep\\a.md"]));
+        let head = frame.hyperlink_at(0, 0).expect("the first row is a link");
+        assert_eq!(head.uri, "file:///D:/src/wrapped/deep/a.md");
+        assert_eq!(
+            frame.hyperlink_at(1, 2).expect("the second row too"),
+            head,
+            "the tail is the same link as the head, not a link of its own"
+        );
+        assert!(frame.underline_hyperlink(&head));
+        for column in 0..COLUMNS {
+            assert!(solid_at(&frame, 0, column), "head column {column}");
+        }
+        for column in 0.."deep\\a.md".len() {
+            assert!(solid_at(&frame, 1, column), "tail column {column}");
+        }
+    }
+
+    /// PIN (§7.1.5f gate ③, repealed 2026-08-20) — **the alternate screen is scanned too.**
+    ///
+    /// Claude Code lives on the alternate screen and prints paths there all day. The repeal of the
+    /// primary-screen gate rests on there being something to find there, so this is the fact that
+    /// repeal now stands on.
+    #[test]
+    fn the_alternate_screen_offers_printed_paths_like_any_other() {
+        let document = HistoryDocument::default();
+        let mut projection = ViewportProjection::new(
+            key(40),
+            DetectionRevision(1),
+            nz32(3),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        projection.set_printed_path_links(&verified(&["D:\\src\\a.md"]));
+        let frame = projection
+            .continuous_frame(
+                &document,
+                &[],
+                live_rows_of("D:\\src\\a.md", 40, 3),
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: false,
+                },
+                ScreenId::Alternate,
+            )
+            .unwrap();
+        let row = frame
+            .row_map
+            .iter()
+            .position(|row| row.live_grid_row == Some(0))
+            .expect("the alternate grid's first row is on screen") as u32;
+        assert_eq!(
+            frame.hyperlink_at(row, 0).expect("a link").uri,
+            "file:///D:/src/a.md"
+        );
+    }
+
+    /// RED LINE — **an OSC 8 span keeps its own cells.** A path printed as the label of a link the
+    /// application declared is that link's text, and inferring a second target over it would make
+    /// the same cell answer two ways depending on which pass ran last.
+    #[test]
+    fn a_printed_path_never_takes_an_osc_8_spans_cells() {
+        const DECLARED: &str = "file:///D:/src/declared.md";
+        let mut row = CapturedRow::plain(&format!("{:<40}", "D:\\src\\a.md"), false);
+        for cell in &mut row.cells[.."D:\\src\\a.md".len()] {
+            cell.hyperlink = Some(CellHyperlink {
+                id: Some("7".to_owned()),
+                uri: DECLARED.to_owned(),
+            });
+        }
+        let mut rows = vec![row];
+        rows.extend(vec![CapturedRow::plain(&" ".repeat(40), false); 2]);
+        let (frame, _) = live_frame_of_paths(rows, verified(&["D:\\src\\a.md"]));
+        assert_eq!(
+            frame.hyperlink_at(0, 0).expect("the declared link").uri,
+            DECLARED,
+            "what the application declared is what the cell carries"
+        );
+    }
+
+    /// PIN — **a relative reference is measured from the directory the shell reported and from
+    /// nowhere else** (§7.1.4's ladder, read here). With no reported directory there is nothing to
+    /// measure from, so relative text is not a reference at all — not even a question.
+    #[test]
+    fn a_relative_reference_needs_a_reported_directory() {
+        let (frame, probes) = live_frame_of_paths(
+            live_rows_of("./a.md docs/b.md", 40, 3),
+            PrintedPathLinks::new(None, BTreeSet::from([PathBuf::from("D:\\src\\a.md")])),
+        );
+        assert!(
+            frame.hyperlink_at(0, 0).is_none(),
+            "nothing to measure from"
+        );
+        assert!(probes.is_empty(), "and therefore nothing to ask about");
     }
 
     /// PIN (user report 2026-08-20) — **a bare URL wider than the pane is one link, and its
@@ -6882,7 +7314,7 @@ mod tests {
 
     #[test]
     fn frame_consumers_recover_from_non_rectangular_cells_and_anchors() {
-        let projection = ViewportProjection::new(
+        let mut projection = ViewportProjection::new(
             key(2),
             DetectionRevision(1),
             nz32(2),
@@ -6926,7 +7358,7 @@ mod tests {
 
     #[test]
     fn frame_validation_binds_every_selection_span_to_its_row_map_interval() {
-        let projection = ViewportProjection::new(
+        let mut projection = ViewportProjection::new(
             key(2),
             DetectionRevision(1),
             nz32(2),
@@ -8745,7 +9177,7 @@ mod tests {
             shell_mark: None,
         });
         let frozen = &result.finalized[0].line;
-        let rows = layout_frozen_line(frozen, 4);
+        let rows = layout_frozen_line(frozen, 4, None);
         let spacer = &rows[0].cells[1];
         assert!(spacer.wide_spacer);
         assert_eq!(
