@@ -68673,7 +68673,7 @@ mod tests {
         assert!(matches!(route, Some(MouseRoute::Forward(_))));
     }
 
-    /// The window half of the prompt-start retirement (DESIGN §7.1.5h): nothing
+    /// The window half of the prompt-start retirement (DESIGN §7.1.5i): nothing
     /// here learns anything new, because `route_forwarded_mouse_button` has always
     /// asked `session.terminal_modes()` afresh for every press. The mode going off
     /// in `bt-term` *is* the whole delivery mechanism — this pins that the router
