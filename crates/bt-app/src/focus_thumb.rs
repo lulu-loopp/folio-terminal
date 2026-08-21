@@ -1579,12 +1579,12 @@ mod tests {
     /// of [`BUDGET_ROWS`], and the number the 2026-08-20 re-strike of the
     /// column's width moved.
     ///
-    /// Fifty-four: what a **lone** pane's seat holds across a 280px column's
-    /// card, spent on *both* seats of all ten tabs, for exactly
-    /// [`BUDGET_ROWS`]'s reason — two seats sharing one body hold twenty-six
-    /// each, so the ceiling is being defended against more than twice the cut
-    /// the mode can actually be asked for.
-    const BUDGET_COLUMNS: usize = 54;
+    /// Fifty-nine: what a **lone** pane's seat holds across a 280px column's
+    /// card in the default face, spent on *both* seats of all ten tabs, for
+    /// exactly [`BUDGET_ROWS`]'s reason — two seats sharing one body hold
+    /// twenty-eight each, so the ceiling is being defended against more than
+    /// twice the cut the mode can actually be asked for.
+    const BUDGET_COLUMNS: usize = 59;
 
     /// The median of `samples`, which is what a frame budget is stated in — a
     /// mean would be moved by the one frame the scheduler took the core away.

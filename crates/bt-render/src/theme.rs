@@ -2434,8 +2434,11 @@ pub const RAIL_TEXT_FADE_OPEN_DELAY_MS: u64 = 60;
 /// *picture* of a tab now, and the width a list of names can live at is not the
 /// width a picture needs. The rail keeps 220, because nothing about a row of
 /// text changed; the column takes 280, because at 220 a tab split left and right
-/// gave each half of its body nineteen columns of 7.5px type, which breaks every
-/// line mid-word, and 280 gives each half twenty-six, which reads.
+/// gave each half of its body twenty-one columns of 7.5px type, which breaks
+/// every line mid-word, and 280 gives each half twenty-eight, which reads.
+/// (What the width fixes is the *run* — 84 logical pixels against 114; those
+/// two counts are what the default face, Consolas, makes of it, measured on the
+/// real machine.)
 ///
 /// **Claude's ruling on the projection line's report from the real machine, and
 /// the user may overrule it** — the evidence is a screenshot of a split card,
@@ -2540,10 +2543,10 @@ pub const FOCUS_EXIT_FONT_LOGICAL_PX: f32 = 11.0;
 /// and carried a fixed six rows; the ruling that followed the first real look at
 /// it is that the left column *is* a running terminal, only set smaller — and
 /// once the type size is a floor (7.5px) and the width is a constraint (a card
-/// is 263 wide, which is fifty-four columns to a lone pane), the only two knobs
+/// is 263 wide, which is fifty-nine columns to a lone pane), the only two knobs
 /// left are **how tall the card is** and **how faithful the picture inside it
-/// is**. (The width was 203 when the ruling was made and the column 220; it was
-/// re-struck to 280 later the same day — see
+/// is**. (The width was 203 when the ruling was made and the column 220, which
+/// was forty-four columns; it was re-struck to 280 later the same day — see
 /// [`FOCUS_COLUMN_WIDTH_LOGICAL_PX`] — which turned the constraint down rather
 /// than into a knob.) This is the
 /// first of those two turned: a lone pane's seat now holds thirteen or fourteen

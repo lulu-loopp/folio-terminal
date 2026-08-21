@@ -27340,27 +27340,51 @@ mod tests {",
     /// 4px padding — because every one of those comes out of the width before a
     /// character does.
     ///
-    /// Red gate: put the column back at [`RAIL_WIDTH_LOGICAL_PX`] and the halves
-    /// answer nineteen columns against the twenty-six asserted here.
+    ///
+    /// **The run is font-independent and asserted exactly; the count is what
+    /// that run buys the face the product actually opens in.** A reader who
+    /// changes the terminal font changes the second number and not the first, so
+    /// the two are stated separately rather than as one figure that would be
+    /// wrong for somebody.
+    ///
+    /// Red gate: put the column back at [`RAIL_WIDTH_LOGICAL_PX`] and the runs
+    /// fall to 181 and 84, which is forty-four columns and twenty-one — the
+    /// twenty-one that broke every line mid-word.
     #[test]
     fn each_half_of_a_split_cards_body_holds_a_readable_run_of_columns() {
-        /// One character of the mini transcript's face — 7.5px of the terminal's
-        /// own monospaced font, whose advance is 0.6em. A fixture here, and the
-        /// live number on the real machine is `WindowRuntime::focus_mini_advance`.
-        const ADVANCE: f32 = 4.5;
+        /// One character of the mini transcript's face, in logical pixels:
+        /// 7.5px of Consolas, which is what `terminal_font_family: ""` opens in
+        /// and therefore what the report was made against.
+        ///
+        /// **Read back off the real machine rather than assumed** (dump
+        /// 2026-08-20, 192 DPI): a half-card's 228 physical-pixel run cut a
+        /// wrapped line at exactly 28 characters, which puts the advance at
+        /// 15px in `(8.143, 8.444]` — Consolas' own 0.5498em, 8.247px, and not
+        /// the 0.6em a first draft of this test guessed.
+        const ADVANCE: f32 = 7.5 * 0.5498;
 
         let card =
             &focus_of_in(TALL_FIXTURE_HEIGHT, focus_rail(TabLayoutMode::Vertical), 1).cards[0];
+        let run_of = |rect: [f32; 4]| {
+            rect[2]
+                - rect[0]
+                - 2.0 * (FOCUS_MINI_BORDER_LOGICAL_PX + FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX)
+        };
         let columns_of = |rect: [f32; 4]| crate::focus_thumb::mini_columns(rect, ADVANCE, 1.0);
 
         let lone = focus_mini_seats(&lone_seat_tree(SeatKind::Terminal), card.mini, 1.0);
         assert_eq!(
-            columns_of(lone[0].rect),
-            54,
+            run_of(lone[0].rect),
+            241.0,
             "a lone pane: 280 − 8 − 8 − 1 = 263 of card, less two card hairlines, \
              less two 5px body insets, less the seat's own hairline and 4px \
-             padding either side = 241px of run, which is 53 whole characters at \
-             4.5px and a 54th to cut"
+             padding either side"
+        );
+        assert_eq!(
+            columns_of(lone[0].rect),
+            59,
+            "which is fifty-eight whole characters of the default face and a \
+             fifty-ninth to cut"
         );
 
         let halves = focus_mini_seats(
@@ -27371,11 +27395,16 @@ mod tests {",
         assert_eq!(halves.len(), 2, "a tab split left and right is two seats");
         for (index, half) in halves.iter().enumerate() {
             assert_eq!(
+                half.rect[2] - half.rect[0],
+                124.0,
+                "half {index}: 251px of field less the 3px divider, halved"
+            );
+            assert_eq!(run_of(half.rect), 114.0, "half {index}: and its own run");
+            assert_eq!(
                 columns_of(half.rect),
-                26,
-                "half {index}: 251px of field less the 3px divider, halved, is \
-                 124px of seat and 114px of run — 25 whole characters and a 26th \
-                 to cut, where 220 gave nineteen and broke every line mid-word"
+                28,
+                "half {index}: twenty-seven whole characters and a twenty-eighth \
+                 to cut, where 220 gave twenty-one and broke every line mid-word"
             );
         }
     }
