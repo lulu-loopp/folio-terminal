@@ -1800,7 +1800,26 @@ mod tests {
         let producer = std::thread::spawn(move || {
             done_tx.send(producer_ring.push(vec![5])).unwrap();
         });
-        assert!(done_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        // Wait for the producer to *say* it is blocked instead of pausing and assuming it got
+        // there. `push` counts the block inside the lock before it waits on the condvar, so
+        // `blocked_pushes` reaching 1 is the producer's own report; a 20ms pause that expires says
+        // only that this thread slept, which a producer the scheduler has not run at all satisfies
+        // equally well. That is not a distinction without a difference — it decides what the test
+        // measures. Draining the ring before the producer ever reached `push` leaves it pushing
+        // into an empty ring, so it never blocks, and the count asserted at the end stays 0. On
+        // this host under load that is exactly what happened, in two runs out of three of this
+        // test on its own.
+        let blocked_since = Instant::now();
+        while ring.stats().blocked_pushes == 0 {
+            assert!(
+                blocked_since.elapsed() < PROBE_CEILING,
+                "the producer never blocked on a ring it cannot fit into: {:?}",
+                ring.stats()
+            );
+            std::thread::yield_now();
+        }
+        // Blocked is the whole claim, so the push must not have returned.
+        assert!(done_rx.try_recv().is_err());
         assert_eq!(
             ring.try_pop(NonZeroUsize::new(4).unwrap()),
             vec![1, 2, 3, 4]
