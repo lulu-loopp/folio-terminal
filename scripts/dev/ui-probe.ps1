@@ -39,9 +39,15 @@
 #                                                                `capture` invocation could start
 #   .\ui-probe.ps1 hover -Pid <pid> -X -160 -Y 20              → park the pointer; negative counts from
 #                                                                the right/bottom edge (the caption run)
-#   .\ui-probe.ps1 drag -Pid <pid> -X 40 -Y 120 -X2 400 -Y2 160 → press at (X,Y), travel, release at
+#   .\ui-probe.ps1 drag -Pid <pid> -X 40 -Y 120 -X2 400 -Y2 160 [-HoldMs 400]
+#                                                              → press at (X,Y), travel, release at
 #                                                                (X2,Y2); this is how a text selection
-#                                                                is made, and the travel is required
+#                                                                is made, and the travel is required.
+#                                                                -HoldMs rests at the far end with the
+#                                                                button still down, which is the only
+#                                                                way to reach a dwell whose clock is a
+#                                                                frame clock (7.1.6k's spring-loaded
+#                                                                tab switch)
 #   .\ui-probe.ps1 close -Pid <pid>
 #
 # Capture is per-monitor-DPI-aware: pixels are 1:1 physical, so cell width can
@@ -100,6 +106,13 @@ param(
   [int]$X2 = 0,
   [int]$Y2 = 0,
   [int]$Steps = 12,
+  # drag: how long to REST at the far end with the button still down, before
+  # letting go. A gesture whose meaning is "stop here and wait" — the
+  # spring-loaded tab switch of DESIGN 7.1.6k is the first — cannot be driven by
+  # travel alone: its clock is a frame clock, so it matures under a pointer that
+  # is sending no events at all, and a drag that arrives and releases in the same
+  # breath never reaches it. Zero (the default) is the old behaviour exactly.
+  [int]$HoldMs = 0,
   # dblclick: the gap between the two releases. Must stay under the app's own
   # multi-click interval; the OS default is 500ms and bt-app follows it.
   [int]$GapMs = 90,
@@ -423,7 +436,7 @@ public class Probe {
      made of. The intermediate moves are the point: bt-app extends a selection
      from CursorMoved events while the button is down, so a press at one end and
      a release at the other with nothing in between selects nothing at all. */
-  public static void Drag(int x1, int y1, int x2, int y2, int steps) {
+  public static void Drag(int x1, int y1, int x2, int y2, int steps, int holdMs) {
     SetCursorPos(x1, y1);
     System.Threading.Thread.Sleep(150);
     mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);   // LEFTDOWN
@@ -433,9 +446,17 @@ public class Probe {
       SetCursorPos(x1 + (x2 - x1) * i / steps, y1 + (y2 - y1) * i / steps);
       System.Threading.Thread.Sleep(40);
     }
+    DragHold(holdMs);
     System.Threading.Thread.Sleep(80);
     mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);   // LEFTUP
     System.Threading.Thread.Sleep(150);
+  }
+  /* Rest where the hand already is, with the button still down. Deliberately
+     NOT a re-issued SetCursorPos: a dwell that had to keep nudging the pointer
+     to stay alive would be testing the wrong thing — the clock under test is
+     supposed to mature under a hand that has genuinely stopped. */
+  public static void DragHold(int ms) {
+    if (ms > 0) System.Threading.Thread.Sleep(ms);
   }
   /* One step of a drag, so a caller can photograph the middle of one. `Drag`
      above is this loop with nothing watching; a gesture whose whole claim is
@@ -720,8 +741,8 @@ switch ($Cmd) {
     if (-not [Probe]::PointBelongsTo($px, $py, $ProcId)) { throw "REFUSED: ($px, $py) is not over pid=$ProcId — not dragging blind" }
     if (-not [Probe]::PointBelongsTo($qx, $qy, $ProcId)) { throw "REFUSED: ($qx, $qy) is not over pid=$ProcId — not dragging blind" }
     if (-not $Out) {
-      [Probe]::Drag($px, $py, $qx, $qy, $Steps)
-      "dragged ($px, $py) -> ($qx, $qy) = window+($X, $Y) -> window+($X2, $Y2) on pid=$ProcId (foreground verified)"
+      [Probe]::Drag($px, $py, $qx, $qy, $Steps, $HoldMs)
+      "dragged ($px, $py) -> ($qx, $qy) = window+($X, $Y) -> window+($X2, $Y2) on pid=$ProcId, held ${HoldMs}ms (foreground verified)"
     } else {
       # With -Out, the *middle* of the gesture is photographed: a frame per step,
       # each one paired with the cursor the OS is showing at that instant. A drag
@@ -747,6 +768,12 @@ switch ($Cmd) {
       for ($i = 1; $i -le $Steps; $i++) {
         [Probe]::DragStep(($px + ($qx - $px) * $i / $Steps), ($py + ($qy - $py) * $i / $Steps))
         & $shot ("{0:d2}-step{1:d2}" -f ($i + 1), $i)
+      }
+      if ($HoldMs -gt 0) {
+        # The rest, photographed at its far end: whatever a dwell is supposed to
+        # produce is on screen in this frame and was not in the one before it.
+        [Probe]::DragHold($HoldMs)
+        & $shot "50-held"
       }
       [Probe]::DragUp()
       & $shot "99-released"
