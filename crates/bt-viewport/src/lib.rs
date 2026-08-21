@@ -1553,9 +1553,9 @@ impl ViewportProjection {
     /// Tell this pane where relative text is measured from and which printed paths are real
     /// (§7.1.5j). Pushed by the session before every projection, because both halves are facts
     /// about a shell — the directory it last reported, and what a worker found on the disk.
-    pub fn set_printed_path_links(&mut self, links: PrintedPathLinks) {
-        if self.printed_path_links != links {
-            self.printed_path_links = links;
+    pub fn set_printed_path_links(&mut self, links: &PrintedPathLinks) {
+        if &self.printed_path_links != links {
+            self.printed_path_links = links.clone();
             self.projection_dirty = true;
         }
     }
@@ -5384,7 +5384,7 @@ mod tests {
             SourceGeneration(1),
             GridGeneration(1),
         );
-        projection.set_printed_path_links(links);
+        projection.set_printed_path_links(&links);
         let frame = projection
             .live_frame(
                 nz32(columns as u32),
