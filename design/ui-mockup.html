@@ -1724,8 +1724,17 @@
      cards ARE this mode's reason to exist, and an icon strip has nowhere to put
      one. (A future narrow "names-only" column would be a focus-mode preference
      of its own, not a Sidebar state.) The classes those rest states ride on are
-     not even applied while the mode is on — see `render`. */
-  .window.focusmode .rail { display: flex; }
+     not even applied while the mode is on — see `render`.
+     CARD-WIDTH IS 280 AND THE RAIL'S IS STILL 220 (Claude's ruling 2026-08-20,
+     on the real machine; the user may overrule it). The two were one number
+     while a card was a name and a dot; the live thumbnail is what made them
+     different questions. At 220 a tab split left/right gave each half of its
+     body twenty-one columns of 7.5px type and broke every line mid-word; 280
+     gives each half twenty-eight, and a lone pane fifty-nine (counts in the
+     default face, measured on the real machine; what the width fixes is the
+     run — 84px against 114). Only this rule carries it — the ordinary vertical
+     rail is a list of names and did not move. */
+  .window.focusmode .rail { display: flex; width: 280px; }
   .window.rail-collapsed .rail { width: 0; padding-left: 0; padding-right: 0; border-right: none; opacity: 0; }
 
   /* Icon rail: parked as a strip of icons, opening over the terminal rather than

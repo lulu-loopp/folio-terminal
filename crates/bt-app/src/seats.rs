@@ -34,28 +34,28 @@ use bt_render::{
     FOCUS_CARD_FONT_LOGICAL_PX, FOCUS_CARD_GAP_LOGICAL_PX, FOCUS_CARD_HEAD_GAP_LOGICAL_PX,
     FOCUS_CARD_HEAD_PADDING_X_LOGICAL_PX, FOCUS_CARD_HEAD_PADDING_Y_LOGICAL_PX,
     FOCUS_CARD_PIN_BOX_LOGICAL_PX, FOCUS_CARD_RADIUS_LOGICAL_PX, FOCUS_CARD_WAIT_HALO_LOGICAL_PX,
-    FOCUS_CARD_WAIT_HALO_OPACITY, FOCUS_EXIT_FONT_LOGICAL_PX, FOCUS_EXIT_GAP_LOGICAL_PX,
-    FOCUS_EXIT_GLYPH_LOGICAL_PX, FOCUS_EXIT_HEIGHT_LOGICAL_PX, FOCUS_EXIT_PADDING_X_LOGICAL_PX,
-    FOCUS_EXIT_RADIUS_LOGICAL_PX, FOCUS_MINI_BORDER_LOGICAL_PX, FOCUS_MINI_FILES_FONT_LOGICAL_PX,
-    FOCUS_MINI_FILES_ICON_LOGICAL_PX, FOCUS_MINI_FILES_INDENT_LOGICAL_PX,
-    FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX, FOCUS_MINI_GAP_LOGICAL_PX, FOCUS_MINI_HEIGHT_LOGICAL_PX,
-    FOCUS_MINI_PADDING_LOGICAL_PX, FOCUS_MINI_RADIUS_LOGICAL_PX,
-    FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX,
-    FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX, OverlayQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX,
-    PANE_HEAD_FOLDER_MARK_LOGICAL_PX, PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX,
-    RAIL_GAP_LOGICAL_PX, RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX,
-    RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX, RAIL_LABEL_PADDING_TOP_LOGICAL_PX,
-    RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM, RAIL_NEW_CHEVRON_BOX_LOGICAL_PX,
-    RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX, RAIL_NEW_MARGIN_TOP_LOGICAL_PX,
-    RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX, RAIL_PADDING_TOP_LOGICAL_PX,
-    RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX, RAIL_SEAM_INSET_X_LOGICAL_PX,
-    RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX, RAIL_SHADE_WIDTH_LOGICAL_PX,
-    RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX, RAIL_TAB_HEIGHT_LOGICAL_PX,
-    RAIL_TAB_PADDING_LEFT_LOGICAL_PX, RAIL_TAB_PADDING_RIGHT_LOGICAL_PX,
-    RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX, RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_WIDTH_LOGICAL_PX,
-    SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX,
-    SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX,
-    SEAT_PANE_CLOSE_BOX_LOGICAL_PX, SEAT_PANE_CLOSE_GLYPH_LOGICAL_PX,
+    FOCUS_CARD_WAIT_HALO_OPACITY, FOCUS_COLUMN_WIDTH_LOGICAL_PX, FOCUS_EXIT_FONT_LOGICAL_PX,
+    FOCUS_EXIT_GAP_LOGICAL_PX, FOCUS_EXIT_GLYPH_LOGICAL_PX, FOCUS_EXIT_HEIGHT_LOGICAL_PX,
+    FOCUS_EXIT_PADDING_X_LOGICAL_PX, FOCUS_EXIT_RADIUS_LOGICAL_PX, FOCUS_MINI_BORDER_LOGICAL_PX,
+    FOCUS_MINI_FILES_FONT_LOGICAL_PX, FOCUS_MINI_FILES_ICON_LOGICAL_PX,
+    FOCUS_MINI_FILES_INDENT_LOGICAL_PX, FOCUS_MINI_FILES_ROW_GAP_LOGICAL_PX,
+    FOCUS_MINI_GAP_LOGICAL_PX, FOCUS_MINI_HEIGHT_LOGICAL_PX, FOCUS_MINI_PADDING_LOGICAL_PX,
+    FOCUS_MINI_RADIUS_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_BOTTOM_LOGICAL_PX,
+    FOCUS_MINI_ROW_PADDING_TOP_LOGICAL_PX, FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX, OverlayQuad,
+    PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
+    PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX, RAIL_GAP_LOGICAL_PX,
+    RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX, RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX,
+    RAIL_LABEL_PADDING_TOP_LOGICAL_PX, RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM,
+    RAIL_NEW_CHEVRON_BOX_LOGICAL_PX, RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX,
+    RAIL_NEW_MARGIN_TOP_LOGICAL_PX, RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX,
+    RAIL_PADDING_TOP_LOGICAL_PX, RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX,
+    RAIL_SEAM_INSET_X_LOGICAL_PX, RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX,
+    RAIL_SHADE_WIDTH_LOGICAL_PX, RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX,
+    RAIL_TAB_HEIGHT_LOGICAL_PX, RAIL_TAB_PADDING_LEFT_LOGICAL_PX,
+    RAIL_TAB_PADDING_RIGHT_LOGICAL_PX, RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX,
+    RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_WIDTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX,
+    SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX, SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX,
+    SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_PANE_CLOSE_BOX_LOGICAL_PX, SEAT_PANE_CLOSE_GLYPH_LOGICAL_PX,
     SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX, SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX,
     SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX, SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX,
     SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
@@ -3217,8 +3217,13 @@ impl RailState {
         // fold, the icon park and the `Sidebar` setting all belong to the panel
         // this one replaces. A narrow names-only column would be focus mode's own
         // preference some day, and it is deliberately not wired to `Sidebar`.
+        //
+        // **Card-width is its own constant and not the rail's**
+        // ([`FOCUS_COLUMN_WIDTH_LOGICAL_PX`], 2026-08-20): the column borrows the
+        // rail's panel, padding and scroll, but not the width a list of names can
+        // live at — see that constant for the evidence and for who owns it.
         if self.focus {
-            return RAIL_WIDTH_LOGICAL_PX;
+            return FOCUS_COLUMN_WIDTH_LOGICAL_PX;
         }
         if self.layout != TabLayoutMode::Vertical {
             return 0.0;
@@ -3259,11 +3264,11 @@ impl RailState {
     pub fn terminal_inset_logical_px(self) -> f32 {
         // [`Self::width_logical_px`]'s first clause again, and here it is also
         // the whole of "entering focus mode moves the panes": the strip costs the
-        // terminal no width, the card column costs it 220, and that step is the
-        // one thing the mode changes about the stage. It steps rather than eases
-        // for this function's own reason — one reflow, not sixty.
+        // terminal no width, the card column costs it its own width, and that
+        // step is the one thing the mode changes about the stage. It steps rather
+        // than eases for this function's own reason — one reflow, not sixty.
         if self.focus {
-            return RAIL_WIDTH_LOGICAL_PX;
+            return FOCUS_COLUMN_WIDTH_LOGICAL_PX;
         }
         if self.layout != TabLayoutMode::Vertical || self.collapsed {
             return 0.0;
@@ -3412,7 +3417,7 @@ pub fn rail_geometry(
     state: RailState,
 ) -> Option<RailGeometry> {
     // **Focus mode is not a rail this function can describe** (§7.1.6b′). The
-    // panel is still there and still 220 wide — `width_logical_px` says so, and
+    // panel is still there and still card-width — `width_logical_px` says so, and
     // the terminal is still keeping the room clear — but what stands in it is a
     // column of cards, which [`focus_rail_geometry`] answers for. `None` here is
     // therefore the same sentence it already was, read one level up: *this* rail
@@ -4000,8 +4005,9 @@ pub fn focus_rail_geometry(
     let top = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
     let bottom = height.max(top);
     // The rail's own border-box arithmetic, unchanged: the hairline comes out of
-    // the 220 rather than being added to it, so a card's run is 203 wide here for
-    // exactly the reason a row's is.
+    // the panel's width rather than being added to it, so a card's run is 263
+    // wide inside a 280px column for exactly the reason a row's is 203 inside a
+    // 220px rail.
     let border = RAIL_BORDER_LOGICAL_PX * scale;
     let pad_x = RAIL_PADDING_X_LOGICAL_PX * scale;
     let content_left = pad_x;
@@ -4234,7 +4240,7 @@ pub struct MiniSeatBox {
 impl MiniSeatBox {
     /// Whether this box has room for anything at all.
     ///
-    /// A card body is 160px tall and 203 wide, and a tab split five ways runs out
+    /// A card body is 160px tall and 263 wide, and a tab split five ways runs out
     /// of both: rather than let a seat be drawn inside out, the walk clamps and
     /// the painter asks this. **Nothing is dropped from the tree** — a seat too
     /// small to draw is still a seat, and a mini tree that quietly forgot its
@@ -4250,7 +4256,7 @@ impl MiniSeatBox {
 /// **The same ratios the stage is solved with, and no solver.** `bt-layout`'s
 /// allocator is where minimum sizes, fixed columns and the collapse ladder live,
 /// and every one of those is a statement about a pane somebody has to work in —
-/// asking it for a 203-pixel window would get back a column of collapsed bars,
+/// asking it for a 263-pixel window would get back a column of collapsed bars,
 /// which is a true answer to the wrong question. A thumbnail is a *picture of the
 /// structure*: two children of a split get the split's ratio, always, however
 /// small the result. That is also why nothing here consults [`SeatMetrics`] —
@@ -27233,7 +27239,7 @@ mod tests {",
     ///
     /// Reading this pin as "the stage is geometrically identical" is exactly how
     /// the column came to be drawn floating over the panes: the panel painted
-    /// itself 220 wide while the solver was handed a state whose `focus` was
+    /// itself card-width while the solver was handed a state whose `focus` was
     /// still false, and the left of every pane disappeared underneath it. The
     /// fixture shares one layout on purpose, and that shared layout is what makes
     /// this a question about the painter alone.
@@ -27309,8 +27315,9 @@ mod tests {",
     /// begins where the column ends.**
     ///
     /// The column is a panel and not an overlay: it stands in the rail's own
-    /// place, it is 220 logical pixels wide in both tab layouts and under all
-    /// three `Sidebar` postures, and the terminal keeps exactly that much clear.
+    /// place, it is [`FOCUS_COLUMN_WIDTH_LOGICAL_PX`] wide in both tab layouts
+    /// and under all three `Sidebar` postures, and the terminal keeps exactly
+    /// that much clear.
     /// So the stage's left edge *is* the column's right edge, to within the half
     /// pixel that separates a rounded device inset from an unrounded logical
     /// width — no pane is ever under the column, in any combination.
@@ -27393,19 +27400,46 @@ mod tests {",
                              but the parked strip — the column was never wired to \
                              that row"
                         ),
-                        (TabLayoutMode::Vertical, RailMode::Expanded, false) => assert_eq!(
-                            left_back, stage[0],
-                            "{case}: while an expanded rail keeps exactly what the \
-                             column kept, which is why the panes do not move when \
-                             this window enters the mode"
-                        ),
+                        // **An expanded rail gives back all but the sixty
+                        // pixels the column is wider than it** (2026-08-20).
+                        // This read `left_back == stage[0]` while the two
+                        // panels shared one constant, and the sentence it
+                        // carried — "the panes do not move when this window
+                        // enters the mode" — was a consequence of that
+                        // sharing rather than a ruling. Re-striking the
+                        // column to 280 spends it: entering the mode over an
+                        // expanded vertical rail now costs the stage exactly
+                        // the difference, which is the honest price of a
+                        // card wide enough to read, and leaving hands that
+                        // difference straight back.
+                        (TabLayoutMode::Vertical, RailMode::Expanded, false) => {
+                            assert!(
+                                left_back < stage[0],
+                                "{case}: the column is the wider of the two panels, \
+                                 so leaving it gives the stage width back"
+                            );
+                            let widened = f64::from(
+                                (FOCUS_COLUMN_WIDTH_LOGICAL_PX - RAIL_WIDTH_LOGICAL_PX) * scale,
+                            );
+                            assert!(
+                                (stage[0] - left_back - widened).abs() <= 1.0,
+                                "{case}: and gives back exactly what the column is \
+                                 wider than the rail ({} vs {widened}), to within the \
+                                 pixel a rounded device inset costs",
+                                stage[0] - left_back
+                            );
+                        }
                     }
                 }
             }
             // **The comparison that says which kind of panel this is.** An icon
-            // rail opens to 220 over the terminal and the terminal never moves;
-            // the column is 220 and the terminal does move. One number apart, and
-            // the difference is the whole ruling.
+            // rail opens to its full width over the terminal and the terminal
+            // never moves; the column takes its own width and the terminal does
+            // move. What is asserted is each panel against *its own* width, and
+            // the difference between the two answers is the whole ruling — the
+            // two panels have been two constants since 2026-08-20, so an
+            // assertion that named one number for both would now be testing the
+            // re-strike instead of the rule.
             let parked = RailState {
                 layout: TabLayoutMode::Vertical,
                 mode: RailMode::Icons,
@@ -27430,6 +27464,158 @@ mod tests {",
                 column.terminal_inset_logical_px(),
                 column.width_logical_px(),
                 "while the card column costs every pixel it covers — it is not"
+            );
+        }
+    }
+
+    /// **The card column is 280 logical pixels wide, and the rail whose panel it
+    /// borrows is still 220** (Claude's ruling 2026-08-20, on the projection
+    /// line's report from the real machine; **the user may overrule it**).
+    ///
+    /// The two panels answered one constant while a card was a name and a dot,
+    /// and F2 is what made them different questions — see
+    /// [`bt_render::FOCUS_COLUMN_WIDTH_LOGICAL_PX`] for the reasoning and for who
+    /// owns it. What is pinned here is that they are now genuinely two numbers
+    /// and that each surface reads its own: widening the column must not widen a
+    /// list of tab names by one pixel, in any layout, at any scale.
+    ///
+    /// Red gate: point either focus branch of [`RailState`] back at
+    /// [`RAIL_WIDTH_LOGICAL_PX`] and this goes red at the panel or at the stage;
+    /// re-strike the rail's own constant to 280 and the last block does.
+    #[test]
+    fn the_card_column_is_wider_than_the_rail_whose_panel_it_borrows() {
+        assert_eq!(
+            bt_render::FOCUS_COLUMN_WIDTH_LOGICAL_PX,
+            280.0,
+            "`.window.focusmode .rail {{ width: 280px }}`"
+        );
+        assert_eq!(
+            RAIL_WIDTH_LOGICAL_PX, 220.0,
+            "`.rail {{ width: 220px }}` — the ordinary list of names did not move"
+        );
+
+        for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
+            let state = focus_rail(layout);
+            assert_eq!(
+                state.width_logical_px(),
+                bt_render::FOCUS_COLUMN_WIDTH_LOGICAL_PX,
+                "{layout:?}: the panel is card-width in both tab layouts"
+            );
+            assert_eq!(
+                state.terminal_inset_logical_px(),
+                bt_render::FOCUS_COLUMN_WIDTH_LOGICAL_PX,
+                "{layout:?}: and the stage gives up exactly what the panel takes"
+            );
+            for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+                let column = focus_rail_geometry(1_200.0, scale, 3, EXIT_CAPTION, 0.0, state)
+                    .expect("focus mode puts a column on screen");
+                assert_eq!(
+                    column.body[2] - column.body[0],
+                    bt_render::FOCUS_COLUMN_WIDTH_LOGICAL_PX * scale,
+                    "{layout:?} at {scale}: the solved panel is the constant, scaled"
+                );
+            }
+        }
+
+        // The other panel, unmoved: the rail is the one surface that must not
+        // have followed the column, and a card's run being wider than a row's is
+        // the difference stated in the one place both are solved.
+        assert_eq!(expanded_rail().width_logical_px(), RAIL_WIDTH_LOGICAL_PX);
+        assert_eq!(
+            expanded_rail().terminal_inset_logical_px(),
+            RAIL_WIDTH_LOGICAL_PX
+        );
+        let rail = rail_of(expanded_rail(), &resting(3), 0);
+        assert_eq!(rail.body[2] - rail.body[0], 220.0);
+        let card = &focus_of(focus_rail(TabLayoutMode::Vertical), 3).cards[0];
+        assert_eq!(
+            card.body[2] - card.body[0],
+            263.0,
+            "280 less two 8px insets and the 1px border that lives inside the width"
+        );
+        assert!(
+            card.body[2] - card.body[0] > rail.tabs[0].body[2] - rail.tabs[0].body[0],
+            "and a card's run is the wider of the two, which is the whole ruling"
+        );
+    }
+
+    /// **Each half of a split tab's card holds a run of columns you can read a
+    /// word in** (Claude's ruling 2026-08-20 — the evidence the width was
+    /// re-struck on).
+    ///
+    /// The projection line's report from the real machine was that a tab split
+    /// left and right had cards nobody could tell apart: every line in either
+    /// half broke mid-word. This is that report as arithmetic, all the way down
+    /// from the panel's own constant — the card's run, its hairline, the body's
+    /// 5px inset, the 3px mini divider, then the mini seat's own hairline and
+    /// 4px padding — because every one of those comes out of the width before a
+    /// character does.
+    ///
+    ///
+    /// **The run is font-independent and asserted exactly; the count is what
+    /// that run buys the face the product actually opens in.** A reader who
+    /// changes the terminal font changes the second number and not the first, so
+    /// the two are stated separately rather than as one figure that would be
+    /// wrong for somebody.
+    ///
+    /// Red gate: put the column back at [`RAIL_WIDTH_LOGICAL_PX`] and the runs
+    /// fall to 181 and 84, which is forty-four columns and twenty-one — the
+    /// twenty-one that broke every line mid-word.
+    #[test]
+    fn each_half_of_a_split_cards_body_holds_a_readable_run_of_columns() {
+        /// One character of the mini transcript's face, in logical pixels:
+        /// 7.5px of Consolas, which is what `terminal_font_family: ""` opens in
+        /// and therefore what the report was made against.
+        ///
+        /// **Read back off the real machine rather than assumed** (dump
+        /// 2026-08-20, 192 DPI): a half-card's 228 physical-pixel run cut a
+        /// wrapped line at exactly 28 characters, which puts the advance at
+        /// 15px in `(8.143, 8.444]` — Consolas' own 0.5498em, 8.247px, and not
+        /// the 0.6em a first draft of this test guessed.
+        const ADVANCE: f32 = 7.5 * 0.5498;
+
+        let card =
+            &focus_of_in(TALL_FIXTURE_HEIGHT, focus_rail(TabLayoutMode::Vertical), 1).cards[0];
+        let run_of = |rect: [f32; 4]| {
+            rect[2]
+                - rect[0]
+                - 2.0 * (FOCUS_MINI_BORDER_LOGICAL_PX + FOCUS_MINI_ROW_PADDING_X_LOGICAL_PX)
+        };
+        let columns_of = |rect: [f32; 4]| crate::focus_thumb::mini_columns(rect, ADVANCE, 1.0);
+
+        let lone = focus_mini_seats(&lone_seat_tree(SeatKind::Terminal), card.mini, 1.0);
+        assert_eq!(
+            run_of(lone[0].rect),
+            241.0,
+            "a lone pane: 280 − 8 − 8 − 1 = 263 of card, less two card hairlines, \
+             less two 5px body insets, less the seat's own hairline and 4px \
+             padding either side"
+        );
+        assert_eq!(
+            columns_of(lone[0].rect),
+            59,
+            "which is fifty-eight whole characters of the default face and a \
+             fifty-ninth to cut"
+        );
+
+        let halves = focus_mini_seats(
+            &split_tree(SeatKind::Terminal, SeatKind::Terminal, 500_000),
+            card.mini,
+            1.0,
+        );
+        assert_eq!(halves.len(), 2, "a tab split left and right is two seats");
+        for (index, half) in halves.iter().enumerate() {
+            assert_eq!(
+                half.rect[2] - half.rect[0],
+                124.0,
+                "half {index}: 251px of field less the 3px divider, halved"
+            );
+            assert_eq!(run_of(half.rect), 114.0, "half {index}: and its own run");
+            assert_eq!(
+                columns_of(half.rect),
+                28,
+                "half {index}: twenty-seven whole characters and a twenty-eighth \
+                 to cut, where 220 gave twenty-one and broke every line mid-word"
             );
         }
     }
@@ -28258,7 +28444,7 @@ mod tests {",
                     };
                     assert_eq!(
                         focused.terminal_inset_logical_px(),
-                        RAIL_WIDTH_LOGICAL_PX,
+                        FOCUS_COLUMN_WIDTH_LOGICAL_PX,
                         "{layout:?}/{mode:?}/collapsed={collapsed}: the column is \
                          card-width in every one of them — no layout is a gate, \
                          and the sidebar's three states govern the other panel"
@@ -28375,12 +28561,12 @@ mod tests {",
     /// The mini tree is the tab's tree at the tab's own ratios — not a solve, and
     /// not a guess.
     ///
-    /// A 70/30 split of a card body 203 wide comes out 70/30 of the run left
+    /// A 70/30 split of a card body 263 wide comes out 70/30 of the run left
     /// after the padding and the 3px gap, in that order, because that is what the
     /// stage does with the same numbers.
     ///
     /// Red gate: send the mini walk through `bt_layout`'s allocator and this goes
-    /// red at once — a 203px window is below every minimum it knows, so what
+    /// red at once — a 263px window is below every minimum it knows, so what
     /// comes back is a column of collapsed bars rather than a picture.
     #[test]
     fn a_cards_body_carries_the_tabs_own_split_at_the_tabs_own_ratio() {

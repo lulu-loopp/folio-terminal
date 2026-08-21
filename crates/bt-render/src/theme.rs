@@ -2412,10 +2412,10 @@ pub const RAIL_TEXT_FADE_OPEN_DELAY_MS: u64 = 60;
 
 // ── §7.1.6b′: the focus column, one card per tab ──
 //
-// The card column lives in the rail, at the rail's own width, and it is the rail
-// that is scrolled and padded — `#focus-rail` contributes a gap and nothing
-// else. So almost every measurement here is the rail's, written as the rail's
-// constant, and what is genuinely new is the card's own chrome: a border, a
+// The card column lives in the rail's own panel, and it is the rail that is
+// scrolled and padded — `#focus-rail` contributes a gap and nothing else. So
+// almost every measurement here is the rail's, written as the rail's constant,
+// and what is genuinely new is the card's own chrome: its width, a border, a
 // radius, a head's padding, and the bar that carries door 5.
 //
 // **F1 ships the head alone.** The mock-up draws a body under it — the whole
@@ -2424,6 +2424,27 @@ pub const RAIL_TEXT_FADE_OPEN_DELAY_MS: u64 = 60;
 // its head plus its border, and [`FOCUS_CARD_HEAD_*`] is what decides how tall
 // one is.
 
+/// `.window.focusmode .rail { width: 280px }` — how wide the card column
+/// stands, and what the stage gives up to it.
+///
+/// **Its own constant rather than [`RAIL_WIDTH_LOGICAL_PX`], since 2026-08-20.**
+/// The two panels shared one number while a card was a name and a dot: the
+/// column borrows the rail's panel, its padding and its scroll, so at F1 there
+/// was no question the two could answer differently. F2 made one — a card is a
+/// *picture* of a tab now, and the width a list of names can live at is not the
+/// width a picture needs. The rail keeps 220, because nothing about a row of
+/// text changed; the column takes 280, because at 220 a tab split left and right
+/// gave each half of its body twenty-one columns of 7.5px type, which breaks
+/// every line mid-word, and 280 gives each half twenty-eight, which reads.
+/// (What the width fixes is the *run* — 84 logical pixels against 114; those
+/// two counts are what the default face, Consolas, makes of it, measured on the
+/// real machine.)
+///
+/// **Claude's ruling on the projection line's report from the real machine, and
+/// the user may overrule it** — the evidence is a screenshot of a split card,
+/// not a measurement anybody could take from the mock-up, and the number that
+/// answers it is a judgement about reading rather than a fact about the layout.
+pub const FOCUS_COLUMN_WIDTH_LOGICAL_PX: f32 = 280.0;
 /// `#focus-rail { gap: 8px }` — between cards.
 ///
 /// Not [`RAIL_GAP_LOGICAL_PX`]'s 1px, and the difference is the point: rail rows
@@ -2522,8 +2543,12 @@ pub const FOCUS_EXIT_FONT_LOGICAL_PX: f32 = 11.0;
 /// and carried a fixed six rows; the ruling that followed the first real look at
 /// it is that the left column *is* a running terminal, only set smaller — and
 /// once the type size is a floor (7.5px) and the width is a constraint (a card
-/// is 203 wide, which is about 45 columns), the only two knobs left are **how
-/// tall the card is** and **how faithful the picture inside it is**. This is the
+/// is 263 wide, which is fifty-nine columns to a lone pane), the only two knobs
+/// left are **how tall the card is** and **how faithful the picture inside it
+/// is**. (The width was 203 when the ruling was made and the column 220, which
+/// was forty-four columns; it was re-struck to 280 later the same day — see
+/// [`FOCUS_COLUMN_WIDTH_LOGICAL_PX`] — which turned the constraint down rather
+/// than into a knob.) This is the
 /// first of those two turned: a lone pane's seat now holds thirteen or fourteen
 /// rows instead of six, which is the difference between a sample of a shell and
 /// a picture of one.
