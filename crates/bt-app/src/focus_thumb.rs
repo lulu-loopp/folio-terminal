@@ -1228,7 +1228,10 @@ mod tests {
         thumbs.project(tab(1), &[face(1, "b")], start + Duration::from_millis(10));
         thumbs.project(tab(1), &[face(1, "c")], start + Duration::from_millis(20));
         let stats = thumbs.stats();
-        assert_eq!(stats.projections, 2, "the shell's next line waited its turn");
+        assert_eq!(
+            stats.projections, 2,
+            "the shell's next line waited its turn"
+        );
         assert_eq!(stats.skipped_throttled, 1);
     }
 
