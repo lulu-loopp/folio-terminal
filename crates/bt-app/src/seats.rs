@@ -5524,22 +5524,32 @@ pub struct TabRun {
     /// over the caption buttons is the strip's own `overflow-x`, and what stops
     /// a row being carried out past the rail's foot is the list's `overflow-y`.
     pub band: [f32; 4],
-    /// **Whether this list will mint a *new* tab out of a pane torn from the
-    /// layout** (K124), which is a different offer from [`Self::slots`] and has
-    /// to be sayable separately.
+    /// **Whether this list will receive a pane dragged out of the layout at
+    /// all**, which is a different offer from [`Self::slots`] and has to be
+    /// sayable separately.
     ///
     /// `slots` answers "where may something already in this list come to rest";
     /// this answers "may something that is not in the list yet join it". The
     /// strip and the rail are a whole window's tab list and say yes to both. The
     /// focus column says yes to the first and no to the second, because
-    /// §7.1.6b′ ② rules that focus mode does not split a tab: *"pane 拖到卡列不得
-    /// 撕成新 tab"*.
+    /// §7.1.6b′ ② rules that focus mode does not take a pane source at all:
+    /// *"pane 拖到卡列不得撕成新 tab"*.
+    ///
+    /// **One bit for the two offers a pane has here, and that is the ruling's
+    /// own shape rather than a shortcut.** A pane over a tab list can mint a
+    /// *new* tab out of itself (K124, the tear-out) or be handed to one of the
+    /// entries already in the list (§7.1.6f, the spring-loaded drop of
+    /// 2026-08-20). Both are "a pane that is not in this list joining it", both
+    /// are refused by the card column and offered by the other two, and the
+    /// ruling behind the refusal is one sentence about the source rather than
+    /// two about the verbs. The field was called `hosts_tear_out` while the
+    /// tear-out was the only offer a pane had here.
     ///
     /// It lives on the run so that the refusal stays R3's kind of fact — a
     /// property of the surface, read off the same object the mids and the band
     /// come off — rather than a second place where the drag engine learns which
     /// mode the window is in.
-    pub hosts_tear_out: bool,
+    pub hosts_pane_drop: bool,
 }
 
 impl TabRun {
@@ -5613,6 +5623,28 @@ impl TabRun {
     pub fn contains(&self, x: f64, y: f64) -> bool {
         contains(self.band, x as f32, y as f32)
     }
+
+    /// **Which entry's own rectangle the pointer is standing on** — `None` for
+    /// the run's padding, the gap above a strip tab, the empty tail past the
+    /// last one.
+    ///
+    /// The distinction [`Self::mids`] cannot make and §7.1.6f needs. A midpoint
+    /// walk answers "between which two entries would this land", which is the
+    /// only question an *insertion* has and is total over the whole band — every
+    /// pointer gets a slot, including one in the empty tail. Spring-loading asks
+    /// the other question: "whose tab is under my hand", which a pointer in the
+    /// tail is not asking about anybody. So the test is the slot's own box on
+    /// both axes rather than a projection onto the run's, because a slot is a
+    /// rectangle and the padding around it belongs to the run rather than to it.
+    ///
+    /// First match wins and there is never a second: the solver lays slots out
+    /// end to end without overlap on either surface.
+    #[must_use]
+    pub fn slot_at(&self, x: f64, y: f64) -> Option<usize> {
+        self.slots
+            .iter()
+            .position(|slot| contains(*slot, x as f32, y as f32))
+    }
 }
 
 /// The horizontal strip as a run.
@@ -5623,7 +5655,7 @@ pub fn strip_run(geometry: &TabStripGeometry, scale: f32) -> TabRun {
         slots: geometry.tabs.iter().map(|tab| tab.body).collect(),
         band: strip_band(geometry, scale),
         viewport: geometry.viewport,
-        hosts_tear_out: true,
+        hosts_pane_drop: true,
     }
 }
 
@@ -5640,7 +5672,7 @@ pub fn rail_run(geometry: &RailGeometry) -> TabRun {
         slots: geometry.tabs.iter().map(|tab| tab.body).collect(),
         band: geometry.body,
         viewport: geometry.viewport,
-        hosts_tear_out: true,
+        hosts_pane_drop: true,
     }
 }
 
@@ -5664,9 +5696,12 @@ pub fn rail_run(geometry: &RailGeometry) -> TabRun {
 /// The other two refusals stand, and they are said in two different places
 /// because they are two different offers:
 ///
-/// * **②, tearing a tab in half:** [`TabRun::hosts_tear_out`], `false` here. A
-///   pane dragged out of the stage may not become a new tab by landing on the
-///   card list.
+/// * **②, a pane source:** [`TabRun::hosts_pane_drop`], `false` here. A pane
+///   dragged out of the stage may not become a new tab by landing on the card
+///   list — and since §7.1.6f (2026-08-20) it may not be handed to a card's tab
+///   either, nor spring the column over to it. ② is a refusal of the *source*,
+///   so it refuses both of the offers a pane has on the other two surfaces, and
+///   it refuses them through one bit rather than at each verb.
 /// * **③, file drops:** `DragSource::Row(_) => None` in
 ///   `Runtime::survey_strip`, which is global to every tab surface, so a card
 ///   has nothing to opt into. The refusal is the strip's own: no insertion caret
@@ -5685,7 +5720,7 @@ pub fn focus_rail_run(geometry: &FocusRailGeometry) -> TabRun {
         slots: geometry.cards.iter().map(|card| card.body).collect(),
         band: geometry.body,
         viewport: geometry.viewport,
-        hosts_tear_out: false,
+        hosts_pane_drop: false,
     }
 }
 
@@ -29045,10 +29080,11 @@ mod tests {",
     ///
     /// The other two refusals are untouched, and this is where they are held:
     ///
-    /// * **② a card list does not tear a tab in half.** A pane dragged out of
-    ///   the stage may not become a new tab by being dropped on the column, so
-    ///   this run hosts no extraction — while both surfaces that *are* a whole
-    ///   window's tab list do.
+    /// * **② a card list refuses a pane source outright.** A pane dragged out of
+    ///   the stage may not become a new tab by being dropped on the column, and
+    ///   since §7.1.6f (2026-08-20) may not be handed to a card's tab or spring
+    ///   the column over to it either — so this run takes no pane drop at all,
+    ///   while both surfaces that *are* a whole window's tab list do.
     /// * **③ it refuses file drops** — *"一份 tab 清单没有一个非任意的 tab 可以
     ///   接住一个文件"*. That one is `DragSource::Row(_) => None` in
     ///   `Runtime::survey_strip`, global to every tab surface, so there is
@@ -29087,8 +29123,9 @@ mod tests {",
             "a column is reordered down its own axis"
         );
         assert!(
-            !run.hosts_tear_out,
-            "②: a pane torn out of the stage has no new tab to become here"
+            !run.hosts_pane_drop,
+            "②: a pane taken out of the stage has no new tab to become here, \
+             and no card's tab to be handed to either (§7.1.6f)"
         );
         assert_eq!(run.band, column.body, "and it claims its own rectangle");
         for card in &column.cards {
@@ -31179,6 +31216,76 @@ mod tests {",
             "the strip runs the other way: {mids:?}"
         );
         assert_eq!(run.pos(37.0, 412.0), 37.0, "and reads the pointer's x");
+    }
+
+    /// **§7.1.6f — "which tab is under my hand" is not "between which two would
+    /// this land", and the run has to be able to say both.**
+    ///
+    /// [`TabRun::mids`] is total over the band: every pointer inside the surface
+    /// gets an insertion slot, including one in the empty tail past the last
+    /// entry and one in the gap above a strip tab, because an insertion always
+    /// has an answer. Spring-loading asks the other question, and a pointer in
+    /// the padding is not resting on anybody's tab — so [`TabRun::slot_at`]
+    /// answers `None` there while `insert_index_at` goes on answering a number.
+    ///
+    /// Asked of both surfaces, because the two are different shapes of the same
+    /// trap: the strip's band is the whole title bar (so there is padding above
+    /// and below every slot) and the rail's is the whole panel (so there is a
+    /// long empty tail below the last row).
+    ///
+    /// Red gate: project `slot_at` onto the run's own axis — which is what every
+    /// other reader here does — and a pointer in the strip's title-bar padding,
+    /// or one below the rail's last row, comes back naming a tab it is nowhere
+    /// near.
+    #[test]
+    fn a_run_names_the_entry_under_the_pointer_and_nobody_in_its_padding() {
+        let rail = rail_of(expanded_rail(), &resting(4), 0);
+        let run = rail_run(&rail);
+        for (index, tab) in rail.tabs.iter().enumerate() {
+            let body = tab.body;
+            let (x, y) = (
+                f64::from((body[0] + body[2]) / 2.0),
+                f64::from((body[1] + body[3]) / 2.0),
+            );
+            assert_eq!(run.slot_at(x, y), Some(index), "a row answers for itself");
+        }
+        let last = rail.tabs[3].body;
+        let tail = f64::from(last[3]) + 40.0;
+        assert!(
+            run.contains(f64::from((last[0] + last[2]) / 2.0), tail),
+            "the empty tail is still the rail's surface"
+        );
+        assert_eq!(
+            run.slot_at(f64::from((last[0] + last[2]) / 2.0), tail),
+            None,
+            "but no row is standing in it, so no row is under the hand"
+        );
+        assert_eq!(
+            insert_index_at(&run.mids(), run.pos(f64::from(last[0]), tail)),
+            4,
+            "while the insertion question still has its ordinary answer there"
+        );
+
+        let strip = tab_strip_geometry(1_600.0, 1.0, &resting(4), 0, 0.0);
+        let run = strip_run(&strip, 1.0);
+        for (index, tab) in strip.tabs.iter().enumerate() {
+            let body = tab.body;
+            assert_eq!(
+                run.slot_at(
+                    f64::from((body[0] + body[2]) / 2.0),
+                    f64::from((body[1] + body[3]) / 2.0),
+                ),
+                Some(index),
+                "a tab answers for itself"
+            );
+        }
+        let first = strip.tabs[0].body;
+        let above = f64::from(first[1]) - 2.0;
+        assert_eq!(
+            run.slot_at(f64::from((first[0] + first[2]) / 2.0), above),
+            None,
+            "and the title bar above it belongs to the strip, not to the tab"
+        );
     }
 
     /// **A row dragged down the rail trades places with the neighbour whose
