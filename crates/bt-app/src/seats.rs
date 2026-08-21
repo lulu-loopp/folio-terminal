@@ -3158,6 +3158,35 @@ impl RailState {
         self.focus
     }
 
+    /// **Which way the `+`'s profile picker hangs off the `˅` beside it**, or
+    /// `None` when this window has no such button on screen at all.
+    ///
+    /// The precedence is the posture's own and is the same one
+    /// [`crate::profile_menu_anchor`] walks for the button's *box*: the focus
+    /// column supersedes both ordinary surfaces in either tab layout
+    /// ([`Self::focus`]'s own sentence), a vertical layout hangs the picker off
+    /// the rail, and a horizontal one hangs it under the strip. The `None` is
+    /// [`rail_geometry`]'s two `None`s asked as one question — a rail with no
+    /// width has no button for anything to hang off.
+    ///
+    /// **One author, three readers** (§7.1.6e, 2026-08-20). The anchor needs the
+    /// rectangle as well; the `˅` itself needs only this, because whether it
+    /// turns over while its list is up is decided by the side and nothing else;
+    /// and so does the turn's own tween, which must not be aimed at an angle
+    /// nobody is going to draw.
+    #[must_use]
+    pub fn profile_menu_side(self) -> Option<crate::profiles::MenuSide> {
+        if self.draws_focus_rail() {
+            return Some(crate::profiles::MenuSide::Beside);
+        }
+        match self.layout {
+            TabLayoutMode::Vertical => {
+                (self.width_logical_px() > 0.0).then_some(crate::profiles::MenuSide::Beside)
+            }
+            TabLayoutMode::Horizontal => Some(crate::profiles::MenuSide::Below),
+        }
+    }
+
     /// How much of the rail the fold leaves on screen right now.
     ///
     /// At rest this is `collapsed` read as a number, which is what makes the
@@ -7585,6 +7614,32 @@ fn slot_contains(slot: LogicalRect, layout: &SeatLayout, seat: SeatId) -> bool {
         && rect.bottom <= slot.bottom
 }
 
+/// **How the new-tab `˅` states that its picker is up** — §7.1.6e's criterion
+/// applied, in the one place all three surfaces read it from (2026-08-20).
+///
+/// Returns the angle the arrow is drawn at and whether the button wears its own
+/// open highlight, and **exactly one of the two ever says anything**: an arrow
+/// that turns over has already announced the list, and a button that both turned
+/// and lit would be stating one fact twice. Which of them speaks is
+/// [`crate::profiles::MenuSide::turns_the_chevron`]'s answer and no surface's
+/// own — the strip, the rail and the card column ask the same question here and
+/// differ only in the posture they hand it.
+///
+/// `side` is `None` when no new-tab button is on screen. Nothing is drawn from
+/// that state, so it is folded in with the side that does not turn rather than
+/// given an arm: there is no arrow to leave at an angle.
+fn profile_menu_tell(
+    side: Option<crate::profiles::MenuSide>,
+    open: bool,
+    turn: f32,
+) -> (f32, bool) {
+    if side.is_some_and(crate::profiles::MenuSide::turns_the_chevron) {
+        (turn, false)
+    } else {
+        (0.0, open)
+    }
+}
+
 /// Everything the tab strip needs to know about itself: what it holds, which of
 /// them is active, how far it is scrolled, and whether its `˅` is open.
 struct TabStrip<'a> {
@@ -7798,8 +7853,13 @@ fn window_tab_strip(
         scroll: tab_scroll,
         profile_menu_open,
         chevron_turn,
-        rail: _,
+        rail,
     } = strip;
+    // §7.1.6e — this surface's picker hangs `Below` by construction, so this is
+    // the one arm that keeps the turn. It is still asked rather than assumed:
+    // one statement of the criterion, read the same way on all three surfaces.
+    let (chevron_turn, menu_lit) =
+        profile_menu_tell(rail.profile_menu_side(), profile_menu_open, chevron_turn);
     let (labels, sprites) = output;
     let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
     let trailers = tabs.iter().map(|tab| tab.trailer).collect::<Vec<_>>();
@@ -8429,7 +8489,7 @@ fn window_tab_strip(
     let menu_hovered = hover == Some(ChromeTarget::NewTabMenu);
     for (rect, hovered) in [
         (geometry.new_tab, new_hovered),
-        (geometry.new_tab_menu, menu_hovered),
+        (geometry.new_tab_menu, menu_hovered || menu_lit),
     ] {
         if hovered && within_strip(viewport, rect) {
             sprites.push(ChromeSprite::new(
@@ -8670,6 +8730,10 @@ fn rail_chrome(
         chevron_turn,
         shown,
     } = rail;
+    // §7.1.6e — a rail's picker opens to the *side* of its `˅`, so the arrow
+    // stays put and the button says it with its own ground instead.
+    let (chevron_turn, menu_lit) =
+        profile_menu_tell(state.profile_menu_side(), profile_menu_open, chevron_turn);
     let (quads, labels, sprites) = output;
     let trailers = tabs.iter().map(|tab| tab.trailer).collect::<Vec<_>>();
     let Some(geometry) = rail_geometry(
@@ -9358,7 +9422,7 @@ fn rail_chrome(
     let menu_hovered = hover == Some(ChromeTarget::NewTabMenu);
     for (rect, hovered) in [
         (Some(geometry.new_tab), new_hovered),
-        (geometry.new_tab_menu, menu_hovered),
+        (geometry.new_tab_menu, menu_hovered || menu_lit),
     ] {
         if let Some(rect) = rect.filter(|rect| hovered && in_panel(*rect)) {
             // The same pill the strip's own `+` wears (`.newtab { border-radius:
@@ -9619,6 +9683,10 @@ fn focus_rail_chrome(
         chevron_turn,
         reveal,
     } = rail;
+    // §7.1.6e — the column keeps the panel's `+` and its `˅`, and it keeps the
+    // rail's answer with them: this picker opens beside its button too.
+    let (chevron_turn, menu_lit) =
+        profile_menu_tell(state.profile_menu_side(), profile_menu_open, chevron_turn);
     let (quads, labels, sprites) = output;
     let Some(geometry) =
         focus_rail_geometry(height, scale, tabs.len(), exit_caption_width, scroll, state)
@@ -10059,7 +10127,7 @@ fn focus_rail_chrome(
     let row_radius = (RAIL_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
     for (rect, hovered) in [
         (geometry.new_tab, new_hovered),
-        (geometry.new_tab_menu, menu_hovered),
+        (geometry.new_tab_menu, menu_hovered || menu_lit),
     ] {
         if hovered {
             sprites.push(ChromeSprite::new(
@@ -19575,6 +19643,149 @@ mod tests {",
             ChromeMark::chevron(1.0),
             "an arrow that has not started back is still over"
         );
+    }
+
+    /// The whole window's chrome with the profile picker **up**, in whatever
+    /// posture the caller names.
+    ///
+    /// The turn is handed in at `1.0` on purpose. §7.1.6e's question is what a
+    /// surface does with a turn it has been *given*, and a fixture that passed
+    /// `0.0` could not tell "this button does not turn" from "nobody asked it
+    /// to".
+    fn window_chrome_with_menu_open(tabs: &[TabContent], rail: RailState) -> WindowChrome {
+        let metrics = seat_metrics(1_000);
+        let seats = Seats::lone_terminal();
+        let layout = solved(
+            &seats,
+            viewport_of(
+                960,
+                FIXTURE_HEIGHT as u32 - WINDOW_TITLE_BAR_LOGICAL_PX as u32,
+                1_000,
+            ),
+            &metrics,
+        );
+        build_chrome_for_tabs(
+            &seats,
+            &layout,
+            1.0,
+            ChromePointer::default(),
+            ChromeContent {
+                tabs,
+                active_tab: 0,
+                grabbed: None,
+                strip_preview: None,
+                float_shown: &[],
+                tab_scroll: 0.0,
+                rail,
+                rail_scroll: 0.0,
+                exit_caption_width: EXIT_CAPTION,
+                focus_reveal: 1.0,
+                focus_thumbnails: &[],
+                preview_titles: &[],
+                terminal_names: &NO_TERMINAL_NAMES,
+                leaf_marks: &NO_LEAF_MARKS,
+                files_names: &NO_FILES_NAMES,
+                files_name_widths: &NO_FILES_NAME_WIDTHS,
+                files_root_open: None,
+                files_trees: &NO_FILES_TREES,
+                files_views: &NO_FILES_VIEWS,
+                git_pages: &NO_GIT_PAGES,
+                git_graphs: &NO_GIT_GRAPHS,
+                preview_messages: &[],
+                preview_feet: &[],
+                preview_heads: &[],
+                preview_cards: &[],
+                fit_overflow: None,
+                profile_menu_open: true,
+                chevron_turn: 1.0,
+                pane_motion: PaneMotionFrame::default(),
+                resizing_cards: None,
+            },
+        )
+    }
+
+    /// The one chevron a window's new-tab button draws, and the pill under it if
+    /// there is one.
+    ///
+    /// The pill is found by containment rather than by restating a rectangle:
+    /// whatever box the button occupies on this surface, the highlight is the
+    /// `--hover` ground drawn *under* the arrow.
+    fn new_tab_chevron_and_pill(chrome: WindowChrome) -> (ChromeSprite, Option<ChromeSprite>) {
+        let (_, _, sprites) = chrome.flattened();
+        let chevron = *sprites
+            .iter()
+            .find(|sprite| matches!(sprite.mark, ChromeMark::Chevron { .. }))
+            .expect("the new-tab button carries a profile chevron");
+        let pill = sprites
+            .iter()
+            .find(|sprite| {
+                matches!(sprite.mark, ChromeMark::ControlPill { .. })
+                    && sprite.rect[0] <= chevron.rect[0]
+                    && sprite.rect[1] <= chevron.rect[1]
+                    && sprite.rect[2] >= chevron.rect[2]
+                    && sprite.rect[3] >= chevron.rect[3]
+            })
+            .copied();
+        (chevron, pill)
+    }
+
+    /// PIN — **§7.1.6e's criterion, now applied to the new-tab `˅` too** (user
+    /// ruling 2026-08-20).
+    ///
+    /// The judgement that took the turn off the pane head's `⌄` is one sentence
+    /// about geometry, not about which surface a button stands on: *"翻到 180°
+    /// 的箭头指向自己菜单之外"*. An arrow turned over says "the list is up
+    /// **there**", and that is only true where the list is directly beneath the
+    /// button. `profiles::MenuSide::Below` — the horizontal strip — is the one
+    /// place it is; on a vertical rail and on the focus card column the picker
+    /// opens to the *side*, so a turned arrow points past its own menu. Those two
+    /// say it with the button's own ground instead: the same `--hover` pill the
+    /// button wears under the pointer, which is what "this control is not at
+    /// rest" already looks like everywhere else in this bar.
+    #[test]
+    fn the_new_tab_chevron_turns_only_where_its_picker_hangs_below() {
+        let palette = chrome_palette();
+        let tabs = plain_tabs(1);
+
+        // `MenuSide::Below`: unchanged, and the one arm the ruling kept.
+        let (below, below_pill) =
+            new_tab_chevron_and_pill(window_chrome_with_menu_open(&tabs, RailState::default()));
+        assert_eq!(
+            below.mark,
+            ChromeMark::chevron(1.0),
+            "the strip's menu hangs off the button's own bottom edge, so the \
+             arrow that turns over is pointing at it"
+        );
+        assert_eq!(
+            below_pill, None,
+            "and the turn is the whole of the tell — the strip's button keeps \
+             `background: none` while its list is up"
+        );
+
+        // `MenuSide::Beside`, twice: the ordinary vertical rail…
+        for (posture, surface) in [
+            (expanded_rail(), "the vertical rail"),
+            (focus_rail(TabLayoutMode::Vertical), "the focus card column"),
+        ] {
+            let (beside, beside_pill) =
+                new_tab_chevron_and_pill(window_chrome_with_menu_open(&tabs, posture));
+            assert_eq!(
+                beside.mark,
+                ChromeMark::chevron(0.0),
+                "{surface}: the picker opens beside this button, so a 180° arrow \
+                 would point past its own list"
+            );
+            let pill = beside_pill.unwrap_or_else(|| {
+                panic!(
+                    "{surface}: a button whose arrow cannot say the list is up has to say it itself"
+                )
+            });
+            assert_eq!(
+                pill.color, palette.caption_hover,
+                "{surface}: the open state borrows the pill this very button \
+                 already wears under the pointer — no second colour is invented"
+            );
+        }
     }
 
     /// PIN (`×` display rule) — the mock-up's `×` is **always shown**, and its
