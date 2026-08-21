@@ -6426,9 +6426,15 @@
     ["horizontal", "vertical"].forEach(v => items.push({
       icon: svgIcon("i-panel"), label: `Tabs: ${v[0].toUpperCase()}${v.slice(1)}`,
       run: () => { state.layoutMode = v; render(); syncCombo("layout", v); } }));
-    /* the palette keeps the door it always had; only the semantics under it
+    /* the palette keeps the row it always had; only the semantics under it
        changed. No gate and no leaf argument, because the stage is the tab and
-       the tab is already chosen. It carries the chord now that P2-7 has one. */
+       the tab is already chosen. It carries the chord now that P2-7 has one.
+       THIS SURVIVED THE 2026-08-20 WITHDRAWAL DELIBERATELY, and it is not a
+       third door: the palette is the INDEX OF EVERY VERB, and this row is the
+       chord's own entry in it — it even prints `Ctrl+Shift+Z` beside itself.
+       §7.1.6b′ says the systematic home for a low-frequency verb is the palette
+       rather than some surface hung near the mode, and that sentence is about
+       where a verb is listed, not about how many ways out the mode has. */
     if (state.focusMode || fl)
       items.push({ icon: svgIcon("i-max"),
         label: state.focusMode ? "Exit focus mode" : "Enter focus mode",
