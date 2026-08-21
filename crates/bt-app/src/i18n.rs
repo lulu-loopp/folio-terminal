@@ -4341,20 +4341,23 @@ mod tests {
         assert_eq!(seen.len(), Text::ALL.len());
     }
 
-    /// PIN (§7.1.6b′, user ruling 2026-08-19) — **the focus-mode row advertises
-    /// the doors that exist, and no others.**
+    /// PIN (§7.1.6b′, user rulings 2026-08-19 and 2026-08-20) — **the focus-mode
+    /// row advertises the doors that exist, and no others.**
     ///
-    /// The mode shipped with five doors and two of them were withdrawn the same
-    /// day: a double-click on a pane header (it reads as "make this pane bigger",
+    /// The mode shipped with five doors and is down to two. Withdrawn on 08-19:
+    /// a double-click on a pane header (it reads as "make this pane bigger",
     /// which is the opposite of what the mode does) and that pane's `⌄` menu (a
     /// list whose every other line acts on the pane under it is no place for a
-    /// verb about the window). What is left is the chord and this row itself —
-    /// and this sentence is the one place in the product that *tells* a reader
-    /// where the doors are, so it is the one place a withdrawn door can go on
-    /// being promised after the code that answered it is gone.
+    /// verb about the window). Withdrawn on 08-20: the column's own `Exit`
+    /// button, the heading row it stood on, and the `Esc` rung —
+    /// 「它是设置里的一个设置，怎么这么容易就退出」. What is left is the chord
+    /// and this row itself — and this sentence is the one place in the product
+    /// that *tells* a reader where the doors are, so it is the one place a
+    /// withdrawn door can go on being promised after the code that answered it
+    /// is gone.
     ///
-    /// Red gate: put either gesture's name back into the sentence without
-    /// building the gesture, and this goes red in whichever language it was added
+    /// Red gate: put any withdrawn door's name back into the sentence without
+    /// building the door, and this goes red in whichever language it was added
     /// to.
     #[test]
     fn the_focus_mode_row_names_the_chord_and_no_gesture_this_build_withdrew() {
@@ -4364,7 +4367,16 @@ mod tests {
                 sentence.contains("Ctrl+Shift+Z"),
                 "{lang:?}: the row names the one chord that turns it"
             );
-            for withdrawn in ["double-click", "双击", "⌄", "pane's header", "窗格标题栏"] {
+            for withdrawn in [
+                "double-click",
+                "双击",
+                "⌄",
+                "pane's header",
+                "窗格标题栏",
+                "Exit",
+                "退出钮",
+                "Esc",
+            ] {
                 assert!(
                     !sentence.contains(withdrawn),
                     "{lang:?}: the sentence still promises `{withdrawn}`, a door this \
