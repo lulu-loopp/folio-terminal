@@ -1353,7 +1353,7 @@ mod tests {
             // A lone pane's seat: the whole card body less the body's own inset.
             let height = (bt_render::FOCUS_MINI_HEIGHT_LOGICAL_PX * scale).round()
                 - 2.0 * (bt_render::FOCUS_MINI_PADDING_LOGICAL_PX * scale).round();
-            let rect = [0.0, 0.0, 203.0 * scale, height];
+            let rect = [0.0, 0.0, 263.0 * scale, height];
             let held = mini_rows(rect, line, scale);
             assert_eq!(
                 held,
@@ -1575,6 +1575,16 @@ mod tests {
     /// ceiling below is being defended against more work than the mode can
     /// actually be asked for.
     const BUDGET_ROWS: usize = 13;
+    /// **How many columns each of those seats is cut to** — the horizontal twin
+    /// of [`BUDGET_ROWS`], and the number the 2026-08-20 re-strike of the
+    /// column's width moved.
+    ///
+    /// Fifty-four: what a **lone** pane's seat holds across a 280px column's
+    /// card, spent on *both* seats of all ten tabs, for exactly
+    /// [`BUDGET_ROWS`]'s reason — two seats sharing one body hold twenty-six
+    /// each, so the ceiling is being defended against more than twice the cut
+    /// the mode can actually be asked for.
+    const BUDGET_COLUMNS: usize = 54;
 
     /// The median of `samples`, which is what a frame budget is stated in — a
     /// mean would be moved by the one frame the scheduler took the core away.
@@ -1637,7 +1647,7 @@ mod tests {
                     .enumerate()
                     .map(|(seat_index, shell)| SeatDemand {
                         id: SeatId(seat_index as u64),
-                        columns: 44,
+                        columns: BUDGET_COLUMNS,
                         rows: BUDGET_ROWS,
                         source: SeatSource::Terminal(shell),
                     })
@@ -1681,7 +1691,7 @@ mod tests {
                     .enumerate()
                     .map(|(seat_index, shell)| SeatDemand {
                         id: SeatId(seat_index as u64),
-                        columns: 44,
+                        columns: BUDGET_COLUMNS,
                         rows: BUDGET_ROWS,
                         source: SeatSource::Terminal(shell),
                     })

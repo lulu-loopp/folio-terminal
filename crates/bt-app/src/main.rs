@@ -5305,9 +5305,9 @@ struct WindowRuntime {
     /// panel is drawn, what the title bar owns — goes through
     /// [`Runtime::rail_posture`] or [`Runtime::sampled_rail`], which are the two
     /// places the two halves are joined. Handing this field to the solver is
-    /// exactly the bug the card column shipped with: the panel drew itself 220
-    /// wide and the stage was solved as though nothing were there, so the column
-    /// stood on top of the panes.
+    /// exactly the bug the card column shipped with: the panel drew itself
+    /// card-width and the stage was solved as though nothing were there, so the
+    /// column stood on top of the panes.
     rail: seats::RailState,
     /// **What shape this window is in right now: focus mode, or not**
     /// (`docs/DESIGN.md` §7.1.6b′).
@@ -19190,7 +19190,8 @@ impl Runtime<'_> {
             self.window.size_policy,
             // The posture and not the stored preference, for
             // [`Self::resolve_seat_layout`]'s reason: a tab born while the card
-            // column is up is born into a stage that starts 220 further in.
+            // column is up is born into a stage that starts a column-width
+            // further in.
             self.rail_posture(),
             FormulaSwitches::from_settings(self.app.settings_store.loaded()),
             scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
@@ -19747,8 +19748,8 @@ impl Runtime<'_> {
             render_physical,
             self.window.size_policy,
             // **The posture, never the stored preference** (§7.1.6b′). The card
-            // column stands in the panel's own place and costs the stage 220
-            // logical pixels exactly as an expanded rail does, and that width is
+            // column stands in the panel's own place and costs the stage its own
+            // width exactly as an expanded rail does, and that width is
             // `RailState::terminal_inset_logical_px` reading `focus`. The bit
             // lives on the window rather than in `window.rail`, so a solve handed
             // the stored preference is a solve told the mode is off — which is
@@ -23610,9 +23611,10 @@ impl Runtime<'_> {
         // (§7.1.6b′: the `Sidebar` row's three rest states govern the *ordinary*
         // panel, and the card column is card-width whatever they say). A window
         // whose sidebar was folded away and then entered focus mode kept the
-        // fold's `opacity: 0` on the panel layer: the column was solved at 220,
-        // the stage started after it, the hit test answered its cards — and
-        // nothing was drawn there. A 220-pixel hole with live buttons in it,
+        // fold's `opacity: 0` on the panel layer: the column was solved at its
+        // full width, the stage started after it, the hit test answered its
+        // cards — and nothing was drawn there. A card-wide hole with live
+        // buttons in it,
         // which is worse than either of the two states it was between.
         //
         // `width_logical_px` already refuses the fold for the same reason; this
@@ -48198,7 +48200,7 @@ impl Runtime<'_> {
             scale_ppm,
             // The posture, because the solver is handed the posture: a rim
             // measured against the stored preference would aim its left-edge drop
-            // zone at the 220 pixels the card column is standing on.
+            // zone at the pixels the card column is standing on.
             seats::rail_inset_device_px(self.rail_posture(), scale_ppm),
         )
     }
@@ -50569,8 +50571,8 @@ impl Runtime<'_> {
     ///
     /// **The solver is one of those callers, and that is the whole of the fix
     /// this branch carries.** The card column is in the flow exactly as an
-    /// expanded rail is: `terminal_inset_logical_px` answers 220 for it, and the
-    /// viewport `solve_seats` is handed begins there. Passing
+    /// expanded rail is: `terminal_inset_logical_px` answers the column's own
+    /// width for it, and the viewport `solve_seats` is handed begins there. Passing
     /// [`WindowRuntime::rail`] instead — which it did — is asking the solver to
     /// lay the stage out as though the panel were not on screen, and a panel
     /// drawn over a stage that was never told about it is the occlusion the
@@ -50649,7 +50651,7 @@ impl Runtime<'_> {
             // because they are *geometry*, and geometry is `seats`'s: what comes
             // back is each seat's own rectangle, and each seat's own rectangle is
             // what its column count is cut from — which is §3.3's "the same
-            // session at another width" in the only form a 203px-wide card has
+            // session at another width" in the only form a 263px-wide card has
             // room for — and, since 2026-08-20, its vertical twin: how many rows
             // that rectangle holds is how many rows it is handed.
             let demands: Vec<focus_thumb::SeatDemand<'_>> =
@@ -50740,7 +50742,7 @@ impl Runtime<'_> {
         // to the stage.** The very path `set_rail_state` takes when `Sidebar`
         // moves the terminal's left edge, and taken here for the same reason: the
         // tree is untouched, every pane's rectangle is not, because the viewport
-        // they are solved into begins 220 logical pixels further in (or stops
+        // they are solved into begins the column's own width further in (or stops
         // doing so). There is no branch anywhere below this for what is being
         // drawn — only a different number for where it starts.
         eprintln!(
@@ -56805,7 +56807,7 @@ fn rail_zone_wants_open(
 /// Red gate: return `fold` unconditionally — which is what this used to do — and
 /// [`the_card_column_is_never_faded_by_a_fold_that_is_not_its_own`] goes red, as
 /// the screen did: a window whose sidebar was folded away entered focus mode and
-/// drew nothing in a 220-pixel column that was nevertheless solved for, hit-
+/// drew nothing in a card-wide column that was nevertheless solved for, hit-
 /// tested and clickable.
 fn panel_opacity(state: seats::RailState, fold: f32) -> f32 {
     if state.draws_focus_rail() { 1.0 } else { fold }
@@ -67099,7 +67101,7 @@ mod tests {
     /// card-width and fully drawn whatever they say, and [`panel_opacity`] is
     /// where those two facts meet. The failure this closes was photographed:
     /// fold the sidebar away, then enter focus mode, and the window solved a
-    /// 220-pixel column, started the stage after it, hit-tested its cards — and
+    /// card-wide column, started the stage after it, hit-tested its cards — and
     /// painted the layer at `opacity: 0`. A live, invisible panel.
     ///
     /// Red gate: return the fold unconditionally and the first loop goes red at
