@@ -371,6 +371,18 @@ pub struct SearchState {
     /// `install` is the one door they come through: anything that changed them went through it,
     /// and anything that did not, did not.
     revision: u64,
+    /// **The tally of a host that counts its own matches** (§7.7 ②, W2 slice ④).
+    ///
+    /// The capsule's second host is a page, and a page's matches are not
+    /// [`Hit`]s: a `Hit` is a range of a transcript line addressed by a
+    /// [`ContentAnchor`], and a document inside an engine has neither. What the
+    /// engine reports is a count and which match is current, so that is what is
+    /// kept — `(count, active)` with `active` 1-based and `0` for none, exactly
+    /// as `ICoreWebView2Find` states them.
+    ///
+    /// `None` means "this host counts through [`Self::hits`]", which is what
+    /// keeps a terminal's capsule byte-identical to what it was.
+    engine_matches: Option<(i32, i32)>,
 }
 
 impl SearchState {
@@ -449,14 +461,47 @@ impl SearchState {
     }
 
     /// What the counter box reads right now.
+    ///
+    /// **One counter, two ways of arriving at the numbers** (§7.7 ②: 「换的是谁
+    /// 数命中,不换胶囊」). A terminal's are counted here out of [`Self::hits`];
+    /// a page's are counted by the engine and reported. `counter_text` is the
+    /// same function either way, so the four states it writes — empty, broken,
+    /// `n/m`, `0/0` — are the same four wherever the capsule is standing.
     #[must_use]
     pub fn counter(&self) -> String {
+        if let Some((count, active)) = self.engine_matches {
+            return counter_text(
+                self.field.is_empty(),
+                self.error.is_some(),
+                count.max(0) as usize,
+                (active > 0).then(|| active as usize - 1),
+            );
+        }
         counter_text(
             self.field.is_empty(),
             self.error.is_some(),
             self.hits.len(),
             self.current,
         )
+    }
+
+    /// A host that counts its own matches has reported.
+    ///
+    /// Returns whether the tally moved, so the caller can leave the chrome alone
+    /// on the several events a single find sends for one answer.
+    pub fn report_engine_matches(&mut self, count: i32, active: i32) -> bool {
+        let reported = Some((count, active));
+        let moved = self.engine_matches != reported;
+        self.engine_matches = reported;
+        moved
+    }
+
+    /// This host counts through [`Self::hits`] again — or has not answered yet.
+    ///
+    /// Called on every door that changes what is being searched, so a stale
+    /// `12/40` cannot survive the query that produced it.
+    pub fn forget_engine_matches(&mut self) {
+        self.engine_matches = None;
     }
 
     /// Open on a pane, or re-focus the one already open there.
@@ -479,6 +524,7 @@ impl SearchState {
         self.seat = Some(seat);
         self.focused = true;
         self.field.select_all();
+        self.engine_matches = None;
         moved
     }
 
@@ -493,6 +539,7 @@ impl SearchState {
     pub fn close(&mut self) -> bool {
         let was_open = self.seat.take().is_some();
         self.focused = false;
+        self.engine_matches = None;
         self.hits.clear();
         self.current = None;
         self.error = None;
@@ -1061,6 +1108,20 @@ pub struct CapsuleLook<'a> {
     /// What the counter box reads.
     pub counter: &'a str,
     pub flags: SearchFlags,
+    /// **Which toggles the host under the capsule can actually honour**
+    /// (§7.7 ②, W2 slice ④).
+    ///
+    /// A terminal answers all three. A page answers `Aa` and no more:
+    /// `ICoreWebView2FindOptions` carries a find term, a case fold and a
+    /// highlight-all, and there is no word-boundary and no pattern anywhere in
+    /// that interface.
+    ///
+    /// **Dimmed and inert rather than gone**, which is this slice's own ruling
+    /// about the navigation buttons applied to the same problem one surface
+    /// over: 「a button that vanishes when the history runs out moves the two
+    /// beside it under the pointer」. A capsule that grew and shrank between
+    /// hosts would be a second capsule.
+    pub offered: SearchFlags,
     /// Which element the pointer is on, if any.
     pub hover: Option<SearchElement>,
 }
@@ -1160,8 +1221,13 @@ pub fn build(
         (SearchFlag::Regex, REGEX_LABEL),
     ] {
         let box_ = capsule.toggle(flag);
-        let on = look.flags.is_on(flag);
-        let hovered = look.hover == Some(SearchElement::Toggle(flag));
+        let offered = look.offered.is_on(flag);
+        // A toggle the host cannot honour is drawn at rest, at the same reveal
+        // the head's spent navigation buttons wear, and never lit and never
+        // hovered — the state says "there is nothing behind this here" without
+        // moving anything.
+        let on = offered && look.flags.is_on(flag);
+        let hovered = offered && look.hover == Some(SearchElement::Toggle(flag));
         // `.sb-tg.on, .sb-tg.on:hover` — **the on state overrules the hover** (A34), so a switched
         // toggle does not change under the pointer. That is what makes "it is on" a fact you can
         // read while your hand is on it.
@@ -1180,7 +1246,15 @@ pub fn build(
                 1.0,
             ));
         }
-        let ink = if on {
+        // **A toggle its host cannot honour is drawn in the ink this surface
+        // uses for structure rather than for verbs** — the capsule's own
+        // hairline colour. It keeps its box, so the two beside it do not move
+        // under the pointer (this slice's own ruling about the navigation
+        // buttons, one surface over), and it stops reading as something to
+        // press.
+        let ink = if !offered {
+            palette.menu_border
+        } else if on {
             palette.accent
         } else if hovered {
             palette.menu_item_text_selected

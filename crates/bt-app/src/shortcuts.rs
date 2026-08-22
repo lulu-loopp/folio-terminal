@@ -94,6 +94,32 @@ pub(crate) enum Action {
     /// Raise the in-pane search capsule on the focused terminal, or — when it is already up —
     /// put the caret back in it with the last query selected (§7.1.5d, B80).
     OpenSearch,
+    /// Put the search capsule away (§7.7, W2 slice ④).
+    ///
+    /// **A row of this table, and it did not have to be until a page could hold
+    /// the keyboard.** Every other rung of §7.1.5's Escape ladder is raised by
+    /// the pointer on this window's own chrome — a menu, a float, a drag — and
+    /// pressing chrome takes the keyboard out of whatever pane it was in, so a
+    /// page and one of those rungs cannot be up at the same time with the page
+    /// still holding the keys. The capsule is the exception, and B81 is why:
+    /// `Ctrl+F` raises it **without** taking the keyboard off the surface below
+    /// it, which is the whole of its second stance. So it is the one rung that
+    /// can stand over a page that still owns Escape — and a page owns every key
+    /// this table does not claim.
+    ///
+    /// On a terminal nothing changes, and the ladder is why: the capsule's rung
+    /// answers an Escape long before `Shortcuts::lookup` is asked, so this row
+    /// is never reached there and `0x1b` still leaves for the shell the instant
+    /// the capsule is gone.
+    CloseSearch,
+    /// Put the caret in the web seat's address field (§7.7 ②, user ruling
+    /// 2026-08-22).
+    ///
+    /// The second door onto the field the page's title already is; the first is
+    /// the double click that renames a file one content class over.
+    WebAddress,
+    /// Open the developer tools on the focused page (§7.7 ②, same ruling).
+    WebDevTools,
     /// Walk to the next match while the **terminal** still holds the keyboard (B81).
     ///
     /// `Enter` cannot do this and that is the whole reason the function key is in the table: Enter
@@ -184,10 +210,41 @@ pub(crate) enum Scope {
     /// and the shortcut-editing panel can *show* the condition instead of
     /// guessing at it.
     ///
-    /// The capsule only ever opens on a terminal showing its primary screen and
-    /// is closed the moment that stops being true, so this scope implies the one
-    /// above rather than having to repeat it.
+    /// The capsule is closed the moment its host stops being able to hold one,
+    /// so this scope implies [`Self::SearchHost`] rather than repeating it.
     SearchOpen,
+    /// Only while the keyboard is on a surface the **search capsule** can open
+    /// on: a terminal showing its primary screen, or a hosted page (§7.7 ②).
+    ///
+    /// Two hosts, one capsule, one row. `Ctrl+F` had [`Self::TerminalPrimary`]
+    /// while the capsule had one host, and the second host is not a second
+    /// instrument — the mock-up's own selector reads `.term, .pv-web-doc`
+    /// (14038) and the ruling says「第二个 host,不是第二份实现」.
+    ///
+    /// **A page makes the scope load-bearing rather than tidy.** With `Ctrl+F`
+    /// out of force over a page the chord is not claimed back through
+    /// `AcceleratorKeyPressed`, so the engine's *own* find bar opens inside the
+    /// seat — a second search box, in a window whose whole search story is that
+    /// there is one. The row's scope is what shuts that door, and there is no
+    /// other: `AreBrowserAcceleratorKeysEnabled` is not in this build's
+    /// bindings, so a key the table does not take is a key the engine keeps.
+    SearchHost,
+    /// Only while a **hosted page** holds the keyboard (§7.7, W2 slice ④).
+    ///
+    /// Its own scope and not [`Self::Preview`], because a web seat is a preview
+    /// seat and the two rows in it would be wrong on every other one: a markdown
+    /// document has no address to put a caret in and no developer tools to open,
+    /// and a chord that lands on nothing is a chord the shortcut page would have
+    /// to describe with a condition it could not show.
+    ///
+    /// It is also what lets `Ctrl+L` exist at all. Discipline (1) — a bare
+    /// `Ctrl+letter` is the shell's control-code alphabet — forbids taking `^L`,
+    /// which is readline's clear-screen and is pressed all day. What the ruling
+    /// that put `Ctrl+S` in [`Self::Preview`] settled is that the discipline
+    /// forbids taking a control letter **from a terminal**, and there is no
+    /// terminal in a page. Out of this scope the row is simply not in the table
+    /// and `^L` reaches the child untouched.
+    WebPage,
 }
 
 /// What the window's focus looks like to the table.
@@ -215,6 +272,11 @@ pub(crate) struct Focus {
     /// hands are back on the shell (B81), so a flag that meant "the field is
     /// focused" would switch the row off exactly when it is wanted.
     pub(crate) search_open: bool,
+    /// Whether the focused leaf is a preview seat **with a page on it**.
+    ///
+    /// Never true without [`Self::preview`] — a web seat is a preview seat, and
+    /// the two flags are a kind and a content class rather than two places.
+    pub(crate) web_page: bool,
 }
 
 impl Scope {
@@ -235,6 +297,11 @@ impl Scope {
             Self::Preview => Some(Text::ShortcutScopePreview),
             Self::TerminalPrimary => Some(Text::ShortcutScopeTerminalPrimary),
             Self::SearchOpen => Some(Text::ShortcutScopeSearchOpen),
+            Self::WebPage => Some(Text::ShortcutScopeWebPage),
+            // The tag names the surface the capsule can open on, and the two
+            // surfaces have no one word between them — so it names the thing
+            // that is true of both: there is something here to search.
+            Self::SearchHost => Some(Text::ShortcutScopeSearchHost),
         }
     }
 
@@ -251,6 +318,8 @@ impl Scope {
             Self::Preview => focus.preview,
             Self::TerminalPrimary => focus.terminal_primary,
             Self::SearchOpen => focus.search_open,
+            Self::WebPage => focus.web_page,
+            Self::SearchHost => focus.terminal_primary || focus.web_page,
         }
     }
 }
@@ -415,6 +484,30 @@ impl Binding {
             action,
             chord: Some(chord),
             scope: Scope::SearchOpen,
+        }
+    }
+
+    /// A row in force only where the search capsule has somewhere to open.
+    const fn search_host(id: &'static str, title: Text, action: Action, chord: Chord) -> Self {
+        Self {
+            id,
+            title,
+            family: None,
+            action,
+            chord: Some(chord),
+            scope: Scope::SearchHost,
+        }
+    }
+
+    /// A row in force only while a hosted page holds the keyboard.
+    const fn web_page(id: &'static str, title: Text, action: Action, chord: Chord) -> Self {
+        Self {
+            id,
+            title,
+            family: None,
+            action,
+            chord: Some(chord),
+            scope: Scope::WebPage,
         }
     }
 
@@ -764,7 +857,17 @@ pub(crate) const BINDINGS: &[Binding] = &[
     // ruling is about one chord, for one surface, with three reasons written
     // down; a recorder that read it as "bare control letters are allowed now"
     // would have turned one argued exception into a policy nobody made.
-    Binding::terminal_primary(
+    //
+    // **The scope widened on 2026-08-22 and the argument did not** (§7.7 ②).
+    // The row moved from `Scope::TerminalPrimary` to [`Scope::SearchHost`] the
+    // day the capsule got its second host, and the three reasons above hold
+    // word for word on the new one: `^F` has no owner in a page either, the
+    // reference product takes `Ctrl+F` for exactly this box, and out of the
+    // scope the row is still not in the table at all. What the widening buys is
+    // not convenience — it is the *only* way to keep the engine's own find bar
+    // from opening inside the seat, because a key this table does not claim is
+    // a key `AcceleratorKeyPressed` hands to the page.
+    Binding::search_host(
         "open-search",
         Text::ShortcutOpenSearch,
         Action::OpenSearch,
@@ -800,6 +903,64 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutPrevMatch,
         Action::PrevMatch,
         Chord::new(ModifiersState::SHIFT, ChordKey::Named(NamedKey::F3)),
+    ),
+    // **Bare `Escape`, and the one row in this table that exists because of
+    // something *below* the keyboard** (§7.7, W2 slice ④).
+    //
+    // Every rung of §7.1.5's Escape ladder is code in `keyboard_input`, and
+    // none of them is a row here — an Escape unwinds one layer per press and
+    // then reaches the shell as `0x1b`, which is not a verb a shortcut panel
+    // could offer a second chord for. That stayed true until a **page** could
+    // hold the keyboard: a page keeps every key this table does not claim, so
+    // the ladder is simply not consulted, and the one rung that can be standing
+    // over a page whose keyboard is still the page's is the capsule (B81 —
+    // `Ctrl+F` raises it *without* taking the keyboard off the surface below).
+    //
+    // So the ruling is: **Escape belongs to the page, and the window takes it
+    // back only where a row of its own table says so.** This is that row and
+    // there is exactly one. On a terminal nothing changes at all — `close_search`
+    // answers at the capsule's rung long before `lookup` is asked — and with no
+    // capsule up the row is not in the table, which is what keeps `0x1b`
+    // reaching every shell.
+    //
+    // Rejected, and written down so the argument is not re-run:
+    // ① a `Scope::Window` row — `lookup` sits above the PTY encoder, so it
+    //    would swallow the one byte a terminal cannot do without;
+    // ② two presses in a row meaning the window — a gesture nobody was told
+    //    about, and indistinguishable from "the page ate the first one";
+    // ③ `Shift+Esc` for the page — it inverts what page code listens for, and
+    //    on this very engine `Shift+Esc` is the browser's task manager.
+    Binding::search_open(
+        "close-search",
+        Text::ShortcutCloseSearch,
+        Action::CloseSearch,
+        Chord::new(ModifiersState::empty(), ChordKey::Named(NamedKey::Escape)),
+    ),
+    // **`Ctrl+L` and `F12`** (user ruling 2026-08-22, W1's open question 3).
+    //
+    // Both are browser conventions and both are doors that do not otherwise
+    // exist: the address field has one gesture, a double click, and the
+    // developer tools live on a hover tool that is invisible until the pointer
+    // arrives. That is what separates them from `Alt+Left` and `Alt+Right`,
+    // which this slice deliberately leaves with the engine — those are not a
+    // door being added, they are a working door being repossessed, and the
+    // engine's answer for them is already this pane's own verb.
+    //
+    // `Ctrl+L` is a bare `Ctrl+letter`, which discipline (1) forbids taking
+    // from a terminal — `^L` is readline's clear-screen. It is taken here on
+    // ruling 9's shape exactly: scoped to a surface where there is no terminal
+    // to take it from. See [`Scope::WebPage`].
+    Binding::web_page(
+        "web-address",
+        Text::ShortcutWebAddress,
+        Action::WebAddress,
+        Chord::new(CTRL, character("l")),
+    ),
+    Binding::web_page(
+        "web-devtools",
+        Text::ShortcutWebDevTools,
+        Action::WebDevTools,
+        Chord::new(ModifiersState::empty(), ChordKey::Named(NamedKey::F12)),
     ),
     // **The first rows in this table that exist in order to be configured**
     // (mock-up 6104-6106, §7.1.5e), and the first that ship with nothing in
@@ -1364,31 +1525,51 @@ impl Binding {
 
 /// Every focus the window can actually be in, and no impossible one.
 ///
-/// The keyboard is on a preview, on a terminal's scrollback, on a scrollback
-/// with the capsule up, or on none of those (a terminal running a full-screen
-/// program, a files column, a menu). "A preview with a search open" is not a
-/// state a window has, and listing it would make the conflict rule refuse pairs
-/// that can never meet.
-const REACHABLE_FOCUS: [Focus; 4] = [
+/// The keyboard is on a preview, on a page inside one, on a terminal's
+/// scrollback, on either of those two with the capsule up, or on none of them (a
+/// terminal running a full-screen program, a files column, a menu).
+///
+/// **A preview with a search open used to be impossible and is not any more**
+/// (§7.7, W2 slice ④). It was listed as impossible here in as many words while
+/// the capsule had one host; the capsule now has two, and the second is a page.
+/// A *document* preview still cannot have one — `web_page` is what tells the two
+/// apart — so the state that was added is the page's and not the whole kind's.
+const REACHABLE_FOCUS: [Focus; 6] = [
     Focus {
         preview: false,
         terminal_primary: false,
         search_open: false,
+        web_page: false,
     },
     Focus {
         preview: true,
         terminal_primary: false,
         search_open: false,
+        web_page: false,
+    },
+    Focus {
+        preview: true,
+        terminal_primary: false,
+        search_open: false,
+        web_page: true,
+    },
+    Focus {
+        preview: true,
+        terminal_primary: false,
+        search_open: true,
+        web_page: true,
     },
     Focus {
         preview: false,
         terminal_primary: true,
         search_open: false,
+        web_page: false,
     },
     Focus {
         preview: false,
         terminal_primary: true,
         search_open: true,
+        web_page: false,
     },
 ];
 
@@ -1733,6 +1914,38 @@ mod tests {
                 preview: true,
                 terminal_primary: false,
                 search_open: false,
+                web_page: false,
+            },
+        )
+    }
+
+    /// The same press with a **page** holding the keyboard inside a preview
+    /// seat, and the capsule down.
+    fn press_on_a_page(key: Key, modifiers: ModifiersState) -> Option<Action> {
+        Shortcuts::defaults().lookup(
+            &key,
+            &key,
+            modifiers,
+            Focus {
+                preview: true,
+                terminal_primary: false,
+                search_open: false,
+                web_page: true,
+            },
+        )
+    }
+
+    /// The same press on a page with the capsule up over it.
+    fn press_on_a_page_with_search_open(key: Key, modifiers: ModifiersState) -> Option<Action> {
+        Shortcuts::defaults().lookup(
+            &key,
+            &key,
+            modifiers,
+            Focus {
+                preview: true,
+                terminal_primary: false,
+                search_open: true,
+                web_page: true,
             },
         )
     }
@@ -1747,6 +1960,7 @@ mod tests {
                 preview: false,
                 terminal_primary: true,
                 search_open: false,
+                web_page: false,
             },
         )
     }
@@ -1762,6 +1976,7 @@ mod tests {
                 preview: false,
                 terminal_primary: true,
                 search_open: true,
+                web_page: false,
             },
         )
     }
@@ -2085,6 +2300,102 @@ mod tests {
         assert_eq!(press_in_preview(character("s"), CTRL_SHIFT), None);
     }
 
+    /// PIN (§7.7 ②, user ruling 2026-08-22) — **the address field and the
+    /// developer tools answer over a page and nowhere else.**
+    ///
+    /// `Ctrl+L` is the whole reason [`Scope::WebPage`] exists. `^L` is
+    /// readline's clear-screen, discipline (1) forbids taking it from a
+    /// terminal, and the ruling that let `Ctrl+S` into a preview is what lets
+    /// this in: there is no terminal in a page to take it from. Out of the scope
+    /// the row is not in the table and the byte leaves for the child.
+    ///
+    /// MUTATIONS:
+    /// ① give either row `Scope::Window` — the terminal assertions go red, and
+    ///    `bare_control_letters_stay_with_the_terminal` goes red with `Ctrl+L`;
+    /// ② give them `Scope::Preview` — the last assertion goes red, which is a
+    ///    markdown document being offered an address bar it has not got.
+    #[test]
+    fn the_address_and_the_developer_tools_answer_only_over_a_page() {
+        assert_eq!(
+            press_on_a_page(character("l"), CTRL),
+            Some(Action::WebAddress)
+        );
+        assert_eq!(
+            press_on_a_page(Key::Named(NamedKey::F12), ModifiersState::empty()),
+            Some(Action::WebDevTools)
+        );
+        assert_eq!(
+            press(character("l"), CTRL),
+            None,
+            "^L is readline's clear-screen and reaches the child untouched"
+        );
+        assert_eq!(
+            press_on_primary_screen(character("l"), CTRL),
+            None,
+            "a scrollback is still a terminal"
+        );
+        assert_eq!(
+            press(Key::Named(NamedKey::F12), ModifiersState::empty()),
+            None,
+            "a full-screen program keeps its function keys"
+        );
+        assert_eq!(
+            press_in_preview(character("l"), CTRL),
+            None,
+            "a document has no address"
+        );
+        assert_eq!(
+            press_in_preview(Key::Named(NamedKey::F12), ModifiersState::empty()),
+            None,
+            "and no developer tools"
+        );
+    }
+
+    /// PIN (§7.7, W2 slice ④) — **`Escape` puts the capsule away, and is the
+    /// shell's the moment there is no capsule.**
+    ///
+    /// The row exists because a page keeps every key this table does not claim,
+    /// and the capsule is the one rung of §7.1.5's ladder that can stand over a
+    /// page whose keyboard is still the page's (B81's second stance). What must
+    /// not change is the terminal: the ladder answers an Escape at the capsule's
+    /// rung long before `lookup` is asked, so this row is never reached there —
+    /// and with no capsule up it is not in the table at all, which is what keeps
+    /// `0x1b` reaching every shell.
+    ///
+    /// MUTATIONS:
+    /// ① give the row `Scope::Window` — the last two assertions go red, and
+    ///    every `vim` in this window loses the one key it cannot do without;
+    /// ② give it `Scope::WebPage` — the terminal-with-a-capsule assertion goes
+    ///    red, and the table would carry a key that means two things depending
+    ///    on which pane raised the capsule.
+    #[test]
+    fn escape_closes_the_capsule_and_belongs_to_the_shell_otherwise() {
+        let escape = Key::Named(NamedKey::Escape);
+        assert_eq!(
+            press_on_a_page_with_search_open(escape.clone(), ModifiersState::empty()),
+            Some(Action::CloseSearch)
+        );
+        assert_eq!(
+            press_with_search_open(escape.clone(), ModifiersState::empty()),
+            Some(Action::CloseSearch),
+            "one row, both hosts — the ladder simply gets there first on a terminal"
+        );
+        assert_eq!(
+            press_on_a_page(escape.clone(), ModifiersState::empty()),
+            None,
+            "with no capsule up the page keeps Escape, exactly as a shell does"
+        );
+        assert_eq!(
+            press(escape.clone(), ModifiersState::empty()),
+            None,
+            "0x1b is the one byte a terminal cannot be asked to do without"
+        );
+        assert_eq!(
+            press_on_primary_screen(escape, ModifiersState::empty()),
+            None
+        );
+    }
+
     #[test]
     fn goto_tab_covers_one_through_nine_and_stops_there() {
         for ordinal in 1..=9u8 {
@@ -2106,6 +2417,7 @@ mod tests {
             preview: false,
             terminal_primary: true,
             search_open: false,
+            web_page: false,
         };
         // US layout: Shift+1 produces "!", the bare key is "1".
         assert_eq!(
@@ -2287,7 +2599,10 @@ mod tests {
         // used to ride here as a second chord for `OpenSearch`, and it was the
         // only place in the table where two rows meant one thing; it is retired,
         // and anybody who wants it records it onto a row of their own.
-        assert_eq!(BINDINGS.len(), 34);
+        // **Three more on 2026-08-22** (§7.7, W2 slice ④): `Ctrl+L` and `F12`,
+        // ruled in by the user, and bare `Escape` — see [`Action::CloseSearch`]
+        // for why a page turns a rung of the ladder into a row of the table.
+        assert_eq!(BINDINGS.len(), 37);
         assert_eq!(
             BINDINGS
                 .iter()
@@ -2682,6 +2997,7 @@ mod tests {
             preview: false,
             terminal_primary: true,
             search_open: true,
+            web_page: false,
         };
         let f3 = Key::Named(NamedKey::F3);
         assert_eq!(
@@ -2867,6 +3183,7 @@ mod tests {
             preview: false,
             terminal_primary: true,
             search_open: false,
+            web_page: false,
         };
         assert_eq!(
             table.lookup(&key("f"), &key("f"), CTRL_SHIFT, on_scrollback),
@@ -2971,13 +3288,13 @@ mod tests {
             "the retired alias must not still be listed: {:?}",
             lines.iter().map(|line| line.title).collect::<Vec<_>>()
         );
-        let search = named("Find in the terminal");
+        let search = named(Text::ShortcutOpenSearch.text());
         assert_eq!(search.ids, vec!["open-search"]);
         assert_eq!(search.caps, vec!["Ctrl", "F"]);
         assert_eq!(
             search.note.as_deref(),
-            Some(Text::ShortcutScopeTerminalPrimary.text()),
-            "and it wears the scope tag its row carries"
+            Some(Text::ShortcutScopeSearchHost.text()),
+            "and it wears the scope tag its row carries — which since 2026-08-22              is the one that covers both of the capsule's hosts"
         );
 
         // A stub row says its machine has not arrived, or a user presses it,
@@ -3078,16 +3395,34 @@ mod tests {
                     preview: true,
                     terminal_primary: false,
                     search_open: false,
+                    web_page: false,
                 },
                 Scope::TerminalPrimary => Focus {
                     preview: false,
                     terminal_primary: true,
                     search_open: false,
+                    web_page: false,
                 },
                 Scope::SearchOpen => Focus {
                     preview: false,
                     terminal_primary: true,
                     search_open: true,
+                    web_page: false,
+                },
+                Scope::SearchHost => Focus {
+                    preview: false,
+                    terminal_primary: true,
+                    search_open: false,
+                    web_page: false,
+                },
+                // A page is a preview seat with a page on it, and the capsule
+                // can stand over one — which is why the `CloseSearch` row is
+                // reachable at all.
+                Scope::WebPage => Focus {
+                    preview: true,
+                    terminal_primary: false,
+                    search_open: true,
+                    web_page: true,
                 },
             };
             assert_eq!(

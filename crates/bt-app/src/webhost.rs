@@ -343,7 +343,7 @@ fn is_blank(url: &str) -> bool {
 // move: `WebSeat` calls the same function with the same arguments it always
 // did. What did move is why the development target is allowed — the stub
 // admitted it by name, and §3’s loopback rule admits it now (DESIGN §7.8 ⑦).
-use crate::webnav::{BLANK_PAGE, Decision, Mint, navigation_starting};
+use crate::webnav::{BLANK_PAGE, Decision, Mint, Refusal, address_bar, navigation_starting};
 
 // ── The development entry ──────────────────────────────────────────────────
 
@@ -599,6 +599,268 @@ impl WebBounds {
     }
 }
 
+// ── The five failure cards, and where each one's reason comes from ─────────
+
+/// What a web seat is showing instead of a page — or, for the one that stands
+/// **over** a page, as well as it (§7.7 ④).
+///
+/// # One drawing, five rows, two placements
+///
+/// Every variant answers the same four questions the card asks: a sentence, at
+/// most one line of fact, exactly one verb, and whether it takes the seat or
+/// stands on a scrim over it. There is no sixth question and no second verb —
+/// 「一排按钮是程序把自己的判断交还给读者」.
+///
+/// # Nothing here decides anything a machine already said
+///
+/// The reasons are not invented at the card. `RuntimeMissing` is the loader's
+/// own answer (gate 7 proved the registry lies and the loader does not),
+/// `DidNotLoad` is `NavigationCompleted`'s `WebErrorStatus`, `RenderProcessGone`
+/// is `ProcessFailed` with the renderer's kind, `Blocked` carries the
+/// [`Refusal`] the navigation gate produced, and `DownloadRefused` is what is
+/// left when `webnav::address_bar` will not take a download's own URL. The card
+/// spells them; it does not judge them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum WebFault {
+    /// There is no WebView2 runtime on this machine.
+    RuntimeMissing {
+        /// The call that failed and the code it failed with.
+        detail: String,
+    },
+    /// A navigation never committed a document.
+    DidNotLoad {
+        /// The host that was asked — the half of a URL a connection failure is
+        /// about.
+        host: String,
+        /// `WebErrorStatus` in the SDK's own spelling.
+        detail: String,
+    },
+    /// The renderer under this page exited.
+    RenderProcessGone,
+    /// A URL this seat was **handed** does not open in a preview.
+    ///
+    /// Handed, not clicked: a link inside a page is inert and says so in the
+    /// foot (§7.1.5g ⑤), and this card is for the case where there is no page to
+    /// say it over — a stale pin, a restored session, the command palette.
+    Blocked { url: String, refusal: Refusal },
+    /// A download was cancelled and could not be handed to the machine's
+    /// browser either.
+    DownloadRefused { file_name: String },
+}
+
+/// The one thing a failure card's button does.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum WebFaultVerb {
+    /// Open Microsoft's download page in the machine's browser.
+    DownloadTheRuntime,
+    /// Try the navigation again.
+    Reload,
+    /// Put the refused address on the clipboard.
+    CopyAddress(String),
+    /// Hand the **page** over, since the file could not be.
+    OpenPageInBrowser,
+}
+
+/// Where Microsoft publishes the runtime, and the only address this product
+/// hands out that is not one somebody asked for.
+///
+/// A constant rather than a search: the card's verb promises a specific page,
+/// and a query typed into whatever engine is configured is not that page.
+pub(crate) const RUNTIME_DOWNLOAD_PAGE: &str =
+    "https://developer.microsoft.com/microsoft-edge/webview2/";
+
+impl WebFault {
+    /// The one sentence.
+    pub(crate) fn say(&self) -> String {
+        match self {
+            Self::RuntimeMissing { .. } => crate::i18n::Text::WebFailRuntimeSay.text().to_owned(),
+            Self::DidNotLoad { host, .. } => crate::i18n::web_fail_did_not_respond(host),
+            Self::RenderProcessGone => crate::i18n::Text::WebFailCrashSay.text().to_owned(),
+            // The scheme comes from `webnav::scheme_of` and from nowhere else
+            // (§7.8 ③: 「不另起第二种解析」). An address that carries none — a
+            // bare host, an empty string — gets the sentence that names no
+            // scheme rather than a sentence with a hole in it.
+            Self::Blocked { url, .. } => match crate::webnav::scheme_of(url) {
+                Some(scheme) => crate::i18n::web_fail_blocked_scheme(&scheme),
+                None => crate::i18n::Text::WebFailBlockedSay.text().to_owned(),
+            },
+            Self::DownloadRefused { .. } => {
+                crate::i18n::Text::WebFailDownloadSay.text().to_owned()
+            }
+        }
+    }
+
+    /// The one line of fact under it, or nothing when there is no fact worth
+    /// quoting into a bug report.
+    pub(crate) fn detail(&self) -> Option<&str> {
+        match self {
+            Self::RuntimeMissing { detail } | Self::DidNotLoad { detail, .. } => {
+                (!detail.is_empty()).then_some(detail.as_str())
+            }
+            // The crash has none, and that is the mock-up's own answer: there is
+            // no code a renderer's exit hands over that a reader could act on.
+            Self::RenderProcessGone => None,
+            Self::Blocked { url, .. } => Some(url.as_str()),
+            Self::DownloadRefused { file_name } => {
+                (!file_name.is_empty()).then_some(file_name.as_str())
+            }
+        }
+    }
+
+    /// The word on the button.
+    pub(crate) fn verb_text(&self) -> crate::i18n::Text {
+        match self {
+            Self::RuntimeMissing { .. } => crate::i18n::Text::WebFailRuntimeVerb,
+            Self::DidNotLoad { .. } | Self::RenderProcessGone => {
+                crate::i18n::Text::PreviewWebReload
+            }
+            Self::Blocked { .. } => crate::i18n::Text::WebFailBlockedVerb,
+            Self::DownloadRefused { .. } => crate::i18n::Text::WebFailDownloadVerb,
+        }
+    }
+
+    /// What pressing it does.
+    pub(crate) fn verb(&self) -> WebFaultVerb {
+        match self {
+            Self::RuntimeMissing { .. } => WebFaultVerb::DownloadTheRuntime,
+            Self::DidNotLoad { .. } | Self::RenderProcessGone => WebFaultVerb::Reload,
+            Self::Blocked { url, .. } => WebFaultVerb::CopyAddress(url.clone()),
+            Self::DownloadRefused { .. } => WebFaultVerb::OpenPageInBrowser,
+        }
+    }
+
+    /// Whether this card stands on a scrim **over a page that is still there**,
+    /// rather than being the whole of what the seat holds.
+    ///
+    /// One variant answers `true` and the ruling says why: what was cancelled is
+    /// the download, and the page that asked for it is still standing and still
+    /// scrolled where the reader left it — blanking it would throw away more
+    /// than the failure did. The other four have nothing behind them to keep;
+    /// take one of those away and what is left is the black hole a hidden
+    /// WebView leaves (`w0-evidence.md` §2⑨), which is why they have no Escape.
+    pub(crate) fn stands_over_the_page(&self) -> bool {
+        matches!(self, Self::DownloadRefused { .. })
+    }
+}
+
+/// `COREWEBVIEW2_WEB_ERROR_STATUS`, in the SDK's own spelling.
+///
+/// The names and not an invented sentence: the fact line under a card exists so
+/// that it can be copied into a bug report, and the string somebody searching
+/// for that failure will find is the one the API uses. The mock-up writes
+/// `ERR_CONNECTION_REFUSED` in this slot, which is **Chromium's** vocabulary and
+/// not this API's — a demo constant, not a ruling, and recorded as a mock-up
+/// debt rather than transcribed into a lie.
+fn web_error_status_name(status: i32) -> &'static str {
+    match status {
+        1 => "CertificateCommonNameIsIncorrect",
+        2 => "CertificateExpired",
+        3 => "ClientCertificateContainsErrors",
+        4 => "CertificateRevoked",
+        5 => "CertificateIsInvalid",
+        6 => "ServerUnreachable",
+        7 => "Timeout",
+        8 => "ErrorHttpInvalidServerResponse",
+        9 => "ConnectionAborted",
+        10 => "ConnectionReset",
+        11 => "Disconnected",
+        12 => "CannotConnect",
+        13 => "HostNameNotResolved",
+        14 => "OperationCanceled",
+        15 => "RedirectFailed",
+        16 => "UnexpectedError",
+        17 => "ValidAuthenticationCredentialsRequired",
+        18 => "ValidProxyAuthenticationRequired",
+        _ => "Unknown",
+    }
+}
+
+/// The one status that is **not** a page that did not load.
+///
+/// A refused navigation completes with `IsSuccess == false` exactly as a
+/// connection failure does, and the two mean opposite things: one is the policy
+/// working and already has a card of its own, the other is the network. Without
+/// this, every `· blocked` in the foot would also raise a 「did not respond」
+/// over the seat.
+const WEB_ERROR_OPERATION_CANCELED: i32 = 14;
+
+// ── Zoom ───────────────────────────────────────────────────────────────────
+
+/// The zoom ladder, as a browser has them: the rungs `Ctrl`+wheel steps
+/// through, with `1.0` a rung so that the way back to unzoomed is a detent and
+/// not an aim.
+///
+/// A ladder and not a multiplier, because a multiplier has no bottom and no top
+/// and never lands on a round number — and because the two ends are where a
+/// reader finds out that the gesture has stopped rather than gone unnoticed.
+const ZOOM_LADDER: [f64; 15] = [
+    0.25, 0.33, 0.50, 0.67, 0.75, 0.80, 0.90, 1.00, 1.10, 1.25, 1.50, 1.75, 2.00, 2.50, 3.00,
+];
+
+/// The rung above or below `factor`, or `factor` itself at the end of the
+/// ladder.
+///
+/// Written as "which rung is this nearest, then step from there" so that a zoom
+/// the page arrived at by some other route — a restored one, a rung that was
+/// removed — still lands on the ladder rather than stepping off a value that is
+/// not on it.
+pub(crate) fn zoom_step(factor: f64, up: bool) -> f64 {
+    let mut nearest = 0;
+    for (index, rung) in ZOOM_LADDER.iter().enumerate() {
+        if (rung - factor).abs() < (ZOOM_LADDER[nearest] - factor).abs() {
+            nearest = index;
+        }
+    }
+    let stepped = if up {
+        (nearest + 1).min(ZOOM_LADDER.len() - 1)
+    } else {
+        nearest.saturating_sub(1)
+    };
+    ZOOM_LADDER[stepped]
+}
+
+// ── What the head, the foot and the cards read ─────────────────────────────
+
+/// Everything about a page that this window draws, and nothing it does not.
+///
+/// **Every field arrives on an event.** None of them is polled, and the W1
+/// report is explicit about why for the two that matter most: 「`CanGoBack` /
+/// `CanGoForward` 事件驱动 ... 不要照抄小样的 420ms 假节拍」. A getter read on
+/// the window's frame clock would be sampling values that settle on the
+/// engine's.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PageFacts {
+    /// `DocumentTitleChanged`. Empty until a document says what it is called,
+    /// which is what makes the head fall back to the address.
+    pub(crate) title: String,
+    /// `SourceChanged` — the committed address, including the ones the history
+    /// API writes without completing a navigation.
+    pub(crate) url: String,
+    pub(crate) can_go_back: bool,
+    pub(crate) can_go_forward: bool,
+    /// Between `NavigationStarting` and `NavigationCompleted`. What turns the
+    /// reload button into a stop.
+    pub(crate) loading: bool,
+    /// `StatusBarTextChanged` — where the pointer is pointing, resolved by the
+    /// engine. Empty when it is over nothing.
+    pub(crate) hover: String,
+}
+
+impl PageFacts {
+    /// What the head's name cell shows.
+    ///
+    /// The title, and the address until there is one. A blank cell over a page
+    /// that is loading would be the one moment the head says nothing at all,
+    /// and the address is what the reader just typed.
+    pub(crate) fn name(&self) -> &str {
+        if self.title.is_empty() {
+            &self.url
+        } else {
+            &self.title
+        }
+    }
+}
+
 // ── The driver ─────────────────────────────────────────────────────────────
 
 /// How long anything waits for a browser process to say it is gone.
@@ -656,11 +918,21 @@ pub(crate) enum WebOutcome {
     /// policy stopped it" and "it went and came back" is not otherwise visible
     /// from outside the process — and one of those two is a security hole.
     Refused(String),
-    /// Something the window should say out loud. Slice ④ owns the five failure
-    /// cards (`DESIGN.md` §7.7 ④); until it exists this goes to `stderr`, which
-    /// is the same place `BT_DPI` writes and for the same reason — a fact with
-    /// nowhere yet to be drawn is still a fact.
+    /// Something the window should say out loud that **no card covers**.
+    ///
+    /// Slice ④ drew the five §7.7 ④ rules, and this is what is left over: an
+    /// engine error in a state nobody has written a sentence for. It goes where
+    /// `BT_DPI` goes and for the same reason — a fact with nowhere to be drawn
+    /// is still a fact.
     Fault(String),
+    /// A URL the window should hand to the machine's browser.
+    ///
+    /// Raised by a download the engine cancelled whose address a plain link can
+    /// replay (方案 §0). External hand-off is the window's verb and always has
+    /// been; the seat only says which address.
+    HandOff(String),
+    /// The find session's tally, on its way to the search capsule.
+    FindMatches { count: i32, active: i32 },
 }
 
 /// Why the driver is waiting for a browser process to go.
@@ -722,6 +994,24 @@ pub(crate) struct WebSeat {
     /// a page a `click` and never a `dblclick`, so selecting a word by
     /// double-clicking it would silently not work.
     last_left_press: Option<(Instant, (i32, i32))>,
+    /// Everything the head, the foot and the cards read (slice ④).
+    page: PageFacts,
+    /// What the seat is showing instead of — or over — its page.
+    fault: Option<WebFault>,
+    /// The refusal the navigation gate produced, kept by the URL it was about.
+    ///
+    /// Shared with the gate for [`WebSeat::mint`]'s reason: the gate runs inside
+    /// a COM callback and cannot reach `self`. It is written there and read here
+    /// when `NavigationStarting` reports the cancel, which is what lets the
+    /// 「导航被拦」 card name a reason **the door actually gave** rather than one
+    /// re-derived afterwards from a mint that may have moved on.
+    refusal: Rc<RefCell<Option<(String, Refusal)>>>,
+    /// The page's zoom as this window last set it.
+    ///
+    /// Kept here as well as in the controller because `Ctrl`+wheel steps from
+    /// the rung it is on, and a rung read back through COM on every notch would
+    /// be a syscall inside a wheel gesture.
+    zoom: f64,
 }
 
 impl WebSeat {
@@ -737,6 +1027,8 @@ impl WebSeat {
         })?;
         let mint = Rc::new(RefCell::new(Mint::Nothing));
         let gate = Rc::clone(&mint);
+        let refusal = Rc::new(RefCell::new(None));
+        let refusal_sink = Rc::clone(&refusal);
         let host = WebHost::new(
             Box::new(move |candidate| {
                 match navigation_starting(candidate, &gate.borrow()) {
@@ -747,7 +1039,18 @@ impl WebSeat {
                     // A search cannot come out of this door — slice ② has a test
                     // that pins that — and a candidate that is not an address is
                     // not one this seat is going to.
-                    Decision::Search(_) | Decision::Refuse(_) => WebNavigationVerdict::Cancel,
+                    //
+                    // **The reason is written down where it was decided.** The
+                    // 「导航被拦」card needs it, and the only place it exists is
+                    // inside this closure: `NavigationStarting` reports that a
+                    // navigation was cancelled and never why, and asking the
+                    // door a second time afterwards would be asking it about a
+                    // mint that may have moved on between the two questions.
+                    Decision::Refuse(why) => {
+                        *refusal_sink.borrow_mut() = Some((candidate.to_owned(), why));
+                        WebNavigationVerdict::Cancel
+                    }
+                    Decision::Search(_) => WebNavigationVerdict::Cancel,
                 }
             }),
             wake,
@@ -765,6 +1068,10 @@ impl WebSeat {
             presence: None,
             buttons: bt_platform::web_mouse_buttons::NONE,
             last_left_press: None,
+            page: PageFacts::default(),
+            fault: None,
+            refusal,
+            zoom: 1.0,
         };
         let effect = web.machine.request(url);
         debug_assert_eq!(effect, WebEffect::Ignore, "an engine that is not up yet");
@@ -801,7 +1108,27 @@ impl WebSeat {
     fn digest(&mut self, event: &WebEvent, outcomes: &mut Vec<WebOutcome>) -> WebEffect {
         match event {
             WebEvent::Environment { generation, error } => {
+                // **The runtime question is asked of the loader, never of this
+                // error string.** Gate 7 watched the registry go on reporting a
+                // version for a runtime that was not there while
+                // `CreateCoreWebView2EnvironmentWithOptions` failed
+                // synchronously; the loader is the oracle that did not lie. So
+                // an environment that failed is two different cards depending on
+                // one further fact, and that fact is a second call rather than a
+                // pattern match on a message.
+                //
+                // **An environment that failed with a runtime installed draws
+                // no card**, and that is a boundary of the ruling rather than a
+                // gap in the code: §7.7 ④ names five states and this is not one
+                // of them, so it goes where slice ① put every fact with nowhere
+                // to be drawn — `stderr`. Recorded as an open item; a sixth card
+                // is a sentence somebody has to rule.
                 if let Some(error) = error {
+                    if bt_platform::webview2_runtime_version().is_err() {
+                        self.fault = Some(WebFault::RuntimeMissing {
+                            detail: error.clone(),
+                        });
+                    }
                     outcomes.push(WebOutcome::Fault(error.clone()));
                 }
                 self.machine.on_environment(*generation, error.is_none())
@@ -816,13 +1143,43 @@ impl WebSeat {
             // finished; what the window owes is the refusal, said out loud.
             WebEvent::NavigationStarting { uri, cancelled } => {
                 if *cancelled {
+                    // The card is for a URL the **seat** was handed, not for a
+                    // link inside a page: §7.1.5g ⑤ says a link this window will
+                    // not follow does nothing and says so in the foot, and there
+                    // is a page standing there to say it over. What tells the two
+                    // apart is whether anything ever committed here.
+                    let refused = self.refusal.borrow_mut().take();
+                    if let Some((url, why)) = refused
+                        && self.page.url.is_empty()
+                    {
+                        self.fault = Some(WebFault::Blocked { url, refusal: why });
+                    }
                     outcomes.push(WebOutcome::Refused(uri.clone()));
+                } else {
+                    self.page.loading = true;
                 }
                 WebEffect::Ignore
             }
-            WebEvent::NavigationCompleted { uri, success, .. } => self
-                .machine
-                .on_navigation_completed(self.machine.generation(), uri, *success),
+            WebEvent::NavigationCompleted {
+                uri,
+                success,
+                status,
+            } => {
+                self.page.loading = false;
+                if *success {
+                    self.fault = None;
+                } else if *status != WEB_ERROR_OPERATION_CANCELED {
+                    // A refused navigation completes with `IsSuccess == false`
+                    // exactly as a connection failure does. Only one of the two
+                    // is the network, and only that one gets this card.
+                    self.fault = Some(WebFault::DidNotLoad {
+                        host: crate::webnav::host_of(uri).unwrap_or_default(),
+                        detail: format!("WebErrorStatus · {}", web_error_status_name(*status)),
+                    });
+                }
+                self.machine
+                    .on_navigation_completed(self.machine.generation(), uri, *success)
+            }
             // 0 is the browser process and 1 the renderer: one name over two
             // entirely different events.
             WebEvent::ProcessFailed { kind, .. } if *kind == 0 => {
@@ -831,7 +1188,11 @@ impl WebSeat {
                     description: String::new(),
                 })
             }
-            WebEvent::ProcessFailed { .. } => self.machine.on_render_process_failed(),
+            WebEvent::ProcessFailed { .. } => {
+                self.page.loading = false;
+                self.fault = Some(WebFault::RenderProcessGone);
+                self.machine.on_render_process_failed()
+            }
             WebEvent::BrowserProcessExited { kind } => {
                 self.browser_is_gone(WebEvent::BrowserProcessExited { kind: *kind })
             }
@@ -861,6 +1222,63 @@ impl WebSeat {
             }
             WebEvent::CursorChanged { system_cursor_id } => {
                 outcomes.push(WebOutcome::Cursor(*system_cursor_id));
+                WebEffect::Ignore
+            }
+            WebEvent::HistoryChanged {
+                can_go_back,
+                can_go_forward,
+            } => {
+                self.page.can_go_back = *can_go_back;
+                self.page.can_go_forward = *can_go_forward;
+                WebEffect::Ignore
+            }
+            WebEvent::DocumentTitleChanged { title } => {
+                self.page.title.clone_from(title);
+                WebEffect::Ignore
+            }
+            WebEvent::SourceChanged { uri } => {
+                // The blank page this host mints for itself is not an address a
+                // person asked for, and putting it in the head would be the seat
+                // announcing its own scaffolding.
+                if uri.eq_ignore_ascii_case(BLANK_PAGE) {
+                    self.page.url.clear();
+                } else {
+                    self.page.url.clone_from(uri);
+                }
+                WebEffect::Ignore
+            }
+            WebEvent::StatusBarTextChanged { text } => {
+                self.page.hover.clone_from(text);
+                WebEffect::Ignore
+            }
+            // **The download is already cancelled** — the engine could not be
+            // asked later. What is decided here is what happens instead, and
+            // the rule is 方案 §0's: hand over a URL that can be replayed, and
+            // say so when it cannot. What「可重放」means is not guessed at —
+            // it is the address bar's own answer, because a `blob:` or a
+            // `data:` URL names memory inside a page rather than a request
+            // anybody else can make, and those are exactly the ones that door
+            // already refuses.
+            WebEvent::DownloadStarting { uri, file_name } => {
+                match address_bar(uri) {
+                    Decision::Navigate(target) => outcomes.push(WebOutcome::HandOff(target)),
+                    Decision::Search(_) | Decision::Refuse(_) => {
+                        self.fault = Some(WebFault::DownloadRefused {
+                            file_name: file_name
+                                .rsplit(['\\', '/'])
+                                .next()
+                                .unwrap_or_default()
+                                .to_owned(),
+                        });
+                    }
+                }
+                WebEffect::Ignore
+            }
+            WebEvent::FindMatches { count, active } => {
+                outcomes.push(WebOutcome::FindMatches {
+                    count: *count,
+                    active: *active,
+                });
                 WebEffect::Ignore
             }
         }
@@ -1151,6 +1569,146 @@ impl WebSeat {
         } else {
             event
         }
+    }
+
+    // ── What the chrome reads, and the verbs it presses (slice ④) ──────────
+
+    /// Everything the head, the foot and the cards draw from.
+    pub(crate) fn page(&self) -> &PageFacts {
+        &self.page
+    }
+
+    /// The card this seat is showing, if it is showing one.
+    pub(crate) fn fault(&self) -> Option<&WebFault> {
+        self.fault.as_ref()
+    }
+
+    /// Take the sheet away.
+    ///
+    /// **Only the sheet.** The four cards that *are* the seat have no Escape and
+    /// no other dismissal, because taking one of them away leaves the black hole
+    /// a hidden WebView draws — see [`WebFault::stands_over_the_page`].
+    pub(crate) fn dismiss_sheet(&mut self) -> bool {
+        if self.fault.as_ref().is_some_and(WebFault::stands_over_the_page) {
+            self.fault = None;
+            return true;
+        }
+        false
+    }
+
+    /// Walk this page's own navigation stack.
+    ///
+    /// Guarded on what the head is drawing, which is what the reader pressed:
+    /// the buttons are dimmed and inert when the stack has no more to give, and
+    /// a call that went through anyway would be the window acting on a history
+    /// the person is not looking at.
+    pub(crate) fn go(&mut self, forwards: bool) -> Result<(), String> {
+        if forwards {
+            if !self.page.can_go_forward {
+                return Ok(());
+            }
+            self.host.go_forward()
+        } else {
+            if !self.page.can_go_back {
+                return Ok(());
+            }
+            self.host.go_back()
+        }
+    }
+
+    /// The third button: reload, or stop while something is in flight.
+    ///
+    /// One verb and not two, because it is one button. 「同一秒里刷新钮变停止钮
+    /// ,三个钮还是三个钮」.
+    /// **The card stays up until something loads.** Clearing it on the press
+    /// would blank the seat to the black hole a hidden WebView draws for as long
+    /// as the retry takes, which is the one state §7.7 ④ exists to keep off the
+    /// glass; the head's mark spins over the card meanwhile, so the retry is
+    /// visible without the card having to leave.
+    pub(crate) fn reload_or_stop(&mut self) -> Result<(), String> {
+        if self.page.loading {
+            return self.host.stop();
+        }
+        self.host.reload()
+    }
+
+    /// Open the engine's developer tools on this page.
+    pub(crate) fn open_dev_tools(&self) -> Result<(), String> {
+        self.host.open_dev_tools()
+    }
+
+    /// Go somewhere, because a person typed it or pressed a row that named it.
+    ///
+    /// **The address door and no other.** The string is judged by
+    /// `webnav::address_bar` — the same function a pin, a restored session and
+    /// the command palette are judged by — and a refusal is silent here on
+    /// purpose: the field says it, in the field, by turning `--err` (§7.7 ④'s
+    /// 「说在打字的地方」). A card would be telling a reader what they are
+    /// already looking at.
+    /// The bool is whether the address was taken; the outcomes are whatever the
+    /// state machine had to say about starting it.
+    pub(crate) fn go_to(
+        &mut self,
+        input: &str,
+        compositor: &bt_platform::Compositor,
+    ) -> (bool, Vec<WebOutcome>) {
+        let Decision::Navigate(target) = address_bar(input) else {
+            return (false, Vec::new());
+        };
+        // Through the machine and not straight at the engine: §4's `desired_url`
+        // is what a seat that is still coming up remembers, and a navigation
+        // issued around it would be one the recovery model never heard of.
+        let effect = self.machine.request(&target);
+        let mut outcomes = Vec::new();
+        self.apply(effect, compositor, &mut outcomes);
+        (true, outcomes)
+    }
+
+    /// Whether this text would be navigated to, for the field that has to say so
+    /// while it is still being typed.
+    ///
+    /// The same door, asked without knocking. An empty field is not wrong — it
+    /// is unfinished — so it does not light up red.
+    pub(crate) fn would_go_to(input: &str) -> bool {
+        input.trim().is_empty() || matches!(address_bar(input), Decision::Navigate(_))
+    }
+
+    /// One notch of `Ctrl`+wheel.
+    ///
+    /// **`Ctrl`+wheel is empty everywhere else in this window** — there is no
+    /// type-size zoom in this product and a picture zooms on the bare wheel — so
+    /// nothing is being taken from anything by claiming it over a page.
+    pub(crate) fn zoom_by(&mut self, up: bool) -> Result<(), String> {
+        let next = zoom_step(self.zoom, up);
+        if (next - self.zoom).abs() < f64::EPSILON {
+            return Ok(());
+        }
+        self.zoom = next;
+        self.host.set_zoom(next)
+    }
+
+    /// The page's zoom, for a test and for whoever asks next.
+    pub(crate) fn zoom(&self) -> f64 {
+        self.zoom
+    }
+
+    /// Search this page for `term`. The counts come back as
+    /// [`WebOutcome::FindMatches`].
+    pub(crate) fn find(&self, term: &str, case_sensitive: bool) -> Result<(), String> {
+        if term.is_empty() {
+            return self.host.find_stop();
+        }
+        self.host.find(term, case_sensitive)
+    }
+
+    /// Walk to the next match, or the previous one.
+    pub(crate) fn find_step(&self, forwards: bool) -> Result<(), String> {
+        self.host.find_step(forwards)
+    }
+
+    /// End the session and take the page's highlights off.
+    pub(crate) fn find_stop(&self) -> Result<(), String> {
+        self.host.find_stop()
     }
 
     /// Put the keyboard inside the page.
@@ -1478,6 +2036,12 @@ mod keyboard_tests {
         ("open-search", "Ctrl+f"),
         ("next-match", "F3"),
         ("prev-match", "Shift+F3"),
+        // **Three arrived on 2026-08-22** (§7.7, W2 slice ④): the capsule's own
+        // Escape, and the two rows the user ruled in for a page's address field
+        // and its developer tools.
+        ("close-search", "Escape"),
+        ("web-address", "Ctrl+l"),
+        ("web-devtools", "F12"),
     ];
 
     fn spell(chord: &Chord) -> String {
@@ -1511,7 +2075,7 @@ mod keyboard_tests {
             .map(|(id, chord)| (*id, (*chord).to_owned()))
             .collect();
         assert_eq!(spelled, expected);
-        assert_eq!(spelled.len(), 30);
+        assert_eq!(spelled.len(), 33);
     }
 
     /// RED — and every one of them reaches a virtual key, because
@@ -1521,7 +2085,7 @@ mod keyboard_tests {
         let claims = claimable_chords(&Shortcuts::defaults(), every_focus());
         assert_eq!(
             claims.len(),
-            30,
+            33,
             "a chord this window owns that the web host cannot name in Win32 is \
              a chord that silently stops working while a page has the focus"
         );
@@ -1567,10 +2131,17 @@ mod keyboard_tests {
                 "Ctrl+{letter} belongs to the page (clipboard, undo, reload, print)"
             );
         }
-        // F5 and F12 are the page's too, and stay so until somebody rules
-        // otherwise — see `w0p-evidence.md` §8, slice ④.
+        // F5 is still the page's: reload has a button of its own on the head,
+        // and the key the engine already answers with the same verb is not one
+        // this table has any reason to take.
         assert!(!claims_chord(&claims, VK_F5, false, false, false));
-        assert!(!claims_chord(&claims, VK_F12, false, false, false));
+        // **F12 is the window's since 2026-08-22** (user ruling). It is a door
+        // that did not otherwise exist from the keyboard — the developer-tools
+        // tool is invisible until the pointer arrives — and the verb behind it
+        // is this window's `web-devtools` row.
+        assert!(claims_chord(&claims, VK_F12, false, false, false));
+        // And `Ctrl+L`, which is the address field's second door.
+        assert!(claims_chord(&claims, b'L' as u16, true, false, false));
         // Bare Alt walks in as a system key and walks straight out to the page.
         assert!(!claims_chord(&claims, VK_MENU, false, false, true));
         // The control row: this one is the window's, and the page must not see it.
@@ -1589,6 +2160,59 @@ mod keyboard_tests {
         let claims = claimable_chords(&Shortcuts::defaults(), every_focus());
         assert!(!claims_chord(&claims, VK_LEFT, false, false, true));
         assert!(!claims_chord(&claims, VK_RIGHT, false, false, true));
+        // **And the ruling that kept them there** (§7.7, W2 slice ④,
+        // 2026-08-22). Not a measurement this time but a decision, and this is
+        // the nail in it: no row of the shipped table may claim those two
+        // chords under *any* focus the window can be in, so taking them back is
+        // a change somebody makes to the ruling and never one that arrives as a
+        // side effect of adding a row.
+        for row in BINDINGS {
+            let Some(chord) = row.chord.as_ref() else {
+                continue;
+            };
+            let alt_only = chord.modifiers == ModifiersState::ALT;
+            let arrow = matches!(
+                &chord.key,
+                ChordKey::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight)
+            );
+            assert!(
+                !(alt_only && arrow),
+                "{}: Alt+Left and Alt+Right are the engine's back and forward (DESIGN §7.7 W2 ④); claiming one is a ruling, not a row",
+                row.id
+            );
+        }
+    }
+
+    /// PIN (§7.7 ②, W2 slice ④) — **`Ctrl+F` is claimed over a page, and that
+    /// is what keeps the engine's own find bar out of the seat.**
+    ///
+    /// This build's bindings do not carry `AreBrowserAcceleratorKeysEnabled`, so
+    /// a key this table does not take is a key the engine keeps — and the key
+    /// the engine keeps here opens a second search box inside a window whose
+    /// whole search story is that there is one.
+    ///
+    /// MUTATION: put `open-search` back on `Scope::TerminalPrimary` and this
+    /// goes red, which is the second host losing its capsule.
+    #[test]
+    fn the_page_gives_the_search_chord_back_to_the_window() {
+        let on_a_page = Focus {
+            preview: true,
+            terminal_primary: false,
+            search_open: false,
+            web_page: true,
+        };
+        let claims = claimable_chords(&Shortcuts::defaults(), on_a_page);
+        assert!(claims_chord(&claims, b'F' as u16, true, false, false));
+        // And Escape is *not* claimed until there is a capsule to put away: a
+        // page owns every key this table does not, and with nothing open there
+        // is nothing for the window to do with it.
+        assert!(!claims_chord(&claims, VK_ESCAPE, false, false, false));
+        let searching = Focus {
+            search_open: true,
+            ..on_a_page
+        };
+        let claims = claimable_chords(&Shortcuts::defaults(), searching);
+        assert!(claims_chord(&claims, VK_ESCAPE, false, false, false));
     }
 
     /// RED — a row out of scope is not claimed, because a key the window will
@@ -1624,6 +2248,7 @@ mod keyboard_tests {
             preview: true,
             terminal_primary: true,
             search_open: true,
+            web_page: true,
         }
     }
 }
