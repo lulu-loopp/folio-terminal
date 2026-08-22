@@ -16578,6 +16578,151 @@ fn persisted_preview_row(
     ))
 }
 
+/// **The switcher's whole list, in one place** — the tab's pool with the kept
+/// rows lifted to the top (P130-P137, user ruling 2026-08-19, W2 slice ③).
+///
+/// **The dropdown is the honest inventory of hidden state** (P130, `DESIGN.md`
+/// §7.1.3): the pool's own order, every buffer in it, and each one's dirty bit —
+/// a list that showed only the clean ones, or only the recent ones, would be the
+/// window deciding which unsaved edits you are allowed to know about.
+///
+/// **Files and pages in one list and one index space** (`docs/DESIGN.md` §7.7 ⑤).
+/// Nothing here branches on which of the two a row is except the two places where
+/// they genuinely differ: which pin category the row belongs to, and what an
+/// *unopened* kept row is called.
+///
+/// A free function, taking the three things it reads, so that "the switcher lists
+/// a page exactly as it lists a file" is a claim a test can make without a window.
+fn switcher_rows(
+    pool: &preview::PreviewPool,
+    current: Option<&preview::PreviewSource>,
+    kept: &[(bt_persist::PinKind, String)],
+) -> Vec<profiles::PreviewMenuItem> {
+    let live: Vec<profiles::PreviewMenuItem> = pool
+        .buffers()
+        .enumerate()
+        .map(|(index, buffer)| profiles::PreviewMenuItem {
+            name: buffer.name.clone(),
+            dirty: buffer.dirty,
+            current: Some(&buffer.source) == current,
+            // **A file and a page can both be kept, and each under its own
+            // category** (W2 slice ③). A diff and a commit's reading of a file
+            // cannot: they are documents this window computed, and keeping one
+            // would be keeping the question.
+            keep: preview_menu_target(&buffer.source),
+            pinned: false,
+            pool: Some(index),
+        })
+        .collect();
+    // **The kept rows first, and each of them once** (user ruling 2026-08-19). A
+    // kept target that is also open is *lifted* out of the list below rather than
+    // copied above it, which is the ruling's own "PINNED 与最近列表不留双副本" —
+    // and a kept target nobody has opened is a row with no buffer behind it,
+    // which is what makes the section survive a restart.
+    //
+    // **Both categories, in the file's own order** (`pins.json` is one table and
+    // array order is display order), and the lift compares the pair rather than
+    // the string: `pins::row_of` identifies a row by category and target
+    // together, and a switcher that compared only targets would let a pinned file
+    // stand in for a pinned page.
+    let kept: Vec<profiles::PreviewMenuTarget> = kept
+        .iter()
+        .map(|(kind, target)| profiles::PreviewMenuTarget {
+            kind: *kind,
+            target: target.clone(),
+        })
+        .collect();
+    // A row that cannot be kept can never match a kept one, and the `Folder`
+    // category is how that is said in this type rather than by a second `Option`
+    // in the comparison: the switcher never draws a folder, so no row it holds
+    // can carry that category honestly.
+    let unkeepable = profiles::PreviewMenuTarget {
+        kind: bt_persist::PinKind::Folder,
+        target: String::new(),
+    };
+    let (pinned, rest) = pins::lift_pinned(&kept, &live, |item| {
+        item.keep.clone().unwrap_or_else(|| unkeepable.clone())
+    });
+    pinned
+        .into_iter()
+        .map(|keep| {
+            let open = live.iter().find(|item| item.keep.as_ref() == Some(&keep));
+            profiles::PreviewMenuItem {
+                // The pool's own name where there is a pool entry, and the
+                // target's own where there is not: a file by its last segment, a
+                // page by its site — the same two functions every other surface
+                // that names an unopened row uses, so a kept thing reads the same
+                // before and after it is opened.
+                name: open.map_or_else(
+                    || match keep.kind {
+                        bt_persist::PinKind::Url => webnav::site_label(&keep.target),
+                        _ => files_row_display_name(Path::new(&keep.target)),
+                    },
+                    |item| item.name.clone(),
+                ),
+                dirty: open.is_some_and(|item| item.dirty),
+                current: open.is_some_and(|item| item.current),
+                keep: Some(keep),
+                pinned: true,
+                pool: open.and_then(|item| item.pool),
+            }
+        })
+        .chain(rest)
+        .collect()
+}
+
+/// **The seat a page opens on in this tab** — the singleton rule (`plan.md` §0
+/// ②「每 tab 单例」).
+///
+/// The tab's own preview seats are what is walked, and the window's hosted set is
+/// only asked *about* them: a window holds a page per seat and its seats span
+/// every tab, so a rule written against that map alone would let a page open on
+/// tab 2 be what tab 1 navigates.
+///
+/// `None` means this tab has no page yet, and the caller lands one the ordinary
+/// way — on `preview_landing_surface`, which is the same address rule a file
+/// opening obeys.
+fn web_seat_among(preview_seats: &[SeatId], hosted: &BTreeSet<SeatId>) -> Option<SeatId> {
+    preview_seats
+        .iter()
+        .copied()
+        .find(|seat| hosted.contains(seat))
+}
+
+/// **Where a switcher row's target actually goes**, or `None` for one this
+/// window will not go to (`plan.md` §3「钉不是授权」).
+///
+/// The *second* of the pin's two validations, as a function so it can be shot at
+/// without a window. It is `webnav::address_bar` and nothing else: the same door
+/// a typed address goes through, because a row that came out of `pins.json` is a
+/// string somebody may have edited by hand, may have written under an older
+/// policy, or may have pinned before this one tightened.
+///
+/// A search cannot come out of this door either. The row's string was written by
+/// this window as a URL, and one that no longer reads as one is a row that has
+/// been edited into something else — so it is refused rather than searched for.
+fn switcher_row_destination(target: &str) -> Option<String> {
+    match webnav::address_bar(target) {
+        webnav::Decision::Navigate(url) => Some(url),
+        webnav::Decision::Search(_) | webnav::Decision::Refuse(_) => None,
+    }
+}
+
+/// **Whether a switcher row may be written into `pins.json`** — the *first* of
+/// the pin's two validations.
+///
+/// A page is kept only if this window would navigate to it now, so a target the
+/// policy refuses never reaches the file at all. A file is not asked: whether a
+/// path is still there is a filesystem question, and `pins.json`'s own header
+/// records that this store deliberately does not ask it.
+///
+/// **An unpin is never gated**, which is why this is asked only of a row that is
+/// not already kept: taking a row *out* of that file must be allowed whatever the
+/// row says, or a tightened policy leaves rows nobody can delete.
+fn switcher_pin_is_allowed(kind: bt_persist::PinKind, target: &str) -> bool {
+    kind != bt_persist::PinKind::Url || switcher_row_destination(target).is_some()
+}
+
 /// **What a switcher row keeps, and under which category** — `None` for a
 /// buffer that cannot be kept at all.
 ///
@@ -39500,77 +39645,15 @@ impl Runtime<'_> {
     /// recent ones, would be the window deciding which unsaved edits you are
     /// allowed to know about.
     fn preview_menu_items(&self, seat: SeatId) -> Vec<profiles::PreviewMenuItem> {
-        let current = self
-            .preview_pane(PreviewSurface::Seat(seat))
-            .and_then(|pane| pane.buffer.as_ref());
-        let live: Vec<profiles::PreviewMenuItem> = self
-            .preview_pool
-            .buffers()
-            .enumerate()
-            .map(|(pool, buffer)| profiles::PreviewMenuItem {
-                name: buffer.name.clone(),
-                dirty: buffer.dirty,
-                current: Some(&buffer.source) == current,
-                // **A file and a page can both be kept, and each under its own
-                // category** (W2 slice ③). A diff and a commit's reading of a
-                // file cannot: they are documents this window computed, and
-                // keeping one would be keeping the question.
-                keep: preview_menu_target(&buffer.source),
-                pinned: false,
-                pool: Some(pool),
-            })
-            .collect();
-        // **The kept rows first, and each of them once** (user ruling
-        // 2026-08-19). A kept target that is also open is *lifted* out of the
-        // list below rather than copied above it, which is the ruling's own
-        // "PINNED 与最近列表不留双副本" — and a kept target nobody has opened is a
-        // row with no buffer behind it, which is what makes the section survive a
-        // restart.
-        //
-        // **Both categories, in the file's own order** (`pins.json` is one table
-        // and array order is display order), and the lift compares the pair
-        // rather than the string: `pins::row_of` identifies a row by category and
-        // target together, and a switcher that compared only targets would let a
-        // pinned file stand in for a pinned page.
-        let kept: Vec<profiles::PreviewMenuTarget> = self
-            .app
-            .pins_store
-            .rows_of(&[bt_persist::PinKind::File, bt_persist::PinKind::Url])
-            .into_iter()
-            .map(|(kind, target)| profiles::PreviewMenuTarget { kind, target })
-            .collect();
-        let (pinned, rest) = pins::lift_pinned(&kept, &live, |item| {
-            item.keep.clone().unwrap_or(profiles::PreviewMenuTarget {
-                kind: bt_persist::PinKind::Folder,
-                target: String::new(),
-            })
-        });
-        pinned
-            .into_iter()
-            .map(|keep| {
-                let open = live.iter().find(|item| item.keep.as_ref() == Some(&keep));
-                profiles::PreviewMenuItem {
-                    // The pool's own name where there is a pool entry, and the
-                    // target's own where there is not: a file by its last
-                    // segment, a page by its site — the same two functions every
-                    // other surface that names an unopened row uses, so a kept
-                    // thing reads the same before and after it is opened.
-                    name: open.map_or_else(
-                        || match keep.kind {
-                            bt_persist::PinKind::Url => webnav::site_label(&keep.target),
-                            _ => files_row_display_name(Path::new(&keep.target)),
-                        },
-                        |item| item.name.clone(),
-                    ),
-                    dirty: open.is_some_and(|item| item.dirty),
-                    current: open.is_some_and(|item| item.current),
-                    keep: Some(keep),
-                    pinned: true,
-                    pool: open.and_then(|item| item.pool),
-                }
-            })
-            .chain(rest)
-            .collect()
+        switcher_rows(
+            &self.preview_pool,
+            self.preview_pane(PreviewSurface::Seat(seat))
+                .and_then(|pane| pane.buffer.as_ref()),
+            &self
+                .app
+                .pins_store
+                .rows_of(&[bt_persist::PinKind::File, bt_persist::PinKind::Url]),
+        )
     }
 
     /// **Go to a page, having asked whether this window may** — the second of
@@ -39588,16 +39671,11 @@ impl Runtime<'_> {
     /// redirects and page scripts start navigations no address field ever saw
     /// (`webnav` ①). This one is about the string; that one is about the load.
     fn navigate_preview_page(&mut self, target: &str) -> Result<()> {
-        match webnav::address_bar(target) {
-            webnav::Decision::Navigate(url) => self.open_web_page(&url),
-            // A search from a switcher row is not a thing: the row's string was
-            // written by this window as a URL, and one that no longer reads as
-            // one is a row that has been edited into something else.
-            webnav::Decision::Search(_) | webnav::Decision::Refuse(_) => {
-                eprintln!("BT_WEB refused {target}");
-                Ok(())
-            }
-        }
+        let Some(url) = switcher_row_destination(target) else {
+            eprintln!("BT_WEB refused {target}");
+            return Ok(());
+        };
+        self.open_web_page(&url)
     }
 
     /// Keep this folder, or stop keeping it (user ruling 2026-08-19).
@@ -39650,13 +39728,7 @@ impl Runtime<'_> {
             .rows_of(&[keep.kind])
             .iter()
             .any(|(_, target)| *target == keep.target);
-        if !already
-            && keep.kind == bt_persist::PinKind::Url
-            && !matches!(
-                webnav::address_bar(&keep.target),
-                webnav::Decision::Navigate(_)
-            )
-        {
+        if !already && !switcher_pin_is_allowed(keep.kind, &keep.target) {
             eprintln!("BT_WEB refused {}", keep.target);
             return Ok(());
         }
@@ -56058,10 +56130,10 @@ impl Runtime<'_> {
     /// spans every tab in the window: a page open on tab 2 must not be what tab 1
     /// navigates when you press a switcher row.
     fn web_seat_of_tab(&self) -> Option<SeatId> {
-        self.seats
-            .preview_seats()
-            .into_iter()
-            .find(|seat| self.window.web.contains_key(seat))
+        web_seat_among(
+            &self.seats.preview_seats(),
+            &self.window.web.keys().copied().collect(),
+        )
     }
 
     /// **Go to a page in this tab** — the one door, whatever asked.
@@ -86002,6 +86074,260 @@ mod tests {
             full.components().count(),
             root.components().count() + 4,
             "and every folder git named is a folder of the path: {full:?}"
+        );
+    }
+
+    // ── W2 slice ③: a page is a preview buffer, in every list a file is in ──
+
+    /// A pool holding a file and a page, which is the state every claim below is
+    /// about.
+    fn a_pool_with_a_file_and_a_page() -> preview::PreviewPool {
+        let mut pool = preview::PreviewPool::default();
+        pool.insert(preview::PreviewBuffer::new(
+            preview::PreviewSource::file(r"C:\work\notes.md"),
+            "notes.md".to_owned(),
+        ));
+        pool.insert(preview::PreviewBuffer::new(
+            preview::PreviewSource::Web("http://localhost:5173/app".to_owned()),
+            "Folio site".to_owned(),
+        ));
+        pool
+    }
+
+    /// **A page and a file are the same kind of row** (`docs/DESIGN.md` §7.7 ⑤ —
+    /// 「同一张列表、同一个索引空间」).
+    ///
+    /// One list, one index space, one order: the pool's. What differs between the
+    /// two rows is the two things that genuinely differ — the mark, and which
+    /// category the pin writes — and the test says both out loud because a build
+    /// that filed a page under `file` would put it in the section the *root menu*
+    /// draws from.
+    ///
+    /// Red gate: `preview_menu_target` answering `PinKind::File` for every source
+    /// makes the category assertion fail; `preview_row_mark` answering `File` for
+    /// every row makes the mark assertion fail.
+    #[test]
+    fn the_switcher_lists_a_page_in_the_same_table_as_a_file() {
+        let rows = switcher_rows(&a_pool_with_a_file_and_a_page(), None, &[]);
+        assert_eq!(
+            rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
+            vec!["notes.md", "Folio site"],
+            "the pool's own order, both kinds of row in it"
+        );
+        assert_eq!(
+            rows.iter().filter_map(|row| row.pool).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            rows[0].keep.as_ref().map(|keep| keep.kind),
+            Some(bt_persist::PinKind::File)
+        );
+        assert_eq!(
+            rows[1].keep.as_ref().map(|keep| keep.kind),
+            Some(bt_persist::PinKind::Url),
+            "a page is kept as a page, not as a file with a strange name"
+        );
+        assert_eq!(
+            rows[1].keep.as_ref().map(|keep| keep.target.as_str()),
+            Some("http://localhost:5173/app"),
+            "and what it keeps is the switcher key, verbatim"
+        );
+        assert!(!rows[0].is_page() && rows[1].is_page());
+        assert_eq!(
+            marks::preview_row_mark(rows[1].is_page()),
+            marks::ChromeMark::Globe
+        );
+        assert_eq!(
+            marks::preview_row_mark(rows[0].is_page()),
+            marks::ChromeMark::File,
+            "and the file beside it is unchanged"
+        );
+    }
+
+    /// **A kept page that is also open is one row, not two** (user ruling
+    /// 2026-08-19: 「已钉 URL 再次出现提升同一条目,PINNED 与 MRU 不留双副本」).
+    ///
+    /// The lift compares the *pair* — category and target — because `pins.json`
+    /// is one array and a row is identified by both. A kept page nobody has
+    /// opened is still a row, which is what makes the section worth having on the
+    /// first frame after a restart, and it is named by its site because the pin
+    /// file stores a place and never a title.
+    ///
+    /// Red gate: make `preview_menu_target` answer one category for everything —
+    /// the open page stops matching its own kept row and is listed twice, once
+    /// above under its site and once below under its title.
+    #[test]
+    fn a_kept_page_that_is_open_is_lifted_rather_than_copied() {
+        let kept = vec![
+            (
+                bt_persist::PinKind::Url,
+                "http://localhost:5173/app".to_owned(),
+            ),
+            (
+                bt_persist::PinKind::Url,
+                "http://127.0.0.1:8080/report".to_owned(),
+            ),
+        ];
+        let rows = switcher_rows(&a_pool_with_a_file_and_a_page(), None, &kept);
+        assert_eq!(
+            rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
+            vec!["Folio site", "127.0.0.1:8080", "notes.md"],
+            "the two kept pages first, then what is left of the pool"
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.keep.as_ref().map(|keep| keep.target.as_str())
+                    == Some("http://localhost:5173/app"))
+                .count(),
+            1,
+            "the open page appears once, lifted rather than copied"
+        );
+        assert_eq!(
+            rows[0].pool,
+            Some(1),
+            "and the lifted row still points at the buffer it came from"
+        );
+        assert_eq!(
+            rows[1].pool, None,
+            "while the kept page nobody has opened has no buffer behind it"
+        );
+        assert!(rows[0].pinned && rows[1].pinned && !rows[2].pinned);
+    }
+
+    /// **A pin is not a permission, at either end** (`plan.md` §3「钉不是授权」).
+    ///
+    /// Twice, because a pin passes through two moments and a check at only one of
+    /// them is a hole: a target that fails now never reaches `pins.json`, and a
+    /// target already in the file is asked again every time somebody presses it —
+    /// which is the only check that catches a row written by an older build,
+    /// edited by hand, or pinned before the policy tightened.
+    ///
+    /// Red gate: return `Some(target.to_owned())` from `switcher_row_destination`
+    /// and every one of the refused strings below is navigated to.
+    #[test]
+    fn a_pinned_page_is_asked_at_the_pin_and_asked_again_at_the_press() {
+        for hostile in [
+            "javascript:alert(1)",
+            "data:text/html,<h1>x</h1>",
+            "file:///C:/Windows/System32/drivers/etc/hosts",
+            "view-source:http://localhost:5173/",
+            "about:blank",
+        ] {
+            assert!(
+                !switcher_pin_is_allowed(bt_persist::PinKind::Url, hostile),
+                "a page this window will not go to never reaches pins.json: {hostile}"
+            );
+            assert_eq!(
+                switcher_row_destination(hostile),
+                None,
+                "and a row hand-edited into it does not navigate: {hostile}"
+            );
+        }
+        // The two that are allowed, and the second is the point of asking twice:
+        // it is already in the file and is checked again anyway.
+        assert!(switcher_pin_is_allowed(
+            bt_persist::PinKind::Url,
+            "http://localhost:5173/app?tab=logs#top"
+        ));
+        assert_eq!(
+            switcher_row_destination("http://localhost:5173/app?tab=logs#top"),
+            Some("http://localhost:5173/app?tab=logs#top".to_owned()),
+            "query and fragment carried through the gate untouched"
+        );
+        // A file pin is not asked, because whether a path is still there is a
+        // filesystem question this store deliberately does not ask.
+        assert!(switcher_pin_is_allowed(
+            bt_persist::PinKind::File,
+            r"C:\work\notes.md"
+        ));
+    }
+
+    /// **One page per tab, and the second address is a navigation rather than a
+    /// second pane** (`plan.md` §0 ②「每 tab 单例」).
+    ///
+    /// And the other half, which is why the tab's own seats are walked rather than
+    /// the window's map: a page open on another tab is not this tab's, so it must
+    /// not be what this tab navigates.
+    ///
+    /// Red gate: ask the hosted set for its first entry instead of walking the
+    /// tab's seats and the second case answers seat 11 — a press in this tab
+    /// steering a page in another one.
+    #[test]
+    fn a_tab_has_at_most_one_page_and_it_is_one_of_its_own_seats() {
+        let seats = |ids: &[u64]| ids.iter().map(|id| SeatId(*id)).collect::<Vec<_>>();
+        let hosted: BTreeSet<SeatId> = [SeatId(7), SeatId(11)].into_iter().collect();
+        assert_eq!(
+            web_seat_among(&seats(&[3, 7, 9]), &hosted),
+            Some(SeatId(7)),
+            "the tab's page is the seat of its own that holds one"
+        );
+        assert_eq!(
+            web_seat_among(&seats(&[3, 9]), &hosted),
+            None,
+            "a tab with no page of its own has none, whatever the window holds"
+        );
+        assert_eq!(
+            web_seat_among(&seats(&[7, 11]), &hosted),
+            Some(SeatId(7)),
+            "and a tab that somehow held two is answered by the first in tree \
+             order, so the reuse target is stable rather than whichever the map \
+             happened to yield"
+        );
+        assert_eq!(web_seat_among(&[], &hosted), None);
+    }
+
+    /// **The switcher's identity is the recovery machine's field, and there is no
+    /// second account of it** (`plan.md` §3 与 §4).
+    ///
+    /// "The URL a session file may record" and "what the switcher calls this
+    /// seat" are one sentence, so they are one field. This drives the machine
+    /// through the three things that must *not* move it — a navigation in flight,
+    /// a failure page, an `about:blank` — and the one that must, and reads the
+    /// switcher's answer off the machine each time.
+    ///
+    /// Red gate: let `WebMachine::on_navigation_completed` write its
+    /// `recoverable_url` whatever `success` said, and the two assertions about a
+    /// page that never loaded both move.
+    #[test]
+    fn the_switchers_identity_is_the_machines_last_committed_url() {
+        let mut machine = webhost::WebMachine::new();
+        machine.request("http://LocalHost:5173/app?tab=logs#top");
+        let generation = machine.generation();
+        machine.on_environment(generation, true);
+        machine.on_controller(generation, true);
+        machine.on_events_installed(generation);
+        assert_eq!(
+            webnav::switcher_identity(machine.recoverable_url()),
+            None,
+            "a navigation that has not committed has no identity — a row for a \
+             page that never existed is a row the switcher cannot honour"
+        );
+        machine.on_navigation_completed(generation, "http://localhost:5173/app?tab=logs#top", true);
+        assert_eq!(
+            webnav::switcher_identity(machine.recoverable_url()),
+            Some("http://localhost:5173/app?tab=logs#top".to_owned()),
+            "query and fragment participate, and only a default port is dropped"
+        );
+        machine.request("http://localhost:5173/gone");
+        assert_eq!(
+            webnav::switcher_identity(machine.recoverable_url()),
+            Some("http://localhost:5173/app?tab=logs#top".to_owned()),
+            "asking for a page is not being on it"
+        );
+        machine.on_navigation_completed(generation, "http://localhost:5173/gone", false);
+        machine.on_navigation_completed(generation, "about:blank", true);
+        assert_eq!(
+            webnav::switcher_identity(machine.recoverable_url()),
+            Some("http://localhost:5173/app?tab=logs#top".to_owned()),
+            "a failure page and a blank page are neither of them where you are"
+        );
+        // A redirect: what committed is the identity, not what was asked for.
+        machine.request("http://localhost:5173/old");
+        machine.on_navigation_completed(generation, "http://localhost:5173/new", true);
+        assert_eq!(
+            webnav::switcher_identity(machine.recoverable_url()),
+            Some("http://localhost:5173/new".to_owned()),
+            "after a redirect the seat is where it landed"
         );
     }
 }
