@@ -982,6 +982,24 @@ impl WebHost {
         .map_err(|error| failure(&format!("SendMouseInput({})", event.name()), &error))
     }
 
+    /// Close a controller that arrived for a generation nobody wants any more.
+    ///
+    /// **Closed and not simply dropped.** The controller is real and running:
+    /// letting the last reference go leaves a browser process tree with nobody
+    /// pointing at it, which is the leak the generation token exists to prevent
+    /// rather than to cause.
+    pub fn close_pending_controller(&mut self) {
+        let Some(pending) = self.pending_controller.take() else {
+            return;
+        };
+        let Some(orphan) = pending.borrow_mut().take() else {
+            return;
+        };
+        if let Ok(controller) = orphan.cast::<ICoreWebView2Controller>() {
+            let _ = unsafe { controller.Close() };
+        }
+    }
+
     /// Close the controller. The browser process goes on living until it says
     /// otherwise — which is what the caller's state machine is waiting for.
     pub fn close(&mut self) {

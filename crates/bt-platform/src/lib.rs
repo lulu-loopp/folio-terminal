@@ -933,7 +933,7 @@ mod windows_impl {
         },
         UI::{
             HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
-            Input::KeyboardAndMouse::GetKeyboardLayout,
+            Input::KeyboardAndMouse::{GetKeyboardLayout, VkKeyScanW},
             Shell::{
                 Common::COMDLG_FILTERSPEC, DefSubclassProc, FO_DELETE, FOF_ALLOWUNDO,
                 FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING,
@@ -2364,6 +2364,36 @@ mod windows_impl {
             return Err("local image path extension is not supported".to_owned());
         }
         Ok(())
+    }
+
+    /// The virtual key this **layout** produces a character on.
+    ///
+    /// The inverse of the mapping every keyboard event already carries, and the
+    /// direction WebView2 forces: `AcceleratorKeyPressed` reports a Win32
+    /// virtual key and nothing else, while this window's shortcut table is
+    /// written in characters — `Ctrl+Shift+n`, `Alt+Shift+-` — because a
+    /// character is what a person presses and a virtual key is what a US
+    /// keyboard happens to reach it on. `VkKeyScanW` is the one call that
+    /// answers for the layout actually installed; a table would answer for a
+    /// keyboard the reader may not own.
+    ///
+    /// `None` when the active layout cannot produce the character at all, which
+    /// is `-1` from Win32 and a shortcut nobody on this machine can press.
+    #[must_use]
+    pub fn virtual_key_for_character(character: char) -> Option<u16> {
+        let mut units = [0u16; 2];
+        let encoded = character.encode_utf16(&mut units);
+        // Outside the basic plane there is no single UTF-16 unit to ask about,
+        // and `VkKeyScanW` takes one.
+        let [unit] = encoded else { return None };
+        // SAFETY: `VkKeyScanW` reads one UTF-16 code unit by value.
+        let answer = unsafe { VkKeyScanW(*unit) };
+        if answer == -1 {
+            return None;
+        }
+        // Low byte is the virtual key; the high byte is which modifiers reach
+        // the character, and the caller's chord already says which it means.
+        Some((answer as u16) & 0x00ff)
     }
 
     pub fn wheel_scroll_amount() -> Result<WheelScrollAmount, String> {
@@ -5341,7 +5371,7 @@ pub use windows_impl::{
     recycle, remove_context_menu, request_window_close, reveal_in_explorer, set_clipboard_text,
     set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
     set_window_topmost, shell_execute, spawn_at_priority, system_backdrop_available,
-    wheel_scroll_amount, write_to_console,
+    virtual_key_for_character, wheel_scroll_amount, write_to_console,
 };
 
 /// The bands, asked of the kernel rather than of the source.
