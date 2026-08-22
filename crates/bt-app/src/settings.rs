@@ -33,7 +33,9 @@
 //! Nothing here is layout: the dialog is not a seat, takes no space from the
 //! solver, and is never persisted (a dialog does not survive a restart).
 
-use bt_persist::{BackgroundFitV1, LanguageV1, MinimumContrastV1, SplitDirectionV1, ThemeModeV1};
+use bt_persist::{
+    BackgroundFitV1, LanguageV1, MinimumContrastV1, SearchEngineV1, SplitDirectionV1, ThemeModeV1,
+};
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, CursorStyle, FLOAT_WINDOW_BORDER_LOGICAL_PX,
     FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad,
@@ -920,6 +922,21 @@ pub const IMAGE_FIT_OPTIONS: [BackgroundFitV1; 3] = [
 /// cut" (user ruling, 2026-08-16), with the historical behaviour first — which
 /// is both the product default and the order a reader expects when the first
 /// item is what they already had.
+/// The three engines a web preview's address field may hand a non-address to
+/// (§7.7 ②, 方案 §0's five extras).
+///
+/// **Named in themselves, and untranslated**, which is the Language row's own
+/// ruling one page over: these are proper nouns, and a person looking for the
+/// one they have an account with is looking for the word that is printed on it.
+pub const SEARCH_ENGINE_OPTIONS: [SearchEngineV1; 3] = [
+    SearchEngineV1::DuckDuckGo,
+    SearchEngineV1::Bing,
+    SearchEngineV1::Google,
+];
+
+/// Their names, in the order above.
+pub const SEARCH_ENGINE_LABELS: [&str; 3] = ["DuckDuckGo", "Bing", "Google"];
+
 pub const SPLIT_DIRECTION_OPTIONS: [SplitDirectionV1; 3] = [
     SplitDirectionV1::Auto,
     SplitDirectionV1::Right,
@@ -2142,6 +2159,19 @@ pub enum SettingsRow {
     /// argued, and `Runtime::settings_split_axis`, which is the one place it is
     /// read.
     SplitDirection,
+    /// **Where a web preview's address field sends something that is not an
+    /// address** (§7.7 ②, 方案 §0's five extras: 「非 URL 输入走默认搜索引擎
+    /// (可设)」).
+    ///
+    /// On `General` and not on `Rendered blocks`, and the page's own name is the
+    /// argument: this is not a look and not a typesetting decision, it is what
+    /// this product *does* on this machine when you type a word instead of an
+    /// address — the same shape as `Default profile` two rows down.
+    ///
+    /// A name and never a URL template. See `bt_persist::SearchEngineV1` for the
+    /// reason, which is §3's whole URL policy: a template in a settings file is
+    /// a string a person can put anything into, handed to a browser engine.
+    SearchEngine,
     /// **The floor a cell's ink is held to against its own paper** (DESIGN §2.6).
     ///
     /// Filed under `Appearance ▸ Advanced`, and both halves of that are decisions. On
@@ -2377,9 +2407,11 @@ impl SettingsRow {
             // wrong noun.
             // And the row that is about what this product is on this machine
             // rather than about what this window looks like — see the variant.
-            Self::GitPanel | Self::DefaultProfile | Self::Language | Self::ContextMenu => {
-                SettingsCategory::General
-            }
+            Self::GitPanel
+            | Self::DefaultProfile
+            | Self::Language
+            | Self::SearchEngine
+            | Self::ContextMenu => SettingsCategory::General,
             // The editor's eight, which are the Profiles page's second view.
             Self::ProfileName
             | Self::ProfileProgram
@@ -2434,6 +2466,7 @@ impl SettingsRow {
             // Mock-up 2374.
             Self::Sidebar => Text::RowSidebar.text(),
             Self::SplitDirection => Text::RowSplitDirection.text(),
+            Self::SearchEngine => Text::RowSearchEngine.text(),
             Self::MinimumContrast => Text::RowMinimumContrast.text(),
             // Mock-up 2467.
             Self::DefaultProfile => Text::RowDefaultProfile.text(),
@@ -2547,6 +2580,7 @@ impl SettingsRow {
             // and a user who then found `Alt+Shift+-` still stacking panes would
             // conclude the switch was broken.
             Self::SplitDirection => Text::DescSplitDirection.text(),
+            Self::SearchEngine => Text::DescSearchEngine.text(),
             Self::MinimumContrast => Text::DescMinimumContrast.text(),
             // Mock-up 2468, word for word. It is also the *scope* of the setting
             // and the reason `profiles::index_of_id` does not read it: a tab and
@@ -2699,6 +2733,10 @@ impl SettingsRow {
             | Self::TerminalFont
             | Self::FontSize
             | Self::Cursor
+            // An everyday row: a reader who types a word into an address field
+            // and lands somewhere is entitled to know where, without opening a
+            // disclosure to find out.
+            | Self::SearchEngine
             | Self::TabLayout
             | Self::FocusMode
             | Self::FocusCardHeight
@@ -2832,6 +2870,7 @@ impl SettingsRow {
             Self::FocusCardHeight => FOCUS_CARD_HEIGHT_OPTIONS.len(),
             Self::Sidebar => SIDEBAR_OPTIONS.len(),
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS.len(),
+            Self::SearchEngine => SEARCH_ENGINE_OPTIONS.len(),
             Self::MinimumContrast => MINIMUM_CONTRAST_OPTIONS.len(),
             Self::Language => LANGUAGE_OPTIONS.len(),
             // The picker is built from the same list the `˅` menu is built from
@@ -2922,6 +2961,8 @@ impl SettingsRow {
                 .get(index)
                 .copied()
                 .map(split_direction_label),
+            // Proper nouns, untranslated, on the Language row's own ruling.
+            Self::SearchEngine => SEARCH_ENGINE_LABELS.get(index).copied(),
             // `BlockMaxHeight`'s shape: the word through the table, the three
             // ratios out of the parallel array. See [`MINIMUM_CONTRAST_LABELS`].
             Self::MinimumContrast => MINIMUM_CONTRAST_OPTIONS.get(index).map(|floor| {
@@ -3211,6 +3252,9 @@ impl SettingsRow {
             Self::SplitDirection => SPLIT_DIRECTION_OPTIONS
                 .iter()
                 .position(|it| *it == values.split_direction),
+            Self::SearchEngine => SEARCH_ENGINE_OPTIONS
+                .iter()
+                .position(|it| *it == values.search_engine),
             Self::MinimumContrast => MINIMUM_CONTRAST_OPTIONS
                 .iter()
                 .position(|it| *it == values.minimum_contrast),
@@ -3361,6 +3405,11 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     rows.push(SettingsRow::BlockMaxHeight);
     rows.push(SettingsRow::Language);
     rows.push(SettingsRow::GitPanel);
+    // Above `Default profile` and below `Git panel`, which keeps the last two
+    // rows of this page where every keyboard walk in this file already expects
+    // them — and reads as the group it belongs to: what this product *does* on
+    // this machine, before the table of things it can start.
+    rows.push(SettingsRow::SearchEngine);
     rows.push(SettingsRow::DefaultProfile);
     // Last on its page, because it is the only row here that changes something
     // **outside this window**: the three above it say how Folio behaves, and
@@ -3647,6 +3696,8 @@ pub struct SettingsValues {
     pub context_menu: bool,
     /// Which way a split with no direction of its own cuts.
     pub split_direction: SplitDirectionV1,
+    /// Where a web preview's address field sends a non-address.
+    pub search_engine: SearchEngineV1,
     /// The floor a cell's ink is held to against its own paper (DESIGN §2.6).
     pub minimum_contrast: MinimumContrastV1,
     /// Which language the window writes in — **the stored mode**, not the
@@ -3786,6 +3837,7 @@ impl SettingsValues {
             // one is.
             context_menu: false,
             split_direction: SplitDirectionV1::Auto,
+            search_engine: SearchEngineV1::DuckDuckGo,
             minimum_contrast: MinimumContrastV1::Off,
             language: LanguageV1::System,
             default_profile: profiles::fallback_profile(),
@@ -6336,6 +6388,17 @@ pub fn split_direction_requested(target: SettingsTarget) -> Option<SplitDirectio
     match target {
         SettingsTarget::Choice(SettingsRow::SplitDirection, index) => {
             SPLIT_DIRECTION_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// The search engine a press asks for, if it asks at all.
+#[must_use]
+pub fn search_engine_requested(target: SettingsTarget) -> Option<SearchEngineV1> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::SearchEngine, index) => {
+            SEARCH_ENGINE_OPTIONS.get(index).copied()
         }
         _ => None,
     }
@@ -16947,6 +17010,7 @@ mod tests {
                 SettingsRow::BlockMaxHeight,
                 SettingsRow::Language,
                 SettingsRow::GitPanel,
+                SettingsRow::SearchEngine,
                 SettingsRow::DefaultProfile,
                 SettingsRow::ContextMenu,
                 SettingsRow::PsReadLine,
@@ -16982,6 +17046,7 @@ mod tests {
                 SettingsRow::BlockMaxHeight,
                 SettingsRow::Language,
                 SettingsRow::GitPanel,
+                SettingsRow::SearchEngine,
                 SettingsRow::DefaultProfile,
                 SettingsRow::ContextMenu,
                 SettingsRow::PsReadLine,

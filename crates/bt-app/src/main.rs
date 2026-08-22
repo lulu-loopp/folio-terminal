@@ -73,8 +73,8 @@ mod tooltip;
 mod trace;
 mod watch_clock;
 mod webhost;
-mod websheet;
 mod webnav;
+mod websheet;
 mod wsl;
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -4850,7 +4850,7 @@ struct WindowRuntime {
     /// rather than a singleton because the five failure cards do not share a
     /// caption with `Open in default app`: one stored width would size every
     /// button to whichever card was drawn last.
-    preview_card_verbs: BTreeMap<SeatId, (f32, bool, bool)>,
+    preview_card_verbs: BTreeMap<SeatId, seats::PreviewCardButton>,
     /// **The download sheet's boxes as they were last drawn** (§7.7 ④), and
     /// which seat they belong to.
     ///
@@ -6709,9 +6709,7 @@ impl TabState {
         // ignored the argument.
         let content = match kind {
             bt_layout::SeatKind::Terminal => Some(profiles::mark(self.leaf_profile(seat))),
-            bt_layout::SeatKind::Preview if page == Some(seat) => {
-                Some(marks::ChromeMark::Globe)
-            }
+            bt_layout::SeatKind::Preview if page == Some(seat) => Some(marks::ChromeMark::Globe),
             _ => None,
         };
         let (mark, _, _) = seats::pane_mark(kind, content, bt_render::chrome_palette());
@@ -21633,7 +21631,16 @@ impl Runtime<'_> {
         );
         self.window.preview_card_verbs = preview_card_notices
             .iter()
-            .map(|(seat, words)| (*seat, (words.width, !words.detail.is_empty(), words.fault)))
+            .map(|(seat, words)| {
+                (
+                    *seat,
+                    seats::PreviewCardButton {
+                        text_px: words.width,
+                        has_detail: !words.detail.is_empty(),
+                        fault: words.fault,
+                    },
+                )
+            })
             .collect();
         let preview_cards: Vec<(SeatId, seats::PreviewCardContent<'_>)> = preview_card_notices
             .iter()
@@ -25117,6 +25124,7 @@ impl Runtime<'_> {
             // change — see `App::context_menu_installed`.
             context_menu: self.app.context_menu_installed,
             split_direction: self.app.settings_store.loaded().split_direction,
+            search_engine: self.app.settings_store.loaded().search_engine,
             minimum_contrast: self.app.settings_store.loaded().minimum_contrast,
             language: self.app.settings_store.loaded().language,
             default_profile: self.default_profile(),
@@ -26357,6 +26365,9 @@ impl Runtime<'_> {
         if let Some(install) = settings::context_menu_requested(target) {
             self.apply_context_menu(install)?;
         }
+        if let Some(engine) = settings::search_engine_requested(target) {
+            self.apply_search_engine(engine)?;
+        }
         if let Some(direction) = settings::split_direction_requested(target) {
             self.apply_split_direction(direction)?;
         }
@@ -26590,6 +26601,7 @@ impl Runtime<'_> {
             | Row::BlockMaxHeight
             | Row::GitPanel
             | Row::DefaultProfile
+            | Row::SearchEngine
             | Row::Language
             // And doubly never: what it would be putting back is not a value in
             // this file at all, it is two keys in the user's own registry, and
@@ -28209,6 +28221,17 @@ impl Runtime<'_> {
     /// `bt_render::set_minimum_contrast` advances the theme revision on a real change, which is
     /// what discards the composed rows shaped under the old floor — so the work here is the
     /// file, the push, and one repaint.
+    /// **Where a non-address goes** (§7.7 ②, 方案 §0's five extras).
+    ///
+    /// One write and nothing else: the engine is read at the moment the address
+    /// field commits, so there is no cached copy anywhere to push it into and
+    /// nothing on the glass changes until somebody types a word.
+    fn apply_search_engine(&mut self, engine: bt_persist::SearchEngineV1) -> Result<bool> {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.search_engine = engine;
+        Ok(self.app.settings_store.store(settings))
+    }
+
     fn apply_minimum_contrast(&mut self, floor: bt_persist::MinimumContrastV1) -> Result<bool> {
         let mut settings = self.app.settings_store.loaded().clone();
         settings.minimum_contrast = floor;
@@ -31743,9 +31766,7 @@ impl Runtime<'_> {
             // The stamp goes on the *hovered* target only. The seat's own URL
             // committed, so it is by definition one this window went to, and a
             // band that stamped it would be arguing with the page behind it.
-            if hovering
-                && !matches!(webnav::address_bar(target), webnav::Decision::Navigate(_))
-            {
+            if hovering && !matches!(webnav::address_bar(target), webnav::Decision::Navigate(_)) {
                 lead.push_str(i18n::Text::HyperlinkBlockedSuffix.text());
             }
             let revealed = self.foot_reveal_is_fresh(RevealedFoot::Preview(seat), now);
@@ -50079,13 +50100,11 @@ impl Runtime<'_> {
         // answers a hit test it is not on screen for is an invisible button.
         .or_else(|| {
             let seat = self.seats.preview()?;
-            let (width, has_detail, fault) = self.window.preview_card_verbs.get(&seat).copied()?;
+            let button = self.window.preview_card_verbs.get(&seat).copied()?;
             seats::hit_preview_card_button(
                 &self.seats,
                 &self.seat_layout,
-                width,
-                has_detail,
-                fault,
+                button,
                 scale,
                 position.x,
                 position.y,
@@ -51794,13 +51813,14 @@ impl Runtime<'_> {
         // regex that will not parse.
         if let RenameSubject::WebAddress { seat } = editor.subject {
             if commit {
+                let engine = self.app.settings_store.loaded().search_engine;
                 let compositor_outcomes = {
                     let window = &mut *self.window;
                     window
                         .web
                         .as_mut()
                         .filter(|web| web.seat == seat)
-                        .map(|web| web.go_to(&editor.text, &window.compositor))
+                        .map(|web| web.go_to(&editor.text, engine, &window.compositor))
                 };
                 if let Some((taken, outcomes)) = compositor_outcomes {
                     if !taken {
@@ -52056,9 +52076,7 @@ impl Runtime<'_> {
                 // it is the same target: a press inside it puts a caret, and a
                 // press anywhere else — the page below very much included — is a
                 // blur that commits.
-                RenameSubject::WebAddress { seat } => {
-                    Some(seats::ChromeTarget::PreviewName(*seat))
-                }
+                RenameSubject::WebAddress { seat } => Some(seats::ChromeTarget::PreviewName(*seat)),
             };
             if editing.is_some() && target == editing {
                 // "编辑器内的按下/双击不触发拖拽或再次进入编辑" (J103): the press
@@ -56344,7 +56362,10 @@ impl Runtime<'_> {
                 .as_ref()
                 .and_then(webhost::WebSeat::fault)
                 .is_some_and(webhost::WebFault::stands_over_the_page);
-        if covered && !self.window.web_covered && let Ok(hwnd) = window_hwnd(&self.window.window) {
+        if covered
+            && !self.window.web_covered
+            && let Ok(hwnd) = window_hwnd(&self.window.window)
+        {
             let _ = bt_platform::take_keyboard_focus(hwnd);
         }
         self.window.web_covered = covered;
@@ -61727,7 +61748,9 @@ mod tests {
             .collect();
         assert_eq!(
             order,
-            vec![0, 16, 13, 1, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 8, 9, 10, 11],
+            vec![
+                0, 16, 13, 1, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 8, 9, 10, 11
+            ],
             "bottom to top: pane bars, terminal thumbs, command rails, rail, ground, search \
              capsule, integration strips, download sheet, schematic, float, modal, file menu, git \
              menu, terminal menu, notices, tip, glance, ghost"

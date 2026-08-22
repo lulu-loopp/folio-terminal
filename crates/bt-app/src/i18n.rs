@@ -1459,6 +1459,11 @@ pub enum Text {
     /// Its one verb. The download is gone; the page that asked for it is not,
     /// and handing *that* over is the one action that still gets the file.
     WebFailDownloadVerb,
+    /// `General ▸ Search engine` — the row.
+    RowSearchEngine,
+    /// Its sentence. Says the one thing the three names cannot: **when** this
+    /// row is consulted at all.
+    DescSearchEngine,
 }
 
 impl Text {
@@ -2634,9 +2639,18 @@ impl Text {
                 "Open this page in your browser",
                 "在浏览器中打开这个页面",
             ),
+            Self::RowSearchEngine => pick(lang, "Search engine", "搜索引擎"),
+            // Names the field rather than the feature, because that is where a
+            // reader meets it: they typed a word into the place an address goes
+            // and something happened. It says nothing about which engine is
+            // better — the three names are on the picker beside this line.
+            Self::DescSearchEngine => pick(
+                lang,
+                "Where a web preview's address field sends text that is not an address",
+                "在网页预览的地址栏里打了一段不是地址的文字时,交给哪个搜索引擎",
+            ),
         }
     }
-
 
     /// Every entry, for the tests that have to walk the whole table.
     ///
@@ -2650,7 +2664,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 443] = [
+    pub const ALL: [Self; 445] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3094,6 +3108,8 @@ impl Text {
         Self::WebFailBlockedVerb,
         Self::WebFailDownloadSay,
         Self::WebFailDownloadVerb,
+        Self::RowSearchEngine,
+        Self::DescSearchEngine,
     ];
 
     /// The entries whose two columns are allowed to be the same string.

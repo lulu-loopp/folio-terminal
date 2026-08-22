@@ -37,9 +37,7 @@
 //! somebody pressed.
 
 use bt_layout::SeatId;
-use bt_render::{
-    ChromeLabel, ChromeLabelWeight, ChromePalette, OverlayQuad, rounded_overlay_fill,
-};
+use bt_render::{ChromeLabel, ChromeLabelWeight, ChromePalette, OverlayQuad, rounded_overlay_fill};
 
 use crate::marks::{ChromeMark, ChromeSprite, OverlayLayer};
 use crate::seats::ChromeTarget;

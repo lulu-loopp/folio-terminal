@@ -1262,7 +1262,8 @@ impl WebHost {
         let view28: ICoreWebView2_28 = webview
             .cast()
             .map_err(|error| failure("ICoreWebView2_28", &error))?;
-        let find = unsafe { view28.Find() }.map_err(|error| failure("ICoreWebView2::Find", &error))?;
+        let find =
+            unsafe { view28.Find() }.map_err(|error| failure("ICoreWebView2::Find", &error))?;
         if self.find_attached.replace(true) {
             return Ok(Some(find));
         }

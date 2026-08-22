@@ -11632,8 +11632,13 @@ pub fn preview_head_geometry(
     // The rule is not a 22px box. `.pv-sep` is one physical pixel wide with a
     // pixel of margin on each side and fourteen of height, which is why it needs
     // the wider door and not the tool-sized one.
-    let separator_width = (PREVIEW_SEPARATOR_WIDTH_LOGICAL_PX * scale).round().max(1.0)
-        + (PREVIEW_SEPARATOR_MARGIN_LOGICAL_PX * scale).round().max(1.0) * 2.0;
+    let separator_width = (PREVIEW_SEPARATOR_WIDTH_LOGICAL_PX * scale)
+        .round()
+        .max(1.0)
+        + (PREVIEW_SEPARATOR_MARGIN_LOGICAL_PX * scale)
+            .round()
+            .max(1.0)
+            * 2.0;
     let separator_height = (PREVIEW_SEPARATOR_HEIGHT_LOGICAL_PX * scale)
         .round()
         .max(1.0);
@@ -11645,11 +11650,13 @@ pub fn preview_head_geometry(
     let flip = take_wide(tools.flip, box_, box_);
     let save = take_wide(tools.save, box_, box_);
 
-    let run_left = [save, flip, browser, back, forward, reload, separator, devtools, popout, pin]
-        .into_iter()
-        .flatten()
-        .map(|box_| box_[0])
-        .fold(head.title[2], f32::min);
+    let run_left = [
+        save, flip, browser, back, forward, reload, separator, devtools, popout, pin,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|box_| box_[0])
+    .fold(head.title[2], f32::min);
     let dirty_slot = (PREVIEW_DIRTY_SLOT_LOGICAL_PX * scale).round().max(1.0);
     // What is left for the flexible half of the row: the name bits and the dot,
     // with the spacer taking whatever neither of them wants.
@@ -13382,9 +13389,7 @@ fn push_preview_head(
         // `#i-chev` turned a quarter, which is the same sentence the submenu's
         // `▸` is drawn with: this window has one directional glyph, and a second
         // arrow family for two buttons would make it two.
-        ChromeMark::Chevron {
-            turned_degrees: 90,
-        },
+        ChromeMark::Chevron { turned_degrees: 90 },
         web.can_go_back,
     );
     nav(
@@ -13423,7 +13428,9 @@ fn push_preview_head(
     if let Some(separator) = geometry.separator
         && pane_hovered
     {
-        let width = (PREVIEW_SEPARATOR_WIDTH_LOGICAL_PX * scale).round().max(1.0);
+        let width = (PREVIEW_SEPARATOR_WIDTH_LOGICAL_PX * scale)
+            .round()
+            .max(1.0);
         let left = ((separator[0] + separator[2] - width) / 2.0).round();
         let mut rule = ChromeSprite::new(
             ChromeMark::Fill,
@@ -14293,23 +14300,37 @@ pub fn preview_seat_body_rect(
 pub fn hit_preview_card_button(
     seats: &Seats,
     layout: &SeatLayout,
-    button_text_px: f32,
-    has_detail: bool,
-    fault: bool,
+    button: PreviewCardButton,
     scale: f32,
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
     let seat = seats.preview()?;
     let body = preview_body_rect(seats, layout, scale)?;
-    let button = preview_card_geometry(body, button_text_px, has_detail, scale).button;
-    contains(button, x as f32, y as f32).then(|| {
-        if fault {
-            ChromeTarget::PreviewFaultVerb(seat)
-        } else {
-            ChromeTarget::PreviewOpenButton(seat)
-        }
+    let box_ = preview_card_geometry(body, button.text_px, button.has_detail, scale).button;
+    if !contains(box_, x as f32, y as f32) {
+        return None;
+    }
+    Some(if button.fault {
+        ChromeTarget::PreviewFaultVerb(seat)
+    } else {
+        ChromeTarget::PreviewOpenButton(seat)
     })
+}
+
+/// **The card's one button, as the hit test has to see it** (§7.7 ④).
+///
+/// Three facts that travel together and cannot be allowed to disagree: how wide
+/// the caption is drawn, whether the card carries a fact line — which moves the
+/// button — and whose press it is. One value rather than three parameters,
+/// because the first two decide the rectangle and the third decides what
+/// pressing it means, and a call site that got any of them from a different
+/// frame would be answering for a button nobody can see.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PreviewCardButton {
+    pub text_px: f32,
+    pub has_detail: bool,
+    pub fault: bool,
 }
 
 /// The tail line of the L4 strip: how many seats it had no row for.
@@ -32981,9 +33002,12 @@ mod tests {",
             "back is drawn on a head nobody is pointing at"
         );
         assert_eq!(
-            glyphs(&sprites, ChromeMark::Chevron {
-                turned_degrees: 270
-            })
+            glyphs(
+                &sprites,
+                ChromeMark::Chevron {
+                    turned_degrees: 270
+                }
+            )
             .len(),
             1,
             "and so is forward"

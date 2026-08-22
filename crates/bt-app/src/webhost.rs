@@ -45,6 +45,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use bt_layout::SeatId;
+use bt_persist::SearchEngineV1;
 use bt_platform::{WebChord, WebEvent, WebHost, WebNavigationVerdict};
 use winit::keyboard::{ModifiersState, NamedKey};
 
@@ -684,9 +685,7 @@ impl WebFault {
                 Some(scheme) => crate::i18n::web_fail_blocked_scheme(&scheme),
                 None => crate::i18n::Text::WebFailBlockedSay.text().to_owned(),
             },
-            Self::DownloadRefused { .. } => {
-                crate::i18n::Text::WebFailDownloadSay.text().to_owned()
-            }
+            Self::DownloadRefused { .. } => crate::i18n::Text::WebFailDownloadSay.text().to_owned(),
         }
     }
 
@@ -822,6 +821,50 @@ pub(crate) fn download_answer(uri: &str, file_name: &str) -> Result<String, WebF
 /// this, every `· blocked` in the foot would also raise a 「did not respond」
 /// over the seat.
 const WEB_ERROR_OPERATION_CANCELED: i32 = 14;
+
+// ── Where a non-address goes ───────────────────────────────────────────────
+
+/// The three engines, as this build spells them.
+///
+/// Constants here and a *name* in `settings.json` (`bt_persist::SearchEngineV1`)
+/// — see that type for why a template in a file is the one shape §3's URL policy
+/// exists to refuse.
+const fn search_prefix(engine: SearchEngineV1) -> &'static str {
+    match engine {
+        SearchEngineV1::DuckDuckGo => "https://duckduckgo.com/?q=",
+        SearchEngineV1::Bing => "https://www.bing.com/search?q=",
+        SearchEngineV1::Google => "https://www.google.com/search?q=",
+    }
+}
+
+/// Where the address field sends something that is not an address (§7.7 ②,
+/// 方案 §0's five extras).
+///
+/// **Form encoding, because a query string is a form.** Everything outside the
+/// unreserved set is percent-encoded and a space becomes `+`, which is what
+/// every search box on the web has sent since forms existed — and it is what
+/// keeps `c++ std::string` and `a&b=c` from arriving as three parameters and a
+/// syntax error. The `+` a person typed is `%2B` for the same reason.
+///
+/// The composed URL is **not** trusted for being composed here: `WebSeat::go_to`
+/// puts it through `webnav::address_bar` exactly as it puts a typed one, which
+/// is the whole of 「钉不是授权」 said about a string this build built itself.
+pub(crate) fn search_url(engine: SearchEngineV1, query: &str) -> String {
+    let mut url = String::from(search_prefix(engine));
+    for byte in query.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                url.push(*byte as char);
+            }
+            b' ' => url.push('+'),
+            other => {
+                use std::fmt::Write as _;
+                let _ = write!(url, "%{other:02X}");
+            }
+        }
+    }
+    url
+}
 
 // ── Zoom ───────────────────────────────────────────────────────────────────
 
@@ -1614,7 +1657,11 @@ impl WebSeat {
     /// no other dismissal, because taking one of them away leaves the black hole
     /// a hidden WebView draws — see [`WebFault::stands_over_the_page`].
     pub(crate) fn dismiss_sheet(&mut self) -> bool {
-        if self.fault.as_ref().is_some_and(WebFault::stands_over_the_page) {
+        if self
+            .fault
+            .as_ref()
+            .is_some_and(WebFault::stands_over_the_page)
+        {
             self.fault = None;
             return true;
         }
@@ -1675,10 +1722,20 @@ impl WebSeat {
     pub(crate) fn go_to(
         &mut self,
         input: &str,
+        engine: SearchEngineV1,
         compositor: &bt_platform::Compositor,
     ) -> (bool, Vec<WebOutcome>) {
-        let Decision::Navigate(target) = address_bar(input) else {
-            return (false, Vec::new());
+        // **A non-address is a search, and the search is an address** (方案 §0).
+        // The composed URL goes back through the same door a typed one does —
+        // this build's own string gets no more trust than a person's, which is
+        // 「钉不是授权」 said about the one URL this window writes itself.
+        let target = match address_bar(input) {
+            Decision::Navigate(target) => target,
+            Decision::Search(query) => match address_bar(&search_url(engine, &query)) {
+                Decision::Navigate(target) => target,
+                Decision::Search(_) | Decision::Refuse(_) => return (false, Vec::new()),
+            },
+            Decision::Refuse(_) => return (false, Vec::new()),
         };
         // Through the machine and not straight at the engine: §4's `desired_url`
         // is what a seat that is still coming up remembers, and a navigation
@@ -1695,7 +1752,11 @@ impl WebSeat {
     /// The same door, asked without knocking. An empty field is not wrong — it
     /// is unfinished — so it does not light up red.
     pub(crate) fn would_go_to(input: &str) -> bool {
-        input.trim().is_empty() || matches!(address_bar(input), Decision::Navigate(_))
+        input.trim().is_empty()
+            || matches!(
+                address_bar(input),
+                Decision::Navigate(_) | Decision::Search(_)
+            )
     }
 
     /// One notch of `Ctrl`+wheel.
@@ -1710,11 +1771,6 @@ impl WebSeat {
         }
         self.zoom = next;
         self.host.set_zoom(next)
-    }
-
-    /// The page's zoom, for a test and for whoever asks next.
-    pub(crate) fn zoom(&self) -> f64 {
-        self.zoom
     }
 
     /// Search this page for `term`. The counts come back as
@@ -2530,10 +2586,7 @@ mod fault_tests {
     #[test]
     fn a_download_is_handed_over_when_a_plain_link_could_replay_it() {
         assert_eq!(
-            download_answer(
-                "http://127.0.0.1:9134/report.pdf",
-                r"C:\Users\a\report.pdf"
-            ),
+            download_answer("http://127.0.0.1:9134/report.pdf", r"C:\Users\a\report.pdf"),
             Ok("http://127.0.0.1:9134/report.pdf".to_owned())
         );
         // The card names the file and not the path it would have been written
@@ -2606,5 +2659,112 @@ mod fault_tests {
             assert!(matches!(fault.verb(), WebFaultVerb::CopyAddress(_)));
             assert!(!fault.stands_over_the_page());
         }
+    }
+}
+
+/// **Where a non-address goes** (§7.7 ②, 方案 §0's five extras).
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    /// PIN — **a non-address becomes an address, and the address goes back
+    /// through the door.**
+    ///
+    /// `webnav::Decision::Search` hands over the *intent*; what this slice owns
+    /// is the URL, the encoding and which engine. The composed URL gets no more
+    /// trust for having been built here than a typed one does — 「钉不是授权」
+    /// said about the one URL this window writes itself — so the test asserts
+    /// the address door takes it, not merely that the string looks right.
+    ///
+    /// MUTATION: skip the second `address_bar` and the rule stops being 「所有
+    /// 顶层导航都过门」 for exactly one caller.
+    #[test]
+    fn a_search_is_composed_into_an_address_the_door_takes() {
+        for engine in [
+            SearchEngineV1::DuckDuckGo,
+            SearchEngineV1::Bing,
+            SearchEngineV1::Google,
+        ] {
+            let url = search_url(engine, "ripgrep");
+            assert!(
+                url.starts_with("https://"),
+                "{engine:?} composes an https address: {url}"
+            );
+            assert!(matches!(
+                crate::webnav::address_bar(&url),
+                crate::webnav::Decision::Navigate(_)
+            ));
+        }
+        // Three engines, three addresses — a name in the file and a constant in
+        // this build, never a template a person can put anything into.
+        assert_eq!(
+            search_url(SearchEngineV1::DuckDuckGo, "ripgrep"),
+            "https://duckduckgo.com/?q=ripgrep"
+        );
+        assert_eq!(
+            search_url(SearchEngineV1::Bing, "ripgrep"),
+            "https://www.bing.com/search?q=ripgrep"
+        );
+        assert_eq!(
+            search_url(SearchEngineV1::Google, "ripgrep"),
+            "https://www.google.com/search?q=ripgrep"
+        );
+    }
+
+    /// PIN — **form encoding, because a query string is a form.**
+    ///
+    /// A space is `+` and everything outside the unreserved set is
+    /// percent-encoded, which is what every search box on the web has sent since
+    /// forms existed. Without it `c++ std::string` arrives as a different query
+    /// and `a&b=c` arrives as three parameters.
+    ///
+    /// MUTATION: pass the query through untouched and the door itself refuses it
+    /// — a space inside something that has already named a scheme is
+    /// `Refusal::ControlOrWhitespace`, which is this rule and the URL rule
+    /// agreeing rather than two rules.
+    #[test]
+    fn a_query_is_form_encoded_on_its_way_into_the_address() {
+        let url = search_url(SearchEngineV1::DuckDuckGo, "c++ std::string");
+        assert_eq!(url, "https://duckduckgo.com/?q=c%2B%2B+std%3A%3Astring");
+        assert!(matches!(
+            crate::webnav::address_bar(&url),
+            crate::webnav::Decision::Navigate(_)
+        ));
+        // An ampersand would otherwise start a second parameter, and a `#` would
+        // cut the query in half.
+        assert_eq!(
+            search_url(SearchEngineV1::Bing, "a&b=c#d"),
+            "https://www.bing.com/search?q=a%26b%3Dc%23d"
+        );
+        // Non-ASCII goes out as UTF-8 bytes, percent by percent.
+        assert_eq!(
+            search_url(SearchEngineV1::Google, "中文"),
+            "https://www.google.com/search?q=%E4%B8%AD%E6%96%87"
+        );
+        // And the unreserved set is left alone, because encoding a character
+        // that never needed it makes an address nobody can read back.
+        assert_eq!(
+            search_url(SearchEngineV1::DuckDuckGo, "a-b_c.d~e9"),
+            "https://duckduckgo.com/?q=a-b_c.d~e9"
+        );
+    }
+
+    /// PIN (§7.7 ④) — **the address field lights up red only for what will not
+    /// be navigated to, and a word is not one of those.**
+    ///
+    /// 「说在打字的地方」 is about a refusal; a non-address is not refused, it is
+    /// searched. An empty field is unfinished rather than wrong.
+    #[test]
+    fn the_field_reddens_for_a_refusal_and_not_for_a_word() {
+        assert!(WebSeat::would_go_to(""));
+        assert!(WebSeat::would_go_to("   "));
+        assert!(WebSeat::would_go_to("localhost:5173/app"));
+        assert!(
+            WebSeat::would_go_to("how do i pin a pane"),
+            "a word is a search, not a refusal"
+        );
+        assert!(!WebSeat::would_go_to("javascript:alert(1)"));
+        assert!(!WebSeat::would_go_to("file:///C:/Windows/win.ini"));
+        assert!(!WebSeat::would_go_to("mailto:a@b.c"));
     }
 }

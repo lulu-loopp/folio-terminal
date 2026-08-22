@@ -116,7 +116,7 @@ use serde::{Deserialize, Serialize};
 /// (`docs/HANDOFF-2026-08-21.md` §2) settles it the way it was written for: whichever
 /// merges second yields, and yielding is renaming the step rather than renumbering a file
 /// anybody already has.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 19;
+pub const SETTINGS_SCHEMA_VERSION: u32 = 20;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -247,7 +247,7 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 /// `settings.json` v19 — docs/M2-persistence-schema-v1.md §2:
 /// ```json
 /// {
-///   "schema_version": 19,
+///   "schema_version": 20,
 ///   "theme_mode": "System" | "Light" | "Dark",
 ///   "display_formulas": true | false,
 ///   "inline_formulas": true | false,
@@ -380,6 +380,17 @@ pub struct SettingsV1 {
     /// before there was a question, and a setting that arrives having changed
     /// something is a setting that broke a habit to announce itself.
     pub split_direction: SplitDirectionV1,
+    /// **Where a web preview's address field sends something that is not an
+    /// address** (`docs/DESIGN.md` §7.7 ②, 方案 §0's five extras: 「非 URL 输入
+    /// 走默认搜索引擎(可设)」).
+    ///
+    /// A named engine and not a URL template, and the reason is what a template
+    /// would be: a string a person can put anything in, read out of a settings
+    /// file, and handed to a browser engine — which is the one shape §3's whole
+    /// URL policy exists to refuse. Three names, three constants in this build,
+    /// and every one of them still goes through `webnav::address_bar` on its way
+    /// out.
+    pub search_engine: SearchEngineV1,
     /// Which language the window's own words are drawn in (user ruling,
     /// 2026-08-10; shipped 2026-08-17).
     ///
@@ -705,6 +716,7 @@ impl Default for SettingsV1 {
             default_profile: DEFAULT_PROFILE_UNSET.to_owned(),
             git_panel: true,
             split_direction: SplitDirectionV1::default(),
+            search_engine: SearchEngineV1::default(),
             language: LanguageV1::default(),
             terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
@@ -817,6 +829,30 @@ pub enum SplitDirectionV1 {
     Down,
 }
 
+/// Which engine a web preview's address field hands a non-address to —
+/// `docs/DESIGN.md` §7.7 ②.
+///
+/// **Three names rather than a template.** A URL template in a settings file is
+/// a string a person can put anything into, and the thing on the other end of it
+/// is a browser engine — which is precisely the shape §3's URL policy spends
+/// three pages refusing. So the file carries a *name*, this build carries the
+/// three addresses, and the composed URL goes out through `webnav::address_bar`
+/// exactly as a typed one does.
+///
+/// **DuckDuckGo is the default**, and the argument is the address field's own
+/// job: what a reader types is what they get. It is the one of the three that
+/// needs no account and no cookie to answer, and that returns the same page in
+/// every region — so an address somebody reads out of this window is an address
+/// somebody else can retype. The other two are here because a person who has an
+/// account with one of them is not being asked to give it up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SearchEngineV1 {
+    #[default]
+    DuckDuckGo,
+    Bing,
+    Google,
+}
+
 /// The contrast floor a terminal cell's ink is held to against its own paper — `docs/DESIGN.md`
 /// §2.6.
 ///
@@ -895,6 +931,7 @@ mod tests {
     fn a_split_with_no_direction_of_its_own_defaults_to_the_longer_edge() {
         let defaults = SettingsV1::default();
         assert_eq!(defaults.split_direction, SplitDirectionV1::Auto);
+        assert_eq!(defaults.search_engine, SearchEngineV1::DuckDuckGo);
         let wire = serde_json::to_value(&defaults).unwrap();
         assert_eq!(wire["split_direction"], serde_json::Value::from("Auto"));
     }
