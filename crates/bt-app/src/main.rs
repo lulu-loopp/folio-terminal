@@ -53,6 +53,7 @@ mod pins;
 mod preview;
 mod preview_edit;
 mod preview_trace;
+mod preview_watch;
 mod profiles;
 mod psreadline;
 mod restore;
@@ -339,6 +340,16 @@ enum AppEvent {
     /// lands while the window is idle would sit unread until somebody moved the
     /// mouse. This is that turn, and nothing else.
     WebPageSpoke,
+    /// **The kernel says the file a preview seat is showing moved** (W2 slice
+    /// 5, `preview_watch`).
+    ///
+    /// [`Self::GitChanged`]'s twin over a third kind of subject, and separate
+    /// from it for that variant's own reason: it carries no answer, only a nudge
+    /// to look at a clock, and the clock may well decide the news is not ripe.
+    /// A shared variant would mean a document saved in an editor walked every
+    /// repository clock in the window, and a commit asked every open preview
+    /// whether its file had moved.
+    PreviewFileChanged,
 }
 
 /// One answer from the picture worker (§7.1.6c-4d).
@@ -3543,6 +3554,68 @@ fn path_is_previewable_image(path: &Path) -> bool {
     bt_term::has_admissible_image_extension(path)
 }
 
+/// **Whether activating a row opens a page rather than a document** (Web
+/// 预览块 W2 片⑤; `plan.md` section 3, the controlled file entry).
+///
+/// **This is the whole of PDF.** The plan's words are "类型路由一行;其余走完整
+/// WebView 生命周期、安全与输入合同" - one line of type routing and then
+/// nothing of its own. A `.pdf` and a `.html` take the same canonicalisation,
+/// the same mint, the same host-minted gate, the same engine, the same four
+/// security switches and the same watcher; the only thing this window knows
+/// about PDF is that the extension belongs on this side of the fork, because
+/// the browser this seat already hosts has a reader for it and this window has
+/// none. A PDF-shaped surface of any kind would be a second answer to a
+/// question the engine has already answered.
+///
+/// The two page spellings come from [`names_an_html_page`] rather than a second
+/// list, so `.htm` and `.html` cannot come apart here; the real extension and
+/// never a substring, for that predicate's own reason.
+fn path_opens_as_a_page(path: &Path) -> bool {
+    names_an_html_page(path)
+        || path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+}
+
+/// **Which content lane a path activated in this window opens on.**
+///
+/// The fork `Runtime::open_preview` has always had, lifted out so that it can be
+/// asked without a window - it is a claim about names and about one policy, and
+/// both halves are answerable on their own. Three lanes and no fourth: pixels
+/// through the decoder, a page through the engine, and everything else through
+/// the tab's pool, which is where the "no preview for this file type" card is
+/// drawn for the things none of the three can read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreviewOpenLane {
+    /// A picture, down the decode lane.
+    Picture,
+    /// A page, minted from this path and hosted by the engine.
+    Page,
+    /// A document, through the tab's shared pool.
+    Document,
+}
+
+/// [`PreviewOpenLane`] for one path.
+///
+/// **A network path is never a page**, and that is not a special case bolted on
+/// here - it is `webnav::Mint::file` refusing to mint one, asked at the fork so
+/// that a share's `.html` goes down the lane that already has an answer for it:
+/// the document pool, whose `PreviewLoad::Refused(NetworkPath)` card is the
+/// refusal section 7.1.3 wrote and the one this window has always shown. Asking
+/// the mint here rather than re-reading the prefix is what keeps one policy in
+/// one place; the *URL* it produces is thrown away, because the URL a
+/// navigation actually uses is minted from the canonicalised path and never
+/// from this one.
+fn preview_open_lane(path: &Path) -> PreviewOpenLane {
+    if path_is_previewable_image(path) {
+        return PreviewOpenLane::Picture;
+    }
+    if path_opens_as_a_page(path) && webnav::Mint::file(path).is_ok() {
+        return PreviewOpenLane::Page;
+    }
+    PreviewOpenLane::Document
+}
+
 /// The files column a stored [`LeafId`] still names on the tab in front of you.
 ///
 /// The whole of D47's self-healing, in one place and answerable without a
@@ -5030,6 +5103,17 @@ struct WindowRuntime {
     /// order every frame and a diff of two frames is a diff of the pixels rather
     /// than of a hash seed.
     web: BTreeMap<SeatId, webhost::WebSeat>,
+    /// **The files this window's preview seats are showing, watched** (W2 slice
+    /// 5, `preview_watch`).
+    ///
+    /// Per window and not per application, which is the opposite of the three
+    /// directory watches beside it and for a reason that is about the *subject*:
+    /// a repository, the schemes folder and the storage folder are one thing
+    /// each in the whole process, so one clock over a union is one clock, while
+    /// a preview seat belongs to a window and no other window can say what it is
+    /// showing. Turned by every window's own [`Runtime::turn`], not behind
+    /// `application_clocks`.
+    preview_watch: preview_watch::PreviewWatch,
     /// The Win32 cursor the page last asked for, while the pointer is over it.
     ///
     /// Kept beside the page rather than folded into [`pointer_cursor`]'s six
@@ -16730,6 +16814,34 @@ fn switcher_row_destination(target: &str) -> Option<String> {
 /// **An unpin is never gated**, which is why this is asked only of a row that is
 /// not already kept: taking a row *out* of that file must be allowed whatever the
 /// row says, or a tightened policy leaves rows nobody can delete.
+/// **What a stored row navigates to, and the mint it needs to get there**
+/// (W2 slice 5).
+///
+/// [`switcher_row_destination`] is the answer for an address; this is the answer
+/// for *any* stored string, and the difference is one case. A `file:` URL in a
+/// switcher row, a `session.json` or a `pins.json` is a **name for a path**, and
+/// it cannot be a permission for one: `webnav::address_bar` refuses `file:` from
+/// every door and always will, because a string is exactly the thing that could
+/// have been edited. So the string is taken back to the disk - decoded to a
+/// path, canonicalised, and minted again by the same
+/// `Runtime::open_preview_web_file` performs - and what authorises the load is
+/// the mint that came out of that, never the row.
+///
+/// The consequence is worth stating: a page whose file has been moved or deleted
+/// does not come back, and the row that names it does nothing when pressed.
+/// That is the same answer a pin the policy no longer allows already gives
+/// (section 7.9 5), for the same reason - nothing happening is more honest than
+/// a dialog about a file that is not there.
+fn page_destination(target: &str) -> Option<(String, webnav::Mint)> {
+    if let Some((path, tail)) = webnav::Mint::path_and_tail_of_file_url(target) {
+        let canonical = std::fs::canonicalize(path).ok()?;
+        let mint = webnav::Mint::file(&canonical).ok()?;
+        let url = format!("{}{tail}", mint.target()?);
+        return Some((url, mint));
+    }
+    Some((switcher_row_destination(target)?, webnav::Mint::Nothing))
+}
+
 fn switcher_pin_is_allowed(kind: bt_persist::PinKind, target: &str) -> bool {
     kind != bt_persist::PinKind::Url || switcher_row_destination(target).is_some()
 }
@@ -19315,6 +19427,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         taskbar: TaskbarMirror::default(),
         compositor,
         web: BTreeMap::new(),
+        preview_watch: preview_watch::PreviewWatch::default(),
         web_cursor: None,
         web_pointer_inside: false,
         window,
@@ -29345,6 +29458,120 @@ impl Runtime<'_> {
     /// The storage folder moved and has gone quiet: read the two hand-editable
     /// files in it again (§7.1.6c-6d).
     ///
+    /// **Bring the preview seats' subscriptions level and answer whatever the
+    /// kernel has said** (W2 slice 5).
+    ///
+    /// [`Self::advance_git_watch`]'s shape one subject over, and the two
+    /// halves are one call for that function's reason: the set a window is
+    /// watching changes on the same events that produce news about it, and
+    /// syncing after answering would act on a file the seat has already left.
+    fn advance_preview_watch(&mut self, now: Instant) -> Result<()> {
+        let wanted = self.watched_preview_files();
+        self.window
+            .preview_watch
+            .sync(&wanted, &self.app.event_proxy);
+        for path in self.window.preview_watch.due(now) {
+            self.refresh_preview_file(&path)?;
+        }
+        Ok(())
+    }
+
+    /// **Every file some preview surface in this window currently has open.**
+    ///
+    /// The gate `preview_watch` follows, and the whole of it. Two kinds of pane
+    /// answer and they answer with the same thing - a path on a disk: a document
+    /// through `PreviewSource::file_path`, and a page through the URL its buffer
+    /// is keyed by, decoded back to the path it was minted from. A page on a
+    /// *server* has no file behind it and contributes nothing, which is why this
+    /// is one function and not two.
+    ///
+    /// **Across tabs, not only the tab on screen** - see
+    /// [`preview_watch::PreviewWatch::sync`] for why. A picture is deliberately
+    /// not here: its pixels come down the decode lane, which owns a picture's
+    /// arrival, and re-decoding one is a door slice ⑤ does not open.
+    fn watched_preview_files(&self) -> BTreeSet<PathBuf> {
+        let mut wanted = BTreeSet::new();
+        for tab in &self.window.tabs {
+            for (_, pane) in tab.preview_panes.iter() {
+                let Some(source) = pane.buffer.as_ref() else {
+                    continue;
+                };
+                if let Some(path) = source.file_path() {
+                    wanted.insert(path.to_path_buf());
+                } else if let Some((path, _)) = source
+                    .web_url()
+                    .and_then(webnav::Mint::path_and_tail_of_file_url)
+                {
+                    wanted.insert(path);
+                }
+            }
+        }
+        wanted
+    }
+
+    /// **One watched file moved: tell whatever is showing it** (W2 slice 5).
+    ///
+    /// Two lanes and the plan names both:
+    ///
+    /// * **a page takes an ordinary `Reload`** ("网页座位刷新 = 一次正常
+    ///   `Reload`(不是重新导航)"). A navigation would truncate the page's own
+    ///   history and re-run the whole policy for an address that has not
+    ///   changed; what changed is the bytes behind where the engine already is,
+    ///   and that is precisely what `Reload` means.
+    /// * **a document re-reads its head** ("文档座位刷新 = 重读那一份头"), through
+    ///   the same worker, the same one-question ledger and the same landing that
+    ///   opening it used. `PreviewBuffer::mark_stale` refuses a buffer with
+    ///   unsaved edits, which is the ruling that keeps a save in another window
+    ///   from destroying work in this one.
+    ///
+    /// Every tab, because a buffer is content and belongs to a tab: two tabs on
+    /// one file are two buffers and both are behind the disk.
+    fn refresh_preview_file(&mut self, path: &Path) -> Result<()> {
+        let reload: Vec<SeatId> = self
+            .window
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.preview_panes.iter())
+            .filter_map(|(surface, pane)| {
+                let PreviewSurface::Seat(seat) = surface else {
+                    return None;
+                };
+                let url = pane.buffer.as_ref()?.web_url()?;
+                let (named, _) = webnav::Mint::path_and_tail_of_file_url(url)?;
+                (named == path && self.window.web.contains_key(&seat)).then_some(seat)
+            })
+            .collect();
+        for seat in reload {
+            let window = &mut *self.window;
+            let outcomes = window
+                .web
+                .get_mut(&seat)
+                .map(|web| web.reload(&window.compositor))
+                .unwrap_or_default();
+            self.apply_web_outcomes(seat, outcomes)?;
+        }
+        let source = preview::PreviewSource::file(path);
+        let stale: Vec<usize> = self
+            .window
+            .tabs
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, tab)| {
+                tab.preview_pool
+                    .get_mut(&source)
+                    .is_some_and(preview::PreviewBuffer::mark_stale)
+                    .then_some(index)
+            })
+            .collect();
+        for index in stale {
+            // The same door a restored tab's documents leave by: it asks each
+            // pane's buffer whether it wants a head read and claims it through
+            // the one ledger, so a file open in two panes is read once.
+            self.request_revived_previews(index);
+        }
+        Ok(())
+    }
+
     /// [`Self::advance_scheme_watch`]'s twin, called once per turn of the loop
     /// beside every other clock in this window, and costing one comparison while
     /// nothing is happening.
@@ -31214,6 +31441,74 @@ impl Runtime<'_> {
         } else {
             self.open_preview_file_on(surface, path)
         }
+    }
+
+    /// **The controlled file entry** (Web 预览块 W2 片⑤; `plan.md` section 3
+    /// 「受控 file 入口」) — a local page, on this tab's web seat.
+    ///
+    /// Four steps and the order is the whole rule:
+    ///
+    /// 1. **The disk says what the path is.** `canonicalize` resolves the
+    ///    junctions, the `..`s, the short names and the case, and what comes back
+    ///    is the only spelling anything downstream sees. A path that is not there
+    ///    is not a page: it goes down the document lane, whose "the disk was
+    ///    asked and said no" card is the answer this window already has for it.
+    /// 2. **The host mints.** `webnav::Mint::file` turns that `PathBuf` into the
+    ///    one `file:` URL this seat may load - percent-encoding the four
+    ///    characters that would re-open the parse, and refusing a network path
+    ///    outright. **No string from anywhere is trusted**: the URL is built from
+    ///    the canonicalised path, never from an address, a row or a session file.
+    /// 3. **The host asks its own gate** (`webnav::Origin::HostMinted`), before
+    ///    a seat is even chosen. Slice ② wrote that arm so that "every navigation
+    ///    this product starts has been through a door" would have no exception in
+    ///    it; this is its first real caller.
+    /// 4. **The mint travels with the request** to `WebSeat`, which installs it
+    ///    before it calls `Navigate` - because `NavigationStarting` can fire
+    ///    before `Navigate` returns, and a gate asked about a target the pane has
+    ///    not yet admitted to minting would cancel the pane's own navigation.
+    ///
+    /// The seat is the singleton rule's ([`Self::open_web_page`]): this tab's
+    /// page if it has one, and a landing preview seat if it has not.
+    fn open_preview_web_file(&mut self, path: PathBuf) -> Result<()> {
+        self.mouse_trace(|| format!("open_preview_web_file enter path={}", path.display()));
+        let canonical = match std::fs::canonicalize(&path) {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                self.mouse_trace(|| format!("open_preview_web_file leave=no-disk error={error}"));
+                return self.open_preview_file(path);
+            }
+        };
+        let mint = match webnav::Mint::file(&canonical) {
+            Ok(mint) => mint,
+            Err(refusal) => {
+                // A share, reached through a canonicalised path that turned out
+                // to be one. The document lane's `NetworkPath` card is section
+                // 7.1.3's own refusal and the one this window has always shown.
+                self.mouse_trace(|| format!("open_preview_web_file leave=refused {refusal:?}"));
+                return self.open_preview_file(path);
+            }
+        };
+        self.open_minted_page(mint)
+    }
+
+    /// **Issue one navigation the host itself minted** — step 3 and step 4 of
+    /// [`Self::open_preview_web_file`], and the one door a minted target leaves
+    /// by.
+    fn open_minted_page(&mut self, mint: webnav::Mint) -> Result<()> {
+        let asked = mint
+            .target()
+            .expect("a mint made by `Mint::file` names the URL it minted")
+            .to_owned();
+        let webnav::Decision::Navigate(url) =
+            webnav::check(&asked, webnav::Origin::HostMinted(&mint))
+        else {
+            // Unreachable by construction and reported rather than asserted: the
+            // gate is the thing being relied on, and a gate that can only be
+            // observed by a panic is a gate nobody would dare move.
+            eprintln!("BT_WEB refused a target it minted itself: {asked}");
+            return Ok(());
+        };
+        self.open_web_page_with(&url, mint)
     }
 
     /// [`Self::open_preview_file`] on a surface the caller has already chosen —
@@ -39709,11 +40004,11 @@ impl Runtime<'_> {
     /// redirects and page scripts start navigations no address field ever saw
     /// (`webnav` ①). This one is about the string; that one is about the load.
     fn navigate_preview_page(&mut self, target: &str) -> Result<()> {
-        let Some(url) = switcher_row_destination(target) else {
+        let Some((url, minted)) = page_destination(target) else {
             eprintln!("BT_WEB refused {target}");
             return Ok(());
         };
-        self.open_web_page(&url)
+        self.open_web_page_with(&url, minted)
     }
 
     /// Keep this folder, or stop keeping it (user ruling 2026-08-19).
@@ -45892,8 +46187,13 @@ impl Runtime<'_> {
         path: PathBuf,
         at: Option<bt_transcript::paths::PrintedPathLocation>,
     ) -> Result<()> {
-        if path_is_previewable_image(&path) {
-            return self.open_preview_image(path);
+        match preview_open_lane(&path) {
+            PreviewOpenLane::Picture => return self.open_preview_image(path),
+            // A page has no lines of this window's either, so `at` is spent the
+            // way it is spent on a picture: the reference opens the thing it
+            // names and the coordinate belongs to a space that does not exist.
+            PreviewOpenLane::Page => return self.open_preview_web_file(path),
+            PreviewOpenLane::Document => {}
         }
         let Some(line) = at.map(|at| at.line) else {
             return self.open_preview_file(path);
@@ -56217,6 +56517,16 @@ impl Runtime<'_> {
     /// the tab's existing page if it has one, and a landing preview seat if it
     /// has not.
     fn open_web_page(&mut self, url: &str) -> Result<()> {
+        self.open_web_page_with(url, webnav::Mint::Nothing)
+    }
+
+    /// [`Self::open_web_page`] carrying the host's own note about this target.
+    ///
+    /// `Mint::Nothing` for every ordinary address, which is what makes the two
+    /// spellings one function: an address was gated by `webnav::address_bar` at
+    /// its call site and has nothing further to declare, while a controlled file
+    /// entry carries the one `file:` URL it minted all the way to the engine.
+    fn open_web_page_with(&mut self, url: &str, minted: webnav::Mint) -> Result<()> {
         let seat = match self.web_seat_of_tab() {
             Some(seat) => seat,
             None => {
@@ -56227,7 +56537,7 @@ impl Runtime<'_> {
                 seat
             }
         };
-        self.open_web_page_on(seat, url)?;
+        self.open_web_page_on(seat, url, minted)?;
         self.focus_seat(seat)
     }
 
@@ -56243,13 +56553,13 @@ impl Runtime<'_> {
     /// built. Both are the same sentence to the recovery machine — `desired_url`,
     /// last write wins, nothing loaded until the events are installed — which is
     /// why the two arms differ only in whether there is a machine yet.
-    fn open_web_page_on(&mut self, seat: SeatId, url: &str) -> Result<()> {
+    fn open_web_page_on(&mut self, seat: SeatId, url: &str, minted: webnav::Mint) -> Result<()> {
         if self.window.web.contains_key(&seat) {
             let window = &mut *self.window;
             let outcomes = window
                 .web
                 .get_mut(&seat)
-                .map(|web| web.go(url, &window.compositor))
+                .map(|web| web.go(url, minted, &window.compositor))
                 .unwrap_or_default();
             return self.apply_web_outcomes(seat, outcomes);
         }
@@ -56259,6 +56569,7 @@ impl Runtime<'_> {
             seat.0,
             hwnd,
             url,
+            minted,
             Box::new(move || {
                 let _ = proxy.send_event(AppEvent::WebPageSpoke);
             }),
@@ -56323,7 +56634,7 @@ impl Runtime<'_> {
         let Some(tab) = self.window.tabs.get(index) else {
             return Ok(());
         };
-        let pages: Vec<(SeatId, String)> = tab
+        let pages: Vec<(SeatId, String, webnav::Mint)> = tab
             .preview_panes
             .iter()
             .filter_map(|(surface, pane)| {
@@ -56331,11 +56642,12 @@ impl Runtime<'_> {
                     return None;
                 };
                 let url = pane.buffer.as_ref()?.web_url()?;
-                Some((seat, switcher_row_destination(url)?))
+                let (url, minted) = page_destination(url)?;
+                Some((seat, url, minted))
             })
             .collect();
-        for (seat, url) in pages {
-            self.open_web_page_on(seat, &url)?;
+        for (seat, url, minted) in pages {
+            self.open_web_page_on(seat, &url, minted)?;
         }
         Ok(())
     }
@@ -56985,6 +57297,12 @@ impl Runtime<'_> {
             self.advance_storage_watch(now)?;
         }
         self.advance_rename_blink_if_due(now)?;
+        // The preview seats' own watch (W2 slice 5). This window's and not the
+        // application's - see [`WindowRuntime::preview_watch`] - and beside the
+        // two above because it is the same shape: a clock that asks for a
+        // wake-up only while it is holding news, over subscriptions that are
+        // brought level with what the seats are showing on the same turn.
+        self.advance_preview_watch(now)?;
         // The hosted page's own clock: the wait for a browser process to say it
         // has gone. **The only backstop on the graceful path**, where
         // `ProcessFailed` does not arrive at all and `BrowserProcessExited`
@@ -57242,6 +57560,11 @@ impl Runtime<'_> {
             application_clocks
                 .then(|| self.app.git_watch.deadline())
                 .flatten(),
+            // And the preview seats', on the same terms and without the
+            // application gate: absent for every window that is not currently
+            // holding unanswered news about a file it has open, which is every
+            // window most of the time.
+            self.window.preview_watch.deadline(),
         ]);
         self.reap_exited_tabs()?;
         Ok(wake_deadline)
@@ -58653,6 +58976,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // Every window, on this family's standing reason: an answer carries
             // its own address and a window with no page finds nothing to read.
             AppEvent::WebPageSpoke => self.for_each_window(|runtime| runtime.drive_web_page()),
+            // Nothing is done here either, on `GitChanged`'s own reasoning a
+            // third time: the moment the folder moved is already in
+            // `preview_watch`'s mailbox, and `about_to_wait` is where the quiet
+            // window is read and where the file itself is asked whether it was
+            // the one that moved.
+            AppEvent::PreviewFileChanged => Ok(()),
         };
         if let Err(error) = applied {
             self.fail(event_loop, error);
@@ -86416,6 +86745,150 @@ mod tests {
             bt_persist::PinKind::File,
             r"C:\work\notes.md"
         ));
+    }
+
+    /// PIN (W2 slice 5) - **which content lane a row activated in the files
+    /// column opens on.**
+    ///
+    /// The fork, asked of six kinds of name and one policy. The three claims the
+    /// ticket asks for are all here:
+    ///
+    /// * `.html`, `.htm` and `.pdf` open a **page** - and the PDF is one line of
+    ///   this table and nothing else, which is `plan.md` section 0's
+    ///   "PDF: 类型路由一行" made literal;
+    /// * a page on a **network share** is not a page: `webnav::Mint::file`
+    ///   refuses to mint one, so it goes down the document lane whose
+    ///   `NetworkPath` card is the refusal this window has always shown;
+    /// * **everything else is untouched.** A picture still goes to the decoder
+    ///   and every other name still goes to the pool, which is the regression
+    ///   half: this slice added a lane, it did not move one.
+    ///
+    /// RED GATE: drop the `pdf` arm of [`path_opens_as_a_page`] - the first
+    /// group fails on `report.pdf` alone, which is exactly how much of this
+    /// feature PDF is.
+    #[test]
+    fn a_row_opens_on_the_lane_its_name_and_the_mint_agree_on() {
+        for page in [
+            r"D:\site\index.html",
+            r"D:\site\index.htm",
+            r"D:\site\INDEX.HTM",
+            r"D:\reports\report.pdf",
+            r"D:\reports\REPORT.PDF",
+        ] {
+            assert_eq!(
+                preview_open_lane(Path::new(page)),
+                PreviewOpenLane::Page,
+                "{page}"
+            );
+        }
+        for share in [
+            r"\\server\share\index.html",
+            r"\\server\share\report.pdf",
+            r"\\?\UNC\server\share\index.htm",
+        ] {
+            assert_eq!(
+                preview_open_lane(Path::new(share)),
+                PreviewOpenLane::Document,
+                "a share is refused at the mint, and the document lane has the \
+                 card that says so: {share}"
+            );
+        }
+        for picture in [r"D:\shots\a.png", r"D:\shots\a.SVG"] {
+            assert_eq!(
+                preview_open_lane(Path::new(picture)),
+                PreviewOpenLane::Picture,
+                "{picture}"
+            );
+        }
+        for document in [
+            r"D:\src\main.rs",
+            r"D:\README.md",
+            r"D:\cases.csv",
+            r"D:\a.exe",
+            // The two neighbours a substring reading would sweep up.
+            r"D:\site\index.htmlx",
+            r"D:\site\report.html.txt",
+            r"D:\site\notes.pdfx",
+        ] {
+            assert_eq!(
+                preview_open_lane(Path::new(document)),
+                PreviewOpenLane::Document,
+                "{document}"
+            );
+        }
+    }
+
+    /// PIN (W2 slice 5) - **a stored row naming a local page is taken back to
+    /// the disk, never trusted as a string.**
+    ///
+    /// [`page_destination`] is what a switcher row, a `session.json` line and a
+    /// hand-edited pin all leave by, and its `file:` arm does the same three
+    /// steps the files column does: decode to a path, canonicalise it against
+    /// the disk, mint from *that*. So what authorises the load is a mint the
+    /// host made this instant, and the row contributes a name and nothing more.
+    ///
+    /// The three refusals below are the shape of that: a path that is not there
+    /// has nothing to canonicalise, a `..` in the string never reaches the disk
+    /// at all, and a percent escape this door does not write is a URL somebody
+    /// else built.
+    ///
+    /// A real file in a real directory, because `canonicalize` is the step under
+    /// test and there is no way to ask it about a disk that is not there.
+    ///
+    /// RED GATE: return `Some((target.to_owned(), Mint::Nothing))` for a `file:`
+    /// string - the round trip below still passes and every refusal fails, which
+    /// is the whole difference between naming a file and being allowed to load
+    /// one.
+    #[test]
+    fn a_stored_local_page_is_minted_from_the_disk_and_not_from_the_row() {
+        let dir = std::env::temp_dir().join(format!(
+            "folio-slice5-page-destination-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let page = dir.join("report.html");
+        std::fs::write(&page, b"<h1>x</h1>").expect("a page on a disk");
+        let canonical = std::fs::canonicalize(&page).expect("canonicalise it");
+        let minted = webnav::Mint::file(&canonical).expect("a local path mints");
+        let url = minted
+            .target()
+            .expect("a file mint names its URL")
+            .to_owned();
+
+        let (destination, carried) =
+            page_destination(&url).expect("a row naming a file that is there");
+        assert_eq!(destination, url, "the same page, minted again");
+        assert_eq!(carried, minted, "and the mint travels with it");
+
+        // The fragment a local report's table of contents uses is the page's own
+        // business and survives the trip.
+        let with_fragment = format!("{url}#chapter-3");
+        assert_eq!(
+            page_destination(&with_fragment).map(|(url, _)| url),
+            Some(with_fragment),
+            "the page answers for its own fragment"
+        );
+
+        std::fs::remove_file(&page).expect("take the file away");
+        assert_eq!(
+            page_destination(&url),
+            None,
+            "a row naming a file that is not there goes nowhere"
+        );
+        for hostile in [
+            "file:///C:/site/../../Windows/win.ini",
+            "file:///C:/site/%2e%2e/secret.html",
+            "file://server/share/page.html",
+            "file:///",
+        ] {
+            assert!(
+                page_destination(hostile).is_none(),
+                "not a string this door minted: {hostile}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **One page per tab, and the second address is a navigation rather than a

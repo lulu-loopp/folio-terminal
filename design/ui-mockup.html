@@ -6701,7 +6701,13 @@
     if (["png", "jpg", "jpeg", "svg", "gif", "webp"].includes(ext)) return "image";
     if (ext === "md") return "markdown";
     if (ext === "csv") return "table";
-    if (["rs", "py", "js", "ts", "json", "toml", "html", "txt", "gitignore", "lock", "yml", "yaml", "diff", "patch"].includes(ext)
+    /* `htm` sits beside `html` (W2 slice 5): the shortened spelling is the same
+       object - Windows registers both against the same handler, and the head's
+       hand-off arrow has read both since it was drawn. This list holding only
+       one of them is what made a `.htm` file draw the "no preview for this file
+       type" card and that arrow at the same time.
+       Native: `preview::TEXT_EXTENSIONS`. */
+    if (["rs", "py", "js", "ts", "json", "toml", "html", "htm", "txt", "gitignore", "lock", "yml", "yaml", "diff", "patch"].includes(ext)
         || name.startsWith(".")) return "text";
     return "unknown";
   };
