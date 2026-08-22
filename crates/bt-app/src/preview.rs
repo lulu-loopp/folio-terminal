@@ -1714,6 +1714,23 @@ pub struct PreviewBuffer {
     /// that has no body yet — there is nothing to be stale.
     pub disk_mtime: Option<SystemTime>,
     pub load: PreviewLoad,
+    /// **A head read is out with the worker** — the question, filed.
+    ///
+    /// [`PreviewLoad::Pending`] cannot carry this: it says "asked, *or about to
+    /// be*", and folding the two was harmless for as long as every caller of
+    /// this lane was an event — a file opened, a tab restored, a hand resting on
+    /// a row. The focus column's cards are not events: a card is looked at on
+    /// every frame it is visible, and a caller on that beat that could not tell
+    /// "asked" from "about to be asked" would re-read the file sixty times a
+    /// second until the answer landed.
+    ///
+    /// So it is a second bit beside the load, and it is exactly
+    /// [`crate::files::DirNode::Pending`] one lane over: that variant is how the
+    /// files column has always known not to ask twice, and this is the same
+    /// ledger for the same reason rather than a second one. It is written
+    /// through one door ([`Self::claim_head_read`]) and closed by the answer
+    /// ([`Self::accept`], [`Self::decline`]).
+    head_asked: bool,
     /// The widest line of [`Self::content`], in drawn columns.
     ///
     /// Derived once, when the body lands, rather than per frame: it is what the
@@ -1778,6 +1795,7 @@ impl PreviewBuffer {
             revision: 0,
             disk_mtime: None,
             load,
+            head_asked: false,
             max_columns: 0,
         }
     }
@@ -1788,13 +1806,34 @@ impl PreviewBuffer {
     /// that has one. This is the gate that keeps a git-backed buffer off
     /// [`PreviewWorker`]'s lane entirely rather than letting it arrive there and
     /// be dropped.
+    /// **And whether one is still owed.** A read already out with the worker is
+    /// not a read to ask for — see [`Self::head_asked`].
     pub fn wants_head_read(&self) -> bool {
         self.source.file_path().is_some()
             && self.load == PreviewLoad::Pending
+            && !self.head_asked
             && matches!(
                 self.ftype,
                 PreviewFtype::Text | PreviewFtype::Markdown | PreviewFtype::Table
             )
+    }
+
+    /// **Take this buffer's head read** — [`Self::wants_head_read`] and the
+    /// filing of the question, in one breath.
+    ///
+    /// The one door onto [`Self::head_asked`], for the reason
+    /// [`PreviewPool::open`] is one door: a caller that asked and forgot to file
+    /// it is a file read again on the next frame, and a caller that filed
+    /// without asking is a document that never arrives. Every send on
+    /// [`PreviewWorker`]'s channel comes through here, so "one document, one
+    /// read" is true by construction rather than by five call sites agreeing.
+    #[must_use]
+    pub fn claim_head_read(&mut self) -> bool {
+        if !self.wants_head_read() {
+            return false;
+        }
+        self.head_asked = true;
+        true
     }
 
     /// Whether this buffer would be shown on a surface that edits, **as the
@@ -1993,6 +2032,8 @@ impl PreviewBuffer {
     /// a head read has to be told never happens.
     pub fn decline(&mut self, words: String) {
         self.revision += 1;
+        // The question is closed by its answer, whichever lane answered it.
+        self.head_asked = false;
         self.content = None;
         self.truncated = false;
         self.max_columns = 0;
@@ -2003,6 +2044,12 @@ impl PreviewBuffer {
     /// File the worker's answer.
     pub fn accept(&mut self, outcome: HeadOutcome) {
         self.revision += 1;
+        // The question is closed by its answer — and the load it lands in
+        // (`Ready`, `Refused`) is already not one this lane asks about, so
+        // clearing the bit re-opens nothing. It keeps the bit meaning exactly
+        // "a read is out", which is what a reader of it has to be able to
+        // believe.
+        self.head_asked = false;
         match outcome {
             HeadOutcome::Read {
                 text,
@@ -3341,6 +3388,74 @@ mod tests {
         );
         assert!(file.wants_head_read());
         assert_eq!(file.view(false), PreviewView::Text);
+    }
+
+    /// **One document, one read** (user ruling 2026-08-21) — the ledger that
+    /// lets a *per-frame* caller ask.
+    ///
+    /// Every caller of this lane before the focus column was an event: a file
+    /// opened, a tab restored, a hand resting on a row. The card that projects a
+    /// background tab's preview seat is not — it is looked at sixty times a
+    /// second — and `PreviewLoad::Pending` cannot tell "asked" from "about to be
+    /// asked" (read its own doc comment), so a caller on that beat would re-read
+    /// the file on every frame until the answer landed.
+    ///
+    /// So the question itself is filed, exactly as [`crate::files::DirNode`]'s
+    /// `Pending` files a directory's: one ledger, on the buffer, and
+    /// [`PreviewBuffer::claim_head_read`] is the only door that writes it.
+    ///
+    /// **And a refusal is not retried.** The failure states are answers, so the
+    /// door stays shut over them for the reason it stays shut over a body that
+    /// arrived: there is nothing left to ask.
+    ///
+    /// MUTATION: let `claim_head_read` return `wants_head_read()` without filing
+    /// anything — the second frame reads the file again.
+    #[test]
+    fn a_head_read_is_claimed_once_and_a_refusal_is_not_retried() {
+        let mut buffer = PreviewBuffer::new(
+            PreviewSource::file(r"C:\w\repo\notes.md"),
+            "notes.md".to_owned(),
+        );
+        assert!(
+            buffer.wants_head_read(),
+            "nobody has asked for this body yet"
+        );
+        assert!(buffer.claim_head_read(), "the first caller takes the read");
+        assert!(
+            !buffer.claim_head_read(),
+            "and every caller after it finds the question already asked"
+        );
+        assert!(
+            !buffer.wants_head_read(),
+            "a question outstanding is not a question to ask"
+        );
+        assert_eq!(
+            buffer.load,
+            PreviewLoad::Pending,
+            "the body is still on its way, which is what the pane is drawing"
+        );
+
+        buffer.accept(HeadOutcome::Refused(PreviewRefusal::Fault(
+            PreviewFault::PermissionDenied,
+        )));
+        assert!(
+            !buffer.claim_head_read(),
+            "a refusal is an answer, and the card draws the sentence it earns \
+             rather than asking again"
+        );
+
+        // A body that arrives is the same shut door, by the other clause.
+        let mut read = PreviewBuffer::new(
+            PreviewSource::file(r"C:\w\repo\main.rs"),
+            "main.rs".to_owned(),
+        );
+        assert!(read.claim_head_read());
+        read.accept(HeadOutcome::Read {
+            text: "fn main() {}\n".to_owned(),
+            truncated: false,
+            mtime: None,
+        });
+        assert!(!read.claim_head_read(), "there is nothing left to ask");
     }
 
     /// ① One file, one buffer — a second open of the same path is the same

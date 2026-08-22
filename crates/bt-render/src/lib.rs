@@ -1202,6 +1202,60 @@ pub struct PreviewBody {
     pub blocks: Vec<PreviewBlock>,
 }
 
+impl PreviewBody {
+    /// Every paragraph this body holds, its scrolling blocks' included.
+    #[must_use]
+    pub fn paragraph_count(&self) -> usize {
+        self.paragraphs.len()
+            + self
+                .blocks
+                .iter()
+                .map(|block| block.paragraphs.len())
+                .sum::<usize>()
+    }
+
+    /// Every fill this body holds, on the same terms.
+    #[must_use]
+    pub fn quad_count(&self) -> usize {
+        self.quads.len()
+            + self
+                .blocks
+                .iter()
+                .map(|block| block.quads.len())
+                .sum::<usize>()
+    }
+}
+
+/// **What one frame did with the preview documents it was handed** — the
+/// forensic record behind `BT_PREVIEW_TRACE` (user report 2026-08-21: a markdown
+/// preview drawing its heading rules and none of its words).
+///
+/// Four numbers and a flag, because the picture the report describes has exactly
+/// four places it can come from and they are otherwise indistinguishable from
+/// outside:
+///
+/// * `bodies == 0` — nothing was built for this seat at all; the two lines on
+///   screen are the pane's own head and foot hairlines.
+/// * `paragraphs == 0` while `quads > 0` — the document was built and its blocks
+///   carried no text, which is a layout that ran on something empty.
+/// * `drawn == 0` while `paragraphs > 0` — every paragraph was refused by
+///   `shape_preview_body`'s own filters: an empty run, a box outside its clip, or
+///   a box that did not survive `crop_to` (zero height, inverted, `NaN`).
+/// * `prepared == false` while `drawn > 0` — the batch was shaped and the atlas
+///   refused it, and the frame presented every fill with none of its glyphs.
+///
+/// **It changes no behaviour.** Nothing in the renderer reads it back.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PreviewTextFrame {
+    pub bodies: usize,
+    pub paragraphs: usize,
+    pub quads: usize,
+    /// Paragraphs that survived every filter and were handed to the atlas.
+    pub drawn: usize,
+    /// Whether the atlas took them.
+    pub prepared: bool,
+}
+
 /// One rendered table block's picture, in the block's own coordinates.
 ///
 /// **Coordinates, not pixels, and that is the whole of what makes a table different from a
@@ -2587,6 +2641,10 @@ pub struct WindowRenderer {
     peek_overlay: Option<PeekImageOverlay>,
     preview_image: Option<PreviewImage>,
     preview_bodies: Vec<PreviewBody>,
+    /// **What the last frame did with the preview documents it was handed** —
+    /// see [`PreviewTextFrame`]. Written on every present, read by whoever is
+    /// tracing; nothing in this module branches on it.
+    preview_text_frame: PreviewTextFrame,
     /// This frame's table pictures, keyed by the source text of the block each belongs to.
     table_blocks: HashMap<String, TableBlockPaint>,
     preview_text_renderer: TextRenderer,
@@ -4010,6 +4068,7 @@ impl WindowRenderer {
             peek_overlay: None,
             preview_image: None,
             preview_bodies: Vec::new(),
+            preview_text_frame: PreviewTextFrame::default(),
             table_blocks: HashMap::new(),
             preview_text_renderer,
             trace_perf,
@@ -4181,6 +4240,13 @@ impl WindowRenderer {
     /// whole-surface coordinates, so nothing here has to know which surface a body
     /// came from — the list is drawn in the order it is given, which is the order
     /// the caller paints its surfaces in.
+    /// What the last presented frame did with the preview documents — the one
+    /// reader is `BT_PREVIEW_TRACE` in `bt-app`.
+    #[must_use]
+    pub fn preview_text_frame(&self) -> PreviewTextFrame {
+        self.preview_text_frame
+    }
+
     pub fn set_preview_bodies(&mut self, bodies: Vec<PreviewBody>) -> bool {
         let changed = self.preview_bodies != bodies;
         self.preview_bodies = bodies;
@@ -5113,6 +5179,30 @@ impl WindowRenderer {
                 &preview_text_layouts,
             )
             .is_ok();
+        // **The forensic line for "the body drew its rules and none of its
+        // words"** (user report 2026-08-21). The three numbers are the three
+        // places that picture can come from and they separate them completely:
+        // a body that was never built (`bodies`), a body built whose paragraphs
+        // did not survive their own clip (`paragraphs` standing while `drawn`
+        // falls to zero — `shape_preview_body`'s filters), and a batch that was
+        // shaped and then refused by the atlas (`drawn` standing while
+        // `prepared` is false). Recorded here rather than reasoned about later
+        // because the frame is gone by the time anybody asks.
+        self.preview_text_frame = PreviewTextFrame {
+            bodies: self.preview_bodies.len(),
+            paragraphs: self
+                .preview_bodies
+                .iter()
+                .map(PreviewBody::paragraph_count)
+                .sum(),
+            quads: self
+                .preview_bodies
+                .iter()
+                .map(PreviewBody::quad_count)
+                .sum(),
+            drawn: preview_text_layouts.len(),
+            prepared: preview_text_prepared,
+        };
         // The modal overlay, one layer at a time. Empty on every frame no dialog
         // is up, and every branch below is guarded on emptiness, so a window
         // without one issues exactly the command stream it issued before modals
