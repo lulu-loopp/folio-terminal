@@ -652,7 +652,7 @@ pub fn detect_local_image_path_candidates(text: &str) -> Vec<LocalImagePathCandi
     bt_transcript::paths::detect_absolute_path_candidates(text)
         .into_iter()
         .filter_map(|candidate| {
-            let path = candidate.text(text);
+            let path = candidate.path_text(text);
             is_admissible_local_image_path(Path::new(path)).then(|| LocalImagePathCandidate {
                 path: path.to_owned(),
                 byte_start: candidate.byte_start,
@@ -680,7 +680,7 @@ pub fn detect_relative_image_path_candidates(text: &str) -> Vec<LocalImagePathCa
     })
     .into_iter()
     .map(|candidate| LocalImagePathCandidate {
-        path: candidate.text(text).to_owned(),
+        path: candidate.path_text(text).to_owned(),
         byte_start: candidate.byte_start,
         byte_end: candidate.byte_end,
         shape: ImageReferenceShape::Native,
@@ -754,7 +754,7 @@ pub fn detect_local_image_uri_candidates(text: &str) -> Vec<LocalImagePathCandid
     bt_transcript::paths::detect_file_uri_candidates(text)
         .into_iter()
         .filter_map(|candidate| {
-            let path = file_uri_to_local_image_path(candidate.text(text))?;
+            let path = file_uri_to_local_image_path(candidate.path_text(text))?;
             Some(LocalImagePathCandidate {
                 path: path.to_string_lossy().into_owned(),
                 byte_start: candidate.byte_start,

@@ -1134,6 +1134,17 @@ struct PreviewPane {
     /// The sentence this surface's body owes about its last save, and when it
     /// was said.
     notice: Option<(String, Instant)>,
+    /// A line this surface was opened at and has not been able to reach yet
+    /// (§7.1.5j, `path:line[:col]`).
+    ///
+    /// It is an **intent rather than a scroll** because the body is read off a
+    /// worker: the frame that opens the file knows its name and nothing about its
+    /// lines, so a number written straight into [`Self::scroll`] would be clamped
+    /// against an empty document and healed back to zero. It waits here — on the
+    /// pane, so it travels with the pane into a torn-off window exactly as the
+    /// rescale ledger does — until [`Runtime::settle_preview_goto`] has something
+    /// to measure, and is cleared the moment it is spent.
+    goto_line: Option<u32>,
     /// Whether this surface is showing a markdown buffer's **source** rather
     /// than its render (P28).
     ///
@@ -10590,8 +10601,15 @@ enum HyperlinkActivation {
     /// document and refuses a program.
     External(PathBuf),
     /// A local file, opened the way this window opens every other file — the
-    /// preview seat's own door.
-    Preview(PathBuf),
+    /// preview seat's own door, and the line inside it the reference named
+    /// (§7.1.5j, `path:line[:col]`).
+    ///
+    /// The line rides on this arm and on no other. The four remaining arms hand
+    /// the reference to something outside this window, and this window has no way
+    /// to tell Explorer or a registered handler where to put a caret — so they
+    /// take the file and drop the line, which is what they did before a line
+    /// could be spelled at all.
+    Preview(PathBuf, Option<bt_transcript::paths::PrintedPathLocation>),
     /// A local folder, which is Explorer's.
     Reveal(PathBuf),
     /// A local folder, opened the way this window opens every other folder — the
@@ -10690,13 +10708,19 @@ fn hyperlink_activation(
         let Some(path) = bt_platform::file_uri_to_path(uri) else {
             return refused;
         };
+        // Where in the file the reference pointed, if it pointed anywhere
+        // (§7.1.5j). It is read off the target's fragment, which is why the line
+        // above — and `reveal_arguments`, and `open_local_path` — go on naming the
+        // same file they always did: every one of them decodes through something
+        // that cuts a fragment before it looks at a name.
+        let at = bt_transcript::paths::PrintedPathLocation::from_uri(uri);
         // A share is one answer under either modifier, and it is the card §7.1.3
         // already has. `Ctrl` does not buy a way past it: `ShellExecuteW` is
         // synchronous on this thread, so handing a cold `\\server` to the shell
         // would stall the window for exactly the network round trip the arm above
         // refuses to make.
         if preview::is_network_path(&path) {
-            return HyperlinkActivation::Preview(path);
+            return HyperlinkActivation::Preview(path, at);
         }
         // The folder question first: a directory may be named `site.html`, and
         // Explorer's arm was settled before the page arm existed.
@@ -10720,7 +10744,7 @@ fn hyperlink_activation(
             // reference to the page. So the plain half stays empty until W2 fills
             // it, rather than answering with the one thing that was not asked for.
             ClickIntent::Here if names_an_html_page(&path) => HyperlinkActivation::None,
-            ClickIntent::Here => HyperlinkActivation::Preview(path),
+            ClickIntent::Here => HyperlinkActivation::Preview(path, at),
             ClickIntent::System => HyperlinkActivation::External(path),
         };
     }
@@ -35373,6 +35397,12 @@ impl Runtime<'_> {
             // body stayed empty, because nothing rebuilt the text after the
             // frame that had nothing to build it from.
             self.refresh_preview_for_layout();
+            // A body landing is also the moment a surface opened at a line can
+            // finally reach it (§7.1.5j). After the rebuild, because the answer is
+            // a *row* and rows are what the rebuild just produced.
+            for surface in self.preview_surfaces() {
+                self.settle_preview_goto(surface);
+            }
             self.refresh_chrome();
             // And presented unconditionally, for the same reason: the chrome
             // genuinely may not have changed — the head already said the name
@@ -45172,11 +45202,118 @@ impl Runtime<'_> {
     /// W2 gives the preview seat something that renders a page, the exception
     /// ends and both doors come back together.
     fn open_preview(&mut self, path: PathBuf) -> Result<()> {
+        self.open_preview_at(path, None)
+    }
+
+    /// [`Self::open_preview`] told **where in the file** the reference pointed
+    /// (§7.1.5j, `path:line[:col]`).
+    ///
+    /// The line is spent on the document lane and nowhere else: a picture has no
+    /// lines, so `sunset.png:12` opens the picture and the `12` is a coordinate in
+    /// a space that does not exist. Only the column is dropped rather than
+    /// honoured — the seat has one caret and putting it at a column would claim a
+    /// precision the reference's *printer* rarely has; landing on the line is what
+    /// every editor's `+N` does with a `file:line` and it is what the reader asked
+    /// for.
+    fn open_preview_at(
+        &mut self,
+        path: PathBuf,
+        at: Option<bt_transcript::paths::PrintedPathLocation>,
+    ) -> Result<()> {
         if path_is_previewable_image(&path) {
-            self.open_preview_image(path)
-        } else {
-            self.open_preview_file(path)
+            return self.open_preview_image(path);
         }
+        let Some(line) = at.map(|at| at.line) else {
+            return self.open_preview_file(path);
+        };
+        // The surface is resolved once and used twice: the landing rule may mint a
+        // leaf, and asking it a second time after the file has landed could name a
+        // different pane than the one the file went to.
+        let Some(surface) = self.preview_landing_surface() else {
+            self.mouse_trace(|| "open_preview_at leave=no-landing-surface".to_owned());
+            return Ok(());
+        };
+        self.open_preview_file_on(surface, path)?;
+        self.aim_preview_at_line(surface, line)
+    }
+
+    /// Point one surface at one line of the document it is showing.
+    ///
+    /// **The source face, always.** A line number is a coordinate in the file's
+    /// bytes, and a rendered markdown page has no such coordinate — its blocks
+    /// carry no source lines and a paragraph is several lines joined. So a
+    /// reference that names a line asks for the face that has lines; the flip is
+    /// the view's own (ruling 8⑧, 2026-08-13), so this changes what *this* surface
+    /// shows and nothing about the buffer or about any other surface on it.
+    ///
+    /// The scroll itself is deferred rather than performed, because the body is
+    /// read off a worker: at this instant the pane knows the file's name and
+    /// nothing about its lines. [`Self::settle_preview_goto`] spends the intent as
+    /// soon as there is something to measure, which is this frame when the pool
+    /// already held the file and a later one when it did not.
+    fn aim_preview_at_line(&mut self, surface: PreviewSurface, line: u32) -> Result<()> {
+        let pane = self.preview_pane_mut(surface);
+        pane.md_source = true;
+        pane.goto_line = Some(line);
+        self.refresh_preview_for_layout();
+        self.settle_preview_goto(surface);
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
+    /// Spend a surface's pending "open at this line", if the bytes it needs have
+    /// arrived.
+    ///
+    /// The line goes to the **top** of the body rather than being revealed by the
+    /// minimum move [`Self::reveal_preview_caret`] makes: a pane that has just
+    /// opened a file has not been anywhere in it, so there is no reading position
+    /// to disturb, and the line the reference named is the first thing the reader
+    /// wants to see with its own text under it.
+    fn settle_preview_goto(&mut self, surface: PreviewSurface) {
+        let Some(line) = self.preview_pane(surface).and_then(|pane| pane.goto_line) else {
+            return;
+        };
+        let Some(content) = self
+            .preview_buffer_on(surface)
+            .and_then(|buffer| buffer.content.clone())
+        else {
+            return;
+        };
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let Some(body) = self.preview_surface_body_rect(surface, scale) else {
+            return;
+        };
+        // Counted from one, the way every printer of a `file:line` counts, and
+        // clamped by `offset_at` to the last line a shorter file actually has.
+        let index = line.saturating_sub(1) as usize;
+        let offset = preview_edit::offset_at(&content, index, 0);
+        // The *drawn* row, not the line number: a wrapped body puts line 40 well
+        // below the fortieth row. A face with no rows of its own — a table, a diff
+        // — answers `None`, and then the intent is spent on the caret alone rather
+        // than left pending forever against a body that will never have lines.
+        let row = self
+            .preview_wrap(surface)
+            .map(|wrap| wrap.row_of(index, 0).0);
+        let scroll = self.preview_pane(surface).map_or([0.0, 0.0], |pane| pane.scroll);
+        let scrolled = match row {
+            Some(row) => {
+                let metrics = seats::preview_text_metrics(scale);
+                let wanted = [
+                    scroll[0],
+                    metrics.padding_y + metrics.line_height * row as f32,
+                ];
+                self.clamped_preview_scroll(surface, body, scale, wanted)
+            }
+            None => scroll,
+        };
+        let pane = self.preview_pane_mut(surface);
+        pane.caret = preview_edit::EditCaret {
+            anchor: offset,
+            caret: offset,
+            desired_column: None,
+        };
+        pane.scroll = scrolled;
+        pane.goto_line = None;
     }
 
     /// Hand one path to the system's default handler, and say so when the window
@@ -47658,7 +47795,7 @@ impl Runtime<'_> {
             // "no preview" card whose one button is the system's handler. A share
             // arrives here too and meets §7.1.3's own refusal, which is a card
             // this window already has words for.
-            HyperlinkActivation::Preview(path) => self.open_preview(path)?,
+            HyperlinkActivation::Preview(path, at) => self.open_preview_at(path, at)?,
             HyperlinkActivation::Reveal(path) => {
                 self.reveal_in_explorer(&path);
             }
@@ -65627,7 +65764,7 @@ mod tests {
             let link = hyperlink_activation(control, true, "file:///C:/notes/plan.md", &|_| false);
             let reference = local_image_activation(control, true, Some(picture));
             let (link_stays, reference_stays) = (
-                matches!(link, HyperlinkActivation::Preview(_)),
+                matches!(link, HyperlinkActivation::Preview(_, None)),
                 matches!(reference, LocalImageActivation::Preview(_)),
             );
             let (link_leaves, reference_leaves) = (
@@ -65715,7 +65852,7 @@ mod tests {
         );
         assert_eq!(
             hyperlink_activation(false, true, "file:///C:/Users/me/notes.md", &no_directories),
-            HyperlinkActivation::Preview(PathBuf::from(r"C:\Users\me\notes.md")),
+            HyperlinkActivation::Preview(PathBuf::from(r"C:\Users\me\notes.md"), None),
             "every other local file goes down the files column's own road"
         );
         assert_eq!(
@@ -65730,7 +65867,7 @@ mod tests {
                 "file:///D:/%E4%B8%AD%E6%96%87/note.md",
                 &no_directories
             ),
-            HyperlinkActivation::Preview(PathBuf::from(r"D:\中文\note.md")),
+            HyperlinkActivation::Preview(PathBuf::from(r"D:\中文\note.md"), None),
             "and it is the decoded path that travels, not the URI"
         );
         assert_eq!(
@@ -65750,7 +65887,7 @@ mod tests {
                 hyperlink_activation(control, true, "file://server/share/notes.md", &|_| {
                     panic!("a share must not be probed: §7.1.3 does not read one unasked")
                 }),
-                HyperlinkActivation::Preview(PathBuf::from(r"\\server\share\notes.md")),
+                HyperlinkActivation::Preview(PathBuf::from(r"\\server\share\notes.md"), None),
                 "a share meets the network card under either modifier, without a round trip"
             );
         }
@@ -65836,7 +65973,7 @@ mod tests {
         ] {
             assert_eq!(
                 hyperlink_activation(false, true, uri, &no_directories),
-                HyperlinkActivation::Preview(PathBuf::from(path)),
+                HyperlinkActivation::Preview(PathBuf::from(path), None),
                 "not a page, so a plain click is still the preview seat's: {uri:?}"
             );
         }
@@ -65851,7 +65988,7 @@ mod tests {
                 hyperlink_activation(control, true, "file://server/share/index.html", &|_| {
                     panic!("a share must not be probed: §7.1.3 does not read one unasked")
                 }),
-                HyperlinkActivation::Preview(PathBuf::from(r"\\server\share\index.html")),
+                HyperlinkActivation::Preview(PathBuf::from(r"\\server\share\index.html"), None),
                 "a share meets the network card it always met, without a round trip"
             );
         }
@@ -66373,7 +66510,7 @@ mod tests {
             (
                 readable_column,
                 readable.clone(),
-                HyperlinkActivation::Preview(readable.clone()),
+                HyperlinkActivation::Preview(readable.clone(), None),
                 HyperlinkActivation::External(readable.clone()),
             ),
             (
@@ -66431,6 +66568,89 @@ mod tests {
 
         std::fs::remove_file(&readable).unwrap();
         std::fs::remove_file(&page).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// PIN (§7.1.5j, `path:line[:col]`) — **a reference that names a line reaches the five-armed
+    /// table as the file it names, with the line riding on the preview arm and on no other.**
+    ///
+    /// The whole of what makes the other four arms free: they decode through something that cuts a
+    /// fragment, so `file:///…/notes.md#L13C5` is the same file to Explorer, to the registered
+    /// handler and to the files column that `file:///…/notes.md` always was.
+    #[test]
+    fn a_located_reference_carries_its_line_to_the_preview_arm_alone() {
+        let directory = std::env::temp_dir().join(format!(
+            "betterterminal-located-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let readable = directory.join("notes.md");
+        std::fs::write(&readable, b"# notes\n").unwrap();
+
+        let printed = format!("{}:13:5", readable.to_string_lossy());
+        let mut session = DualPlaneSession::new(
+            NonZeroU32::new(printed.chars().count() as u32 + 8).unwrap(),
+            NonZeroU32::new(4).unwrap(),
+        );
+        session.set_math_layout_options(bt_term::MathLayoutOptions {
+            detect_image_paths: true,
+            ..bt_term::MathLayoutOptions::default()
+        });
+        session.feed(printed.as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        while let Some(task) = session.take_decoration_worker_task() {
+            if let bt_term::SessionDecorationTask::VerifyPath(path) = task {
+                let exists = bt_term::path_exists(&path);
+                session.complete_path_verification(path, exists);
+            }
+        }
+        let frame = session.viewport_frame(&mut projection).unwrap();
+
+        // The span is the whole reference, so the `:13:5` is part of what a pointer must be over
+        // and part of what the mark covers.
+        let last = printed.chars().count() as u32 - 1;
+        let hit = frame
+            .hyperlink_at(0, last)
+            .expect("the line number is inside the reference, not prose behind it");
+        assert_eq!(
+            hit,
+            frame.hyperlink_at(0, 0).expect("and so is its head"),
+            "one reference, one link"
+        );
+        assert_eq!(
+            hit.uri,
+            format!(
+                "{}#L13C5",
+                bt_transcript::paths::local_path_to_file_uri(&readable)
+            ),
+            "the target is the file, and the line rides in its fragment"
+        );
+
+        let is_directory = |path: &Path| path.is_dir();
+        assert_eq!(
+            hyperlink_activation(false, true, &hit.uri, &is_directory),
+            HyperlinkActivation::Preview(
+                readable.clone(),
+                Some(bt_transcript::paths::PrintedPathLocation {
+                    line: 13,
+                    column: Some(5)
+                })
+            ),
+            "plainly, the preview seat — told where to look"
+        );
+        assert_eq!(
+            hyperlink_activation(true, true, &hit.uri, &is_directory),
+            HyperlinkActivation::External(readable.clone()),
+            "and the system's handler takes the file it always took"
+        );
+
+        std::fs::remove_file(&readable).unwrap();
         std::fs::remove_dir(&directory).unwrap();
     }
 
@@ -66499,7 +66719,7 @@ mod tests {
         assert_eq!(head, tail, "two segments of one run are one hit");
         assert_eq!(head.uri, "file:///C:/notes/phd%20application.md");
 
-        let opened = HyperlinkActivation::Preview(PathBuf::from(r"C:\notes\phd application.md"));
+        let opened = HyperlinkActivation::Preview(PathBuf::from(r"C:\notes\phd application.md"), None);
         for hit in [&head, &tail] {
             assert_eq!(
                 hyperlink_activation(false, true, &hit.uri, &|_| false),
