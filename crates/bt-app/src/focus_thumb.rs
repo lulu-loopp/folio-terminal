@@ -49,6 +49,15 @@
 //! assert on — a counter, not a stopwatch, so the gates are checked for what they
 //! are rather than for how fast the machine that ran them was.
 //!
+//! # What a projection could not answer
+//!
+//! The red line stands: **a projection never goes and fetches**. What it does,
+//! since 2026-08-21, is hand back the list of things it had nothing in memory
+//! for ([`UnreadDir`]), and the caller — which owns the workers and knows
+//! whether the mode is even on — decides whether to go. That keeps the fetching
+//! and the drawing on opposite sides of the same line they were always on, and
+//! it costs nothing extra: the list falls out of the walk that drew the rows.
+//!
 //! # Where the width and the height come in
 //!
 //! §3.3's multi-projection — the same session presented at more than one width —
@@ -197,6 +206,26 @@ enum Damage {
     /// A face: the two words on it. There is nothing behind them to have a
     /// generation, so they *are* the generation.
     Face { name: String, kind: String },
+}
+
+/// **A directory one card's files seat had nothing in memory to draw** (user
+/// ruling 2026-08-21).
+///
+/// The projection asks nobody anything — that is §7.1.6b′'s red line and it has
+/// not moved. What it does now is *say what it lacked*: [`files::tree_view`]
+/// already hands back the keys it could not answer (`TreeView::wanted`, the very
+/// list the docked walk feeds `Runtime::files_trees` from), and throwing that
+/// away here was what left a background tab's card sitting on `Loading…` for as
+/// long as nobody clicked the tab.
+///
+/// The caller owns the worker and decides whether to go. It is produced only by
+/// a projection that actually ran, so the four gates bound how often it can be
+/// produced exactly as they bound the walk that produces it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnreadDir {
+    pub seat: SeatId,
+    /// The tree key, in [`files::tree_view`]'s own grammar — `""` is the root.
+    pub key: String,
 }
 
 /// One seat's entry: what it says, what that was built from, and when.
@@ -414,7 +443,17 @@ impl FocusThumbnails {
     /// `demands` is the tab's seats in tree order, already carrying their own
     /// widths. Seats not in the list are dropped, which is how a pane closed in a
     /// background tab stops being drawn on its card.
-    pub fn project(&mut self, tab: TabId, demands: &[SeatDemand<'_>], now: Instant) {
+    ///
+    /// **What comes back is what the projection could not answer out of memory**
+    /// — see [`UnreadDir`]. It is empty on every frame that projected nothing,
+    /// which is most of them, and an empty `Vec` allocates nothing.
+    pub fn project(
+        &mut self,
+        tab: TabId,
+        demands: &[SeatDemand<'_>],
+        now: Instant,
+    ) -> Vec<UnreadDir> {
+        let mut unread = Vec::new();
         let content = self.content.entry(tab).or_default();
         let live: BTreeSet<SeatId> = demands.iter().map(|demand| demand.id).collect();
         content.retain(|seat, _| live.contains(seat));
@@ -449,7 +488,12 @@ impl FocusThumbnails {
                 }
                 _ => {}
             }
-            content.insert(demand.id, demand.project());
+            let (projected, wanted) = demand.project();
+            unread.extend(wanted.into_iter().map(|key| UnreadDir {
+                seat: demand.id,
+                key,
+            }));
+            content.insert(demand.id, projected);
             self.entries.insert(
                 key,
                 Entry {
@@ -460,6 +504,7 @@ impl FocusThumbnails {
             );
             self.stats.projections += 1;
         }
+        unread
     }
 }
 
@@ -499,27 +544,47 @@ impl SeatDemand<'_> {
 
     /// The expensive half: build the seat's content. Reached only past all four
     /// gates.
-    fn project(&self) -> MiniSeatContent {
+    ///
+    /// **And the directories the build had nothing for** — see [`UnreadDir`].
+    /// They come back from the same walk that drew the rows rather than from a
+    /// second one, so asking what a card is missing costs nothing beyond drawing
+    /// it and cannot disagree with what it drew.
+    fn project(&self) -> (MiniSeatContent, Vec<String>) {
         match &self.source {
             SeatSource::Terminal { session, skip } => {
                 let (lines, more_below) = transcript_tail(session, self.columns, self.rows, *skip);
-                MiniSeatContent::Transcript { lines, more_below }
+                (
+                    MiniSeatContent::Transcript { lines, more_below },
+                    Vec::new(),
+                )
             }
-            SeatSource::Document { buffer, mono } => MiniSeatContent::Document {
-                lines: document_head(buffer, self.columns, self.rows),
-                mono: *mono,
-            },
+            SeatSource::Document { buffer, mono } => (
+                MiniSeatContent::Document {
+                    lines: document_head(buffer, self.columns, self.rows),
+                    mono: *mono,
+                },
+                Vec::new(),
+            ),
             // **The page the column is on, and not the one it has** (§7.1.3g's
             // ruling, one surface further out): a Files seat is a column with
             // two pages and `view` says which of them is on screen right now.
             SeatSource::Files { state, cache } => match state.view {
-                FilesView::Files => MiniSeatContent::Files(files_head(state, cache, self.rows)),
-                FilesView::Git => git_face(state),
+                FilesView::Files => {
+                    let (rows, wanted) = files_head(state, cache, self.rows);
+                    (MiniSeatContent::Files(rows), wanted)
+                }
+                // A column standing on its Git page draws two words out of its
+                // own state and reads no directory, so there is nothing here it
+                // could be missing.
+                FilesView::Git => (git_face(state), Vec::new()),
             },
-            SeatSource::Face { name, kind } => MiniSeatContent::Face {
-                name: name.clone(),
-                kind: kind.clone(),
-            },
+            SeatSource::Face { name, kind } => (
+                MiniSeatContent::Face {
+                    name: name.clone(),
+                    kind: kind.clone(),
+                },
+                Vec::new(),
+            ),
         }
     }
 }
@@ -807,12 +872,28 @@ fn git_face(state: &FilesLeafState) -> MiniSeatContent {
 /// [`git_face`] for the other one.
 ///
 /// The column's **own** walk (`files::tree_view`), so a card can never show a
-/// tree the pane under it disagrees with — and it asks for nothing: `tree_view`
-/// returns the directories it would like read next and this drops them on the
-/// floor, because a thumbnail must not put a question to the disk. A folder
-/// nobody has opened stays a folder nobody has opened.
-fn files_head(state: &FilesLeafState, cache: &DirCache, rows: usize) -> Vec<MiniFilesRow> {
-    files::tree_view(state, cache)
+/// tree the pane under it disagrees with — and **it still asks nobody
+/// anything**: what comes back beside the rows is `tree_view`'s own list of the
+/// directories it could not answer, handed up to the caller that owns the
+/// worker. A thumbnail does not put a question to the disk; it says which
+/// question there is (user ruling 2026-08-21, [`UnreadDir`]).
+///
+/// Dropping that list on the floor was right for as long as a card was the only
+/// picture of a tab nobody was looking at. §7.1.6b′ changed what "on screen"
+/// means: the column of cards puts every background tab's seats on the glass,
+/// and a `Loading…` row for a read nobody had started is a card promising
+/// something that was never coming.
+///
+/// A folder nobody has opened still stays a folder nobody has opened —
+/// `tree_view` walks the open set and nothing else, so what is asked for is
+/// exactly what the card is already drawing a placeholder line for.
+fn files_head(
+    state: &FilesLeafState,
+    cache: &DirCache,
+    rows: usize,
+) -> (Vec<MiniFilesRow>, Vec<String>) {
+    let view = files::tree_view(state, cache);
+    let head = view
         .rows
         .into_iter()
         .take(rows)
@@ -821,7 +902,8 @@ fn files_head(state: &FilesLeafState, cache: &DirCache, rows: usize) -> Vec<Mini
             depth: u16::try_from(row.depth).unwrap_or(u16::MAX),
             name: row.name,
         })
-        .collect()
+        .collect();
+    (head, view.wanted)
 }
 
 /// **The first `rows` lines of a preview's body** (user ruling, 2026-08-20).
@@ -1010,6 +1092,95 @@ mod tests {
                     directory: false,
                 },
             ]))
+        );
+    }
+
+    /// **A card is a reason to read the directory under it** (user ruling
+    /// 2026-08-21) — the projection quotes what is in memory, and says out loud
+    /// what it had nothing in memory for.
+    ///
+    /// A background tab's files column has never been walked: `files_trees`
+    /// walks the *active* tab and no other, which was right for as long as a
+    /// background tab was off screen. The focus column put it on screen, and
+    /// what the card then drew was `📄 Loading…` — a `RowNotice::Loading` for a
+    /// read nobody had started and nobody was going to start, which is the
+    /// user's screenshot.
+    ///
+    /// The projection still asks nobody anything. It hands the caller the keys
+    /// [`files::tree_view`] could not answer — the very list the docked walk
+    /// already hands `Runtime::files_trees` — and the caller, who owns the
+    /// worker, decides whether to go.
+    ///
+    /// MUTATION: throw `TreeView::wanted` away here — the card sits on
+    /// "Loading…" until somebody clicks the tab.
+    #[test]
+    fn a_card_whose_column_was_never_walked_asks_for_the_directory_it_could_not_draw() {
+        let state = FilesLeafState {
+            root: r"D:\Developer\folio".to_owned(),
+            view: FilesView::Files,
+            ..FilesLeafState::default()
+        };
+        let cache = DirCache::default();
+        let mut thumbs = FocusThumbnails::default();
+        let asks = thumbs.project(tab(1), &[files_demand(&state, &cache)], Instant::now());
+        assert_eq!(
+            asks,
+            vec![UnreadDir {
+                seat: seat(1),
+                key: String::new(),
+            }],
+            "the root is what a column with an empty cache could not draw"
+        );
+    }
+
+    /// **And it is asked once.** The ledger is the one the docked walk already
+    /// keeps — [`DirCache`]'s own `Pending` — so a card looked at sixty times a
+    /// second reads the directory on the first of those frames and on none of
+    /// the rest.
+    ///
+    /// The mark is made by the caller, exactly as `files_trees` makes it, and
+    /// this test plays that caller: ask, mark, then keep projecting.
+    ///
+    /// MUTATION: ask without marking — a card becomes a `read_dir` at 60 Hz.
+    #[test]
+    fn a_directory_already_asked_for_is_asked_no_second_time() {
+        let state = FilesLeafState {
+            root: r"D:\Developer\folio".to_owned(),
+            view: FilesView::Files,
+            ..FilesLeafState::default()
+        };
+        let mut cache = DirCache::default();
+        let mut thumbs = FocusThumbnails::default();
+        let start = Instant::now();
+        let asks = thumbs.project(tab(1), &[files_demand(&state, &cache)], start);
+        assert_eq!(asks.len(), 1, "the first frame asks");
+        for ask in &asks {
+            cache.mark_pending(&ask.key);
+        }
+        for frame in 1..20 {
+            assert!(
+                thumbs
+                    .project(
+                        tab(1),
+                        &[files_demand(&state, &cache)],
+                        start + MIN_INTERVAL * frame
+                    )
+                    .is_empty(),
+                "a question already asked is not asked again"
+            );
+        }
+    }
+
+    /// A column whose listing is in memory asks for nothing at all — the gate is
+    /// "what could this card not draw", never "is this card a files column".
+    #[test]
+    fn a_card_whose_column_has_its_listing_asks_for_nothing() {
+        let (state, cache) = files_column(FilesView::Files);
+        let mut thumbs = FocusThumbnails::default();
+        assert!(
+            thumbs
+                .project(tab(1), &[files_demand(&state, &cache)], Instant::now())
+                .is_empty()
         );
     }
 

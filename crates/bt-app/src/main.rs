@@ -6983,6 +6983,31 @@ impl TabState {
         }
     }
 
+    /// **The document a preview seat is on that nobody has read** (user ruling
+    /// 2026-08-21) — [`Self::mini_source`]'s exact complement.
+    ///
+    /// `mini_source` answers "what is in memory for this seat"; this answers
+    /// "what is *not*, and has a name", and the two are deliberately different
+    /// functions on the same table. Folding this into the projection would put a
+    /// reason to fetch inside the one thing §7.1.6b′ says must never fetch.
+    ///
+    /// `None` for a seat with no pane, a pane on no buffer, a picture (whose
+    /// pixels come down the decode lane), a composed git document (which waits
+    /// on the git worker and never on a disk) and a body already read — every
+    /// one of those through [`preview::PreviewBuffer::wants_head_read`], which
+    /// is the same gate the ordinary doors ask.
+    fn unread_card_document(&self, seat: SeatId) -> Option<preview::PreviewSource> {
+        let pane = self.preview_panes.get(PreviewSurface::Seat(seat))?;
+        if pane.image.is_some() {
+            return None;
+        }
+        let source = pane.buffer.as_ref()?;
+        self.preview_pool
+            .get(source)
+            .filter(|buffer| buffer.wants_head_read())
+            .map(|_| source.clone())
+    }
+
     /// **Where one seat's thumbnail content comes from** (§7.1.6b′ F2) — handed
     /// to the budget *unevaluated*, so that the walk it stands for happens only
     /// past the gates.
@@ -20455,6 +20480,20 @@ impl Runtime<'_> {
             })
             .collect();
         for (source, want) in wants {
+            // The head lane's one door, for [`Self::arm_card_reads`]'s reason: a
+            // buffer whose read is already out with the worker is not asked
+            // again. A size is a question about a picture and has no such
+            // ledger — the decode lane is what owns a picture's arrival.
+            if want == preview::PreviewWant::Head
+                && !self
+                    .window
+                    .tabs
+                    .get_mut(index)
+                    .and_then(|tab| tab.preview_pool.get_mut(&source))
+                    .is_some_and(preview::PreviewBuffer::claim_head_read)
+            {
+                continue;
+            }
             if !self.app.preview_worker.request(preview::PreviewRequest {
                 tab: id,
                 source,
@@ -30701,7 +30740,11 @@ impl Runtime<'_> {
         let tab = self.id;
         let shown = self.preview_panes.showing();
         let buffer = self.preview_pool.open(source.clone(), name, &shown);
-        let wants_read = buffer.wants_head_read();
+        // Claimed rather than merely asked about: every send on this channel
+        // goes through the one door, so a file already out with the worker —
+        // opened into a second pane, or armed by the card column a frame ago —
+        // is read once (user ruling 2026-08-21).
+        let wants_read = buffer.claim_head_read();
         // The outgoing view is filed and the incoming one is found: a caret and
         // a scroll are the pane's memory of a file, and a switch that reset them
         // would make the switcher a thing you pay for using (ruling 8⑧).
@@ -35282,6 +35325,16 @@ impl Runtime<'_> {
                     else {
                         continue;
                     };
+                    // **A card is a surface too** (user ruling 2026-08-21). A
+                    // head read landing in a background tab used to owe nobody a
+                    // frame, because nothing of that tab was on screen; in focus
+                    // mode its card is, and the projection that would turn the
+                    // face into the document's first lines only runs on a frame
+                    // somebody asks for. `seats` answering is gates 1 and 2 of
+                    // `focus_thumb` — the mode is on and this card is inside the
+                    // column's clip box — read from the pass that just ran
+                    // rather than re-derived here.
+                    let carded = self.window.focus_thumbs.seats(response.tab).is_some();
                     let tab = &mut self.window.tabs[index];
                     match response.answer {
                         preview::PreviewAnswer::Head(outcome) => {
@@ -35329,7 +35382,8 @@ impl Runtime<'_> {
                                     tab.preview_panes.entry(*surface).caret.heal(&content);
                                 }
                             }
-                            changed |= index == self.window.active_tab && !showing.is_empty();
+                            changed |=
+                                !showing.is_empty() && (index == self.window.active_tab || carded);
                         }
                         // A picture's byte count, for the meta line under it.
                         // Filed against the image state rather than the pool,
@@ -37204,6 +37258,12 @@ impl Runtime<'_> {
                         else {
                             continue;
                         };
+                        // The card's claim on a frame, for `apply_preview_results`'
+                        // reason exactly: a listing landing in a background tab
+                        // is what turns that tab's card from `Loading…` into its
+                        // tree, and only a frame somebody asks for will project
+                        // it.
+                        let carded = self.window.focus_thumbs.seats(leaf.tab).is_some();
                         let tab = &mut self.window.tabs[index];
                         if !tab.files.contains_key(&leaf.seat) {
                             continue;
@@ -37212,7 +37272,7 @@ impl Runtime<'_> {
                             .entry(leaf.seat)
                             .or_default()
                             .accept(&response.key, response.outcome);
-                        changed |= index == self.window.active_tab;
+                        changed |= index == self.window.active_tab || carded;
                     }
                     // The float's version of the same cancellation: the window is
                     // gone, or it is showing a *different* view than the one that
@@ -37954,7 +38014,7 @@ impl Runtime<'_> {
             buffer: Some(source.clone()),
             ..PreviewPane::default()
         };
-        if let Some(pooled) = self.preview_pool.get(&source) {
+        if let Some(pooled) = self.preview_pool.get_mut(&source) {
             // A restored pool remembers names, never text (P151) — so "in the
             // pool" is not "has something to show". A buffer that still wants
             // its head read gets the same request a stranger would; the answer
@@ -37962,7 +38022,7 @@ impl Runtime<'_> {
             // repaint path every head read already takes. (User-reported
             // 2026-08-14: hovering a restored, never-opened pool entry showed
             // an empty card forever.)
-            let wants_read = pooled.wants_head_read();
+            let wants_read = pooled.claim_head_read();
             self.window.peek_buffer = None;
             if wants_read {
                 let tab = self.id;
@@ -37976,8 +38036,8 @@ impl Runtime<'_> {
             }
             return true;
         }
-        let buffer = preview::PreviewBuffer::new(source.clone(), name);
-        let wants_read = buffer.wants_head_read();
+        let mut buffer = preview::PreviewBuffer::new(source.clone(), name);
+        let wants_read = buffer.claim_head_read();
         self.window.peek_buffer = Some(buffer);
         // **A composed document waits for git and never for a disk.** A glance
         // over a commit's file is a `GitShow`, and `wants_head_read` answers
@@ -52388,6 +52448,35 @@ impl Runtime<'_> {
     /// carrying a *reference* to the session or the cache — so the walks that
     /// actually cost something happen on the far side of the damage check and the
     /// throttle, where a gate can still refuse them.
+    ///
+    /// # And the reads a card arms (user ruling 2026-08-21)
+    ///
+    /// **A seat projected into a card is on screen, and that is the whole of why
+    /// its document may be read.** "A background tab does not load" is older than
+    /// this mode and was right when it was written: a tab nobody was looking at
+    /// had nothing on the glass. §7.1.6b′ gave that rule a new subject — the card
+    /// column puts *every* seat of *every* visible tab on the glass, shrunk — and
+    /// what a card then drew for an unread document was a sentence that was never
+    /// going to come true: `📄 Loading…` on a files column nobody was walking, a
+    /// bare `notes.md / MD` face over a document nobody was reading.
+    ///
+    /// So the two reads a card can be missing are armed **here**, and here is the
+    /// whole of the boundary:
+    ///
+    /// * **Only in the mode.** The arming is below the gate above, so a window
+    ///   that is not in focus mode returns before either list exists and a
+    ///   background tab is left exactly as it was.
+    /// * **Once.** The document's ledger is the buffer's own
+    ///   ([`preview::PreviewBuffer::claim_head_read`]) and the directory's is the
+    ///   cache's own (`DirCache::mark_pending`) — the same two ledgers the
+    ///   ordinary doors have always written, so a card looked at sixty times a
+    ///   second reads each thing once and a refusal is never retried.
+    /// * **Never on this thread.** Both go to the workers that already own those
+    ///   two lanes; nothing here touches a disk.
+    ///
+    /// The projection itself is untouched: it still quotes only what is in
+    /// memory, and the next pass finds the body there because somebody else put
+    /// it there.
     fn refresh_focus_thumbnails(&mut self, now: Instant, scale: f32) {
         let Some(geometry) = self.focus_rail_geometry_now(now) else {
             self.window.focus_thumbs.clear();
@@ -52397,6 +52486,10 @@ impl Runtime<'_> {
         let mono_advance = self.window.focus_mini_advance;
         let face_advance = self.window.focus_mini_face_advance;
         let mut visible = BTreeSet::new();
+        // What the cards could not draw out of memory, gathered by tab index
+        // because the sending needs `&mut self` and the walking holds `&self`.
+        let mut unread_documents: Vec<(usize, preview::PreviewSource)> = Vec::new();
+        let mut unread_dirs: Vec<(usize, focus_thumb::UnreadDir)> = Vec::new();
         for (index, card) in geometry.cards.iter().enumerate() {
             if card.body[3] <= list_top || card.body[1] >= list_bottom {
                 continue;
@@ -52416,6 +52509,15 @@ impl Runtime<'_> {
                 seats::focus_mini_seats(tab.seats.tree(), card.mini, scale)
                     .into_iter()
                     .filter_map(|seat| {
+                        // **The document this seat is on, if nobody has read
+                        // it.** Asked here rather than inside `mini_source`,
+                        // which must stay a projection: it answers what is in
+                        // memory and this is the question of what is not.
+                        if seat.kind == SeatKind::Preview
+                            && let Some(source) = tab.unread_card_document(seat.id)
+                        {
+                            unread_documents.push((index, source));
+                        }
                         let source = tab.mini_source(seat.id, seat.kind)?;
                         // **The seat's own face decides both counts.** A row's
                         // height and a column's width are two readings of the
@@ -52437,10 +52539,82 @@ impl Runtime<'_> {
                         })
                     })
                     .collect();
-            self.window.focus_thumbs.project(tab.id, &demands, now);
+            unread_dirs.extend(
+                self.window
+                    .focus_thumbs
+                    .project(tab.id, &demands, now)
+                    .into_iter()
+                    .map(|ask| (index, ask)),
+            );
         }
         self.window.focus_thumbs.retain_visible(&visible);
         dump_focus_thumb_frame(visible.len(), self.window.focus_thumbs.stats());
+        self.arm_card_reads(unread_documents, unread_dirs);
+    }
+
+    /// **Go and get what the cards could not draw** — the sending half of
+    /// [`Self::refresh_focus_thumbnails`]'s ruling, and the only place in this
+    /// window where a background tab's content is asked for.
+    ///
+    /// Split out because the walk above holds the tab list immutably and both
+    /// ledgers are written through `&mut`; the lists it carries are the frame's
+    /// own and are empty on every frame after the first sight of a card.
+    fn arm_card_reads(
+        &mut self,
+        documents: Vec<(usize, preview::PreviewSource)>,
+        dirs: Vec<(usize, focus_thumb::UnreadDir)>,
+    ) {
+        for (index, source) in documents {
+            let Some(tab) = self.window.tabs.get_mut(index) else {
+                continue;
+            };
+            let id = tab.id;
+            // The buffer's own ledger says whether this is the first asking, and
+            // says it while filing that it was asked (P151's restore, the
+            // glance's card and an opened pane all come through the same door).
+            if !tab
+                .preview_pool
+                .get_mut(&source)
+                .is_some_and(preview::PreviewBuffer::claim_head_read)
+            {
+                continue;
+            }
+            if !self.app.preview_worker.request(preview::PreviewRequest {
+                tab: id,
+                source,
+                want: preview::PreviewWant::Head,
+            }) {
+                self.disable_preview_worker();
+                break;
+            }
+        }
+        for (index, ask) in dirs {
+            let Some(tab) = self.window.tabs.get_mut(index) else {
+                continue;
+            };
+            let id = tab.id;
+            let Some(root) = tab.files.get(&ask.seat).map(|state| state.root.clone()) else {
+                continue;
+            };
+            // Marked before the send, exactly as `files_trees` marks it, so the
+            // walk that runs on this very frame sees a question already asked.
+            tab.file_trees
+                .entry(ask.seat)
+                .or_default()
+                .mark_pending(&ask.key);
+            let request = files::DirRequest {
+                host: files::FilesHost::Docked(LeafId {
+                    tab: id,
+                    seat: ask.seat,
+                }),
+                path: files::full_path(&root, &ask.key),
+                key: ask.key,
+            };
+            if !self.app.files_worker.request(request) {
+                self.disable_files_worker();
+                break;
+            }
+        }
     }
 
     /// **The one door behind every door** (§7.1.6b′: "one bit, one face").
@@ -56081,6 +56255,77 @@ mod focus_mode_door_tests {
             !body("    fn keyboard_input(").contains("focus_mode"),
             "the escape ladder mentions focus mode, so some key still leaves it"
         );
+    }
+
+    /// **A seat projected into a card is on screen, and that is the whole of
+    /// why its document may be read** (user ruling 2026-08-21).
+    ///
+    /// The reads the card arms are the two a card can be missing: a preview
+    /// seat's document and a files column's directory. Both are armed in one
+    /// place — [`Runtime::refresh_focus_thumbnails`] — and that place opens with
+    /// the mode gate, so a window that is not in focus mode returns before
+    /// either of them exists. Outside the mode a background tab really is off
+    /// screen and the old rule stands unchanged.
+    ///
+    /// Read as text for this module's reason: an arming written into some other
+    /// per-frame method would be one more call and nothing about it would fail.
+    #[test]
+    fn the_card_arms_its_reads_only_behind_the_mode_gate() {
+        let arming = body("    fn arm_card_reads(");
+        for lane in ["claim_head_read", "DirRequest"] {
+            assert!(
+                arming.contains(lane),
+                "the card's {lane} arming lives in one place and this is it"
+            );
+        }
+
+        // And that one place is reached from one call site, which stands below
+        // the gate that answers "is there a card column at all".
+        let needle = ["self", ".", "arm_card_reads", "("].concat();
+        let callers: Vec<&str> = SOURCE
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains(needle.as_str()))
+            .collect();
+        assert_eq!(
+            callers.len(),
+            1,
+            "a second caller is a second answer to when a background tab loads"
+        );
+        let pass = body("    fn refresh_focus_thumbnails(");
+        let gate = pass
+            .find("focus_rail_geometry_now")
+            .expect("the projection pass opens by asking whether there is a column at all");
+        let call = pass
+            .find(needle.as_str())
+            .expect("the arming is spent by the projection pass");
+        assert!(
+            gate < call,
+            "a window with no card column would arm a read before returning"
+        );
+    }
+
+    /// **The projection layer did not move an inch.**
+    ///
+    /// §7.1.6b′'s red line — a thumbnail takes text only out of a buffer already
+    /// in memory and never goes looking — is right, and the ruling that made a
+    /// card arm a read left it alone on purpose: the projection does not fetch,
+    /// *somebody else* puts the body in memory and the next projection finds it
+    /// there. `Runtime::mini_source` is where that line is drawn, and it names no
+    /// worker.
+    #[test]
+    fn the_projection_still_takes_its_text_only_from_memory() {
+        let source = body("    fn mini_source(");
+        assert!(
+            source.contains("buffer.content.is_some()"),
+            "the red line is 'is there text here already, without asking a disk'"
+        );
+        for fetch in ["claim_head_read", "preview_worker", "files_worker"] {
+            assert!(
+                !source.contains(fetch),
+                "the projection reached for {fetch}, which is it going looking"
+            );
+        }
     }
 }
 
