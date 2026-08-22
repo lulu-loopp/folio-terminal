@@ -363,6 +363,8 @@ run 1 之后 `bt-spike-webview2-w0.exe` **八个进程全部还在**(一组一�
 | `attachments/run2-extended-gates.jsonl` | 补洞后的探针,十扇门全跑 |
 | `attachments/run5-gates-4-and-5.jsonl` | 门 4 / 门 5 定稿读数(逐键矩阵、剪贴板、两接触点、触摸注入) |
 | `attachments/run6-gate-5-autorepeat.jsonl` | 门 5 的 autorepeat 用有间隔的按键再测一次 |
+| `attachments/g1-01-page-in-seat.png` | 网页在座位里,四周是宿主自己画的 chrome |
 | `attachments/g1-03-translucent-panel.png` | 半透明浮窗底下网页正文透出来 |
+| `attachments/g1-05-web-rounded-clip.png` | 48px 圆角遮罩咬在 web visual 上 |
 | `attachments/g2-capturepreview-00.png` | `CapturePreview` 只有视口,没有宿主边框 |
 | `attachments/g2-window-while-webview-hidden.png` | 隐藏后座位是纯黑洞 |
