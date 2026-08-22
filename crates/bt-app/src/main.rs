@@ -16578,6 +16578,24 @@ fn persisted_preview_row(
     ))
 }
 
+/// **What a switcher row keeps, and under which category** — `None` for a
+/// buffer that cannot be kept at all.
+///
+/// The pin file's vocabulary, derived from this window's identity type in one
+/// place. A file is a `file` row and a page is a `url` row; a git-backed document
+/// is neither, because keeping it would keep a question this window asked rather
+/// than a place somebody went.
+fn preview_menu_target(source: &preview::PreviewSource) -> Option<profiles::PreviewMenuTarget> {
+    let (target, kind) = persisted_preview_row(source)?;
+    Some(profiles::PreviewMenuTarget {
+        kind: match kind {
+            bt_persist::PreviewSourceV1::File => bt_persist::PinKind::File,
+            bt_persist::PreviewSourceV1::Url => bt_persist::PinKind::Url,
+        },
+        target,
+    })
+}
+
 /// [`persisted_preview_row`] in the vault's own spelling — see
 /// [`bt_persist::RecentPreviewV1`] for why that list says which by shape rather
 /// than by a field.
@@ -39493,48 +39511,93 @@ impl Runtime<'_> {
                 name: buffer.name.clone(),
                 dirty: buffer.dirty,
                 current: Some(&buffer.source) == current,
-                // Only a file on a disk can be kept — a diff and a commit's
-                // reading of a file are documents this window computed.
-                path: match &buffer.source {
-                    preview::PreviewSource::File(path) => Some(path.display().to_string()),
-                    _ => None,
-                },
+                // **A file and a page can both be kept, and each under its own
+                // category** (W2 slice ③). A diff and a commit's reading of a
+                // file cannot: they are documents this window computed, and
+                // keeping one would be keeping the question.
+                keep: preview_menu_target(&buffer.source),
                 pinned: false,
                 pool: Some(pool),
             })
             .collect();
-        // **The kept files first, and each of them once** (user ruling
-        // 2026-08-19). A kept file that is also open is *lifted* out of the list
-        // below rather than copied above it, which is the ruling's own "PINNED
-        // 与最近列表不留双副本" — and a kept file nobody has opened is a row with
-        // no buffer behind it, which is what makes the section survive a restart.
-        let kept = self.app.pins_store.targets(bt_persist::PinKind::File);
-        let (pinned, rest) =
-            pins::lift_pinned(&kept, &live, |item| item.path.clone().unwrap_or_default());
+        // **The kept rows first, and each of them once** (user ruling
+        // 2026-08-19). A kept target that is also open is *lifted* out of the
+        // list below rather than copied above it, which is the ruling's own
+        // "PINNED 与最近列表不留双副本" — and a kept target nobody has opened is a
+        // row with no buffer behind it, which is what makes the section survive a
+        // restart.
+        //
+        // **Both categories, in the file's own order** (`pins.json` is one table
+        // and array order is display order), and the lift compares the pair
+        // rather than the string: `pins::row_of` identifies a row by category and
+        // target together, and a switcher that compared only targets would let a
+        // pinned file stand in for a pinned page.
+        let kept: Vec<profiles::PreviewMenuTarget> = self
+            .app
+            .pins_store
+            .rows_of(&[bt_persist::PinKind::File, bt_persist::PinKind::Url])
+            .into_iter()
+            .map(|(kind, target)| profiles::PreviewMenuTarget { kind, target })
+            .collect();
+        let (pinned, rest) = pins::lift_pinned(&kept, &live, |item| {
+            item.keep.clone().unwrap_or(profiles::PreviewMenuTarget {
+                kind: bt_persist::PinKind::Folder,
+                target: String::new(),
+            })
+        });
         pinned
             .into_iter()
-            .map(|path| {
-                let open = live
-                    .iter()
-                    .find(|item| item.path.as_deref() == Some(path.as_str()));
+            .map(|keep| {
+                let open = live.iter().find(|item| item.keep.as_ref() == Some(&keep));
                 profiles::PreviewMenuItem {
                     // The pool's own name where there is a pool entry, and the
-                    // file's own name where there is not: the same function the
-                    // head uses, so a kept file reads the same before and after
-                    // it is opened.
+                    // target's own where there is not: a file by its last
+                    // segment, a page by its site — the same two functions every
+                    // other surface that names an unopened row uses, so a kept
+                    // thing reads the same before and after it is opened.
                     name: open.map_or_else(
-                        || files_row_display_name(Path::new(&path)),
+                        || match keep.kind {
+                            bt_persist::PinKind::Url => webnav::site_label(&keep.target),
+                            _ => files_row_display_name(Path::new(&keep.target)),
+                        },
                         |item| item.name.clone(),
                     ),
                     dirty: open.is_some_and(|item| item.dirty),
                     current: open.is_some_and(|item| item.current),
-                    path: Some(path),
+                    keep: Some(keep),
                     pinned: true,
                     pool: open.and_then(|item| item.pool),
                 }
             })
             .chain(rest)
             .collect()
+    }
+
+    /// **Go to a page, having asked whether this window may** — the second of
+    /// the pin's two validations (`plan.md` §3「钉不是授权」).
+    ///
+    /// The first is at the moment of pinning ([`Self::toggle_preview_pin`]); this
+    /// is the one at the moment of *using*, and both are the same door
+    /// (`webnav::address_bar`) because a store that could grant permission is a
+    /// store whose permission is "whatever that file says". A pin written by an
+    /// older build, edited by hand, or made before the policy tightened is
+    /// refused here and the seat does not move — which is also §7.7 ③'s
+    /// "什么都没发生比一个确认框更诚实" for a target this window will not go to.
+    ///
+    /// The engine asks a *third* time, inside `NavigationStarting`, because
+    /// redirects and page scripts start navigations no address field ever saw
+    /// (`webnav` ①). This one is about the string; that one is about the load.
+    fn navigate_preview_page(&mut self, target: &str) -> Result<()> {
+        match webnav::address_bar(target) {
+            webnav::Decision::Navigate(url) => self.open_web_page(&url),
+            // A search from a switcher row is not a thing: the row's string was
+            // written by this window as a URL, and one that no longer reads as
+            // one is a row that has been edited into something else.
+            webnav::Decision::Search(_) | webnav::Decision::Refuse(_) => {
+                eprintln!("BT_WEB refused {target}");
+                Ok(())
+            }
+        }
     }
 
     /// Keep this folder, or stop keeping it (user ruling 2026-08-19).
@@ -39553,9 +39616,51 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// Keep this file, or stop keeping it — [`Self::toggle_folder_pin`]'s twin.
-    fn toggle_file_pin(&mut self, path: &str) -> Result<()> {
-        self.app.pins_store.toggle(bt_persist::PinKind::File, path);
+    /// **Keep this switcher row, or stop keeping it** —
+    /// [`Self::toggle_folder_pin`]'s twin, told the row's own category (W2 slice
+    /// ③).
+    ///
+    /// It replaced a `toggle_file_pin` that hard-coded `PinKind::File`, which was
+    /// right for as long as the switcher held only files: one list holding two
+    /// categories cannot have one category written into it.
+    ///
+    /// Named for the *switcher* and not for the preview, because this window has
+    /// two pins two hundred pixels apart and they mean different things:
+    /// [`Self::toggle_preview_pin`] pins the **pane** (the next file opens
+    /// beside it), and this pins the **row** (keep this place across restarts).
+    /// The naming ticket is W1's fifth open question and is not this slice's; what
+    /// is this slice's is that the two functions cannot be confused at a call
+    /// site.
+    ///
+    /// **The first of the pin's two validations** (`plan.md` §3「钉不是授权」): a
+    /// page is written into `pins.json` only if this window would navigate to it
+    /// *now*, so a target the policy refuses never reaches the file at all. The
+    /// second is at the moment of pressing that row —
+    /// [`Self::navigate_preview_page`] — and it exists because passing this check
+    /// today is not passing it forever: policies tighten, builds change, and the
+    /// file is one somebody may edit.
+    ///
+    /// An unpin is never gated. Taking a row *out* of that file is allowed
+    /// whatever the row says, and a build that could not remove a target it
+    /// refuses to load would be a build with rows nobody can delete.
+    fn toggle_switcher_pin(&mut self, keep: &profiles::PreviewMenuTarget) -> Result<()> {
+        let already = self
+            .app
+            .pins_store
+            .rows_of(&[keep.kind])
+            .iter()
+            .any(|(_, target)| *target == keep.target);
+        if !already
+            && keep.kind == bt_persist::PinKind::Url
+            && !matches!(
+                webnav::address_bar(&keep.target),
+                webnav::Decision::Navigate(_)
+            )
+        {
+            eprintln!("BT_WEB refused {}", keep.target);
+            return Ok(());
+        }
+        self.app.pins_store.toggle(keep.kind, &keep.target);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -39639,12 +39744,27 @@ impl Runtime<'_> {
         let Some(item) = self.preview_menu_items(seat).into_iter().nth(index) else {
             return Ok(());
         };
-        let Some(pool) = item.pool else {
+        // **A page row is a navigation, always, and it goes through the gate.**
+        // `plan.md` §3's third determinism clause: 从切换器选择 = 一次正常顶层导航
+        // (进入/截断当前导航栈,不绕导航策略). So a page row does not restore a
+        // buffer and does not read the pool — it asks `webnav::address_bar` for
+        // permission exactly as a typed address would, and **a pin is not a
+        // permission**: a row that came out of `pins.json` is a string somebody
+        // may have edited by hand, may have written under an older policy, or may
+        // have pinned before this one tightened.
+        if item.is_page() {
             self.close_preview_menu()?;
-            let Some(path) = item.path else {
+            let Some(keep) = item.keep else {
                 return Ok(());
             };
-            return self.open_preview(PathBuf::from(path));
+            return self.navigate_preview_page(&keep.target);
+        }
+        let Some(pool) = item.pool else {
+            self.close_preview_menu()?;
+            let Some(keep) = item.keep else {
+                return Ok(());
+            };
+            return self.open_preview(PathBuf::from(keep.target));
         };
         self.close_preview_menu()?;
         // **The pool's own identity and the pool's own name.** The row was
@@ -52582,10 +52702,10 @@ impl Runtime<'_> {
                             // The root menu's rule, one menu over: a pin changes
                             // the list you are looking at and leaves it up.
                             Some(profiles::PreviewMenuHit::Pin(index)) => {
-                                if let Some(path) =
-                                    items.get(index).and_then(|item| item.path.clone())
+                                if let Some(keep) =
+                                    items.get(index).and_then(|item| item.keep.clone())
                                 {
-                                    self.toggle_file_pin(&path)?;
+                                    self.toggle_switcher_pin(&keep)?;
                                 }
                             }
                             Some(profiles::PreviewMenuHit::Row(index)) => {

@@ -8514,13 +8514,19 @@ pub struct PreviewMenuItem {
     pub dirty: bool,
     /// Whether this is the buffer the pane is showing (`.tm-item.cur`).
     pub current: bool,
-    /// The file this row names, when it names one.
+    /// What this row names, when it names something that can be kept — the pin's
+    /// category and its target.
     ///
-    /// The pin's identity, and the only thing that can be pinned: a diff and a
-    /// commit's reading of a file are documents this window computed, not files
-    /// on a disk, and keeping one across a restart would mean keeping the
-    /// question rather than the answer.
-    pub path: Option<String>,
+    /// **The category is the row's, not the surface's** (W2 slice ③): one list
+    /// holds files and pages, and a `pins.json` row is identified by its category
+    /// *and* its target, so a switcher that pinned everything as a `file` would
+    /// write a page into the section the root menu draws from.
+    ///
+    /// `None` for the rows that cannot be kept at all: a diff and a commit's
+    /// reading of a file are documents this window computed, not places, and
+    /// keeping one across a restart would mean keeping the question rather than
+    /// the answer.
+    pub keep: Option<PreviewMenuTarget>,
     /// Whether the user said to keep this file.
     ///
     /// The kept rows are at the front of the list — one list and one index
@@ -8534,6 +8540,28 @@ pub struct PreviewMenuItem {
     /// choosing any other row is a change of view over a buffer that already
     /// exists.
     pub pool: Option<usize>,
+}
+
+impl PreviewMenuItem {
+    /// Whether this row is a page — which decides its mark and, at the two call
+    /// sites that navigate, which door it goes through.
+    #[must_use]
+    pub fn is_page(&self) -> bool {
+        self.keep
+            .as_ref()
+            .is_some_and(|keep| keep.kind == bt_persist::PinKind::Url)
+    }
+}
+
+/// **What one switcher row keeps** — a `pins.json` row's two halves.
+///
+/// A pair and not a bare string, for [`crate::pins::row_of`]'s reason: the table
+/// is one array, so "is this pinned" has to be asked of a category *and* a
+/// target or the answer comes back from somebody else's row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreviewMenuTarget {
+    pub kind: bt_persist::PinKind,
+    pub target: String,
 }
 
 /// Which preview pane's switcher is up, and which row the pointer is on.
@@ -8647,7 +8675,7 @@ pub fn preview_menu_layout(
     // The pin's column, reserved wherever any row could carry one — the dot's
     // own reservation, one control further out. A switcher of nothing but
     // computed documents has no pin anywhere and gives the width back.
-    let pin = if items.iter().any(|item| item.path.is_some()) {
+    let pin = if items.iter().any(|item| item.keep.is_some()) {
         row_pin_claim(scale)
     } else {
         0.0
@@ -8758,7 +8786,7 @@ pub fn preview_menu_hit(
             // The pin is inside the row and is asked about first — and only on
             // rows that have one: a computed document's row is a row all the way
             // to its trailing edge.
-            let keepable = items.get(index).is_some_and(|item| item.path.is_some());
+            let keepable = items.get(index).is_some_and(|item| item.keep.is_some());
             return Some(Some(
                 if keepable && contains(row_pin_rect(*item, layout.scale), x, y) {
                     PreviewMenuHit::Pin(index)
@@ -8818,7 +8846,10 @@ pub fn preview_menu_build(
         push_row(
             &Row {
                 rect: *rect,
-                mark: Some(ChromeMark::File),
+                // **A page wears the web class's globe and a file wears
+                // `#i-file`, in the same box** (`docs/DESIGN.md` §7.7 ⑤), through
+                // the one door every preview row asks.
+                mark: Some(crate::marks::preview_row_mark(item.is_page())),
                 name: &item.name,
                 // Reserved on every row and inked on the dirty ones. Drawn as an
                 // empty string rather than omitted so the name's box ends in the
@@ -8842,7 +8873,7 @@ pub fn preview_menu_build(
                 // Only a row that names a file on a disk. A diff and a commit's
                 // reading of a file are documents this window computed, and
                 // keeping one would be keeping a question.
-                pin: item.path.as_ref().map(|_| RowPin {
+                pin: item.keep.as_ref().map(|_| RowPin {
                     filled: item.pinned,
                     hovered: hover == Some(PreviewMenuHit::Pin(index)),
                     // The *pointer's* row and not `.cur`: the current buffer is
@@ -8937,7 +8968,10 @@ mod tests {
                 name: (*name).to_owned(),
                 dirty: *dirty,
                 current: *current,
-                path: Some(format!(r"C:\work\{name}")),
+                keep: Some(PreviewMenuTarget {
+                    kind: bt_persist::PinKind::File,
+                    target: format!(r"C:\work\{name}"),
+                }),
                 pinned: false,
                 pool: Some(index),
             })
@@ -9046,7 +9080,10 @@ mod tests {
                 name: "a.txt".to_owned(),
                 dirty: true,
                 current: false,
-                path: Some(r"C:\work\a.txt".to_owned()),
+                keep: Some(PreviewMenuTarget {
+                    kind: bt_persist::PinKind::File,
+                    target: r"C:\work\a.txt".to_owned(),
+                }),
                 pinned: true,
                 pool: Some(0),
             },
@@ -9058,7 +9095,10 @@ mod tests {
                 name: "old.rs".to_owned(),
                 dirty: false,
                 current: false,
-                path: Some(r"C:\work\old.rs".to_owned()),
+                keep: Some(PreviewMenuTarget {
+                    kind: bt_persist::PinKind::File,
+                    target: r"C:\work\old.rs".to_owned(),
+                }),
                 pinned: true,
                 pool: None,
             },
@@ -9067,14 +9107,15 @@ mod tests {
             name: "main.rs (working tree)".to_owned(),
             dirty: false,
             current: false,
-            path: None,
+            keep: None,
             pinned: false,
             pool: Some(9),
         });
         assert_eq!(
             items
                 .iter()
-                .filter(|item| item.path.as_deref() == Some(r"C:\work\a.txt"))
+                .filter(|item| item.keep.as_ref().map(|keep| keep.target.as_str())
+                    == Some(r"C:\work\a.txt"))
                 .count(),
             1,
             "a kept file that is also open is one row, not two"
@@ -9172,7 +9213,7 @@ mod tests {
         // the box is a boundary between one thing and no things.
         let all_kept: Vec<PreviewMenuItem> = items
             .iter()
-            .filter(|item| item.path.is_some())
+            .filter(|item| item.keep.is_some())
             .map(|item| PreviewMenuItem {
                 pinned: true,
                 ..item.clone()
