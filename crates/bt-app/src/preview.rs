@@ -284,10 +284,9 @@ impl PreviewView {
             Self::Markdown | Self::Table | Self::Diff | Self::Text | Self::None => {
                 PreviewChrome::Document
             }
-            // STUB (slice ③, red gate): the document pipeline draws its "no
-            // preview" card for a body it has nothing to say about, which over a
-            // live page is a card standing on top of a browser.
-            Self::Web => PreviewChrome::Document,
+            // The page, composed under this surface by the engine and seen
+            // through the hole punched in it — see [`Self::Web`].
+            Self::Web => PreviewChrome::Web,
         }
     }
 }
@@ -1679,10 +1678,13 @@ impl PreviewSource {
             )
         };
         match self {
-            // STUB (slice (3), red gate): a page has no path either, and a foot
-            // that answered nothing for it would print nothing on the one strip
-            // whose whole job is saying what you are looking at.
-            Self::File(_) | Self::Web(_) => None,
+            Self::File(_) => None,
+            // **A page's foot is its address** (§7.7 ③). It comes through this
+            // door and not through [`Self::file_path`] for the reason a git
+            // document does: the strip's left hand asks "where does this live",
+            // and a page lives at a URL — which is also the string this window
+            // hands the default browser when the foot is pressed.
+            Self::Web(url) => Some(url.clone()),
             Self::GitDiff { root, path, .. }
             | Self::GitShow { root, path, .. }
             | Self::GitDiffRange { root, path, .. } => {
@@ -1830,10 +1832,20 @@ impl PreviewBuffer {
     /// reasons the file is. What the source decides is the *load* — whether
     /// there is a disk to go to — and, at [`Self::view`], which body is drawn.
     pub fn new(source: PreviewSource, name: String) -> Self {
-        // STUB (slice (3), red gate): a page's name is its title, and asking the
-        // name-classifier about it hands a page called `release-notes.md` the
-        // markdown reader.
-        let ftype = preview_ftype(&name);
+        // **The name's judgement for every source that has a name to judge, and
+        // the source's for the one that has not.** A git diff of `main.rs` is
+        // named `main.rs` and is text for exactly the reasons the file is; a page
+        // is named by its *title*, which is a sentence somebody wrote, and a
+        // title ending `.md` is not a markdown document (see
+        // [`PreviewFtype::Web`]).
+        let ftype = match &source {
+            PreviewSource::Web(_) => PreviewFtype::Web,
+            PreviewSource::File(_)
+            | PreviewSource::GitDiff { .. }
+            | PreviewSource::GitShow { .. }
+            | PreviewSource::GitDiffRange { .. }
+            | PreviewSource::GitGraph { .. } => preview_ftype(&name),
+        };
         let load = match &source {
             PreviewSource::File(path) => {
                 if is_network_path(path) {
@@ -1873,11 +1885,12 @@ impl PreviewBuffer {
             // "Loading …" line forever, which was exactly what the first real
             // frame of it showed.
             PreviewSource::GitGraph { .. } => PreviewLoad::Ready,
-            // STUB (slice (3), red gate): `Pending` is "the text is on its way",
-            // and nothing is on its way for a page — there is no disk and no
-            // subprocess to answer, so this sits under a "Loading ..." line for
-            // ever.
-            PreviewSource::Web(_) => PreviewLoad::Pending,
+            // **A page is complete the moment it is made**, on the graph's own
+            // sentence one lane over: `Pending` says text is on its way, and for
+            // a page nothing is — the pixels are the engine's and arrive through
+            // the composition tree, not through this crate. Left `Pending` it
+            // would sit under a "Loading …" line for ever.
+            PreviewSource::Web(_) => PreviewLoad::Ready,
         };
         Self {
             source,
@@ -2042,12 +2055,12 @@ impl PreviewBuffer {
     /// happens to be spelled.
     pub fn view(&self, md_source: bool) -> PreviewView {
         match &self.source {
-            // STUB (slice (3), red gate): a page put through the *file* ladder
-            // answers with whatever its title's extension looks like, and with
-            // `PreviewView::None` when it looks like nothing.
-            PreviewSource::File(_) | PreviewSource::Web(_) => {
-                preview_view(&self.name, self.ftype, md_source)
-            }
+            PreviewSource::File(_) => preview_view(&self.name, self.ftype, md_source),
+            // **A page is a page because of what it is**, which is this method's
+            // own standing rule said about the fourth kind of content: the
+            // extension ladder is about what a *file* is, and a page has no file
+            // and no source view to flip to.
+            PreviewSource::Web(_) => PreviewView::Web,
             PreviewSource::GitDiff { .. }
             | PreviewSource::GitShow { .. }
             | PreviewSource::GitDiffRange { .. } => PreviewView::Diff,
@@ -5178,5 +5191,141 @@ mod tests {
                 .any(|item| item.iter().any(|span| span.style == SpanStyle::Code)),
             "and one of them carries an inline code span, which is set at 85%"
         );
+    }
+
+    // ── W2 slice ③: a page is a preview buffer ─────────────────────────────
+
+    /// **A page's name is its title, so a page is not classified by its name**
+    /// (`docs/DESIGN.md` §7.7 ①).
+    ///
+    /// The one class [`preview_ftype`] never answers, and the reason is a real
+    /// collision rather than tidiness: page titles routinely end in something
+    /// that reads as an extension, and a build that put a title through the
+    /// name-classifier would draw the markdown reader over a live browser.
+    ///
+    /// Red gate: `PreviewBuffer::new` asks `preview_ftype(&name)` for every
+    /// source, so a page called `release-notes.md` is `Markdown`, its view is
+    /// `Markdown`, and the document pipeline is asked to paint it.
+    #[test]
+    fn a_page_is_not_classified_by_the_title_it_happens_to_wear() {
+        for title in ["release-notes.md", "sunset.png", "data.csv", "Folio site"] {
+            let buffer = PreviewBuffer::new(
+                PreviewSource::Web("http://localhost:5173/".to_owned()),
+                title.to_owned(),
+            );
+            assert_eq!(
+                buffer.ftype,
+                PreviewFtype::Web,
+                "a page is a page whatever its title says: {title}"
+            );
+            assert_eq!(buffer.view(false), PreviewView::Web);
+            assert_eq!(
+                buffer.view(true),
+                PreviewView::Web,
+                "and the source flip is a question about text, which this window
+                 holds none of for a page"
+            );
+            assert_eq!(
+                buffer.view(false).chrome(),
+                PreviewChrome::Web,
+                "and nothing in this window paints its body"
+            );
+        }
+    }
+
+    /// **A page never waits for a disk** — the graph's own rule, one lane over.
+    ///
+    /// `Pending` means "the text is on its way", and for a page nothing is on
+    /// its way: the pixels are the engine's and arrive through the composition
+    /// tree. Left `Pending` a page sits under a "Loading …" line for ever, which
+    /// is exactly what the graph's first real frame did (see
+    /// [`PreviewBuffer::new`]).
+    ///
+    /// The three doors that ask about a disk are pinned in the same breath,
+    /// because each would be a different wrong thing: a head read for a URL, an
+    /// edit surface over a page, and a save with nowhere to write.
+    ///
+    /// Red gate: `PreviewSource::Web(_) => PreviewLoad::Pending`.
+    #[test]
+    fn a_page_is_ready_the_moment_it_is_made_and_asks_no_disk_anything() {
+        let mut buffer = PreviewBuffer::new(
+            PreviewSource::Web("http://localhost:5173/app".to_owned()),
+            "Folio site".to_owned(),
+        );
+        assert_eq!(buffer.load, PreviewLoad::Ready);
+        assert!(!buffer.wants_head_read(), "there is no disk to ask");
+        assert!(!buffer.claim_head_read());
+        assert!(!buffer.is_editable(false) && !buffer.is_editable(true));
+        assert!(matches!(buffer.save(), SaveOutcome::Failed(_)));
+        assert_eq!(buffer.body_notice(), None, "and it is not an empty document");
+        assert_eq!(buffer.refusal(), None, "nor a refused one");
+    }
+
+    /// **A page has no file and no repository, and its foot says its address.**
+    ///
+    /// `file_path` is the door every file-only verb asks through — saving,
+    /// revealing in Explorer, the head read, a relative markdown link — and each
+    /// of them would be wrong about a URL. `composed_lead` is the other half:
+    /// the foot asks "where does this live", and for a page the answer is the
+    /// address, which is what §7.7 ③ has the strip print.
+    ///
+    /// Red gate: `Self::File(_) | Self::Web(_) => None` in `composed_lead`.
+    #[test]
+    fn a_page_answers_no_file_no_repository_and_its_own_address() {
+        const URL: &str = "http://localhost:5173/app?tab=logs#line-42";
+        let source = PreviewSource::Web(URL.to_owned());
+        assert_eq!(source.file_path(), None);
+        assert_eq!(source.repo_file(), None);
+        assert!(!source.is_git());
+        assert_eq!(source.web_url(), Some(URL));
+        assert_eq!(
+            source.composed_lead(),
+            Some(URL.to_owned()),
+            "the foot of a page says the page, query and fragment included"
+        );
+        assert_eq!(
+            PreviewSource::file(r"C:\a\b.md").web_url(),
+            None,
+            "and a file is not a page asked the other way"
+        );
+    }
+
+    /// **Two pages that differ only in query or fragment are two buffers, and
+    /// one URL twice is one** (`plan.md` §3 切换器确定性三则).
+    ///
+    /// The pool is the switcher's list, so this is the de-duplication rule said
+    /// where it actually happens. Query and fragment participate because they
+    /// are part of what was asked for; the identity the caller hands in is
+    /// `webnav::switcher_key`'s, which is the other half of the rule and is
+    /// pinned where the caller lives.
+    #[test]
+    fn a_pool_holds_one_row_per_page_and_query_and_fragment_are_part_of_which() {
+        let mut pool = PreviewPool::default();
+        let open = |pool: &mut PreviewPool, url: &str| {
+            pool.open(
+                PreviewSource::Web(url.to_owned()),
+                "Folio site".to_owned(),
+                &[],
+            );
+        };
+        open(&mut pool, "http://localhost:5173/app");
+        open(&mut pool, "http://localhost:5173/app");
+        assert_eq!(pool.len(), 1, "one URL twice is one row");
+        open(&mut pool, "http://localhost:5173/app?tab=logs");
+        open(&mut pool, "http://localhost:5173/app#top");
+        assert_eq!(pool.len(), 3, "and three questions are three rows");
+        assert!(
+            pool.get(&PreviewSource::Web("http://localhost:5173/app".to_owned()))
+                .is_some()
+        );
+        // A file and a page cannot collide even if somebody manages to spell one
+        // as the other: they are different variants, not different strings.
+        open(&mut pool, r"C:\notes.md");
+        pool.open(
+            PreviewSource::file(r"C:\notes.md"),
+            "notes.md".to_owned(),
+            &[],
+        );
+        assert_eq!(pool.len(), 5);
     }
 }

@@ -5011,15 +5011,25 @@ struct WindowRuntime {
     /// and wgpu will never do it. See [`Self::present_seats_and_commit`], which
     /// is the only place in this program that presents a frame.
     compositor: bt_platform::Compositor,
-    /// **This window's hosted web page** (web preview slice 1), while
-    /// `BT_WEB_DEV` has put one on a seat.
+    /// **This window's hosted web pages, one per seat** (web preview slice ③).
     ///
-    /// One and not a list, and the singular is this slice's scope rather than a
-    /// shortcut: the only door to a page in this build is a development
-    /// environment variable read once at launch. Slice 3 gives the page a
+    /// Slice ① held one, and said in this comment that "slice 3 gives the page a
     /// preview buffer and with it a pane's ordinary plurality, and that is the
-    /// slice this field becomes a map in.
-    web: Option<webhost::WebSeat>,
+    /// slice this field becomes a map in". This is that slice and this is that
+    /// map.
+    ///
+    /// **Keyed by seat and not by tab, because the seat is what owns the
+    /// engine**: a controller renders into one visual at one rectangle, and a
+    /// window with a page on two tabs has two of both. The singleton rule the
+    /// plan states (§0 ②「每 tab 单例」) is one level up and is a rule about where
+    /// a *new* page lands — see [`Runtime::web_seat_of_tab`] — not about what
+    /// this window can hold.
+    ///
+    /// A `BTreeMap` for the reason every other seat-keyed map here is one: seat
+    /// order is stable, so the holes handed to the renderer come out in the same
+    /// order every frame and a diff of two frames is a diff of the pixels rather
+    /// than of a hash seed.
+    web: BTreeMap<SeatId, webhost::WebSeat>,
     /// The Win32 cursor the page last asked for, while the pointer is over it.
     ///
     /// Kept beside the page rather than folded into [`pointer_cursor`]'s six
@@ -19133,7 +19143,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         custom_window_frame,
         taskbar: TaskbarMirror::default(),
         compositor,
-        web: None,
+        web: BTreeMap::new(),
         web_cursor: None,
         web_pointer_inside: false,
         window,
@@ -48124,10 +48134,14 @@ impl Runtime<'_> {
         if self.window.web_pointer_inside {
             self.window.web_pointer_inside = false;
             self.window.web_cursor = None;
-            self.send_to_web_page(
-                bt_platform::WebMouseEvent::Move,
-                PhysicalPosition::new(-1.0, -1.0),
-            );
+            let seats: Vec<SeatId> = self.window.web.keys().copied().collect();
+            for seat in seats {
+                self.send_to_web_page(
+                    seat,
+                    bt_platform::WebMouseEvent::Move,
+                    PhysicalPosition::new(-1.0, -1.0),
+                );
+            }
         }
         self.window.pointer_position = None;
         // **Both `⌄` clocks, told the pointer is nowhere** (user report,
@@ -55732,33 +55746,45 @@ impl Runtime<'_> {
     /// a page peeping out beside its own pane, and there is no third place the
     /// two could be reconciled.
     fn sync_web_page(&mut self, now: Instant) {
-        let Some(seat) = self.window.web.as_ref().map(|web| web.seat) else {
+        if self.window.web.is_empty() {
             self.window.renderer.set_web_holes(Vec::new());
             return;
-        };
+        }
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let motion = self.app.motion;
-        let transform = self.window.pane_motion.transform_of(seat, now, motion);
-        let body = preview_image_placement(&self.seats, &self.seat_layout, seat, scale, transform)
-            .map(|placement| {
-                [
-                    placement.seat.x as f32,
-                    placement.seat.y as f32,
-                    (placement.seat.x + placement.seat.width) as f32,
-                    (placement.seat.y + placement.seat.height) as f32,
-                ]
-            });
-        let presence = webhost::web_presence(body, self.a_modal_covers_the_window());
-        let window = &mut *self.window;
-        if let Some(web) = window.web.as_mut()
-            && let Err(error) = web.place(&window.compositor, presence)
-        {
-            eprintln!("BT_WEB place failed: {error}");
+        let obstructed = self.a_modal_covers_the_window();
+        // Every seat, and its answer read off the tab that holds it — a page on a
+        // tab nobody is looking at has no placement in *this* tab's layout, and
+        // `preview_image_placement` says so by answering `None`, which is the
+        // same `Hidden` a page under a modal gets.
+        let seats: Vec<SeatId> = self.window.web.keys().copied().collect();
+        let mut presences: Vec<(SeatId, webhost::WebPresence)> = Vec::with_capacity(seats.len());
+        for seat in seats {
+            let transform = self.window.pane_motion.transform_of(seat, now, motion);
+            let body =
+                preview_image_placement(&self.seats, &self.seat_layout, seat, scale, transform)
+                    .map(|placement| {
+                        [
+                            placement.seat.x as f32,
+                            placement.seat.y as f32,
+                            (placement.seat.x + placement.seat.width) as f32,
+                            (placement.seat.y + placement.seat.height) as f32,
+                        ]
+                    });
+            presences.push((seat, webhost::web_presence(body, obstructed)));
         }
-        let holes = match presence {
-            webhost::WebPresence::Shown(bounds) => vec![bounds.as_rect()],
-            webhost::WebPresence::Hidden => Vec::new(),
-        };
+        let window = &mut *self.window;
+        let mut holes = Vec::new();
+        for (seat, presence) in presences {
+            if let Some(web) = window.web.get_mut(&seat)
+                && let Err(error) = web.place(&window.compositor, presence)
+            {
+                eprintln!("BT_WEB place failed: {error}");
+            }
+            if let webhost::WebPresence::Shown(bounds) = presence {
+                holes.push(bounds.as_rect());
+            }
+        }
         window.renderer.set_web_holes(holes);
     }
 
@@ -55775,21 +55801,28 @@ impl Runtime<'_> {
             || self.window.restore_prompt.is_open()
     }
 
-    /// Read everything this window's page has said, and do it.
+    /// Read everything this window's pages have said, and do it.
     fn drive_web_page(&mut self) -> Result<()> {
-        if self.window.web.is_none() {
+        if self.window.web.is_empty() {
             return Ok(());
         }
         let window = &mut *self.window;
-        let outcomes = window
+        let outcomes: Vec<(SeatId, Vec<webhost::WebOutcome>)> = window
             .web
-            .as_mut()
-            .map(|web| web.drive(&window.compositor))
-            .unwrap_or_default();
-        self.apply_web_outcomes(outcomes)
+            .iter_mut()
+            .map(|(seat, web)| (*seat, web.drive(&window.compositor)))
+            .collect();
+        for (seat, outcomes) in outcomes {
+            self.apply_web_outcomes(seat, outcomes)?;
+        }
+        Ok(())
     }
 
-    fn apply_web_outcomes(&mut self, outcomes: Vec<webhost::WebOutcome>) -> Result<()> {
+    fn apply_web_outcomes(
+        &mut self,
+        seat: SeatId,
+        outcomes: Vec<webhost::WebOutcome>,
+    ) -> Result<()> {
         for outcome in outcomes {
             match outcome {
                 // The chord the page was not allowed to see. It runs on the
@@ -55814,10 +55847,18 @@ impl Runtime<'_> {
                     self.apply_pointer_cursor();
                 }
                 webhost::WebOutcome::PageFocus(_) => {}
+                // **The page committed, so this seat now has an identity** (slice
+                // ③). One row in the tab's pool, keyed by `webnav::switcher_key`
+                // of the URL the engine actually loaded — which is why a redirect
+                // leaves one row and not two, and why a navigation that never
+                // committed leaves none at all.
+                webhost::WebOutcome::Committed => self.commit_web_page(seat)?,
                 webhost::WebOutcome::Gone => {
-                    self.window.web = None;
+                    self.window.web.remove(&seat);
                     self.window.web_cursor = None;
-                    self.window.renderer.set_web_holes(Vec::new());
+                    if self.window.web.is_empty() {
+                        self.window.renderer.set_web_holes(Vec::new());
+                    }
                 }
                 webhost::WebOutcome::Refused(uri) => eprintln!("BT_WEB refused {uri}"),
                 // Slice 4 owns the five failure cards; until they exist this
@@ -55832,33 +55873,43 @@ impl Runtime<'_> {
     /// The clock the browser-exit deadline is hung on, the seat's own mortality,
     /// and the chord list the focus keeps changing.
     fn advance_web_page(&mut self, now: Instant) -> Result<()> {
-        if self.window.web.is_none() {
+        if self.window.web.is_empty() {
             return Ok(());
         }
         // A page whose pane has left the tree goes with it. Asked of every tab
         // and not of the active one: a web seat on a tab nobody is looking at is
         // still a web seat.
-        let seat = self.window.web.as_ref().map(|web| web.seat);
-        let orphaned = seat.is_some_and(|seat| {
-            !self
-                .window
-                .tabs
-                .iter()
-                .any(|tab| tab.seats.preview_seats().contains(&seat))
-        });
+        let orphaned: BTreeSet<SeatId> = self
+            .window
+            .web
+            .keys()
+            .copied()
+            .filter(|seat| {
+                !self
+                    .window
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.seats.preview_seats().contains(seat))
+            })
+            .collect();
         let focus = self.shortcut_focus();
         let window = &mut *self.window;
-        let mut outcomes = Vec::new();
-        if let Some(web) = window.web.as_mut() {
+        let mut outcomes: Vec<(SeatId, Vec<webhost::WebOutcome>)> = Vec::new();
+        for (seat, web) in &mut window.web {
+            let mut theirs = Vec::new();
             // The chords the page may not keep change with the focus, and the
             // focus changes without anything telling the engine so.
             web.set_claims(&self.app.shortcuts, focus);
-            if orphaned {
-                outcomes.extend(web.close(&window.compositor));
+            if orphaned.contains(seat) {
+                theirs.extend(web.close(&window.compositor));
             }
-            outcomes.extend(web.tick(now, &window.compositor));
+            theirs.extend(web.tick(now, &window.compositor));
+            outcomes.push((*seat, theirs));
         }
-        self.apply_web_outcomes(outcomes)
+        for (seat, theirs) in outcomes {
+            self.apply_web_outcomes(seat, theirs)?;
+        }
+        Ok(())
     }
 
     /// `BT_WEB_DEV=<url>` — open a preview seat and put that page on it.
@@ -55871,6 +55922,47 @@ impl Runtime<'_> {
         let Some(url) = webhost::development_target() else {
             return Ok(());
         };
+        self.open_web_page(&url.to_owned())
+    }
+
+    /// **The web seat this tab already has, if it has one** — the singleton rule
+    /// (`plan.md` §0 ②「每 tab 单例」).
+    ///
+    /// One page per tab, and the reuse target is that page's seat: opening a
+    /// second address in a tab that already holds one is a *navigation on the
+    /// seat you are looking at*, not a second pane and not a second controller.
+    /// The plan's own words for what the alternative would be are one line up
+    /// from that clause: "不做预览内多标签(多页靠无终端 tab 片)".
+    ///
+    /// Asked of the tab's own tree and not of `self.window.web`, because that map
+    /// spans every tab in the window: a page open on tab 2 must not be what tab 1
+    /// navigates when you press a switcher row.
+    fn web_seat_of_tab(&self) -> Option<SeatId> {
+        self.seats
+            .preview_seats()
+            .into_iter()
+            .find(|seat| self.window.web.contains_key(seat))
+    }
+
+    /// **Go to a page in this tab** — the one door, whatever asked.
+    ///
+    /// `BT_WEB_DEV` at launch, a switcher row, a pin, a restored session: all of
+    /// them arrive here, and every one of them passes `webnav::address_bar`
+    /// first, at the call site, because **a pin is not a permission** (`plan.md`
+    /// §3) and neither is a session file. What this function owns is the *seat*:
+    /// the tab's existing page if it has one, and a landing preview seat if it
+    /// has not.
+    fn open_web_page(&mut self, url: &str) -> Result<()> {
+        if let Some(seat) = self.web_seat_of_tab() {
+            let window = &mut *self.window;
+            let outcomes = window
+                .web
+                .get_mut(&seat)
+                .map(|web| web.go(url, &window.compositor))
+                .unwrap_or_default();
+            self.apply_web_outcomes(seat, outcomes)?;
+            return self.focus_seat(seat);
+        }
         let Some(PreviewSurface::Seat(seat)) = self.preview_landing_surface() else {
             eprintln!("BT_WEB no preview seat could be opened for {url}");
             return Ok(());
@@ -55878,7 +55970,6 @@ impl Runtime<'_> {
         let hwnd = window_hwnd(&self.window.window)?;
         let proxy = self.app.event_proxy.clone();
         match webhost::WebSeat::open(
-            seat,
             hwnd,
             url,
             Box::new(move || {
@@ -55886,7 +55977,13 @@ impl Runtime<'_> {
             }),
         ) {
             Ok(web) => {
-                self.window.web = Some(web);
+                self.window.web.insert(seat, web);
+                // The pane stops showing whatever document it was on the moment
+                // it becomes a page: one seat shows one thing, and a buffer left
+                // pointed at from underneath a browser is a switcher row claiming
+                // to be current while a page covers it.
+                self.leave_preview_buffer(PreviewSurface::Seat(seat));
+                self.clear_preview_image(PreviewSurface::Seat(seat));
                 self.focus_seat(seat)?;
             }
             Err(error) => eprintln!("BT_WEB {error}"),
@@ -55894,34 +55991,86 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// Whether a point is inside the page as it stands on the glass this frame.
-    fn point_is_on_the_web_page(&self, position: PhysicalPosition<f64>) -> bool {
-        let Some(bounds) = self
+    /// **A page loaded, so the seat has an identity and the pool has a row.**
+    ///
+    /// The identity is `webnav::switcher_key` of what the engine actually
+    /// committed — `webhost::WebSeat::identity`, which is
+    /// `WebMachine::recoverable_url`, which is the *one* ledger (see
+    /// [`webhost::WebOutcome::Committed`]). Three consequences fall out rather
+    /// than being arranged: a redirect leaves one row because only the committed
+    /// address is ever keyed; a failed navigation leaves none because the machine
+    /// did not move; and re-visiting an address finds the row already there,
+    /// because `PreviewPool::open` finds before it makes.
+    ///
+    /// The row is listed under the page's *title* once slice ④ reads one; until
+    /// then it is listed under its site, which is what a Recent row and an
+    /// unopened pin already print (`webnav::site_label`).
+    fn commit_web_page(&mut self, seat: SeatId) -> Result<()> {
+        let Some(url) = self
             .window
             .web
-            .as_ref()
-            .and_then(webhost::WebSeat::shown_at)
+            .get(&seat)
+            .and_then(webhost::WebSeat::identity)
         else {
-            return false;
+            return Ok(());
         };
-        position.x >= f64::from(bounds.x)
-            && position.y >= f64::from(bounds.y)
-            && position.x < f64::from(bounds.x + bounds.width as i32)
-            && position.y < f64::from(bounds.y + bounds.height as i32)
+        let key = webnav::switcher_key(url);
+        let source = preview::PreviewSource::Web(key.clone());
+        let name = self
+            .preview_pool
+            .get(&source)
+            .map_or_else(|| webnav::site_label(&key), |buffer| buffer.name.clone());
+        self.open_preview_source_on(PreviewSurface::Seat(seat), source, name)
     }
 
-    /// Forward one mouse event to the page, in the window's own coordinates.
+    /// **Which page a point is inside**, as the pages stand on the glass this
+    /// frame — and `None` for a point that is on none of them.
+    ///
+    /// Asked of what each seat was actually *told* (`shown_at`) rather than of
+    /// the layout, which is the same rule the single-page version kept: a page
+    /// hidden behind a modal is not somewhere a click can land, and the engine's
+    /// own bounds are the only account of that which cannot be a frame stale.
+    fn web_page_at(&self, position: PhysicalPosition<f64>) -> Option<SeatId> {
+        self.window.web.iter().find_map(|(seat, web)| {
+            let bounds = web.shown_at()?;
+            (position.x >= f64::from(bounds.x)
+                && position.y >= f64::from(bounds.y)
+                && position.x < f64::from(bounds.x + bounds.width as i32)
+                && position.y < f64::from(bounds.y + bounds.height as i32))
+            .then_some(*seat)
+        })
+    }
+
+    /// Whether a point is inside any page this frame.
+    fn point_is_on_the_web_page(&self, position: PhysicalPosition<f64>) -> bool {
+        self.web_page_at(position).is_some()
+    }
+
+    /// Forward one mouse event to a page, in the window's own coordinates.
     fn send_to_web_page(
         &mut self,
+        seat: SeatId,
         event: bt_platform::WebMouseEvent,
         position: PhysicalPosition<f64>,
     ) {
         let now = Instant::now();
-        let Some(web) = self.window.web.as_mut() else {
+        let Some(web) = self.window.web.get_mut(&seat) else {
             return;
         };
         if let Err(error) = web.send_mouse(event, (position.x as i32, position.y as i32), now) {
             eprintln!("BT_WEB {error}");
+        }
+    }
+
+    /// The same, for the page a point is over — and nothing at all when it is
+    /// over none.
+    fn send_to_web_page_at(
+        &mut self,
+        event: bt_platform::WebMouseEvent,
+        position: PhysicalPosition<f64>,
+    ) {
+        if let Some(seat) = self.web_page_at(position) {
+            self.send_to_web_page(seat, event, position);
         }
     }
 
@@ -55932,18 +56081,38 @@ impl Runtime<'_> {
     /// the pointer has gone is a move to a point outside its rectangle, which is
     /// what the position already is on the frame the pointer crosses out.
     fn drive_web_pointer(&mut self, position: PhysicalPosition<f64>) {
-        if self.window.web.is_none() {
+        if self.window.web.is_empty() {
             return;
         }
-        let inside = self.point_is_on_the_web_page(position);
-        if !inside && !self.window.web_pointer_inside {
+        let inside = self.web_page_at(position);
+        if inside.is_none() && !self.window.web_pointer_inside {
             return;
         }
-        self.window.web_pointer_inside = inside;
-        self.send_to_web_page(bt_platform::WebMouseEvent::Move, position);
-        // The page's cursor stops being the answer the moment the pointer is out
-        // of its rectangle, and the answer has to be re-asked to say so.
-        if !inside {
+        // **The page the pointer just left hears about it too**, and it hears the
+        // only thing the engine will accept: a move to somewhere it is not. A
+        // window with two pages has a boundary between them, and a page that was
+        // never told the hand had gone keeps a hover lit under a page it is no
+        // longer under.
+        let leaving: Vec<SeatId> = self
+            .window
+            .web
+            .keys()
+            .copied()
+            .filter(|seat| Some(*seat) != inside)
+            .collect();
+        for seat in leaving {
+            self.send_to_web_page(
+                seat,
+                bt_platform::WebMouseEvent::Move,
+                PhysicalPosition::new(-1.0, -1.0),
+            );
+        }
+        self.window.web_pointer_inside = inside.is_some();
+        if let Some(seat) = inside {
+            self.send_to_web_page(seat, bt_platform::WebMouseEvent::Move, position);
+        } else {
+            // The page's cursor stops being the answer the moment the pointer is
+            // out of its rectangle, and the answer has to be re-asked to say so.
             self.window.web_cursor = None;
         }
         self.apply_pointer_cursor();
@@ -55957,11 +56126,14 @@ impl Runtime<'_> {
         position: PhysicalPosition<f64>,
     ) -> Result<()> {
         let down = state == ElementState::Pressed;
+        let Some(seat) = self.web_page_at(position) else {
+            return Ok(());
+        };
         if down {
             // The seat takes the layout focus exactly as any pane does when it
             // is pressed (D40), and then the keyboard goes inside the page.
             self.focus_pane_at(position)?;
-            if let Some(web) = self.window.web.as_ref()
+            if let Some(web) = self.window.web.get(&seat)
                 && let Err(error) = web.focus_page()
             {
                 eprintln!("BT_WEB focus failed: {error}");
@@ -55970,7 +56142,7 @@ impl Runtime<'_> {
         let Some(event) = web_mouse_button(button, down) else {
             return Ok(());
         };
-        self.send_to_web_page(event, position);
+        self.send_to_web_page(seat, event, position);
         Ok(())
     }
 
@@ -55983,10 +56155,10 @@ impl Runtime<'_> {
         // `WHEEL_DELTA`, which is what a page's own `deltaY` is derived from.
         let notch = |value: f32| (value * 120.0).round().clamp(-32768.0, 32767.0) as i16;
         if y != 0.0 {
-            self.send_to_web_page(bt_platform::WebMouseEvent::Wheel(notch(y)), position);
+            self.send_to_web_page_at(bt_platform::WebMouseEvent::Wheel(notch(y)), position);
         }
         if x != 0.0 {
-            self.send_to_web_page(
+            self.send_to_web_page_at(
                 bt_platform::WebMouseEvent::HorizontalWheel(notch(x)),
                 position,
             );
@@ -56603,8 +56775,9 @@ impl Runtime<'_> {
             // no page, and a page nobody is closing, ask for no wake-ups at all.
             self.window
                 .web
-                .as_ref()
-                .and_then(webhost::WebSeat::next_deadline),
+                .values()
+                .filter_map(webhost::WebSeat::next_deadline)
+                .min(),
             pty_resize_deadline,
             resize_finish_deadline,
             synchronized_update_deadline,
@@ -56750,7 +56923,7 @@ impl Runtime<'_> {
         // session. The wait for that browser to go is the state machine's, and
         // this window is not around for it: what is owed at this door is the
         // close, and the process tree goes when the environment does.
-        if let Some(web) = self.window.web.as_mut() {
+        for web in self.window.web.values_mut() {
             let _ = web.close(&self.window.compositor);
         }
         for tab in &mut self.window.tabs {

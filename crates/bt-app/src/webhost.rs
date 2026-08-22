@@ -44,7 +44,6 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use bt_layout::SeatId;
 use bt_platform::{WebChord, WebEvent, WebHost, WebNavigationVerdict};
 use winit::keyboard::{ModifiersState, NamedKey};
 
@@ -172,7 +171,12 @@ impl WebMachine {
     /// still a crash that has to come back to the right page. Read today by
     /// `a_failed_page_does_not_overwrite_a_recoverable_url` and by the two
     /// crash tests beside it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    ///
+    /// **Slice ③ is the consumer this was written for.** It is read by
+    /// [`WebSeat::identity`], and through it by the preview pool, the switcher,
+    /// `session.json` and the Recent vault — all four of them off this one field,
+    /// because "the URL a session file may record" and "what the switcher calls
+    /// this seat" are the same sentence (`plan.md` §3 与 §4).
     pub(crate) fn recoverable_url(&self) -> Option<&str> {
         self.recoverable_url.as_deref()
     }
@@ -646,6 +650,27 @@ pub(crate) enum WebOutcome {
     Cursor(u32),
     /// The page took (`true`) or lost (`false`) the keyboard.
     PageFocus(bool),
+    /// **A top-level navigation actually loaded, and this seat's identity is now
+    /// that URL** (W2 slice ③).
+    ///
+    /// Read straight off [`WebMachine::recoverable_url`] and not off the event,
+    /// which is the whole point: `plan.md` §4 says only a
+    /// `NavigationCompleted(IsSuccess)` writes that field, and `plan.md` §3 says
+    /// the switcher's identity is the last successfully committed URL. Those are
+    /// **one sentence**, so they are one field — the machine's — and this outcome
+    /// is how the pool, the switcher, `session.json` and Recent read it. A second
+    /// ledger kept beside it would be the two accounts disagreeing about which
+    /// page a restart comes back to.
+    ///
+    /// Emitted only when the machine's answer actually changed, so a reload of
+    /// the same address is not a new row.
+    ///
+    /// **It carries nothing**, and that is the point: the window asks
+    /// [`WebSeat::identity`] for the URL, so the only string anybody reads is the
+    /// machine's own field. An outcome that carried a copy would be a second
+    /// account travelling beside the first, and the two would part company the
+    /// first time one of them was dropped on the floor.
+    Committed,
     /// The teardown is finished: the browser has let go and the seat may be
     /// forgotten.
     Gone,
@@ -680,7 +705,6 @@ enum BrowserWait {
 
 /// One web seat: the state machine, the engine, and the mint they share.
 pub(crate) struct WebSeat {
-    pub(crate) seat: SeatId,
     hwnd: std::num::NonZeroIsize,
     folder: PathBuf,
     machine: WebMachine,
@@ -727,7 +751,6 @@ pub(crate) struct WebSeat {
 impl WebSeat {
     /// Open a web seat on this pane and start the engine towards `url`.
     pub(crate) fn open(
-        seat: SeatId,
         hwnd: std::num::NonZeroIsize,
         url: &str,
         wake: Box<dyn Fn()>,
@@ -753,7 +776,6 @@ impl WebSeat {
             wake,
         );
         let mut web = Self {
-            seat,
             hwnd,
             folder,
             machine: WebMachine::new(),
@@ -770,6 +792,40 @@ impl WebSeat {
         debug_assert_eq!(effect, WebEffect::Ignore, "an engine that is not up yet");
         web.start_environment()?;
         Ok(web)
+    }
+
+    /// **Go somewhere on this seat** — the one door every later navigation takes
+    /// (W2 slice ③).
+    ///
+    /// The switcher's row, a pin, a restored session and the address field slice
+    /// ④ will grow all arrive here, and each of them is *a request*, not a
+    /// permission: the URL still passes `webnav::address_bar` at the call site
+    /// and `webnav::navigation_starting` inside the engine's own callback, which
+    /// is the two-gate rule `plan.md` §3 states and `webnav`'s ① records at
+    /// length. This method's own contract is narrower and is the recovery
+    /// machine's: last write wins, and nothing is navigated until the events are
+    /// installed.
+    ///
+    /// It answers the effect rather than acting on it, because acting needs the
+    /// window's compositor and this type is asked from places that do not hold
+    /// one — see [`WebSeat::go`], which is this plus that.
+    pub(crate) fn go(
+        &mut self,
+        url: &str,
+        compositor: &bt_platform::Compositor,
+    ) -> Vec<WebOutcome> {
+        let effect = self.machine.request(url);
+        let mut outcomes = Vec::new();
+        self.apply(effect, compositor, &mut outcomes);
+        outcomes
+    }
+
+    /// **What this seat is remembered as** — the last URL that actually loaded.
+    ///
+    /// One field, one reader: [`WebMachine::recoverable_url`]. See
+    /// [`WebOutcome::Committed`] for why there is no second account of it.
+    pub(crate) fn identity(&self) -> Option<&str> {
+        self.machine.recoverable_url()
     }
 
     /// The chords the window takes back from a focused page.
@@ -820,9 +876,24 @@ impl WebSeat {
                 }
                 WebEffect::Ignore
             }
-            WebEvent::NavigationCompleted { uri, success, .. } => self
-                .machine
-                .on_navigation_completed(self.machine.generation(), uri, *success),
+            WebEvent::NavigationCompleted { uri, success, .. } => {
+                // Asked *before* and *after*, and the answer is the machine's
+                // both times: a failure page, an `about:blank` and a cancelled
+                // navigation all reach here and none of them may move the
+                // identity (`plan.md` §4). Comparing the machine's own field
+                // across the call is what makes that true without this arm
+                // knowing which of the three it is looking at.
+                let was = self.machine.recoverable_url().map(str::to_owned);
+                let effect =
+                    self.machine
+                        .on_navigation_completed(self.machine.generation(), uri, *success);
+                if let Some(now) = self.machine.recoverable_url()
+                    && was.as_deref() != Some(now)
+                {
+                    outcomes.push(WebOutcome::Committed);
+                }
+                effect
+            }
             // 0 is the browser process and 1 the renderer: one name over two
             // entirely different events.
             WebEvent::ProcessFailed { kind, .. } if *kind == 0 => {
