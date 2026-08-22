@@ -52,6 +52,7 @@ mod persist;
 mod pins;
 mod preview;
 mod preview_edit;
+mod preview_trace;
 mod profiles;
 mod psreadline;
 mod restore;
@@ -4851,6 +4852,9 @@ struct WindowRuntime {
     /// ever projects its own tabs, so a second window costs the first nothing and
     /// closing one takes its projections with it.
     focus_thumbs: focus_thumb::FocusThumbnails,
+    /// What `BT_PREVIEW_TRACE`'s frame station last said about this window, so
+    /// that a still pane writes one line and not sixty a second.
+    preview_trace_echo: preview_trace::FrameEcho,
     /// The fraction of a wheel detent the card aim is holding, if any — see
     /// [`CardAim`].
     ///
@@ -18849,6 +18853,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         focus_mini_advance: 0.0,
         focus_mini_face_advance: 0.0,
         focus_thumbs: focus_thumb::FocusThumbnails::default(),
+        preview_trace_echo: preview_trace::FrameEcho::default(),
         card_aim: None,
         table_paints: HashMap::new(),
         preview_button_width: 0.0,
@@ -33756,7 +33761,15 @@ impl Runtime<'_> {
     /// keep out of it.
     fn build_preview_body(&mut self, surface: PreviewSurface) -> Option<bt_render::PreviewBody> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
-        let body = self.preview_surface_body_rect(surface, scale)?;
+        let Some(body) = self.preview_surface_body_rect(surface, scale) else {
+            // The seat has no solved rectangle this pass — which is a body that
+            // is not drawn at all, and on screen is a pane showing its head, its
+            // foot and the two hairlines between them.
+            preview_trace::emit(preview_trace::global(), || {
+                format!("built {surface:?} leave=no-rect")
+            });
+            return None;
+        };
         self.build_preview_body_in(surface, body)
     }
 
@@ -33779,10 +33792,32 @@ impl Runtime<'_> {
             .preview_pane(surface)
             .is_some_and(|pane| pane.image.is_some())
         {
+            preview_trace::emit(preview_trace::global(), || {
+                format!("built {surface:?} leave=picture")
+            });
             return self.preview_image_meta(surface, body, scale);
         }
+        // **The inputs, before the document is built out of them**
+        // (`BT_PREVIEW_TRACE`): a body laid out at a scale of zero or into a
+        // rectangle the solver has not answered for yet is a body whose every
+        // paragraph is a box no clip can keep, and by the time the picture is on
+        // screen the numbers that made it are gone.
+        preview_trace::emit(preview_trace::global(), || {
+            let scroll = self
+                .preview_pane(surface)
+                .map_or([0.0, 0.0], |pane| pane.scroll);
+            format!(
+                "build {surface:?} scale={scale} body=[{},{},{},{}] scroll=[{},{}]",
+                body[0], body[1], body[2], body[3], scroll[0], scroll[1]
+            )
+        });
         self.rebuild_preview_document(surface, body, scale);
-        self.preview_buffer_on(surface)?;
+        if self.preview_buffer_on(surface).is_none() {
+            preview_trace::emit(preview_trace::global(), || {
+                format!("built {surface:?} leave=no-buffer")
+            });
+            return None;
+        }
         let palette = bt_render::chrome_palette();
         let pane = self.preview_pane(surface)?;
         let scroll = pane.scroll;
@@ -33899,6 +33934,14 @@ impl Runtime<'_> {
             });
         }
         self.preview_pane_mut(surface).links = links;
+        preview_trace::emit(preview_trace::global(), || {
+            format!(
+                "built {surface:?} paragraphs={} quads={} blocks={}",
+                built.paragraph_count(),
+                built.quad_count(),
+                built.blocks.len()
+            )
+        });
         Some(built)
     }
 
@@ -55143,10 +55186,15 @@ impl Runtime<'_> {
         gpu: &mut GpuContext,
         renderer: &mut WindowRenderer,
         compositor: &bt_platform::Compositor,
+        echo: &mut preview_trace::FrameEcho,
         seat_frames: &[bt_render::SeatFrame<'_>],
         trigger: FrameTrigger,
     ) -> Result<PresentOutcome> {
         let outcome = renderer.present_frame(gpu, seat_frames, trigger)?;
+        // **What this frame did with the documents on it** — the one funnel is
+        // also the one place that can say it, and it says it only when the
+        // answer moved (`BT_PREVIEW_TRACE`).
+        preview_trace::frame(preview_trace::global(), echo, renderer.preview_text_frame());
         if matches!(outcome, PresentOutcome::Presented(_)) {
             compositor
                 .commit()
@@ -55260,6 +55308,7 @@ impl Runtime<'_> {
             &mut self.app.gpu,
             &mut self.window.renderer,
             &self.window.compositor,
+            &mut self.window.preview_trace_echo,
             &seat_frames,
             trigger,
         )
@@ -55401,6 +55450,7 @@ impl Runtime<'_> {
             &mut self.app.gpu,
             &mut self.window.renderer,
             &self.window.compositor,
+            &mut self.window.preview_trace_echo,
             &seat_frames,
             trigger,
         )
