@@ -5535,6 +5535,96 @@ mod tests {
         }
     }
 
+    /// PIN (user report 2026-08-21) — **the break the terminal put in a path is not a boundary of
+    /// anything**: both halves carry the one target, and the resting mark covers both.
+    ///
+    /// The report was one line read twice. In a wide pane `briefs/brief_USA_d1_s7.md` wore its
+    /// dotted rest and opened; the pane was narrowed until the terminal wrapped it into `briefs/b`
+    /// and `rief_USA_d1_s7.md`, and the whole reference stopped being a link. §7.1.5h ① settled
+    /// exactly this for bare web addresses; this is the same fact asked of the other inferred kind.
+    #[test]
+    fn a_wrapped_printed_path_is_one_link_on_both_halves() {
+        for (head, tail, printed, file) in [
+            // Mid-name, which is where a terminal's own wrap always falls.
+            (
+                "see briefs/brief",
+                "_USA.md",
+                "briefs/brief_USA.md",
+                "D:\\src\\briefs\\brief_USA.md",
+            ),
+            // The drive-rooted spelling of the same break.
+            (
+                "see D:\\src\\briefs",
+                "\\a.md",
+                "D:\\src\\briefs\\a.md",
+                "D:\\src\\briefs\\a.md",
+            ),
+            // A located reference broken **inside** its line number, and one broken exactly at the
+            // colon that opens it — the two places a `:12:3` suffix makes newly reachable.
+            (
+                "see docs/a.md:1",
+                "2:3",
+                "docs/a.md:12:3",
+                "D:\\src\\docs\\a.md",
+            ),
+            (
+                "see docs/a.md",
+                ":12:3",
+                "docs/a.md:12:3",
+                "D:\\src\\docs\\a.md",
+            ),
+        ] {
+            let columns = head.chars().count();
+            let mut rows = vec![
+                CapturedRow::plain(head, true),
+                CapturedRow::plain(&format!("{tail:<columns$}"), false),
+            ];
+            rows.push(CapturedRow::plain(&" ".repeat(columns), false));
+            let (mut frame, _) = live_frame_of_paths(rows, verified(&[file]));
+            let opens = columns - (printed.chars().count() - tail.chars().count());
+            let hit = frame
+                .hyperlink_at(0, opens as u32)
+                .unwrap_or_else(|| panic!("{printed} opens a link on the first row"));
+            assert_eq!(
+                hit.uri.split('#').next(),
+                Some(bt_transcript::paths::local_path_to_file_uri(Path::new(file)).as_str()),
+                "{printed} targets the file it names across the break"
+            );
+            assert_eq!(
+                frame
+                    .hyperlink_at(1, 0)
+                    .unwrap_or_else(|| panic!("{printed} carries on over the break")),
+                hit,
+                "{printed} is one link, not a head and an orphan"
+            );
+            for column in opens..columns {
+                assert!(
+                    dotted_at(&frame, 0, column),
+                    "{printed} rests marked at {column}"
+                );
+            }
+            for column in 0..tail.chars().count() {
+                assert!(
+                    dotted_at(&frame, 1, column),
+                    "{printed} rests marked past the break at {column}"
+                );
+            }
+            assert!(frame.underline_hyperlink(&hit));
+            for column in opens..columns {
+                assert!(
+                    solid_at(&frame, 0, column),
+                    "{printed} head column {column}"
+                );
+            }
+            for column in 0..tail.chars().count() {
+                assert!(
+                    solid_at(&frame, 1, column),
+                    "{printed} tail column {column}"
+                );
+            }
+        }
+    }
+
     /// PIN (§7.1.5f gate ③, repealed 2026-08-20) — **the alternate screen is scanned too.**
     ///
     /// Claude Code lives on the alternate screen and prints paths there all day. The repeal of the

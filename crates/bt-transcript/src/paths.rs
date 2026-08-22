@@ -32,20 +32,91 @@ pub enum PrintedPathSpelling {
     Uri,
 }
 
-/// One printed path candidate: the half-open byte range it occupies in the line, and its spelling.
+/// The `:line[:col]` a printed reference may end with — the shape an agent, a compiler, a linter
+/// and `grep -n` all print a place in a file as.
+///
+/// Both numbers are decimal positive integers, counted the way every one of those printers counts
+/// them: the first line of a file is 1.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PrintedPathLocation {
+    pub line: u32,
+    pub column: Option<u32>,
+}
+
+impl PrintedPathLocation {
+    /// The URI fragment a location is carried in.
+    ///
+    /// A location has to travel **inside the `file:` target**, because §7.1.5j ① folded a printed
+    /// path into exactly the object an application would have declared over OSC 8 and that object
+    /// is one string. A fragment is the one part of a URI that is not the file's name, which is
+    /// precisely what a line number is — and it costs the other four arms of §7.1.5g nothing,
+    /// since every one of them reaches its path through a decoder that cuts fragments already.
+    ///
+    /// The spelling is the one a reader of these targets will recognize from a browser's address
+    /// bar and a code host's deep link: `L13`, and `L13C5` when a column was named.
+    #[must_use]
+    pub fn uri_fragment(self) -> String {
+        match self.column {
+            Some(column) => format!("L{}C{column}", self.line),
+            None => format!("L{}", self.line),
+        }
+    }
+
+    /// The location a `file:` target names, if it names one. The inverse of [`Self::uri_fragment`],
+    /// and the only reader of that spelling.
+    #[must_use]
+    pub fn from_uri(uri: &str) -> Option<Self> {
+        let fragment = uri.split_once('#')?.1;
+        let (line, column) = match fragment.strip_prefix('L')?.split_once('C') {
+            Some((line, column)) => (line, Some(positive_integer(column)?)),
+            None => (fragment.strip_prefix('L')?, None),
+        };
+        Some(Self {
+            line: positive_integer(line)?,
+            column,
+        })
+    }
+}
+
+/// One decimal positive integer, or `None` for anything else — an empty run, a sign, a digit of
+/// another script, a number that overflows, or the zero no line is numbered with.
+fn positive_integer(text: &str) -> Option<u32> {
+    text.bytes()
+        .all(|byte| byte.is_ascii_digit())
+        .then(|| text.parse::<u32>().ok())
+        .flatten()
+        .filter(|value| *value >= 1)
+}
+
+/// One printed path candidate: the half-open byte range it occupies in the line, its spelling, and
+/// the place inside the file it may name.
+///
+/// **`byte_end` covers the whole reference, `:line:col` included**, because that whole string is
+/// one thing's name: what a reader points at in `docs/a.md:12:3` is *that line of that file*, not
+/// a link with three characters of prose behind it. `path_byte_end` is where the file's own name
+/// stops, and the two are equal exactly when there is no location.
 ///
 /// The range is the text a pointer must be over to reach the reference, which for a URI is *not*
 /// the path — see [`PrintedPathSpelling::Uri`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PrintedPathCandidate {
     pub byte_start: usize,
+    pub path_byte_end: usize,
     pub byte_end: usize,
     pub spelling: PrintedPathSpelling,
+    pub location: Option<PrintedPathLocation>,
 }
 
 impl PrintedPathCandidate {
-    /// The candidate's own text, cut from the line it was found in.
-    pub fn text<'line>(&self, line: &'line str) -> &'line str {
+    /// The file's own name, cut from the line it was found in — what this candidate must be
+    /// resolved and verified as.
+    pub fn path_text<'line>(&self, line: &'line str) -> &'line str {
+        &line[self.byte_start..self.path_byte_end]
+    }
+
+    /// The whole reference as printed, location included — what a pointer must be over, and what
+    /// an underline covers.
+    pub fn reference_text<'line>(&self, line: &'line str) -> &'line str {
         &line[self.byte_start..self.byte_end]
     }
 }
@@ -90,7 +161,7 @@ pub fn detect_absolute_path_candidates(text: &str) -> Vec<PrintedPathCandidate> 
             cursor += 1;
             continue;
         }
-        let end = if quoted {
+        let token = if quoted {
             bytes[start..]
                 .iter()
                 .position(|byte| *byte == b'"')
@@ -98,21 +169,31 @@ pub fn detect_absolute_path_candidates(text: &str) -> Vec<PrintedPathCandidate> 
         } else {
             Some(token_end(text, start))
         };
-        let Some(end) = end.filter(|end| *end > start) else {
+        let Some(token) = token.filter(|end| *end > start) else {
             cursor += 1;
             continue;
         };
-        if is_local_absolute_path(Path::new(&text[start..end])) {
+        // Quoting is a declaration of extent, so nothing inside quotes is prose to be released.
+        let end = if quoted {
+            token
+        } else {
+            release_prose_tail(text, start, token)
+        };
+        let (path_length, location) = split_printed_location(&text[start..end]);
+        let path_byte_end = start + path_length;
+        if is_local_absolute_path(Path::new(&text[start..path_byte_end])) {
             candidates.push(PrintedPathCandidate {
                 byte_start: start,
+                path_byte_end,
                 byte_end: end,
                 spelling: PrintedPathSpelling::Absolute,
+                location,
             });
         }
         cursor = if quoted {
-            end.saturating_add(1)
+            token.saturating_add(1)
         } else {
-            end.max(cursor.saturating_add(1))
+            token.max(cursor.saturating_add(1))
         };
     }
     candidates
@@ -131,7 +212,9 @@ pub fn detect_absolute_path_candidates(text: &str) -> Vec<PrintedPathCandidate> 
 /// text ever says so. The separator *is* that boundary — it is the only mark a bare reference
 /// carries that ordinary prose does not.
 ///
-/// `accepted` is the caller's own reading of what counts as a reference, and it is a **parameter of
+/// `accepted` is the caller's own reading of what counts as a reference — asked of the **path**,
+/// with any `:line[:col]` already split off, because an extension allowlist is a question about a
+/// file's name and `sunset.png:12` names `sunset.png`. It is a **parameter of
 /// the scan rather than a filter over its result** because admission decides how far the cursor
 /// moves: an admitted candidate consumes its text, a refused one gives up a single character so
 /// that a reference may still begin one character later. Filtering afterwards would let a caller
@@ -168,7 +251,7 @@ pub fn detect_relative_path_candidates(
             cursor += 1;
             continue;
         }
-        let end = if quoted {
+        let token = if quoted {
             bytes[start..]
                 .iter()
                 .position(|byte| *byte == b'"')
@@ -179,11 +262,21 @@ pub fn detect_relative_path_candidates(
             }
             Some(token_end_seen)
         };
-        let Some(end) = end.filter(|end| *end > start) else {
+        let Some(token) = token.filter(|end| *end > start) else {
             cursor += 1;
             continue;
         };
-        let candidate = &text[start..end];
+        // Both of these read a **bounded tail** — a run of non-ASCII punctuation, a run of digits
+        // and colons — so they may stand in front of the opening test below without costing this
+        // loop the bound that test buys it.
+        let end = if quoted {
+            token
+        } else {
+            release_prose_tail(text, start, token)
+        };
+        let reference = &text[start..end];
+        let (path_length, location) = split_printed_location(reference);
+        let candidate = &reference[..path_length];
         // What opened the candidate is asked before what it says, because the bare opening is the
         // one test whose cost this loop can bound: it stops at the first character that is not a
         // path character, and every opening has such a character in front of it, so no two
@@ -201,8 +294,10 @@ pub fn detect_relative_path_candidates(
         if admitted {
             candidates.push(PrintedPathCandidate {
                 byte_start: start,
+                path_byte_end: start + path_length,
                 byte_end: end,
                 spelling: PrintedPathSpelling::Relative,
+                location,
             });
         }
         // An admitted candidate consumes its text, so nothing is read out of the middle of one. A
@@ -223,6 +318,11 @@ pub fn detect_relative_path_candidates(
 }
 
 /// The shape a relative reference must have, whatever opened it.
+///
+/// Asked of the **path** — [`split_printed_location`] has already taken any `:line[:col]` off the
+/// end — which is why a located reference can clear the no-colon rule below without that rule being
+/// loosened: `docs/a.md:12:3` reaches this as `docs/a.md`, and `docs/a.md:abc` reaches it whole and
+/// is refused exactly as it always was.
 ///
 /// Three refusals. A candidate with no separator is a single bare name, which is out of scope. One
 /// that *opens* with a separator names a place from the drive root rather than from here —
@@ -385,6 +485,81 @@ fn token_end(text: &str, start: usize) -> usize {
         .map_or(text.len(), |(offset, _)| start + offset)
 }
 
+/// Where the path stops inside one reference, and the `:line[:col]` that follows it.
+///
+/// This is the shape an agent, a compiler, a linter and `grep -n` all print a place in a file as,
+/// and it is **one reference**: what a reader points at in `docs/a.md:12:3` is *that line of that
+/// file*, not a link with three characters of prose behind it. So the span the caller builds covers
+/// the whole of it, while the name the caller resolves and verifies stops here.
+///
+/// # Why the drive's own colon can never be read as a line
+///
+/// The search is the maximal **trailing** run of digits and colons, and a drive-rooted path carries
+/// a `\` or a `/` at its third byte — `is_drive_prefix_at` demands one — so the run stops there and
+/// never arrives at the `:` behind the letter. That is a property of the shapes rather than a case
+/// this function tests for, which is why `C:\12` keeps its whole name and `C:\a\b.md:12` does not.
+///
+/// Inside that run the **leftmost** colon wins, so a reference naming both numbers is read as both:
+/// `a.md:12:3` is line 12 column 3, never file `a.md:12` at line 3. Anything that is not a decimal
+/// positive integer is not a number at all — `docs/a.md:abc` and `docs/a.md:0` come back whole, and
+/// the caller's own shape gate then refuses or admits them exactly as it did before this existed.
+fn split_printed_location(reference: &str) -> (usize, Option<PrintedPathLocation>) {
+    let bytes = reference.as_bytes();
+    let mut run = reference.len();
+    while run > 0 && matches!(bytes[run - 1], b':' | b'0'..=b'9') {
+        run -= 1;
+    }
+    for offset in run..reference.len() {
+        if bytes[offset] != b':' {
+            continue;
+        }
+        let tail = &reference[offset + 1..];
+        let location = match tail.split_once(':') {
+            Some((line, column)) => {
+                positive_integer(line)
+                    .zip(positive_integer(column))
+                    .map(|(line, column)| PrintedPathLocation {
+                        line,
+                        column: Some(column),
+                    })
+            }
+            None => positive_integer(tail).map(|line| PrintedPathLocation { line, column: None }),
+        };
+        if location.is_some() {
+            return (offset, location);
+        }
+    }
+    (reference.len(), None)
+}
+
+/// Release the prose an unquoted token swallowed: its trailing run of **non-ASCII punctuation**.
+///
+/// [`token_end`] stops at whitespace and at closing delimiters, which leaves `。`、`，`、`、` and the
+/// rest of CJK sentence punctuation inside the token — so `见 D:\x\a.md。` went to the disk under a
+/// name with a full stop welded to it and came back "not found" (§7.1.5j boundary table row 17).
+/// The sibling scan for bare web addresses has released its own tail since the day it was written
+/// ([`crate::detect_http_urls`]); this is the same debt on the same kind of text.
+///
+/// **A class, not a list** — the same discipline §7.1.5h ⑤ settled for URLs: enumerating full-width
+/// stops means adding one every time a new script turns up, and each addition only restates what
+/// the class already said. The class is "not ASCII, and not a character a path is spelled with".
+///
+/// Two things it deliberately does not touch. **ASCII punctuation stays**, so the trailing `.` of
+/// `见 D:\x\a.md.` is still part of the reference — Windows eats a name's trailing dots, so that is
+/// the same file and the link stands (boundary table row 16). And only the **tail** is released, so
+/// a filename that really carries CJK punctuation in the middle of it (`D:\资料\A、B.md`) is read
+/// whole; what sits at the very end of a token is prose, what sits inside it is somebody's name.
+fn release_prose_tail(text: &str, start: usize, end: usize) -> usize {
+    let mut end = end;
+    while let Some(character) = text[start..end].chars().next_back() {
+        if character.is_ascii() || is_path_tail_char(character) {
+            break;
+        }
+        end -= character.len_utf8();
+    }
+    end
+}
+
 /// Whether a candidate at byte offset `start` opens a token rather than continuing one. The decision
 /// is per *character*: the byte before a candidate is the last byte of a multi-byte character in
 /// every CJK-adjacent line, so a byte test would reject `（D:\a.png）` and `路径：D:\a.png` on the
@@ -420,11 +595,15 @@ pub fn detect_file_uri_candidates(text: &str) -> Vec<PrintedPathCandidate> {
             continue;
         }
         let end = uri_token_end(text, cursor + SCHEME.len());
-        if file_uri_to_local_reference(&text[cursor..end]).is_some() {
+        let (path_length, location) = split_printed_location(&text[cursor..end]);
+        let path_byte_end = cursor + path_length;
+        if file_uri_to_local_reference(&text[cursor..path_byte_end]).is_some() {
             candidates.push(PrintedPathCandidate {
                 byte_start: cursor,
+                path_byte_end,
                 byte_end: end,
                 spelling: PrintedPathSpelling::Uri,
+                location,
             });
         }
         cursor = end.max(cursor + 1);
@@ -680,16 +859,24 @@ impl PrintedPathLinks {
         candidates.sort_by_key(|candidate| candidate.byte_start);
         let mut links = Vec::new();
         for candidate in candidates {
-            let Some(path) = self.resolve(candidate.text(text), candidate.spelling) else {
+            let Some(path) = self.resolve(candidate.path_text(text), candidate.spelling) else {
                 continue;
             };
+            // **The line is never part of what is asked about.** A reference to line 9999 of a real
+            // file is a reference to a real file, and a probe carrying `:9999` would be a question
+            // about a name no filesystem holds — permanently unanswerable, permanently unlinked.
             if self.verified.contains(&path) {
+                let mut uri = local_path_to_file_uri(&path);
+                if let Some(location) = candidate.location {
+                    uri.push('#');
+                    uri.push_str(&location.uri_fragment());
+                }
                 links.push((
                     HyperlinkRange {
                         byte_start: candidate.byte_start,
                         byte_end: candidate.byte_end,
                     },
-                    local_path_to_file_uri(&path),
+                    uri,
                 ));
             } else {
                 unknown.insert(path);
@@ -729,7 +916,7 @@ mod tests {
         found.sort_by_key(|candidate| candidate.byte_start);
         found
             .into_iter()
-            .map(|candidate| (candidate.text(text), candidate.spelling))
+            .map(|candidate| (candidate.reference_text(text), candidate.spelling))
             .collect()
     }
 
@@ -738,6 +925,18 @@ mod tests {
             .into_iter()
             .map(|(text, _)| text)
             .collect::<Vec<_>>()
+    }
+
+    /// Every candidate as `(path text, location)` — the two halves a located reference splits into.
+    fn located(text: &str) -> Vec<(&str, Option<PrintedPathLocation>)> {
+        let mut found = detect_absolute_path_candidates(text);
+        found.extend(detect_relative_path_candidates(text, &|_| true));
+        found.extend(detect_file_uri_candidates(text));
+        found.sort_by_key(|candidate| candidate.byte_start);
+        found
+            .into_iter()
+            .map(|candidate| (candidate.path_text(text), candidate.location))
+            .collect()
     }
 
     /// Boundary table row 1 and 2: the two spellings of a drive-rooted path, each read whole.
@@ -971,6 +1170,185 @@ mod tests {
                 per_frame
             );
         }
+    }
+
+    /// Boundary table rows 18 and 19: a `:line` or `:line:col` behind a reference is part of the
+    /// reference, in every one of the three spellings.
+    ///
+    /// The span is the whole of it because the whole of it is **one thing's name** — what the
+    /// reader is pointing at is "this line of this file", not a link with some prose stuck to it.
+    #[test]
+    fn a_line_and_column_belong_to_the_reference_they_follow() {
+        assert_eq!(
+            spans("docs/HANDOFF-2026-08-21.md:13"),
+            ["docs/HANDOFF-2026-08-21.md:13"]
+        );
+        assert_eq!(
+            spans("docs/HANDOFF-2026-08-21.md:13:5"),
+            ["docs/HANDOFF-2026-08-21.md:13:5"]
+        );
+        assert_eq!(spans("D:\\a\\b.md:12:3"), ["D:\\a\\b.md:12:3"]);
+        assert_eq!(spans("file:///D:/x/a.md:9"), ["file:///D:/x/a.md:9"]);
+        assert_eq!(
+            located("docs/HANDOFF-2026-08-21.md:13:5"),
+            [(
+                "docs/HANDOFF-2026-08-21.md",
+                Some(PrintedPathLocation {
+                    line: 13,
+                    column: Some(5)
+                })
+            )]
+        );
+        assert_eq!(
+            located("D:\\a\\b.md:12"),
+            [(
+                "D:\\a\\b.md",
+                Some(PrintedPathLocation {
+                    line: 12,
+                    column: None
+                })
+            )]
+        );
+        assert_eq!(
+            located("file:///D:/x/a.md:9"),
+            [(
+                "file:///D:/x/a.md",
+                Some(PrintedPathLocation {
+                    line: 9,
+                    column: None
+                })
+            )]
+        );
+    }
+
+    /// Boundary table row 20: the colon that makes a path absolute is never the colon that opens a
+    /// line number.
+    ///
+    /// It is out of reach **by construction** rather than by a special case: the location is read
+    /// as the trailing run of digits and colons, and a drive-rooted path carries a `\` or `/` at
+    /// its third byte, which stops that run long before it could arrive at the drive's own colon.
+    #[test]
+    fn a_drives_colon_is_never_a_line_number() {
+        assert_eq!(located("C:\\12"), [("C:\\12", None)]);
+        assert_eq!(located("C:/12"), [("C:/12", None)]);
+        assert_eq!(
+            located("C:\\a\\b.md:12:3"),
+            [(
+                "C:\\a\\b.md",
+                Some(PrintedPathLocation {
+                    line: 12,
+                    column: Some(3)
+                })
+            )]
+        );
+        // A name that is itself a number keeps it: the run stops at the separator in front of it,
+        // so only what follows a colon can ever be a line.
+        assert_eq!(
+            located("D:\\a\\1:2"),
+            [(
+                "D:\\a\\1",
+                Some(PrintedPathLocation {
+                    line: 2,
+                    column: None
+                })
+            )]
+        );
+    }
+
+    /// Boundary table row 21: what follows the colon must be a decimal positive integer, and text
+    /// that is not one leaves the reference exactly as it was — which is a refusal, not a guess.
+    #[test]
+    fn text_behind_a_colon_that_is_not_a_number_is_not_a_location() {
+        // Relative: the candidate still carries a `:`, which `is_relative_reference` refuses, so
+        // the line offers nothing at all — the same "not recognized" it has always answered with.
+        assert!(spans("docs/a.md:abc").is_empty());
+        // Absolute: the shape gate is the drive prefix, so the whole token stays one candidate
+        // with no location, goes to the disk under that name and is not found.
+        assert_eq!(located("D:\\x\\a.md:abc"), [("D:\\x\\a.md:abc", None)]);
+        // Zero is not a positive integer, and a line count starts at one.
+        assert_eq!(located("D:\\x\\a.md:0"), [("D:\\x\\a.md:0", None)]);
+    }
+
+    /// Boundary table row 17, the debt this slice pays: a trailing full-width stop is prose behind
+    /// the reference, not the tail of a filename.
+    #[test]
+    fn a_reference_releases_the_non_ascii_punctuation_behind_it() {
+        assert_eq!(spans("见 D:\\x\\a.md。"), ["D:\\x\\a.md"]);
+        assert_eq!(spans("见 docs/a.md。"), ["docs/a.md"]);
+        assert_eq!(spans("见 D:\\x\\a.md:12。"), ["D:\\x\\a.md:12"]);
+        assert_eq!(spans("见 D:\\x\\a.md》"), ["D:\\x\\a.md"]);
+        // Interior punctuation is a filename's own: only the tail is released, so a name that
+        // really carries a `、` in the middle of it is still read whole.
+        assert_eq!(spans("D:\\资料\\A、B.md"), ["D:\\资料\\A、B.md"]);
+        // And the limit of that, written down rather than discovered: a sentence that goes on
+        // **past** the punctuation puts its own words inside the token, and words are what a
+        // filename is made of. The token is then a name nothing on the disk carries, so the line
+        // offers no link — the same safe "not recognized" this whole boundary table is built on.
+        assert_eq!(spans("见 D:\\x\\a.md，然后"), ["D:\\x\\a.md，然后"]);
+    }
+
+    /// Boundary table row 16, nailed down so the row above cannot break it: Windows eats a trailing
+    /// ASCII `.`, so the dot names the same file and stays inside the reference.
+    #[test]
+    fn an_ascii_full_stop_stays_inside_the_reference() {
+        assert_eq!(spans("见 D:\\x\\a.md."), ["D:\\x\\a.md."]);
+        assert_eq!(spans("see docs/a.md."), ["docs/a.md."]);
+    }
+
+    /// A located reference is a link to the file, and the line rides in the target's fragment:
+    /// `verified` is asked about the **file**, because a reference to line 9999 of a real file is
+    /// still a reference to a real file.
+    #[test]
+    fn a_located_reference_is_verified_by_its_file_and_carries_its_line_in_the_target() {
+        let links = PrintedPathLinks::new(
+            Some(PathBuf::from("D:\\src")),
+            BTreeSet::from([PathBuf::from("D:\\src\\real.md")]),
+        );
+        let mut unknown = BTreeSet::new();
+        let line = "real/../real.md:13:5 and D:\\src\\real.md:9999";
+        let found = links.links_in(line, &mut unknown);
+        assert_eq!(
+            found
+                .iter()
+                .map(|(range, uri)| (&line[range.byte_start..range.byte_end], uri.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("real/../real.md:13:5", "file:///D:/src/real.md#L13C5"),
+                ("D:\\src\\real.md:9999", "file:///D:/src/real.md#L9999"),
+            ]
+        );
+        assert!(
+            unknown.is_empty(),
+            "the file is known; the line is not asked"
+        );
+    }
+
+    /// The fragment a location is carried in is read back as itself, and nothing else is read as a
+    /// location.
+    #[test]
+    fn a_locations_fragment_is_written_and_read_by_one_rule() {
+        for location in [
+            PrintedPathLocation {
+                line: 13,
+                column: None,
+            },
+            PrintedPathLocation {
+                line: 13,
+                column: Some(5),
+            },
+        ] {
+            let uri = format!(
+                "{}#{}",
+                local_path_to_file_uri(Path::new("D:\\src\\a.md")),
+                location.uri_fragment()
+            );
+            assert_eq!(PrintedPathLocation::from_uri(&uri), Some(location));
+        }
+        assert_eq!(PrintedPathLocation::from_uri("file:///D:/src/a.md"), None);
+        assert_eq!(
+            PrintedPathLocation::from_uri("file:///D:/src/a.md#intro"),
+            None
+        );
     }
 
     /// A link's range covers the text that was printed, which for a URI is not the path — and no

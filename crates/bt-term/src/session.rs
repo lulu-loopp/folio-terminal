@@ -19083,6 +19083,157 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
+    /// PIN (user report 2026-08-21) — **a path the terminal wrapped is still one link**, asked of
+    /// the real vendor grid rather than of a hand-built one.
+    ///
+    /// The report was one line read at two pane widths: wide, the reference wore its dotted rest;
+    /// narrowed until the terminal broke it mid-name, the whole thing stopped being a link. The
+    /// projection reads logical lines (§7.1.5h ①) and the grid records the break as `WRAPLINE`, so
+    /// what this pins is the **join between those two facts** — that the wrap the vendor performs
+    /// is the wrap the scan is told about, on a session narrow enough to force several of them.
+    #[test]
+    fn a_printed_path_the_terminal_wrapped_is_still_one_link() {
+        let (directory, path) = temporary_ordinary_file();
+        let printed = path.to_string_lossy().into_owned();
+        // Narrow enough that a temporary directory's own name breaks more than once.
+        let columns = 24u32;
+        assert!(
+            printed.chars().count() > columns as usize * 2,
+            "the fixture has to wrap at least twice: {printed}"
+        );
+        let mut session = DualPlaneSession::new(nz(columns), nz(8));
+        enable_path_detection(&mut session);
+        session
+            .feed(format!("see {printed} here\r\n").as_bytes())
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+
+        let head = frame
+            .hyperlink_at(0, 4)
+            .expect("the first row of a wrapped path is a link");
+        assert_eq!(
+            head.uri,
+            bt_transcript::paths::local_path_to_file_uri(&path),
+            "the target is the whole file and not the half the first row spells"
+        );
+        // Every row the name runs through answers with the same link, including the last, which
+        // holds its tail and then ordinary prose.
+        let rows = (4 + printed.chars().count()).div_ceil(columns as usize);
+        for row in 1..rows as u32 {
+            assert_eq!(
+                frame
+                    .hyperlink_at(row, 0)
+                    .unwrap_or_else(|| panic!("row {row} carries the wrapped name")),
+                head,
+                "row {row} is the same link and not one of its own"
+            );
+        }
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// PIN (user report 2026-08-21, the gesture as performed) — **narrowing the pane until the
+    /// terminal breaks a printed path does not take the link away.**
+    ///
+    /// The line is printed at a width that holds it whole, read once so the disk has answered, and
+    /// then the pane is narrowed under it — which is a vendor reflow, not a reprint. What the user
+    /// saw was the link disappearing at that moment, so the fact being pinned is that the reflowed
+    /// grid still reports the break as one logical line and the scan still reads it as one name.
+    #[test]
+    fn narrowing_a_pane_under_a_printed_path_keeps_it_one_link() {
+        let (directory, path) = temporary_ordinary_file();
+        let printed = path.to_string_lossy().into_owned();
+        let mut session = DualPlaneSession::new(nz(160), nz(8));
+        enable_path_detection(&mut session);
+        session
+            .feed(format!("see {printed} here\r\n").as_bytes())
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let wide = frame_after_path_verification(&mut session, &mut projection);
+        let target = bt_transcript::paths::local_path_to_file_uri(&path);
+        assert_eq!(
+            wide.hyperlink_at(0, 4)
+                .expect("a link at the wide width")
+                .uri,
+            target
+        );
+
+        let columns = 24u32;
+        session.resize(nz(columns), nz(8)).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let narrow = frame_after_path_verification(&mut session, &mut projection);
+        let head = narrow
+            .hyperlink_at(0, 4)
+            .expect("narrowing does not take the link away");
+        assert_eq!(head.uri, target, "nor shorten what it points at");
+        let rows = (4 + printed.chars().count()).div_ceil(columns as usize);
+        for row in 1..rows as u32 {
+            assert_eq!(
+                narrow
+                    .hyperlink_at(row, 0)
+                    .unwrap_or_else(|| panic!("row {row} carries the wrapped name")),
+                head,
+                "row {row} of the reflowed line is the same link"
+            );
+        }
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// PIN — **the same, once the line has frozen into history and is being wrapped by the
+    /// projection rather than by the grid.**
+    ///
+    /// The third and last plane a printed path can be wrapped on. Together with the two above it
+    /// closes the elimination the 2026-08-21 report needed: if every plane keeps a terminal-wrapped
+    /// name whole, then a name that came apart on a real screen was broken by the **application**,
+    /// which is a different fact with a different fix (§7.1.5h ②).
+    #[test]
+    fn a_frozen_printed_path_wrapped_by_the_projection_is_still_one_link() {
+        let (directory, path) = temporary_ordinary_file();
+        let printed = path.to_string_lossy().into_owned();
+        let columns = 24u32;
+        let mut session = DualPlaneSession::new(nz(columns), nz(4));
+        enable_path_detection(&mut session);
+        let mut bytes = format!("see {printed} here\r\n");
+        for index in 0..12 {
+            bytes.push_str(&format!("filler {index}\r\n"));
+        }
+        session.feed(bytes.as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        // Up to the top, where the frozen line is: the scan is asked about what a frame draws.
+        projection.scroll_to_top();
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+
+        let target = bt_transcript::paths::local_path_to_file_uri(&path);
+        let carrying = (0..frame.row_map.len() as u32)
+            .filter(|row| {
+                (0..columns).any(|column| {
+                    frame
+                        .hyperlink_at(*row, column)
+                        .is_some_and(|hit| hit.uri == target)
+                })
+            })
+            .collect::<Vec<_>>();
+        let wanted = (4 + printed.chars().count()).div_ceil(columns as usize);
+        assert_eq!(
+            carrying.len(),
+            wanted,
+            "a frozen name wraps onto {wanted} rows and every one of them is the link; \
+             rows carrying it: {carrying:?}"
+        );
+        assert!(
+            carrying.windows(2).all(|pair| pair[1] == pair[0] + 1),
+            "and they are the consecutive rows of one line: {carrying:?}"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
     /// PIN — **the alternate screen is where the report came from**, so this is the same fact asked
     /// of the screen Claude Code actually lives on (§7.1.5f gate ③, repealed 2026-08-20).
     #[test]
@@ -19110,6 +19261,93 @@ mod tests {
                 .uri,
             bt_transcript::paths::local_path_to_file_uri(&path)
         );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// PIN — **the same line as the 2026-08-21 report: CJK prose with a relative reference inside
+    /// it, wrapped.**
+    ///
+    /// The report's line was `… 三臂(brief 在 briefs/brief_USA_d1_s7.md)`, so the wrap has to be
+    /// read past full-width glyphs, whose spacer columns spell nothing, and the reference is the
+    /// relative kind, which is measured from §7.1.4's ladder rather than read off its own text.
+    #[test]
+    fn a_wrapped_relative_reference_in_cjk_prose_is_one_link() {
+        let (directory, path) = temporary_ordinary_file();
+        let mut session = DualPlaneSession::new(nz(24), nz(8));
+        enable_path_detection(&mut session);
+        session.set_spawn_directory(Some(directory.clone()));
+        session
+            .feed("s7 三臂(brief 在 ./notes.md)\r\n".as_bytes())
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+
+        let target = bt_transcript::paths::local_path_to_file_uri(&path);
+        let carrying = (0..frame.row_map.len() as u32)
+            .filter(|row| {
+                (0..24).any(|column| {
+                    frame
+                        .hyperlink_at(*row, column)
+                        .is_some_and(|hit| hit.uri == target)
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            carrying.len(),
+            2,
+            "the reference straddles the wrap, so two rows carry it: {carrying:?}"
+        );
+        assert_eq!(carrying[1], carrying[0] + 1, "and they are neighbours");
+        let head = frame.hyperlink_at(carrying[0], 23).expect("the head half");
+        assert_eq!(head.uri, target);
+        assert_eq!(
+            frame.hyperlink_at(carrying[1], 0).expect("the tail half"),
+            head,
+            "one reference across a wrap in CJK prose is one link"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// PIN — **and wrapped on the alternate screen too**, which is the surface the 2026-08-21
+    /// report was made on. The alternate grid has no staging and no history behind it, so this is
+    /// the one plane where a wrapped line is nothing but `WRAPLINE`.
+    #[test]
+    fn a_wrapped_printed_path_on_the_alternate_screen_is_one_link() {
+        let (directory, path) = temporary_ordinary_file();
+        let printed = path.to_string_lossy().into_owned();
+        let columns = 24u32;
+        let mut session = DualPlaneSession::new(nz(columns), nz(8));
+        enable_path_detection(&mut session);
+        session
+            .feed(format!("\x1b[?1049hsee {printed} here\r\n").as_bytes())
+            .unwrap();
+        assert!(session.terminal.modes().alternate_screen);
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+
+        let first = frame
+            .row_map
+            .iter()
+            .position(|row| row.live_grid_row == Some(0))
+            .expect("the alternate grid's first row is on screen") as u32;
+        let target = bt_transcript::paths::local_path_to_file_uri(&path);
+        let head = frame
+            .hyperlink_at(first, 4)
+            .expect("the wrapped name is a link on the alternate screen");
+        assert_eq!(head.uri, target);
+        let rows = (4 + printed.chars().count()).div_ceil(columns as usize);
+        for offset in 1..rows as u32 {
+            assert_eq!(
+                frame
+                    .hyperlink_at(first + offset, 0)
+                    .unwrap_or_else(|| panic!("alternate row {offset} carries the wrapped name")),
+                head
+            );
+        }
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
