@@ -12,7 +12,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bt_persist::{RecentEntryV1, RecentSeedV1};
+use bt_persist::{PreviewSourceV1, RecentEntryV1, RecentPreviewV1, RecentSeedV1};
 
 /// How many seeds the vault keeps. Mock-up 4056: `state.recent.slice(0, 8)`.
 pub const RECENT_CAPACITY: usize = 8;
@@ -44,8 +44,18 @@ pub enum Seed {
     },
     /// A place a files pane was rooted at.
     Files { root: String },
-    /// The file a lone preview pane was on (§7.1.6h).
-    Preview { path: String },
+    /// The file — or, from W2 slice ③, the **page** — a lone preview pane was
+    /// on (§7.1.6h).
+    ///
+    /// One shape and not two, because a page and a file are one kind of tab: the
+    /// same pane, the same close, the same row in this vault. `source` is which
+    /// of the two the string is, and it is carried rather than inferred for the
+    /// reason `bt_persist::PreviewSourceV1` states — a build that guessed would
+    /// hand a URL to a filesystem or a path to a navigation.
+    Preview {
+        path: String,
+        source: PreviewSourceV1,
+    },
     /// **A whole window that was closed** (multiwindow slice D, ruling ②).
     ///
     /// Closing a tab has always filled this vault, and closing a window closes
@@ -91,7 +101,21 @@ impl Seed {
             // rooted at `D:\a\b` are two rows and not one. They are two
             // different tabs and a key that collapsed them would let opening a
             // folder evict the file you had open in it.
-            Self::Preview { path } => format!("||{path}"),
+            // **A page takes a fourth spelling of the third slot** and a file
+            // keeps the one it has always had, because every vault row on every
+            // disk says `||{path}` and re-keying them would evict them all on
+            // first launch. The two cannot collide and it is provable rather than
+            // likely: `|` is not a legal character in a Windows path, so no file
+            // seed can produce a third slot beginning `url|`; and a window's key
+            // begins `|||`, which this never does.
+            Self::Preview {
+                path,
+                source: PreviewSourceV1::File,
+            } => format!("||{path}"),
+            Self::Preview {
+                path,
+                source: PreviewSourceV1::Url,
+            } => format!("||url|{path}"),
             // **A fourth slot, which no tab shape can reach.** The three above
             // are `a|b|c`; this one is `|||…`, so a window can never collide
             // with a tab however its children are spelled. Inside it, the
@@ -179,7 +203,7 @@ impl Seed {
             // A place and a file are their own captions, so an empty one is not a
             // caption. There is no second field to fall through to.
             Self::Files { root } => !root.is_empty(),
-            Self::Preview { path } => !path.is_empty(),
+            Self::Preview { path, .. } => !path.is_empty(),
             Self::Window { seeds } => seeds.iter().any(Self::names_itself),
         }
     }
@@ -234,7 +258,10 @@ impl From<&Seed> for RecentSeedV1 {
                 manual_name: manual_name.clone(),
             },
             Seed::Files { root } => Self::Files { root: root.clone() },
-            Seed::Preview { path } => Self::Preview { path: path.clone() },
+            Seed::Preview { path, source } => Self::Preview {
+                path: path.clone(),
+                source: *source,
+            },
             Seed::Window { seeds } => Self::Window {
                 seeds: seeds.iter().map(Self::from).collect(),
             },
@@ -255,7 +282,10 @@ impl From<&RecentSeedV1> for Seed {
                 manual_name: manual_name.clone(),
             },
             RecentSeedV1::Files { root } => Self::Files { root: root.clone() },
-            RecentSeedV1::Preview { path } => Self::Preview { path: path.clone() },
+            RecentSeedV1::Preview { path, source } => Self::Preview {
+                path: path.clone(),
+                source: *source,
+            },
             RecentSeedV1::Window { seeds } => Self::Window {
                 seeds: seeds.iter().map(Self::from).collect(),
             },
@@ -279,10 +309,15 @@ pub struct RecentEntry {
     /// (`bt_persist::TabV1::preview`), so an entry that dropped it would be that
     /// asymmetry again, in this store, for this reason.
     ///
-    /// Paths only, and no pins: Recent is a *launcher*, not a layout. It
+    /// Places only, and no pins: Recent is a *launcher*, not a layout. It
     /// restores the places you were — the pool regrows from disk on demand, and
     /// nobody ever promised a closed tab's pane arrangement back.
-    pub previews: Vec<String>,
+    ///
+    /// **A page is one of those places** (W2 slice ③), which is why the element
+    /// is the wire type rather than a bare `String`: it is the one list in this
+    /// module whose rows are scalars, and `bt_persist::RecentPreviewV1` is where
+    /// the rule about telling a path from a URL without guessing already lives.
+    pub previews: Vec<RecentPreviewV1>,
     /// Absolute, not relative — "3 分钟前" is computed at the moment it is drawn,
     /// so a vault read back from disk a day later says "a day ago" rather than
     /// repeating whatever it said when it was written.
@@ -316,7 +351,7 @@ impl SeedVault {
     /// keeps the row indices honest — `MenuRow::Recent` carries the vault's own
     /// index straight into [`Self::take`], so a menu that hid a row the vault
     /// still held would revive the entry beside the one that was clicked.
-    pub fn record(&mut self, seed: Seed, previews: Vec<String>, at: SystemTime) {
+    pub fn record(&mut self, seed: Seed, previews: Vec<RecentPreviewV1>, at: SystemTime) {
         if !seed.names_itself() {
             return;
         }
@@ -650,6 +685,7 @@ mod tests {
         vault.record(
             Seed::Preview {
                 path: String::new(),
+                source: PreviewSourceV1::File,
             },
             Vec::new(),
             at(4),
@@ -803,6 +839,7 @@ mod tests {
                     term("C:\\repo", Some("build")),
                     Seed::Preview {
                         path: "C:\\repo\\README.md".to_owned(),
+                        source: PreviewSourceV1::File,
                     },
                 ],
             },
@@ -821,6 +858,7 @@ mod tests {
                     },
                     RecentSeedV1::Preview {
                         path: "C:\\repo\\README.md".to_owned(),
+                        source: PreviewSourceV1::File,
                     },
                 ],
             }
@@ -907,8 +945,8 @@ mod tests {
     fn a_closed_tabs_preview_comes_back_out_of_the_vault_with_it() {
         let mut vault = SeedVault::default();
         let pages = vec![
-            r"C:\repo\README.md".to_owned(),
-            r"C:\repo\src\main.rs".to_owned(),
+            RecentPreviewV1::File(r"C:\repo\README.md".to_owned()),
+            RecentPreviewV1::File(r"C:\repo\src\main.rs".to_owned()),
         ];
         vault.record(term(r"C:\repo", None), pages.clone(), at(0));
 
@@ -937,18 +975,18 @@ mod tests {
         let mut vault = SeedVault::default();
         vault.record(
             term(r"C:\repo", None),
-            vec![r"C:\repo\a.md".to_owned()],
+            vec![RecentPreviewV1::File(r"C:\repo\a.md".to_owned())],
             at(0),
         );
         vault.record(
             term(r"C:\repo", None),
-            vec![r"C:\repo\b.md".to_owned()],
+            vec![RecentPreviewV1::File(r"C:\repo\b.md".to_owned())],
             at(60),
         );
         assert_eq!(vault.len(), 1, "still one place");
         assert_eq!(
             vault.entries()[0].previews,
-            vec![r"C:\repo\b.md".to_owned()]
+            vec![RecentPreviewV1::File(r"C:\repo\b.md".to_owned())]
         );
     }
 

@@ -504,6 +504,34 @@ pub fn switcher_identity(last_committed: Option<&str>) -> Option<String> {
     last_committed.map(switcher_key)
 }
 
+/// **What a page is called where nobody has its title** — its site, `host[:port]`.
+///
+/// A page's name is the page's title (`docs/DESIGN.md` §7.7 ②), and the two
+/// surfaces that have no title to read are exactly the two that stand for a page
+/// nothing has opened: a Recent row (the vault stores places, never names) and a
+/// pinned URL with no buffer behind it. §7.7 ③ already names the half of a URL
+/// that is its identity — "scheme 与 host 是身份" — and this is that half,
+/// through the *same* splitters `switcher_key` normalises with, so a row cannot
+/// name a site the key does not agree it is.
+///
+/// A string this module cannot read as a URL answers with itself. That is not a
+/// fallback but the boundary: `pins.json` is a file a person may edit, and a row
+/// whose target is not a URL is drawn as what it says — it is refused at the
+/// navigation gate, not silently renamed here.
+pub fn site_label(url: &str) -> String {
+    let Some((_, rest)) = split_scheme(url) else {
+        return url.to_owned();
+    };
+    let (host, port) = split_host_port(authority(rest));
+    if host.is_empty() {
+        return url.to_owned();
+    }
+    match port {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

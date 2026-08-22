@@ -4044,7 +4044,7 @@ pub fn build(
             &Row {
                 rect: *row,
                 mark: Some(recent_mark(&entry.seed)),
-                name: recent_label(&entry.seed),
+                name: &recent_label(&entry.seed),
                 // Still the age, and deliberately not `not installed`: a Recent
                 // row's one annotation answers "when", the grey already answers
                 // "can you", and losing the timestamp would cost the row the
@@ -4363,7 +4363,11 @@ fn recent_mark(seed: &Seed) -> ChromeMark {
     match seed {
         Seed::Term { profile_id, .. } => mark(index_of_id(profile_id)),
         Seed::Files { .. } => ChromeMark::Folder,
-        Seed::Preview { .. } => ChromeMark::File,
+        // A page wears the web class's globe and a file wears `#i-file`, through
+        // the one door every preview row asks (`docs/DESIGN.md` §7.7 ⑤/⑥).
+        Seed::Preview { source, .. } => {
+            crate::marks::preview_row_mark(*source == bt_persist::PreviewSourceV1::Url)
+        }
         // **A window wears a window** (multiwindow slice D), and it is the one
         // row in this list whose mark is not its content's: a row captioned
         // `alpha` with a PowerShell mark says "that shell", and the whole
@@ -4384,7 +4388,7 @@ fn recent_tip(seed: &Seed) -> String {
     match seed {
         Seed::Term { cwd, .. } => cwd.clone(),
         Seed::Files { root } => root.clone(),
-        Seed::Preview { path } => path.clone(),
+        Seed::Preview { path, .. } => path.clone(),
         Seed::Window { seeds } => crate::i18n::recent_window_tip(seeds.len()),
     }
 }
@@ -4395,21 +4399,35 @@ fn recent_tip(seed: &Seed) -> String {
 /// never gave it one. An empty manual name is not a name: `||` in the mock-up
 /// falls through an empty string, and a row captioned with nothing would be a
 /// row you cannot tell from the one above it.
-fn recent_label(seed: &Seed) -> &str {
+fn recent_label(seed: &Seed) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
     match seed {
         Seed::Term {
             cwd, manual_name, ..
-        } => manual_name
-            .as_deref()
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| cwd_leaf(cwd)),
+        } => Cow::Borrowed(
+            manual_name
+                .as_deref()
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| cwd_leaf(cwd)),
+        ),
         // A files locus has no name of its own; the mock-up captions it with the
         // same leaf rule applied to its root.
-        Seed::Files { root } => cwd_leaf(root),
+        Seed::Files { root } => Cow::Borrowed(cwd_leaf(root)),
         // And a file is captioned by its own last segment through the same rule,
         // which for a path ending in a file name is that file name — the string
         // a preview head already prints (§7.1.6h).
-        Seed::Preview { path } => cwd_leaf(path),
+        // **And a page is captioned by its site**, `host[:port]`, because that is
+        // the half of a URL §7.7 ③ calls its identity and the vault stores a
+        // place rather than a title. `webnav::site_label` is the one splitter, so
+        // the row cannot name a site the switcher key disagrees with.
+        Seed::Preview {
+            path,
+            source: bt_persist::PreviewSourceV1::File,
+        } => Cow::Borrowed(cwd_leaf(path)),
+        Seed::Preview {
+            path,
+            source: bt_persist::PreviewSourceV1::Url,
+        } => Cow::Owned(crate::webnav::site_label(path)),
         // **A window is captioned by the tab it opened with** (multiwindow slice
         // D) — or, since 2026-08-20, by the first one that can say what it is;
         // see [`Seed::first_tab`] for that and for why the word "window" is in
@@ -4417,7 +4435,9 @@ fn recent_label(seed: &Seed) -> &str {
         // themselves never reaches the vault (`Seed::names_itself`), so the
         // fallback is a shape nothing constructs; it answers the empty string
         // because that is what an unnameable row already answers above.
-        Seed::Window { .. } => seed.first_tab().map_or("", recent_label),
+        Seed::Window { .. } => seed
+            .first_tab()
+            .map_or(Cow::Borrowed(""), recent_label),
     }
 }
 

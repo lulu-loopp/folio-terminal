@@ -6692,9 +6692,10 @@ impl TabState {
             // A pane showing nothing has no file to be reopened on, so it seeds
             // nothing — the same sentence `preview_showing` already writes about
             // the session file, applied to the other store that reads it.
-            bt_layout::SeatKind::Preview => Some(seed::Seed::Preview {
-                path: self.preview_showing(seat)?.to_string_lossy().into_owned(),
-            }),
+            bt_layout::SeatKind::Preview => {
+                let (path, source) = persisted_preview_row(&self.preview_showing(seat)?)?;
+                Some(seed::Seed::Preview { path, source })
+            }
             bt_layout::SeatKind::Placeholder => None,
         }
     }
@@ -6706,16 +6707,22 @@ impl TabState {
     /// pane on" has to ask both — a reader that only knew about the pool would
     /// write a pinned pane full of picture back to disk as an empty one.
     ///
-    /// **A path, and therefore only what has one.** Both of this function's
-    /// readers write a path to disk — the tab's content section and the Recent
-    /// vault — and the file section of `session.json` has no vocabulary for a
-    /// document composed out of a repository (see [`Self::preview_content`]).
-    fn preview_showing(&self, seat: SeatId) -> Option<&Path> {
+    /// **An identity, and therefore whatever the pane is on** — a file, or, since
+    /// W2 slice ③, a page. What *can be written down* is a separate question and
+    /// is asked once, by [`persisted_preview_row`]: both of this function's
+    /// readers write to disk, and `session.json` has no vocabulary for a document
+    /// composed out of a repository (see [`Self::preview_content`]).
+    ///
+    /// A picture answers as the file it is, because a picture's pane holds no
+    /// pool buffer and a reader that only knew about the pool would write a pane
+    /// full of picture back to disk as an empty one.
+    fn preview_showing(&self, seat: SeatId) -> Option<preview::PreviewSource> {
         let pane = self.preview_panes.get(PreviewSurface::Seat(seat))?;
-        pane.buffer
-            .as_ref()
-            .and_then(preview::PreviewSource::file_path)
-            .or_else(|| pane.image.as_ref().map(|image| image.path.as_path()))
+        pane.buffer.clone().or_else(|| {
+            pane.image
+                .as_ref()
+                .map(|image| preview::PreviewSource::file(image.path.clone()))
+        })
     }
 
     /// **The tab's content section** — `bt_persist::TabV1::preview`.
@@ -6749,7 +6756,17 @@ impl TabState {
                 leaf: format!("leaf-{index}"),
                 cur: self
                     .preview_showing(seat.id)
-                    .map(|path| path.to_string_lossy().into_owned()),
+                    .as_ref()
+                    .and_then(persisted_preview_row)
+                    .map(|(target, _)| target),
+                // **Which of the two `cur` is** (schema v11). Read through the
+                // same one door, so a pane and its pool row cannot disagree about
+                // what kind of thing they are naming.
+                cur_source: self
+                    .preview_showing(seat.id)
+                    .as_ref()
+                    .and_then(persisted_preview_row)
+                    .map_or(bt_persist::PreviewSourceV1::File, |(_, source)| source),
                 // **The graph's filter** (T2/T3, v2 ③) — written only when the
                 // reader has actually touched it, so a pane that has never seen a
                 // graph, and one whose graph is unfiltered, both write exactly
@@ -6788,9 +6805,11 @@ impl TabState {
             .preview_pool
             .buffers()
             .filter_map(|buffer| {
+                let (path, source) = persisted_preview_row(&buffer.source)?;
                 Some(bt_persist::PreviewPoolEntryV1 {
-                    path: buffer.source.file_path()?.to_string_lossy().into_owned(),
+                    path,
                     name: buffer.name.clone(),
+                    source,
                 })
             })
             .collect();
@@ -6802,12 +6821,12 @@ impl TabState {
     ///
     /// The pool is deliberately *not* here: Recent restores the places you were,
     /// and a browsing history regrown from disk is not one of them.
-    fn preview_pages(&self) -> Vec<String> {
+    fn preview_pages(&self) -> Vec<bt_persist::RecentPreviewV1> {
         self.seats
             .preview_seats()
             .into_iter()
             .filter_map(|seat| self.preview_showing(seat))
-            .map(|path| path.to_string_lossy().into_owned())
+            .filter_map(|source| recent_preview_row(&source))
             .collect()
     }
 }
@@ -7027,8 +7046,11 @@ impl TabState {
             | preview::PreviewView::Diff => Some(true),
             // A rendered page: prose, in the window's face, at the files size.
             preview::PreviewView::Markdown => Some(false),
+            // A page is the fourth: what is on the glass is the engine's, and
+            // this window has no lines of it to quote at any size.
             preview::PreviewView::Image
             | preview::PreviewView::Graph
+            | preview::PreviewView::Web
             | preview::PreviewView::None => None,
         }
     }
@@ -16408,10 +16430,11 @@ fn revive_plan(
 /// pane.
 #[derive(Clone, Debug, Default)]
 struct PreviewRestore {
-    /// The file each preview seat comes back showing.
-    cur: BTreeMap<SeatId, PathBuf>,
-    /// The tab's pool, oldest first — path and the name it was listed under.
-    pool: Vec<(PathBuf, String)>,
+    /// What each preview seat comes back showing — a file, or a page.
+    cur: BTreeMap<SeatId, preview::PreviewSource>,
+    /// The tab's pool, oldest first — the identity and the name it was listed
+    /// under.
+    pool: Vec<(preview::PreviewSource, String)>,
     /// The branch filter each preview seat's graph was of (T2/T3, v2 (3)).
     ///
     /// Restored even though the *document* is not: `session.json` has no
@@ -16442,14 +16465,23 @@ impl PreviewRestore {
                 // build read differently. The pane still arrives; it arrives
                 // empty, which is a state, and it is the same degradation §5.4
                 // asks for everywhere else.
-                (seat.kind == bt_layout::SeatKind::Preview)
-                    .then(|| Some((seat.id, PathBuf::from(pane.cur.as_ref()?))))?
+                (seat.kind == bt_layout::SeatKind::Preview).then(|| {
+                    Some((
+                        seat.id,
+                        preview_source_of(pane.cur.as_ref()?, pane.cur_source),
+                    ))
+                })?
             })
             .collect();
         let pool = saved
             .pool
             .iter()
-            .map(|entry| (PathBuf::from(&entry.path), entry.name.clone()))
+            .map(|entry| {
+                (
+                    preview_source_of(&entry.path, entry.source),
+                    entry.name.clone(),
+                )
+            })
             .collect();
         let filters = saved
             .panes
@@ -16475,7 +16507,7 @@ impl PreviewRestore {
 
     /// The one thing a Recent entry can rebuild: the files, with the pool left
     /// to regrow (裁决 10).
-    fn from_pages(cur: BTreeMap<SeatId, PathBuf>) -> Self {
+    fn from_pages(cur: BTreeMap<SeatId, preview::PreviewSource>) -> Self {
         Self {
             cur,
             pool: Vec::new(),
@@ -16492,12 +16524,80 @@ impl PreviewRestore {
 /// Declining is not discarding (see [`Runtime::answer_restore`]), so the entry
 /// it writes has to carry everything the tab would have come back with. This is
 /// [`TabState::preview_pages`]'s opposite number for a tab that was never built.
-fn persisted_preview_pages(tab: &TabV1) -> Vec<String> {
+fn persisted_preview_pages(tab: &TabV1) -> Vec<bt_persist::RecentPreviewV1> {
     tab.preview
         .iter()
         .flat_map(|content| content.panes.iter())
-        .filter_map(|pane| pane.cur.clone())
+        .filter_map(|pane| {
+            let cur = pane.cur.as_ref()?;
+            Some(match pane.cur_source {
+                bt_persist::PreviewSourceV1::File => {
+                    bt_persist::RecentPreviewV1::File(cur.clone())
+                }
+                bt_persist::PreviewSourceV1::Url => {
+                    bt_persist::RecentPreviewV1::Page { url: cur.clone() }
+                }
+            })
+        })
         .collect()
+}
+
+/// **What a preview source can be written down as** — the one door between this
+/// window's identity type and the two stores that keep it.
+///
+/// `None` for a source neither store has a vocabulary for. That is not an
+/// omission but the standing rule the pool section already states about git:
+/// `session.json` has no field for a repository, and a pseudo-path smuggled into
+/// `path` would be exactly the ambiguity [`preview::PreviewSource`] was
+/// introduced to retire.
+///
+/// **A page answers `Url` and its whole URL** (W2 slice ③). The string is the
+/// switcher key — `webnav::switcher_key` of the last successfully committed
+/// address — carried verbatim, query and fragment included, which is the
+/// persistence clause `plan.md` §3 states and `bt_persist::SESSION_SCHEMA_VERSION`
+/// records.
+fn persisted_preview_row(
+    source: &preview::PreviewSource,
+) -> Option<(String, bt_persist::PreviewSourceV1)> {
+    if let Some(url) = source.web_url() {
+        return Some((url.to_owned(), bt_persist::PreviewSourceV1::Url));
+    }
+    Some((
+        source.file_path()?.to_string_lossy().into_owned(),
+        bt_persist::PreviewSourceV1::File,
+    ))
+}
+
+/// [`persisted_preview_row`] in the vault's own spelling — see
+/// [`bt_persist::RecentPreviewV1`] for why that list says which by shape rather
+/// than by a field.
+fn recent_preview_row(source: &preview::PreviewSource) -> Option<bt_persist::RecentPreviewV1> {
+    let (target, kind) = persisted_preview_row(source)?;
+    Some(match kind {
+        bt_persist::PreviewSourceV1::File => bt_persist::RecentPreviewV1::File(target),
+        bt_persist::PreviewSourceV1::Url => bt_persist::RecentPreviewV1::Page { url: target },
+    })
+}
+
+/// [`persisted_preview_row`] run backwards: the identity one stored row names.
+///
+/// The pair is deliberately one function each way and in one place. A reader that
+/// re-derived "is this a page" from the string would be the heuristic the whole
+/// `source` field exists to avoid, and two readers doing it differently is how a
+/// restored URL comes back as a path on one surface and a page on another.
+fn preview_source_of(target: &str, kind: bt_persist::PreviewSourceV1) -> preview::PreviewSource {
+    match kind {
+        bt_persist::PreviewSourceV1::File => preview::PreviewSource::file(target),
+        bt_persist::PreviewSourceV1::Url => preview::PreviewSource::Web(target.to_owned()),
+    }
+}
+
+/// The same, for the vault's shaped row.
+fn preview_source_of_recent(row: &bt_persist::RecentPreviewV1) -> preview::PreviewSource {
+    match row {
+        bt_persist::RecentPreviewV1::File(path) => preview::PreviewSource::file(path),
+        bt_persist::RecentPreviewV1::Page { url } => preview::PreviewSource::Web(url.clone()),
+    }
 }
 
 /// Every Term leaf of a persisted tree, in the order the tree is drawn.
@@ -16590,12 +16690,13 @@ fn restore_row_seed(tab: &TabV1) -> seed::Seed {
             root: leaf.root.clone(),
         };
     }
-    if let Some(path) = tab
-        .preview
-        .as_ref()
-        .and_then(|preview| preview.panes.iter().find_map(|pane| pane.cur.clone()))
-    {
-        return seed::Seed::Preview { path };
+    if let Some((path, source)) = tab.preview.as_ref().and_then(|preview| {
+        preview
+            .panes
+            .iter()
+            .find_map(|pane| Some((pane.cur.clone()?, pane.cur_source)))
+    }) {
+        return seed::Seed::Preview { path, source };
     }
     seed::Seed::Files {
         root: String::new(),
@@ -16645,7 +16746,7 @@ fn seeded_tab(seed: &seed::Seed) -> TabV1 {
             })),
             None,
         ),
-        seed::Seed::Preview { path } => (
+        seed::Seed::Preview { path, source } => (
             LayoutNodeV1::Leaf(LeafNodeV1::Preview(bt_persist::PreviewLeafV1 {
                 pinned: false,
             })),
@@ -16653,11 +16754,20 @@ fn seeded_tab(seed: &seed::Seed) -> TabV1 {
                 panes: vec![bt_persist::PreviewPaneV1 {
                     leaf: "leaf-0".to_owned(),
                     cur: Some(path.clone()),
+                    cur_source: *source,
                     graph: None,
                 }],
                 pool: vec![bt_persist::PreviewPoolEntryV1 {
                     path: path.clone(),
-                    name: profiles::cwd_leaf(path).to_owned(),
+                    name: match source {
+                        // A file is listed by its last segment, as it always was.
+                        // A page has no title here — the vault stores a place and
+                        // never a name — so it is listed by its site, through the
+                        // one splitter every page row asks (§7.7 ③).
+                        bt_persist::PreviewSourceV1::File => profiles::cwd_leaf(path).to_owned(),
+                        bt_persist::PreviewSourceV1::Url => webnav::site_label(path),
+                    },
+                    source: *source,
                 }],
             }),
         ),
@@ -17584,36 +17694,42 @@ fn create_tab_state(
     // without a disk, and the bytes are the worker's to fetch when the pane is
     // actually looked at.
     //
-    // Every entry the file carries is a file — that is all the section can say
-    // (see [`TabState::preview_content`]) — so every buffer minted here is a
-    // [`preview::PreviewSource::File`].
+    // Every entry the file carries is a file or a page — that is all the section
+    // can say (see [`TabState::preview_content`]) — and which of the two it is
+    // was decided once, on the way in, by [`preview_source_of`].
     let mut preview_pool = preview::PreviewPool::default();
-    for (path, name) in &preview.pool {
-        preview_pool.insert(preview::PreviewBuffer::new(
-            preview::PreviewSource::file(path.clone()),
-            name.clone(),
-        ));
+    for (source, name) in &preview.pool {
+        preview_pool.insert(preview::PreviewBuffer::new(source.clone(), name.clone()));
     }
     let mut preview_panes = PreviewPanes::default();
     for seat in seats.preview_seats() {
-        let Some(path) = preview.cur.get(&seat) else {
+        let Some(source) = preview.cur.get(&seat) else {
             continue;
         };
-        if path_is_previewable_image(path) {
+        if let Some(path) = source.file_path()
+            && path_is_previewable_image(path)
+        {
             // A picture is not a pool buffer — it comes back down the decode
             // lane, exactly as a click on a `.png` row sends it.
             preview_panes.entry(PreviewSurface::Seat(seat)).image =
-                Some(PreviewImageState::new(path.clone()));
+                Some(PreviewImageState::new(path.to_path_buf()));
             continue;
         }
-        let source = preview::PreviewSource::file(path.clone());
-        if preview_pool.get(&source).is_none() {
-            preview_pool.insert(preview::PreviewBuffer::new(
-                source.clone(),
-                files_row_display_name(path),
-            ));
+        if preview_pool.get(source).is_none() {
+            // A file is named by its last segment and a page by its site: the
+            // vault and a hand-edited content section both carry a `cur` with no
+            // pool row behind it, and a page has no title to read until it has
+            // committed once.
+            let name = match source.file_path() {
+                Some(path) => files_row_display_name(path),
+                None => source
+                    .web_url()
+                    .map(webnav::site_label)
+                    .unwrap_or_default(),
+            };
+            preview_pool.insert(preview::PreviewBuffer::new(source.clone(), name));
         }
-        preview_panes.entry(PreviewSurface::Seat(seat)).buffer = Some(source);
+        preview_panes.entry(PreviewSurface::Seat(seat)).buffer = Some(source.clone());
     }
     // **The filter comes back even though the graph does not** (T2/T3, v2 (3)) —
     // see [`PreviewRestore::filters`]. The view is seeded with a root of its own
@@ -18886,7 +19002,9 @@ fn git_document_question(
                 renamed_from,
             })
         }
-        preview::PreviewSource::File(_) | preview::PreviewSource::GitGraph { .. } => None,
+        preview::PreviewSource::File(_)
+        | preview::PreviewSource::GitGraph { .. }
+        | preview::PreviewSource::Web(_) => None,
     }
 }
 
@@ -20495,12 +20613,17 @@ impl Runtime<'_> {
             // the authority because it is what identifies the tab; `previews` is
             // a list of what its panes were showing, which for this shape is a
             // longer way of saying the same word.
-            seed::Seed::Preview { path } => {
+            seed::Seed::Preview { path, source } => {
                 let (seats, _) = seats::Seats::lone_seat(&bt_layout::Seat::new(
                     bt_layout::SeatId(1),
                     bt_layout::SeatKind::Preview,
                 ));
-                pages = vec![path];
+                pages = vec![match source {
+                    bt_persist::PreviewSourceV1::File => bt_persist::RecentPreviewV1::File(path),
+                    bt_persist::PreviewSourceV1::Url => {
+                        bt_persist::RecentPreviewV1::Page { url: path }
+                    }
+                }];
                 (seats, None, BTreeMap::new(), BTreeMap::new())
             }
             // **A window comes back as a window, not as a tab** (multiwindow
@@ -20544,7 +20667,7 @@ impl Runtime<'_> {
         let metrics = self.seat_metrics();
         let mut standing: std::collections::VecDeque<SeatId> =
             seats.preview_seats().into_iter().collect();
-        let mut preview_cur: BTreeMap<SeatId, PathBuf> = BTreeMap::new();
+        let mut preview_cur: BTreeMap<SeatId, preview::PreviewSource> = BTreeMap::new();
         for (page, is_last) in pages
             .iter()
             .enumerate()
@@ -20557,7 +20680,7 @@ impl Runtime<'_> {
                     None => break,
                 },
             };
-            preview_cur.insert(seat, PathBuf::from(page));
+            preview_cur.insert(seat, preview_source_of_recent(page));
             if !is_last {
                 seats.toggle_preview_pin(seat);
             }
@@ -33628,8 +33751,13 @@ impl Runtime<'_> {
             // rectangle, so a `PreviewDocument` that put anything here would put
             // it *over* the graph. An image is the same arrangement one surface
             // along, and `None` is the card.
+            // And a page's body is empty for the graph's reason one lane over:
+            // the pixels are the engine's, composed *under* this surface and seen
+            // through the hole punched in it (DESIGN.md 7.8 (2)), so anything put
+            // here would be put over a browser.
             preview::PreviewView::Image
             | preview::PreviewView::Graph
+            | preview::PreviewView::Web
             | preview::PreviewView::None => PreviewDocument::Empty,
         };
         self.preview_pane_mut(surface).doc = doc;
@@ -44630,6 +44758,13 @@ impl Runtime<'_> {
             // — the same three channels the docked pane's graph is drawn into,
             // built by the same `build_git_graph`.
             preview::PreviewChrome::Graph => self.push_float_graph(id, geometry.body, scale),
+            // **A page has no second host** (slice (3) debt, DESIGN.md 7.8): one
+            // seat, one controller, one visual in one composition tree, so a page
+            // torn into a float has nowhere for its pixels to be. Drawing nothing
+            // is the honest answer until a slice gives a float an engine of its
+            // own; what stops anybody meeting it is that a web buffer is not
+            // offered to the tear-off verb (`preview_can_pop_out`).
+            preview::PreviewChrome::Web => float::FloatBody::default(),
         };
         let mut layer = float::build(
             &geometry,
@@ -57430,6 +57565,14 @@ mod multiwindow_session_tests {
             },
             seed::Seed::Preview {
                 path: r"D:\work\README.md".to_owned(),
+                source: bt_persist::PreviewSourceV1::File,
+            },
+            // And a page, on the same round trip: `seeded_tab` writes it into the
+            // content section as a URL row and `restore_row_seed` reads it back
+            // as one, which is the whole of what schema v11 bought.
+            seed::Seed::Preview {
+                path: "http://localhost:5173/app?tab=logs#top".to_owned(),
+                source: bt_persist::PreviewSourceV1::Url,
             },
         ] {
             assert_eq!(
@@ -62644,11 +62787,13 @@ mod tests {
                 bt_persist::PreviewPaneV1 {
                     leaf: token(landing),
                     cur: None,
+                    cur_source: bt_persist::PreviewSourceV1::File,
                     graph: None,
                 },
                 bt_persist::PreviewPaneV1 {
                     leaf: token(pinned),
                     cur: Some(readme.to_string_lossy().into_owned()),
+                    cur_source: bt_persist::PreviewSourceV1::File,
                     graph: None,
                 },
                 // A row naming the terminal: a hand edit, or a tree a newer
@@ -62656,6 +62801,7 @@ mod tests {
                 bt_persist::PreviewPaneV1 {
                     leaf: token(seats.identity()),
                     cur: Some(r"C:\repo\stray.md".to_owned()),
+                    cur_source: bt_persist::PreviewSourceV1::File,
                     graph: None,
                 },
             ],
@@ -62663,10 +62809,12 @@ mod tests {
                 bt_persist::PreviewPoolEntryV1 {
                     path: readme.to_string_lossy().into_owned(),
                     name: "README.md".to_owned(),
+                    source: bt_persist::PreviewSourceV1::File,
                 },
                 bt_persist::PreviewPoolEntryV1 {
                     path: r"C:\repo\notes.md".to_owned(),
                     name: "notes.md".to_owned(),
+                    source: bt_persist::PreviewSourceV1::File,
                 },
             ],
         };
@@ -62674,7 +62822,7 @@ mod tests {
         let restored = PreviewRestore::from_persisted(&seats, Some(&saved));
         assert_eq!(
             restored.cur.get(&pinned),
-            Some(&readme),
+            Some(&preview::PreviewSource::file(readme.clone())),
             "the file lands on the leaf the section named"
         );
         assert_eq!(
@@ -62698,11 +62846,8 @@ mod tests {
         let sessions = BTreeMap::from([(seats.identity(), leaf_saying("SHELL"))]);
         let focused = seats.identity();
         let mut pool = preview::PreviewPool::default();
-        for (path, name) in &restored.pool {
-            pool.insert(preview::PreviewBuffer::new(
-                preview::PreviewSource::file(path.clone()),
-                name.clone(),
-            ));
+        for (source, name) in &restored.pool {
+            pool.insert(preview::PreviewBuffer::new(source.clone(), name.clone()));
         }
         let mut panes = PreviewPanes::default();
         panes.entry(PreviewSurface::Seat(pinned)).buffer =
@@ -62735,7 +62880,9 @@ mod tests {
         );
         assert_eq!(
             tab.preview_pages(),
-            vec![readme.to_string_lossy().into_owned()],
+            vec![bt_persist::RecentPreviewV1::File(
+                readme.to_string_lossy().into_owned()
+            )],
             "and the vault takes the files, skipping the pane that had none (裁决 10)"
         );
     }
@@ -80829,13 +80976,15 @@ mod tests {
                     panes: vec![bt_persist::PreviewPaneV1 {
                         leaf: "leaf-0".to_owned(),
                         cur: Some(r"C:\repo\README.md".to_owned()),
+                        cur_source: bt_persist::PreviewSourceV1::File,
                         graph: None,
                     }],
                     pool: Vec::new(),
                 }),
             }),
             seed::Seed::Preview {
-                path: r"C:\repo\README.md".to_owned()
+                path: r"C:\repo\README.md".to_owned(),
+                source: bt_persist::PreviewSourceV1::File,
             }
         );
     }
@@ -80901,7 +81050,8 @@ mod tests {
         assert_eq!(
             file.seed(),
             Some(seed::Seed::Preview {
-                path: "D:\\work\\notes.md".to_owned()
+                path: "D:\\work\\notes.md".to_owned(),
+                source: bt_persist::PreviewSourceV1::File,
             }),
             "and a file tab as the file it was on — the vault's third shape, \
              without which Ctrl+Shift+T would be a door onto an empty store"
@@ -82030,7 +82180,7 @@ mod tests {
         assert_eq!(landed.len(), 1, "the pane crossed as a preview seat");
         assert_eq!(
             torn.preview_showing(landed[0]),
-            Some(Path::new("D:\\work\\notes.md")),
+            Some(preview::PreviewSource::file("D:\\work\\notes.md")),
             "still showing the file it was showing"
         );
         assert_eq!(
@@ -82284,7 +82434,7 @@ mod tests {
         assert_eq!(seats.preview_seats().len(), 1);
         assert_eq!(
             preview.cur.values().collect::<Vec<_>>(),
-            vec![&PathBuf::from("D:\\work\\notes.md")],
+            vec![&preview::PreviewSource::file("D:\\work\\notes.md")],
             "and back on that file"
         );
     }
@@ -82317,7 +82467,8 @@ mod tests {
         );
         assert!(
             !seed::Seed::Preview {
-                path: "D:\\work\\notes.md".to_string()
+                path: "D:\\work\\notes.md".to_string(),
+                source: bt_persist::PreviewSourceV1::File,
             }
             .can_be_named(),
             "and so is a file"

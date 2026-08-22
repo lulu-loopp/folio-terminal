@@ -76,6 +76,16 @@ pub enum PreviewFtype {
     Markdown,
     Table,
     Text,
+    /// **A page** (Web 预览块 W2 片③) — the mock-up's `previewFtype === "web"`
+    /// (`docs/DESIGN.md` §7.7 ①).
+    ///
+    /// The one class that is **not** asked of the name, and the exception is the
+    /// point rather than a hole in the rule: a page's name is its *title*, which
+    /// is a sentence somebody wrote, and asking [`preview_ftype`] about a page
+    /// called `release-notes.md` would draw a markdown document over a live
+    /// browser. What decides this class is [`PreviewSource::Web`] — see
+    /// [`PreviewBuffer::new`], which is the one place the two questions meet.
+    Web,
     /// No reader in this window. The "no preview" card, by name alone.
     Unknown,
 }
@@ -94,6 +104,7 @@ impl PreviewFtype {
             Self::Markdown => "markdown",
             Self::Table => "table",
             Self::Text => "text",
+            Self::Web => "web",
             Self::Unknown => "unknown",
         }
     }
@@ -190,7 +201,12 @@ pub fn is_editable(name: &str, ftype: PreviewFtype, md_source: bool) -> bool {
     match ftype {
         PreviewFtype::Text => true,
         PreviewFtype::Markdown => md_source,
-        PreviewFtype::Image | PreviewFtype::Table | PreviewFtype::Unknown => false,
+        // A page has no text of this window's to put a caret in: what is on the
+        // glass belongs to the engine, and the one place typing goes is inside
+        // the page itself.
+        PreviewFtype::Image | PreviewFtype::Table | PreviewFtype::Web | PreviewFtype::Unknown => {
+            false
+        }
     }
 }
 
@@ -220,6 +236,16 @@ pub enum PreviewView {
     /// is that every surface asking "what is this" gets the true answer rather
     /// than the one that happens to render the same.
     Graph,
+    /// **One page, drawn by the engine** (Web 预览块 W2 片③).
+    ///
+    /// Its own answer for [`Self::Graph`]'s reason twice over: there is a great
+    /// deal to show here and none of it is this window's to paint. The pixels
+    /// arrive through the composition tree, under wgpu, through the hole
+    /// `bt_render::WindowRenderer::set_web_holes` punches (§7.8 ②) — so what
+    /// this variant buys is that a surface asking "what is this" is told the
+    /// truth, and that no host quietly draws a "no preview" card over a live
+    /// browser.
+    Web,
     /// The "no preview" card.
     None,
 }
@@ -258,6 +284,10 @@ impl PreviewView {
             Self::Markdown | Self::Table | Self::Diff | Self::Text | Self::None => {
                 PreviewChrome::Document
             }
+            // STUB (slice ③, red gate): the document pipeline draws its "no
+            // preview" card for a body it has nothing to say about, which over a
+            // live page is a card standing on top of a browser.
+            Self::Web => PreviewChrome::Document,
         }
     }
 }
@@ -271,6 +301,10 @@ pub enum PreviewChrome {
     Picture,
     /// One repository's commit graph, pushed into the body rectangle.
     Graph,
+    /// **Nothing, on purpose** — a page's pixels are the engine's, composed
+    /// under this surface and seen through the hole in it (§7.8 ②). A host that
+    /// painted a body here would be painting over a browser.
+    Web,
 }
 
 /// Which body this name, type and flip state earn.
@@ -1540,6 +1574,24 @@ pub enum PreviewSource {
     /// graph per repository and it is the same graph whoever asks.
     #[allow(dead_code)]
     GitGraph { root: PathBuf },
+    /// **One page** (Web 预览块 W2 片③) — the normalised, whole URL.
+    ///
+    /// `docs/DESIGN.md` §7.7 ① settled that a page is *a preview buffer and not
+    /// a fourth kind of leaf*: it goes into this same pool, is listed by the same
+    /// switcher, is named by the same tab, is seeded into the same Recent and is
+    /// keyed by this same enum — so that nowhere in this window does anything
+    /// have to ask "is this a web page" before it can do its job.
+    ///
+    /// **The string is the switcher key and nothing else is** (`plan.md` §3
+    /// 切换器确定性三则). It is `webnav::switcher_key` of the URL that *last
+    /// successfully committed* — `webnav::switcher_identity` of
+    /// `webhost::WebMachine::recoverable_url`, which is the same ledger the
+    /// session file and the recovery machine read, never a second one. Query and
+    /// fragment participate, because they are part of what was asked for; only a
+    /// default port is dropped. A navigation that never committed has no identity
+    /// and therefore no buffer, which is why a page in flight is a seat with no
+    /// row rather than a row naming a page that never existed.
+    Web(String),
 }
 
 impl PreviewSource {
@@ -1562,7 +1614,12 @@ impl PreviewSource {
             Self::GitDiff { .. }
             | Self::GitShow { .. }
             | Self::GitDiffRange { .. }
-            | Self::GitGraph { .. } => None,
+            | Self::GitGraph { .. }
+            // A page is not a file and must never answer as one: saving,
+            // revealing in Explorer, the head read and the relative-link
+            // resolver all come through this door, and every one of them would
+            // be wrong about a URL.
+            | Self::Web(_) => None,
         }
     }
 
@@ -1574,6 +1631,26 @@ impl PreviewSource {
             | Self::GitShow { .. }
             | Self::GitDiffRange { .. }
             | Self::GitGraph { .. } => true,
+            Self::Web(_) => false,
+        }
+    }
+
+    /// **The page this buffer is, when it is one** — the switcher key, verbatim.
+    ///
+    /// [`Self::file_path`]'s opposite number, and separate from it for that
+    /// method's own reason: the two answer different questions and a caller that
+    /// took either for "where does this content live" would hand a URL to a
+    /// filesystem or a path to a navigation. Every door that is about a *page* —
+    /// the switcher's row, the pin's category, the session's `source`, the seat
+    /// the engine is driving — asks this one.
+    pub fn web_url(&self) -> Option<&str> {
+        match self {
+            Self::Web(url) => Some(url),
+            Self::File(_)
+            | Self::GitDiff { .. }
+            | Self::GitShow { .. }
+            | Self::GitDiffRange { .. }
+            | Self::GitGraph { .. } => None,
         }
     }
 
@@ -1602,7 +1679,10 @@ impl PreviewSource {
             )
         };
         match self {
-            Self::File(_) => None,
+            // STUB (slice (3), red gate): a page has no path either, and a foot
+            // that answered nothing for it would print nothing on the one strip
+            // whose whole job is saying what you are looking at.
+            Self::File(_) | Self::Web(_) => None,
             Self::GitDiff { root, path, .. }
             | Self::GitShow { root, path, .. }
             | Self::GitDiffRange { root, path, .. } => {
@@ -1627,7 +1707,7 @@ impl PreviewSource {
             Self::GitDiff { root, path, .. }
             | Self::GitShow { root, path, .. }
             | Self::GitDiffRange { root, path, .. } => Some(root.join(path)),
-            Self::GitGraph { .. } => None,
+            Self::GitGraph { .. } | Self::Web(_) => None,
         }
     }
 }
@@ -1750,6 +1830,9 @@ impl PreviewBuffer {
     /// reasons the file is. What the source decides is the *load* — whether
     /// there is a disk to go to — and, at [`Self::view`], which body is drawn.
     pub fn new(source: PreviewSource, name: String) -> Self {
+        // STUB (slice (3), red gate): a page's name is its title, and asking the
+        // name-classifier about it hands a page called `release-notes.md` the
+        // markdown reader.
         let ftype = preview_ftype(&name);
         let load = match &source {
             PreviewSource::File(path) => {
@@ -1764,7 +1847,13 @@ impl PreviewBuffer {
                         // already exists, so its buffer is complete the moment
                         // it is made.
                         PreviewFtype::Image => PreviewLoad::Ready,
-                        PreviewFtype::Unknown => PreviewLoad::Refused(PreviewRefusal::Type),
+                        // A name cannot be a page: `preview_ftype` is asked of
+                        // the name and `Web` is the one class it never answers
+                        // (see [`PreviewFtype::Web`]), so a *file* reaching this
+                        // arm is a file with no reader, exactly as before.
+                        PreviewFtype::Web | PreviewFtype::Unknown => {
+                            PreviewLoad::Refused(PreviewRefusal::Type)
+                        }
                     }
                 }
             }
@@ -1784,6 +1873,11 @@ impl PreviewBuffer {
             // "Loading …" line forever, which was exactly what the first real
             // frame of it showed.
             PreviewSource::GitGraph { .. } => PreviewLoad::Ready,
+            // STUB (slice (3), red gate): `Pending` is "the text is on its way",
+            // and nothing is on its way for a page — there is no disk and no
+            // subprocess to answer, so this sits under a "Loading ..." line for
+            // ever.
+            PreviewSource::Web(_) => PreviewLoad::Pending,
         };
         Self {
             source,
@@ -1948,7 +2042,12 @@ impl PreviewBuffer {
     /// happens to be spelled.
     pub fn view(&self, md_source: bool) -> PreviewView {
         match &self.source {
-            PreviewSource::File(_) => preview_view(&self.name, self.ftype, md_source),
+            // STUB (slice (3), red gate): a page put through the *file* ladder
+            // answers with whatever its title's extension looks like, and with
+            // `PreviewView::None` when it looks like nothing.
+            PreviewSource::File(_) | PreviewSource::Web(_) => {
+                preview_view(&self.name, self.ftype, md_source)
+            }
             PreviewSource::GitDiff { .. }
             | PreviewSource::GitShow { .. }
             | PreviewSource::GitDiffRange { .. } => PreviewView::Diff,
