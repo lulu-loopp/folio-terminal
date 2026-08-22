@@ -515,12 +515,14 @@ fn split_printed_location(reference: &str) -> (usize, Option<PrintedPathLocation
         }
         let tail = &reference[offset + 1..];
         let location = match tail.split_once(':') {
-            Some((line, column)) => positive_integer(line)
-                .zip(positive_integer(column))
-                .map(|(line, column)| PrintedPathLocation {
-                    line,
-                    column: Some(column),
-                }),
+            Some((line, column)) => {
+                positive_integer(line)
+                    .zip(positive_integer(column))
+                    .map(|(line, column)| PrintedPathLocation {
+                        line,
+                        column: Some(column),
+                    })
+            }
             None => positive_integer(tail).map(|line| PrintedPathLocation { line, column: None }),
         };
         if location.is_some() {
@@ -1315,7 +1317,10 @@ mod tests {
                 ("D:\\src\\real.md:9999", "file:///D:/src/real.md#L9999"),
             ]
         );
-        assert!(unknown.is_empty(), "the file is known; the line is not asked");
+        assert!(
+            unknown.is_empty(),
+            "the file is known; the line is not asked"
+        );
     }
 
     /// The fragment a location is carried in is read back as itself, and nothing else is read as a

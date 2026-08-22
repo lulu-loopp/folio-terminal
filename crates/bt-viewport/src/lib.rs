@@ -5598,7 +5598,10 @@ mod tests {
                 "{printed} is one link, not a head and an orphan"
             );
             for column in opens..columns {
-                assert!(dotted_at(&frame, 0, column), "{printed} rests marked at {column}");
+                assert!(
+                    dotted_at(&frame, 0, column),
+                    "{printed} rests marked at {column}"
+                );
             }
             for column in 0..tail.chars().count() {
                 assert!(
@@ -5608,10 +5611,16 @@ mod tests {
             }
             assert!(frame.underline_hyperlink(&hit));
             for column in opens..columns {
-                assert!(solid_at(&frame, 0, column), "{printed} head column {column}");
+                assert!(
+                    solid_at(&frame, 0, column),
+                    "{printed} head column {column}"
+                );
             }
             for column in 0..tail.chars().count() {
-                assert!(solid_at(&frame, 1, column), "{printed} tail column {column}");
+                assert!(
+                    solid_at(&frame, 1, column),
+                    "{printed} tail column {column}"
+                );
             }
         }
     }

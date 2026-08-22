@@ -19103,7 +19103,9 @@ mod tests {
         );
         let mut session = DualPlaneSession::new(nz(columns), nz(8));
         enable_path_detection(&mut session);
-        session.feed(format!("see {printed} here\r\n").as_bytes()).unwrap();
+        session
+            .feed(format!("see {printed} here\r\n").as_bytes())
+            .unwrap();
         let mut projection = session.new_projection(session.layout_key());
         let frame = frame_after_path_verification(&mut session, &mut projection);
 
@@ -19145,12 +19147,16 @@ mod tests {
         let printed = path.to_string_lossy().into_owned();
         let mut session = DualPlaneSession::new(nz(160), nz(8));
         enable_path_detection(&mut session);
-        session.feed(format!("see {printed} here\r\n").as_bytes()).unwrap();
+        session
+            .feed(format!("see {printed} here\r\n").as_bytes())
+            .unwrap();
         let mut projection = session.new_projection(session.layout_key());
         let wide = frame_after_path_verification(&mut session, &mut projection);
         let target = bt_transcript::paths::local_path_to_file_uri(&path);
         assert_eq!(
-            wide.hyperlink_at(0, 4).expect("a link at the wide width").uri,
+            wide.hyperlink_at(0, 4)
+                .expect("a link at the wide width")
+                .uri,
             target
         );
 

@@ -45294,7 +45294,9 @@ impl Runtime<'_> {
         let row = self
             .preview_wrap(surface)
             .map(|wrap| wrap.row_of(index, 0).0);
-        let scroll = self.preview_pane(surface).map_or([0.0, 0.0], |pane| pane.scroll);
+        let scroll = self
+            .preview_pane(surface)
+            .map_or([0.0, 0.0], |pane| pane.scroll);
         let scrolled = match row {
             Some(row) => {
                 let metrics = seats::preview_text_metrics(scale);
@@ -66719,7 +66721,8 @@ mod tests {
         assert_eq!(head, tail, "two segments of one run are one hit");
         assert_eq!(head.uri, "file:///C:/notes/phd%20application.md");
 
-        let opened = HyperlinkActivation::Preview(PathBuf::from(r"C:\notes\phd application.md"), None);
+        let opened =
+            HyperlinkActivation::Preview(PathBuf::from(r"C:\notes\phd application.md"), None);
         for hit in [&head, &tail] {
             assert_eq!(
                 hyperlink_activation(false, true, &hit.uri, &|_| false),
