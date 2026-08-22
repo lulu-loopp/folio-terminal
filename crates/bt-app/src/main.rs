@@ -34204,6 +34204,16 @@ impl Runtime<'_> {
         // against the extent this frame actually has rather than the last one's
         // — which is what makes a pane grown taller give its scroll back.
         self.refresh_preview_body();
+        // **Between the rebuild and the heal, and that is the whole of why it is
+        // here** (§7.1.5j ⑨). A surface opened at a line cannot reach it until the
+        // rows exist, because the answer is a *row* and a wrapped body puts line
+        // 40 well below the fortieth of them; and it has to land before the heal,
+        // so the offset it writes is clamped by the same authority every other
+        // scroll on this surface is clamped by. It costs nothing on the frames
+        // that owe nothing — the pending line is `None` and the walk stops there.
+        for surface in self.preview_surfaces() {
+            self.settle_preview_goto(surface);
+        }
         self.heal_preview_scroll();
         let hosts = self.preview_picture_hosts();
         // The one `set_preview_image` slot, emptied when no seat is holding it —
@@ -35397,12 +35407,6 @@ impl Runtime<'_> {
             // body stayed empty, because nothing rebuilt the text after the
             // frame that had nothing to build it from.
             self.refresh_preview_for_layout();
-            // A body landing is also the moment a surface opened at a line can
-            // finally reach it (§7.1.5j). After the rebuild, because the answer is
-            // a *row* and rows are what the rebuild just produced.
-            for surface in self.preview_surfaces() {
-                self.settle_preview_goto(surface);
-            }
             self.refresh_chrome();
             // And presented unconditionally, for the same reason: the chrome
             // genuinely may not have changed — the head already said the name
@@ -45255,8 +45259,10 @@ impl Runtime<'_> {
         let pane = self.preview_pane_mut(surface);
         pane.md_source = true;
         pane.goto_line = Some(line);
+        // Which spends the intent on the spot when the pool already held the file,
+        // and leaves it standing when the bytes are still on the worker — see
+        // [`Self::settle_preview_goto`], which every layout refresh walks.
         self.refresh_preview_for_layout();
-        self.settle_preview_goto(surface);
         self.refresh_chrome();
         self.present_chrome_change()
     }
@@ -45277,10 +45283,14 @@ impl Runtime<'_> {
             .preview_buffer_on(surface)
             .and_then(|buffer| buffer.content.clone())
         else {
+            // The bytes are still on the worker. The intent stays on the pane.
+            self.mouse_trace(|| format!("settle_preview_goto leave=no-body line={line}"));
             return;
         };
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let Some(body) = self.preview_surface_body_rect(surface, scale) else {
+            // The surface has no rectangle yet, so it has no rows to count.
+            self.mouse_trace(|| format!("settle_preview_goto leave=no-rect line={line}"));
             return;
         };
         // Counted from one, the way every printer of a `file:line` counts, and
@@ -45314,8 +45324,27 @@ impl Runtime<'_> {
             caret: offset,
             desired_column: None,
         };
+        let moved = pane.scroll != scrolled;
         pane.scroll = scrolled;
         pane.goto_line = None;
+        let rows = self
+            .preview_wrap(surface)
+            .map(preview_edit::WrapLayout::rows);
+        self.mouse_trace(|| {
+            format!(
+                "settle_preview_goto surface={surface:?} line={line} row={row:?} rows={rows:?} \
+                 scroll={scrolled:?} moved={}",
+                u8::from(moved)
+            )
+        });
+        // **The body is built from the offset, so a scroll written after it was
+        // built is a number nothing has drawn.** Both callers rebuild before this
+        // runs — they have to, because the row this lands on is only knowable once
+        // the wrap exists — so the rebuild owed by the move belongs here, on the
+        // one frame in a file's life that a goto is spent.
+        if moved {
+            self.refresh_preview_body();
+        }
     }
 
     /// Hand one path to the system's default handler, and say so when the window
