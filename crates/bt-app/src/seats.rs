@@ -28616,6 +28616,79 @@ mod tests {",
         }
     }
 
+    /// PIN (§7.1.6b′, user report 2026-08-21) — **the reporter's four cards, and
+    /// the offer the column makes is exactly the height they hang below it.**
+    ///
+    /// The shape is the one that was photographed: four tabs, the default 160px
+    /// card, a 1080-pixel window at 150%. What is asserted is not merely that
+    /// the column scrolls but that the number it scrolls by is the *hidden*
+    /// number — a `max_scroll` short of that would leave the fourth card
+    /// unreachable with a wheel that moved, which is the same complaint one step
+    /// further along, and one longer than that would scroll the list off the
+    /// bottom of its own content.
+    ///
+    /// Red gate: drop the `+ card_gap` the loop leaves behind the last card, or
+    /// measure the list against the panel instead of against the `+`, and the
+    /// equality goes by exactly the term that was dropped.
+    #[test]
+    fn the_reporters_four_cards_hang_below_the_fold_by_what_the_column_offers() {
+        let column = focus_rail_geometry(1080.0, 1.5, 4, 0.0, focus_rail(TabLayoutMode::Vertical))
+            .expect("focus mode puts a column on screen");
+        assert!(
+            column.max_scroll > 0.0,
+            "four default cards outrun this window, which is what the report says"
+        );
+        let last = column.cards.last().expect("four tabs are four cards");
+        assert_eq!(
+            column.max_scroll,
+            last.body[3] - column.viewport[1],
+            "the column offers exactly the height its last card hangs below the fold"
+        );
+    }
+
+    /// PIN — **and a column whose cards all fit offers nothing.**
+    ///
+    /// The other half of the same claim, and the one the ruling leans on: a
+    /// plain notch over a column with nothing below the fold does nothing at
+    /// all, honestly, rather than quietly turning into some other gesture.
+    #[test]
+    fn a_column_whose_cards_all_fit_offers_no_scroll() {
+        let column = focus_of_in(TALL_FIXTURE_HEIGHT, focus_rail(TabLayoutMode::Vertical), 2);
+        assert_eq!(
+            column.max_scroll, 0.0,
+            "two cards in a tall window have nothing below the fold"
+        );
+        assert!(
+            column.cards[1].body[3] <= column.viewport[1],
+            "and the second card really is above it"
+        );
+    }
+
+    /// PIN — **the offer is a fact about the content, not about where the list
+    /// currently stands.**
+    ///
+    /// `content_height` is written as a difference that the scroll offset
+    /// appears on both sides of, so it cancels; if it ever stopped cancelling,
+    /// the bound would chase the offset and the list would either stop short of
+    /// its own end or never reach one.
+    #[test]
+    fn the_offer_does_not_move_as_the_column_scrolls() {
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let at = |scroll: f32| {
+            focus_rail_geometry(1080.0, 1.5, 4, scroll, state)
+                .expect("focus mode puts a column on screen")
+                .max_scroll
+        };
+        let rest = at(0.0);
+        assert!(rest > 0.0);
+        assert_eq!(
+            at(rest / 2.0),
+            rest,
+            "halfway down, the end is where it was"
+        );
+        assert_eq!(at(rest), rest, "and standing on the end does not move it");
+    }
+
     /// PIN (§7.1.6b′, user ruling 2026-08-20) — **and the column paints no
     /// heading row either.**
     ///
