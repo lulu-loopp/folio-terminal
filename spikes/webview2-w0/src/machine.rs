@@ -42,6 +42,33 @@ pub enum Effect {
     Reload,
     /// Wait for `BrowserProcessExited` before touching the user data folder.
     AwaitBrowserExitBeforeCleanup,
+    /// The folder may be removed now. **Three doors lead here and the plan named
+    /// only one of them.** `BrowserProcessExited` is the door it named;
+    /// `ProcessFailed(BROWSER_PROCESS_EXITED)` is the second, and the wait
+    /// running out is the third — measured, on this machine, as the outcome of
+    /// half the crash paths (`w0-evidence.md` §2③).
+    CleanupUserDataFolder,
+    /// Evergreen installed a new build under a running process. Nothing about
+    /// the window is wrong — only the browser binary is — so the seat comes
+    /// back on the same `HWND` and the same visual, at the last good URL.
+    ///
+    /// What the caller owes this effect, in order: close every controller over
+    /// the old environment, wait for the browser to go by the same three doors
+    /// as `close`, **release the cached environment**, then create a new one.
+    /// A new environment made while the old browser still holds the folder does
+    /// not fail loudly — its controller callback simply never arrives.
+    RebuildForNewVersion,
+}
+
+/// Where a closing pane is in its wait for the browser to go.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Cleanup {
+    /// Not closing.
+    Idle,
+    /// `close` was called and the folder is still the browser's.
+    Awaiting,
+    /// Somebody already got the folder; a second door opening changes nothing.
+    Done,
 }
 
 pub struct Preview {
@@ -53,6 +80,7 @@ pub struct Preview {
     /// navigation writes here.
     recoverable_url: Option<String>,
     events_installed: bool,
+    cleanup: Cleanup,
 }
 
 impl Default for Preview {
@@ -69,6 +97,7 @@ impl Preview {
             desired_url: None,
             recoverable_url: None,
             events_installed: false,
+            cleanup: Cleanup::Idle,
         }
     }
 
@@ -162,7 +191,15 @@ impl Preview {
     }
 
     /// The browser process died. Everything is invalid; a new generation starts.
+    ///
+    /// **Unless the pane was already closing.** The same event carries both
+    /// meanings — a crash under a live pane, and the exit of a browser that was
+    /// asked to go — and the state is the only thing that tells them apart. A
+    /// model that rebuilt on both would resurrect a pane the person shut.
     pub fn on_browser_process_failed(&mut self) -> Effect {
+        if self.state == State::Closing {
+            return self.finish_cleanup();
+        }
         self.generation += 1;
         self.state = State::EnvironmentPending;
         self.events_installed = false;
@@ -192,7 +229,49 @@ impl Preview {
         self.generation += 1;
         self.state = State::Closing;
         self.events_installed = false;
+        self.cleanup = Cleanup::Awaiting;
         Effect::AwaitBrowserExitBeforeCleanup
+    }
+
+    /// `BrowserProcessExited` arrived — the door the plan named.
+    pub fn on_browser_process_exited(&mut self) -> Effect {
+        self.finish_cleanup()
+    }
+
+    /// The wait ran out. The plan's literal wording has no such input, which is
+    /// why it deadlocks on the crash paths where the event never comes; this is
+    /// the input that keeps the folder from being held forever by a browser
+    /// that already died without saying so.
+    pub fn on_cleanup_deadline(&mut self) -> Effect {
+        self.finish_cleanup()
+    }
+
+    /// One folder, one removal, whichever door opened first.
+    fn finish_cleanup(&mut self) -> Effect {
+        match self.cleanup {
+            Cleanup::Awaiting => {
+                self.cleanup = Cleanup::Done;
+                Effect::CleanupUserDataFolder
+            }
+            _ => Effect::Ignore,
+        }
+    }
+
+    /// A newer runtime is installed and the running one is now the old one.
+    pub fn on_new_browser_version_available(&mut self) -> Effect {
+        if self.state == State::Closing {
+            // The seat is going away; the version it goes away on is nobody's
+            // business.
+            return Effect::Ignore;
+        }
+        self.generation += 1;
+        self.state = State::EnvironmentPending;
+        self.events_installed = false;
+        self.desired_url = self
+            .recoverable_url
+            .clone()
+            .or_else(|| self.desired_url.clone());
+        Effect::RebuildForNewVersion
     }
 }
 
@@ -339,6 +418,114 @@ mod tests {
         let mut preview = Preview::new();
         boot(&mut preview, "https://good.example/");
         assert_eq!(preview.close(), Effect::AwaitBrowserExitBeforeCleanup);
+        assert_eq!(preview.state(), State::Closing);
+        assert_eq!(
+            preview.on_browser_process_exited(),
+            Effect::CleanupUserDataFolder
+        );
+    }
+
+    /// The red row for `w0-evidence.md` §2③. On this machine the same kill gave
+    /// `BrowserProcessExited` in 280 ms once and never in 25 s the other time,
+    /// so a model that only listens for that event holds the folder — and the
+    /// profile behind it — for the rest of the session. Written as a test
+    /// because the plan's literal sentence cannot pass it.
+    #[test]
+    fn a_browser_that_never_says_it_exited_is_cleaned_up_when_the_wait_runs_out() {
+        let mut preview = Preview::new();
+        boot(&mut preview, "https://good.example/");
+        assert_eq!(preview.close(), Effect::AwaitBrowserExitBeforeCleanup);
+        // Neither event ever comes.
+        assert_eq!(preview.on_cleanup_deadline(), Effect::CleanupUserDataFolder);
+    }
+
+    #[test]
+    fn process_failed_is_the_second_door_to_cleanup() {
+        let mut preview = Preview::new();
+        boot(&mut preview, "https://good.example/");
+        preview.close();
+        // COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED, arriving
+        // where BrowserProcessExited did not.
+        assert_eq!(
+            preview.on_browser_process_failed(),
+            Effect::CleanupUserDataFolder
+        );
+    }
+
+    #[test]
+    fn the_user_data_folder_is_cleaned_exactly_once() {
+        let mut preview = Preview::new();
+        boot(&mut preview, "https://good.example/");
+        preview.close();
+        assert_eq!(
+            preview.on_browser_process_exited(),
+            Effect::CleanupUserDataFolder
+        );
+        // Every later door opens on an empty room.
+        assert_eq!(preview.on_browser_process_failed(), Effect::Ignore);
+        assert_eq!(preview.on_cleanup_deadline(), Effect::Ignore);
+        assert_eq!(preview.on_browser_process_exited(), Effect::Ignore);
+    }
+
+    /// The other half of the same ambiguity: `ProcessFailed` means "rebuild"
+    /// under a live pane and "the folder is yours" under a closing one, and the
+    /// only thing that separates them is the state.
+    #[test]
+    fn a_dying_browser_does_not_resurrect_a_closed_pane() {
+        let mut preview = Preview::new();
+        boot(&mut preview, "https://good.example/");
+        preview.close();
+        let closed_at = preview.generation();
+        assert_ne!(
+            preview.on_browser_process_failed(),
+            Effect::RebuildFromScratch
+        );
+        assert_eq!(preview.state(), State::Closing);
+        assert_eq!(preview.generation(), closed_at);
+    }
+
+    #[test]
+    fn a_new_runtime_version_rebuilds_the_seat_at_the_last_good_url() {
+        let mut preview = Preview::new();
+        boot(&mut preview, "https://good.example/");
+        let generation = preview.generation();
+        preview.on_navigation_completed(generation, "https://good.example/", true);
+        assert_eq!(
+            preview.on_new_browser_version_available(),
+            Effect::RebuildForNewVersion
+        );
+        assert_ne!(preview.generation(), generation);
+        let current = preview.generation();
+        preview.on_environment(current, true);
+        preview.on_controller(current, true);
+        assert_eq!(
+            preview.on_events_installed(current),
+            Effect::Navigate("https://good.example/".into())
+        );
+    }
+
+    #[test]
+    fn a_controller_from_before_the_version_change_is_closed_not_adopted() {
+        let mut preview = Preview::new();
+        preview.request("https://good.example/");
+        let stale = preview.generation();
+        preview.on_environment(stale, true);
+        assert_eq!(
+            preview.on_new_browser_version_available(),
+            Effect::RebuildForNewVersion
+        );
+        assert_eq!(
+            preview.on_controller(stale, true),
+            Effect::CloseOrphanController
+        );
+    }
+
+    #[test]
+    fn a_version_change_during_close_is_nobodys_business() {
+        let mut preview = Preview::new();
+        boot(&mut preview, "https://good.example/");
+        preview.close();
+        assert_eq!(preview.on_new_browser_version_available(), Effect::Ignore);
         assert_eq!(preview.state(), State::Closing);
     }
 

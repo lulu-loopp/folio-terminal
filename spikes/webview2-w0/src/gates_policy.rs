@@ -216,6 +216,9 @@ pub fn gate9(probe: &mut Probe) -> Result<()> {
 
     emit(9, "live-matrix", serde_json::json!({ "rows": live_rows }));
 
+    // The scheme §4 uses on itself, put through the door §3 built.
+    crate::gates_w0p::gate9_about_blank(probe)?;
+
     let all_refused = live_rows.iter().all(|row| {
         row["blocked"].as_bool() == Some(true) || row["route"].as_str() == Some("sanctioned-file")
     });
@@ -456,14 +459,60 @@ pub fn gate10(probe: &mut Probe) -> Result<()> {
     }
 
     // ── closing waits for the browser to exit before the folder is touched ─
+    //
+    // **All three doors, because the machine has to survive the one that does
+    // not open.** This run's own gate 7 has produced `BrowserProcessExited` in
+    // 280 ms and not at all in 25 s from the same kill, so the model is asked
+    // what it does in each case rather than only in the happy one.
     let closing = model.close();
+    let by_the_named_event = {
+        let mut copy = crate::machine::Preview::new();
+        copy.request("http://localhost/");
+        copy.close();
+        format!("{:?}", copy.on_browser_process_exited())
+    };
+    let by_process_failed = {
+        let mut copy = crate::machine::Preview::new();
+        copy.request("http://localhost/");
+        copy.close();
+        format!("{:?}", copy.on_browser_process_failed())
+    };
+    let by_the_deadline = format!("{:?}", model.on_cleanup_deadline());
+    let a_second_door = format!("{:?}", model.on_browser_process_exited());
     emit(
         10,
         "udf-cleanup-ordering",
         serde_json::json!({
             "effect": format!("{closing:?}"),
             "state": format!("{:?}", model.state()),
-            "live": "Probe::shutdown closes the controller, pumps until BrowserProcessExited, and only then removes the folder; the shutdown record at the end of this log says whether the event arrived",
+            "on_browser_process_exited": by_the_named_event,
+            "on_process_failed_browser_exited": by_process_failed,
+            "on_the_wait_running_out": by_the_deadline,
+            "a_second_door_after_the_first": a_second_door,
+            "live": "Probe::shutdown closes the controller, waits for either event with a bound, and removes the folder either way; the shutdown record at the end of this log carries which door opened and how long it took",
+        }),
+    );
+
+    // The version change §2 gate 7 names and cannot trigger, asked of the model
+    // that would have to handle it.
+    let mut updating = crate::machine::Preview::new();
+    updating.request("http://localhost/");
+    let generation = updating.generation();
+    updating.on_environment(generation, true);
+    updating.on_controller(generation, true);
+    updating.on_events_installed(generation);
+    updating.on_navigation_completed(generation, "http://localhost/", true);
+    let effect = updating.on_new_browser_version_available();
+    let orphan = updating.on_controller(generation, true);
+    emit(
+        10,
+        "new-browser-version",
+        serde_json::json!({
+            "effect": format!("{effect:?}"),
+            "generation_moved": updating.generation() != generation,
+            "comes_back_to": updating.desired_url(),
+            "controller_from_the_old_version": format!("{orphan:?}"),
+            "live_counterpart": "gate 7's self-update-rebuild row runs this sequence on the real engine",
         }),
     );
 

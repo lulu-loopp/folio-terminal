@@ -424,22 +424,83 @@ impl Probe {
     /// exited, then remove the user data folder. §4's ordering, exercised on
     /// every run rather than only in the gate that measures it.
     pub fn shutdown(self) -> Result<()> {
-        let before = self.evidence.borrow().browser_exited.len();
-        self.host.close();
-        let evidence = Rc::clone(&self.evidence);
-        let exited = crate::win::pump_until(Duration::from_secs(10), || {
-            evidence.borrow().browser_exited.len() > before
-        });
+        let waited = self.wait_for_the_browser_to_go(Duration::from_secs(10));
         crate::log::emit(
             7,
             "shutdown",
-            serde_json::json!({ "browser_process_exited": exited }),
+            serde_json::json!({
+                "browser_process_exited": waited.browser_process_exited,
+                "process_failed_browser_exited": waited.process_failed,
+                "waited_ms": waited.elapsed_ms,
+                "timed_out": waited.timed_out,
+            }),
         );
-        if exited {
-            std::fs::remove_dir_all(&self.user_data_folder)
-                .context("remove user data folder")
-                .ok();
-        }
+        // **The folder goes either way.** Waiting for `BrowserProcessExited`
+        // and cleaning up only if it came is what the plan says literally, and
+        // it is why a previous run of this probe left its user data folder — a
+        // whole browser profile — behind on the disk. Three doors, one removal.
+        std::fs::remove_dir_all(&self.user_data_folder)
+            .context("remove user data folder")
+            .ok();
         Ok(())
     }
+
+    /// Close the controller and wait for the browser to be gone by any of the
+    /// three doors §4 has to know about.
+    pub fn wait_for_the_browser_to_go(&self, timeout: Duration) -> BrowserExit {
+        let exits_before = self.evidence.borrow().browser_exited.len();
+        let failures_before = self.evidence.borrow().process_failures.len();
+        let started = std::time::Instant::now();
+        self.host.close();
+        let evidence = Rc::clone(&self.evidence);
+        crate::win::pump_until(timeout, || {
+            let evidence = evidence.borrow();
+            evidence.browser_exited.len() > exits_before
+                || evidence.process_failures[failures_before..]
+                    .iter()
+                    // COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED
+                    .any(|failure| failure.kind == 0)
+        });
+        let evidence = self.evidence.borrow();
+        let exited = evidence.browser_exited.len() > exits_before;
+        let failed = evidence.process_failures[failures_before..]
+            .iter()
+            .any(|failure| failure.kind == 0);
+        BrowserExit {
+            browser_process_exited: exited,
+            process_failed: failed,
+            timed_out: !exited && !failed,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        }
+    }
+
+    /// Tear the engine down and build it again on the same window, the same
+    /// visual and the same seat — the rebuild a runtime update asks for.
+    pub fn rebuild_host(&mut self) -> Result<BrowserExit> {
+        let waited = self.wait_for_the_browser_to_go(Duration::from_secs(10));
+        crate::host::forget_environment();
+        let (environment, created) = crate::host::environment(&self.user_data_folder)?;
+        crate::log::emit(
+            7,
+            "environment",
+            serde_json::json!({ "created_now": created, "udf": self.user_data_folder }),
+        );
+        let host =
+            crate::host::Host::create(&environment, self.window.hwnd, Rc::clone(&self.evidence))?;
+        host.attach_environment_events()?;
+        host.set_root_visual(&self.tree.web_visual())?;
+        self.host = host;
+        let seat = self.seat;
+        self.move_seat(seat)?;
+        Ok(waited)
+    }
+}
+
+/// How a browser process went, and how long it took to say so.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct BrowserExit {
+    pub browser_process_exited: bool,
+    pub process_failed: bool,
+    pub timed_out: bool,
+    pub elapsed_ms: u64,
 }

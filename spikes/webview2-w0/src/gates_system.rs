@@ -82,6 +82,8 @@ pub fn gate6(probe: &mut Probe) -> Result<()> {
 
 pub fn gate7(probe: &mut Probe) -> Result<()> {
     // ── one environment, two controllers ──────────────────────────────────
+    let mut renderer_reported = false;
+    let mut renderer_recovered = false;
     let (_, created_again) = crate::host::environment(&probe.user_data_folder)?;
     emit(
         7,
@@ -91,6 +93,13 @@ pub fn gate7(probe: &mut Probe) -> Result<()> {
             "cached": crate::host::environment_is_cached(),
         }),
     );
+
+    // ── the rebuild a runtime update would ask for ────────────────────────
+    //
+    // First, while the engine is healthy and before a second controller or a
+    // dead process can muddy what is being measured. Everything after this line
+    // — every census, every pid — belongs to the engine this rebuild produced.
+    crate::gates_w0p::gate7_self_update_rebuild(probe)?;
 
     let (ok, _) = probe.navigate(&probe.server.url("/"), Duration::from_secs(20));
     emit(7, "first-page", serde_json::json!({ "loaded": ok }));
@@ -129,11 +138,43 @@ pub fn gate7(probe: &mut Probe) -> Result<()> {
     }
 
     // ── kill the renderer ─────────────────────────────────────────────────
+    //
+    // **Which renderer.** The census lists every renderer under the shared
+    // browser, and by this point in the gate there are two — the second
+    // controller brought its own. Killing an arbitrary one and then waiting for
+    // *this* controller's `ProcessFailed` is a wait on an event that belongs to
+    // somebody else: the first W0′ run did exactly that, sat out its twenty
+    // seconds, and still printed a verdict saying the renderer kill produced
+    // `ProcessFailed`. The renderer is chosen by navigating this host and
+    // taking the census fresh, then preferring a renderer that was already
+    // there before the second controller existed.
+    let (ok, _) = probe.navigate(&probe.server.url("/"), Duration::from_secs(20));
+    emit(
+        7,
+        "page-before-renderer-kill",
+        serde_json::json!({ "loaded": ok }),
+    );
+    probe.pump(Duration::from_millis(600));
     let census = procs::census(&probe.host.environment)?;
+    let renderers_before_second: Vec<u32> = before_second
+        .iter()
+        .filter(|row| row.kind_name == "renderer")
+        .map(|row| row.pid)
+        .collect();
     let renderer = census
         .iter()
-        .find(|row| row.kind_name == "renderer")
+        .find(|row| row.kind_name == "renderer" && renderers_before_second.contains(&row.pid))
+        .or_else(|| census.iter().find(|row| row.kind_name == "renderer"))
         .copied_pid();
+    emit(
+        7,
+        "renderer-choice",
+        serde_json::json!({
+            "renderers_now": census.iter().filter(|row| row.kind_name == "renderer").map(|row| row.pid).collect::<Vec<_>>(),
+            "renderers_before_the_second_controller": renderers_before_second,
+            "chosen": renderer,
+        }),
+    );
     match renderer {
         Some(pid) => {
             let failures_before = probe.evidence.borrow().process_failures.len();
@@ -144,6 +185,7 @@ pub fn gate7(probe: &mut Probe) -> Result<()> {
                 evidence.borrow().process_failures.len() > failures_before
             });
             let failures = probe.evidence.borrow().process_failures[failures_before..].to_vec();
+            renderer_reported = saw;
             emit(
                 7,
                 "renderer-killed",
@@ -157,6 +199,7 @@ pub fn gate7(probe: &mut Probe) -> Result<()> {
             // §4 says a renderer death is a Reload, not a rebuild.
             probe.host.reload()?;
             let (recovered, url) = wait_for_navigation(probe, Duration::from_secs(20));
+            renderer_recovered = recovered;
             emit(
                 7,
                 "renderer-recovery",
@@ -246,14 +289,33 @@ pub fn gate7(probe: &mut Probe) -> Result<()> {
     // Across identical runs this event has both arrived in 280 ms and failed to
     // arrive inside 25 s, so a verdict that always claimed "both events" would
     // be asserting something the run did not measure.
+    // **The verdict says what this run measured.** Its first draft asserted the
+    // renderer row unconditionally and printed "a renderer kill produced
+    // ProcessFailed and reloaded" on a run whose own log said the event never
+    // came. A sentence that survives its measurement being false is not a
+    // verdict.
+    let renderer_words = match (renderer_reported, renderer_recovered) {
+        (true, true) => "a renderer kill produced ProcessFailed and Reload restored the page",
+        (true, false) => "a renderer kill produced ProcessFailed but the Reload did not come back",
+        (false, _) => {
+            "**the renderer kill produced NO ProcessFailed inside the wait** — see renderer-killed and renderer-choice"
+        }
+    };
+    let browser_words = if saw_either {
+        "a browser kill produced BOTH ProcessFailed and BrowserProcessExited"
+    } else {
+        "**a browser kill produced ProcessFailed but NO BrowserProcessExited within the wait**"
+    };
     verdict(
         7,
-        "pass",
-        if saw_either {
-            "one environment served two controllers, a renderer kill produced ProcessFailed and reloaded, a browser kill produced BOTH ProcessFailed and BrowserProcessExited, and the missing-runtime path failed synchronously. Runtime self-update and GPU reset are recorded as not forced"
+        if renderer_reported {
+            "pass"
         } else {
-            "one environment served two controllers, a renderer kill produced ProcessFailed and reloaded, and the missing-runtime path failed synchronously. **A browser kill produced ProcessFailed but NO BrowserProcessExited within the wait** — see browser-killed. Runtime self-update and GPU reset are recorded as not forced"
+            "pass-with-caveat"
         },
+        &format!(
+            "one environment served two controllers, {renderer_words}, {browser_words}, the self-update rebuild ran on the same window, and the missing-runtime path failed synchronously. The self-update *trigger* and GPU reset are recorded as not forced"
+        ),
     );
     Ok(())
 }
@@ -347,7 +409,12 @@ pub fn gate8(probe: &mut Probe) -> Result<()> {
     );
     if let Ok(second) = &second {
         second.set_seat_none();
-        let _ = second.navigate("https://example.com/");
+        // **Loopback, not the internet.** `127.0.0.1` and `localhost` are the
+        // same socket and different *sites* to Chromium, which is all the
+        // site-isolation count needs; the first pass reached
+        // `https://example.com` for it, which is a network request from a probe
+        // whose own server module says nothing here reaches the network.
+        let _ = second.navigate(&probe.server.other_origin_url("/second"));
         probe.pump(Duration::from_secs(6));
         let two_origins = procs::census(&probe.host.environment)?;
         let renderers = |rows: &[procs::ProcessRow]| {
@@ -359,7 +426,7 @@ pub fn gate8(probe: &mut Probe) -> Result<()> {
             8,
             "site-isolation",
             serde_json::json!({
-                "origins": ["http://localhost (loopback probe server)", "https://example.com"],
+                "origins": ["http://localhost:port (loopback probe server)", "http://127.0.0.1:port (the same socket, a different site)"],
                 "renderers_with_one_origin": renderers(&one_origin),
                 "renderers_with_two_origins": renderers(&two_origins),
                 "processes": two_origins,

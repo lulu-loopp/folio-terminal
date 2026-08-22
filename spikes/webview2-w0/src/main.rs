@@ -21,8 +21,10 @@ mod gates_input;
 mod gates_pixels;
 mod gates_policy;
 mod gates_system;
+mod gates_w0p;
 mod gfx;
 mod host;
+mod inject;
 mod log;
 mod machine;
 mod policy;
@@ -231,6 +233,27 @@ fn run() -> Result<()> {
     // `Probe::shutdown` closes the controller and waits for
     // `BrowserProcessExited` before removing the user data folder.
     std::io::Write::flush(&mut std::io::stdout()).ok();
+    leave_now();
+}
+
+/// Stop being a process, without asking the loader's permission.
+///
+/// `std::process::exit` is not enough here and the re-verification run proved
+/// it: eight probe processes, one per gate group, each having written its
+/// `done` line and called `exit(0)`, were **still resident** afterwards holding
+/// their own binary and their user data folder open. `exit` runs the C
+/// at-exit chain and then `DLL_PROCESS_DETACH` for every loaded module, and the
+/// WebView2 loader's teardown on an apartment thread that has stopped pumping
+/// is where those eight stopped. `TerminateProcess` on ourselves runs none of
+/// it. Everything that needed an orderly release — the controller closed, the
+/// browser waited for, the user data folder removed — already happened in
+/// `Probe::shutdown` above.
+fn leave_now() -> ! {
+    use windows::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+    unsafe {
+        let _ = TerminateProcess(GetCurrentProcess(), 0);
+    }
+    // Unreachable in practice; the compiler does not know that.
     std::process::exit(0);
 }
 

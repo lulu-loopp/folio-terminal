@@ -447,6 +447,9 @@ pub fn gate2(probe: &mut Probe, capture: &WindowCapture, calibration: &Calibrati
             "reason": "a protected-media surface needs a licensed EME stream; nothing offline can stand in for it, and a canvas is not a protected surface",
         }),
     );
+    // …but the pipeline behind that surface is answerable offline, and the
+    // first pass never asked.
+    crate::gates_w0p::gate2_protected_media(probe)?;
 
     // ── how long a whole-window capture costs, for the same comparison ────
     let mut window_timings = Vec::new();

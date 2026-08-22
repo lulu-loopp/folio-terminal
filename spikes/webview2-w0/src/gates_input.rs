@@ -406,7 +406,10 @@ pub fn gate4(probe: &mut Probe) -> Result<()> {
         ];
         let mut errors = Vec::new();
         for (name, kind, flags, at) in steps {
-            if let Err(error) = probe.host.send_pointer(kind, pointer_kind, at, 512, flags) {
+            if let Err(error) = probe
+                .host
+                .send_pointer(kind, pointer_kind, 1, at, 512, flags)
+            {
                 errors.push(format!("{name}: {error}"));
             }
             probe.pump(Duration::from_millis(60));
@@ -444,37 +447,10 @@ pub fn gate4(probe: &mut Probe) -> Result<()> {
         pointer_rows.push(row);
     }
 
-    // Two fingers at once, which is the row a single-pointer host would pass
-    // without noticing it cannot do.
-    probe.drain_messages();
-    let mut multi_errors = Vec::new();
-    for (id, fraction) in [(1u32, 0.35_f32), (2, 0.6)] {
-        let point = probe.seat_point(fraction, 0.55);
-        // `send_pointer` always uses pointer id 1; a second finger needs its own,
-        // which is exactly the limitation worth recording rather than papering
-        // over — the product will need an id per contact.
-        if let Err(error) = probe.host.send_pointer(
-            COREWEBVIEW2_POINTER_EVENT_KIND_DOWN,
-            2,
-            point,
-            512,
-            0x0001_0006,
-        ) {
-            multi_errors.push(format!("finger {id}: {error}"));
-        }
-        probe.pump(Duration::from_millis(60));
-    }
-    probe.pump(Duration::from_millis(200));
-    let multi = probe.drain_messages();
-    emit(
-        4,
-        "multi-touch",
-        serde_json::json!({
-            "errors": multi_errors,
-            "page_events": multi.len(),
-            "limitation": "this probe mints one pointer id; a real multi-touch host needs one ICoreWebView2PointerInfo per contact",
-        }),
-    );
+    // Two fingers at once — each with its own id, which the first pass recorded
+    // as a limitation of the probe rather than measuring — and then a contact
+    // the OS input stack made rather than this process.
+    crate::gates_w0p::gate4_real_contacts(probe)?;
 
     // ── OLE drag and drop ─────────────────────────────────────────────────
     let payload = probe.shots.join("dropped-file.txt");
@@ -803,41 +779,11 @@ pub fn gate5(probe: &mut Probe) -> Result<()> {
         }),
     );
 
-    // ── keyup and autorepeat ──────────────────────────────────────────────
-    //
-    // Focus has to be put *back* into the page first: the Tab walk above ended
-    // by leaving through MoveFocusRequested, which the host handled, so the
-    // keyboard is Folio's again at this point. Without this the autorepeat is
-    // measured against the host window and reads as a page that saw nothing.
-    probe.host.move_focus_into_web()?;
-    probe.pump(Duration::from_millis(200));
-    probe.tell_page("focus-field");
-    probe.pump(Duration::from_millis(200));
-    probe.drain_messages();
-    let accelerators_before = probe.evidence.borrow().accelerators.len();
-    crate::win::send_autorepeat(b'K' as u16, 6);
-    probe.pump(Duration::from_millis(300));
-    let evidence = probe.evidence.borrow();
-    let repeat_records: Vec<_> = evidence.accelerators[accelerators_before..].to_vec();
-    drop(evidence);
-    let page_repeats = probe
-        .drain_messages()
-        .into_iter()
-        .filter(|message| {
-            message.get("kind").and_then(|kind| kind.as_str()) == Some("key")
-                && message.get("type").and_then(|value| value.as_str()) == Some("keydown")
-        })
-        .count();
-    emit(
-        5,
-        "autorepeat-and-keyup",
-        serde_json::json!({
-            "accelerator_records": repeat_records.len(),
-            "kinds": repeat_records.iter().map(|record| record.kind).collect::<Vec<_>>(),
-            "page_keydowns": page_repeats,
-            "note": "kind 0 = KEY_DOWN, 1 = KEY_UP, 2 = SYSTEM_KEY_DOWN, 3 = SYSTEM_KEY_UP",
-        }),
-    );
+    // ── the keys the page owns, and the clipboard behind two of them ──────
+    let page_keys_measured = crate::gates_w0p::gate5_page_owned_keys(probe)?;
+    if page_keys_measured {
+        crate::gates_w0p::gate5_clipboard_round_trip(probe)?;
+    }
 
     // ── the IME's own window, and whether it follows the pane ─────────────
     ime_reading(probe, "seat-at-rest");
