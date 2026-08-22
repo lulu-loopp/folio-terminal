@@ -2487,14 +2487,27 @@ impl Text {
             // thing is 卡片 and 高度 is what a settings row measures, which is the
             // pair every other quantity row here is built out of.
             Self::RowFocusCardHeight => pick(lang, "Focus card height", "聚焦卡片高度"),
-            // Two clauses and no third: what the number is spent on, and how
-            // many rows each rung buys at the default face. The second is the
-            // one that earns its place — the reader is choosing pixels and
-            // counting rows, and no picker of pixels can say the conversion.
+            // Three clauses: what the number is spent on, how many rows each
+            // rung buys at the default face, and where in a seat those rows are
+            // taken from. The second earns its place because the reader is
+            // choosing pixels and counting rows, and no picker of pixels can say
+            // the conversion.
+            //
+            // The third is this row paying a debt that is not its own (user
+            // ruling 2026-08-21, the day the aim moved onto `Alt`). A gesture
+            // that can only be found by holding down a key nobody was told about
+            // does not exist, and every other surface that could have named it
+            // was ruled out by something already written: the column refuses
+            // tooltips (§7.1.6b′, "the cards write the name out in full"), a
+            // card is not a `⌄` menu's subject, and a new affordance on the
+            // column is exactly what the 2026-08-20 ruling took off it. What is
+            // left is the one row in this file that is already about a card's
+            // picture — and "how tall the picture is" and "which rows it shows"
+            // are the same reader's question one sentence apart.
             Self::DescFocusCardHeight => pick(
                 lang,
-                "How tall each card's picture of its tab stands. At the default face a lone pane's seat holds 12 rows at 160, 20 at 240 and 27 at 320",
-                "每张卡片里那幅 tab 缩图的高度。默认字面下,单 pane 的格子在 160 装得下 12 行、240 装 20 行、320 装 27 行",
+                "How tall each card's picture of its tab stands. At the default face a lone pane's seat holds 12 rows at 160, 20 at 240 and 27 at 320. Alt+wheel over a seat lifts its picture off the bottom of that pane, a row per notch",
+                "每张卡片里那幅 tab 缩图的高度。默认字面下,单 pane 的格子在 160 装得下 12 行、240 装 20 行、320 装 27 行。在格子上 Alt+滚轮,把这幅图从那块 pane 的底部往上抬,一格一行",
             ),
         }
     }

@@ -10217,6 +10217,67 @@ impl CardAim {
     }
 }
 
+/// What one wheel notch over the focus column is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ColumnNotch {
+    /// Scroll the column of cards — every notch that is not the other one.
+    List,
+    /// Aim the window of the terminal seat under the pointer (§7.1.6b′ ③).
+    Aim,
+}
+
+/// **The list first** (user ruling 2026-08-21, the same day's correction of
+/// §7.1.6b′ ③).
+///
+/// The first landing of the aim asked for no modifier and stood at the top of
+/// the column's wheel door, on the sentence this house answers everywhere else
+/// — *the innermost scroller under the pointer takes the notch*. That sentence
+/// was quoted about the wrong pair of things. **Aiming is not a scroller**: it
+/// points one seat's window at a row, and it can neither run out of travel nor
+/// tell the reader it has. The thing on this surface with content out of sight
+/// is the **column**, and a card's mini seat covers all but the few pixels of
+/// gap between one card and the next — so the reading that reached the build
+/// spent every notch a reader could aim at the list on something else, and the
+/// fourth card of four could not be brought on screen at all (user report,
+/// with a photograph, 2026-08-21).
+///
+/// So the plain wheel is the column's, unconditionally and in the same words as
+/// every other list in this window, and the aim moves onto a modifier.
+///
+/// **A column with nothing below the fold does nothing.** The plain notch is not
+/// quietly re-read as an aim when the list has no travel left: a gesture that
+/// changed meaning with the number of tabs open would be a gesture the reader
+/// has to count furniture to predict, and the reader who scrolls a short column
+/// is telling us they wanted the list.
+///
+/// # Why `Alt`
+///
+/// It is the one modifier this window has not already spent on the wheel.
+/// `Shift`+wheel is taken twice over — it is the preview body's *other axis*
+/// (`scroll_preview_body`) and it is [`wheel_route`]'s explicit "this notch is
+/// mine, not the program's" override, which is §7.1.5f's sentence in the wheel's
+/// own words. `Ctrl`+wheel is the pair Windows reports AltGr as when it is
+/// joined by `Alt`, and it is also the chord every desktop reserves for scale;
+/// this build spends it on nothing today, and leaving it unspent is what keeps
+/// that door open. `Alt`+wheel is claimed by nothing in this build: no chrome
+/// scroller reads it, and the one place `Alt` reaches a shell at all is the
+/// modifier bit of an SGR mouse report — which is a *pane's* business, and the
+/// column is chrome, so the two can never be the same notch.
+///
+/// **`Ctrl+Alt` is not carved out of it.** Discipline ② of the shortcut table
+/// forbids `Ctrl+Alt` chords because Windows reports AltGr as that pair and a
+/// binding there steals a character from every layout that composes with it. A
+/// wheel notch composes no character, so there is nothing for it to steal, and
+/// an exception here would only mean that a reader resting a hand on the wrong
+/// key gets a gesture that silently stops working.
+fn column_notch(modifiers: ModifiersState) -> ColumnNotch {
+    if modifiers.alt_key() {
+        ColumnNotch::Aim
+    } else {
+        ColumnNotch::List
+    }
+}
+
 /// Whether the picture is bigger than the body it is seen through, on either
 /// axis — the condition for a drag to have anywhere to go.
 ///
@@ -52849,14 +52910,18 @@ impl Runtime<'_> {
     /// consequence for *this* function is the order below: the seat is found
     /// **before** the notch is measured, because a report too small to be a
     /// whole row is still this seat's report and must be kept rather than
-    /// dropped through to the column's own scrolling.
+    /// dropped through to the column's own scrolling. That reading of "spent
+    /// here" is now confined to the modified gesture, where it is the only
+    /// honest answer — under `Alt` there is no other claimant for the fraction —
+    /// and it is exactly what made the *unmodified* wheel unusable while this
+    /// function stood on the plain path: see [`column_notch`].
     ///
-    /// **There is no modifier.** This house already
-    /// spends `Shift`+wheel on the *other axis* (`scroll_preview_body`), and a
-    /// mini seat has no other axis to be turned onto; giving it a magnitude here
-    /// would make one key mean two things on two surfaces. A flick of the wheel
-    /// already arrives as a merged burst of notches (`queue_wheel`), so crossing
-    /// a dozen rows of status bar is one flick rather than a dozen gestures.
+    /// **The gesture is `Alt`+wheel** ([`column_notch`], user ruling 2026-08-21;
+    /// it asked for no modifier for one day, and the correction is recorded
+    /// beside the original in §7.1.6b′). A flick of the wheel already arrives as
+    /// a merged burst of notches (`queue_wheel`), so crossing a dozen rows of
+    /// status bar is one flick rather than a dozen gestures — with `Alt` held
+    /// down for it.
     ///
     /// **Only a terminal seat answers.** A files column, a preview and a face
     /// have no tail to be lifted off — what they draw is read from the top
@@ -52954,13 +53019,14 @@ impl Runtime<'_> {
 
     fn scroll_rail(&mut self, delta: MouseScrollDelta) -> Result<()> {
         let now = Instant::now();
-        // **A notch over a card's terminal seat aims that seat's window** (user
-        // ruling 2026-08-21), and it is asked before the list scrolls for the
-        // sentence this house answers everywhere else: the innermost scroller
-        // under the pointer takes the notch. It is also the only surface where
-        // the two readings can be told apart — a seat is a rectangle inside a
-        // card, so a notch over it is unambiguous.
-        if self.aim_focus_card_window(now, delta)? {
+        // **The plain notch is this list's; `Alt` aims the seat under the
+        // pointer** ([`column_notch`], user ruling 2026-08-21). The decision is
+        // asked here, above everything the list does, because the two readings
+        // are alternatives and not a fallback: a bare notch is the column's even
+        // when the column has nowhere to go, and a modified one that finds no
+        // terminal seat under the pointer is the column's too.
+        let notch = column_notch(self.window.modifiers);
+        if notch == ColumnNotch::Aim && self.aim_focus_card_window(now, delta)? {
             return Ok(());
         }
         // The two lists share `rail_scroll` because they share the panel; what
@@ -56080,6 +56146,94 @@ mod focus_mode_door_tests {
         assert!(
             !body("    fn keyboard_input(").contains("focus_mode"),
             "the escape ladder mentions focus mode, so some key still leaves it"
+        );
+    }
+}
+
+/// **The bare notch belongs to the list** (user ruling 2026-08-21, the same
+/// day's correction of §7.1.6b′ ③).
+///
+/// These read this file as text for [`focus_mode_door_tests`]' reason, and it is
+/// the same failure mode: the aim is one method call, and a call that has
+/// wandered back out from under the modifier would still compile, still pass
+/// every unit test the aim owns, and still eat every notch the reader spends on
+/// the column — which is precisely the defect this slice repairs.
+#[cfg(test)]
+mod focus_column_notch_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// **There is one call to the aim, and it stands inside the modified arm.**
+    ///
+    /// The needle is assembled at run time so that this pin cannot match its own
+    /// text — [`focus_mode_door_tests`]' rule, for its reason.
+    ///
+    /// Red gate: this is the defect. Before the ruling the one call was the
+    /// first statement of the column's wheel door with nothing in front of it,
+    /// so every notch that landed on a card's terminal seat — which is almost
+    /// the whole column — was spent aiming and the list never moved.
+    #[test]
+    fn the_only_aim_stands_inside_the_modified_arm() {
+        let needle = ["self", ".", "aim_focus_card_window", "("].concat();
+        let calls: Vec<&str> = SOURCE
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains(needle.as_str()))
+            .collect();
+        assert_eq!(
+            calls.len(),
+            1,
+            "the aim is reached from one place, so there is one line to read"
+        );
+        assert!(
+            calls[0].contains(&["ColumnNotch", "::", "Aim"].concat()),
+            "a notch reaches the aim without the ruling having been asked: {}",
+            calls[0]
+        );
+    }
+
+    /// **The ruling is asked before the list is measured**, which is the half
+    /// the line above cannot say: a decision taken after the column has already
+    /// scrolled would move both.
+    #[test]
+    fn the_column_asks_the_ruling_before_it_scrolls() {
+        let scroll_rail = body("    fn scroll_rail(");
+        let decision = scroll_rail
+            .find(&["column_notch", "("].concat())
+            .expect("the column's own wheel door names the ruling");
+        let travel = scroll_rail
+            .find("vertical_wheel_travel")
+            .expect("the column's own wheel door measures its travel");
+        assert!(
+            decision < travel,
+            "the list moved before anybody asked what the notch was for"
+        );
+    }
+
+    /// **One writer moves a card's window**, so "the plain notch does not change
+    /// `card_skip`" is a claim about one line rather than about a search.
+    #[test]
+    fn one_line_moves_a_cards_window() {
+        let needle = ["card", "_skip", " = "].concat();
+        let writes: Vec<&str> = SOURCE
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains(needle.as_str()))
+            .collect();
+        assert_eq!(
+            writes,
+            vec![format!("leaf.{needle}aimed;")],
+            "a card's window is aimed from one place and no other"
         );
     }
 }
@@ -68388,6 +68542,53 @@ mod tests {
             -1,
             "and the downward halves add up among themselves"
         );
+    }
+
+    /// **The bare wheel is the column's, whatever else is held down** (user
+    /// ruling 2026-08-21).
+    ///
+    /// The list this window puts under the pointer is the thing with content out
+    /// of sight, so the gesture every other list in the product answers is the
+    /// one this one answers too. `Shift` is named here on purpose: it is spent
+    /// twice already on the wheel — the preview body's other axis, and
+    /// [`wheel_route`]'s "this notch is mine, not the program's" — so a reader
+    /// holding it over the column gets the list, not a third meaning.
+    #[test]
+    fn a_bare_notch_over_the_column_is_the_lists() {
+        for held in [
+            ModifiersState::empty(),
+            ModifiersState::SHIFT,
+            ModifiersState::CONTROL,
+            ModifiersState::CONTROL.union(ModifiersState::SHIFT),
+            ModifiersState::SUPER,
+        ] {
+            assert_eq!(
+                column_notch(held),
+                ColumnNotch::List,
+                "{held:?} over the card column has to scroll the card column"
+            );
+        }
+    }
+
+    /// **`Alt` is the aim, and nothing else is.**
+    ///
+    /// The second half names `Ctrl+Alt` deliberately: the shortcut table's AltGr
+    /// discipline is about chords that would swallow a character, and a notch is
+    /// not a character — so a reader whose hand is on AltGr still aims rather
+    /// than discovering that the gesture has holes in it.
+    #[test]
+    fn alt_and_a_notch_aims_the_seat_under_the_pointer() {
+        for held in [
+            ModifiersState::ALT,
+            ModifiersState::ALT.union(ModifiersState::SHIFT),
+            ModifiersState::ALT.union(ModifiersState::CONTROL),
+        ] {
+            assert_eq!(
+                column_notch(held),
+                ColumnNotch::Aim,
+                "{held:?} is a wheel with Alt held, which aims"
+            );
+        }
     }
 
     /// **The fraction belongs to the seat it was turned at**, not to the window.
