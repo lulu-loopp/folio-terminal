@@ -4338,6 +4338,14 @@
   <symbol id="i-dock-left" viewBox="0 0 16 16"><rect x="1.6" y="2.6" width="12.8" height="10.8" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="1.6" y="2.6" width="5" height="10.8" rx="2.2" fill="currentColor" opacity=".7"/></symbol>
   <symbol id="i-dock-right" viewBox="0 0 16 16"><rect x="1.6" y="2.6" width="12.8" height="10.8" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="9.4" y="2.6" width="5" height="10.8" rx="2.2" fill="currentColor" opacity=".7"/></symbol>
   <symbol id="i-float" viewBox="0 0 16 16"><path d="M8 3.2H4.4c-.7 0-1.2.6-1.2 1.2v7.2c0 .7.6 1.2 1.2 1.2h7.2c.7 0 1.2-.6 1.2-1.2V8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M10.2 2.8h3v3M13.2 2.8L8.3 7.7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <!-- THE HAND-OFF ARROW (user ruling 2026-08-20). A bare ↗ and NOT `#i-float`'s
+       framed one, because the two stand next to each other in a page's head and
+       say different things: the frame says "this pane leaves the tree", the bare
+       arrow says "this content leaves the window". Two framed arrows side by side
+       would be one drawing asked to mean both. It is `#i-float`'s own arrow —
+       same 1.2 stroke, same round caps, same 45° — struck at the size a glyph
+       with nothing around it has to be to hold a 13px box. -->
+  <symbol id="i-external" viewBox="0 0 16 16"><path d="M7.4 3.6h5v5M12.4 3.6L3.6 12.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M12.8 8a4.8 4.8 0 1 1-1.4-3.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M12.9 2.5v2.7h-2.7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <!-- THE WEB CONTENT CLASS'S MARK (W1, 2026-08-20). It is drawn at `#i-file`'s
        own 1.15 stroke and inside `#i-file`'s own 16-box, because the two answer
@@ -9362,6 +9370,19 @@
     const pool = poolOf(w);
     const flippable = pv.ftype === "markdown";   /* markdown gets the view/source flip */
     const editable = pv.ftype === "text" || pv.ftype === "markdown";
+    /* A PAGE GETS THE HAND-OFF ARROW (user ruling 2026-08-20). `.html` is in the
+       text list, so what this seat shows a page is its SOURCE — and the one verb
+       a reader of a page's source wants that this window has no other door for is
+       "show me the page". A printed link to a page has that door: Ctrl+click hands
+       it to the browser (§7.1.5g). A page ALREADY OPEN in this seat has no link to
+       Ctrl+click, so it needs a door of its own, and this is it.
+       THE REAL EXTENSION AND NEVER A SUBSTRING: `index.htmlx` is a template
+       dialect and `report.html.txt` is a text file that spells `.html` in the
+       middle of itself, which is `names_an_html_page`'s own rule and not a second
+       reading of it. Not on a web seat: a page that is already a page is handed
+       over by its foot (「外链一律外交」), and the arrow would be that band's
+       second spelling. */
+    const page = !isWebBuf(pv) && /\.html?$/i.test(pv.name);
     /* THE CHEVRON FOLLOWS THE LIST, NOT THE POOL (found on the machine,
        2026-08-19). It is the only door into this list, and it used to open on
        `pool.length > 1` — so on the first frame after a restart, with one buffer
@@ -9431,6 +9452,7 @@
               <span class="pv-spacer"></span>
               ${editable ? `<span class="pv-tool pv-save" title="Save (Ctrl+S)"><svg><use href="#i-save"/></svg></span>` : ""}
               ${flippable ? `<span class="pv-tool pv-md-flip" title="${pv.mdSource ? "Rendered view" : "Edit source"}"><svg><use href="${pv.mdSource ? "#i-eye" : "#i-code"}"/></svg></span>` : ""}
+              ${page ? `<span class="pv-tool pv-browser" title="Open in browser"><svg><use href="#i-external"/></svg></span>` : ""}
               ${webTools}
               <span class="pv-tool pv-popout" data-popout-leaf="${leaf.id}" title="Pop out to a floating window"><svg><use href="#i-float"/></svg></span>
               <span class="pv-tool pv-pin ${leaf.pvPinned ? "on" : ""}" title="${leaf.pvPinned ? "Unpin — make this the reusable preview again" : web ? "Pin — keep this pane; the next page opens a new preview" : "Pin — keep this pane; the next file opens a new preview"}">${leaf.pvPinned ? pinnedSvg : pinSvg}</span>
@@ -12948,6 +12970,26 @@
       e.stopPropagation();
       ext.textContent = "Opened ✓";
       setTimeout(() => { if (ext.isConnected) ext.textContent = "Open in default app"; }, 1100);
+      return;
+    }
+    /* ── a page's hand-off arrow (user ruling 2026-08-20) ──
+       `open_local_path`, the one door out this window has for a path somebody
+       pointed at — the same door the files tree's own double click goes through,
+       and through it the same refusal for anything on the executable list.
+       THE CONFIRMATION IN THE REAL WINDOW IS THE BROWSER ARRIVING IN FRONT OF
+       IT. The card's `Opened ✓` exists because the card is still on screen with
+       nothing else to say, and the foot's `Revealed` because Explorer can open
+       behind you; a browser handed a page takes the foreground, and a window
+       that has just lost it has no reader to print a word for. Here the mock
+       borrows this band's own flash to stand in for the program it cannot
+       launch — the same stand-in `.pv-open-ext` makes when it prints `Opened ✓`
+       in place of one. */
+    const browser = e.target.closest(".pv-browser");
+    if (browser) {
+      e.stopPropagation();
+      const id = browser.closest(".preview-head").dataset.leaf;
+      const bfoot = $("termhost").querySelector(`.files-foot[data-leaf="${id}"]`);
+      if (bfoot) webFootFlash(bfoot, "Opened in your browser");
       return;
     }
     /* ── the web seat's three buttons ──

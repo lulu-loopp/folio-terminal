@@ -10812,6 +10812,27 @@ fn names_an_html_page(path: &Path) -> bool {
     })
 }
 
+/// The file a preview seat would hand to a browser, when its content is a page
+/// (user ruling 2026-08-20, §7.1.5g).
+///
+/// **One predicate for both halves of the button**: whether the head draws the
+/// arrow at all, and which path a press on it gives the shell. Written once
+/// because the two are the same question — a button that can be lit over
+/// something it will not open is the class of bug `PreviewHeadTools`' own note
+/// exists to make impossible, and a second reading of "which file" is how a
+/// button comes to hand over whatever the *focused* seat is showing rather than
+/// the one it stands on.
+///
+/// It composes the two functions that already answer the halves —
+/// [`preview::PreviewSource::file_path`], the one door every file-only
+/// capability asks through, and [`names_an_html_page`], §7.1.5g's own reading of
+/// what names a page. So a document this window composed out of a repository
+/// answers `None` however its path inside the repo is spelled: it is not a file,
+/// so it is not a page.
+fn preview_page_hand_off(source: &preview::PreviewSource) -> Option<&Path> {
+    source.file_path().filter(|path| names_an_html_page(path))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum LocalImageActivation {
     None,
@@ -21614,6 +21635,23 @@ impl Runtime<'_> {
                     pane_chevron_tip(),
                 );
             }
+            // A page's hand-off arrow, in the same pass and inside the same
+            // guard: it is a pane head's control like the chevron above, and a
+            // head under a drag is a head nobody is pointing at. Only the seats
+            // whose head actually draws one register — `preview_head_tools`
+            // answers `browser: false` for everything else, so the box is `None`
+            // and nothing is pushed.
+            let previews: Vec<SeatId> = self.seats.preview_seats();
+            for seat in previews {
+                let Some(rect) = self.preview_browser_box(seat) else {
+                    continue;
+                };
+                anchors.push(
+                    tooltip::TooltipAnchorId::PreviewBrowser(seat),
+                    rect,
+                    i18n::Text::PreviewOpenInBrowser.text(),
+                );
+            }
             // The search capsule's own controls, pushed after the heads and
             // before the Git page's rows for this list's own innermost-first
             // rule: the capsule stands over one pane's body, so it is inside
@@ -30943,6 +30981,7 @@ impl Runtime<'_> {
                 seats::PreviewHeadTools {
                     save: buffer.is_editable(md_source),
                     flip: buffer.ftype == preview::PreviewFtype::Markdown,
+                    browser: preview_page_hand_off(&buffer.source).is_some(),
                     ..seats::PreviewHeadTools::default()
                 },
                 buffer.dirty,
@@ -31040,6 +31079,7 @@ impl Runtime<'_> {
         seats::PreviewHeadTools {
             save: self.preview_is_editable(surface),
             flip: buffer.is_some_and(|buffer| buffer.ftype == preview::PreviewFtype::Markdown),
+            browser: buffer.is_some_and(|buffer| preview_page_hand_off(&buffer.source).is_some()),
             switcher: self.preview_switcher_rows(seat) > 1,
             // Zero until this seat's head has been drawn once, which is the
             // honest answer for a frame the paint has not reached yet: a pill
@@ -31158,6 +31198,37 @@ impl Runtime<'_> {
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
+        Ok(())
+    }
+
+    /// Hand the page on this seat to the machine's own browser — the head's `↗`
+    /// (user ruling 2026-08-20, §7.1.5g).
+    ///
+    /// **The same one door out this window has always had**,
+    /// [`Self::open_local_path`], and through it `bt_platform`'s own refusal for
+    /// the executable list — a refusal this route cannot reach (nothing on that
+    /// list is named `.html`) and is subject to anyway, because the rule belongs
+    /// to the door rather than to the call sites that knock on it.
+    ///
+    /// **This seat's own buffer and not the focused one**: the button stands on a
+    /// head, and a head belongs to a pane. Asking `current_preview_buffer` here
+    /// would hand over whatever the *focused* seat happened to be showing, which
+    /// on a window with two preview panes is the other one.
+    ///
+    /// **No confirmation is printed.** The card's `Opened ✓` exists because the
+    /// card is still on screen with nothing else to say, and the foot's
+    /// `Revealed` because Explorer can open behind you; a browser handed a page
+    /// comes to the front, and a window that has just lost the foreground has no
+    /// reader to print a word for.
+    fn open_preview_in_browser(&mut self, seat: SeatId) -> Result<()> {
+        let Some(path) = self
+            .preview_buffer_on(PreviewSurface::Seat(seat))
+            .and_then(|buffer| preview_page_hand_off(&buffer.source))
+            .map(Path::to_path_buf)
+        else {
+            return Ok(());
+        };
+        self.open_local_path(&path);
         Ok(())
     }
 
@@ -41009,6 +41080,21 @@ impl Runtime<'_> {
             scale,
             self.window.search.seat(),
         )
+    }
+
+    /// The hand-off arrow's box on one preview seat, or `None` when that seat is
+    /// not showing a page (or has no room for the control).
+    ///
+    /// Re-derived from the frame the seat is standing in, which is the
+    /// `&self`-hit-test discipline [`Self::pane_chevron_box`] states at length:
+    /// the rectangle a tip hangs off has to be the rectangle the button was
+    /// drawn in, by one derivation and not by two that agree today. It is the
+    /// hit test's own derivation, down to the stored measurement.
+    fn preview_browser_box(&self, seat: SeatId) -> Option<[f32; 4]> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
+        let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
+        seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat)).browser
     }
 
     /// The pane menu's own level of the overlay stack, or nothing when none is
@@ -51299,6 +51385,11 @@ impl Runtime<'_> {
                 self.window.tab_clicks.interrupt();
                 self.window.files_row_clicks.interrupt();
                 self.flip_preview_source()?;
+            }
+            seats::ChromeTarget::PreviewBrowser(seat) => {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                self.open_preview_in_browser(seat)?;
             }
             seats::ChromeTarget::PreviewPin(seat) => {
                 self.window.tab_clicks.interrupt();
@@ -66009,6 +66100,67 @@ mod tests {
                 "a share meets the network card it always met, without a round trip"
             );
         }
+    }
+
+    /// PIN — **the head's `↗` hands over the seat's own file, and only when that
+    /// file is a page** (user ruling 2026-08-20, §7.1.5g).
+    ///
+    /// One predicate answers both halves of the button: whether it is drawn at
+    /// all, and which path it hands over when it is pressed. A second spelling
+    /// of "is this a page" would be a button that can come to be lit over a file
+    /// it will not open — the class of bug D4 exists to make impossible — and a
+    /// second spelling of "which file" would be a button that hands over
+    /// whatever the *focused* seat is showing rather than the one it stands on.
+    ///
+    /// MUTATIONS:
+    /// ① drop the `names_an_html_page` filter — every preview head in the window
+    ///    grows an arrow, and `notes.md` gets handed to a browser;
+    /// ② answer from the buffer's `name` instead of `source.file_path()` — a git
+    ///    diff of `index.html` grows an arrow over a document that has no file
+    ///    at all, and the press has nothing to give the shell;
+    /// ③ spell the extension test with `ends_with` — `report.html.txt`, a text
+    ///    file, is handed to a browser.
+    #[test]
+    fn only_a_page_with_a_file_behind_it_is_handed_over_to_a_browser() {
+        for name in [
+            r"D:\Developer\BetterTerminal\design\ui-mockup.html",
+            r"C:\Users\me\TIMELINE.HTM",
+            r"D:\中文\页.html",
+        ] {
+            let source = preview::PreviewSource::file(name);
+            assert_eq!(
+                preview_page_hand_off(&source),
+                Some(Path::new(name)),
+                "a page hands over its own path: {name:?}"
+            );
+        }
+        // Everything else the seat can show. The extension is the real one and
+        // never a substring of the name, which is `names_an_html_page`'s own
+        // rule reaching this button rather than a second reading of it.
+        for name in [
+            r"C:\Users\me\notes.md",
+            r"C:\Users\me\a.png",
+            r"C:\site\index.htmlx",
+            r"C:\site\report.html.txt",
+            r"C:\site\html",
+        ] {
+            assert_eq!(
+                preview_page_hand_off(&preview::PreviewSource::file(name)),
+                None,
+                "not a page, so there is no arrow and nothing to hand over: {name:?}"
+            );
+        }
+        // A document this window composed out of a repository has no file, so it
+        // has no door out however its path inside the repo is spelled.
+        assert_eq!(
+            preview_page_hand_off(&preview::PreviewSource::GitDiff {
+                root: PathBuf::from(r"D:\repo"),
+                path: "design/ui-mockup.html".to_owned(),
+                against: preview::GitDiffAgainst::WorkingTree,
+            }),
+            None,
+            "a composed document is not a file, so it is not a page either"
+        );
     }
 
     #[test]
