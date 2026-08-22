@@ -3747,6 +3747,27 @@ mod tests {
         assert_eq!(preview_ftype("A.RS"), PreviewFtype::Text);
     }
 
+    /// PIN (W2 slice 5) - **`.htm` and `.html` are one object in every table.**
+    ///
+    /// The account this pays was opened by the head's hand-off arrow and
+    /// recorded in `docs/HANDOFF-2026-08-21.md` section 5, item 18:
+    /// `names_an_html_page` has read both spellings since the day it was written
+    /// - Windows registers them against the same handler - while this table
+    /// listed only `html`. So a `.htm` file drew the "no preview for this file
+    /// type" card *and* the head's hand-off arrow at the same time: one pane,
+    /// two buttons, one door.
+    ///
+    /// MUTATION: take `"htm"` back out of [`TEXT_EXTENSIONS`].
+    #[test]
+    fn the_two_spellings_of_a_page_are_one_file_type() {
+        assert_eq!(preview_ftype("timeline.htm"), PreviewFtype::Text);
+        assert_eq!(preview_ftype("timeline.html"), PreviewFtype::Text);
+        assert_eq!(preview_ftype("TIMELINE.HTM"), PreviewFtype::Text);
+        // And the neighbour that must not be swept up with them: an extension is
+        // the real one and never a substring.
+        assert_eq!(preview_ftype("index.htmlx"), PreviewFtype::Unknown);
+    }
+
     /// ④ `editable` names the surface that actually edits.
     ///
     /// Mutation: return `true` for [`PreviewFtype::Table`], or delete the

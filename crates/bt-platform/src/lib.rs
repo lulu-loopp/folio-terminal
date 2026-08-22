@@ -186,6 +186,90 @@ impl VisualLayer {
     }
 }
 
+/// **The four switches a locally minted page is hosted behind** (W2 slice 5;
+/// `docs/plans/web-preview/plan.md` section 3, the controlled file entry).
+///
+/// Source pins, and they have to be: three of the four are calls into a COM
+/// object that only exists once a browser is running, and the fourth is an
+/// argument this product deliberately never passes - there is no API anywhere
+/// that reports "no additional browser arguments were given". What a machine
+/// can hold is that the calls are in the file and spelled the way the ruling
+/// spells them, which is the same kind of claim
+/// `the_compositor_adds_the_web_visual_at_the_bottom_and_nowhere_else` makes
+/// one screen up and for the same reason.
+///
+/// The switches are unconditional rather than thrown for `file:` pages: a
+/// setting that depends on where the page came from is a setting somebody has
+/// to remember to change, and this host has exactly one way to be configured.
+///
+/// RED GATE: delete any of the four lines. `SetAreHostObjectsAllowed` was the
+/// one actually missing on 2026-08-22, which is what this test was written red
+/// against.
+#[cfg(test)]
+mod web_security_tests {
+    /// `webview.rs` with its whitespace removed, so that rustfmt's line breaks
+    /// are not part of any claim below.
+    fn source() -> String {
+        include_str!("webview.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect()
+    }
+
+    /// The bridge is shut in both directions, and permission requests are
+    /// refused before anybody is asked.
+    #[test]
+    fn the_page_gets_no_bridge_and_no_permissions() {
+        let source = source();
+        for switch in [
+            concat!("SetIsWebMessage", "Enabled(false)"),
+            concat!("SetAreHostObjects", "Allowed(false)"),
+        ] {
+            assert_eq!(
+                source.matches(switch).count(),
+                1,
+                "exactly one call throws this switch, and it throws it off: {switch}"
+            );
+        }
+        // The permission handler exists and its body is the denial. Written as
+        // one needle rather than two facts, because a handler that is installed
+        // and answers something else is worse than no handler at all.
+        assert!(
+            source.contains(concat!(
+                "args.SetState(COREWEBVIEW2_PERMISSION",
+                "_STATE_DENY)?;"
+            )),
+            "every permission request is refused by the handler itself"
+        );
+    }
+
+    /// **No additional browser arguments at all**, which is how
+    /// `--allow-file-access-from-files` is not passed.
+    ///
+    /// The stronger claim than "that one flag is absent", and the reason it is
+    /// worth making: the environment is created with no
+    /// `ICoreWebView2EnvironmentOptions`, so there is no place for *any*
+    /// command line to be added. A future slice that needs one has to come
+    /// through here and past this test.
+    #[test]
+    fn the_environment_is_created_with_no_browser_arguments() {
+        let source = source();
+        assert!(
+            source.contains(concat!("None::<&ICoreWebView2", "EnvironmentOptions>,")),
+            "the environment takes no options, so it takes no command line"
+        );
+        for absent in [
+            concat!("Additional", "BrowserArguments"),
+            concat!("allow-file-access", "-from-files"),
+        ] {
+            assert!(
+                !source.contains(absent),
+                "this host does not pass browser arguments: {absent}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod visual_layer_tests {
     use super::VisualLayer;
@@ -4710,6 +4794,29 @@ mod windows_impl {
             | FILE_NOTIFY_CHANGE_ATTRIBUTES.0,
     );
 
+    /// **How far under a watched directory the kernel is asked to look.**
+    ///
+    /// Named rather than a bare `bool` at the call sites for
+    /// [`VisualLayer`]'s reason one file over: `true` at a call site says
+    /// nothing about what it is true *of*, and the two callers of this
+    /// subscription want opposite answers for reasons that are worth reading.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum WatchDepth {
+        /// The directory and everything under it - a working tree.
+        Tree,
+        /// The directory's own entries and nothing deeper - the folder one
+        /// watched file happens to live in.
+        HereOnly,
+    }
+
+    impl WatchDepth {
+        /// The `bWatchSubtree` argument this depth is.
+        #[must_use]
+        pub fn recursive(self) -> bool {
+            matches!(self, Self::Tree)
+        }
+    }
+
     /// **Test-only: a place to hold the watcher thread just short of a read.**
     ///
     /// The defect this exists to pin is a *window*, not a value. `DirWatch::start`
@@ -4874,6 +4981,31 @@ mod windows_impl {
             path: &Path,
             wake: impl Fn() + Send + 'static,
         ) -> Result<Self, std::io::Error> {
+            Self::start_scoped(path, WatchDepth::Tree, wake)
+        }
+
+        /// The same subscription over **this directory and no deeper**.
+        ///
+        /// `ReadDirectoryChangesW` takes the depth as an argument, so this is
+        /// one boolean and not a second mechanism - which is the whole reason it
+        /// lives here rather than in a watcher of its own. The caller that wants
+        /// it is `preview_watch`: a preview seat is looking at *one file*, and
+        /// the directory holding it is only ever asked because Windows has no
+        /// way to subscribe to a single file. Watching the tree instead would
+        /// mean a `target\debug` under the folder somebody is previewing a
+        /// README out of woke this thread for every object file a build wrote.
+        pub fn start_shallow(
+            path: &Path,
+            wake: impl Fn() + Send + 'static,
+        ) -> Result<Self, std::io::Error> {
+            Self::start_scoped(path, WatchDepth::HereOnly, wake)
+        }
+
+        fn start_scoped(
+            path: &Path,
+            depth: WatchDepth,
+            wake: impl Fn() + Send + 'static,
+        ) -> Result<Self, std::io::Error> {
             let mut units = path.as_os_str().encode_wide().collect::<Vec<u16>>();
             if units.contains(&0) {
                 return Err(std::io::Error::new(
@@ -4932,7 +5064,7 @@ mod windows_impl {
             let (armed, listening) = std::sync::mpsc::channel::<Result<(), std::io::Error>>();
             let thread = std::thread::Builder::new()
                 .name("bt-dir-watch".to_owned())
-                .spawn(move || watch_loop(dir, change, stop, armed, wake));
+                .spawn(move || watch_loop(dir, change, stop, depth, armed, wake));
             let thread = match thread {
                 Ok(thread) => thread,
                 Err(error) => {
@@ -5005,6 +5137,7 @@ mod windows_impl {
         dir: SendHandle,
         change: SendHandle,
         stop: SendHandle,
+        depth: WatchDepth,
         armed: std::sync::mpsc::Sender<Result<(), std::io::Error>>,
         wake: impl Fn(),
     ) {
@@ -5036,9 +5169,11 @@ mod windows_impl {
                         dir.0,
                         buffer.as_mut_ptr().cast::<std::ffi::c_void>(),
                         u32::try_from(DIR_WATCH_BUFFER_BYTES).unwrap_or(u32::MAX),
-                        // Recursively. A repository is a tree and a commit
-                        // touches any depth of it.
-                        true,
+                        // A repository is a tree and a commit touches any
+                        // depth of it; a preview seat is one file and its
+                        // directory is only being asked because there is no way
+                        // to subscribe to a file. The caller said which.
+                        depth.recursive(),
                         DIR_WATCH_FILTER,
                         None,
                         Some(std::ptr::from_mut(&mut overlapped)),
@@ -5615,6 +5750,52 @@ mod dir_watch_tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// PIN (W2 slice 5) - **a shallow watch hears its own directory and
+    /// nothing under it.**
+    ///
+    /// `preview_watch` subscribes to the folder a previewed file lives in,
+    /// because Windows has no way to subscribe to a single file. Watching the
+    /// tree instead would mean a README previewed out of a repository root woke
+    /// this thread for every object file a build wrote into `target\debug` -
+    /// a storm that the debounce would then have to absorb sixty times a second
+    /// for news that was never about the watched file at all.
+    ///
+    /// Both halves in one test for the reason the recursive one above gives:
+    /// "nothing arrived" is also what a subscription that never worked reports,
+    /// so the shallow watch is proved to be *awake* on its own directory first
+    /// and only then proved deaf to the subtree.
+    ///
+    /// MUTATION: make `start_shallow` pass `WatchDepth::Tree`, and the second
+    /// half goes red.
+    #[test]
+    fn a_shallow_watch_hears_its_own_directory_and_not_the_tree_below_it() {
+        let _turn = first_read_gate::watchers_take_turns();
+        let scratch = Scratch::new("shallow");
+        let subtree = scratch.0.join("nested");
+        std::fs::create_dir_all(&subtree).expect("make the subtree before arming");
+        let (tx, rx) = mpsc::channel::<()>();
+        let watch = DirWatch::start_shallow(&scratch.0, move || {
+            let _ = tx.send(());
+        })
+        .expect("watch a directory this process just made");
+
+        std::fs::write(scratch.0.join("watched.txt"), b"hello").expect("write beside the file");
+        rx.recv_timeout(ARRIVES_WITHIN)
+            .expect("a shallow watch still hears its own directory");
+
+        while rx.try_recv().is_ok() {}
+        std::fs::write(subtree.join("deep.txt"), b"not ours").expect("write into the subtree");
+        let deadline = Instant::now() + SILENCE_FOR;
+        while Instant::now() < deadline {
+            assert!(
+                rx.try_recv().is_err(),
+                "a shallow watch does not hear a directory below the one it was given"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(watch);
     }
 
     /// PIN — **`start` returns already listening.**
