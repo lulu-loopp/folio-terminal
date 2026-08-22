@@ -953,7 +953,11 @@ mod tests {
             "http://0.0.0.0.example.com/",
             "http://127.0.0.1:5173/",
         ] {
-            assert_eq!(rewrite_unspecified_host(untouched), untouched, "{untouched}");
+            assert_eq!(
+                rewrite_unspecified_host(untouched),
+                untouched,
+                "{untouched}"
+            );
         }
     }
 
@@ -1158,9 +1162,15 @@ mod tests {
     /// second way.
     #[test]
     fn the_blocked_card_can_name_the_scheme() {
-        assert_eq!(scheme_of("javascript:alert(1)").as_deref(), Some("javascript"));
+        assert_eq!(
+            scheme_of("javascript:alert(1)").as_deref(),
+            Some("javascript")
+        );
         assert_eq!(scheme_of("  MAILTO:a@b  ").as_deref(), Some("mailto"));
-        assert_eq!(scheme_of("view-source:https://x/").as_deref(), Some("view-source"));
+        assert_eq!(
+            scheme_of("view-source:https://x/").as_deref(),
+            Some("view-source")
+        );
         assert_eq!(scheme_of("localhost:3000"), None);
         assert_eq!(scheme_of("how do i exit vim"), None);
     }
@@ -1175,7 +1185,10 @@ mod tests {
                 address_bar("javascript:alert(1)"),
             ),
             (Refusal::FileScheme, address_bar("file:///C:/x")),
-            (Refusal::BrowserInternalScheme, address_bar("edge://settings")),
+            (
+                Refusal::BrowserInternalScheme,
+                address_bar("edge://settings"),
+            ),
             (Refusal::ExternalScheme, address_bar("mailto:a@b")),
             (Refusal::UserInfo, address_bar("https://u:p@example.com/")),
             (
