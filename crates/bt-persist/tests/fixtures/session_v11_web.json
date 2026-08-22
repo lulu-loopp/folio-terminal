@@ -1,0 +1,91 @@
+{
+  "schema_version": 11,
+  "theme": "dark",
+  "cursor_style": "block",
+  "windows": [
+    {
+      "placement": {
+        "bounds": {
+          "x": 64,
+          "y": 48,
+          "width": 1520,
+          "height": 940
+        },
+        "dpi": 120,
+        "maximized": false,
+        "monitor_id": "\\\\.\\DISPLAY1"
+      },
+      "tab_layout": "vertical",
+      "sidebar_mode": "icons",
+      "tabs": [
+        {
+          "root": {
+            "dir": "row",
+            "ratio": 480000,
+            "children": [
+              {
+                "kind": "preview",
+                "pinned": true
+              },
+              {
+                "kind": "preview",
+                "pinned": false
+              }
+            ]
+          },
+          "pinned": true,
+          "focused_leaf": "leaf-1",
+          "preview": {
+            "panes": [
+              {
+                "leaf": "leaf-0",
+                "cur": "D:\\work\\folio\\docs\\DESIGN.md"
+              },
+              {
+                "leaf": "leaf-1",
+                "cur": "http://localhost:5173/app?tab=logs&token=s3cr3t#line-42",
+                "cur_source": "url"
+              }
+            ],
+            "pool": [
+              {
+                "path": "D:\\work\\folio\\docs\\DESIGN.md",
+                "name": "DESIGN.md"
+              },
+              {
+                "path": "http://localhost:5173/app?tab=logs&token=s3cr3t#line-42",
+                "name": "Folio site",
+                "source": "url"
+              }
+            ]
+          }
+        }
+      ],
+      "active_tab": 0
+    }
+  ],
+  "recent": [
+    {
+      "key": "||http://127.0.0.1:8080/report?run=7#totals",
+      "seed": {
+        "kind": "preview",
+        "path": "http://127.0.0.1:8080/report?run=7#totals",
+        "source": "url"
+      },
+      "timestamp": "2026-08-22T04:12:00Z",
+      "previews": [
+        {
+          "url": "http://127.0.0.1:8080/report?run=7#totals"
+        }
+      ]
+    },
+    {
+      "key": "||D:\\work\\folio\\README.md",
+      "seed": {
+        "kind": "preview",
+        "path": "D:\\work\\folio\\README.md"
+      },
+      "timestamp": "2026-08-22T04:13:00Z"
+    }
+  ]
+}

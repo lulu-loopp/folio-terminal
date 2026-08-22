@@ -249,6 +249,19 @@ pub enum ChromeMark {
     ProfileGeneric { colour: MarkColour },
     /// `#i-file`.
     File,
+    /// `#i-globe` — **the web class's own mark** (Web 预览块 W2 片③).
+    ///
+    /// What a page wears wherever a preview buffer is drawn small: the switcher
+    /// row, the Recent row, the restore prompt's row. `docs/DESIGN.md` §7.7 ⑤
+    /// puts it in the *same* box as `#i-file` so that the two kinds of row line
+    /// up down one left edge and neither reads as the guest — which is why it is
+    /// asked for at the file mark's own size and not at one of its own.
+    ///
+    /// A site's own favicon is slice ⑥'s: that is a raster fetched per origin
+    /// with a cache and a failure state, while this is the class's drawing and is
+    /// what every row wears until one arrives.
+    Globe,
+    // `Globe`'s one door is [`preview_row_mark`], below the enum.
     /// `#i-folder`.
     Folder,
     /// `#i-panel` — a pane whose kind this build cannot name.
@@ -685,6 +698,7 @@ impl ChromeMark {
             // them apart is a parameter `mark_key` adds.
             Self::ProfileGeneric { .. } => "p-shell",
             Self::File => "i-file",
+            Self::Globe => "i-globe",
             Self::Folder => "i-folder",
             Self::FolderOpen => "i-folder-open",
             // One id for every angle, on `Self::Chevron`'s precedent above.
@@ -1558,6 +1572,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::Plus => 4,
         ChromeMark::ProfilePowerShell => 5,
         ChromeMark::File => 6,
+        ChromeMark::Globe => 41,
         ChromeMark::Folder => 7,
         ChromeMark::FolderOpen => 15,
         ChromeMark::TreeDisclosure { .. } => 16,
@@ -1614,9 +1629,30 @@ fn symbol_index(mark: ChromeMark) -> usize {
 /// Named rather than spelled inside the format string because the chassis's body
 /// is generated and its siblings' are quoted, and two spellings of one box is
 /// how a generated glyph comes to sit a pixel off the ones beside it.
+/// **The mark a preview buffer wears wherever it is drawn small** — the
+/// switcher's row, the Recent row, the restore prompt's row (Web 预览块 W2 片③).
+///
+/// One function and not a `?:` at each of the three, which is the mock-up's own
+/// note on `pvMarkId` said in Rust: "so a page can never be a globe in the
+/// switcher and a page icon in the strip". A file is `#i-file`, a page is
+/// `#i-globe`, and every surface that draws a preview row asks here.
+///
+/// A `bool` and not a `PreviewSource`, because two of the three callers have no
+/// buffer to ask: a Recent row and a pinned URL stand for a page nothing has
+/// opened, and what they have is the vault's or the pin file's own word for
+/// which of the two the row is.
+#[must_use]
+pub fn preview_row_mark(is_page: bool) -> ChromeMark {
+    if is_page {
+        ChromeMark::Globe
+    } else {
+        ChromeMark::File
+    }
+}
+
 const PROFILE_CHASSIS_VIEW_BOX: &str = "0 0 16 16";
 
-const SYMBOL_VIEW_BOX: [&str; 41] = [
+const SYMBOL_VIEW_BOX: [&str; 42] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -1693,11 +1729,15 @@ const SYMBOL_VIEW_BOX: [&str; 41] = [
     // `#i-external`, the house sixteen — it is `#i-float`'s arrow drawn without
     // the frame, and the two share a run, so they share a box.
     "0 0 16 16",
+    // `#i-globe`, the house sixteen: it stands in the same 13px box `#i-file`
+    // does, down one left edge with it (§7.7 ⑤), so it has to be cut in the same
+    // units or it sits at a different optical weight in the same column.
+    "0 0 16 16",
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 41] = [
+const SYMBOL_BODY: [&str; 42] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min
@@ -1955,6 +1995,13 @@ const SYMBOL_BODY: [&str; 41] = [
     // wraps its own arrow in. The arms are two fifths of the shaft, which is what
     // keeps a bare arrowhead reading as one at thirteen pixels.
     r#"<path d="M7.4 3.6h5v5M12.4 3.6L3.6 12.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    // `#i-globe` — byte for byte from `design/ui-mockup.html:4358`: a circle, the
+    // two latitudes, and the ellipse that is every meridian seen edge on.
+    concat!(
+        r#"<circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.15"/>"#,
+        r#"<path d="M2.6 6.2h10.8M2.6 9.8h10.8" stroke="currentColor" stroke-width="1.15" stroke-linecap="round"/>"#,
+        r#"<ellipse cx="8" cy="8" rx="2.7" ry="6" fill="none" stroke="currentColor" stroke-width="1.15"/>"#,
+    ),
 ];
 
 /// The active tab's closed outline, in physical pixels, clockwise from the
@@ -2465,6 +2512,8 @@ mod tests {
             (ChromeMark::ProfileGit, 15.0),
             (ChromeMark::ProfileCmd, 15.0),
             (ChromeMark::File, 14.0),
+            // The page's mark, at the file mark's size: they share one column.
+            (ChromeMark::Globe, 14.0),
             (ChromeMark::Folder, 13.0),
             (ChromeMark::Panel, 13.0),
             // `.panehead .pane-split svg { width: 13px }` — the folder's size,

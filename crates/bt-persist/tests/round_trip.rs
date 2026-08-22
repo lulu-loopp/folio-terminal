@@ -16,11 +16,12 @@ use std::path::PathBuf;
 
 use bt_persist::{
     BackgroundFitV1, DegradationReport, FilesViewV1, LanguageV1, LayoutNodeV1, LeafNodeV1,
-    MinimumContrastV1, PreviewLeafV1, PreviewPaneV1, PreviewPoolEntryV1, PsReadLineInviteV1,
-    ReadReport, RecentSeedV1, SESSION_SCHEMA_VERSION, SETTINGS_SCHEMA_VERSION,
-    SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1,
-    SessionWindowV1, SettingsV1, SplitDirectionV1, TabPreviewV1, TabV1, TermLeafV1, ThemeModeV1,
-    read_session, read_settings, write_session_atomic, write_settings_atomic,
+    MinimumContrastV1, PreviewLeafV1, PreviewPaneV1, PreviewPoolEntryV1, PreviewSourceV1,
+    PsReadLineInviteV1, ReadReport, RecentPreviewV1, RecentSeedV1, SESSION_SCHEMA_VERSION,
+    SETTINGS_SCHEMA_VERSION, SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1,
+    SessionThemeV1, SessionV1, SessionWindowV1, SettingsV1, SplitDirectionV1, TabPreviewV1, TabV1,
+    TermLeafV1, ThemeModeV1, read_session, read_settings, write_session_atomic,
+    write_settings_atomic,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -223,11 +224,13 @@ fn a_preview_pane_keeps_its_pin_in_the_tree_and_its_file_in_the_content_section(
             PreviewPaneV1 {
                 leaf: "leaf-1".to_owned(),
                 cur: Some(r"C:\Users\dev\project\README.md".to_owned()),
+                cur_source: PreviewSourceV1::File,
                 graph: None,
             },
             PreviewPaneV1 {
                 leaf: "leaf-2".to_owned(),
                 cur: None,
+                cur_source: PreviewSourceV1::File,
                 graph: None,
             },
         ],
@@ -240,17 +243,21 @@ fn a_preview_pane_keeps_its_pin_in_the_tree_and_its_file_in_the_content_section(
             PreviewPoolEntryV1 {
                 path: r"C:\Users\dev\project\README.md".to_owned(),
                 name: "README.md".to_owned(),
+                source: PreviewSourceV1::File,
             },
             PreviewPoolEntryV1 {
                 path: r"C:\Users\dev\project\src\main.rs".to_owned(),
                 name: "main.rs".to_owned(),
+                source: PreviewSourceV1::File,
             },
         ],
         "the pool is the tab's history: it holds a buffer no pane is showing"
     );
     assert_eq!(
         session.recent[0].previews,
-        vec![r"C:\Users\dev\notes\todo.md".to_owned()],
+        vec![RecentPreviewV1::File(
+            r"C:\Users\dev\notes\todo.md".to_owned()
+        )],
         "裁决 10 — a closed tab's preview goes into Recent with it, so undo-close \
          and the restore prompt are not two doors with one of them broken"
     );
@@ -376,6 +383,7 @@ fn two_windows_round_trip_with_their_own_geometry_rail_and_tabs() {
                 },
                 RecentSeedV1::Preview {
                     path: r"D:\work\delta\notes.md".to_owned(),
+                    source: PreviewSourceV1::File,
                 },
             ],
         },
@@ -477,6 +485,7 @@ fn a_folder_tab_and_a_file_tab_round_trip_with_the_seeds_that_reopen_them() {
         vec![PreviewPaneV1 {
             leaf: "leaf-0".to_owned(),
             cur: Some(r"D:\work\folio\docs\DESIGN.md".to_owned()),
+            cur_source: PreviewSourceV1::File,
             graph: None,
         }],
     );
@@ -490,7 +499,8 @@ fn a_folder_tab_and_a_file_tab_round_trip_with_the_seeds_that_reopen_them() {
     assert_eq!(
         session.recent[1].seed,
         RecentSeedV1::Preview {
-            path: r"D:\work\folio\README.md".to_owned()
+            path: r"D:\work\folio\README.md".to_owned(),
+            source: PreviewSourceV1::File,
         },
         "§7.1.6h's third seed shape — without it, closing a file tab puts nothing \
          in the vault and Ctrl+Shift+T is a door onto an empty store"
@@ -586,11 +596,13 @@ fn the_content_section_round_trips_through_the_public_session_api() {
                     panes: vec![PreviewPaneV1 {
                         leaf: "leaf-0".to_owned(),
                         cur: None,
+                        cur_source: PreviewSourceV1::File,
                         graph: None,
                     }],
                     pool: vec![PreviewPoolEntryV1 {
                         path: r"C:\work\notes.md".to_owned(),
                         name: "notes.md".to_owned(),
+                        source: PreviewSourceV1::File,
                     }],
                 }),
             }],
@@ -1965,4 +1977,161 @@ fn settings_v1_fixture_migrates_to_v2_preserving_theme_and_rendering_formulas() 
         "unknown fields are dropped, never round-tripped (§1.3 ruling 4)"
     );
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// ── W2 slice ③: a page is a preview row ──────────────────────────────────────
+
+/// **The persistence clause, on the disk it is about** (`plan.md` §3, user
+/// ruling 2026-08-22).
+///
+/// A page's URL goes into `session.json` *verbatim* — scheme, host, port, path,
+/// query and fragment, in the clear, tokens and all — because query and fragment
+/// are part of what was asked for and therefore part of the row's identity
+/// (`webnav::switcher_key`). A document that normalised, stripped or escaped any
+/// of it would come back to a different page than the one that was closed, and a
+/// build that silently dropped a `?token=` would be inventing a privacy promise
+/// the ruling explicitly declined to make.
+///
+/// The fixture carries the shape three times over, because the three are three
+/// different fields and a reader that taught only one of them the word would
+/// pass: a pane's `cur`, a pool row, and a `preview` vault seed.
+///
+/// Red gate: this fixture says `"schema_version": 11`, so on a build that has
+/// not taken the version it is refused as a future document and `report` is
+/// `FellBackToDefaults`.
+#[test]
+fn a_page_is_a_preview_row_and_its_query_and_fragment_survive_verbatim() {
+    let (session, report, degradation) = read_session(&fixture_path("session_v11_web.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert!(degradation.is_clean());
+    assert_eq!(session.schema_version, SESSION_SCHEMA_VERSION);
+
+    const PAGE: &str = "http://localhost:5173/app?tab=logs&token=s3cr3t#line-42";
+    const REPORT: &str = "http://127.0.0.1:8080/report?run=7#totals";
+
+    let content = session.windows[0].tabs[0]
+        .preview
+        .as_ref()
+        .expect("the tab carries a content section");
+    assert_eq!(
+        content.panes[1].cur.as_deref(),
+        Some(PAGE),
+        "a pane on a page names the page, query and fragment included"
+    );
+    assert_eq!(
+        content.pool[1].path, PAGE,
+        "and the pool row beside it says the same string"
+    );
+    assert_eq!(
+        content.pool[1].name, "Folio site",
+        "a page's row is listed under its title, exactly as a file's is listed \
+         under its name"
+    );
+    assert_eq!(content.panes[1].cur_source, PreviewSourceV1::Url);
+    assert_eq!(content.pool[1].source, PreviewSourceV1::Url);
+    assert_eq!(
+        content.panes[0].cur_source,
+        PreviewSourceV1::File,
+        "the file beside it is still a file — one table, two kinds of row"
+    );
+    assert_eq!(
+        session.recent[0].seed,
+        RecentSeedV1::Preview {
+            path: REPORT.to_owned(),
+            source: PreviewSourceV1::Url,
+        },
+        "the vault's fifth shape is the third one with a source"
+    );
+    assert_eq!(
+        session.recent[1].seed,
+        RecentSeedV1::Preview {
+            path: r"D:\work\folio\README.md".to_owned(),
+            source: PreviewSourceV1::File,
+        },
+        "and a file seed written with no source key reads as a file"
+    );
+    assert_eq!(
+        session.recent[0].previews,
+        vec![RecentPreviewV1::Page {
+            url: REPORT.to_owned()
+        }],
+        "and a closed page is in the vault, which is the whole reason the seed \
+         was extended: without it, closing a web tab is the one close in this \
+         window with no way back"
+    );
+
+    // The fixed-point gate every other fixture gets. It is what proves nothing
+    // in the write path re-encodes a `?` or a `#`.
+    let reserialized = serde_json::to_vec_pretty(&session).expect("SessionV1 always serializes");
+    let expected = std::fs::read(fixture_path("session_v11_web.json")).unwrap();
+    assert_eq!(
+        String::from_utf8(reserialized).unwrap(),
+        String::from_utf8(expected).unwrap().trim_end().to_owned(),
+        "the web fixture must be a fixed point of parse-then-serialize"
+    );
+}
+
+/// **v10 → v11 is a version and nothing else, and a document written before the
+/// field reads as *files*.**
+///
+/// The step exists for a distinction no v10 document can draw — every preview
+/// string a v10 build ever wrote was a path — so the honest migration touches no
+/// field, and "touches no field" is exactly what a migration test is for. What
+/// it has to prove beside that is the default: a pane, a pool row and a vault
+/// seed with no `source` key are a file, because a build that read them as
+/// anything else would turn every restored document into a navigation.
+///
+/// The bump is owed even so, for the reason v7 → v8 was: nothing in this crate
+/// refuses an unknown key, so a v10 build handed a v11 document would read
+/// `http://localhost:5173/` as a *path* and hand it to a filesystem. The version
+/// is what makes it refuse for the right reason (§5.4's future-version refusal).
+///
+/// Red gate: the two fixtures are the same document at two versions, so on a
+/// build with no v10 → v11 step the first read is refused.
+#[test]
+fn a_v10_document_arrives_at_v11_reading_every_preview_row_as_a_file() {
+    // The fixture is a *migration source*, which is a claim about this build and
+    // not about the file: a document recorded at the version this build writes
+    // has migrated through nothing, and a test built on one would pass on a
+    // build that never took the step.
+    let raw: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixture_path("session_v10_pages.json")).unwrap())
+            .unwrap();
+    let recorded = raw["schema_version"]
+        .as_u64()
+        .expect("the fixture records a version");
+    assert_eq!(recorded, 10);
+    assert!(
+        recorded < u64::from(SESSION_SCHEMA_VERSION),
+        "v11 is this slice's version — see the persistence clause in `session.rs`"
+    );
+
+    let (migrated, report, degradation) = read_session(&fixture_path("session_v10_pages.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(degradation, DegradationReport::default());
+    assert_eq!(migrated.schema_version, SESSION_SCHEMA_VERSION);
+
+    let (native, report, _) = read_session(&fixture_path("session_v8_sessionless.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(
+        migrated, native,
+        "a v10 document read at v11 is the v11 document, field for field"
+    );
+
+    let content = native.windows[0].tabs[1]
+        .preview
+        .as_ref()
+        .expect("the file tab carries a content section");
+    let on_disk =
+        String::from_utf8(std::fs::read(fixture_path("session_v8_sessionless.json")).unwrap())
+            .unwrap();
+    assert!(
+        !on_disk.contains("source"),
+        "a document with no page in it writes exactly the bytes it used to: {on_disk}"
+    );
+    assert_eq!(
+        content.panes[0].cur.as_deref(),
+        Some(r"D:\work\folio\docs\DESIGN.md"),
+        "and the file it named is still the file it names"
+    );
 }

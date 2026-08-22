@@ -19,7 +19,51 @@ use crate::layout::LayoutNodeV1;
 /// leaf** — where that pane's focus card aims its window, in rows above the tail (§7.1.6b′, user
 /// ruling 2026-08-21), which is v7's shape on the other kind of leaf: a fact about the pane's
 /// *shape* rather than its content, and one a reader sets once and expects to find again.
-pub const SESSION_SCHEMA_VERSION: u32 = 10;
+/// **v11 lets a preview row name a page as well as a file** (Web 预览块 W2 片③, user ruling
+/// 2026-08-22): [`PreviewSourceV1`] joins the pane's `cur`, the pool row and [`RecentSeedV1::Preview`]
+/// as the one field that says which of the two a string is.
+///
+/// # The plaintext clause (`docs/plans/web-preview/plan.md` §3, user ruling 2026-08-22)
+///
+/// **A page's URL is written verbatim** — scheme, host, port, path, **query and fragment** — into
+/// this file and into `pins.json`, in the clear. Query and fragment are part of what was asked for
+/// and therefore part of the row's identity (`bt_app::webnav::switcher_key` keys the switcher on
+/// exactly this string), so a document that dropped them would restore a different page than the
+/// one that was closed. The consequence is stated rather than hidden: **a URL carrying a session
+/// token is stored in the clear**, and a restore whose token has expired lands on a login page,
+/// which is the normal outcome and not a failure of this file.
+pub const SESSION_SCHEMA_VERSION: u32 = 11;
+
+/// **What a preview row's string names** — schema v11.
+///
+/// The one field that tells a path from a page. Everything else about the row is unchanged: a page
+/// is listed, restored, deduplicated, pinned and put in the vault through the fields a file already
+/// used, which is `docs/DESIGN.md` §7.7 ①'s "同一张表、同一个索引空间" said about the disk.
+///
+/// **`File` is the default and is not written**, so a document with no page in it is byte for byte
+/// the document a v10 build wrote: every string a v10 build ever put in one of these fields was a
+/// path, and a reader that guessed otherwise would hand `http://localhost:5173/` to a filesystem.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PreviewSourceV1 {
+    /// A file on a disk — the only thing a preview row could name before v11.
+    #[default]
+    File,
+    /// A page. The string is the normalised, whole URL; see the plaintext clause above.
+    Url,
+}
+
+impl PreviewSourceV1 {
+    /// Whether this is the historical answer, which is what `skip_serializing_if` asks.
+    ///
+    /// A method rather than a closure at each of the three fields, because "a document with no page
+    /// in it writes the bytes it always wrote" is one promise and three copies of it is three
+    /// chances for one field to start writing `"source": "file"` into every session on disk.
+    #[must_use]
+    pub fn is_file(&self) -> bool {
+        matches!(self, Self::File)
+    }
+}
 
 /// Persisted theme mode restored with the session. `System` is resolved by the app against winit's
 /// OS theme; `BT_BG` remains a process diagnostic override and is never persisted as a mode.
@@ -275,11 +319,20 @@ pub struct PreviewPaneV1 {
     /// function of the same tree shape the file already carries, so it cannot
     /// point outside it.
     pub leaf: String,
-    /// The file this pane was showing, or `null` for a pane that was showing
-    /// nothing. Written rather than omitted: an empty preview pane is a pane,
-    /// and a reader that inferred it from a missing row could not tell it from
-    /// a pane the writer forgot.
+    /// The file — or, from schema v11, the page — this pane was showing, or
+    /// `null` for a pane that was showing nothing. Written rather than omitted:
+    /// an empty preview pane is a pane, and a reader that inferred it from a
+    /// missing row could not tell it from a pane the writer forgot.
     pub cur: Option<String>,
+    /// Which of the two [`Self::cur`] is (schema v11).
+    ///
+    /// Beside `cur` rather than inside it, because that is what keeps this
+    /// section the shape it has always been: a pane row is `{leaf, cur}` and
+    /// still is, and a document with no page in it is byte for byte the document
+    /// a v10 build wrote. See [`PreviewSourceV1`], and the plaintext clause on
+    /// [`SESSION_SCHEMA_VERSION`] for what a URL here carries.
+    #[serde(default, skip_serializing_if = "PreviewSourceV1::is_file")]
+    pub cur_source: PreviewSourceV1,
     /// **Which branches this pane's commit graph was of** (T2/T3, v2 ③).
     ///
     /// Here rather than on the preview *leaf* for [`TabV1::preview`]'s own
@@ -347,7 +400,14 @@ pub struct PreviewPoolEntryV1 {
     /// than re-derived, for the same reason `files` leaves store their root:
     /// this crate does not own a path grammar, and a name split off a path by a
     /// rule that drifts is a switcher row labelled differently after a restart.
+    ///
+    /// **A page's name is its title**, on exactly those terms: it is not derived
+    /// from the URL, because the two are different sentences and the title is
+    /// the one the switcher lists.
     pub name: String,
+    /// Which of the two [`Self::path`] is (schema v11) — see [`PreviewSourceV1`].
+    #[serde(default, skip_serializing_if = "PreviewSourceV1::is_file")]
+    pub source: PreviewSourceV1,
 }
 
 /// One `recent` entry — docs/M2-persistence-schema-v1.md §3.5, deduped by
@@ -374,11 +434,48 @@ pub struct RecentEntryV1 {
     /// ([`TabV1::preview`]), an entry that did not carry it would be that same
     /// asymmetry a second time, in the same store, for the same reason.
     ///
-    /// A list of paths and nothing else. Recent is a *launcher*: it restores
+    /// A list of places and nothing else. Recent is a *launcher*: it restores
     /// the places you were, not a layout — the pool regrows on demand and the
     /// pins are not promises anyone made about a closed tab.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub previews: Vec<String>,
+    pub previews: Vec<RecentPreviewV1>,
+}
+
+/// One thing a closed tab's preview pane was on — **a file, spelled as the bare
+/// string it has always been, or a page** (schema v11).
+///
+/// The discriminator here is the element's *shape* and not a field beside it,
+/// which is the opposite of [`RecentSeedV1::Preview`]'s choice one field over.
+/// Both are the same rule applied to two different forms: keep what the file
+/// already says, and add only the word that says which. A seed is an object that
+/// already had a `path` key, so the word goes beside it; this is a list of bare
+/// strings, so the word is *that a page is not a bare string*. The result either
+/// way is that **every row on every disk is byte for byte what it was** — no
+/// migration step, no rewritten list, and a v10 build reading a v11 vault meets a
+/// shape it cannot read rather than a path it would hand to a filesystem.
+///
+/// `untagged`, and the two arms cannot be confused: a JSON string and a JSON
+/// object are disjoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RecentPreviewV1 {
+    /// A file on a disk — `"D:\\work\\notes.md"`.
+    File(String),
+    /// A page — `{ "url": "http://localhost:5173/app?tab=logs" }`. See the
+    /// plaintext clause on [`SESSION_SCHEMA_VERSION`] for what that string may
+    /// carry.
+    Page { url: String },
+}
+
+impl RecentPreviewV1 {
+    /// The string this row names, whichever of the two it is.
+    #[must_use]
+    pub fn target(&self) -> &str {
+        match self {
+            Self::File(path) => path,
+            Self::Page { url } => url,
+        }
+    }
 }
 
 /// `docs/DESIGN.md` §7.1.4: "Recent 条目 = 终端 seed **或** files 场所" — the
@@ -425,8 +522,18 @@ pub enum RecentSeedV1 {
     /// A path and nothing else, on [`TabPreviewV1`]'s own ruling: a restored
     /// preview shows the file as it is on disk, so there is no view, no scroll
     /// and no dirty bit here to be a promise nobody can keep.
+    ///
+    /// **The fifth shape is not a fifth variant** (schema v11, user ruling
+    /// 2026-08-22): a page closes exactly as a file does, so it is this row with
+    /// [`Self::Preview::source`] saying which of the two the string is. Without
+    /// it, closing a web tab would be the one close in this window with no way
+    /// back — which is the asymmetry this whole enum exists to prevent, said a
+    /// fourth time. The field is named `source` and not `kind` because `kind` is
+    /// already this enum's own serde tag.
     Preview {
         path: String,
+        #[serde(default, skip_serializing_if = "PreviewSourceV1::is_file")]
+        source: PreviewSourceV1,
     },
     /// **A whole window that was closed** (multiwindow slice D, 2026-08-19 ruling
     /// ②: 关一扇非最后的窗不弹提示,该窗的种子进 Recent).

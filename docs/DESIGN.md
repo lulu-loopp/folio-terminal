@@ -1527,6 +1527,30 @@ W0′ 的双向矩阵在这里落成三条:
 
 **⑧ 隐藏不是装饰,是账。** 页面所在座位没有矩形(tab 切走、fit 阶梯把它挤掉、聚焦模式把它挪下台——三件事都是 `device_rect: None`)或被模态盖住时,`SetIsVisible(false)`。同一个六秒窗口实测:可见时 CPU **1 811ms**、rAF **718 帧**;隐藏时 **0 和 0**(`w0p-evidence.md` §1 门 8)。这就是「没人看的 tab 上那张网页不要钱」的全部机制。
 
+### 7.9 网页是一个预览缓冲（Web 预览块 W2 片③，2026-08-22，已落地；`crates/bt-persist/src/{session,migrate,lib}.rs`、`crates/bt-app/src/{preview,main,seed,profiles,restore,pins,marks,webnav,webhost}.rs`、`crates/bt-platform/src/{lib,webview}.rs`）
+
+**这一片没有画一个新表面,它把网页塞进已经有的每一张表里。** §7.7 ① 早就裁定「网页是一个预览缓冲,不是第四种叶」;本片是那句话的落地,而落地的判据只有一条:**代码里不该有一处先问「这是不是网页」再决定怎么办**。所以 `PreviewSource` 多了一臂、`session.json` 每个预览字段多了一个词、`pins.json` 的第三类第一次有人消费,除此之外切换器、Recent、恢复提示、tab 命名、卡片动词一行没有为网页分岔。
+
+**① `PreviewSource::Web(String)`,字符串是切换器键,而且只有一本账。** 这一臂拿的是 `webnav::switcher_key` 规范化之后的完整 URL——query 与 fragment 参与身份(§3 切换器确定性三则),只丢默认端口。它从哪儿来是本片最要紧的一句话:**`webnav::switcher_identity(webhost::WebMachine::recoverable_url())`,而 `recoverable_url` 只被 `NavigationCompleted(IsSuccess)` 写**。§3 说「切换器身份 = 最后一次成功提交的 URL」,§4 说「失败页/about:blank/取消不覆盖可恢复 URL」——**这两句是同一件事**,所以它们是同一个字段:池的键、切换器的行、`session.json` 的 `cur`、Recent 的种子,四个读者全部读它。`WebOutcome::Committed` 因此**不带字符串**:带一份拷贝就是让第二本账上路,而两本账迟早会对「重启回哪一页」给出两个答案。一次从未提交的导航没有身份,所以也没有缓冲——在途的页面是一个还没有行的座位,而不是一行指向从未存在过的页面。
+
+**② `WindowRuntime::web` 从 `Option` 变成 map,而 DirectComposition 的那一个 visual 也跟着变。** §7.8 的注释预告过这件事;真做的时候暴露出的是它的另一半:**`Compositor` 的 web visual 也是单数的**,而一个 controller 的 `SetRootVisualTarget` 是终身的。实机拍到:从 Recent 重开一页时,上一页还在等它的 browser 退出,新页面被指到同一个 visual 上,**约三百毫秒后旧座位的收尾把那个 visual 从树里摘走**——屏幕上是一个后面什么都没有的洞。所以 `Compositor::{attach,detach,place,web}_visual` 四扇门现在都带座位号,`bt_platform` 里每座位一个 visual;`every_web_visual_belongs_to_one_seat_and_is_reached_by_naming_it` 是那条源码钉。**键是座位不是 tab**:一个 controller 渲染进一个矩形,而「每 tab 单例」是上一层的事——`web_seat_among` 走的是**这张 tab 自己的**座位表,所以另一张 tab 上的页面不会被这张 tab 的按键操走。
+
+**③ 尺寸和露面是两个问题,从这一片起。** §7.8 记过「引擎必须先拿到尺寸再拿到 URL」;当一个窗口只有一页时,那一页永远就是你正在看的那一页,于是「有多大」和「在不在玻璃上」是一个答案。现在不是了:一页可以生在没人看的 tab 上,也可以生在模态背后(启动时恢复提示压着)。实机结果是那一页**从未提交过**——零尺寸的 controller 不完成导航——于是座位没有身份、池里没有行、`session.json` 里什么都没有。修法是把两个问题分开:每个座位按**它自己那张 tab 的树**量矩形(`WebPlacement`),尺寸照给,露面另判(模态、或不是当前 tab)。隐藏本身一毫米没松:隐藏的 WebView 仍然是 CPU 0、rAF 0(§7.8 ⑧)。
+
+**④ 切换器、Recent、恢复提示:同一张表,两处分岔,一个记号。** 切换器的行由一个自由函数 `switcher_rows` 造(池 + 当前缓冲 + 钉表),网页行与文件行同表同索引空间;真正分岔的只有两处,而且都是它们本来就不同的地方——**这一行属于 `pins.json` 的哪一类**(`file` 还是 `url`),以及**没人打开过的钉行叫什么**(文件取最后一段,网页取 `webnav::site_label` 的 `host[:port]`,因为钉与 Recent 存的是地方不是标题)。记号走一扇门 `marks::preview_row_mark`:文件 `#i-file`、网页 `#i-globe`,同一个盒子、同一列左缘(§7.7 ⑤)——这是小样 `pvMarkId` 那句注释的 Rust 版,「一个页面不可以在切换器里是地球、在别处是文件」。提升用的是 `pins::lift_pinned`,它现在对键泛型:`pins.json` 的一行由**类目加目标**共同标识,只比字符串会让一枚钉住的文件顶替一枚钉住的网页。
+
+**⑤ 钉不是授权,两处验,而且第二处才是要紧的那处。** 第一处在钉的时候(`switcher_pin_is_allowed`):不合规的目标根本进不了文件。第二处在按下的时候(`switcher_row_destination`):同一扇 `webnav::address_bar`,因为今天过了不等于永远过——旧版本写的、手工改过的、政策收紧之前钉的,都只有这一次能拦住。**会话文件同理**:`revive_web_pages` 把 `session.json` 里的 URL 照走同一扇门,一份文档不比一枚钉更有权限。**取消钉从不设门**:一条这个版本拒绝加载的行,必须仍然能被删掉,否则收紧一次政策就留下一批谁也删不掉的行。实机验证:一枚被手工改成 `javascript:alert(document.cookie)` 的 pin 照样列在 PINNED 段里(它是一行,不是一个错误),按下去 `BT_WEB refused javascript:alert(document.cookie)`,座位一动不动——「什么都没发生比一个确认框更诚实」在这条路上的落点。
+
+**⑥ schema v11,以及写进档案的明文条款。** `session.json` 升到 v11:`PreviewSourceV1{File,Url}` 一个字段,同时长在 pane 的 `cur`、池行、以及 `RecentSeedV1::Preview` 上;`File` 是默认且**不写**,所以一份没有网页的文档与 v10 逐字节相同。迁移 `migrate_session_v10_to_v11` **一个字段都不动**,理由与 v7→v8 一字不差:v10 文档写过的每一个预览字符串都是磁盘上的路径,那正是默认值说的话。**版本号仍然欠着**,因为这个 crate 不拒绝未知键——一个 v10 build 读到 v11 文档会把 `http://localhost:5173/app` 当**路径**交给文件系统,而版本号是把那件事变成 §5.4 的未来版本拒绝(一句读者能行动的话)的唯一东西。
+
+Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别式是**元素的形状**而不是旁边的字段:`RecentPreviewV1::{File(String), Page{url}}`,untagged,JSON 的字符串与对象互斥。两处不同拼法是同一条规矩的两次应用——**保留文件已经在说的,只加那个说明是哪一种的词**;结果是每一台机器上的每一行原样不动,不需要迁移步,而一个 v10 build 遇到的是一个它读不懂的形状,不是一个它会拿去当路径的字符串。
+
+**明文条款(用户裁决 2026-08-22,记档)**:一条 URL 的 scheme、host、port、path、**query 与 fragment** 原样明文写进 `session.json` 与 `pins.json`。query 与 fragment 是「你要的那个东西」的一部分,也就是身份的一部分(`switcher_key` 就是按这个键的),丢掉它们等于恢复到另一页。**后果照直说:一条带会话 token 的 URL 是明文存着的**,而 token 过期后恢复落在登录页是正常结果,不是这份文件的失败。这句话同时写在 `bt_persist::SESSION_SCHEMA_VERSION` 的文档上,因为读代码的人不会先来读这里。
+
+**⑦ 每 tab 单例。** `plan.md` §0 ② 的「每 tab 单例、可成 tab 根」落成一句可验的话:一张 tab 已经有页面时,第二条地址是**在那个座位上导航**,不是第二个 pane、也不是第二个 controller;那张 tab 没有页面时才按普通的落位规矩要一个预览座位。实机:启动时恢复的那张 tab 已经带着 `?run=9`,`BT_WEB_DEV` 又给了 `?run=10`,结果是**一个 pane、cur 是 run=10、池里两行**——座位换了内容,历史留在池里,这正是切换器该列的东西。
+
+**⑧ 池里有,不代表窗口里有。** 一张 tab 的池是它的历史,恢复回来的是**行**;`create_tab_state` 把行放回池、把 pane 指回去(所以头、脚、tab 名、切换器在第一帧就是对的),`revive_web_pages` 才把它变回一个真的页面。两件事故意分开:缓冲是内容、归 tab;引擎是一个挂在窗口 `HWND` 上的 controller,而只有恢复的这一侧手里有窗口。也因此它挂在 `show_new_window` **之后**——一个建在还没显示过的窗口上的 WebView2 无处可合成,这是 §7.8 已经付过一次的学费。
+
 ## 8. 依赖策略
 
 同 v3 表格，关键修订：**alacritty_terminal 稳态配置 scrollback=0**。vendor seam 包含既有上滚事件钩子，以及窄事务操作：打开 primary native history、查询行数、在 coalesced final viewport 上用 vendor row/WRAPLINE/cursor 重新评估高度、一次性 `take_history(oldest→newest)`、清空并恢复 limit=0，以及只针对唯一未闭合 staging candidate 的 `restore_history(oldest→newest)`；没有可独立呈现的 transcript snapshot/backing 镜像，也不复制 reflow 算法。事务期 vendor grid 是 mutable tail 唯一权威；收割后转录层拥有 staging ID/配额/定稿权，vendor 只保留该候选的原生 row escrow 供下一事务无损交还。升级必须 diff `grid/resize.rs`/history 语义，跑 vendor 181 项与完整生命周期矩阵。

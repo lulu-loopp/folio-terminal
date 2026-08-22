@@ -452,6 +452,7 @@ pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (7, migrate_session_v7_to_v8),
     (8, migrate_session_v8_to_v9),
     (9, migrate_session_v9_to_v10),
+    (10, migrate_session_v10_to_v11),
 ];
 
 fn migrate_session_v1_to_v2(mut value: Value) -> Value {
@@ -701,6 +702,27 @@ fn migrate_card_skip_in_leaf(leaf: &mut Value) {
     if !object.contains_key("card_skip") {
         object.insert("card_skip".to_owned(), Value::from(0));
     }
+}
+
+/// **v10 → v11 — a preview row may name a page, and no v10 row does** (Web 预览块 W2 片③, user
+/// ruling 2026-08-22).
+///
+/// `v7_to_v8`'s step exactly, and for its sentence: the bump exists for a distinction no v10
+/// document can draw. Every string a v10 build ever wrote into a pane's `cur`, a pool row's `path`
+/// or a `preview` vault seed was a path on a disk, which is precisely what
+/// [`PreviewSourceV1`](crate::PreviewSourceV1)'s default says — so the honest step writes no field
+/// and invents no key (rule 3: 迁移函数只做结构升级,不做语义修复).
+///
+/// **The version is still owed.** Nothing in this crate refuses an unknown key, so a v10 build
+/// handed a v11 document would read `http://localhost:5173/app` out of `cur` as a *path* and hand
+/// it to a filesystem — a silent misreading rather than a refusal. The version number is what turns
+/// that into §5.4's future-version refusal, which is a sentence the reader can act on ("this file
+/// was written by a newer Folio").
+fn migrate_session_v10_to_v11(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(11));
+    }
+    value
 }
 
 /// Walks a persisted layout tree, giving every `files` leaf its page.

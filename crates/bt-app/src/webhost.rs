@@ -44,7 +44,6 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use bt_layout::SeatId;
 use bt_platform::{WebChord, WebEvent, WebHost, WebNavigationVerdict};
 use winit::keyboard::{ModifiersState, NamedKey};
 
@@ -172,7 +171,12 @@ impl WebMachine {
     /// still a crash that has to come back to the right page. Read today by
     /// `a_failed_page_does_not_overwrite_a_recoverable_url` and by the two
     /// crash tests beside it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    ///
+    /// **Slice ③ is the consumer this was written for.** It is read by
+    /// [`WebSeat::identity`], and through it by the preview pool, the switcher,
+    /// `session.json` and the Recent vault — all four of them off this one field,
+    /// because "the URL a session file may record" and "what the switcher calls
+    /// this seat" are the same sentence (`plan.md` §3 与 §4).
     pub(crate) fn recoverable_url(&self) -> Option<&str> {
         self.recoverable_url.as_deref()
     }
@@ -585,6 +589,21 @@ pub(crate) fn web_presence(body: Option<[f32; 4]>, obstructed: bool) -> WebPrese
     })
 }
 
+impl WebPresence {
+    /// The rectangle, when there is one on the glass.
+    ///
+    /// Read by the one caller that asks [`web_presence`] twice — once with
+    /// nothing standing over the seat, to learn its *size*, and once honestly, to
+    /// learn its *presence*. See [`WebSeat::apply_presence`] for why those are
+    /// two questions.
+    pub(crate) fn bounds(self) -> Option<WebBounds> {
+        match self {
+            Self::Shown(bounds) => Some(bounds),
+            Self::Hidden => None,
+        }
+    }
+}
+
 impl WebBounds {
     /// The rectangle `bt_render::WindowRenderer::set_web_holes` is given, in the
     /// `[left, top, right, bottom]` every chrome rectangle in this program is
@@ -646,6 +665,27 @@ pub(crate) enum WebOutcome {
     Cursor(u32),
     /// The page took (`true`) or lost (`false`) the keyboard.
     PageFocus(bool),
+    /// **A top-level navigation actually loaded, and this seat's identity is now
+    /// that URL** (W2 slice ③).
+    ///
+    /// Read straight off [`WebMachine::recoverable_url`] and not off the event,
+    /// which is the whole point: `plan.md` §4 says only a
+    /// `NavigationCompleted(IsSuccess)` writes that field, and `plan.md` §3 says
+    /// the switcher's identity is the last successfully committed URL. Those are
+    /// **one sentence**, so they are one field — the machine's — and this outcome
+    /// is how the pool, the switcher, `session.json` and Recent read it. A second
+    /// ledger kept beside it would be the two accounts disagreeing about which
+    /// page a restart comes back to.
+    ///
+    /// Emitted only when the machine's answer actually changed, so a reload of
+    /// the same address is not a new row.
+    ///
+    /// **It carries nothing**, and that is the point: the window asks
+    /// [`WebSeat::identity`] for the URL, so the only string anybody reads is the
+    /// machine's own field. An outcome that carried a copy would be a second
+    /// account travelling beside the first, and the two would part company the
+    /// first time one of them was dropped on the floor.
+    Committed,
     /// The teardown is finished: the browser has let go and the seat may be
     /// forgotten.
     Gone,
@@ -680,7 +720,15 @@ enum BrowserWait {
 
 /// One web seat: the state machine, the engine, and the mint they share.
 pub(crate) struct WebSeat {
-    pub(crate) seat: SeatId,
+    /// **Which seat's visual this controller renders into.**
+    ///
+    /// The window's compositor holds one visual per seat since W2 slice ③, and a
+    /// controller is pointed at one of them for its whole life
+    /// (`SetRootVisualTarget`). Carrying the key here rather than passing it at
+    /// each call is what makes "this seat's page composes into this seat's box"
+    /// true by construction: the attach, the placement and the detach cannot name
+    /// three different visuals.
+    seat: u64,
     hwnd: std::num::NonZeroIsize,
     folder: PathBuf,
     machine: WebMachine,
@@ -708,6 +756,12 @@ pub(crate) struct WebSeat {
     /// What the engine has actually been told, so a frame that changed nothing
     /// issues no calls.
     presence: Option<WebPresence>,
+    /// **How big this seat's rectangle is**, whether or not the page is on the
+    /// glass — see [`WebSeat::apply_presence`] for why the two are separate
+    /// questions since W2 slice ③.
+    wanted_size: Option<(u32, u32)>,
+    /// And what the engine has actually been told about it.
+    sized: Option<(u32, u32)>,
     /// Which buttons the page believes are down.
     ///
     /// Kept here and nowhere else because it is derived from the very events
@@ -727,7 +781,7 @@ pub(crate) struct WebSeat {
 impl WebSeat {
     /// Open a web seat on this pane and start the engine towards `url`.
     pub(crate) fn open(
-        seat: SeatId,
+        seat: u64,
         hwnd: std::num::NonZeroIsize,
         url: &str,
         wake: Box<dyn Fn()>,
@@ -763,6 +817,8 @@ impl WebSeat {
             waiting: None,
             wanted: WebPresence::Hidden,
             presence: None,
+            wanted_size: None,
+            sized: None,
             buttons: bt_platform::web_mouse_buttons::NONE,
             last_left_press: None,
         };
@@ -770,6 +826,40 @@ impl WebSeat {
         debug_assert_eq!(effect, WebEffect::Ignore, "an engine that is not up yet");
         web.start_environment()?;
         Ok(web)
+    }
+
+    /// **Go somewhere on this seat** — the one door every later navigation takes
+    /// (W2 slice ③).
+    ///
+    /// The switcher's row, a pin, a restored session and the address field slice
+    /// ④ will grow all arrive here, and each of them is *a request*, not a
+    /// permission: the URL still passes `webnav::address_bar` at the call site
+    /// and `webnav::navigation_starting` inside the engine's own callback, which
+    /// is the two-gate rule `plan.md` §3 states and `webnav`'s ① records at
+    /// length. This method's own contract is narrower and is the recovery
+    /// machine's: last write wins, and nothing is navigated until the events are
+    /// installed.
+    ///
+    /// It answers the effect rather than acting on it, because acting needs the
+    /// window's compositor and this type is asked from places that do not hold
+    /// one — see [`WebSeat::go`], which is this plus that.
+    pub(crate) fn go(
+        &mut self,
+        url: &str,
+        compositor: &bt_platform::Compositor,
+    ) -> Vec<WebOutcome> {
+        let effect = self.machine.request(url);
+        let mut outcomes = Vec::new();
+        self.apply(effect, compositor, &mut outcomes);
+        outcomes
+    }
+
+    /// **What this seat is remembered as** — the last URL that actually loaded.
+    ///
+    /// One field, one reader: [`WebMachine::recoverable_url`]. See
+    /// [`WebOutcome::Committed`] for why there is no second account of it.
+    pub(crate) fn identity(&self) -> Option<&str> {
+        self.machine.recoverable_url()
     }
 
     /// The chords the window takes back from a focused page.
@@ -820,9 +910,24 @@ impl WebSeat {
                 }
                 WebEffect::Ignore
             }
-            WebEvent::NavigationCompleted { uri, success, .. } => self
-                .machine
-                .on_navigation_completed(self.machine.generation(), uri, *success),
+            WebEvent::NavigationCompleted { uri, success, .. } => {
+                // Asked *before* and *after*, and the answer is the machine's
+                // both times: a failure page, an `about:blank` and a cancelled
+                // navigation all reach here and none of them may move the
+                // identity (`plan.md` §4). Comparing the machine's own field
+                // across the call is what makes that true without this arm
+                // knowing which of the three it is looking at.
+                let was = self.machine.recoverable_url().map(str::to_owned);
+                let effect =
+                    self.machine
+                        .on_navigation_completed(self.machine.generation(), uri, *success);
+                if let Some(now) = self.machine.recoverable_url()
+                    && was.as_deref() != Some(now)
+                {
+                    outcomes.push(WebOutcome::Committed);
+                }
+                effect
+            }
             // 0 is the browser process and 1 the renderer: one name over two
             // entirely different events.
             WebEvent::ProcessFailed { kind, .. } if *kind == 0 => {
@@ -926,8 +1031,8 @@ impl WebSeat {
             WebEffect::InstallEvents => {
                 // The visual first: the controller is told where to render
                 // before it is told to do anything at all.
-                compositor.attach_web_visual()?;
-                self.host.install(compositor)?;
+                compositor.attach_web_visual(self.seat)?;
+                self.host.install(compositor, self.seat)?;
                 // **Before the navigation, never after.** The next line's
                 // acknowledgement produces the first `Navigate`, and a page that
                 // begins loading against the controller's default zero-by-zero
@@ -994,7 +1099,7 @@ impl WebSeat {
             }
             WebEffect::ReleaseUserDataFolder => {
                 self.waiting = None;
-                let _ = compositor.detach_web_visual();
+                let _ = compositor.detach_web_visual(self.seat);
                 outcomes.push(WebOutcome::Gone);
                 Ok(None)
             }
@@ -1051,23 +1156,49 @@ impl WebSeat {
         &mut self,
         compositor: &bt_platform::Compositor,
         presence: WebPresence,
+        size: Option<(u32, u32)>,
     ) -> Result<(), String> {
         self.wanted = presence;
+        // **The size is not the presence** (W2 slice ③). A seat's rectangle
+        // exists whenever its pane does; whether the page is *on the glass* is a
+        // second question, answered by a modal and by which tab is in front. They
+        // were one answer while a window held one page, because the only page
+        // there was was the one you were looking at.
+        if let Some(size) = size {
+            self.wanted_size = Some(size);
+        }
         self.apply_presence(compositor)
     }
 
     /// Tell the engine where it is, if there is an engine and it does not know
     /// already.
     fn apply_presence(&mut self, compositor: &bt_platform::Compositor) -> Result<(), String> {
-        if !self.host.has_controller() || self.presence == Some(self.wanted) {
+        if !self.host.has_controller() {
+            return Ok(());
+        }
+        // **A page is given its size even while it is hidden**, and this is slice
+        // ①'s own sentence — "the engine has to be given its size before it is
+        // given a URL" — meeting the case slice ③ created. A page can now be born
+        // on a tab nobody is looking at (a restored window with two of them) or
+        // behind a modal (the restore prompt is up at launch), and a page whose
+        // controller was never sized loads against zero by zero. Measured: such a
+        // page never committed at all, so the seat had no identity, no pool row
+        // and nothing in `session.json`.
+        if let Some((width, height)) = self.wanted_size
+            && self.sized != self.wanted_size
+        {
+            self.host.set_size(width, height)?;
+            self.sized = Some((width, height));
+        }
+        if self.presence == Some(self.wanted) {
             return Ok(());
         }
         self.presence = Some(self.wanted);
         match self.wanted {
             WebPresence::Hidden => self.host.set_visible(false),
             WebPresence::Shown(bounds) => {
-                self.host.set_size(bounds.width, bounds.height)?;
                 compositor.place_web_visual(
+                    self.seat,
                     (bounds.x, bounds.y),
                     (0.0, 0.0, bounds.width as f32, bounds.height as f32),
                 )?;

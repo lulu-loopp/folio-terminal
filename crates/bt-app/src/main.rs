@@ -5011,15 +5011,25 @@ struct WindowRuntime {
     /// and wgpu will never do it. See [`Self::present_seats_and_commit`], which
     /// is the only place in this program that presents a frame.
     compositor: bt_platform::Compositor,
-    /// **This window's hosted web page** (web preview slice 1), while
-    /// `BT_WEB_DEV` has put one on a seat.
+    /// **This window's hosted web pages, one per seat** (web preview slice ③).
     ///
-    /// One and not a list, and the singular is this slice's scope rather than a
-    /// shortcut: the only door to a page in this build is a development
-    /// environment variable read once at launch. Slice 3 gives the page a
+    /// Slice ① held one, and said in this comment that "slice 3 gives the page a
     /// preview buffer and with it a pane's ordinary plurality, and that is the
-    /// slice this field becomes a map in.
-    web: Option<webhost::WebSeat>,
+    /// slice this field becomes a map in". This is that slice and this is that
+    /// map.
+    ///
+    /// **Keyed by seat and not by tab, because the seat is what owns the
+    /// engine**: a controller renders into one visual at one rectangle, and a
+    /// window with a page on two tabs has two of both. The singleton rule the
+    /// plan states (§0 ②「每 tab 单例」) is one level up and is a rule about where
+    /// a *new* page lands — see [`Runtime::web_seat_of_tab`] — not about what
+    /// this window can hold.
+    ///
+    /// A `BTreeMap` for the reason every other seat-keyed map here is one: seat
+    /// order is stable, so the holes handed to the renderer come out in the same
+    /// order every frame and a diff of two frames is a diff of the pixels rather
+    /// than of a hash seed.
+    web: BTreeMap<SeatId, webhost::WebSeat>,
     /// The Win32 cursor the page last asked for, while the pointer is over it.
     ///
     /// Kept beside the page rather than folded into [`pointer_cursor`]'s six
@@ -6692,9 +6702,10 @@ impl TabState {
             // A pane showing nothing has no file to be reopened on, so it seeds
             // nothing — the same sentence `preview_showing` already writes about
             // the session file, applied to the other store that reads it.
-            bt_layout::SeatKind::Preview => Some(seed::Seed::Preview {
-                path: self.preview_showing(seat)?.to_string_lossy().into_owned(),
-            }),
+            bt_layout::SeatKind::Preview => {
+                let (path, source) = persisted_preview_row(&self.preview_showing(seat)?)?;
+                Some(seed::Seed::Preview { path, source })
+            }
             bt_layout::SeatKind::Placeholder => None,
         }
     }
@@ -6706,16 +6717,22 @@ impl TabState {
     /// pane on" has to ask both — a reader that only knew about the pool would
     /// write a pinned pane full of picture back to disk as an empty one.
     ///
-    /// **A path, and therefore only what has one.** Both of this function's
-    /// readers write a path to disk — the tab's content section and the Recent
-    /// vault — and the file section of `session.json` has no vocabulary for a
-    /// document composed out of a repository (see [`Self::preview_content`]).
-    fn preview_showing(&self, seat: SeatId) -> Option<&Path> {
+    /// **An identity, and therefore whatever the pane is on** — a file, or, since
+    /// W2 slice ③, a page. What *can be written down* is a separate question and
+    /// is asked once, by [`persisted_preview_row`]: both of this function's
+    /// readers write to disk, and `session.json` has no vocabulary for a document
+    /// composed out of a repository (see [`Self::preview_content`]).
+    ///
+    /// A picture answers as the file it is, because a picture's pane holds no
+    /// pool buffer and a reader that only knew about the pool would write a pane
+    /// full of picture back to disk as an empty one.
+    fn preview_showing(&self, seat: SeatId) -> Option<preview::PreviewSource> {
         let pane = self.preview_panes.get(PreviewSurface::Seat(seat))?;
-        pane.buffer
-            .as_ref()
-            .and_then(preview::PreviewSource::file_path)
-            .or_else(|| pane.image.as_ref().map(|image| image.path.as_path()))
+        pane.buffer.clone().or_else(|| {
+            pane.image
+                .as_ref()
+                .map(|image| preview::PreviewSource::file(image.path.clone()))
+        })
     }
 
     /// **The tab's content section** — `bt_persist::TabV1::preview`.
@@ -6749,7 +6766,17 @@ impl TabState {
                 leaf: format!("leaf-{index}"),
                 cur: self
                     .preview_showing(seat.id)
-                    .map(|path| path.to_string_lossy().into_owned()),
+                    .as_ref()
+                    .and_then(persisted_preview_row)
+                    .map(|(target, _)| target),
+                // **Which of the two `cur` is** (schema v11). Read through the
+                // same one door, so a pane and its pool row cannot disagree about
+                // what kind of thing they are naming.
+                cur_source: self
+                    .preview_showing(seat.id)
+                    .as_ref()
+                    .and_then(persisted_preview_row)
+                    .map_or(bt_persist::PreviewSourceV1::File, |(_, source)| source),
                 // **The graph's filter** (T2/T3, v2 ③) — written only when the
                 // reader has actually touched it, so a pane that has never seen a
                 // graph, and one whose graph is unfiltered, both write exactly
@@ -6788,9 +6815,11 @@ impl TabState {
             .preview_pool
             .buffers()
             .filter_map(|buffer| {
+                let (path, source) = persisted_preview_row(&buffer.source)?;
                 Some(bt_persist::PreviewPoolEntryV1 {
-                    path: buffer.source.file_path()?.to_string_lossy().into_owned(),
+                    path,
                     name: buffer.name.clone(),
+                    source,
                 })
             })
             .collect();
@@ -6802,12 +6831,12 @@ impl TabState {
     ///
     /// The pool is deliberately *not* here: Recent restores the places you were,
     /// and a browsing history regrown from disk is not one of them.
-    fn preview_pages(&self) -> Vec<String> {
+    fn preview_pages(&self) -> Vec<bt_persist::RecentPreviewV1> {
         self.seats
             .preview_seats()
             .into_iter()
             .filter_map(|seat| self.preview_showing(seat))
-            .map(|path| path.to_string_lossy().into_owned())
+            .filter_map(|source| recent_preview_row(&source))
             .collect()
     }
 }
@@ -7027,8 +7056,11 @@ impl TabState {
             | preview::PreviewView::Diff => Some(true),
             // A rendered page: prose, in the window's face, at the files size.
             preview::PreviewView::Markdown => Some(false),
+            // A page is the fourth: what is on the glass is the engine's, and
+            // this window has no lines of it to quote at any size.
             preview::PreviewView::Image
             | preview::PreviewView::Graph
+            | preview::PreviewView::Web
             | preview::PreviewView::None => None,
         }
     }
@@ -16408,10 +16440,11 @@ fn revive_plan(
 /// pane.
 #[derive(Clone, Debug, Default)]
 struct PreviewRestore {
-    /// The file each preview seat comes back showing.
-    cur: BTreeMap<SeatId, PathBuf>,
-    /// The tab's pool, oldest first — path and the name it was listed under.
-    pool: Vec<(PathBuf, String)>,
+    /// What each preview seat comes back showing — a file, or a page.
+    cur: BTreeMap<SeatId, preview::PreviewSource>,
+    /// The tab's pool, oldest first — the identity and the name it was listed
+    /// under.
+    pool: Vec<(preview::PreviewSource, String)>,
     /// The branch filter each preview seat's graph was of (T2/T3, v2 (3)).
     ///
     /// Restored even though the *document* is not: `session.json` has no
@@ -16442,14 +16475,23 @@ impl PreviewRestore {
                 // build read differently. The pane still arrives; it arrives
                 // empty, which is a state, and it is the same degradation §5.4
                 // asks for everywhere else.
-                (seat.kind == bt_layout::SeatKind::Preview)
-                    .then(|| Some((seat.id, PathBuf::from(pane.cur.as_ref()?))))?
+                (seat.kind == bt_layout::SeatKind::Preview).then(|| {
+                    Some((
+                        seat.id,
+                        preview_source_of(pane.cur.as_ref()?, pane.cur_source),
+                    ))
+                })?
             })
             .collect();
         let pool = saved
             .pool
             .iter()
-            .map(|entry| (PathBuf::from(&entry.path), entry.name.clone()))
+            .map(|entry| {
+                (
+                    preview_source_of(&entry.path, entry.source),
+                    entry.name.clone(),
+                )
+            })
             .collect();
         let filters = saved
             .panes
@@ -16475,7 +16517,7 @@ impl PreviewRestore {
 
     /// The one thing a Recent entry can rebuild: the files, with the pool left
     /// to regrow (裁决 10).
-    fn from_pages(cur: BTreeMap<SeatId, PathBuf>) -> Self {
+    fn from_pages(cur: BTreeMap<SeatId, preview::PreviewSource>) -> Self {
         Self {
             cur,
             pool: Vec::new(),
@@ -16492,12 +16534,254 @@ impl PreviewRestore {
 /// Declining is not discarding (see [`Runtime::answer_restore`]), so the entry
 /// it writes has to carry everything the tab would have come back with. This is
 /// [`TabState::preview_pages`]'s opposite number for a tab that was never built.
-fn persisted_preview_pages(tab: &TabV1) -> Vec<String> {
+fn persisted_preview_pages(tab: &TabV1) -> Vec<bt_persist::RecentPreviewV1> {
     tab.preview
         .iter()
         .flat_map(|content| content.panes.iter())
-        .filter_map(|pane| pane.cur.clone())
+        .filter_map(|pane| {
+            let cur = pane.cur.as_ref()?;
+            Some(match pane.cur_source {
+                bt_persist::PreviewSourceV1::File => bt_persist::RecentPreviewV1::File(cur.clone()),
+                bt_persist::PreviewSourceV1::Url => {
+                    bt_persist::RecentPreviewV1::Page { url: cur.clone() }
+                }
+            })
+        })
         .collect()
+}
+
+/// **One web seat's answer for one frame** — where it is, and whether it is on
+/// the glass.
+///
+/// Two fields and not one, because they are two questions since W2 slice ③: a
+/// page on a background tab has a rectangle and is not visible, and the engine
+/// needs the first of those whether or not it gets the second (see
+/// `webhost::WebSeat::apply_presence`).
+struct WebPlacement {
+    seat: SeatId,
+    presence: webhost::WebPresence,
+    size: Option<(u32, u32)>,
+}
+
+/// **What a preview source can be written down as** — the one door between this
+/// window's identity type and the two stores that keep it.
+///
+/// `None` for a source neither store has a vocabulary for. That is not an
+/// omission but the standing rule the pool section already states about git:
+/// `session.json` has no field for a repository, and a pseudo-path smuggled into
+/// `path` would be exactly the ambiguity [`preview::PreviewSource`] was
+/// introduced to retire.
+///
+/// **A page answers `Url` and its whole URL** (W2 slice ③). The string is the
+/// switcher key — `webnav::switcher_key` of the last successfully committed
+/// address — carried verbatim, query and fragment included, which is the
+/// persistence clause `plan.md` §3 states and `bt_persist::SESSION_SCHEMA_VERSION`
+/// records.
+fn persisted_preview_row(
+    source: &preview::PreviewSource,
+) -> Option<(String, bt_persist::PreviewSourceV1)> {
+    if let Some(url) = source.web_url() {
+        return Some((url.to_owned(), bt_persist::PreviewSourceV1::Url));
+    }
+    Some((
+        source.file_path()?.to_string_lossy().into_owned(),
+        bt_persist::PreviewSourceV1::File,
+    ))
+}
+
+/// **The switcher's whole list, in one place** — the tab's pool with the kept
+/// rows lifted to the top (P130-P137, user ruling 2026-08-19, W2 slice ③).
+///
+/// **The dropdown is the honest inventory of hidden state** (P130, `DESIGN.md`
+/// §7.1.3): the pool's own order, every buffer in it, and each one's dirty bit —
+/// a list that showed only the clean ones, or only the recent ones, would be the
+/// window deciding which unsaved edits you are allowed to know about.
+///
+/// **Files and pages in one list and one index space** (`docs/DESIGN.md` §7.7 ⑤).
+/// Nothing here branches on which of the two a row is except the two places where
+/// they genuinely differ: which pin category the row belongs to, and what an
+/// *unopened* kept row is called.
+///
+/// A free function, taking the three things it reads, so that "the switcher lists
+/// a page exactly as it lists a file" is a claim a test can make without a window.
+fn switcher_rows(
+    pool: &preview::PreviewPool,
+    current: Option<&preview::PreviewSource>,
+    kept: &[(bt_persist::PinKind, String)],
+) -> Vec<profiles::PreviewMenuItem> {
+    let live: Vec<profiles::PreviewMenuItem> = pool
+        .buffers()
+        .enumerate()
+        .map(|(index, buffer)| profiles::PreviewMenuItem {
+            name: buffer.name.clone(),
+            dirty: buffer.dirty,
+            current: Some(&buffer.source) == current,
+            // **A file and a page can both be kept, and each under its own
+            // category** (W2 slice ③). A diff and a commit's reading of a file
+            // cannot: they are documents this window computed, and keeping one
+            // would be keeping the question.
+            keep: preview_menu_target(&buffer.source),
+            pinned: false,
+            pool: Some(index),
+        })
+        .collect();
+    // **The kept rows first, and each of them once** (user ruling 2026-08-19). A
+    // kept target that is also open is *lifted* out of the list below rather than
+    // copied above it, which is the ruling's own "PINNED 与最近列表不留双副本" —
+    // and a kept target nobody has opened is a row with no buffer behind it,
+    // which is what makes the section survive a restart.
+    //
+    // **Both categories, in the file's own order** (`pins.json` is one table and
+    // array order is display order), and the lift compares the pair rather than
+    // the string: `pins::row_of` identifies a row by category and target
+    // together, and a switcher that compared only targets would let a pinned file
+    // stand in for a pinned page.
+    let kept: Vec<profiles::PreviewMenuTarget> = kept
+        .iter()
+        .map(|(kind, target)| profiles::PreviewMenuTarget {
+            kind: *kind,
+            target: target.clone(),
+        })
+        .collect();
+    // A row that cannot be kept can never match a kept one, and the `Folder`
+    // category is how that is said in this type rather than by a second `Option`
+    // in the comparison: the switcher never draws a folder, so no row it holds
+    // can carry that category honestly.
+    let unkeepable = profiles::PreviewMenuTarget {
+        kind: bt_persist::PinKind::Folder,
+        target: String::new(),
+    };
+    let (pinned, rest) = pins::lift_pinned(&kept, &live, |item| {
+        item.keep.clone().unwrap_or_else(|| unkeepable.clone())
+    });
+    pinned
+        .into_iter()
+        .map(|keep| {
+            let open = live.iter().find(|item| item.keep.as_ref() == Some(&keep));
+            profiles::PreviewMenuItem {
+                // The pool's own name where there is a pool entry, and the
+                // target's own where there is not: a file by its last segment, a
+                // page by its site — the same two functions every other surface
+                // that names an unopened row uses, so a kept thing reads the same
+                // before and after it is opened.
+                name: open.map_or_else(
+                    || match keep.kind {
+                        bt_persist::PinKind::Url => webnav::site_label(&keep.target),
+                        _ => files_row_display_name(Path::new(&keep.target)),
+                    },
+                    |item| item.name.clone(),
+                ),
+                dirty: open.is_some_and(|item| item.dirty),
+                current: open.is_some_and(|item| item.current),
+                keep: Some(keep),
+                pinned: true,
+                pool: open.and_then(|item| item.pool),
+            }
+        })
+        .chain(rest)
+        .collect()
+}
+
+/// **The seat a page opens on in this tab** — the singleton rule (`plan.md` §0
+/// ②「每 tab 单例」).
+///
+/// The tab's own preview seats are what is walked, and the window's hosted set is
+/// only asked *about* them: a window holds a page per seat and its seats span
+/// every tab, so a rule written against that map alone would let a page open on
+/// tab 2 be what tab 1 navigates.
+///
+/// `None` means this tab has no page yet, and the caller lands one the ordinary
+/// way — on `preview_landing_surface`, which is the same address rule a file
+/// opening obeys.
+fn web_seat_among(preview_seats: &[SeatId], hosted: &BTreeSet<SeatId>) -> Option<SeatId> {
+    preview_seats
+        .iter()
+        .copied()
+        .find(|seat| hosted.contains(seat))
+}
+
+/// **Where a switcher row's target actually goes**, or `None` for one this
+/// window will not go to (`plan.md` §3「钉不是授权」).
+///
+/// The *second* of the pin's two validations, as a function so it can be shot at
+/// without a window. It is `webnav::address_bar` and nothing else: the same door
+/// a typed address goes through, because a row that came out of `pins.json` is a
+/// string somebody may have edited by hand, may have written under an older
+/// policy, or may have pinned before this one tightened.
+///
+/// A search cannot come out of this door either. The row's string was written by
+/// this window as a URL, and one that no longer reads as one is a row that has
+/// been edited into something else — so it is refused rather than searched for.
+fn switcher_row_destination(target: &str) -> Option<String> {
+    match webnav::address_bar(target) {
+        webnav::Decision::Navigate(url) => Some(url),
+        webnav::Decision::Search(_) | webnav::Decision::Refuse(_) => None,
+    }
+}
+
+/// **Whether a switcher row may be written into `pins.json`** — the *first* of
+/// the pin's two validations.
+///
+/// A page is kept only if this window would navigate to it now, so a target the
+/// policy refuses never reaches the file at all. A file is not asked: whether a
+/// path is still there is a filesystem question, and `pins.json`'s own header
+/// records that this store deliberately does not ask it.
+///
+/// **An unpin is never gated**, which is why this is asked only of a row that is
+/// not already kept: taking a row *out* of that file must be allowed whatever the
+/// row says, or a tightened policy leaves rows nobody can delete.
+fn switcher_pin_is_allowed(kind: bt_persist::PinKind, target: &str) -> bool {
+    kind != bt_persist::PinKind::Url || switcher_row_destination(target).is_some()
+}
+
+/// **What a switcher row keeps, and under which category** — `None` for a
+/// buffer that cannot be kept at all.
+///
+/// The pin file's vocabulary, derived from this window's identity type in one
+/// place. A file is a `file` row and a page is a `url` row; a git-backed document
+/// is neither, because keeping it would keep a question this window asked rather
+/// than a place somebody went.
+fn preview_menu_target(source: &preview::PreviewSource) -> Option<profiles::PreviewMenuTarget> {
+    let (target, kind) = persisted_preview_row(source)?;
+    Some(profiles::PreviewMenuTarget {
+        kind: match kind {
+            bt_persist::PreviewSourceV1::File => bt_persist::PinKind::File,
+            bt_persist::PreviewSourceV1::Url => bt_persist::PinKind::Url,
+        },
+        target,
+    })
+}
+
+/// [`persisted_preview_row`] in the vault's own spelling — see
+/// [`bt_persist::RecentPreviewV1`] for why that list says which by shape rather
+/// than by a field.
+fn recent_preview_row(source: &preview::PreviewSource) -> Option<bt_persist::RecentPreviewV1> {
+    let (target, kind) = persisted_preview_row(source)?;
+    Some(match kind {
+        bt_persist::PreviewSourceV1::File => bt_persist::RecentPreviewV1::File(target),
+        bt_persist::PreviewSourceV1::Url => bt_persist::RecentPreviewV1::Page { url: target },
+    })
+}
+
+/// [`persisted_preview_row`] run backwards: the identity one stored row names.
+///
+/// The pair is deliberately one function each way and in one place. A reader that
+/// re-derived "is this a page" from the string would be the heuristic the whole
+/// `source` field exists to avoid, and two readers doing it differently is how a
+/// restored URL comes back as a path on one surface and a page on another.
+fn preview_source_of(target: &str, kind: bt_persist::PreviewSourceV1) -> preview::PreviewSource {
+    match kind {
+        bt_persist::PreviewSourceV1::File => preview::PreviewSource::file(target),
+        bt_persist::PreviewSourceV1::Url => preview::PreviewSource::Web(target.to_owned()),
+    }
+}
+
+/// The same, for the vault's shaped row.
+fn preview_source_of_recent(row: &bt_persist::RecentPreviewV1) -> preview::PreviewSource {
+    match row {
+        bt_persist::RecentPreviewV1::File(path) => preview::PreviewSource::file(path),
+        bt_persist::RecentPreviewV1::Page { url } => preview::PreviewSource::Web(url.clone()),
+    }
 }
 
 /// Every Term leaf of a persisted tree, in the order the tree is drawn.
@@ -16590,12 +16874,13 @@ fn restore_row_seed(tab: &TabV1) -> seed::Seed {
             root: leaf.root.clone(),
         };
     }
-    if let Some(path) = tab
-        .preview
-        .as_ref()
-        .and_then(|preview| preview.panes.iter().find_map(|pane| pane.cur.clone()))
-    {
-        return seed::Seed::Preview { path };
+    if let Some((path, source)) = tab.preview.as_ref().and_then(|preview| {
+        preview
+            .panes
+            .iter()
+            .find_map(|pane| Some((pane.cur.clone()?, pane.cur_source)))
+    }) {
+        return seed::Seed::Preview { path, source };
     }
     seed::Seed::Files {
         root: String::new(),
@@ -16645,7 +16930,7 @@ fn seeded_tab(seed: &seed::Seed) -> TabV1 {
             })),
             None,
         ),
-        seed::Seed::Preview { path } => (
+        seed::Seed::Preview { path, source } => (
             LayoutNodeV1::Leaf(LeafNodeV1::Preview(bt_persist::PreviewLeafV1 {
                 pinned: false,
             })),
@@ -16653,11 +16938,20 @@ fn seeded_tab(seed: &seed::Seed) -> TabV1 {
                 panes: vec![bt_persist::PreviewPaneV1 {
                     leaf: "leaf-0".to_owned(),
                     cur: Some(path.clone()),
+                    cur_source: *source,
                     graph: None,
                 }],
                 pool: vec![bt_persist::PreviewPoolEntryV1 {
                     path: path.clone(),
-                    name: profiles::cwd_leaf(path).to_owned(),
+                    name: match source {
+                        // A file is listed by its last segment, as it always was.
+                        // A page has no title here — the vault stores a place and
+                        // never a name — so it is listed by its site, through the
+                        // one splitter every page row asks (§7.7 ③).
+                        bt_persist::PreviewSourceV1::File => profiles::cwd_leaf(path).to_owned(),
+                        bt_persist::PreviewSourceV1::Url => webnav::site_label(path),
+                    },
+                    source: *source,
                 }],
             }),
         ),
@@ -17584,36 +17878,39 @@ fn create_tab_state(
     // without a disk, and the bytes are the worker's to fetch when the pane is
     // actually looked at.
     //
-    // Every entry the file carries is a file — that is all the section can say
-    // (see [`TabState::preview_content`]) — so every buffer minted here is a
-    // [`preview::PreviewSource::File`].
+    // Every entry the file carries is a file or a page — that is all the section
+    // can say (see [`TabState::preview_content`]) — and which of the two it is
+    // was decided once, on the way in, by [`preview_source_of`].
     let mut preview_pool = preview::PreviewPool::default();
-    for (path, name) in &preview.pool {
-        preview_pool.insert(preview::PreviewBuffer::new(
-            preview::PreviewSource::file(path.clone()),
-            name.clone(),
-        ));
+    for (source, name) in &preview.pool {
+        preview_pool.insert(preview::PreviewBuffer::new(source.clone(), name.clone()));
     }
     let mut preview_panes = PreviewPanes::default();
     for seat in seats.preview_seats() {
-        let Some(path) = preview.cur.get(&seat) else {
+        let Some(source) = preview.cur.get(&seat) else {
             continue;
         };
-        if path_is_previewable_image(path) {
+        if let Some(path) = source.file_path()
+            && path_is_previewable_image(path)
+        {
             // A picture is not a pool buffer — it comes back down the decode
             // lane, exactly as a click on a `.png` row sends it.
             preview_panes.entry(PreviewSurface::Seat(seat)).image =
-                Some(PreviewImageState::new(path.clone()));
+                Some(PreviewImageState::new(path.to_path_buf()));
             continue;
         }
-        let source = preview::PreviewSource::file(path.clone());
-        if preview_pool.get(&source).is_none() {
-            preview_pool.insert(preview::PreviewBuffer::new(
-                source.clone(),
-                files_row_display_name(path),
-            ));
+        if preview_pool.get(source).is_none() {
+            // A file is named by its last segment and a page by its site: the
+            // vault and a hand-edited content section both carry a `cur` with no
+            // pool row behind it, and a page has no title to read until it has
+            // committed once.
+            let name = match source.file_path() {
+                Some(path) => files_row_display_name(path),
+                None => source.web_url().map(webnav::site_label).unwrap_or_default(),
+            };
+            preview_pool.insert(preview::PreviewBuffer::new(source.clone(), name));
         }
-        preview_panes.entry(PreviewSurface::Seat(seat)).buffer = Some(source);
+        preview_panes.entry(PreviewSurface::Seat(seat)).buffer = Some(source.clone());
     }
     // **The filter comes back even though the graph does not** (T2/T3, v2 (3)) —
     // see [`PreviewRestore::filters`]. The view is seeded with a root of its own
@@ -18886,7 +19183,9 @@ fn git_document_question(
                 renamed_from,
             })
         }
-        preview::PreviewSource::File(_) | preview::PreviewSource::GitGraph { .. } => None,
+        preview::PreviewSource::File(_)
+        | preview::PreviewSource::GitGraph { .. }
+        | preview::PreviewSource::Web(_) => None,
     }
 }
 
@@ -19015,7 +19314,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         custom_window_frame,
         taskbar: TaskbarMirror::default(),
         compositor,
-        web: None,
+        web: BTreeMap::new(),
         web_cursor: None,
         web_pointer_inside: false,
         window,
@@ -19805,6 +20104,12 @@ impl Runtime<'_> {
             );
         }
         runtime.show_new_window(restored.is_some_and(|placement| placement.maximized))?;
+        // **Every page the file said this window's panes were on**, and here for
+        // the reason `open_development_web_page` is here twenty lines down: a
+        // WebView2 created against a window nobody has shown yet has nowhere to
+        // compose, so this cannot ride with the head reads in `dress_new_window`
+        // however much it belongs beside them.
+        runtime.revive_all_web_pages()?;
         // Said now rather than at the moment of the scan, because the scan
         // happens before there is a window to say it in. Said once per launch:
         // a rescan afterwards reports only the file behind the scheme actually
@@ -20117,6 +20422,9 @@ impl Runtime<'_> {
         // Maximized only if the file said this window was: a window a verb asked
         // for is one nobody has told to be.
         runtime.show_new_window(maximized)?;
+        // The pages of the tabs this window opened holding, on the launch door's
+        // own terms and for its reason.
+        runtime.revive_all_web_pages()?;
         Ok((id, window))
     }
 
@@ -20495,12 +20803,17 @@ impl Runtime<'_> {
             // the authority because it is what identifies the tab; `previews` is
             // a list of what its panes were showing, which for this shape is a
             // longer way of saying the same word.
-            seed::Seed::Preview { path } => {
+            seed::Seed::Preview { path, source } => {
                 let (seats, _) = seats::Seats::lone_seat(&bt_layout::Seat::new(
                     bt_layout::SeatId(1),
                     bt_layout::SeatKind::Preview,
                 ));
-                pages = vec![path];
+                pages = vec![match source {
+                    bt_persist::PreviewSourceV1::File => bt_persist::RecentPreviewV1::File(path),
+                    bt_persist::PreviewSourceV1::Url => {
+                        bt_persist::RecentPreviewV1::Page { url: path }
+                    }
+                }];
                 (seats, None, BTreeMap::new(), BTreeMap::new())
             }
             // **A window comes back as a window, not as a tab** (multiwindow
@@ -20544,7 +20857,7 @@ impl Runtime<'_> {
         let metrics = self.seat_metrics();
         let mut standing: std::collections::VecDeque<SeatId> =
             seats.preview_seats().into_iter().collect();
-        let mut preview_cur: BTreeMap<SeatId, PathBuf> = BTreeMap::new();
+        let mut preview_cur: BTreeMap<SeatId, preview::PreviewSource> = BTreeMap::new();
         for (page, is_last) in pages
             .iter()
             .enumerate()
@@ -20557,7 +20870,7 @@ impl Runtime<'_> {
                     None => break,
                 },
             };
-            preview_cur.insert(seat, PathBuf::from(page));
+            preview_cur.insert(seat, preview_source_of_recent(page));
             if !is_last {
                 seats.toggle_preview_pin(seat);
             }
@@ -20592,6 +20905,7 @@ impl Runtime<'_> {
         // unpinned tab belongs at the end by construction.
         self.window.tabs.push(tab);
         self.request_revived_previews(self.window.tabs.len() - 1);
+        self.revive_web_pages(self.window.tabs.len() - 1)?;
         self.apply_window_min_inner_size()?;
         self.activate_tab(self.window.tabs.len() - 1, true)
     }
@@ -20729,6 +21043,7 @@ impl Runtime<'_> {
             )?;
             self.window.tabs.push(revived);
             self.request_revived_previews(self.window.tabs.len() - 1);
+            self.revive_web_pages(self.window.tabs.len() - 1)?;
         }
         if let Some(placeholder) = placeholder
             && self.window.tabs.len() > 1
@@ -30477,6 +30792,25 @@ impl Runtime<'_> {
     /// is in the host to be asked about, and the tab it means is the active one
     /// by construction.
     fn preview_tab_index(&self, surface: PreviewSurface) -> usize {
+        // **A seat belongs to the tab whose tree holds it, and until W2 slice ③
+        // that was always the active one.** Every gesture that reaches a preview
+        // *seat* is a gesture on the tab in front of you — except a page, which
+        // goes on living on a tab nobody is looking at and answers its engine
+        // from there: a navigation that commits while another tab is up would
+        // otherwise put its buffer in that other tab's pool, and the row would
+        // appear in a switcher belonging to a tab that has never been to it.
+        //
+        // Measured on the real window: a page opened at launch under the restore
+        // prompt, committing after the prompt had put a restored tab in front of
+        // it, left its row in the restored tab and none in its own.
+        if let PreviewSurface::Seat(seat) = surface {
+            return self
+                .window
+                .tabs
+                .iter()
+                .position(|state| state.seats.preview_seats().contains(&seat))
+                .unwrap_or(self.window.active_tab);
+        }
         let PreviewSurface::Float(id) = surface else {
             return self.window.active_tab;
         };
@@ -33628,8 +33962,13 @@ impl Runtime<'_> {
             // rectangle, so a `PreviewDocument` that put anything here would put
             // it *over* the graph. An image is the same arrangement one surface
             // along, and `None` is the card.
+            // And a page's body is empty for the graph's reason one lane over:
+            // the pixels are the engine's, composed *under* this surface and seen
+            // through the hole punched in it (DESIGN.md 7.8 (2)), so anything put
+            // here would be put over a browser.
             preview::PreviewView::Image
             | preview::PreviewView::Graph
+            | preview::PreviewView::Web
             | preview::PreviewView::None => PreviewDocument::Empty,
         };
         self.preview_pane_mut(surface).doc = doc;
@@ -39344,59 +39683,37 @@ impl Runtime<'_> {
     /// recent ones, would be the window deciding which unsaved edits you are
     /// allowed to know about.
     fn preview_menu_items(&self, seat: SeatId) -> Vec<profiles::PreviewMenuItem> {
-        let current = self
-            .preview_pane(PreviewSurface::Seat(seat))
-            .and_then(|pane| pane.buffer.as_ref());
-        let live: Vec<profiles::PreviewMenuItem> = self
-            .preview_pool
-            .buffers()
-            .enumerate()
-            .map(|(pool, buffer)| profiles::PreviewMenuItem {
-                name: buffer.name.clone(),
-                dirty: buffer.dirty,
-                current: Some(&buffer.source) == current,
-                // Only a file on a disk can be kept — a diff and a commit's
-                // reading of a file are documents this window computed.
-                path: match &buffer.source {
-                    preview::PreviewSource::File(path) => Some(path.display().to_string()),
-                    _ => None,
-                },
-                pinned: false,
-                pool: Some(pool),
-            })
-            .collect();
-        // **The kept files first, and each of them once** (user ruling
-        // 2026-08-19). A kept file that is also open is *lifted* out of the list
-        // below rather than copied above it, which is the ruling's own "PINNED
-        // 与最近列表不留双副本" — and a kept file nobody has opened is a row with
-        // no buffer behind it, which is what makes the section survive a restart.
-        let kept = self.app.pins_store.targets(bt_persist::PinKind::File);
-        let (pinned, rest) =
-            pins::lift_pinned(&kept, &live, |item| item.path.clone().unwrap_or_default());
-        pinned
-            .into_iter()
-            .map(|path| {
-                let open = live
-                    .iter()
-                    .find(|item| item.path.as_deref() == Some(path.as_str()));
-                profiles::PreviewMenuItem {
-                    // The pool's own name where there is a pool entry, and the
-                    // file's own name where there is not: the same function the
-                    // head uses, so a kept file reads the same before and after
-                    // it is opened.
-                    name: open.map_or_else(
-                        || files_row_display_name(Path::new(&path)),
-                        |item| item.name.clone(),
-                    ),
-                    dirty: open.is_some_and(|item| item.dirty),
-                    current: open.is_some_and(|item| item.current),
-                    path: Some(path),
-                    pinned: true,
-                    pool: open.and_then(|item| item.pool),
-                }
-            })
-            .chain(rest)
-            .collect()
+        switcher_rows(
+            &self.preview_pool,
+            self.preview_pane(PreviewSurface::Seat(seat))
+                .and_then(|pane| pane.buffer.as_ref()),
+            &self
+                .app
+                .pins_store
+                .rows_of(&[bt_persist::PinKind::File, bt_persist::PinKind::Url]),
+        )
+    }
+
+    /// **Go to a page, having asked whether this window may** — the second of
+    /// the pin's two validations (`plan.md` §3「钉不是授权」).
+    ///
+    /// The first is at the moment of pinning ([`Self::toggle_preview_pin`]); this
+    /// is the one at the moment of *using*, and both are the same door
+    /// (`webnav::address_bar`) because a store that could grant permission is a
+    /// store whose permission is "whatever that file says". A pin written by an
+    /// older build, edited by hand, or made before the policy tightened is
+    /// refused here and the seat does not move — which is also §7.7 ③'s
+    /// "什么都没发生比一个确认框更诚实" for a target this window will not go to.
+    ///
+    /// The engine asks a *third* time, inside `NavigationStarting`, because
+    /// redirects and page scripts start navigations no address field ever saw
+    /// (`webnav` ①). This one is about the string; that one is about the load.
+    fn navigate_preview_page(&mut self, target: &str) -> Result<()> {
+        let Some(url) = switcher_row_destination(target) else {
+            eprintln!("BT_WEB refused {target}");
+            return Ok(());
+        };
+        self.open_web_page(&url)
     }
 
     /// Keep this folder, or stop keeping it (user ruling 2026-08-19).
@@ -39415,9 +39732,45 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// Keep this file, or stop keeping it — [`Self::toggle_folder_pin`]'s twin.
-    fn toggle_file_pin(&mut self, path: &str) -> Result<()> {
-        self.app.pins_store.toggle(bt_persist::PinKind::File, path);
+    /// **Keep this switcher row, or stop keeping it** —
+    /// [`Self::toggle_folder_pin`]'s twin, told the row's own category (W2 slice
+    /// ③).
+    ///
+    /// It replaced a `toggle_file_pin` that hard-coded `PinKind::File`, which was
+    /// right for as long as the switcher held only files: one list holding two
+    /// categories cannot have one category written into it.
+    ///
+    /// Named for the *switcher* and not for the preview, because this window has
+    /// two pins two hundred pixels apart and they mean different things:
+    /// [`Self::toggle_preview_pin`] pins the **pane** (the next file opens
+    /// beside it), and this pins the **row** (keep this place across restarts).
+    /// The naming ticket is W1's fifth open question and is not this slice's; what
+    /// is this slice's is that the two functions cannot be confused at a call
+    /// site.
+    ///
+    /// **The first of the pin's two validations** (`plan.md` §3「钉不是授权」): a
+    /// page is written into `pins.json` only if this window would navigate to it
+    /// *now*, so a target the policy refuses never reaches the file at all. The
+    /// second is at the moment of pressing that row —
+    /// [`Self::navigate_preview_page`] — and it exists because passing this check
+    /// today is not passing it forever: policies tighten, builds change, and the
+    /// file is one somebody may edit.
+    ///
+    /// An unpin is never gated. Taking a row *out* of that file is allowed
+    /// whatever the row says, and a build that could not remove a target it
+    /// refuses to load would be a build with rows nobody can delete.
+    fn toggle_switcher_pin(&mut self, keep: &profiles::PreviewMenuTarget) -> Result<()> {
+        let already = self
+            .app
+            .pins_store
+            .rows_of(&[keep.kind])
+            .iter()
+            .any(|(_, target)| *target == keep.target);
+        if !already && !switcher_pin_is_allowed(keep.kind, &keep.target) {
+            eprintln!("BT_WEB refused {}", keep.target);
+            return Ok(());
+        }
+        self.app.pins_store.toggle(keep.kind, &keep.target);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -39501,12 +39854,27 @@ impl Runtime<'_> {
         let Some(item) = self.preview_menu_items(seat).into_iter().nth(index) else {
             return Ok(());
         };
-        let Some(pool) = item.pool else {
+        // **A page row is a navigation, always, and it goes through the gate.**
+        // `plan.md` §3's third determinism clause: 从切换器选择 = 一次正常顶层导航
+        // (进入/截断当前导航栈,不绕导航策略). So a page row does not restore a
+        // buffer and does not read the pool — it asks `webnav::address_bar` for
+        // permission exactly as a typed address would, and **a pin is not a
+        // permission**: a row that came out of `pins.json` is a string somebody
+        // may have edited by hand, may have written under an older policy, or may
+        // have pinned before this one tightened.
+        if item.is_page() {
             self.close_preview_menu()?;
-            let Some(path) = item.path else {
+            let Some(keep) = item.keep else {
                 return Ok(());
             };
-            return self.open_preview(PathBuf::from(path));
+            return self.navigate_preview_page(&keep.target);
+        }
+        let Some(pool) = item.pool else {
+            self.close_preview_menu()?;
+            let Some(keep) = item.keep else {
+                return Ok(());
+            };
+            return self.open_preview(PathBuf::from(keep.target));
         };
         self.close_preview_menu()?;
         // **The pool's own identity and the pool's own name.** The row was
@@ -44630,6 +44998,13 @@ impl Runtime<'_> {
             // — the same three channels the docked pane's graph is drawn into,
             // built by the same `build_git_graph`.
             preview::PreviewChrome::Graph => self.push_float_graph(id, geometry.body, scale),
+            // **A page has no second host** (slice (3) debt, DESIGN.md 7.8): one
+            // seat, one controller, one visual in one composition tree, so a page
+            // torn into a float has nowhere for its pixels to be. Drawing nothing
+            // is the honest answer until a slice gives a float an engine of its
+            // own; what stops anybody meeting it is that a web buffer is not
+            // offered to the tear-off verb (`preview_can_pop_out`).
+            preview::PreviewChrome::Web => float::FloatBody::default(),
         };
         let mut layer = float::build(
             &geometry,
@@ -47989,10 +48364,14 @@ impl Runtime<'_> {
         if self.window.web_pointer_inside {
             self.window.web_pointer_inside = false;
             self.window.web_cursor = None;
-            self.send_to_web_page(
-                bt_platform::WebMouseEvent::Move,
-                PhysicalPosition::new(-1.0, -1.0),
-            );
+            let seats: Vec<SeatId> = self.window.web.keys().copied().collect();
+            for seat in seats {
+                self.send_to_web_page(
+                    seat,
+                    bt_platform::WebMouseEvent::Move,
+                    PhysicalPosition::new(-1.0, -1.0),
+                );
+            }
         }
         self.window.pointer_position = None;
         // **Both `⌄` clocks, told the pointer is nowhere** (user report,
@@ -52433,10 +52812,10 @@ impl Runtime<'_> {
                             // The root menu's rule, one menu over: a pin changes
                             // the list you are looking at and leaves it up.
                             Some(profiles::PreviewMenuHit::Pin(index)) => {
-                                if let Some(path) =
-                                    items.get(index).and_then(|item| item.path.clone())
+                                if let Some(keep) =
+                                    items.get(index).and_then(|item| item.keep.clone())
                                 {
-                                    self.toggle_file_pin(&path)?;
+                                    self.toggle_switcher_pin(&keep)?;
                                 }
                             }
                             Some(profiles::PreviewMenuHit::Row(index)) => {
@@ -55597,33 +55976,79 @@ impl Runtime<'_> {
     /// a page peeping out beside its own pane, and there is no third place the
     /// two could be reconciled.
     fn sync_web_page(&mut self, now: Instant) {
-        let Some(seat) = self.window.web.as_ref().map(|web| web.seat) else {
+        if self.window.web.is_empty() {
             self.window.renderer.set_web_holes(Vec::new());
             return;
-        };
+        }
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let motion = self.app.motion;
-        let transform = self.window.pane_motion.transform_of(seat, now, motion);
-        let body = preview_image_placement(&self.seats, &self.seat_layout, seat, scale, transform)
-            .map(|placement| {
-                [
-                    placement.seat.x as f32,
-                    placement.seat.y as f32,
-                    (placement.seat.x + placement.seat.width) as f32,
-                    (placement.seat.y + placement.seat.height) as f32,
-                ]
+        let obstructed = self.a_modal_covers_the_window();
+        // Every seat, and its answer read off the tab that holds it — a page on a
+        // tab nobody is looking at has no placement in *this* tab's layout, and
+        // `preview_image_placement` says so by answering `None`, which is the
+        // same `Hidden` a page under a modal gets.
+        let seats: Vec<SeatId> = self.window.web.keys().copied().collect();
+        let active = self.window.active_tab;
+        let mut placements: Vec<WebPlacement> = Vec::with_capacity(seats.len());
+        for seat in seats {
+            let transform = self.window.pane_motion.transform_of(seat, now, motion);
+            // **Each seat measured against its own tab's tree**, not against
+            // whichever tab is in front. A page on a background tab still has a
+            // rectangle, and the engine still has to be told its size — see
+            // `webhost::WebSeat::apply_presence`. Asking the active tab would
+            // answer `None` for every page but one, which is how a restored
+            // window's second page came up against zero by zero and never loaded.
+            let Some(index) = self
+                .window
+                .tabs
+                .iter()
+                .position(|tab| tab.seats.preview_seats().contains(&seat))
+            else {
+                placements.push(WebPlacement {
+                    seat,
+                    presence: webhost::WebPresence::Hidden,
+                    size: None,
+                });
+                continue;
+            };
+            let tab = &self.window.tabs[index];
+            let body =
+                preview_image_placement(&tab.seats, &tab.seat_layout, seat, scale, transform).map(
+                    |placement| {
+                        [
+                            placement.seat.x as f32,
+                            placement.seat.y as f32,
+                            (placement.seat.x + placement.seat.width) as f32,
+                            (placement.seat.y + placement.seat.height) as f32,
+                        ]
+                    },
+                );
+            // The size comes off the rectangle whatever is standing over it; the
+            // presence is the second question, and a page on a tab nobody is
+            // looking at answers it the same way a page under a modal does.
+            let size = webhost::web_presence(body, false)
+                .bounds()
+                .map(|bounds| (bounds.width, bounds.height));
+            let presence = webhost::web_presence(body, obstructed || index != active);
+            placements.push(WebPlacement {
+                seat,
+                presence,
+                size,
             });
-        let presence = webhost::web_presence(body, self.a_modal_covers_the_window());
-        let window = &mut *self.window;
-        if let Some(web) = window.web.as_mut()
-            && let Err(error) = web.place(&window.compositor, presence)
-        {
-            eprintln!("BT_WEB place failed: {error}");
         }
-        let holes = match presence {
-            webhost::WebPresence::Shown(bounds) => vec![bounds.as_rect()],
-            webhost::WebPresence::Hidden => Vec::new(),
-        };
+        let window = &mut *self.window;
+        let mut holes = Vec::new();
+        for placement in placements {
+            if let Some(web) = window.web.get_mut(&placement.seat)
+                && let Err(error) =
+                    web.place(&window.compositor, placement.presence, placement.size)
+            {
+                eprintln!("BT_WEB place failed: {error}");
+            }
+            if let webhost::WebPresence::Shown(bounds) = placement.presence {
+                holes.push(bounds.as_rect());
+            }
+        }
         window.renderer.set_web_holes(holes);
     }
 
@@ -55640,21 +56065,28 @@ impl Runtime<'_> {
             || self.window.restore_prompt.is_open()
     }
 
-    /// Read everything this window's page has said, and do it.
+    /// Read everything this window's pages have said, and do it.
     fn drive_web_page(&mut self) -> Result<()> {
-        if self.window.web.is_none() {
+        if self.window.web.is_empty() {
             return Ok(());
         }
         let window = &mut *self.window;
-        let outcomes = window
+        let outcomes: Vec<(SeatId, Vec<webhost::WebOutcome>)> = window
             .web
-            .as_mut()
-            .map(|web| web.drive(&window.compositor))
-            .unwrap_or_default();
-        self.apply_web_outcomes(outcomes)
+            .iter_mut()
+            .map(|(seat, web)| (*seat, web.drive(&window.compositor)))
+            .collect();
+        for (seat, outcomes) in outcomes {
+            self.apply_web_outcomes(seat, outcomes)?;
+        }
+        Ok(())
     }
 
-    fn apply_web_outcomes(&mut self, outcomes: Vec<webhost::WebOutcome>) -> Result<()> {
+    fn apply_web_outcomes(
+        &mut self,
+        seat: SeatId,
+        outcomes: Vec<webhost::WebOutcome>,
+    ) -> Result<()> {
         for outcome in outcomes {
             match outcome {
                 // The chord the page was not allowed to see. It runs on the
@@ -55679,10 +56111,18 @@ impl Runtime<'_> {
                     self.apply_pointer_cursor();
                 }
                 webhost::WebOutcome::PageFocus(_) => {}
+                // **The page committed, so this seat now has an identity** (slice
+                // ③). One row in the tab's pool, keyed by `webnav::switcher_key`
+                // of the URL the engine actually loaded — which is why a redirect
+                // leaves one row and not two, and why a navigation that never
+                // committed leaves none at all.
+                webhost::WebOutcome::Committed => self.commit_web_page(seat)?,
                 webhost::WebOutcome::Gone => {
-                    self.window.web = None;
+                    self.window.web.remove(&seat);
                     self.window.web_cursor = None;
-                    self.window.renderer.set_web_holes(Vec::new());
+                    if self.window.web.is_empty() {
+                        self.window.renderer.set_web_holes(Vec::new());
+                    }
                 }
                 webhost::WebOutcome::Refused(uri) => eprintln!("BT_WEB refused {uri}"),
                 // Slice 4 owns the five failure cards; until they exist this
@@ -55697,33 +56137,43 @@ impl Runtime<'_> {
     /// The clock the browser-exit deadline is hung on, the seat's own mortality,
     /// and the chord list the focus keeps changing.
     fn advance_web_page(&mut self, now: Instant) -> Result<()> {
-        if self.window.web.is_none() {
+        if self.window.web.is_empty() {
             return Ok(());
         }
         // A page whose pane has left the tree goes with it. Asked of every tab
         // and not of the active one: a web seat on a tab nobody is looking at is
         // still a web seat.
-        let seat = self.window.web.as_ref().map(|web| web.seat);
-        let orphaned = seat.is_some_and(|seat| {
-            !self
-                .window
-                .tabs
-                .iter()
-                .any(|tab| tab.seats.preview_seats().contains(&seat))
-        });
+        let orphaned: BTreeSet<SeatId> = self
+            .window
+            .web
+            .keys()
+            .copied()
+            .filter(|seat| {
+                !self
+                    .window
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.seats.preview_seats().contains(seat))
+            })
+            .collect();
         let focus = self.shortcut_focus();
         let window = &mut *self.window;
-        let mut outcomes = Vec::new();
-        if let Some(web) = window.web.as_mut() {
+        let mut outcomes: Vec<(SeatId, Vec<webhost::WebOutcome>)> = Vec::new();
+        for (seat, web) in &mut window.web {
+            let mut theirs = Vec::new();
             // The chords the page may not keep change with the focus, and the
             // focus changes without anything telling the engine so.
             web.set_claims(&self.app.shortcuts, focus);
-            if orphaned {
-                outcomes.extend(web.close(&window.compositor));
+            if orphaned.contains(seat) {
+                theirs.extend(web.close(&window.compositor));
             }
-            outcomes.extend(web.tick(now, &window.compositor));
+            theirs.extend(web.tick(now, &window.compositor));
+            outcomes.push((*seat, theirs));
         }
-        self.apply_web_outcomes(outcomes)
+        for (seat, theirs) in outcomes {
+            self.apply_web_outcomes(seat, theirs)?;
+        }
+        Ok(())
     }
 
     /// `BT_WEB_DEV=<url>` — open a preview seat and put that page on it.
@@ -55736,14 +56186,77 @@ impl Runtime<'_> {
         let Some(url) = webhost::development_target() else {
             return Ok(());
         };
-        let Some(PreviewSurface::Seat(seat)) = self.preview_landing_surface() else {
-            eprintln!("BT_WEB no preview seat could be opened for {url}");
-            return Ok(());
+        self.open_web_page(url)
+    }
+
+    /// **The web seat this tab already has, if it has one** — the singleton rule
+    /// (`plan.md` §0 ②「每 tab 单例」).
+    ///
+    /// One page per tab, and the reuse target is that page's seat: opening a
+    /// second address in a tab that already holds one is a *navigation on the
+    /// seat you are looking at*, not a second pane and not a second controller.
+    /// The plan's own words for what the alternative would be are one line up
+    /// from that clause: "不做预览内多标签(多页靠无终端 tab 片)".
+    ///
+    /// Asked of the tab's own tree and not of `self.window.web`, because that map
+    /// spans every tab in the window: a page open on tab 2 must not be what tab 1
+    /// navigates when you press a switcher row.
+    fn web_seat_of_tab(&self) -> Option<SeatId> {
+        web_seat_among(
+            &self.seats.preview_seats(),
+            &self.window.web.keys().copied().collect(),
+        )
+    }
+
+    /// **Go to a page in this tab** — the one door, whatever asked.
+    ///
+    /// `BT_WEB_DEV` at launch, a switcher row, a pin, a restored session: all of
+    /// them arrive here, and every one of them passes `webnav::address_bar`
+    /// first, at the call site, because **a pin is not a permission** (`plan.md`
+    /// §3) and neither is a session file. What this function owns is the *seat*:
+    /// the tab's existing page if it has one, and a landing preview seat if it
+    /// has not.
+    fn open_web_page(&mut self, url: &str) -> Result<()> {
+        let seat = match self.web_seat_of_tab() {
+            Some(seat) => seat,
+            None => {
+                let Some(PreviewSurface::Seat(seat)) = self.preview_landing_surface() else {
+                    eprintln!("BT_WEB no preview seat could be opened for {url}");
+                    return Ok(());
+                };
+                seat
+            }
         };
+        self.open_web_page_on(seat, url)?;
+        self.focus_seat(seat)
+    }
+
+    /// **Go to a page on one named seat**, without choosing the seat and without
+    /// taking the focus.
+    ///
+    /// [`Self::open_web_page`]'s other half, split off for the door that has both
+    /// answers already: a restored session names the seat *and* the page (see
+    /// [`Self::revive_web_pages`]), and a restore that moved the focus would land
+    /// a window on whichever tab happened to hold a page.
+    ///
+    /// An engine that is already on this seat is *navigated*; one that is not is
+    /// built. Both are the same sentence to the recovery machine — `desired_url`,
+    /// last write wins, nothing loaded until the events are installed — which is
+    /// why the two arms differ only in whether there is a machine yet.
+    fn open_web_page_on(&mut self, seat: SeatId, url: &str) -> Result<()> {
+        if self.window.web.contains_key(&seat) {
+            let window = &mut *self.window;
+            let outcomes = window
+                .web
+                .get_mut(&seat)
+                .map(|web| web.go(url, &window.compositor))
+                .unwrap_or_default();
+            return self.apply_web_outcomes(seat, outcomes);
+        }
         let hwnd = window_hwnd(&self.window.window)?;
         let proxy = self.app.event_proxy.clone();
         match webhost::WebSeat::open(
-            seat,
+            seat.0,
             hwnd,
             url,
             Box::new(move || {
@@ -55751,42 +56264,181 @@ impl Runtime<'_> {
             }),
         ) {
             Ok(web) => {
-                self.window.web = Some(web);
-                self.focus_seat(seat)?;
+                self.window.web.insert(seat, web);
+                // The pane stops showing whatever document it was on the moment
+                // it becomes a page: one seat shows one thing, and a buffer left
+                // pointed at from underneath a browser is a switcher row claiming
+                // to be current while a page covers it.
+                //
+                // **Except the buffer that is the page itself**, which a restore
+                // has already put there and which the first commit will put there
+                // again: clearing it would blank the head and the foot for as long
+                // as the engine takes to come up, which on a cold profile is the
+                // better part of a second.
+                if self
+                    .preview_buffer_on(PreviewSurface::Seat(seat))
+                    .is_none_or(|buffer| buffer.source.web_url().is_none())
+                {
+                    self.leave_preview_buffer(PreviewSurface::Seat(seat));
+                }
+                self.clear_preview_image(PreviewSurface::Seat(seat));
             }
             Err(error) => eprintln!("BT_WEB {error}"),
         }
         Ok(())
     }
 
-    /// Whether a point is inside the page as it stands on the glass this frame.
-    fn point_is_on_the_web_page(&self, position: PhysicalPosition<f64>) -> bool {
-        let Some(bounds) = self
-            .window
-            .web
-            .as_ref()
-            .and_then(webhost::WebSeat::shown_at)
-        else {
-            return false;
-        };
-        position.x >= f64::from(bounds.x)
-            && position.y >= f64::from(bounds.y)
-            && position.x < f64::from(bounds.x + bounds.width as i32)
-            && position.y < f64::from(bounds.y + bounds.height as i32)
+    /// **Every page a restored tab was on, put back on the engine** (`plan.md`
+    /// §5 片③ 恢复; §4's state machine does the rest).
+    ///
+    /// `create_tab_state` brings the *buffer* back — that is what makes the head,
+    /// the foot, the switcher row and the tab's name right on the first frame —
+    /// and this is what makes it a page again rather than a picture of one. The
+    /// two are deliberately separate: a buffer is content and belongs to the tab,
+    /// while an engine is a controller on a window's `HWND`, and only this side of
+    /// the restore has a window.
+    ///
+    /// **A session file is not an authorisation either.** The URL goes through
+    /// `webnav::address_bar` exactly as a pin does and for the pin's own reason:
+    /// the document is editable, may have been written by an older build, and may
+    /// name a target this policy no longer allows. What comes back is the
+    /// *normalised* answer, so a restore navigates where a fresh open would.
+    ///
+    /// Asked by index, like [`Self::request_revived_previews`] beside it, because
+    /// a restore builds every tab before it activates any of them.
+    /// [`Self::revive_web_pages`] for every tab this window opened holding.
+    ///
+    /// A loop and not a call on the active tab, for the reason the head reads
+    /// beside it are a loop: a page on a tab nobody is looking at is still a
+    /// page, and a window that only revived the tab it opened on would leave the
+    /// others showing a head and a foot over a hole.
+    fn revive_all_web_pages(&mut self) -> Result<()> {
+        for index in 0..self.window.tabs.len() {
+            self.revive_web_pages(index)?;
+        }
+        Ok(())
     }
 
-    /// Forward one mouse event to the page, in the window's own coordinates.
+    fn revive_web_pages(&mut self, index: usize) -> Result<()> {
+        let Some(tab) = self.window.tabs.get(index) else {
+            return Ok(());
+        };
+        let pages: Vec<(SeatId, String)> = tab
+            .preview_panes
+            .iter()
+            .filter_map(|(surface, pane)| {
+                let PreviewSurface::Seat(seat) = surface else {
+                    return None;
+                };
+                let url = pane.buffer.as_ref()?.web_url()?;
+                Some((seat, switcher_row_destination(url)?))
+            })
+            .collect();
+        for (seat, url) in pages {
+            self.open_web_page_on(seat, &url)?;
+        }
+        Ok(())
+    }
+
+    /// **A page loaded, so the seat has an identity and the pool has a row.**
+    ///
+    /// The identity is `webnav::switcher_key` of what the engine actually
+    /// committed — `webhost::WebSeat::identity`, which is
+    /// `WebMachine::recoverable_url`, which is the *one* ledger (see
+    /// [`webhost::WebOutcome::Committed`]). Three consequences fall out rather
+    /// than being arranged: a redirect leaves one row because only the committed
+    /// address is ever keyed; a failed navigation leaves none because the machine
+    /// did not move; and re-visiting an address finds the row already there,
+    /// because `PreviewPool::open` finds before it makes.
+    ///
+    /// The row is listed under the page's *title* once slice ④ reads one; until
+    /// then it is listed under its site, which is what a Recent row and an
+    /// unopened pin already print (`webnav::site_label`).
+    fn commit_web_page(&mut self, seat: SeatId) -> Result<()> {
+        let Some(url) = self
+            .window
+            .web
+            .get(&seat)
+            .and_then(webhost::WebSeat::identity)
+        else {
+            return Ok(());
+        };
+        let key = webnav::switcher_key(url);
+        let source = preview::PreviewSource::Web(key.clone());
+        let surface = PreviewSurface::Seat(seat);
+        // **This seat's own tab, which is not always the one in front.** A page
+        // commits on whatever tab it lives on, so the row goes in that tab's pool
+        // — see [`Self::preview_tab_index`], which is where the difference is
+        // written down. `open_preview_source_on` is the *browsing* door and reads
+        // the active tab throughout, which is right for every gesture a hand
+        // makes and wrong for an engine answering from behind another tab.
+        let index = self.preview_tab_index(surface);
+        let tab = &mut self.window.tabs[index];
+        let shown = tab.preview_panes.showing();
+        // The name it already had where it has been here before, and its site
+        // where it has not. A title is slice ④'s to read.
+        let name = tab
+            .preview_pool
+            .get(&source)
+            .map_or_else(|| webnav::site_label(&key), |buffer| buffer.name.clone());
+        tab.preview_pool.open(source.clone(), name, &shown);
+        // No caret and no scroll to file or restore: a page's view is the
+        // engine's, and this window has never held one.
+        tab.preview_panes.entry(surface).buffer = Some(source);
+        self.mark_session_dirty(Instant::now());
+        self.refresh_preview_for_layout();
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
+    /// **Which page a point is inside**, as the pages stand on the glass this
+    /// frame — and `None` for a point that is on none of them.
+    ///
+    /// Asked of what each seat was actually *told* (`shown_at`) rather than of
+    /// the layout, which is the same rule the single-page version kept: a page
+    /// hidden behind a modal is not somewhere a click can land, and the engine's
+    /// own bounds are the only account of that which cannot be a frame stale.
+    fn web_page_at(&self, position: PhysicalPosition<f64>) -> Option<SeatId> {
+        self.window.web.iter().find_map(|(seat, web)| {
+            let bounds = web.shown_at()?;
+            (position.x >= f64::from(bounds.x)
+                && position.y >= f64::from(bounds.y)
+                && position.x < f64::from(bounds.x + bounds.width as i32)
+                && position.y < f64::from(bounds.y + bounds.height as i32))
+            .then_some(*seat)
+        })
+    }
+
+    /// Whether a point is inside any page this frame.
+    fn point_is_on_the_web_page(&self, position: PhysicalPosition<f64>) -> bool {
+        self.web_page_at(position).is_some()
+    }
+
+    /// Forward one mouse event to a page, in the window's own coordinates.
     fn send_to_web_page(
         &mut self,
+        seat: SeatId,
         event: bt_platform::WebMouseEvent,
         position: PhysicalPosition<f64>,
     ) {
         let now = Instant::now();
-        let Some(web) = self.window.web.as_mut() else {
+        let Some(web) = self.window.web.get_mut(&seat) else {
             return;
         };
         if let Err(error) = web.send_mouse(event, (position.x as i32, position.y as i32), now) {
             eprintln!("BT_WEB {error}");
+        }
+    }
+
+    /// The same, for the page a point is over — and nothing at all when it is
+    /// over none.
+    fn send_to_web_page_at(
+        &mut self,
+        event: bt_platform::WebMouseEvent,
+        position: PhysicalPosition<f64>,
+    ) {
+        if let Some(seat) = self.web_page_at(position) {
+            self.send_to_web_page(seat, event, position);
         }
     }
 
@@ -55797,18 +56449,38 @@ impl Runtime<'_> {
     /// the pointer has gone is a move to a point outside its rectangle, which is
     /// what the position already is on the frame the pointer crosses out.
     fn drive_web_pointer(&mut self, position: PhysicalPosition<f64>) {
-        if self.window.web.is_none() {
+        if self.window.web.is_empty() {
             return;
         }
-        let inside = self.point_is_on_the_web_page(position);
-        if !inside && !self.window.web_pointer_inside {
+        let inside = self.web_page_at(position);
+        if inside.is_none() && !self.window.web_pointer_inside {
             return;
         }
-        self.window.web_pointer_inside = inside;
-        self.send_to_web_page(bt_platform::WebMouseEvent::Move, position);
-        // The page's cursor stops being the answer the moment the pointer is out
-        // of its rectangle, and the answer has to be re-asked to say so.
-        if !inside {
+        // **The page the pointer just left hears about it too**, and it hears the
+        // only thing the engine will accept: a move to somewhere it is not. A
+        // window with two pages has a boundary between them, and a page that was
+        // never told the hand had gone keeps a hover lit under a page it is no
+        // longer under.
+        let leaving: Vec<SeatId> = self
+            .window
+            .web
+            .keys()
+            .copied()
+            .filter(|seat| Some(*seat) != inside)
+            .collect();
+        for seat in leaving {
+            self.send_to_web_page(
+                seat,
+                bt_platform::WebMouseEvent::Move,
+                PhysicalPosition::new(-1.0, -1.0),
+            );
+        }
+        self.window.web_pointer_inside = inside.is_some();
+        if let Some(seat) = inside {
+            self.send_to_web_page(seat, bt_platform::WebMouseEvent::Move, position);
+        } else {
+            // The page's cursor stops being the answer the moment the pointer is
+            // out of its rectangle, and the answer has to be re-asked to say so.
             self.window.web_cursor = None;
         }
         self.apply_pointer_cursor();
@@ -55822,11 +56494,14 @@ impl Runtime<'_> {
         position: PhysicalPosition<f64>,
     ) -> Result<()> {
         let down = state == ElementState::Pressed;
+        let Some(seat) = self.web_page_at(position) else {
+            return Ok(());
+        };
         if down {
             // The seat takes the layout focus exactly as any pane does when it
             // is pressed (D40), and then the keyboard goes inside the page.
             self.focus_pane_at(position)?;
-            if let Some(web) = self.window.web.as_ref()
+            if let Some(web) = self.window.web.get(&seat)
                 && let Err(error) = web.focus_page()
             {
                 eprintln!("BT_WEB focus failed: {error}");
@@ -55835,7 +56510,7 @@ impl Runtime<'_> {
         let Some(event) = web_mouse_button(button, down) else {
             return Ok(());
         };
-        self.send_to_web_page(event, position);
+        self.send_to_web_page(seat, event, position);
         Ok(())
     }
 
@@ -55848,10 +56523,10 @@ impl Runtime<'_> {
         // `WHEEL_DELTA`, which is what a page's own `deltaY` is derived from.
         let notch = |value: f32| (value * 120.0).round().clamp(-32768.0, 32767.0) as i16;
         if y != 0.0 {
-            self.send_to_web_page(bt_platform::WebMouseEvent::Wheel(notch(y)), position);
+            self.send_to_web_page_at(bt_platform::WebMouseEvent::Wheel(notch(y)), position);
         }
         if x != 0.0 {
-            self.send_to_web_page(
+            self.send_to_web_page_at(
                 bt_platform::WebMouseEvent::HorizontalWheel(notch(x)),
                 position,
             );
@@ -56468,8 +57143,9 @@ impl Runtime<'_> {
             // no page, and a page nobody is closing, ask for no wake-ups at all.
             self.window
                 .web
-                .as_ref()
-                .and_then(webhost::WebSeat::next_deadline),
+                .values()
+                .filter_map(webhost::WebSeat::next_deadline)
+                .min(),
             pty_resize_deadline,
             resize_finish_deadline,
             synchronized_update_deadline,
@@ -56615,7 +57291,7 @@ impl Runtime<'_> {
         // session. The wait for that browser to go is the state machine's, and
         // this window is not around for it: what is owed at this door is the
         // close, and the process tree goes when the environment does.
-        if let Some(web) = self.window.web.as_mut() {
+        for web in self.window.web.values_mut() {
             let _ = web.close(&self.window.compositor);
         }
         for tab in &mut self.window.tabs {
@@ -57430,6 +58106,14 @@ mod multiwindow_session_tests {
             },
             seed::Seed::Preview {
                 path: r"D:\work\README.md".to_owned(),
+                source: bt_persist::PreviewSourceV1::File,
+            },
+            // And a page, on the same round trip: `seeded_tab` writes it into the
+            // content section as a URL row and `restore_row_seed` reads it back
+            // as one, which is the whole of what schema v11 bought.
+            seed::Seed::Preview {
+                path: "http://localhost:5173/app?tab=logs#top".to_owned(),
+                source: bt_persist::PreviewSourceV1::Url,
             },
         ] {
             assert_eq!(
@@ -62644,11 +63328,13 @@ mod tests {
                 bt_persist::PreviewPaneV1 {
                     leaf: token(landing),
                     cur: None,
+                    cur_source: bt_persist::PreviewSourceV1::File,
                     graph: None,
                 },
                 bt_persist::PreviewPaneV1 {
                     leaf: token(pinned),
                     cur: Some(readme.to_string_lossy().into_owned()),
+                    cur_source: bt_persist::PreviewSourceV1::File,
                     graph: None,
                 },
                 // A row naming the terminal: a hand edit, or a tree a newer
@@ -62656,6 +63342,7 @@ mod tests {
                 bt_persist::PreviewPaneV1 {
                     leaf: token(seats.identity()),
                     cur: Some(r"C:\repo\stray.md".to_owned()),
+                    cur_source: bt_persist::PreviewSourceV1::File,
                     graph: None,
                 },
             ],
@@ -62663,10 +63350,12 @@ mod tests {
                 bt_persist::PreviewPoolEntryV1 {
                     path: readme.to_string_lossy().into_owned(),
                     name: "README.md".to_owned(),
+                    source: bt_persist::PreviewSourceV1::File,
                 },
                 bt_persist::PreviewPoolEntryV1 {
                     path: r"C:\repo\notes.md".to_owned(),
                     name: "notes.md".to_owned(),
+                    source: bt_persist::PreviewSourceV1::File,
                 },
             ],
         };
@@ -62674,7 +63363,7 @@ mod tests {
         let restored = PreviewRestore::from_persisted(&seats, Some(&saved));
         assert_eq!(
             restored.cur.get(&pinned),
-            Some(&readme),
+            Some(&preview::PreviewSource::file(readme.clone())),
             "the file lands on the leaf the section named"
         );
         assert_eq!(
@@ -62698,11 +63387,8 @@ mod tests {
         let sessions = BTreeMap::from([(seats.identity(), leaf_saying("SHELL"))]);
         let focused = seats.identity();
         let mut pool = preview::PreviewPool::default();
-        for (path, name) in &restored.pool {
-            pool.insert(preview::PreviewBuffer::new(
-                preview::PreviewSource::file(path.clone()),
-                name.clone(),
-            ));
+        for (source, name) in &restored.pool {
+            pool.insert(preview::PreviewBuffer::new(source.clone(), name.clone()));
         }
         let mut panes = PreviewPanes::default();
         panes.entry(PreviewSurface::Seat(pinned)).buffer =
@@ -62735,7 +63421,9 @@ mod tests {
         );
         assert_eq!(
             tab.preview_pages(),
-            vec![readme.to_string_lossy().into_owned()],
+            vec![bt_persist::RecentPreviewV1::File(
+                readme.to_string_lossy().into_owned()
+            )],
             "and the vault takes the files, skipping the pane that had none (裁决 10)"
         );
     }
@@ -80829,13 +81517,15 @@ mod tests {
                     panes: vec![bt_persist::PreviewPaneV1 {
                         leaf: "leaf-0".to_owned(),
                         cur: Some(r"C:\repo\README.md".to_owned()),
+                        cur_source: bt_persist::PreviewSourceV1::File,
                         graph: None,
                     }],
                     pool: Vec::new(),
                 }),
             }),
             seed::Seed::Preview {
-                path: r"C:\repo\README.md".to_owned()
+                path: r"C:\repo\README.md".to_owned(),
+                source: bt_persist::PreviewSourceV1::File,
             }
         );
     }
@@ -80901,7 +81591,8 @@ mod tests {
         assert_eq!(
             file.seed(),
             Some(seed::Seed::Preview {
-                path: "D:\\work\\notes.md".to_owned()
+                path: "D:\\work\\notes.md".to_owned(),
+                source: bt_persist::PreviewSourceV1::File,
             }),
             "and a file tab as the file it was on — the vault's third shape, \
              without which Ctrl+Shift+T would be a door onto an empty store"
@@ -82030,7 +82721,7 @@ mod tests {
         assert_eq!(landed.len(), 1, "the pane crossed as a preview seat");
         assert_eq!(
             torn.preview_showing(landed[0]),
-            Some(Path::new("D:\\work\\notes.md")),
+            Some(preview::PreviewSource::file("D:\\work\\notes.md")),
             "still showing the file it was showing"
         );
         assert_eq!(
@@ -82284,7 +82975,7 @@ mod tests {
         assert_eq!(seats.preview_seats().len(), 1);
         assert_eq!(
             preview.cur.values().collect::<Vec<_>>(),
-            vec![&PathBuf::from("D:\\work\\notes.md")],
+            vec![&preview::PreviewSource::file("D:\\work\\notes.md")],
             "and back on that file"
         );
     }
@@ -82317,7 +83008,8 @@ mod tests {
         );
         assert!(
             !seed::Seed::Preview {
-                path: "D:\\work\\notes.md".to_string()
+                path: "D:\\work\\notes.md".to_string(),
+                source: bt_persist::PreviewSourceV1::File,
             }
             .can_be_named(),
             "and so is a file"
@@ -85558,6 +86250,260 @@ mod tests {
             full.components().count(),
             root.components().count() + 4,
             "and every folder git named is a folder of the path: {full:?}"
+        );
+    }
+
+    // ── W2 slice ③: a page is a preview buffer, in every list a file is in ──
+
+    /// A pool holding a file and a page, which is the state every claim below is
+    /// about.
+    fn a_pool_with_a_file_and_a_page() -> preview::PreviewPool {
+        let mut pool = preview::PreviewPool::default();
+        pool.insert(preview::PreviewBuffer::new(
+            preview::PreviewSource::file(r"C:\work\notes.md"),
+            "notes.md".to_owned(),
+        ));
+        pool.insert(preview::PreviewBuffer::new(
+            preview::PreviewSource::Web("http://localhost:5173/app".to_owned()),
+            "Folio site".to_owned(),
+        ));
+        pool
+    }
+
+    /// **A page and a file are the same kind of row** (`docs/DESIGN.md` §7.7 ⑤ —
+    /// 「同一张列表、同一个索引空间」).
+    ///
+    /// One list, one index space, one order: the pool's. What differs between the
+    /// two rows is the two things that genuinely differ — the mark, and which
+    /// category the pin writes — and the test says both out loud because a build
+    /// that filed a page under `file` would put it in the section the *root menu*
+    /// draws from.
+    ///
+    /// Red gate: `preview_menu_target` answering `PinKind::File` for every source
+    /// makes the category assertion fail; `preview_row_mark` answering `File` for
+    /// every row makes the mark assertion fail.
+    #[test]
+    fn the_switcher_lists_a_page_in_the_same_table_as_a_file() {
+        let rows = switcher_rows(&a_pool_with_a_file_and_a_page(), None, &[]);
+        assert_eq!(
+            rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
+            vec!["notes.md", "Folio site"],
+            "the pool's own order, both kinds of row in it"
+        );
+        assert_eq!(
+            rows.iter().filter_map(|row| row.pool).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            rows[0].keep.as_ref().map(|keep| keep.kind),
+            Some(bt_persist::PinKind::File)
+        );
+        assert_eq!(
+            rows[1].keep.as_ref().map(|keep| keep.kind),
+            Some(bt_persist::PinKind::Url),
+            "a page is kept as a page, not as a file with a strange name"
+        );
+        assert_eq!(
+            rows[1].keep.as_ref().map(|keep| keep.target.as_str()),
+            Some("http://localhost:5173/app"),
+            "and what it keeps is the switcher key, verbatim"
+        );
+        assert!(!rows[0].is_page() && rows[1].is_page());
+        assert_eq!(
+            marks::preview_row_mark(rows[1].is_page()),
+            marks::ChromeMark::Globe
+        );
+        assert_eq!(
+            marks::preview_row_mark(rows[0].is_page()),
+            marks::ChromeMark::File,
+            "and the file beside it is unchanged"
+        );
+    }
+
+    /// **A kept page that is also open is one row, not two** (user ruling
+    /// 2026-08-19: 「已钉 URL 再次出现提升同一条目,PINNED 与 MRU 不留双副本」).
+    ///
+    /// The lift compares the *pair* — category and target — because `pins.json`
+    /// is one array and a row is identified by both. A kept page nobody has
+    /// opened is still a row, which is what makes the section worth having on the
+    /// first frame after a restart, and it is named by its site because the pin
+    /// file stores a place and never a title.
+    ///
+    /// Red gate: make `preview_menu_target` answer one category for everything —
+    /// the open page stops matching its own kept row and is listed twice, once
+    /// above under its site and once below under its title.
+    #[test]
+    fn a_kept_page_that_is_open_is_lifted_rather_than_copied() {
+        let kept = vec![
+            (
+                bt_persist::PinKind::Url,
+                "http://localhost:5173/app".to_owned(),
+            ),
+            (
+                bt_persist::PinKind::Url,
+                "http://127.0.0.1:8080/report".to_owned(),
+            ),
+        ];
+        let rows = switcher_rows(&a_pool_with_a_file_and_a_page(), None, &kept);
+        assert_eq!(
+            rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
+            vec!["Folio site", "127.0.0.1:8080", "notes.md"],
+            "the two kept pages first, then what is left of the pool"
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.keep.as_ref().map(|keep| keep.target.as_str())
+                    == Some("http://localhost:5173/app"))
+                .count(),
+            1,
+            "the open page appears once, lifted rather than copied"
+        );
+        assert_eq!(
+            rows[0].pool,
+            Some(1),
+            "and the lifted row still points at the buffer it came from"
+        );
+        assert_eq!(
+            rows[1].pool, None,
+            "while the kept page nobody has opened has no buffer behind it"
+        );
+        assert!(rows[0].pinned && rows[1].pinned && !rows[2].pinned);
+    }
+
+    /// **A pin is not a permission, at either end** (`plan.md` §3「钉不是授权」).
+    ///
+    /// Twice, because a pin passes through two moments and a check at only one of
+    /// them is a hole: a target that fails now never reaches `pins.json`, and a
+    /// target already in the file is asked again every time somebody presses it —
+    /// which is the only check that catches a row written by an older build,
+    /// edited by hand, or pinned before the policy tightened.
+    ///
+    /// Red gate: return `Some(target.to_owned())` from `switcher_row_destination`
+    /// and every one of the refused strings below is navigated to.
+    #[test]
+    fn a_pinned_page_is_asked_at_the_pin_and_asked_again_at_the_press() {
+        for hostile in [
+            "javascript:alert(1)",
+            "data:text/html,<h1>x</h1>",
+            "file:///C:/Windows/System32/drivers/etc/hosts",
+            "view-source:http://localhost:5173/",
+            "about:blank",
+        ] {
+            assert!(
+                !switcher_pin_is_allowed(bt_persist::PinKind::Url, hostile),
+                "a page this window will not go to never reaches pins.json: {hostile}"
+            );
+            assert_eq!(
+                switcher_row_destination(hostile),
+                None,
+                "and a row hand-edited into it does not navigate: {hostile}"
+            );
+        }
+        // The two that are allowed, and the second is the point of asking twice:
+        // it is already in the file and is checked again anyway.
+        assert!(switcher_pin_is_allowed(
+            bt_persist::PinKind::Url,
+            "http://localhost:5173/app?tab=logs#top"
+        ));
+        assert_eq!(
+            switcher_row_destination("http://localhost:5173/app?tab=logs#top"),
+            Some("http://localhost:5173/app?tab=logs#top".to_owned()),
+            "query and fragment carried through the gate untouched"
+        );
+        // A file pin is not asked, because whether a path is still there is a
+        // filesystem question this store deliberately does not ask.
+        assert!(switcher_pin_is_allowed(
+            bt_persist::PinKind::File,
+            r"C:\work\notes.md"
+        ));
+    }
+
+    /// **One page per tab, and the second address is a navigation rather than a
+    /// second pane** (`plan.md` §0 ②「每 tab 单例」).
+    ///
+    /// And the other half, which is why the tab's own seats are walked rather than
+    /// the window's map: a page open on another tab is not this tab's, so it must
+    /// not be what this tab navigates.
+    ///
+    /// Red gate: ask the hosted set for its first entry instead of walking the
+    /// tab's seats and the second case answers seat 11 — a press in this tab
+    /// steering a page in another one.
+    #[test]
+    fn a_tab_has_at_most_one_page_and_it_is_one_of_its_own_seats() {
+        let seats = |ids: &[u64]| ids.iter().map(|id| SeatId(*id)).collect::<Vec<_>>();
+        let hosted: BTreeSet<SeatId> = [SeatId(7), SeatId(11)].into_iter().collect();
+        assert_eq!(
+            web_seat_among(&seats(&[3, 7, 9]), &hosted),
+            Some(SeatId(7)),
+            "the tab's page is the seat of its own that holds one"
+        );
+        assert_eq!(
+            web_seat_among(&seats(&[3, 9]), &hosted),
+            None,
+            "a tab with no page of its own has none, whatever the window holds"
+        );
+        assert_eq!(
+            web_seat_among(&seats(&[7, 11]), &hosted),
+            Some(SeatId(7)),
+            "and a tab that somehow held two is answered by the first in tree \
+             order, so the reuse target is stable rather than whichever the map \
+             happened to yield"
+        );
+        assert_eq!(web_seat_among(&[], &hosted), None);
+    }
+
+    /// **The switcher's identity is the recovery machine's field, and there is no
+    /// second account of it** (`plan.md` §3 与 §4).
+    ///
+    /// "The URL a session file may record" and "what the switcher calls this
+    /// seat" are one sentence, so they are one field. This drives the machine
+    /// through the three things that must *not* move it — a navigation in flight,
+    /// a failure page, an `about:blank` — and the one that must, and reads the
+    /// switcher's answer off the machine each time.
+    ///
+    /// Red gate: let `WebMachine::on_navigation_completed` write its
+    /// `recoverable_url` whatever `success` said, and the two assertions about a
+    /// page that never loaded both move.
+    #[test]
+    fn the_switchers_identity_is_the_machines_last_committed_url() {
+        let mut machine = webhost::WebMachine::new();
+        machine.request("http://LocalHost:5173/app?tab=logs#top");
+        let generation = machine.generation();
+        machine.on_environment(generation, true);
+        machine.on_controller(generation, true);
+        machine.on_events_installed(generation);
+        assert_eq!(
+            webnav::switcher_identity(machine.recoverable_url()),
+            None,
+            "a navigation that has not committed has no identity — a row for a \
+             page that never existed is a row the switcher cannot honour"
+        );
+        machine.on_navigation_completed(generation, "http://localhost:5173/app?tab=logs#top", true);
+        assert_eq!(
+            webnav::switcher_identity(machine.recoverable_url()),
+            Some("http://localhost:5173/app?tab=logs#top".to_owned()),
+            "query and fragment participate, and only a default port is dropped"
+        );
+        machine.request("http://localhost:5173/gone");
+        assert_eq!(
+            webnav::switcher_identity(machine.recoverable_url()),
+            Some("http://localhost:5173/app?tab=logs#top".to_owned()),
+            "asking for a page is not being on it"
+        );
+        machine.on_navigation_completed(generation, "http://localhost:5173/gone", false);
+        machine.on_navigation_completed(generation, "about:blank", true);
+        assert_eq!(
+            webnav::switcher_identity(machine.recoverable_url()),
+            Some("http://localhost:5173/app?tab=logs#top".to_owned()),
+            "a failure page and a blank page are neither of them where you are"
+        );
+        // A redirect: what committed is the identity, not what was asked for.
+        machine.request("http://localhost:5173/old");
+        machine.on_navigation_completed(generation, "http://localhost:5173/new", true);
+        assert_eq!(
+            webnav::switcher_identity(machine.recoverable_url()),
+            Some("http://localhost:5173/new".to_owned()),
+            "after a redirect the seat is where it landed"
         );
     }
 }

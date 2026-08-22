@@ -71,6 +71,26 @@ pub fn toggle_pin(table: &mut PinsV1, kind: PinKind, target: &str) -> bool {
     }
 }
 
+/// **Every pinned row of any of these categories, in the file's own order.**
+///
+/// [`pinned_targets`] for a surface that draws more than one category in one
+/// list — the preview switcher, which since W2 slice ③ holds files and pages
+/// together. The category comes back with the target because that is what
+/// identifies a row here ([`row_of`]): the table is one array, and a caller that
+/// kept only the strings would have to guess which section a row came from.
+///
+/// One walk over the file rather than one per category, so the interleaving the
+/// user made by pinning in some order is the interleaving the menu draws.
+pub fn pinned_rows<'a>(
+    table: &'a PinsV1,
+    kinds: &'a [PinKind],
+) -> impl Iterator<Item = (PinKind, &'a str)> {
+    table.pins.iter().filter_map(move |pin| {
+        let kind = pin.kind()?;
+        kinds.contains(&kind).then_some((kind, pin.target.as_str()))
+    })
+}
+
 /// Every pinned target of one category, in the file's own order.
 pub fn pinned_targets(table: &PinsV1, kind: PinKind) -> impl Iterator<Item = &str> {
     table
@@ -166,6 +186,13 @@ impl PinsStore {
             .collect()
     }
 
+    /// Every pinned row of any of these categories — see [`pinned_rows`].
+    pub fn rows_of(&self, kinds: &[PinKind]) -> Vec<(PinKind, String)> {
+        pinned_rows(&self.loaded, kinds)
+            .map(|(kind, target)| (kind, target.to_owned()))
+            .collect()
+    }
+
     /// Pin or unpin one target and put the table on disk. Answers whether it is
     /// pinned now, which is what the row that was just clicked has to draw.
     pub fn toggle(&mut self, kind: PinKind, target: &str) -> bool {
@@ -225,13 +252,20 @@ impl PinsStore {
 /// Two answers rather than one concatenated list, because the caller has to draw
 /// a section label and a hairline between them and would otherwise have to
 /// re-derive the boundary it was just told.
+///
+/// **Generic in the identity** since W2 slice ③: the preview switcher's rows are
+/// files *and* pages in one list, and a `pins.json` row is identified by its
+/// category and its target together ([`row_of`]) — so a lift that compared bare
+/// strings would let a pinned file and a pinned page of the same spelling stand
+/// for one another. The root menu still hands `String`s, which is the same
+/// function with the pair collapsed to the half it has.
 #[must_use]
-pub fn lift_pinned<T: Clone>(
-    pinned: &[String],
+pub fn lift_pinned<K: Clone + PartialEq, T: Clone>(
+    pinned: &[K],
     recent: &[T],
-    identity: impl Fn(&T) -> String,
-) -> (Vec<String>, Vec<T>) {
-    let kept: Vec<String> = pinned.to_vec();
+    identity: impl Fn(&T) -> K,
+) -> (Vec<K>, Vec<T>) {
+    let kept: Vec<K> = pinned.to_vec();
     let rest = recent
         .iter()
         .filter(|item| !kept.contains(&identity(item)))

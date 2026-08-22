@@ -4044,7 +4044,7 @@ pub fn build(
             &Row {
                 rect: *row,
                 mark: Some(recent_mark(&entry.seed)),
-                name: recent_label(&entry.seed),
+                name: &recent_label(&entry.seed),
                 // Still the age, and deliberately not `not installed`: a Recent
                 // row's one annotation answers "when", the grey already answers
                 // "can you", and losing the timestamp would cost the row the
@@ -4363,7 +4363,11 @@ fn recent_mark(seed: &Seed) -> ChromeMark {
     match seed {
         Seed::Term { profile_id, .. } => mark(index_of_id(profile_id)),
         Seed::Files { .. } => ChromeMark::Folder,
-        Seed::Preview { .. } => ChromeMark::File,
+        // A page wears the web class's globe and a file wears `#i-file`, through
+        // the one door every preview row asks (`docs/DESIGN.md` §7.7 ⑤/⑥).
+        Seed::Preview { source, .. } => {
+            crate::marks::preview_row_mark(*source == bt_persist::PreviewSourceV1::Url)
+        }
         // **A window wears a window** (multiwindow slice D), and it is the one
         // row in this list whose mark is not its content's: a row captioned
         // `alpha` with a PowerShell mark says "that shell", and the whole
@@ -4384,7 +4388,7 @@ fn recent_tip(seed: &Seed) -> String {
     match seed {
         Seed::Term { cwd, .. } => cwd.clone(),
         Seed::Files { root } => root.clone(),
-        Seed::Preview { path } => path.clone(),
+        Seed::Preview { path, .. } => path.clone(),
         Seed::Window { seeds } => crate::i18n::recent_window_tip(seeds.len()),
     }
 }
@@ -4395,21 +4399,35 @@ fn recent_tip(seed: &Seed) -> String {
 /// never gave it one. An empty manual name is not a name: `||` in the mock-up
 /// falls through an empty string, and a row captioned with nothing would be a
 /// row you cannot tell from the one above it.
-fn recent_label(seed: &Seed) -> &str {
+fn recent_label(seed: &Seed) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
     match seed {
         Seed::Term {
             cwd, manual_name, ..
-        } => manual_name
-            .as_deref()
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| cwd_leaf(cwd)),
+        } => Cow::Borrowed(
+            manual_name
+                .as_deref()
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| cwd_leaf(cwd)),
+        ),
         // A files locus has no name of its own; the mock-up captions it with the
         // same leaf rule applied to its root.
-        Seed::Files { root } => cwd_leaf(root),
+        Seed::Files { root } => Cow::Borrowed(cwd_leaf(root)),
         // And a file is captioned by its own last segment through the same rule,
         // which for a path ending in a file name is that file name — the string
         // a preview head already prints (§7.1.6h).
-        Seed::Preview { path } => cwd_leaf(path),
+        // **And a page is captioned by its site**, `host[:port]`, because that is
+        // the half of a URL §7.7 ③ calls its identity and the vault stores a
+        // place rather than a title. `webnav::site_label` is the one splitter, so
+        // the row cannot name a site the switcher key disagrees with.
+        Seed::Preview {
+            path,
+            source: bt_persist::PreviewSourceV1::File,
+        } => Cow::Borrowed(cwd_leaf(path)),
+        Seed::Preview {
+            path,
+            source: bt_persist::PreviewSourceV1::Url,
+        } => Cow::Owned(crate::webnav::site_label(path)),
         // **A window is captioned by the tab it opened with** (multiwindow slice
         // D) — or, since 2026-08-20, by the first one that can say what it is;
         // see [`Seed::first_tab`] for that and for why the word "window" is in
@@ -4417,7 +4435,7 @@ fn recent_label(seed: &Seed) -> &str {
         // themselves never reaches the vault (`Seed::names_itself`), so the
         // fallback is a shape nothing constructs; it answers the empty string
         // because that is what an unnameable row already answers above.
-        Seed::Window { .. } => seed.first_tab().map_or("", recent_label),
+        Seed::Window { .. } => seed.first_tab().map_or(Cow::Borrowed(""), recent_label),
     }
 }
 
@@ -8494,13 +8512,19 @@ pub struct PreviewMenuItem {
     pub dirty: bool,
     /// Whether this is the buffer the pane is showing (`.tm-item.cur`).
     pub current: bool,
-    /// The file this row names, when it names one.
+    /// What this row names, when it names something that can be kept — the pin's
+    /// category and its target.
     ///
-    /// The pin's identity, and the only thing that can be pinned: a diff and a
-    /// commit's reading of a file are documents this window computed, not files
-    /// on a disk, and keeping one across a restart would mean keeping the
-    /// question rather than the answer.
-    pub path: Option<String>,
+    /// **The category is the row's, not the surface's** (W2 slice ③): one list
+    /// holds files and pages, and a `pins.json` row is identified by its category
+    /// *and* its target, so a switcher that pinned everything as a `file` would
+    /// write a page into the section the root menu draws from.
+    ///
+    /// `None` for the rows that cannot be kept at all: a diff and a commit's
+    /// reading of a file are documents this window computed, not places, and
+    /// keeping one across a restart would mean keeping the question rather than
+    /// the answer.
+    pub keep: Option<PreviewMenuTarget>,
     /// Whether the user said to keep this file.
     ///
     /// The kept rows are at the front of the list — one list and one index
@@ -8514,6 +8538,28 @@ pub struct PreviewMenuItem {
     /// choosing any other row is a change of view over a buffer that already
     /// exists.
     pub pool: Option<usize>,
+}
+
+impl PreviewMenuItem {
+    /// Whether this row is a page — which decides its mark and, at the two call
+    /// sites that navigate, which door it goes through.
+    #[must_use]
+    pub fn is_page(&self) -> bool {
+        self.keep
+            .as_ref()
+            .is_some_and(|keep| keep.kind == bt_persist::PinKind::Url)
+    }
+}
+
+/// **What one switcher row keeps** — a `pins.json` row's two halves.
+///
+/// A pair and not a bare string, for [`crate::pins::row_of`]'s reason: the table
+/// is one array, so "is this pinned" has to be asked of a category *and* a
+/// target or the answer comes back from somebody else's row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreviewMenuTarget {
+    pub kind: bt_persist::PinKind,
+    pub target: String,
 }
 
 /// Which preview pane's switcher is up, and which row the pointer is on.
@@ -8627,7 +8673,7 @@ pub fn preview_menu_layout(
     // The pin's column, reserved wherever any row could carry one — the dot's
     // own reservation, one control further out. A switcher of nothing but
     // computed documents has no pin anywhere and gives the width back.
-    let pin = if items.iter().any(|item| item.path.is_some()) {
+    let pin = if items.iter().any(|item| item.keep.is_some()) {
         row_pin_claim(scale)
     } else {
         0.0
@@ -8738,7 +8784,7 @@ pub fn preview_menu_hit(
             // The pin is inside the row and is asked about first — and only on
             // rows that have one: a computed document's row is a row all the way
             // to its trailing edge.
-            let keepable = items.get(index).is_some_and(|item| item.path.is_some());
+            let keepable = items.get(index).is_some_and(|item| item.keep.is_some());
             return Some(Some(
                 if keepable && contains(row_pin_rect(*item, layout.scale), x, y) {
                     PreviewMenuHit::Pin(index)
@@ -8798,7 +8844,10 @@ pub fn preview_menu_build(
         push_row(
             &Row {
                 rect: *rect,
-                mark: Some(ChromeMark::File),
+                // **A page wears the web class's globe and a file wears
+                // `#i-file`, in the same box** (`docs/DESIGN.md` §7.7 ⑤), through
+                // the one door every preview row asks.
+                mark: Some(crate::marks::preview_row_mark(item.is_page())),
                 name: &item.name,
                 // Reserved on every row and inked on the dirty ones. Drawn as an
                 // empty string rather than omitted so the name's box ends in the
@@ -8822,7 +8871,7 @@ pub fn preview_menu_build(
                 // Only a row that names a file on a disk. A diff and a commit's
                 // reading of a file are documents this window computed, and
                 // keeping one would be keeping a question.
-                pin: item.path.as_ref().map(|_| RowPin {
+                pin: item.keep.as_ref().map(|_| RowPin {
                     filled: item.pinned,
                     hovered: hover == Some(PreviewMenuHit::Pin(index)),
                     // The *pointer's* row and not `.cur`: the current buffer is
@@ -8917,7 +8966,10 @@ mod tests {
                 name: (*name).to_owned(),
                 dirty: *dirty,
                 current: *current,
-                path: Some(format!(r"C:\work\{name}")),
+                keep: Some(PreviewMenuTarget {
+                    kind: bt_persist::PinKind::File,
+                    target: format!(r"C:\work\{name}"),
+                }),
                 pinned: false,
                 pool: Some(index),
             })
@@ -9026,7 +9078,10 @@ mod tests {
                 name: "a.txt".to_owned(),
                 dirty: true,
                 current: false,
-                path: Some(r"C:\work\a.txt".to_owned()),
+                keep: Some(PreviewMenuTarget {
+                    kind: bt_persist::PinKind::File,
+                    target: r"C:\work\a.txt".to_owned(),
+                }),
                 pinned: true,
                 pool: Some(0),
             },
@@ -9038,7 +9093,10 @@ mod tests {
                 name: "old.rs".to_owned(),
                 dirty: false,
                 current: false,
-                path: Some(r"C:\work\old.rs".to_owned()),
+                keep: Some(PreviewMenuTarget {
+                    kind: bt_persist::PinKind::File,
+                    target: r"C:\work\old.rs".to_owned(),
+                }),
                 pinned: true,
                 pool: None,
             },
@@ -9047,14 +9105,15 @@ mod tests {
             name: "main.rs (working tree)".to_owned(),
             dirty: false,
             current: false,
-            path: None,
+            keep: None,
             pinned: false,
             pool: Some(9),
         });
         assert_eq!(
             items
                 .iter()
-                .filter(|item| item.path.as_deref() == Some(r"C:\work\a.txt"))
+                .filter(|item| item.keep.as_ref().map(|keep| keep.target.as_str())
+                    == Some(r"C:\work\a.txt"))
                 .count(),
             1,
             "a kept file that is also open is one row, not two"
@@ -9152,7 +9211,7 @@ mod tests {
         // the box is a boundary between one thing and no things.
         let all_kept: Vec<PreviewMenuItem> = items
             .iter()
-            .filter(|item| item.path.is_some())
+            .filter(|item| item.keep.is_some())
             .map(|item| PreviewMenuItem {
                 pinned: true,
                 ..item.clone()
@@ -15439,5 +15498,41 @@ mod tests {
         assert_eq!(of("wsl"), "wsl.exe --cd ~");
         assert_eq!(of("gitbash"), "bash.exe --login -i");
         assert_eq!(of("cmd"), "cmd.exe");
+    }
+
+    /// **A page's Recent row is a Recent row** (W2 slice ③; `docs/DESIGN.md`
+    /// §7.7 ⑥ — 「预览戴它那块 pane 自己的记号」).
+    ///
+    /// Same list, same three questions, two different answers where the two
+    /// genuinely differ: the mark, which is the web class's globe through the one
+    /// door every preview row asks, and the caption, which is the page's *site*
+    /// because this vault stores a place and never a title. The tip is the whole
+    /// address either way, which is where this list has always put what a caption
+    /// crops.
+    ///
+    /// Red gate: answer `ChromeMark::File` for both and the first assertion
+    /// fails; caption a page with `cwd_leaf` and the second answers the whole URL,
+    /// because a URL has no backslash for that rule to split on.
+    #[test]
+    fn a_recent_row_for_a_page_wears_the_globe_and_is_captioned_by_its_site() {
+        const URL: &str = "http://localhost:5173/app?tab=logs#top";
+        let page = Seed::Preview {
+            path: URL.to_owned(),
+            source: bt_persist::PreviewSourceV1::Url,
+        };
+        let file = Seed::Preview {
+            path: r"D:\work\folio\README.md".to_owned(),
+            source: bt_persist::PreviewSourceV1::File,
+        };
+        assert_eq!(recent_mark(&page), ChromeMark::Globe);
+        assert_eq!(
+            recent_mark(&file),
+            ChromeMark::File,
+            "and the file beside it is unchanged"
+        );
+        assert_eq!(recent_label(&page), "localhost:5173");
+        assert_eq!(recent_label(&file), "README.md");
+        assert_eq!(recent_tip(&page), URL, "the tip is the whole address");
+        assert_eq!(recent_tip(&file), r"D:\work\folio\README.md");
     }
 }

@@ -68,10 +68,10 @@ pub use profiles::{
 pub use scheme::{SchemeFileV1, SchemeParseError, parse_scheme, write_scheme};
 pub use sentinel::{ExitState, create_sentinel, probe_sentinel, remove_sentinel};
 pub use session::{
-    DegradationReport, GraphFilterV1, PreviewPaneV1, PreviewPoolEntryV1, RecentEntryV1,
-    RecentSeedV1, SESSION_SCHEMA_VERSION, SessionCursorStyleV1, SessionSidebarModeV1,
-    SessionTabLayoutV1, SessionThemeV1, SessionV1, SessionWindowV1, TabPreviewV1, TabV1,
-    WindowBoundsV1, WindowStateV1,
+    DegradationReport, GraphFilterV1, PreviewPaneV1, PreviewPoolEntryV1, PreviewSourceV1,
+    RecentEntryV1, RecentPreviewV1, RecentSeedV1, SESSION_SCHEMA_VERSION, SessionCursorStyleV1,
+    SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1, SessionWindowV1,
+    TabPreviewV1, TabV1, WindowBoundsV1, WindowStateV1,
 };
 pub use settings::{
     BackgroundFitV1, DEFAULT_BACKGROUND_IMAGE, DEFAULT_BACKGROUND_IMAGE_OPACITY,
