@@ -329,6 +329,15 @@ enum AppEvent {
     /// is *which* window, tab and pane it came from — and that window may be
     /// behind, minimised, or gone.
     NotificationClicked,
+    /// **A hosted web page's engine said something** (web preview slice 1).
+    ///
+    /// The ninth of the family and separate for the family's own reason, read
+    /// from an unusual direction: WebView2's callbacks arrive on *this* thread,
+    /// inside the message pump winit is already turning, so nothing about them
+    /// is cross-thread. What they lack is a turn of the loop — a callback that
+    /// lands while the window is idle would sit unread until somebody moved the
+    /// mouse. This is that turn, and nothing else.
+    WebPageSpoke,
 }
 
 /// One answer from the picture worker (§7.1.6c-4d).
@@ -5001,6 +5010,30 @@ struct WindowRuntime {
     /// and wgpu will never do it. See [`Self::present_seats_and_commit`], which
     /// is the only place in this program that presents a frame.
     compositor: bt_platform::Compositor,
+    /// **This window's hosted web page** (web preview slice 1), while
+    /// `BT_WEB_DEV` has put one on a seat.
+    ///
+    /// One and not a list, and the singular is this slice's scope rather than a
+    /// shortcut: the only door to a page in this build is a development
+    /// environment variable read once at launch. Slice 3 gives the page a
+    /// preview buffer and with it a pane's ordinary plurality, and that is the
+    /// slice this field becomes a map in.
+    web: Option<webhost::WebSeat>,
+    /// The Win32 cursor the page last asked for, while the pointer is over it.
+    ///
+    /// Kept beside the page rather than folded into [`pointer_cursor`]'s six
+    /// answers: that function decides what *this window* means by a rectangle,
+    /// and this is another program saying what it means by one. The one place
+    /// they meet is [`Runtime::apply_pointer_cursor`], where the page's answer
+    /// wins inside its own rectangle and nowhere else.
+    web_cursor: Option<u32>,
+    /// Whether the pointer was inside the page on the previous move.
+    ///
+    /// The one bit that turns "the pointer is elsewhere" into "the pointer has
+    /// *left*", which is a different sentence and the only one a page can act
+    /// on — a hover that never ends is a link that stays lit after the hand has
+    /// gone.
+    web_pointer_inside: bool,
     window: Arc<Window>,
     /// The geometry changes the most recent layout commit produced (T230).
     ///
@@ -18981,6 +19014,9 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         custom_window_frame,
         taskbar: TaskbarMirror::default(),
         compositor,
+        web: None,
+        web_cursor: None,
+        web_pointer_inside: false,
         window,
         last_layout_events: Vec::new(),
         resize_trace_logged_transaction: 0,
@@ -19785,6 +19821,11 @@ impl Runtime<'_> {
         // succeeding.
         runtime.app.storage_watch.arm(&runtime.app.event_proxy);
         runtime.refresh_scheme_sources();
+        // After the window is up and the tree is solved, because a page needs a
+        // rectangle before it can be given one — and after `show_new_window`,
+        // because a WebView2 that is created against a window nobody has shown
+        // yet has nowhere to compose.
+        runtime.open_development_web_page()?;
         let background_visible = startup_started.elapsed();
         runtime.window.background_visible = Some(background_visible);
         if trace_startup {
@@ -47941,6 +47982,17 @@ impl Runtime<'_> {
     }
 
     fn pointer_left(&mut self) -> Result<()> {
+        // The page hears it too, and hears it as a move to somewhere it is not:
+        // the engine refuses a `LEAVE` outright (`w0p-evidence.md` gate 3), so a
+        // point far outside the rectangle is what says the hand has gone.
+        if self.window.web_pointer_inside {
+            self.window.web_pointer_inside = false;
+            self.window.web_cursor = None;
+            self.send_to_web_page(
+                bt_platform::WebMouseEvent::Move,
+                PhysicalPosition::new(-1.0, -1.0),
+            );
+        }
         self.window.pointer_position = None;
         // **Both `⌄` clocks, told the pointer is nowhere** (user report,
         // 2026-08-21) — through the same function every pointer move goes
@@ -48567,6 +48619,11 @@ impl Runtime<'_> {
 
     fn pointer_moved(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
         self.window.pointer_position = Some(position);
+        // **The hosted page, before anything returns**, for the reason the two
+        // chevron clocks below are told: a page's own hover ends when the
+        // pointer is somewhere else, and every branch under this one consumes
+        // the move it would have heard that from.
+        self.drive_web_pointer(position);
         // **Both `⌄` clocks, before anything returns** (user ruling, 2026-08-16).
         // A chevron's leave grace is running precisely when the pointer is
         // somewhere else, so it has to be told about moves that every branch
@@ -49566,6 +49623,21 @@ impl Runtime<'_> {
                     .map(|slot| slot.dir),
                 _ => None,
             });
+        // **Inside the page, the page decides.** A hosted document says what
+        // its own rectangle means — a link, a text field, a resize grip — and
+        // this window has no way to know any of it. Outside that rectangle the
+        // answer is this window's, exactly as it always was, which is why the
+        // page's answer is asked for first and only here.
+        if let Some(cursor) = self
+            .window
+            .pointer_position
+            .filter(|position| self.point_is_on_the_web_page(*position))
+            .and(self.window.web_cursor)
+            .and_then(web_page_cursor)
+        {
+            self.window.window.set_cursor(cursor);
+            return;
+        }
         self.window.window.set_cursor(pointer_cursor(
             self.window.drag.is_some(),
             grasp,
@@ -52388,6 +52460,18 @@ impl Runtime<'_> {
                 }
             }
         }
+        // **A press inside a hosted page is the page's** (web preview slice 1).
+        //
+        // Below every surface that floats over the window — each of those has
+        // already returned above — and above the chrome router, because inside
+        // that rectangle there is no chrome to route to: the page is what the
+        // pane's body *is*.
+        if let Some(position) = self.window.pointer_position
+            && self.point_is_on_the_web_page(position)
+        {
+            self.press_web_page(state, button, position)?;
+            return Ok(());
+        }
         if let Some(position) = self.window.pointer_position
             && self.chrome_mouse_input(state, button, position)?
         {
@@ -53847,6 +53931,25 @@ impl Runtime<'_> {
             )
             .is_some()
         {
+            return Ok(());
+        }
+        // **A notch over a hosted page is the page's** (web preview slice 1).
+        //
+        // Under the scrim and under a card, on their own arguments above; over
+        // every pane, because the pane a page sits in has no document of its own
+        // to move and both axes are the page's exactly as they are in any other
+        // browser.
+        if let Some(position) = self.window.pointer_position
+            && self.point_is_on_the_web_page(position)
+        {
+            let (x, y) = match delta {
+                MouseScrollDelta::LineDelta(x, y) => (x, y),
+                // A trackpad already speaks pixels, and a notch is 120 of them.
+                MouseScrollDelta::PixelDelta(position) => {
+                    (position.x as f32 / 120.0, position.y as f32 / 120.0)
+                }
+            };
+            self.scroll_web_page(position, x, y);
             return Ok(());
         }
         // A7/A8 — a notch over the tab strip is the strip's. The mock-up gives
@@ -55475,7 +55578,282 @@ impl Runtime<'_> {
                 .renderer
                 .place_preview_image(placement.seat, placement.clip);
         }
+        // And the hosted page, on the same clock and for the same reason: a web
+        // seat is a pane, it FLIPs with its neighbours, and a rectangle that is
+        // a function of the clock cannot be answered once per commit.
+        self.sync_web_page(now);
         bodies
+    }
+
+    // ── The web preview (slice 1) ──────────────────────────────────────────
+
+    /// Put the page where the seat is — and punch the hole that lets it be
+    /// seen — or take both away.
+    ///
+    /// **The two halves are one decision and are made here together.** The page
+    /// is composed *under* wgpu's visual, so it is visible exactly where this
+    /// surface is transparent; a frame that moved one and not the other would be
+    /// a page peeping out beside its own pane, and there is no third place the
+    /// two could be reconciled.
+    fn sync_web_page(&mut self, now: Instant) {
+        let Some(seat) = self.window.web.as_ref().map(|web| web.seat) else {
+            self.window.renderer.set_web_holes(Vec::new());
+            return;
+        };
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let motion = self.app.motion;
+        let transform = self.window.pane_motion.transform_of(seat, now, motion);
+        let body = preview_image_placement(&self.seats, &self.seat_layout, seat, scale, transform)
+            .map(|placement| {
+                [
+                    placement.seat.x as f32,
+                    placement.seat.y as f32,
+                    (placement.seat.x + placement.seat.width) as f32,
+                    (placement.seat.y + placement.seat.height) as f32,
+                ]
+            });
+        let presence = webhost::web_presence(body, self.a_modal_covers_the_window());
+        let window = &mut *self.window;
+        if let Some(web) = window.web.as_mut()
+            && let Err(error) = web.place(&window.compositor, presence)
+        {
+            eprintln!("BT_WEB place failed: {error}");
+        }
+        let holes = match presence {
+            webhost::WebPresence::Shown(bounds) => vec![bounds.as_rect()],
+            webhost::WebPresence::Hidden => Vec::new(),
+        };
+        window.renderer.set_web_holes(holes);
+    }
+
+    /// Whether a surface that covers the **whole window** stands over the panes.
+    ///
+    /// Only the four that draw a scrim. A menu or a popup is drawn as an overlay
+    /// layer *after* the hole and therefore covers it correctly on its own
+    /// rectangle; a scrim covers every rectangle, and a hole punched through one
+    /// would be a page read clearly through a dimmed window.
+    fn a_modal_covers_the_window(&self) -> bool {
+        self.window.dirty_gate.is_open()
+            || self.window.psreadline_invite.is_open()
+            || self.window.settings.is_open()
+            || self.window.restore_prompt.is_open()
+    }
+
+    /// Read everything this window's page has said, and do it.
+    fn drive_web_page(&mut self) -> Result<()> {
+        if self.window.web.is_none() {
+            return Ok(());
+        }
+        let window = &mut *self.window;
+        let outcomes = window
+            .web
+            .as_mut()
+            .map(|web| web.drive(&window.compositor))
+            .unwrap_or_default();
+        self.apply_web_outcomes(outcomes)
+    }
+
+    fn apply_web_outcomes(&mut self, outcomes: Vec<webhost::WebOutcome>) -> Result<()> {
+        for outcome in outcomes {
+            match outcome {
+                // The chord the page was not allowed to see. It runs on the
+                // ordinary door, so that a verb pressed over a web seat and the
+                // same verb pressed over a terminal are the same verb.
+                webhost::WebOutcome::Run(action) => self.run_shortcut(action)?,
+                // The Tab contract's far edge: inside a page `Tab` walks the
+                // page's own controls, and at the end of them the keyboard comes
+                // back to this window. One call, because a window with one
+                // `HWND` and no Win32 controls of its own has exactly one place
+                // for the keyboard to come back *to* — and once it is there the
+                // next `Tab` is Folio's, which is what "handed back" has to mean
+                // before there is a pane order to hand it into.
+                webhost::WebOutcome::FocusLeftThePage { .. } => {
+                    let hwnd = window_hwnd(&self.window.window)?;
+                    if let Err(error) = bt_platform::take_keyboard_focus(hwnd) {
+                        eprintln!("BT_WEB focus return failed: {error}");
+                    }
+                }
+                webhost::WebOutcome::Cursor(id) => {
+                    self.window.web_cursor = Some(id);
+                    self.apply_pointer_cursor();
+                }
+                webhost::WebOutcome::PageFocus(_) => {}
+                webhost::WebOutcome::Gone => {
+                    self.window.web = None;
+                    self.window.web_cursor = None;
+                    self.window.renderer.set_web_holes(Vec::new());
+                }
+                // Slice 4 owns the five failure cards; until they exist this
+                // goes where `BT_DPI` goes and for its reason — a fact with
+                // nowhere yet to be drawn is still a fact.
+                webhost::WebOutcome::Fault(text) => eprintln!("BT_WEB {text}"),
+            }
+        }
+        Ok(())
+    }
+
+    /// The clock the browser-exit deadline is hung on, the seat's own mortality,
+    /// and the chord list the focus keeps changing.
+    fn advance_web_page(&mut self, now: Instant) -> Result<()> {
+        if self.window.web.is_none() {
+            return Ok(());
+        }
+        // A page whose pane has left the tree goes with it. Asked of every tab
+        // and not of the active one: a web seat on a tab nobody is looking at is
+        // still a web seat.
+        let seat = self.window.web.as_ref().map(|web| web.seat);
+        let orphaned = seat.is_some_and(|seat| {
+            !self
+                .window
+                .tabs
+                .iter()
+                .any(|tab| tab.seats.preview_seats().contains(&seat))
+        });
+        let focus = self.shortcut_focus();
+        let window = &mut *self.window;
+        let mut outcomes = Vec::new();
+        if let Some(web) = window.web.as_mut() {
+            // The chords the page may not keep change with the focus, and the
+            // focus changes without anything telling the engine so.
+            web.set_claims(&self.app.shortcuts, focus);
+            if orphaned {
+                outcomes.extend(web.close(&window.compositor));
+            }
+            outcomes.extend(web.tick(now, &window.compositor));
+        }
+        self.apply_web_outcomes(outcomes)
+    }
+
+    /// `BT_WEB_DEV=<url>` — open a preview seat and put that page on it.
+    ///
+    /// The whole of slice 1's entry, and deliberately the whole of it: no
+    /// address field, no verb, no menu row, because those are slice 4's and
+    /// putting a provisional one in front of a person is how a provisional one
+    /// ships.
+    fn open_development_web_page(&mut self) -> Result<()> {
+        let Some(url) = webhost::development_target() else {
+            return Ok(());
+        };
+        let Some(PreviewSurface::Seat(seat)) = self.preview_landing_surface() else {
+            eprintln!("BT_WEB no preview seat could be opened for {url}");
+            return Ok(());
+        };
+        let hwnd = window_hwnd(&self.window.window)?;
+        let proxy = self.app.event_proxy.clone();
+        match webhost::WebSeat::open(
+            seat,
+            hwnd,
+            url,
+            Box::new(move || {
+                let _ = proxy.send_event(AppEvent::WebPageSpoke);
+            }),
+        ) {
+            Ok(web) => {
+                self.window.web = Some(web);
+                self.focus_seat(seat)?;
+            }
+            Err(error) => eprintln!("BT_WEB {error}"),
+        }
+        Ok(())
+    }
+
+    /// Whether a point is inside the page as it stands on the glass this frame.
+    fn point_is_on_the_web_page(&self, position: PhysicalPosition<f64>) -> bool {
+        let Some(bounds) = self
+            .window
+            .web
+            .as_ref()
+            .and_then(webhost::WebSeat::shown_at)
+        else {
+            return false;
+        };
+        position.x >= f64::from(bounds.x)
+            && position.y >= f64::from(bounds.y)
+            && position.x < f64::from(bounds.x + bounds.width as i32)
+            && position.y < f64::from(bounds.y + bounds.height as i32)
+    }
+
+    /// Forward one mouse event to the page, in the window's own coordinates.
+    fn send_to_web_page(
+        &mut self,
+        event: bt_platform::WebMouseEvent,
+        position: PhysicalPosition<f64>,
+    ) {
+        let now = Instant::now();
+        let Some(web) = self.window.web.as_mut() else {
+            return;
+        };
+        if let Err(error) = web.send_mouse(event, (position.x as i32, position.y as i32), now) {
+            eprintln!("BT_WEB {error}");
+        }
+    }
+
+    /// The pointer, forwarded to the page — and the page told when it left.
+    ///
+    /// The second half is not symmetrical with the first because the engine will
+    /// not take a `LEAVE` at all (`w0p-evidence.md` §1 gate 3): what tells a page
+    /// the pointer has gone is a move to a point outside its rectangle, which is
+    /// what the position already is on the frame the pointer crosses out.
+    fn drive_web_pointer(&mut self, position: PhysicalPosition<f64>) {
+        if self.window.web.is_none() {
+            return;
+        }
+        let inside = self.point_is_on_the_web_page(position);
+        if !inside && !self.window.web_pointer_inside {
+            return;
+        }
+        self.window.web_pointer_inside = inside;
+        self.send_to_web_page(bt_platform::WebMouseEvent::Move, position);
+        // The page's cursor stops being the answer the moment the pointer is out
+        // of its rectangle, and the answer has to be re-asked to say so.
+        if !inside {
+            self.window.web_cursor = None;
+        }
+        self.apply_pointer_cursor();
+    }
+
+    /// A button, over the page.
+    fn press_web_page(
+        &mut self,
+        state: ElementState,
+        button: MouseButton,
+        position: PhysicalPosition<f64>,
+    ) -> Result<()> {
+        let down = state == ElementState::Pressed;
+        if down {
+            // The seat takes the layout focus exactly as any pane does when it
+            // is pressed (D40), and then the keyboard goes inside the page.
+            self.focus_pane_at(position)?;
+            if let Some(web) = self.window.web.as_ref()
+                && let Err(error) = web.focus_page()
+            {
+                eprintln!("BT_WEB focus failed: {error}");
+            }
+        }
+        let Some(event) = web_mouse_button(button, down) else {
+            return Ok(());
+        };
+        self.send_to_web_page(event, position);
+        Ok(())
+    }
+
+    /// A wheel notch, over the page.
+    ///
+    /// **Not the window's scroll**: the pane a page sits in has no document of
+    /// its own to move, and the two axes are the page's exactly as they are in
+    /// any other browser.
+    fn scroll_web_page(&mut self, position: PhysicalPosition<f64>, x: f32, y: f32) {
+        // `WHEEL_DELTA`, which is what a page's own `deltaY` is derived from.
+        let notch = |value: f32| (value * 120.0).round().clamp(-32768.0, 32767.0) as i16;
+        if y != 0.0 {
+            self.send_to_web_page(bt_platform::WebMouseEvent::Wheel(notch(y)), position);
+        }
+        if x != 0.0 {
+            self.send_to_web_page(
+                bt_platform::WebMouseEvent::HorizontalWheel(notch(x)),
+                position,
+            );
+        }
     }
 
     /// **The one door a frame reaches the screen through.**
@@ -55930,6 +56308,11 @@ impl Runtime<'_> {
             self.advance_storage_watch(now)?;
         }
         self.advance_rename_blink_if_due(now)?;
+        // The hosted page's own clock: the wait for a browser process to say it
+        // has gone. **The only backstop on the graceful path**, where
+        // `ProcessFailed` does not arrive at all and `BrowserProcessExited`
+        // arrived late in one of eight measured shutdowns and never in another.
+        self.advance_web_page(now)?;
         // Ahead of the strip's own animation tick: paying the press's promise
         // activates a tab, and the strip that is redrawn afterwards should be
         // the one the switch produced.
@@ -56079,6 +56462,12 @@ impl Runtime<'_> {
                 .then(|| self.window.rename_blink.deadline())
                 .flatten(),
             self.strip_animation_deadline(now),
+            // Only while a page is waiting for its browser to go — a window with
+            // no page, and a page nobody is closing, ask for no wake-ups at all.
+            self.window
+                .web
+                .as_ref()
+                .and_then(webhost::WebSeat::next_deadline),
             pty_resize_deadline,
             resize_finish_deadline,
             synchronized_update_deadline,
@@ -57565,6 +57954,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 self.for_each_window(|runtime| runtime.adopt_background_picture())
             }
             AppEvent::NotificationClicked => self.route_clicked_notifications(),
+            // Every window, on this family's standing reason: an answer carries
+            // its own address and a window with no page finds nothing to read.
+            AppEvent::WebPageSpoke => self.for_each_window(|runtime| runtime.drive_web_page()),
         };
         if let Err(error) = applied {
             self.fail(event_loop, error);
@@ -57798,6 +58190,55 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             app.finish();
         }
     }
+}
+
+/// One of this window's mouse buttons, in the vocabulary `SendMouseInput`
+/// speaks.
+///
+/// `Other` is refused rather than guessed at: WebView2 knows two X buttons and
+/// a mouse with a fifth is a mouse whose fifth button this window has never had
+/// a meaning for either.
+fn web_mouse_button(button: MouseButton, down: bool) -> Option<bt_platform::WebMouseEvent> {
+    use bt_platform::WebMouseEvent as Event;
+    Some(match (button, down) {
+        (MouseButton::Left, true) => Event::LeftDown,
+        (MouseButton::Left, false) => Event::LeftUp,
+        (MouseButton::Right, true) => Event::RightDown,
+        (MouseButton::Right, false) => Event::RightUp,
+        (MouseButton::Middle, true) => Event::MiddleDown,
+        (MouseButton::Middle, false) => Event::MiddleUp,
+        (MouseButton::Back, true) => Event::XDown(1),
+        (MouseButton::Back, false) => Event::XUp(1),
+        (MouseButton::Forward, true) => Event::XDown(2),
+        (MouseButton::Forward, false) => Event::XUp(2),
+        (MouseButton::Other(_), _) => return None,
+    })
+}
+
+/// The cursor a hosted page asked for, in winit's vocabulary.
+///
+/// The numbers are Win32 `IDC_*` values, which is what `CursorChanged` reports
+/// and the only form the engine offers. The five below are the five gate 3
+/// measured a page asking for; anything else falls back to nothing — **not** to
+/// an arrow, because "the page said something this window cannot draw" and "the
+/// page asked for the default" are different, and only the second of them means
+/// the arrow.
+fn web_page_cursor(system_cursor_id: u32) -> Option<winit::window::CursorIcon> {
+    use winit::window::CursorIcon;
+    Some(match system_cursor_id {
+        32512 => CursorIcon::Default,
+        32513 => CursorIcon::Text,
+        32649 => CursorIcon::Pointer,
+        32514 => CursorIcon::Wait,
+        32515 => CursorIcon::Crosshair,
+        32642 => CursorIcon::NwseResize,
+        32643 => CursorIcon::NeswResize,
+        32644 => CursorIcon::EwResize,
+        32645 => CursorIcon::NsResize,
+        32646 => CursorIcon::Move,
+        32648 => CursorIcon::NotAllowed,
+        _ => return None,
+    })
 }
 
 /// Where the IME's caret is drawn inside a composition — or `None` for "at

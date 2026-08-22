@@ -163,6 +163,16 @@ impl WebMachine {
         self.generation
     }
 
+    /// The URL a session file could record — the last one that actually
+    /// loaded.
+    ///
+    /// Written here because the recovery model is the thing that knows it: a
+    /// machine that only tracked it while somebody was listening would be a
+    /// different machine, and a crash three seconds before slice ③ arrives is
+    /// still a crash that has to come back to the right page. Read today by
+    /// `a_failed_page_does_not_overwrite_a_recoverable_url` and by the two
+    /// crash tests beside it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn recoverable_url(&self) -> Option<&str> {
         self.recoverable_url.as_deref()
     }
@@ -340,7 +350,14 @@ fn is_blank(url: &str) -> bool {
 
 /// Why a candidate is not going anywhere. Slice ②'s vocabulary, carried here so
 /// that the day it lands is a day of deletions.
+///
+/// **All ten variants, including the four this placeholder never reaches.** A
+/// stub that carried only the refusals it happens to produce would be a stub
+/// whose shape has to be widened on the day the real module lands, and widening
+/// is exactly the change a merge cannot make silently — so the shape is right
+/// now and the answers catch up.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 pub(crate) enum Refusal {
     ScriptOrInlineScheme,
     FileScheme,
@@ -355,7 +372,12 @@ pub(crate) enum Refusal {
 }
 
 /// What the policy says about one candidate.
+///
+/// `Search` is never produced here and is carried for [`Refusal`]'s reason: it
+/// is slice ②'s shape, and the arm that handles it is written today so that the
+/// day the real policy lands is a day of deletions.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 pub(crate) enum Decision {
     /// Go here. **The string is not always the candidate**: §3's loopback rule
     /// rewrites `0.0.0.0` to `127.0.0.1` keeping port, path, query and
@@ -374,6 +396,7 @@ pub(crate) enum Decision {
 /// `desired_url` and for the same reason: a mint is the answer to "did *we* ask
 /// for this", and two of them is two answers.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[allow(dead_code)]
 pub(crate) enum Mint {
     /// The pane has asked for nothing.
     #[default]
@@ -540,7 +563,18 @@ pub(crate) fn claimable_chords(shortcuts: &Shortcuts, focus: Focus) -> Vec<Claim
         .collect()
 }
 
+/// The claim on that chord, if this list has one.
+pub(crate) fn claim_for(claims: &[ClaimedChord], chord: WebChord) -> Option<&ClaimedChord> {
+    claims.iter().find(|claim| claim.chord == chord)
+}
+
 /// Whether this list claims that key with those modifiers.
+///
+/// The window's own code path asks [`claim_for`], because it wants the verb and
+/// not the verdict. This spelling exists for the reconciliation tests, whose
+/// whole subject is which keys a page keeps — a question that has a yes and a no
+/// and no verb at all.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn claims_chord(
     claims: &[ClaimedChord],
     virtual_key: u16,
@@ -548,15 +582,16 @@ pub(crate) fn claims_chord(
     shift: bool,
     alt: bool,
 ) -> bool {
-    claims.iter().any(|claim| {
-        claim.chord
-            == WebChord {
-                virtual_key,
-                ctrl,
-                shift,
-                alt,
-            }
-    })
+    claim_for(
+        claims,
+        WebChord {
+            virtual_key,
+            ctrl,
+            shift,
+            alt,
+        },
+    )
+    .is_some()
 }
 
 /// The Win32 virtual key a chord's key half is pressed on **this layout**.
@@ -611,7 +646,6 @@ pub(crate) fn named_key_virtual_key(key: NamedKey) -> Option<u16> {
 
 pub(crate) const VK_TAB: u16 = 0x09;
 pub(crate) const VK_ESCAPE: u16 = 0x1b;
-pub(crate) const VK_MENU: u16 = 0x12;
 pub(crate) const VK_LEFT: u16 = 0x25;
 pub(crate) const VK_RIGHT: u16 = 0x27;
 pub(crate) const VK_F5: u16 = 0x74;
@@ -698,6 +732,29 @@ impl WebBounds {
 /// one that *did* answer would turn that shutdown into a false deadline.
 const BROWSER_EXIT_DEADLINE: Duration = Duration::from_secs(10);
 
+/// How far apart two presses may land and still be one double click, in
+/// physical pixels.
+const DOUBLE_CLICK_SLOP: i32 = 6;
+
+/// Which button a mouse event moves, and which way.
+fn button_bit(event: bt_platform::WebMouseEvent) -> Option<(u32, bool)> {
+    use bt_platform::WebMouseEvent as Event;
+    use bt_platform::web_mouse_buttons as bit;
+    Some(match event {
+        Event::LeftDown | Event::LeftDoubleClick => (bit::LEFT, true),
+        Event::LeftUp => (bit::LEFT, false),
+        Event::RightDown => (bit::RIGHT, true),
+        Event::RightUp => (bit::RIGHT, false),
+        Event::MiddleDown => (bit::MIDDLE, true),
+        Event::MiddleUp => (bit::MIDDLE, false),
+        Event::XDown(1) => (bit::X1, true),
+        Event::XUp(1) => (bit::X1, false),
+        Event::XDown(_) => (bit::X2, true),
+        Event::XUp(_) => (bit::X2, false),
+        Event::Move | Event::Leave | Event::Wheel(_) | Event::HorizontalWheel(_) => return None,
+    })
+}
+
 /// What the window has to do about something the engine said.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum WebOutcome {
@@ -754,6 +811,20 @@ pub(crate) struct WebSeat {
     /// What is on the glass now, so a frame that changed nothing issues no
     /// calls.
     presence: WebPresence,
+    /// Which buttons the page believes are down.
+    ///
+    /// Kept here and nowhere else because it is derived from the very events
+    /// this seat forwards: a mask assembled at the call site would be a second
+    /// account of the same presses, and the two would part company the first
+    /// time a button came up over another window.
+    buttons: u32,
+    /// The last left press, for the double click the engine cannot infer.
+    ///
+    /// `SendMouseInput` has a `LEFT_BUTTON_DOUBLE_CLICK` kind and no way to
+    /// derive it: a host that only ever sent `LEFT_BUTTON_DOWN` twice would give
+    /// a page a `click` and never a `dblclick`, so selecting a word by
+    /// double-clicking it would silently not work.
+    last_left_press: Option<(Instant, (i32, i32))>,
 }
 
 impl WebSeat {
@@ -794,24 +865,13 @@ impl WebSeat {
             claims: Vec::new(),
             waiting: None,
             presence: WebPresence::Hidden,
+            buttons: bt_platform::web_mouse_buttons::NONE,
+            last_left_press: None,
         };
         let effect = web.machine.request(url);
         debug_assert_eq!(effect, WebEffect::Ignore, "an engine that is not up yet");
         web.start_environment()?;
         Ok(web)
-    }
-
-    pub(crate) fn state(&self) -> WebState {
-        self.machine.state()
-    }
-
-    /// The URL a session file could record — the last one that actually loaded.
-    ///
-    /// Slice ③'s to write down; slice ① keeps it because the recovery model is
-    /// the thing that knows it, and a machine that tracked it only when
-    /// somebody was listening would be a different machine.
-    pub(crate) fn recoverable_url(&self) -> Option<&str> {
-        self.machine.recoverable_url()
     }
 
     /// The chords the window takes back from a focused page.
@@ -1069,10 +1129,7 @@ impl WebSeat {
     }
 
     fn action_for(&self, chord: WebChord) -> Option<Action> {
-        self.claims
-            .iter()
-            .find(|claim| claim.chord == chord)
-            .map(|claim| claim.action)
+        claim_for(&self.claims, chord).map(|claim| claim.action)
     }
 
     /// Put the page where the seat is, or take it off the glass.
@@ -1114,20 +1171,66 @@ impl WebSeat {
     /// Forward one mouse event. `window_point` is in the window's client area,
     /// in physical pixels; the translation into the page's own space happens
     /// here and nowhere else.
+    ///
+    /// **A point outside the bounds is deliberately still forwarded.** That is
+    /// how a page is told the pointer left it: `SendMouseInput(LEAVE)` is
+    /// refused by the engine in all three spellings the API allows —
+    /// `E_INVALIDARG` whatever coordinates and button mask it is given
+    /// (`w0p-evidence.md` §1 gate 3) — and a move to a point outside the
+    /// rectangle is the substitute the same gate measured working.
     pub(crate) fn send_mouse(
-        &self,
+        &mut self,
         event: bt_platform::WebMouseEvent,
         window_point: (i32, i32),
-        buttons_down: u32,
+        now: Instant,
     ) -> Result<(), String> {
         let Some(bounds) = self.shown_at() else {
             return Ok(());
         };
-        self.host.send_mouse(
-            event,
-            (window_point.0 - bounds.x, window_point.1 - bounds.y),
-            buttons_down,
-        )
+        let point = (window_point.0 - bounds.x, window_point.1 - bounds.y);
+        let event = self.upgrade_to_double_click(event, window_point, now);
+        // The mask the engine is handed describes the state **including** this
+        // event, which is what a Win32 mouse message carries: a press arrives
+        // with its own bit set and a release arrives with it already clear.
+        if let Some((bit, down)) = button_bit(event) {
+            if down {
+                self.buttons |= bit;
+            } else {
+                self.buttons &= !bit;
+            }
+        }
+        self.host.send_mouse(event, point, self.buttons)
+    }
+
+    /// A second left press in the same place, soon enough, is a double click.
+    ///
+    /// The interval is the window's own [`crate::MULTI_CLICK_INTERVAL`] rather
+    /// than a number of this module's, so that a double click on a page and a
+    /// double click on a tab are the same gesture to the same hand. The slop is
+    /// six physical pixels: a hand that has moved further than that between two
+    /// presses meant two presses.
+    fn upgrade_to_double_click(
+        &mut self,
+        event: bt_platform::WebMouseEvent,
+        window_point: (i32, i32),
+        now: Instant,
+    ) -> bt_platform::WebMouseEvent {
+        if event != bt_platform::WebMouseEvent::LeftDown {
+            return event;
+        }
+        let paired = self.last_left_press.is_some_and(|(at, was)| {
+            now.saturating_duration_since(at) <= crate::MULTI_CLICK_INTERVAL
+                && (was.0 - window_point.0).abs() <= DOUBLE_CLICK_SLOP
+                && (was.1 - window_point.1).abs() <= DOUBLE_CLICK_SLOP
+        });
+        // A double click consumes its own history, exactly as the tab strip's
+        // does: without this a third press would pair with the second.
+        self.last_left_press = (!paired).then_some((now, window_point));
+        if paired {
+            bt_platform::WebMouseEvent::LeftDoubleClick
+        } else {
+            event
+        }
     }
 
     /// Put the keyboard inside the page.
@@ -1144,12 +1247,6 @@ impl WebSeat {
         let mut outcomes = Vec::new();
         self.apply(effect, compositor, &mut outcomes);
         outcomes
-    }
-
-    /// The browser process this seat is talking to, for evidence taking. `0`
-    /// before there is one.
-    pub(crate) fn browser_process_id(&self) -> u32 {
-        self.host.browser_process_id()
     }
 }
 
@@ -1417,6 +1514,11 @@ mod keyboard_tests {
     use super::*;
     use crate::shortcuts::{BINDINGS, Chord, ChordKey, Focus, Shortcuts};
     use winit::keyboard::{ModifiersState, NamedKey};
+
+    /// Bare `Alt`. Named here and not beside the table above because no code
+    /// path in this window reaches it — the point of the row below is precisely
+    /// that this key is the page's.
+    const VK_MENU: u16 = 0x12;
 
     /// Every chord the shipped table carries, spelled the way a person presses
     /// it — the product-side twin of the transcription the W0′ probe fired at a

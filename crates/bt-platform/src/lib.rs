@@ -933,7 +933,7 @@ mod windows_impl {
         },
         UI::{
             HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
-            Input::KeyboardAndMouse::{GetKeyboardLayout, VkKeyScanW},
+            Input::KeyboardAndMouse::{GetKeyboardLayout, SetFocus, VkKeyScanW},
             Shell::{
                 Common::COMDLG_FILTERSPEC, DefSubclassProc, FO_DELETE, FOF_ALLOWUNDO,
                 FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING,
@@ -2364,6 +2364,36 @@ mod windows_impl {
             return Err("local image path extension is not supported".to_owned());
         }
         Ok(())
+    }
+
+    /// Put the keyboard back on this window itself.
+    ///
+    /// The one thing a host can do when a hosted WebView2 says `Tab` walked off
+    /// the end of its own controls (`MoveFocusRequested`): there is no call that
+    /// takes focus *away* from a controller, only calls that give it to
+    /// somewhere else, and a window with one `HWND` and no Win32 controls of its
+    /// own has exactly one somewhere else. After this the next key arrives at
+    /// winit, which is what "the keyboard came back to Folio" has to mean.
+    ///
+    /// Never called for anything but that: this window does not otherwise move
+    /// its own focus, because there is nothing inside it that Win32 knows about.
+    pub fn take_keyboard_focus(hwnd: NonZeroIsize) -> Result<(), String> {
+        let hwnd = HWND(hwnd.get() as *mut c_void);
+        // SAFETY: `SetFocus` takes a window handle by value. It answers the
+        // previously focused window or null, and null with a last error of zero
+        // is "there was no focus to take", which is not a failure.
+        unsafe { SetLastError(WIN32_ERROR(0)) };
+        match unsafe { SetFocus(Some(hwnd)) } {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                let error = unsafe { GetLastError().0 };
+                if error == 0 {
+                    Ok(())
+                } else {
+                    Err(format!("SetFocus failed: 0x{error:08X}"))
+                }
+            }
+        }
     }
 
     /// The virtual key this **layout** produces a character on.
@@ -5371,7 +5401,7 @@ pub use windows_impl::{
     recycle, remove_context_menu, request_window_close, reveal_in_explorer, set_clipboard_text,
     set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
     set_window_topmost, shell_execute, spawn_at_priority, system_backdrop_available,
-    virtual_key_for_character, wheel_scroll_amount, write_to_console,
+    take_keyboard_focus, virtual_key_for_character, wheel_scroll_amount, write_to_console,
 };
 
 /// The bands, asked of the kernel rather than of the source.
