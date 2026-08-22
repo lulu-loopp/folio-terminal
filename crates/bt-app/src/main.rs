@@ -11942,6 +11942,11 @@ fn read_motion_preference() -> Motion {
 
 /// `.pring.indeterminate { animation: pring-spin 1.1s linear infinite }`.
 ///
+/// `.preview-head .pv-fav.loading { border: 1.4px }` — the stroke the page's own
+/// spinner is drawn at, which is thinner than a tab ring's two because the box
+/// it turns in is fourteen pixels rather than eighteen.
+const PAGE_SPINNER_STROKE_LOGICAL_PX: f32 = 1.4;
+
 /// A fixed arc (`stroke-dasharray: 13 40.4`, line 283) carried around the ring
 /// at a constant rate, which is what "indeterminate" means: the shape says how
 /// much is done — nothing knowable — and the motion says it is still going.
@@ -21437,8 +21442,27 @@ impl Runtime<'_> {
         // meaning is "which content is this leaf holding", which is the one
         // thing `seats::pane_mark` cannot work out from a `SeatKind`.
         let mut leaf_marks = self.leaf_marks();
-        if let Some(seat) = self.window.web.as_ref().map(|web| web.seat) {
-            leaf_marks.insert(seat, marks::ChromeMark::Globe);
+        if let Some((seat, page)) = self.window.web.as_ref().map(|web| (web.seat, web.page())) {
+            // **While a navigation is in flight the mark spins in place**
+            // (§7.7 ②): no progress hairline, no second row, and no second
+            // glyph — the seat gains nothing for a state that lasts a second,
+            // and the arc it borrows is the one this window already turns on a
+            // working tab. `stroke_px` is the mock-up's own 1.4.
+            leaf_marks.insert(
+                seat,
+                match page.loading_since.filter(|_| page.loading) {
+                    Some(since) => marks::ChromeMark::ProgressRing {
+                        start_milliturns: indeterminate_start_milliturns(
+                            now.saturating_duration_since(since),
+                            self.app.motion,
+                        ),
+                        sweep_milliturns: (bt_render::WINDOW_TAB_RING_INDETERMINATE_TURNS * 1000.0)
+                            .round() as u16,
+                        stroke_px: (PAGE_SPINNER_STROKE_LOGICAL_PX * scale).round().max(1.0) as u32,
+                    },
+                    None => marks::ChromeMark::Globe,
+                },
+            );
         }
         // B14, per leaf: every files pane head names its *own* root. Resolved
         // beside the terminal names for the same reason and by the same rule.
@@ -47525,6 +47549,19 @@ impl Runtime<'_> {
             .file_trees
             .values()
             .any(|cache| cache.any_turning(now, motion));
+        // §7.7 ②, and the same argument once more: a page's mark spins while a
+        // navigation is in flight, and nothing else in the window is moving
+        // while it does — the engine reports when the navigation *ends*, not
+        // sixty times a second on the way. Under reduced motion the phase is
+        // pinned at twelve o'clock, so the arc is a still picture and asks for
+        // no frames at all, which is what keeps `Reduced` a genuinely idle
+        // window rather than a fast animation.
+        let page_loading = motion != Motion::Reduced
+            && self
+                .window
+                .web
+                .as_ref()
+                .is_some_and(|web| web.page().loading);
         [
             (tabs_moving
                 || chevron_turning
@@ -47532,7 +47569,8 @@ impl Runtime<'_> {
                 || cards_moving
                 || focus_arriving
                 || rail_moving
-                || files_turning)
+                || files_turning
+                || page_loading)
                 .then(|| now + STRIP_ANIMATION_FRAME),
             self.window.pane_motion.deadline(now, motion),
         ]
@@ -56705,6 +56743,15 @@ impl Runtime<'_> {
     }
 
     /// Whether a point is inside the page as it stands on the glass this frame.
+    ///
+    /// **Less whatever this window has standing on it** (§7.7 ②, ④, W2 slice
+    /// ④). Two of this window's own surfaces are drawn *over* a page — the
+    /// search capsule in the pane's top-right corner, and the download sheet —
+    /// and both are overlay layers, which is above the transparency hole and
+    /// therefore above the page (§7.8 ②). One subtraction here rather than four
+    /// guards, because the press, the wheel, the hover and the cursor all ask
+    /// this same question: a pointer that is over the capsule is not over the
+    /// page, whatever the rectangles say.
     fn point_is_on_the_web_page(&self, position: PhysicalPosition<f64>) -> bool {
         let Some(bounds) = self
             .window
@@ -56714,6 +56761,22 @@ impl Runtime<'_> {
         else {
             return false;
         };
+        let (x, y) = (position.x as f32, position.y as f32);
+        let inside = |box_: [f32; 4]| x >= box_[0] && x < box_[2] && y >= box_[1] && y < box_[3];
+        if self
+            .window
+            .web_sheet_layout
+            .is_some_and(|(_, layout)| websheet::covers(&layout, x, y))
+        {
+            return false;
+        }
+        if self
+            .window
+            .search_layout
+            .is_some_and(|capsule| self.window.search.is_open() && inside(capsule.frame))
+        {
+            return false;
+        }
         position.x >= f64::from(bounds.x)
             && position.y >= f64::from(bounds.y)
             && position.x < f64::from(bounds.x + bounds.width as i32)

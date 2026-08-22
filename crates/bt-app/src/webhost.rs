@@ -923,6 +923,12 @@ pub(crate) struct PageFacts {
     /// Between `NavigationStarting` and `NavigationCompleted`. What turns the
     /// reload button into a stop.
     pub(crate) loading: bool,
+    /// When the navigation in flight began — the phase the mark's own spinner is
+    /// carried round on (§7.7 ②: 「导航在途时这一格自转」).
+    ///
+    /// An instant and not a counter, because the spin is a *rate* and the frames
+    /// it is sampled on are whatever the loop happens to turn.
+    pub(crate) loading_since: Option<Instant>,
     /// `StatusBarTextChanged` — where the pointer is pointing, resolved by the
     /// engine. Empty when it is over nothing.
     pub(crate) hover: String,
@@ -1238,6 +1244,9 @@ impl WebSeat {
                     }
                     outcomes.push(WebOutcome::Refused(uri.clone()));
                 } else {
+                    if !self.page.loading {
+                        self.page.loading_since = Some(Instant::now());
+                    }
                     self.page.loading = true;
                 }
                 WebEffect::Ignore
@@ -1248,6 +1257,7 @@ impl WebSeat {
                 status,
             } => {
                 self.page.loading = false;
+                self.page.loading_since = None;
                 if *success {
                     self.fault = None;
                 } else if let Some(fault) = load_fault(uri, *success, *status) {
@@ -1266,6 +1276,7 @@ impl WebSeat {
             }
             WebEvent::ProcessFailed { .. } => {
                 self.page.loading = false;
+                self.page.loading_since = None;
                 self.fault = Some(WebFault::RenderProcessGone);
                 self.machine.on_render_process_failed()
             }
