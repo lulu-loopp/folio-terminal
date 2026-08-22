@@ -306,6 +306,20 @@ pub enum ChromeMark {
     /// standard "opens outside this frame" idiom, and the mock-up's own drawing
     /// of it (line 2236).
     Float,
+    /// `#i-external` — "hand this content to the program the machine keeps for
+    /// it" (user ruling 2026-08-20), the `.pv-tool.pv-browser` on a page's
+    /// preview head.
+    ///
+    /// **A bare arrow and not [`Self::Float`]'s framed one**, because the two
+    /// stand next to each other in that head and say different things: the frame
+    /// says *this pane* leaves the tree, the bare arrow says *this content*
+    /// leaves the window. Two framed arrows side by side would be one drawing
+    /// asked to mean both, at thirteen pixels, in the same run.
+    ///
+    /// It is `#i-float`'s own arrow — same 1.2 stroke, same round caps, same
+    /// forty-five degrees — struck at the size a glyph with nothing around it has
+    /// to be to hold the box the framed one fills.
+    External,
     /// `#i-dock-left` — "put this floating window back on the left as a pane"
     /// (B20), the `DOCK` button in a float's header.
     ///
@@ -682,6 +696,7 @@ impl ChromeMark {
             Self::SplitRight => "i-split-right",
             Self::SplitDown => "i-split-down",
             Self::Float => "i-float",
+            Self::External => "i-external",
             Self::DockLeft => "i-dock-left",
             Self::DockRight => "i-dock-right",
             Self::ResizeGrip => "fly-resize",
@@ -1554,6 +1569,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::ProfileGit => 13,
         ChromeMark::ProfileCmd => 14,
         ChromeMark::Float => 17,
+        ChromeMark::External => 40,
         ChromeMark::DockLeft => 18,
         ChromeMark::DockRight => 26,
         ChromeMark::ResizeGrip => 19,
@@ -1600,7 +1616,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
 /// how a generated glyph comes to sit a pixel off the ones beside it.
 const PROFILE_CHASSIS_VIEW_BOX: &str = "0 0 16 16";
 
-const SYMBOL_VIEW_BOX: [&str; 40] = [
+const SYMBOL_VIEW_BOX: [&str; 41] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -1674,11 +1690,14 @@ const SYMBOL_VIEW_BOX: [&str; 40] = [
     // `#i-pencil`, the house sixteen: it stands in a run beside `#i-close` and
     // has to be cut in the same units as every other mark in this dialog.
     "0 0 16 16",
+    // `#i-external`, the house sixteen — it is `#i-float`'s arrow drawn without
+    // the frame, and the two share a run, so they share a box.
+    "0 0 16 16",
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 40] = [
+const SYMBOL_BODY: [&str; 41] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min
@@ -1931,6 +1950,11 @@ const SYMBOL_BODY: [&str; 40] = [
         r#"<path d="M10.6 2.4l3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#,
         r#"<path d="M11.5 1.5l3 3-8.4 8.4-3.9.9.9-3.9z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>"#,
     ),
+    // `#i-external` — the hand-off arrow, one path: the corner bracket that is
+    // the head, and the shaft it stands on, drawn without the frame `#i-float`
+    // wraps its own arrow in. The arms are two fifths of the shaft, which is what
+    // keeps a bare arrowhead reading as one at thirteen pixels.
+    r#"<path d="M7.4 3.6h5v5M12.4 3.6L3.6 12.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
 ];
 
 /// The active tab's closed outline, in physical pixels, clockwise from the
@@ -3530,6 +3554,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// PAGE (user ruling 2026-08-20) — **the hand-off arrow and the pop-out are
+    /// two drawings, and they stand next to each other.**
+    ///
+    /// The two are `#i-float` with and without its frame, and they share a run in
+    /// a page's preview head. What this guards is the lift: a body or a `viewBox`
+    /// copied into the wrong slot of the two parallel tables would still compile,
+    /// still rasterize, and put a framed arrow beside a framed arrow — which is
+    /// the failure the bare drawing exists to prevent, arriving as a table index
+    /// instead of as a design decision.
+    ///
+    /// Red gate: point `ChromeMark::External` at `#i-float`'s slot and the
+    /// inequality goes red; empty its body and the ink mass does.
+    #[test]
+    fn the_hand_off_arrow_is_not_the_pop_outs_framed_one() {
+        let ink = [0x7a, 0x99, 0xff];
+        let mut rasters = ChromeMarkRasters::default();
+        let icons = rasters.resolve(&[
+            sprite(ChromeMark::External, 32.0, 32.0, ink),
+            sprite(ChromeMark::Float, 32.0, 32.0, ink),
+        ]);
+        assert!(
+            ink_mass(&icons[0]) > 0,
+            "the hand-off arrow rasterized to nothing at all"
+        );
+        assert_ne!(
+            icons[0].rgba, icons[1].rgba,
+            "the arrow and the pop-out are the same drawing, so one of them is in the wrong slot"
+        );
+        // A bare arrow carries less ink than a frame with the same arrow through
+        // it — which is the whole of what tells them apart at thirteen pixels.
+        assert!(
+            ink_mass(&icons[0]) < ink_mass(&icons[1]),
+            "the bare arrow is not lighter than the framed one, so it is not bare"
+        );
     }
 
     /// PIN — ONE pin at ONE angle: 45°, head upper-right, needle lower-left

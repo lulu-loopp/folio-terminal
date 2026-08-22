@@ -1390,6 +1390,16 @@ pub enum Text {
     /// filled the card, and a settings row that named somebody's tool would be a
     /// row that goes stale the day they change tools.
     DescFocusCardHeight,
+
+    // ── the page's hand-off arrow (§7.1.5g, user ruling 2026-08-20) ─────────
+    //
+    // One contiguous block at the end, per this table's standing rule. **One
+    // entry**: the tip on the `↗` a preview head wears while it is showing a
+    // page. It says what pressing it does and names no program — which browser a
+    // machine keeps is the machine's business, and a tip that said `Chrome` would
+    // be this window guessing.
+    /// `.pv-tool.pv-browser`'s tip.
+    PreviewOpenInBrowser,
 }
 
 impl Text {
@@ -2496,6 +2506,11 @@ impl Text {
                 "How tall each card's picture of its tab stands. At the default face a lone pane's seat holds 12 rows at 160, 20 at 240 and 27 at 320",
                 "每张卡片里那幅 tab 缩图的高度。默认字面下,单 pane 的格子在 160 装得下 12 行、240 装 20 行、320 装 27 行",
             ),
+            // A fact and no more: where the page goes. Not "open this page in
+            // your default browser" — "your default" is the machine's setting
+            // and not something this button chose — and not a name, because
+            // which browser answers is the machine's business.
+            Self::PreviewOpenInBrowser => pick(lang, "Open in browser", "在浏览器中打开"),
         }
     }
 
@@ -2511,7 +2526,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 426] = [
+    pub const ALL: [Self; 427] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -2938,6 +2953,7 @@ impl Text {
         Self::DescPowerShellOffer,
         Self::RowFocusCardHeight,
         Self::DescFocusCardHeight,
+        Self::PreviewOpenInBrowser,
     ];
 
     /// The entries whose two columns are allowed to be the same string.

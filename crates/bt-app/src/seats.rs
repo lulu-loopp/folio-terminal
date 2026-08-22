@@ -2236,6 +2236,16 @@ pub enum ChromeTarget {
     PreviewSave(SeatId),
     /// `.pv-tool.pv-md-flip` — rendered view ⇄ source (P28).
     PreviewFlip(SeatId),
+    /// `.pv-tool.pv-browser` — "hand this page to your browser" (user ruling
+    /// 2026-08-20, §7.1.5g).
+    ///
+    /// **The one verb on this head that has no other door.** Every other way a
+    /// page reaches a browser is `Ctrl` over a printed link, and a page already
+    /// open in this seat is the one case where there is no link to press: what
+    /// the seat is showing is the page's *source*, which is what the plain half
+    /// of §7.1.5g's table deliberately does not offer for a page. So it is a
+    /// button rather than a modifier.
+    PreviewBrowser(SeatId),
     /// `.pv-tool.pv-popout` — "pop out to a floating window" (P29/P60).
     ///
     /// **It moves the presentation, not the buffer.** The buffer stays in its
@@ -11395,6 +11405,12 @@ pub struct PreviewHeadTools {
     pub save: bool,
     /// `flippable` (P28) — the buffer is markdown.
     pub flip: bool,
+    /// The buffer is a **page** with a file behind it (user ruling 2026-08-20) —
+    /// `crate::preview_page_hand_off`, the one predicate that also decides which
+    /// path the press hands over. A head drawn with an arrow its geometry did not
+    /// reserve, or lit over a file it will not open, is the same class of bug the
+    /// note on this struct exists to make impossible.
+    pub browser: bool,
     /// The pool holds more than one buffer, so the name is a control (P18/P23).
     pub switcher: bool,
     /// `.pv-name`'s drawn width, measured by the caller that holds a font.
@@ -11417,6 +11433,8 @@ pub struct PreviewHeadGeometry {
     pub dirty: [f32; 4],
     pub save: Option<[f32; 4]>,
     pub flip: Option<[f32; 4]>,
+    /// `.pv-tool.pv-browser` — the hand-off arrow, last of the per-type verbs.
+    pub browser: Option<[f32; 4]>,
     /// `.pv-tool.pv-popout` (P29) — the slice-5 arrival the note below reserved.
     pub popout: Option<[f32; 4]>,
     pub pin: Option<[f32; 4]>,
@@ -11425,13 +11443,19 @@ pub struct PreviewHeadGeometry {
 /// Lay one preview head's contents out inside the common head it rides on.
 ///
 /// The trailing run is taken off the right in the mock-up's own DOM order —
-/// `.pv-save`, `.pv-md-flip`, `.pv-popout`, `.pv-pin`, `.pane-close` — so a head
-/// that has lost room drops controls from the *left* of that run, which is the
-/// order flexbox would drop them in and the order that keeps the `×` reachable
-/// longest.
+/// `.pv-save`, `.pv-md-flip`, `.pv-browser`, `.pv-popout`, `.pv-pin`,
+/// `.pane-close` — so a head that has lost room drops controls from the *left* of
+/// that run, which is the order flexbox would drop them in and the order that
+/// keeps the `×` reachable longest.
 ///
 /// The pop-out arrived in slice 5 and took the box this note had reserved for it,
 /// between the flip and the pin, and nothing else moved.
+///
+/// The hand-off arrow (user ruling 2026-08-20) went in **ahead of the pop-out**
+/// and not beside it, because the mock-up puts every content class's own verbs
+/// in one slot — first in the tool run, before the three every pane has — and
+/// that is where `Save`, `Edit source` and W1's `[back][forward][reload]` all
+/// sit. A page's one verb is a per-type verb like theirs.
 #[must_use]
 pub fn preview_head_geometry(
     head: &PaneHeadGeometry,
@@ -11467,10 +11491,14 @@ pub fn preview_head_geometry(
     // how it leaves the tree altogether. Neither is a property of the content, so
     // neither can be earned or lost by it.
     let popout = take(true);
+    // Last of the per-type verbs, so it is the first of them off the right — see
+    // the note above for why a page's verb sits with `Save` and the flip rather
+    // than with the pop-out it would otherwise be read as a second spelling of.
+    let browser = take(tools.browser);
     let flip = take(tools.flip);
     let save = take(tools.save);
 
-    let run_left = [save, flip, popout, pin]
+    let run_left = [save, flip, browser, popout, pin]
         .into_iter()
         .flatten()
         .map(|box_| box_[0])
@@ -11549,6 +11577,7 @@ pub fn preview_head_geometry(
         ],
         save,
         flip,
+        browser,
         popout,
         pin,
     }
@@ -12462,6 +12491,9 @@ pub fn hit_preview_head(
         if hit(geometry.flip) {
             return Some(ChromeTarget::PreviewFlip(placement.id));
         }
+        if hit(geometry.browser) {
+            return Some(ChromeTarget::PreviewBrowser(placement.id));
+        }
         if hit(geometry.popout) {
             return Some(ChromeTarget::PreviewPopOut(placement.id));
         }
@@ -13073,6 +13105,14 @@ fn push_preview_head(
         } else {
             ChromeMark::Eye
         },
+        false,
+    );
+    tool(
+        geometry.browser,
+        ChromeTarget::PreviewBrowser(seat),
+        // `#i-external` — the bare arrow, and the reason it is bare is that the
+        // framed one is drawn immediately to its right: see `ChromeMark::External`.
+        ChromeMark::External,
         false,
     );
     tool(
@@ -16499,6 +16539,7 @@ mod tests {
         let tools = PreviewHeadTools {
             save: true,
             flip: true,
+            browser: false,
             switcher: true,
             name_width: 60.0,
             count_width: 8.0,
@@ -16554,6 +16595,175 @@ mod tests {
             hit_preview_head(&layout, 1.0, &[(seat, lone)], x, y),
             Some(ChromeTarget::PreviewName(seat)),
             "and the name answers for itself"
+        );
+    }
+
+    /// PAGE (user ruling 2026-08-20) — **a page in a preview seat wears one more
+    /// tool, and it stands in the per-type verb slot.**
+    ///
+    /// The mock-up puts every content class's own verbs in exactly one place:
+    /// first in the tool run, before the three every pane has (pop out, pin,
+    /// close). `Save` sits there for a text file, `Edit source` for a markdown,
+    /// and W1's `[back][forward][reload]` for a web seat — so a page's one verb
+    /// sits there too, rather than beside the pop-out it would then be read as a
+    /// second spelling of.
+    ///
+    /// MUTATIONS:
+    /// ① take the arrow's box before the pop-out's rather than after it — the
+    ///    arrow lands outside the per-type slot and the pop-out and pin shift by
+    ///    one box on every page;
+    /// ② leave `browser` out of `run_left`'s fold — the name's box overlaps the
+    ///    arrow, and a long file name is drawn under it;
+    /// ③ offer the box unconditionally — every preview head in the window grows
+    ///    an arrow, including the markdown the ruling explicitly leaves alone.
+    #[test]
+    fn a_page_wears_the_hand_off_arrow_in_the_slot_save_and_edit_source_sit_in() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.add_preview(&metrics).expect("the preview seat lands");
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let seat = seats.preview().expect("the preview seat");
+        let rect = full_pane_rect(&layout, seat).expect("a full pane");
+        let head = pane_head_geometry(rect, SeatKind::Preview, 1.0);
+        let page = PreviewHeadTools {
+            browser: true,
+            name_width: 60.0,
+            ..PreviewHeadTools::default()
+        };
+        let geometry = preview_head_geometry(&head, 1.0, page);
+        let browser = geometry
+            .browser
+            .expect("a page's head seats the hand-off arrow");
+        let popout = geometry.popout.expect("a pop-out box");
+        let pin = geometry.pin.expect("a pin box");
+        assert!(
+            browser[2] <= popout[0] && popout[2] <= pin[0],
+            "the arrow stands ahead of the three every pane has"
+        );
+        assert_eq!(
+            [browser[2] - browser[0], browser[3] - browser[1]],
+            [popout[2] - popout[0], popout[3] - popout[1]],
+            "one family, one box"
+        );
+        assert!(
+            geometry.name[2] <= browser[0],
+            "and the name is cut short of it, not drawn under it"
+        );
+        // ② The slot really is the per-type one: with `Save` and the flip in the
+        // head too, the arrow stands between them and the pop-out — the mock-up's
+        // own DOM order `.pv-save, .pv-md-flip, <this class's verbs>, .pv-popout`.
+        let dressed = PreviewHeadTools {
+            save: true,
+            flip: true,
+            ..page
+        };
+        let dressed = preview_head_geometry(&head, 1.0, dressed);
+        let (save, flip, browser) = (
+            dressed.save.expect("a save box"),
+            dressed.flip.expect("a flip box"),
+            dressed.browser.expect("a browser box"),
+        );
+        assert!(
+            save[2] <= flip[0] && flip[2] <= browser[0],
+            "the arrow is the last of the per-type verbs, not the first"
+        );
+        assert!(browser[2] <= dressed.popout.expect("a pop-out box")[0]);
+        // ③ And nothing that is not a page has one — the boxes of the four tools
+        // that were always there do not move when the arrow is not asked for.
+        let plain = PreviewHeadTools {
+            browser: false,
+            ..page
+        };
+        let plain = preview_head_geometry(&head, 1.0, plain);
+        assert_eq!(plain.browser, None, "no page, no arrow");
+        assert_eq!(
+            (plain.popout, plain.pin),
+            (geometry.popout, geometry.pin),
+            "and the run's other boxes are where they always were"
+        );
+    }
+
+    /// PAGE — **the arrow answers the pointer for its own rectangle, and it is
+    /// drawn on the same reveal ladder as the tools beside it.**
+    ///
+    /// Mutation: leave `browser` out of `hit_preview_head`'s ladder and the box
+    /// falls through to `PaneHeader`, which arms the head as a drag handle — a
+    /// press on a `.pv-tool` never does (mock-up 5874).
+    #[test]
+    fn the_hand_off_arrow_answers_for_its_own_rectangle_and_reveals_with_the_pane() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.add_preview(&metrics).expect("the preview seat lands");
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let seat = seats.preview().expect("the preview seat");
+        let rect = full_pane_rect(&layout, seat).expect("a full pane");
+        let tools = PreviewHeadTools {
+            browser: true,
+            name_width: 60.0,
+            ..PreviewHeadTools::default()
+        };
+        let head = pane_head_geometry(rect, SeatKind::Preview, 1.0);
+        let box_ = preview_head_geometry(&head, 1.0, tools)
+            .browser
+            .expect("a page's head seats the arrow");
+        let (x, y) = (
+            f64::from((box_[0] + box_[2]) / 2.0),
+            f64::from((box_[1] + box_[3]) / 2.0),
+        );
+        assert_eq!(
+            hit_preview_head(&layout, 1.0, &[(seat, tools)], x, y),
+            Some(ChromeTarget::PreviewBrowser(seat)),
+            "the arrow answers for its own rectangle"
+        );
+        // The paint: nothing at rest, and the mark itself once the pointer is in
+        // the pane — `.pv-tool`'s own ladder, which this button joins rather than
+        // being an exception to.
+        let content = PreviewHeadContent {
+            name: "ui-mockup.html",
+            tools,
+            ..PreviewHeadContent::default()
+        };
+        let (_, _, resting) = preview_chrome(content, ChromePointer::default());
+        assert!(
+            !resting
+                .iter()
+                .any(|sprite| sprite.mark == ChromeMark::External),
+            "no tool is drawn on a head nobody is pointing at"
+        );
+        let (_, _, hovered) = preview_chrome(
+            content,
+            ChromePointer {
+                pane_hover: Some(seat),
+                ..ChromePointer::default()
+            },
+        );
+        let drawn = hovered
+            .iter()
+            .find(|sprite| sprite.mark == ChromeMark::External)
+            .expect("the arrow is revealed with the pane");
+        assert!((drawn.opacity - PREVIEW_TOOL_REVEAL).abs() < f32::EPSILON);
+        // And a head with no page has no arrow however hard it is hovered.
+        let markdown = PreviewHeadContent {
+            name: "README.md",
+            tools: PreviewHeadTools {
+                browser: false,
+                flip: true,
+                ..tools
+            },
+            ..PreviewHeadContent::default()
+        };
+        let (_, _, hovered) = preview_chrome(
+            markdown,
+            ChromePointer {
+                pane_hover: Some(seat),
+                ..ChromePointer::default()
+            },
+        );
+        assert!(
+            !hovered
+                .iter()
+                .any(|sprite| sprite.mark == ChromeMark::External),
+            "a markdown is not a page, and the ruling leaves it alone"
         );
     }
 
@@ -16862,6 +17072,7 @@ mod tests {",
                     tools: PreviewHeadTools {
                         save: true,
                         flip: true,
+                        browser: false,
                         switcher: true,
                         name_width: 120.0,
                         count_width: 8.0,

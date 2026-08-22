@@ -380,6 +380,17 @@ pub enum TooltipAnchorId {
     /// is a list here" and never what is on it. It is exactly the case a tip is
     /// for.
     PaneChevron(bt_layout::SeatId),
+    /// A preview head's `↗` — the hand-off arrow a page's seat wears (user
+    /// ruling 2026-08-20).
+    ///
+    /// **The one preview tool that registers**, and for [`Self::PaneChevron`]'s
+    /// own reason rather than in spite of it: a `×`, a folder, a pin and a
+    /// floppy disk are idioms this product has taught elsewhere, and so is a
+    /// framed arrow leaving a box — which is exactly the trouble. The framed one
+    /// is drawn immediately to this button's right and means "this pane leaves
+    /// the tree"; a *bare* arrow beside it has to say which of the two leavings
+    /// it is, and nothing in the picture can.
+    PreviewBrowser(bt_layout::SeatId),
     /// One tick of a pane's command marks rail — *"hover **glances** the command"*
     /// (mock 4604).
     ///
