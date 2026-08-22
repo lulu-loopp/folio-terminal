@@ -1455,6 +1455,30 @@ mod tests {
     // 1x1 opaque red PNG.
     const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
+    /// PIN — **the image lane reads the one lexicon, so what the boundary rules learn, it learns**
+    /// (§7.1.5j ⑧, checked after the 2026-08-21 slice moved two of them).
+    ///
+    /// Two changes reach here through `bt_transcript::paths` rather than through this file. The
+    /// **released tail**: a picture named at the end of a Chinese sentence is now a picture, where
+    /// before the full stop went into the name and the extension read `png。`. And the **located
+    /// reference**: the extension question is asked of the path, so `a.png:12` names a picture —
+    /// the `:12` is a coordinate in a space a picture does not have, but where the reference
+    /// *stops* is one question with one answer, and this file is not the place to give it a second.
+    #[test]
+    fn the_image_lane_reads_the_boundary_rules_the_one_lexicon_holds() {
+        let spans = |text: &str| {
+            detect_local_image_path_candidates(text)
+                .into_iter()
+                .map(|candidate| candidate.path)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(spans("见 D:\\shots\\a.png。"), ["D:\\shots\\a.png"]);
+        assert_eq!(spans("D:\\shots\\a.png:12"), ["D:\\shots\\a.png"]);
+        // The ASCII full stop is still part of the name (boundary table row 16), and it still has
+        // to clear the extension list — which `png.` does not.
+        assert!(spans("D:\\shots\\a.png.").is_empty());
+    }
+
     #[test]
     fn png_decodes_to_rgba_artifact_with_content_identity() {
         let decoded = decode_inline_image(InlineImageTask {
