@@ -171,7 +171,19 @@ impl HostWindow {
 #[derive(Default)]
 pub struct PumpLog {
     pub keys: Vec<KeyMessage>,
+    /// `WM_POINTER*`, which only ever arrives from the OS input stack — there
+    /// is no way for this probe to post one to itself, so a row here is proof
+    /// that the injected contact travelled the driver path.
+    pub pointers: Vec<PointerMessage>,
     pub quit: bool,
+}
+
+/// One pointer message, with the contact it belongs to.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct PointerMessage {
+    pub hwnd: isize,
+    pub message: u32,
+    pub pointer_id: u32,
 }
 
 /// Pump messages for `duration`, letting `before_dispatch` see each message
@@ -199,6 +211,14 @@ where
                     hwnd: msg.hwnd.0 as isize,
                     message: msg.message,
                     vk: msg.wParam.0 as u32,
+                });
+            }
+            // WM_POINTERUPDATE .. WM_POINTERLEAVE, the whole family.
+            if (0x0245..=0x024A).contains(&msg.message) {
+                log.pointers.push(PointerMessage {
+                    hwnd: msg.hwnd.0 as isize,
+                    message: msg.message,
+                    pointer_id: (msg.wParam.0 & 0xffff) as u32,
                 });
             }
             before_dispatch(&msg);
@@ -317,6 +337,21 @@ pub fn send_autorepeat(vk: u16, count: u32) -> u32 {
     }
     batch.push(key_input(VIRTUAL_KEY(vk), true));
     unsafe { SendInput(&batch, size_of::<INPUT>() as i32) }
+}
+
+/// The top-level window that owns the pixels at a screen point.
+///
+/// Injected touch goes to whoever owns those pixels, so this is the check that
+/// stands between a measurement and touching a stranger's window.
+pub fn root_window_from_point(screen: POINT) -> isize {
+    use windows::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, WindowFromPoint};
+    unsafe {
+        let hwnd = WindowFromPoint(screen);
+        if hwnd.0.is_null() {
+            return 0;
+        }
+        GetAncestor(hwnd, GA_ROOT).0 as isize
+    }
 }
 
 /// Every child window of `hwnd`, with the class and rectangle of each.

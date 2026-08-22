@@ -224,6 +224,18 @@ pub fn environment_is_cached() -> bool {
     ENVIRONMENT.with(|cell| cell.borrow().is_some())
 }
 
+/// Drop the cached environment so the next `environment()` builds a new one.
+///
+/// This is the step a runtime update forces and the one it is easiest to leave
+/// out: a new controller made over the *old* environment is a controller on the
+/// old browser build, so the update takes effect for nobody. The caller must
+/// already have closed every controller and waited for the browser to go —
+/// a new environment over a folder the old browser still holds does not fail,
+/// it simply never calls back.
+pub fn forget_environment() {
+    ENVIRONMENT.with(|cell| *cell.borrow_mut() = None);
+}
+
 // ── The host ───────────────────────────────────────────────────────────────
 
 /// Where the WebView2 believes its own origin is.
@@ -245,6 +257,20 @@ pub struct Host {
     pub evidence: Rc<RefCell<Evidence>>,
     pub seat: RECT,
     pub origin: BoundsOrigin,
+    /// Which injected frame the next pointer belongs to. Contacts sent inside
+    /// one `frame` share it; `next_pointer_frame` moves it on.
+    frame_id: std::cell::Cell<u32>,
+}
+
+impl Host {
+    /// Start a new pointer frame. Two fingers sent after the same call are two
+    /// contacts of one frame; a finger sent after another call is a later
+    /// frame.
+    pub fn next_pointer_frame(&self) -> u32 {
+        let next = self.frame_id.get() + 1;
+        self.frame_id.set(next);
+        next
+    }
 }
 
 impl Host {
@@ -289,6 +315,7 @@ impl Host {
             evidence,
             seat: RECT::default(),
             origin: BoundsOrigin::AtZero,
+            frame_id: std::cell::Cell::new(1),
         };
         host.configure_settings()?;
         host.attach_events()?;
@@ -895,10 +922,16 @@ impl Host {
     /// Forward one pointer event — the pen/touch path, which is a different
     /// entry point entirely and needs a `ICoreWebView2PointerInfo` the
     /// environment mints.
+    ///
+    /// `pointer_id` is the contact. **One `ICoreWebView2PointerInfo` per
+    /// contact, each with its own id** — a host that mints one id and moves it
+    /// around has a mouse with a different name, and every second finger it
+    /// sends replaces the first.
     pub fn send_pointer(
         &self,
         kind: COREWEBVIEW2_POINTER_EVENT_KIND,
         pointer_kind: u32,
+        pointer_id: u32,
         client: POINT,
         pressure: u32,
         flags: u32,
@@ -910,6 +943,7 @@ impl Host {
         let info = unsafe { environment3.CreateCoreWebView2PointerInfo() }
             .context("CreateCoreWebView2PointerInfo")?;
         let point = self.to_webview_point(client);
+        let frame_id = self.frame_id.get();
         let parent = read::<HWND>(|out| unsafe { self.controller.ParentWindow(out) });
         let screen = crate::win::client_to_screen(parent, client);
         // The device and display rectangles are what a real digitizer would
@@ -923,8 +957,11 @@ impl Host {
         };
         unsafe {
             info.SetPointerKind(pointer_kind)?;
-            info.SetPointerId(1)?;
-            info.SetFrameId(1)?;
+            info.SetPointerId(pointer_id)?;
+            // Contacts that belong to the same frame share a frame id; that is
+            // how the engine knows two fingers are simultaneous rather than
+            // sequential.
+            info.SetFrameId(frame_id)?;
             info.SetPointerFlags(flags)?;
             info.SetPointerDeviceRect(display)?;
             info.SetDisplayRect(display)?;

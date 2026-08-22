@@ -457,6 +457,84 @@ mod tests {
         }
     }
 
+    /// **The red matrix has to be able to fail.**
+    ///
+    /// A refusal table that a naive check would also pass proves nothing about
+    /// the rule it is testing. This row fires the same attacker strings at the
+    /// check somebody writes when they are in a hurry — "does it start with
+    /// `javascript:`" — and requires that it let most of them through while
+    /// `address_bar` lets none.
+    #[test]
+    fn the_red_matrix_is_not_vacuous() {
+        let attackers = [
+            "javascript:alert(1)",
+            "data:text/html,<h1>x",
+            "file:///C:/Windows/win.ini",
+            "edge://settings",
+            "view-source:https://example.com",
+            "https://user:pass@example.com/",
+            "blob:https://example.com/abc",
+            "vbscript:msgbox",
+        ];
+        let naive = |url: &str| !url.starts_with("javascript:");
+        let slipped_past_the_naive_check = attackers.iter().filter(|url| naive(url)).count();
+        assert!(
+            slipped_past_the_naive_check >= 6,
+            "the matrix would pass a check that only looks for javascript:, so it tests nothing"
+        );
+        for url in attackers {
+            assert!(
+                matches!(address_bar(url), Decision::Refuse(_)),
+                "address_bar admitted {url}"
+            );
+            assert!(
+                navigation_starting(url, None).is_err(),
+                "navigation_starting admitted {url}"
+            );
+        }
+    }
+
+    /// The spellings a scheme can wear when somebody is trying to get it past a
+    /// string comparison. None of these may become a `Navigate`; becoming a
+    /// `Search` is fine, because a search box is not a navigation.
+    #[test]
+    fn obfuscated_scheme_spellings_never_become_a_navigation() {
+        let rows = [
+            "JaVaScRiPt:alert(1)",
+            "\tjavascript:alert(1)",
+            "java\tscript:alert(1)",
+            "java\nscript:alert(1)",
+            "\u{0}javascript:alert(1)",
+            "%6aavascript:alert(1)",
+            " \r\n file:///C:/Windows/win.ini",
+            "FILE:///C:/Windows/win.ini",
+            "EDGE://settings",
+        ];
+        for input in rows {
+            if let Decision::Navigate(url) = address_bar(input) {
+                panic!("{input:?} became a navigation to {url}");
+            }
+        }
+    }
+
+    /// The one the plan has not decided. §3 refuses `about:`; §4 navigates to
+    /// `about:blank` and expects it to load and *not* become the recoverable
+    /// URL. Both cannot be true of one door, and this test pins today's answer
+    /// so that the day somebody changes it is a day somebody chose to.
+    #[test]
+    fn about_blank_is_refused_by_the_same_door_paragraph_four_navigates_through() {
+        assert_eq!(
+            address_bar("about:blank"),
+            Decision::Refuse(Refusal::BrowserInternalScheme)
+        );
+        assert_eq!(
+            navigation_starting("about:blank", None),
+            Err(Refusal::BrowserInternalScheme)
+        );
+        // …while the recovery model treats it as a load that simply must not be
+        // remembered — see machine::Preview::on_navigation_completed.
+    }
+
     #[test]
     fn switcher_identity_keeps_query_and_fragment() {
         assert_eq!(

@@ -186,6 +186,21 @@
     const command = event.data;
     if (command === 'focus-field') { document.getElementById('ime').focus(); }
     if (command === 'clear') { logElement.textContent = ''; }
+    // Gate 5's page-owned keys need a field whose contents the host chose, so
+    // that "the page got Ctrl+A" is a reading and not an impression.
+    if (typeof command === 'string' && command.startsWith('set-field:')) {
+      const field = document.getElementById('ime');
+      field.value = command.slice('set-field:'.length);
+      field.focus();
+      field.setSelectionRange(field.value.length, field.value.length);
+      post({ kind: 'field', value: field.value,
+             selected: field.selectionEnd - field.selectionStart });
+    }
+    if (command === 'report-field') {
+      const field = document.getElementById('ime');
+      post({ kind: 'field', value: field.value,
+             selected: field.selectionEnd - field.selectionStart });
+    }
     if (command === 'caret-rect') {
       const rect = document.getElementById('ime').getBoundingClientRect();
       post({ kind: 'caret-rect', x: rect.x, y: rect.y, width: rect.width, height: rect.height });
