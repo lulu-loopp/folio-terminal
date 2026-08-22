@@ -2,6 +2,8 @@
 
 **W0′ 已执行,十扇门全 pass(触屏无设备、IME 须人工两条如实标注),W2 六片全部 GO**——证据 `w0-evidence.md`,四条按实测修订本方案的发现:①门 5 的「AcceleratorKeyPressed 覆盖有限」**被推翻**:30 和弦逐测全部被宿主夺回,键盘接线不需要兜底设计;②隐藏 WebView 的 CapturePreview 不返回 → 片⑥ 收窄为**低频抓+缓存最后成功帧**(这是唯一可行实现,活缩略图仍无受支持路径),且隐藏座位是纯黑洞 → **W1 的失败态三张(加载失败/进程崩溃/Runtime 缺失)从可选升为必须**;③`BrowserProcessExited` 有时 280ms 有时永不到 → UDF 收尾 = 两事件之一 + 超时;④`AddVisual(insertAbove=TRUE, NULL)` 落到视觉树最底层,与 airspace 失败同相——web 视觉入树时的插入次序是片① 的第一条红测。其余九条新增约束见 w0-evidence.md §2,开工时落进各片单;片① 验收含人工 IME 记录(spike 04 先例)。
 
+**W0′ 复验(2026-08-22,`w0p-evidence/evidence.md`)——十扇门再问一遍,8 pass / 1 fail / 其余带 caveat,上一版的结构类结论一条没翻。** 三条改方案的:①**门 9 fail,而且不是安全洞**——§3 把 `about:` 无条件拒在 `NavigationStarting`,而引擎**确实会为 `about:blank` 触发 `NavigationStarting`**,§4 又把 `about:blank` 写进正常流程;照 §3 字面装强制器,产品会取消自己发起的导航,**片② 必须给「宿主自己铸的 `about:blank`」开一个口子,地址栏那道门不动**。②§4 还缺两条:UDF 收尾**必须有超时门**(八组实测一组两个事件都没来;而且**优雅关闭路径上 `ProcessFailed` 根本不来**,所以「两事件之一」的第二扇门在那条路上不开,超时是唯一兜底),以及 `Closing` 态下的 `ProcessFailed` 是「文件夹归你了」不是「重建」——原模型会**把用户已关掉的 pane 复活**。③门 5 的另外半张表补齐:`Ctrl+C/V/X/A/Z/Y`、`F5`、`F12`、`Ctrl+P`、裸 `Alt` **全部归网页**且剪贴板真往返可用,但 **`Alt+Left`/`Alt+Right` 被引擎吃掉**(在预览块里已经是后退/前进,片④ 要么接受要么 `SetHandled` 抢回),而**裸可打印键根本不进 `AcceleratorKeyPressed`**——将来往 `BINDINGS` 加一行裸字母会静默永不触发。另外三条转好的:门 2 的 EME 管道三家 key system 全通(只剩受保护表面未测)、门 4 的每接触点独立 `PointerInfo` 已证可行、门 7 的自更新**恢复动作**已在真引擎上跑通(browser 进程换掉、HWND 不变、回到最后一个成功 URL;只有触发器仍不可强制)。跨 DPI 今天不可复验(本机只剩一台显示器),autorepeat 与 IME 候选窗同列为人工项。
+
 仓库 D:\Developer\BetterTerminal。审阅记录:一轮 `web-preview-codex-review.md`、二轮 `web-preview-codex-confirm.md`。v2 改动:①按必改句子表全部落实(最重的:composition 是 **visual hosting 不是 render-to-texture**,三种像素通道分开说;仓库已有 2026-08-13 WebView2 spike 与 §2.3 DComp/wgpu 地基,W0 改为 W0′ 复验+补洞);②并入用户 2026-08-19 两条追加裁决(历史进预览切换器、钉式收藏)。
 
 ## 0. 形态定稿(用户裁决,不重开;※ 为本轮修订/追加)
