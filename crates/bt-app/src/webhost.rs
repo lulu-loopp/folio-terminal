@@ -775,6 +775,45 @@ fn web_error_status_name(status: i32) -> &'static str {
     }
 }
 
+/// What a finished navigation leaves on the seat: a card, or nothing.
+///
+/// A pure function so that the one distinction it makes can be shot at without
+/// an engine — and the distinction is the whole of it. A **refused** navigation
+/// completes with `IsSuccess == false` exactly as a connection failure does, and
+/// the two mean opposite things: one is the policy working and already has a
+/// card of its own, the other is the network. Without this, every `· blocked`
+/// in the foot would also raise a 「did not respond」 over the seat.
+pub(crate) fn load_fault(uri: &str, success: bool, status: i32) -> Option<WebFault> {
+    if success || status == WEB_ERROR_OPERATION_CANCELED {
+        return None;
+    }
+    Some(WebFault::DidNotLoad {
+        host: crate::webnav::host_of(uri).unwrap_or_default(),
+        detail: format!("WebErrorStatus · {}", web_error_status_name(status)),
+    })
+}
+
+/// What to do about a download the engine has already been told to cancel.
+///
+/// 方案 §0: 「取消并外开可重放的 GET URL,不可重放者提示无法下载」. **What
+/// 「可重放」 means is not guessed at** — it is the address bar's own answer,
+/// because a `blob:` or a `data:` URL names memory inside a page rather than a
+/// request anybody else can make, and those are exactly the ones that door
+/// already refuses. One rule, one door, and no second opinion about what a plain
+/// link can carry.
+pub(crate) fn download_answer(uri: &str, file_name: &str) -> Result<String, WebFault> {
+    match address_bar(uri) {
+        Decision::Navigate(target) => Ok(target),
+        Decision::Search(_) | Decision::Refuse(_) => Err(WebFault::DownloadRefused {
+            file_name: file_name
+                .rsplit(['\\', '/'])
+                .next()
+                .unwrap_or_default()
+                .to_owned(),
+        }),
+    }
+}
+
 /// The one status that is **not** a page that did not load.
 ///
 /// A refused navigation completes with `IsSuccess == false` exactly as a
@@ -1168,14 +1207,8 @@ impl WebSeat {
                 self.page.loading = false;
                 if *success {
                     self.fault = None;
-                } else if *status != WEB_ERROR_OPERATION_CANCELED {
-                    // A refused navigation completes with `IsSuccess == false`
-                    // exactly as a connection failure does. Only one of the two
-                    // is the network, and only that one gets this card.
-                    self.fault = Some(WebFault::DidNotLoad {
-                        host: crate::webnav::host_of(uri).unwrap_or_default(),
-                        detail: format!("WebErrorStatus · {}", web_error_status_name(*status)),
-                    });
+                } else if let Some(fault) = load_fault(uri, *success, *status) {
+                    self.fault = Some(fault);
                 }
                 self.machine
                     .on_navigation_completed(self.machine.generation(), uri, *success)
@@ -1260,17 +1293,9 @@ impl WebSeat {
             // anybody else can make, and those are exactly the ones that door
             // already refuses.
             WebEvent::DownloadStarting { uri, file_name } => {
-                match address_bar(uri) {
-                    Decision::Navigate(target) => outcomes.push(WebOutcome::HandOff(target)),
-                    Decision::Search(_) | Decision::Refuse(_) => {
-                        self.fault = Some(WebFault::DownloadRefused {
-                            file_name: file_name
-                                .rsplit(['\\', '/'])
-                                .next()
-                                .unwrap_or_default()
-                                .to_owned(),
-                        });
-                    }
+                match download_answer(uri, file_name) {
+                    Ok(target) => outcomes.push(WebOutcome::HandOff(target)),
+                    Err(fault) => self.fault = Some(fault),
                 }
                 WebEffect::Ignore
             }
@@ -2335,5 +2360,251 @@ mod presence_tests {
             web_presence(Some([10.0, 20.0, 210.0, 20.0]), false),
             WebPresence::Hidden
         );
+    }
+}
+
+/// **The five failure cards, and the rules that pick one** (§7.7 ④, W2 slice ④).
+///
+/// Every reason a card carries comes from a machine — the loader, the engine's
+/// `WebErrorStatus`, the navigation gate's own [`Refusal`], the address door's
+/// answer about a download's URL — and these are the tests of the picking rather
+/// than of the drawing. Not one of them needs a browser.
+#[cfg(test)]
+mod fault_tests {
+    use super::*;
+    use crate::i18n::Text;
+
+    /// The five, so that a sixth cannot arrive without somebody writing its
+    /// sentence here.
+    fn every_fault() -> Vec<WebFault> {
+        vec![
+            WebFault::RuntimeMissing {
+                detail: "CreateCoreWebView2Environment failed (0x80070002)".to_owned(),
+            },
+            WebFault::DidNotLoad {
+                host: "127.0.0.1".to_owned(),
+                detail: "WebErrorStatus · CannotConnect".to_owned(),
+            },
+            WebFault::RenderProcessGone,
+            WebFault::Blocked {
+                url: "mailto:someone@example.com".to_owned(),
+                refusal: Refusal::ExternalScheme,
+            },
+            WebFault::DownloadRefused {
+                file_name: "report.pdf".to_owned(),
+            },
+        ]
+    }
+
+    /// PIN (§7.7 ④) — **one sentence, at most one fact, exactly one verb.**
+    ///
+    /// 「一图五行、一句话一事实一动词、无旁白」. The shape is the ruling: a row
+    /// of buttons is the program handing its own decision back to the reader,
+    /// and a second sentence of prose under the first is the aside the ruling
+    /// forbids.
+    ///
+    /// MUTATIONS:
+    /// ① give any card a second verb — there is nowhere to put it, which is the
+    ///    point of `verb()` being one value;
+    /// ② let a detail carry a sentence — the assertion on the full stop goes red.
+    #[test]
+    fn every_failure_says_one_sentence_one_fact_and_one_verb() {
+        for fault in every_fault() {
+            let say = fault.say();
+            assert!(!say.trim().is_empty(), "{fault:?} says nothing");
+            assert!(
+                say.ends_with('.') || say.ends_with('。'),
+                "{fault:?}'s sentence is a sentence: {say:?}"
+            );
+            let verb = fault.verb_text().text();
+            assert!(!verb.trim().is_empty(), "{fault:?} offers no way out");
+            // A fact is a thing you can copy into a bug report, never a second
+            // sentence: no card's detail ends in a full stop.
+            if let Some(detail) = fault.detail() {
+                assert!(
+                    !detail.ends_with('.') && !detail.ends_with('。'),
+                    "{fault:?}'s fact reads as prose: {detail:?}"
+                );
+            }
+        }
+        // The crash is the one with no fact at all, and that is the mock-up's
+        // own answer: a renderer's exit hands over no code a reader could act on.
+        assert_eq!(WebFault::RenderProcessGone.detail(), None);
+        assert_eq!(
+            WebFault::RenderProcessGone.verb_text(),
+            Text::PreviewWebReload,
+            "and the way out is the button the head already carries"
+        );
+    }
+
+    /// PIN (§7.7 ④, W2 slice ④) — **one of the five stands over a page and four
+    /// replace one.**
+    ///
+    /// The download is the one that keeps what is behind it, because what was
+    /// cancelled is the download and the page is still standing where the reader
+    /// left it. The other four have nothing behind them to keep: take one away
+    /// and what is left is the black hole a hidden WebView draws
+    /// (`w0-evidence.md` §2⑨), which is why they have no Escape.
+    ///
+    /// MUTATION: make `stands_over_the_page` answer `true` for the crash — the
+    /// seat stops hiding its page (`Runtime::sync_web_page`), the hole is
+    /// punched over the card, and the card is invisible.
+    #[test]
+    fn only_the_download_stands_over_a_page() {
+        for fault in every_fault() {
+            let expected = matches!(fault, WebFault::DownloadRefused { .. });
+            assert_eq!(fault.stands_over_the_page(), expected, "{fault:?}");
+        }
+    }
+
+    /// PIN (§7.8 ③) — **the blocked card names the scheme the door named, and
+    /// through the door's own parser.**
+    ///
+    /// `webnav::scheme_of` is the one reader; 「不另起第二种解析」. An address
+    /// that carries no scheme gets the sentence that names none rather than a
+    /// sentence with a hole in it.
+    #[test]
+    fn the_blocked_card_names_the_scheme_the_door_named() {
+        let blocked = |url: &str| {
+            WebFault::Blocked {
+                url: url.to_owned(),
+                refusal: Refusal::ExternalScheme,
+            }
+            .say()
+        };
+        assert!(blocked("mailto:a@b.c").starts_with("mailto:"));
+        assert!(blocked("javascript:alert(1)").starts_with("javascript:"));
+        assert_eq!(
+            blocked("not an address"),
+            Text::WebFailBlockedSay.text(),
+            "an address with no scheme gets the sentence that names none"
+        );
+        // The address itself is the fact under the sentence, in full — that is
+        // what the `Copy address` verb is for.
+        assert_eq!(
+            WebFault::Blocked {
+                url: "mailto:a@b.c".to_owned(),
+                refusal: Refusal::ExternalScheme,
+            }
+            .detail(),
+            Some("mailto:a@b.c")
+        );
+    }
+
+    /// PIN (§7.7 ④) — **a refused navigation is not a page that did not load.**
+    ///
+    /// Both complete with `IsSuccess == false`. One is the policy working and
+    /// already has a card of its own; the other is the network. Without the
+    /// distinction, every `· blocked` in the foot would also raise a
+    /// 「did not respond」 over the seat.
+    ///
+    /// MUTATION: drop the `OPERATION_CANCELED` arm and the first assertion goes
+    /// red — which is exactly the double card the ruling forbids.
+    #[test]
+    fn a_cancelled_navigation_is_not_a_page_that_did_not_load() {
+        assert_eq!(load_fault("http://127.0.0.1:9134/x", false, 14), None);
+        assert_eq!(load_fault("http://127.0.0.1:9134/x", true, 0), None);
+        let fault = load_fault("http://127.0.0.1:9134/x", false, 12).expect("a card");
+        assert_eq!(
+            fault,
+            WebFault::DidNotLoad {
+                host: "127.0.0.1".to_owned(),
+                detail: "WebErrorStatus · CannotConnect".to_owned(),
+            }
+        );
+        // The sentence names the host that was asked and nothing else: the URL
+        // is on the head, in full, three centimetres above this card.
+        assert!(fault.say().starts_with("127.0.0.1"));
+    }
+
+    /// PIN (方案 §0) — **a download is handed over exactly when the address door
+    /// would take its URL.**
+    ///
+    /// 「取消并外开可重放的 GET URL,不可重放者提示无法下载」, and what
+    /// 「可重放」 means is that door's answer rather than a guess: a `blob:` or a
+    /// `data:` URL names memory inside a page rather than a request anybody else
+    /// can make, and those are the ones it already refuses.
+    ///
+    /// MUTATION: accept every scheme and a `blob:` download is handed to the
+    /// machine's browser, which opens nothing at all.
+    #[test]
+    fn a_download_is_handed_over_when_a_plain_link_could_replay_it() {
+        assert_eq!(
+            download_answer(
+                "http://127.0.0.1:9134/report.pdf",
+                r"C:\Users\a\report.pdf"
+            ),
+            Ok("http://127.0.0.1:9134/report.pdf".to_owned())
+        );
+        // The card names the file and not the path it would have been written
+        // to: a reader is looking for the thing they asked for.
+        assert_eq!(
+            download_answer("blob:http://127.0.0.1/9f2", r"C:\Users\a\report.pdf"),
+            Err(WebFault::DownloadRefused {
+                file_name: "report.pdf".to_owned(),
+            })
+        );
+        assert!(matches!(
+            download_answer("data:text/csv,a%2Cb", "table.csv"),
+            Err(WebFault::DownloadRefused { .. })
+        ));
+    }
+
+    /// PIN (方案 §0's five extras) — **`Ctrl`+wheel walks a ladder, and the
+    /// ladder has two ends.**
+    ///
+    /// A ladder and not a multiplier: a multiplier has no bottom and no top and
+    /// never lands on a round number, and `1.0` has to be a rung so that the way
+    /// back to unzoomed is a detent rather than an aim.
+    #[test]
+    fn the_zoom_ladder_steps_and_stops() {
+        assert!((zoom_step(1.0, true) - 1.10).abs() < 1e-9);
+        assert!((zoom_step(1.0, false) - 0.90).abs() < 1e-9);
+        // Both ends hold.
+        assert!((zoom_step(3.0, true) - 3.0).abs() < 1e-9);
+        assert!((zoom_step(0.25, false) - 0.25).abs() < 1e-9);
+        // A factor that is not on the ladder joins it at the nearest rung rather
+        // than stepping off a value the ladder does not have.
+        assert!((zoom_step(1.03, true) - 1.10).abs() < 1e-9);
+        assert!((zoom_step(1.03, false) - 0.90).abs() < 1e-9);
+        // And a walk out and back lands exactly where it started, which is the
+        // whole reason the rungs are named numbers.
+        let mut factor = 1.0;
+        for _ in 0..4 {
+            factor = zoom_step(factor, true);
+        }
+        for _ in 0..4 {
+            factor = zoom_step(factor, false);
+        }
+        assert!((factor - 1.0).abs() < 1e-9);
+    }
+
+    /// PIN — **every refusal the door can give has a card that can say it.**
+    ///
+    /// `webnav::Refusal` is ten variants and the blocked card is what a reader
+    /// sees for any of them; this is the sweep that keeps an eleventh from
+    /// arriving with nothing to draw.
+    #[test]
+    fn every_refusal_can_be_drawn() {
+        for refusal in [
+            Refusal::ScriptOrInlineScheme,
+            Refusal::FileScheme,
+            Refusal::BrowserInternalScheme,
+            Refusal::ExternalScheme,
+            Refusal::UserInfo,
+            Refusal::NetworkPath,
+            Refusal::ControlOrWhitespace,
+            Refusal::NoHost,
+            Refusal::NotMinted,
+            Refusal::Empty,
+        ] {
+            let fault = WebFault::Blocked {
+                url: "ftp://example.com/x".to_owned(),
+                refusal,
+            };
+            assert!(!fault.say().is_empty(), "{refusal:?}");
+            assert!(matches!(fault.verb(), WebFaultVerb::CopyAddress(_)));
+            assert!(!fault.stands_over_the_page());
+        }
     }
 }
