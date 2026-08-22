@@ -2573,6 +2573,8 @@ pub struct WindowRenderer {
     chrome_quads: Vec<ChromeQuad>,
     chrome_labels: Vec<ChromeLabel>,
     chrome_icons: Vec<ChromeIcon>,
+    /// Rectangles where this window is **not**. See [`WindowRenderer::set_web_holes`].
+    web_holes: Vec<[f32; 4]>,
     /// The modal overlay's own stack. Kept apart from the chrome's lists rather
     /// than appended to them because the two are drawn in different places in the
     /// frame: seat chrome owns the space between seats, and a modal owns the
@@ -4045,6 +4047,7 @@ impl WindowRenderer {
             chrome_quads: Vec::new(),
             chrome_labels: Vec::new(),
             chrome_icons: Vec::new(),
+            web_holes: Vec::new(),
             overlay_layers: Vec::new(),
             seat_slots,
             chrome_viewport,
@@ -4250,6 +4253,41 @@ impl WindowRenderer {
     pub fn set_preview_bodies(&mut self, bodies: Vec<PreviewBody>) -> bool {
         let changed = self.preview_bodies != bodies;
         self.preview_bodies = bodies;
+        changed
+    }
+
+    /// The rectangles where this window is **not** — where a web page hosted
+    /// underneath it shows through. Returns whether they changed.
+    ///
+    /// # A hole is not a colour, it is an absence
+    ///
+    /// The web preview's visual sits **below** wgpu's in the window's
+    /// composition tree (`bt_platform::Compositor::attach_web_visual`), so the
+    /// page is only ever seen where this surface is transparent. A hole is
+    /// therefore `(0, 0, 0, 0)` premultiplied, written with `Replace` — the same
+    /// arithmetic and the same pipeline every ground uses, at an alpha of zero.
+    /// `ALPHA_BLENDING` could not express it at all: there is no source that
+    /// leaves the destination *less* opaque than it was.
+    ///
+    /// This is the second half of a pair and neither half works alone. The
+    /// compositor decides who is on top; this decides where the top is not
+    /// there. A window that punched no hole would host a page nobody could see,
+    /// and every trace in the program would report it running normally — which
+    /// is exactly what a first attempt looks like.
+    ///
+    /// # Where in the frame
+    ///
+    /// After everything a seat draws — its chrome, its picture, its text body —
+    /// and **before** the peek flyout and the modal overlay. Those two are
+    /// drawn over the whole window on purpose, and a hole punched through a
+    /// scrim would be a page read clearly through a dimmed window. The caller
+    /// keeps the other half of that bargain by hiding the page outright while a
+    /// modal is up (`bt_app::webhost::web_presence`), so the two never disagree
+    /// about a rectangle: this one is simply where the page is when there is a
+    /// page.
+    pub fn set_web_holes(&mut self, holes: Vec<[f32; 4]>) -> bool {
+        let changed = self.web_holes != holes;
+        self.web_holes = holes;
         changed
     }
 
@@ -5163,6 +5201,31 @@ impl WindowRenderer {
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
+        // The holes, in the ground's own arithmetic at an alpha of zero — see
+        // [`WindowRenderer::set_web_holes`]. The colour handed in is never read
+        // by the shader once it has been multiplied by nothing, and naming it
+        // black is the honest way of saying so.
+        let web_hole_rects: Vec<RectInstance> = self
+            .web_holes
+            .iter()
+            .map(|rect| {
+                premultiplied_surface_pixel_rect(
+                    *rect,
+                    [0, 0, 0],
+                    0.0,
+                    self.config.width,
+                    self.config.height,
+                )
+            })
+            .collect();
+        let web_hole_buffer = (!web_hole_rects.is_empty()).then(|| {
+            gpu.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("web preview holes"),
+                    contents: bytemuck::cast_slice(web_hole_rects.as_slice()),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
         let mut preview_text_layouts: Vec<ChromeTextLayout> = Vec::new();
         for body in self.preview_bodies.iter().chain(table_block_bodies.iter()) {
             preview_text_layouts.extend(shape_preview_body(&mut gpu.font_system, body));
@@ -5595,6 +5658,24 @@ impl WindowRenderer {
                         .render(&gpu.atlas, &self.chrome_viewport, &mut pass)
                         .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
                 }
+            }
+            // The web preview's holes, over everything the seats themselves drew
+            // and under everything that stands over the window. See
+            // [`WindowRenderer::set_web_holes`]: this is not a rectangle painted
+            // on the window, it is the window not being there.
+            if let Some(buffer) = web_hole_buffer.as_ref() {
+                pass.set_viewport(
+                    0.0,
+                    0.0,
+                    self.config.width as f32,
+                    self.config.height as f32,
+                    0.0,
+                    1.0,
+                );
+                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+                pass.set_pipeline(&gpu.ground_rect_pipeline);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..6, 0..web_hole_rects.len() as u32);
             }
             // The hover-peek flyout, over every seat, over seat chrome and over a
             // preview's picture — a floating window is not a child of the pane it
@@ -15426,6 +15507,89 @@ mod tests {
     /// Every test in here needs a real adapter, for `two_layers`' reason: what is
     /// under test is what the render path actually hands the two pipelines, and
     /// the only honest way to ask that is to ask a window renderer.
+    /// The web preview block's slice ①: the hole a hosted page is seen through.
+    mod web_holes {
+        use super::super::*;
+
+        /// PIN — **a hole is the absence of the window, whatever colour is
+        /// handed in.**
+        ///
+        /// The page's visual is *below* wgpu's in the composition tree, so the
+        /// only thing that makes it visible is this surface writing a
+        /// premultiplied zero at that rectangle. Any non-zero alpha there is a
+        /// veil over the page; any non-zero colour is a tint on it.
+        ///
+        /// Mutation: pass the window's ground alpha instead of zero and the
+        /// fourth channel stops being zero on every opaque window, which is
+        /// every window by default.
+        #[test]
+        fn a_hole_is_a_premultiplied_zero_in_all_four_channels() {
+            for colour in [[0, 0, 0], [255, 255, 255], [27, 110, 243]] {
+                let hole = premultiplied_surface_pixel_rect(
+                    [10.0, 20.0, 210.0, 120.0],
+                    colour,
+                    0.0,
+                    800,
+                    600,
+                );
+                assert_eq!(
+                    hole.color,
+                    [0.0, 0.0, 0.0, 0.0],
+                    "a hole tinted {colour:?} is a tint on somebody else's page"
+                );
+            }
+            // And the same rectangle at the alpha an opaque window carries is
+            // the opposite of a hole — the contrast is the whole claim.
+            let ground = premultiplied_surface_pixel_rect(
+                [10.0, 20.0, 210.0, 120.0],
+                [27, 27, 27],
+                1.0,
+                800,
+                600,
+            );
+            assert!((ground.color[3] - 1.0).abs() < 1e-6);
+        }
+
+        /// PIN — **and it is drawn after the seats and before anything that
+        /// stands over the window.**
+        ///
+        /// Above the seat's own chrome, picture and text body, because those are
+        /// what a page replaces. Below the peek flyout and the modal overlay,
+        /// because those are drawn over the whole window on purpose and a hole
+        /// punched through a scrim is a page read clearly through a dimmed
+        /// window. There is no way to ask a render pass what order it issued its
+        /// draws in after the fact, so the order is held here, in the source
+        /// that issues them.
+        #[test]
+        fn the_hole_is_drawn_over_the_seat_and_under_everything_over_the_window() {
+            let source: String = include_str!("lib.rs")
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect();
+            let hole = source
+                .find(concat!(
+                    "pass.set_vertex_buffer(0,",
+                    "buffer.slice(..));pass.draw(0..6,0..web_hole_rects"
+                ))
+                .expect("the hole draw");
+            let body = source
+                .find(concat!("pass.draw(0..6,0..", "preview_body_rects.len()"))
+                .expect("the preview body draw");
+            let peek = source
+                .find(concat!("pass.draw(0..6,0..", "peek_rects.len()"))
+                .expect("the peek flyout draw");
+            let overlay = source
+                .find(concat!(
+                    "pass.set_pipeline(&gpu.",
+                    "ground_fade_rect_pipeline);"
+                ))
+                .expect("the overlay's own grounds");
+            assert!(body < hole, "the hole covers the seat's own body");
+            assert!(hole < peek, "a floating window covers the hole");
+            assert!(hole < overlay, "a scrim covers the hole");
+        }
+    }
+
     mod one_translucency {
         use super::*;
 

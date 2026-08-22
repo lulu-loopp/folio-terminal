@@ -6,6 +6,15 @@ license.workspace = true
 rust-version.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# The web preview's engine (`src/webview.rs`). It is a thin, generated binding
+# over the WebView2 SDK's COM interfaces on top of the same `windows` 0.62 this
+# crate already carries — three new packages (`webview2-com`,
+# `webview2-com-macros`, `webview2-com-sys`) and no second copy of anything.
+webview2-com = "0.39.1"
+# `#[implement]` in `webview2-com`'s generated callbacks expands to code that
+# names `::windows_core` directly, so the crate has to be in the dependency list
+# even though every path this crate writes goes through `windows::core`.
+windows-core = "0.62.2"
 windows = { version = "0.62.2", features = [
     # The three WinRT namespaces one desktop notification needs: the XML document
     # a toast is (`Data_Xml_Dom`), the handler its click arrives on

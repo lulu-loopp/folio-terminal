@@ -239,7 +239,13 @@ impl Scope {
     }
 
     /// Whether a row in this scope is in force with the window focused like this.
-    const fn holds(self, focus: Focus) -> bool {
+    ///
+    /// `pub(crate)` since the web preview: a page holding the focus takes the
+    /// window's chords back through `AcceleratorKeyPressed` rather than through
+    /// [`Shortcuts::lookup`], and a chord out of force must be left to the page
+    /// — so the *same* predicate has to answer at both doors
+    /// (`webhost::claimable_chords`).
+    pub(crate) const fn holds(self, focus: Focus) -> bool {
         match self {
             Self::Window => true,
             Self::Preview => focus.preview,
@@ -961,6 +967,17 @@ pub(crate) struct OverrideFault {
 }
 
 impl Shortcuts {
+    /// The effective rows, in the table's own order.
+    ///
+    /// Read by `webhost::claimable_chords`, which needs the *effective* table
+    /// and not [`BINDINGS`]: a page that kept handing the window back the
+    /// factory chords after somebody rebound one would be a shortcut table with
+    /// two answers.
+    #[must_use]
+    pub(crate) fn rows(&self) -> &[Binding] {
+        &self.rows
+    }
+
     /// The table as this build ships it.
     #[must_use]
     pub(crate) fn defaults() -> Self {
