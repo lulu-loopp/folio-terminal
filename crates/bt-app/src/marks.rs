@@ -651,6 +651,21 @@ pub enum ChromeMark {
     /// corner to corner it would lose half its width to the edge of its own
     /// raster at both ends, which reads as an edge that goes thin exactly where
     /// it meets the line it is joining.
+    /// `#i-globe` — **the web content class's own mark** (§7.7 ②, W2 slice ④).
+    ///
+    /// A page's head, the strip row above it, the preview switcher's line and
+    /// Recent's row all draw the seat's mark, and they all draw it through
+    /// `seats::pane_mark`, so there is one glyph and one place it is chosen.
+    ///
+    /// **The site's own favicon is not this mark and is not drawn yet.** §7.7 ②
+    /// asks for the favicon where a site has one and this globe where it has
+    /// not, and the two halves are not the same kind of work: every variant of
+    /// this enum is a vector symbol struck from a path list and cached by name,
+    /// and a favicon is a raster the engine fetches at runtime — a second
+    /// pipeline into the chrome atlas that no mark has. Recorded as an open item
+    /// rather than faked: a coloured square with a letter in it would be this
+    /// window inventing an icon for somebody else's site.
+    Globe,
     GraphCurve {
         stroke_px: u32,
         /// The dot is at the box's right rather than its left — the edge runs
@@ -730,6 +745,7 @@ impl ChromeMark {
             Self::GitMergeCurve => "git-merge-curve",
             // One id for four mirrorings and every span, exactly as the chevron
             // has one id for every angle: `mark_key` adds the rest.
+            Self::Globe => "i-globe",
             Self::GraphCurve { .. } => "graph-curve",
         }
     }
@@ -1570,6 +1586,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::ProfileCmd => 14,
         ChromeMark::Float => 17,
         ChromeMark::External => 40,
+        ChromeMark::Globe => 41,
         ChromeMark::DockLeft => 18,
         ChromeMark::DockRight => 26,
         ChromeMark::ResizeGrip => 19,
@@ -1616,7 +1633,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
 /// how a generated glyph comes to sit a pixel off the ones beside it.
 const PROFILE_CHASSIS_VIEW_BOX: &str = "0 0 16 16";
 
-const SYMBOL_VIEW_BOX: [&str; 41] = [
+const SYMBOL_VIEW_BOX: [&str; 42] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -1693,11 +1710,14 @@ const SYMBOL_VIEW_BOX: [&str; 41] = [
     // `#i-external`, the house sixteen — it is `#i-float`'s arrow drawn without
     // the frame, and the two share a run, so they share a box.
     "0 0 16 16",
+    // `#i-globe`, the sheet's own sixteen (mock-up 4358). It rides in the same
+    // fourteen-pixel box `#i-file` does, so it has to be cut in the same units.
+    "0 0 16 16",
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 41] = [
+const SYMBOL_BODY: [&str; 42] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min
@@ -1955,6 +1975,14 @@ const SYMBOL_BODY: [&str; 41] = [
     // wraps its own arrow in. The arms are two fifths of the shaft, which is what
     // keeps a bare arrowhead reading as one at thirteen pixels.
     r#"<path d="M7.4 3.6h5v5M12.4 3.6L3.6 12.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    // `#i-globe` — mock-up 4358, verbatim: the sphere, its two parallels, and
+    // the meridian ellipse that turns a circle with two lines through it into a
+    // globe.
+    concat!(
+        r#"<circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.15"/>"#,
+        r#"<path d="M2.6 6.2h10.8M2.6 9.8h10.8" stroke="currentColor" stroke-width="1.15" stroke-linecap="round"/>"#,
+        r#"<ellipse cx="8" cy="8" rx="2.7" ry="6" fill="none" stroke="currentColor" stroke-width="1.15"/>"#,
+    ),
 ];
 
 /// The active tab's closed outline, in physical pixels, clockwise from the
