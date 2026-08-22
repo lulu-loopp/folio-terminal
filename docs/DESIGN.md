@@ -1447,6 +1447,66 @@ HKCU\Software\Classes\AppUserModelId\Folio.Terminal
 
 **⑦ 小样怎么读。** 网页座位在演示窗最后一张 tab（`[files | web]`，无 shell）；`?web=ok|runtime|load|crash|blocked|download` 把它切到六态之一，`?web=blocked&scheme=javascript` 换被拒的 scheme。这道读取器与 `?lonehead=` / `?icons=` 同类，但**不是临时的、不挑胜者**——六态全都要发。
 
+### 7.8 网页宿主与它的输入（Web 预览块 W2 片①，2026-08-22，已落地；`crates/bt-platform/src/{lib,webview}.rs`、`crates/bt-render/src/lib.rs`、`crates/bt-app/src/{webhost,main,shortcuts}.rs`）
+
+**这一片只装引擎，不画一个像素的 chrome。** §7.7 画的那张头、那五张失败态、那条脚，一格都不在这里；地址栏、三钮、查找、缩放、DevTools 是片④，URL 策略与受控 `file:` 入口是片②，预览缓冲与 session schema 是片③。本片交付的是：进程唯一的 environment、每个网页座位一个 controller、§4 的恢复状态机、visual 在窗口合成树里的位置，以及输入合同——哪些鼠标事件送进去，哪些和弦拿得回来，`Tab` 走到页面尽头时发生什么。**这一版进到页面的唯一一扇门是 `BT_WEB_DEV`**，人按不到。
+
+**① visual 落在树的最底层,而且是由那一个参数保证的。** §2.3 建的树留了第二个孩子的位置,这一片把它填上:
+
+```
+target  ← CreateTargetForHwnd(hwnd, topmost = true)
+ └─ root                    ← IDCompositionTarget::SetRoot
+     ├─ web                 ← WebView2 自己的 visual 树(SetRootVisualTarget)
+     └─ gpu                 ← wgpu 的 swapchain
+```
+
+**次序不是靠「按对的顺序添加」得来的**——`gpu` 是开窗时加的,`web` 是有人开页面时才来的,两者的先后由人的动作决定。次序靠的是 `AddVisual(child, insertAbove = TRUE, NULL)`:**参考 visual 为 NULL 时,`TRUE` 把孩子插到子列表的开头,而 DirectComposition 的子列表按列表序从前往后画,所以开头就是最底层**。这不是读文档读出来的,是拍出来的:W0′ 探针两个孩子都用 `TRUE` 建树,结果 wgpu overlay 被合成到网页**下面**,浮窗在座位左缘被齐齐切掉,看上去和 child-HWND 的 airspace 失败一模一样,而它不是(`plan.md` §0 ④、`w0p-evidence/evidence.md` §1 门 1 第二次复现)。
+
+于是它被写成一个具名的判断而不是一个裸布尔:`bt_platform::VisualLayer::{Bottom, Top}`,`Bottom.insert_above_with_null_reference() == true`。三条红测从三个角度按住它:纯判断一条;**源码钉一条**——`Compositor` 里 `AddVisual(&web, …)` 有且只有一处,且必须写着 `VisualLayer::Bottom`(DirectComposition 没有任何 API 能反过来问一个 visual 它的孩子是什么顺序,层叠只能作为像素被观测,而像素由探针门 1 与本片的验收截图各拍一次);真机一条——在真 DComp 设备上按产品的参数建两个孩子、加 clip、加偏移、`Commit`,证明这一组参数是合法的。
+
+**② 洞:窗口在网页那块矩形上「不在」。** 页面在 wgpu 之下,所以它只在本表面透明的地方看得见。`bt_render::WindowRenderer::set_web_holes` 收下这些矩形,用**每一个 ground 都在用的那条 `Replace` 管线**、以 alpha **0** 预乘写进去——即 `(0,0,0,0)`。`ALPHA_BLENDING` 根本表达不了这件事:没有哪个源能让目标比原来**更透明**。
+
+**画在哪一层是这条规矩的另一半**:在座位自己画完的一切之上(它的 chrome、它的图、它的正文),在悬浮窗与模态遮罩之下。后两者是故意覆盖整窗的,而一张穿过遮罩的洞就是一张在暗下来的窗口里被看得清清楚楚的网页。两侧各有一条钉子:`a_hole_is_a_premultiplied_zero_in_all_four_channels` 按住值,`the_hole_is_drawn_over_the_seat_and_under_everything_over_the_window` 按住位置。**宿主这边守约定的另一半**:模态一开,页面直接 `SetIsVisible(false)` 而不是靠洞去躲(`webhost::web_presence`),两处于是不可能对同一块矩形给出两个答案。
+
+**③ 状态机整体从探针搬进来,带着它的十六条合同测试,外加 W0′ 逼出来的两条修订。** `webhost::WebMachine` 里没有一行引擎——整套恢复模型可以在一台没装 Runtime 的机器上被 `cargo test` 打。它管的还是 §4 那几件事:generation token 淘汰晚到的回调(**晚到的 controller 是关掉而不是收养**,收养等于留一棵没人指的浏览器进程树)、`desired_url` 后写覆盖前写、**事件与策略全部装完才首航**、只有 `NavigationCompleted(IsSuccess)` 才更新可恢复 URL、browser 崩溃重建 / renderer 崩溃只 Reload。两条修订:
+
+- **UDF 收尾必须有超时门,而且在优雅关闭这条路上超时是唯一兜底。** 八组实测:六组 `BrowserProcessExited` 在 271–390ms 到达,一组 6 588ms,**一组十秒里两个事件都没来**;而八组的 `process_failed_browser_exited` **全是 false**——`ProcessFailed` 在优雅关闭路径上根本不来,所以「两事件之一」的第二扇门在那条路上不开。三扇门任一 + 有界等待,只放行一次。
+- **`Closing` 态下的 `ProcessFailed` 不是重建。** 同一个事件在活着的 pane 上是「你的浏览器死了,再建一个」,在正在关的 pane 上是「文件夹归你了」,只有状态能分开这两件事;原模型两条都走重建,于是**用户关掉的 pane 会自己回来**。
+
+**效果名从探针的 `CleanupUserDataFolder` 改成 `ReleaseUserDataFolder`,因为产品不删那个文件夹。** 探针的 UDF 是它自己造的临时目录;产品的是 **profile**——`%LOCALAPPDATA%\Folio\WebView2`,装着 cookie 罐和缓存(`plan.md` §0),最后一张网页关掉就删掉它,等于删掉它存在的理由。这个效果命名的是**时刻**不是动作:文件夹不再被谁占着,拆卸走完了,新的 environment 可以建在它上面了——而这一步正是 Runtime 自更新唯一不能提前做的那一步(**旧 browser 还占着文件夹时建新 environment 不会报错,它只是永远不回调**,`w0p-evidence.md` §3.4)。测试与实机取证一律靠隔离 `LOCALAPPDATA` 拿到隔离 UDF,于是「隔离的用户数据文件夹」是一个变量而不是两个。
+
+**④ 键盘:和弦从表里推出来,不是抄出来的。** 探针抄了一份 `BINDINGS`(它在 workspace 外),产品里抄就是缺陷:`Shortcuts` 是 `BINDINGS` **叠上用户的 `keybindings.json`**,一张页面持续把出厂和弦还给窗口,就是一张有两个答案的快捷键表。`webhost::claimable_chords` 因此从**生效表**推导,并且只推导**此刻焦点下在force的那些行**——一个窗口不会去执行的键不许从页面手里拿走。字符行经 `VkKeyScanW` 问**当前布局**要虚拟键(`Alt+Shift+-` 在美式键盘上是 `VK_OEM_MINUS`,在德语键盘上不是,按键的人的布局才算数);具名键是一张纯表。
+
+W0′ 的双向矩阵在这里落成三条:
+
+- **窗口拿得回 30/30。** 逐键实测三十行和弦全部触发 `AcceleratorKeyPressed`、全部 `SetHandled` 生效、宿主 HWND 一条按键消息都没收到、网页只额外看见裸的 `Control`/`Shift`/`Alt`。
+- **网页拿得到它要的一切。** `Ctrl+C/V/X/A/Z/Y`、`Ctrl+R`、`F5`、`F12`、`Ctrl+P`、裸 `Alt` 全归网页,剪贴板真往返可用。`the_page_keeps_every_key_the_window_does_not_claim` 逐条钉住。
+- **`Alt+Left` / `Alt+Right` 归引擎,本片不动。** 回调看得见它们、宿主没设 `SetHandled`、网页也什么都没收到——引擎自己吃掉并前进/后退了。**也就是说预览块里它们已经是后退/前进**。要不要用 `SetHandled(true)` 抢回来是一条产品裁决,**留给片④**;真做的话改动就在 `claimable_chords` 加两行,所以测试 `alt_left_and_alt_right_stay_with_the_engine` 钉的是事实而不是代码。
+
+**还有一条要写进快捷键表的注意事项:裸可打印键根本不进 `AcceleratorKeyPressed`。** 探针按下裸 `K`,网页收到了,回调一次没响。所以将来往 `BINDINGS` 加一行裸字母,它会在网页座位上**静默地永不触发**。今天没有这样的行,`no_shipped_chord_is_a_bare_printable_key` 是明天说这句话的人。
+
+**Tab 合同两半。** 页内:`Tab` 是页面的,走它自己的控件。到边界:`MoveFocusRequested` 触发,宿主 `SetHandled(true)` 并把键盘拿回来——**`SetFocus(hwnd)` 一次**,因为一扇只有一个 HWND、没有任何 Win32 子控件的窗口,键盘只有一个地方可回。回来之后下一个 `Tab` 就是 Folio 的,而这正是「交回 Folio 焦点移动」在今天能有的全部含义:**本产品没有 pane 之间的 Tab 序**(`BINDINGS` 三十行里没有一行走 pane 焦点),所以这里没有第二步可走。哪天有了,那一步加在同一个出口上。
+
+**⑤ 鼠标、滚轮、光标。** 全部经 `ICoreWebView2CompositionController::SendMouseInput`,坐标由宿主一处换算(客户区点 − 座位原点;引擎那边 bounds 从 `(0,0)` 起,位置由 visual 携带,这是所有 visual-hosting 范例的排法,也是门 3 量坐标走的那条路)。
+
+- **`LEAVE` 送不进去**:三种写法全被 `E_INVALIDARG` 拒(门 3 两次复现)。让页面知道指针离开的是**一次落在矩形之外的 `Move`**,而指针跨出去的那一帧位置本来就在外面。指针离开整扇窗时补发一次 `(-1,-1)`。
+- **双击引擎推不出来**:`SendMouseInput` 有 `LEFT_BUTTON_DOUBLE_CLICK` 这个 kind,却没有任何办法自己得出它,所以只发两次 `LEFT_BUTTON_DOWN` 的宿主会让页面拿到 `click` 而永远拿不到 `dblclick`——双击选词会静悄悄地不工作。判据用窗口自己的 `MULTI_CLICK_INTERVAL`(一张网页上的双击和一枚 tab 上的双击对同一只手是同一个手势),外加六物理像素的宽容。
+- **按钮掩码是从转发的事件本身推的**,不是在调用处另攒一份:两份账目会在按钮抬起在别的窗口上时分家。
+- **滚轮两轴都归页面**:页面所在的 pane 没有自己的文档可动,而两个轴在别的浏览器里也都是页面的。落在模态与通知卡之下(它们各有各的理由),在所有 pane 之上。
+- **光标进了矩形归页面**:`CursorChanged` 报的是 Win32 `IDC_*`,一份对照表译成 winit 的 `CursorIcon`。**矩形之外仍旧是窗口自己的六个答案**,一行没动。表里没有的号码答 `None` 而不是答箭头——「页面说了一件本窗画不出的事」和「页面要默认光标」是两句话,只有后一句是箭头。
+
+**⑥ IME:接到 caveat 允许的程度,没接到的如实记。** 本产品的 IME 候选窗位置走 `set_ime_cursor_area` + `ImeSystemCaret`,由**持有键盘的那一层**在每一趟尾巴上发布;键盘在网页里时,持有键盘的不是本窗的任何一层,而是引擎自己。W0′ 两次取证同一结论:**焦点进网页后 `ImmGetCompositionWindow` 返回 false、`ptCurrentPos` 恒 `(0,0)`——没有正在进行的合成时,引擎不经 IMM 暴露候选窗位置**(`w0p-evidence.md` §4.3)。所以「候选窗跟不跟 pane 偏移」这件事今天**在程序外部不可观测**,本片不发明一个观测不到的修正:引擎自己在同一个 HWND 上摆候选窗,pane 偏移由 visual 承担而不由 IMM 承担。这一条与 autorepeat 一起留在人工验收单上(spike 04 先例)。
+
+**⑦ `BT_WEB_DEV=<url>`——诊断开关,登记在 `docs/HANDOFF-2026-08-21.md` §2。** 设了就在活动 tab 的预览座位上开一张网页(走 `preview_landing_surface`,与双击一个文件落地走的是同一扇门),没设就一行代码都不跑。**只放行两个目标**:这一条 URL,和宿主自铸的 `about:blank`;别的一律 `SetCancel(true)`。这半扇门是片②的形状、片①的答案——`webhost` 里 `Refusal`/`Decision`/`Mint`/`navigation_starting`/`BLANK_PAGE` 五个定义与片② `webnav` 逐字同形,合并那天是一次删除。
+
+**`about:blank` 为什么要 mint。** 门 9 判 fail 的那条:引擎**确实会**为 `about:blank` 触发 `NavigationStarting`(`navigation_starting_fired: true`,`uri: "about:blank"`),而 §3 字面把 `about:` 无条件拒掉——照字面装上,产品会取消自己发起的导航,座位停在旧页面上。`Mint::Blank` 就是「这一张空白页是**我们**要的」这句话,一个 pane 一份、后写覆盖前写(与 §4 `desired_url` 同一条纪律),**先铸后导航**,因为 `NavigationStarting` 可以在 `Navigate` 返回之前就打回来。
+
+**取消一次导航不等于没有发出请求——本片实机撞上的一条,记在这里给片②。** 点一条本窗不会去的链接,`NavigationStarting` 触发、门判拒、`SetCancel(true)`,座位一动不动(`BT_WEB refused http://127.0.0.1:9134/second.html`,截图 09);
+**但那台本地服务器的日志里同一秒记下了一条 `GET /second.html`**。原因是 Chromium 在 pointerdown 上就做预连接/预取,那一发请求早于 `NavigationStarting`,而取消导航并不能把已经发出去的请求收回来。
+**这不是本片的洞**——没有任何一次导航被提交,页面没变——但它是一句关于「拒绝」的话:**拒绝的是「去」,不是「碰」**。片② 的 allowlist 写文档时要照此措辞,真要连碰都不许碰,得靠 `WebResourceRequested` 一类的另一扇门,那不在 §3 的范围里。
+
+**⑧ 隐藏不是装饰,是账。** 页面所在座位没有矩形(tab 切走、fit 阶梯把它挤掉、聚焦模式把它挪下台——三件事都是 `device_rect: None`)或被模态盖住时,`SetIsVisible(false)`。同一个六秒窗口实测:可见时 CPU **1 811ms**、rAF **718 帧**;隐藏时 **0 和 0**(`w0p-evidence.md` §1 门 8)。这就是「没人看的 tab 上那张网页不要钱」的全部机制。
+
 ## 8. 依赖策略
 
 同 v3 表格，关键修订：**alacritty_terminal 稳态配置 scrollback=0**。vendor seam 包含既有上滚事件钩子，以及窄事务操作：打开 primary native history、查询行数、在 coalesced final viewport 上用 vendor row/WRAPLINE/cursor 重新评估高度、一次性 `take_history(oldest→newest)`、清空并恢复 limit=0，以及只针对唯一未闭合 staging candidate 的 `restore_history(oldest→newest)`；没有可独立呈现的 transcript snapshot/backing 镜像，也不复制 reflow 算法。事务期 vendor grid 是 mutable tail 唯一权威；收割后转录层拥有 staging ID/配额/定稿权，vendor 只保留该候选的原生 row escrow 供下一事务无损交还。升级必须 diff `grid/resize.rs`/history 语义，跑 vendor 181 项与完整生命周期矩阵。

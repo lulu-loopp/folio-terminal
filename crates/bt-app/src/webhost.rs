@@ -772,6 +772,13 @@ pub(crate) enum WebOutcome {
     /// The teardown is finished: the browser has let go and the seat may be
     /// forgotten.
     Gone,
+    /// A navigation was refused, and this is where it wanted to go.
+    ///
+    /// Slice ④ draws this as the「导航被拦」card (`DESIGN.md` §7.7 ④). Until then
+    /// it is said out loud on `stderr`, because the difference between "the
+    /// policy stopped it" and "it went and came back" is not otherwise visible
+    /// from outside the process — and one of those two is a security hole.
+    Refused(String),
     /// Something the window should say out loud. Slice ④ owns the five failure
     /// cards (`DESIGN.md` §7.7 ④); until it exists this goes to `stderr`, which
     /// is the same place `BT_DPI` writes and for the same reason — a fact with
@@ -808,9 +815,22 @@ pub(crate) struct WebSeat {
     claims: Vec<ClaimedChord>,
     /// What is waiting on a browser, and until when.
     waiting: Option<(BrowserWait, Instant)>,
-    /// What is on the glass now, so a frame that changed nothing issues no
-    /// calls.
-    presence: WebPresence,
+    /// Where the window says the page belongs this frame.
+    ///
+    /// Recorded whether or not there is a controller to tell, because **the
+    /// engine has to be given its size before it is given a URL**. The first
+    /// run of this slice navigated first and sized a frame later: the page laid
+    /// out against the controller's default zero-by-zero bounds, and what
+    /// arrived on the glass was a document whose backgrounds had re-laid
+    /// themselves to the real width while its text was still rastered for the
+    /// size it loaded at — a page with bands and no words, unchanged by a click,
+    /// and correct the instant the window was resized. So the wish is kept here
+    /// from the moment the window has one, and [`WebSeat::apply_presence`] pays
+    /// it the moment there is somebody to pay.
+    wanted: WebPresence,
+    /// What the engine has actually been told, so a frame that changed nothing
+    /// issues no calls.
+    presence: Option<WebPresence>,
     /// Which buttons the page believes are down.
     ///
     /// Kept here and nowhere else because it is derived from the very events
@@ -864,7 +884,8 @@ impl WebSeat {
             mint,
             claims: Vec::new(),
             waiting: None,
-            presence: WebPresence::Hidden,
+            wanted: WebPresence::Hidden,
+            presence: None,
             buttons: bt_platform::web_mouse_buttons::NONE,
             last_left_press: None,
         };
@@ -914,9 +935,14 @@ impl WebSeat {
                 }
                 self.machine.on_controller(*generation, error.is_none())
             }
-            // Recorded by the engine and acted on there; the state machine has
-            // no opinion about a navigation that has not finished.
-            WebEvent::NavigationStarting { .. } => WebEffect::Ignore,
+            // The state machine has no opinion about a navigation that has not
+            // finished; what the window owes is the refusal, said out loud.
+            WebEvent::NavigationStarting { uri, cancelled } => {
+                if *cancelled {
+                    outcomes.push(WebOutcome::Refused(uri.clone()));
+                }
+                WebEffect::Ignore
+            }
             WebEvent::NavigationCompleted { uri, success, .. } => self
                 .machine
                 .on_navigation_completed(self.machine.generation(), uri, *success),
@@ -1025,6 +1051,12 @@ impl WebSeat {
                 // before it is told to do anything at all.
                 compositor.attach_web_visual()?;
                 self.host.install(compositor)?;
+                // **Before the navigation, never after.** The next line's
+                // acknowledgement produces the first `Navigate`, and a page that
+                // begins loading against the controller's default zero-by-zero
+                // bounds rasters its text for a viewport it will never be shown
+                // in. See [`WebSeat::wanted`].
+                self.apply_presence(compositor)?;
                 let generation = self.machine.generation();
                 Ok(Some(self.machine.on_events_installed(generation)))
             }
@@ -1054,7 +1086,7 @@ impl WebSeat {
                 // so there is nothing to wait for. Its folder is free the moment
                 // its process tree ended.
                 self.host.close();
-                self.presence = WebPresence::Hidden;
+                self.presence = None;
                 bt_platform::forget_web_environment();
                 self.start_environment()?;
                 Ok(None)
@@ -1064,7 +1096,7 @@ impl WebSeat {
                 // has gone may a new environment be made — see [`BrowserWait::Rebuild`].
                 if self.waiting.is_none() {
                     self.host.close();
-                    self.presence = WebPresence::Hidden;
+                    self.presence = None;
                     self.waiting =
                         Some((BrowserWait::Rebuild, Instant::now() + BROWSER_EXIT_DEADLINE));
                     return Ok(None);
@@ -1076,7 +1108,7 @@ impl WebSeat {
             }
             WebEffect::AwaitBrowserExitBeforeCleanup => {
                 self.host.close();
-                self.presence = WebPresence::Hidden;
+                self.presence = None;
                 self.waiting = Some((
                     BrowserWait::Teardown,
                     Instant::now() + BROWSER_EXIT_DEADLINE,
@@ -1143,11 +1175,18 @@ impl WebSeat {
         compositor: &bt_platform::Compositor,
         presence: WebPresence,
     ) -> Result<(), String> {
-        if presence == self.presence {
+        self.wanted = presence;
+        self.apply_presence(compositor)
+    }
+
+    /// Tell the engine where it is, if there is an engine and it does not know
+    /// already.
+    fn apply_presence(&mut self, compositor: &bt_platform::Compositor) -> Result<(), String> {
+        if !self.host.has_controller() || self.presence == Some(self.wanted) {
             return Ok(());
         }
-        self.presence = presence;
-        match presence {
+        self.presence = Some(self.wanted);
+        match self.wanted {
             WebPresence::Hidden => self.host.set_visible(false),
             WebPresence::Shown(bounds) => {
                 self.host.set_size(bounds.width, bounds.height)?;
@@ -1161,10 +1200,14 @@ impl WebSeat {
     }
 
     /// Where the page is this frame, or `None` when it is not on the glass.
+    ///
+    /// What the engine has been *told*, not what the window last wished: a
+    /// pointer is forwarded in the coordinates the page believes it occupies,
+    /// and those are the ones it was given.
     pub(crate) fn shown_at(&self) -> Option<WebBounds> {
         match self.presence {
-            WebPresence::Shown(bounds) => Some(bounds),
-            WebPresence::Hidden => None,
+            Some(WebPresence::Shown(bounds)) => Some(bounds),
+            Some(WebPresence::Hidden) | None => None,
         }
     }
 

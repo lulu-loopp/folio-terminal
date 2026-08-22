@@ -55683,6 +55683,7 @@ impl Runtime<'_> {
                     self.window.web_cursor = None;
                     self.window.renderer.set_web_holes(Vec::new());
                 }
+                webhost::WebOutcome::Refused(uri) => eprintln!("BT_WEB refused {uri}"),
                 // Slice 4 owns the five failure cards; until they exist this
                 // goes where `BT_DPI` goes and for its reason — a fact with
                 // nowhere yet to be drawn is still a fact.
