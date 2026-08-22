@@ -515,7 +515,7 @@ impl WebHost {
     /// and policies are all installed before the first navigation, because a
     /// navigation started a moment earlier would run before `NavigationStarting`
     /// existed to check it.
-    pub fn install(&mut self, compositor: &Compositor) -> Result<(), String> {
+    pub fn install(&mut self, compositor: &Compositor, seat: u64) -> Result<(), String> {
         let pending = self
             .pending_controller
             .take()
@@ -536,8 +536,8 @@ impl WebHost {
         self.attach_events()?;
         self.attach_environment_events()?;
         let visual = compositor
-            .web_visual()
-            .ok_or_else(|| String::from("the window has no web visual to render into"))?;
+            .web_visual(seat)
+            .ok_or_else(|| String::from("this seat has no web visual to render into"))?;
         unsafe { self.composition().SetRootVisualTarget(&visual) }
             .map_err(|error| failure("SetRootVisualTarget", &error))
     }

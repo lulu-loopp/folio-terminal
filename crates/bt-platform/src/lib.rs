@@ -245,6 +245,47 @@ mod visual_layer_tests {
         );
     }
 
+    /// **One visual per seat, and every operation on one names the seat**
+    /// (W2 slice ③).
+    ///
+    /// A source pin for the reason the test above is one: DirectComposition
+    /// cannot be asked what is in a tree, so what a machine can hold is the shape
+    /// of the calls. The bug it forbids was measured on the real window — a
+    /// window that held a single slot pointed the second page's controller at the
+    /// first page's visual, and then the first seat's teardown took that visual
+    /// out of the tree about three hundred milliseconds after the second page
+    /// arrived, leaving a hole with nothing behind it.
+    ///
+    /// Red gate: put the slot back to `RefCell<Option<IDCompositionVisual>>` and
+    /// the first assertion fails; drop the `seat` argument from any of the four
+    /// entry points and the crate stops compiling, which is the other half.
+    #[test]
+    fn every_web_visual_belongs_to_one_seat_and_is_reached_by_naming_it() {
+        let source: String = include_str!("lib.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        assert!(
+            source.contains(concat!(
+                "web:RefCell<BTreeMap<u64,",
+                "IDCompositionVisual",
+                ">>"
+            )),
+            "the window's web visuals are a map keyed by seat, not one slot"
+        );
+        for entry in [
+            concat!("fnattach_web", "_visual(&self,seat:u64)"),
+            concat!("fndetach_web", "_visual(&self,seat:u64)"),
+            concat!("fnweb_", "visual(&self,seat:u64)"),
+            concat!("fnplace_web", "_visual(&self,seat:u64,"),
+        ] {
+            assert!(
+                source.contains(entry),
+                "every door onto a web visual takes the seat it belongs to: {entry}"
+            );
+        }
+    }
+
     /// The third angle, on a real DirectComposition device: the argument pair
     /// the two tests above are *about* is one the API accepts.
     ///
@@ -848,6 +889,7 @@ pub use webview::{
 mod windows_impl {
     use std::{
         cell::{Cell, RefCell},
+        collections::BTreeMap,
         ffi::c_void,
         os::windows::ffi::OsStrExt,
         path::{Path, PathBuf},
@@ -1063,13 +1105,23 @@ mod windows_impl {
         /// have.
         root: IDCompositionVisual,
         gpu: IDCompositionVisual,
-        /// The web preview's visual, once a seat has asked for one.
+        /// **One visual per web seat**, each keyed by the seat that asked for it.
+        ///
+        /// A single slot until W2 slice ③ made a window able to hold a page per
+        /// seat, and the plural is not tidiness: a controller is pointed at one
+        /// visual for its whole life (`SetRootVisualTarget`), so two seats sharing
+        /// a slot means the second page composes into the first page's box and the
+        /// first seat's teardown takes the second page's visual out of the tree.
+        /// Measured on the real window — a page reopened from Recent while the
+        /// closed one was still waiting for its browser to go appeared as a hole
+        /// with nothing behind it, about three hundred milliseconds after it
+        /// arrived.
         ///
         /// `RefCell` because a web seat opens and closes while the window is
         /// running, and every other operation on this type takes `&self` — the
         /// present funnel holds the compositor by shared reference and always
         /// has.
-        web: RefCell<Option<IDCompositionVisual>>,
+        web: RefCell<BTreeMap<u64, IDCompositionVisual>>,
     }
 
     impl Compositor {
@@ -1101,7 +1153,7 @@ mod windows_impl {
                 _target: target,
                 root,
                 gpu,
-                web: RefCell::new(None),
+                web: RefCell::new(BTreeMap::new()),
             };
             // The tree exists on screen only once it is committed, and this one
             // is empty until wgpu sets the swapchain on `gpu` — so what this
@@ -1190,8 +1242,8 @@ mod windows_impl {
         /// Folio still has to *stop painting* where the page is — see
         /// `bt_render::WindowRenderer::set_web_holes`. This method decides who
         /// is on top; the hole decides where the top is transparent.
-        pub fn attach_web_visual(&self) -> Result<(), String> {
-            if self.web.borrow().is_some() {
+        pub fn attach_web_visual(&self, seat: u64) -> Result<(), String> {
+            if self.web.borrow().contains_key(&seat) {
                 return Ok(());
             }
             let web = Self::create_visual(&self.device, "web")?;
@@ -1203,7 +1255,7 @@ mod windows_impl {
                 )
             }
             .map_err(|error| compositor_failure("IDCompositionVisual::AddVisual(web)", &error))?;
-            *self.web.borrow_mut() = Some(web);
+            self.web.borrow_mut().insert(seat, web);
             Ok(())
         }
 
@@ -1212,8 +1264,8 @@ mod windows_impl {
         /// Called when the last page in this window goes away. Leaving an empty
         /// visual behind would cost nothing on screen and would still be a lie
         /// in the tree, which is the thing this file is for.
-        pub fn detach_web_visual(&self) -> Result<(), String> {
-            let Some(web) = self.web.borrow_mut().take() else {
+        pub fn detach_web_visual(&self, seat: u64) -> Result<(), String> {
+            let Some(web) = self.web.borrow_mut().remove(&seat) else {
                 return Ok(());
             };
             unsafe { self.root.RemoveVisual(&web) }
@@ -1222,10 +1274,10 @@ mod windows_impl {
 
         /// The `IUnknown` a `ICoreWebView2CompositionController` is handed as its
         /// root visual target.
-        pub(crate) fn web_visual(&self) -> Option<IUnknown> {
+        pub(crate) fn web_visual(&self, seat: u64) -> Option<IUnknown> {
             self.web
                 .borrow()
-                .as_ref()
+                .get(&seat)
                 .and_then(|visual| visual.cast::<IUnknown>().ok())
         }
 
@@ -1243,11 +1295,12 @@ mod windows_impl {
         /// with a zero-based rectangle) and the visual carries the placement.
         pub fn place_web_visual(
             &self,
+            seat: u64,
             offset: (i32, i32),
             clip: (f32, f32, f32, f32),
         ) -> Result<(), String> {
             let borrowed = self.web.borrow();
-            let Some(web) = borrowed.as_ref() else {
+            let Some(web) = borrowed.get(&seat) else {
                 return Ok(());
             };
             let (x, y) = composition_visual_offset(offset.0, offset.1);

@@ -16550,6 +16550,19 @@ fn persisted_preview_pages(tab: &TabV1) -> Vec<bt_persist::RecentPreviewV1> {
         .collect()
 }
 
+/// **One web seat's answer for one frame** — where it is, and whether it is on
+/// the glass.
+///
+/// Two fields and not one, because they are two questions since W2 slice ③: a
+/// page on a background tab has a rectangle and is not visible, and the engine
+/// needs the first of those whether or not it gets the second (see
+/// `webhost::WebSeat::apply_presence`).
+struct WebPlacement {
+    seat: SeatId,
+    presence: webhost::WebPresence,
+    size: Option<(u32, u32)>,
+}
+
 /// **What a preview source can be written down as** — the one door between this
 /// window's identity type and the two stores that keep it.
 ///
@@ -20091,6 +20104,12 @@ impl Runtime<'_> {
             );
         }
         runtime.show_new_window(restored.is_some_and(|placement| placement.maximized))?;
+        // **Every page the file said this window's panes were on**, and here for
+        // the reason `open_development_web_page` is here twenty lines down: a
+        // WebView2 created against a window nobody has shown yet has nowhere to
+        // compose, so this cannot ride with the head reads in `dress_new_window`
+        // however much it belongs beside them.
+        runtime.revive_all_web_pages()?;
         // Said now rather than at the moment of the scan, because the scan
         // happens before there is a window to say it in. Said once per launch:
         // a rescan afterwards reports only the file behind the scheme actually
@@ -20403,6 +20422,9 @@ impl Runtime<'_> {
         // Maximized only if the file said this window was: a window a verb asked
         // for is one nobody has told to be.
         runtime.show_new_window(maximized)?;
+        // The pages of the tabs this window opened holding, on the launch door's
+        // own terms and for its reason.
+        runtime.revive_all_web_pages()?;
         Ok((id, window))
     }
 
@@ -20883,6 +20905,7 @@ impl Runtime<'_> {
         // unpinned tab belongs at the end by construction.
         self.window.tabs.push(tab);
         self.request_revived_previews(self.window.tabs.len() - 1);
+        self.revive_web_pages(self.window.tabs.len() - 1)?;
         self.apply_window_min_inner_size()?;
         self.activate_tab(self.window.tabs.len() - 1, true)
     }
@@ -21020,6 +21043,7 @@ impl Runtime<'_> {
             )?;
             self.window.tabs.push(revived);
             self.request_revived_previews(self.window.tabs.len() - 1);
+            self.revive_web_pages(self.window.tabs.len() - 1)?;
         }
         if let Some(placeholder) = placeholder
             && self.window.tabs.len() > 1
@@ -30768,6 +30792,25 @@ impl Runtime<'_> {
     /// is in the host to be asked about, and the tab it means is the active one
     /// by construction.
     fn preview_tab_index(&self, surface: PreviewSurface) -> usize {
+        // **A seat belongs to the tab whose tree holds it, and until W2 slice ③
+        // that was always the active one.** Every gesture that reaches a preview
+        // *seat* is a gesture on the tab in front of you — except a page, which
+        // goes on living on a tab nobody is looking at and answers its engine
+        // from there: a navigation that commits while another tab is up would
+        // otherwise put its buffer in that other tab's pool, and the row would
+        // appear in a switcher belonging to a tab that has never been to it.
+        //
+        // Measured on the real window: a page opened at launch under the restore
+        // prompt, committing after the prompt had put a restored tab in front of
+        // it, left its row in the restored tab and none in its own.
+        if let PreviewSurface::Seat(seat) = surface {
+            return self
+                .window
+                .tabs
+                .iter()
+                .position(|state| state.seats.preview_seats().contains(&seat))
+                .unwrap_or(self.window.active_tab);
+        }
         let PreviewSurface::Float(id) = surface else {
             return self.window.active_tab;
         };
@@ -55945,30 +55988,64 @@ impl Runtime<'_> {
         // `preview_image_placement` says so by answering `None`, which is the
         // same `Hidden` a page under a modal gets.
         let seats: Vec<SeatId> = self.window.web.keys().copied().collect();
-        let mut presences: Vec<(SeatId, webhost::WebPresence)> = Vec::with_capacity(seats.len());
+        let active = self.window.active_tab;
+        let mut placements: Vec<WebPlacement> = Vec::with_capacity(seats.len());
         for seat in seats {
             let transform = self.window.pane_motion.transform_of(seat, now, motion);
+            // **Each seat measured against its own tab's tree**, not against
+            // whichever tab is in front. A page on a background tab still has a
+            // rectangle, and the engine still has to be told its size — see
+            // `webhost::WebSeat::apply_presence`. Asking the active tab would
+            // answer `None` for every page but one, which is how a restored
+            // window's second page came up against zero by zero and never loaded.
+            let Some(index) = self
+                .window
+                .tabs
+                .iter()
+                .position(|tab| tab.seats.preview_seats().contains(&seat))
+            else {
+                placements.push(WebPlacement {
+                    seat,
+                    presence: webhost::WebPresence::Hidden,
+                    size: None,
+                });
+                continue;
+            };
+            let tab = &self.window.tabs[index];
             let body =
-                preview_image_placement(&self.seats, &self.seat_layout, seat, scale, transform)
-                    .map(|placement| {
+                preview_image_placement(&tab.seats, &tab.seat_layout, seat, scale, transform).map(
+                    |placement| {
                         [
                             placement.seat.x as f32,
                             placement.seat.y as f32,
                             (placement.seat.x + placement.seat.width) as f32,
                             (placement.seat.y + placement.seat.height) as f32,
                         ]
-                    });
-            presences.push((seat, webhost::web_presence(body, obstructed)));
+                    },
+                );
+            // The size comes off the rectangle whatever is standing over it; the
+            // presence is the second question, and a page on a tab nobody is
+            // looking at answers it the same way a page under a modal does.
+            let size = webhost::web_presence(body, false)
+                .bounds()
+                .map(|bounds| (bounds.width, bounds.height));
+            let presence = webhost::web_presence(body, obstructed || index != active);
+            placements.push(WebPlacement {
+                seat,
+                presence,
+                size,
+            });
         }
         let window = &mut *self.window;
         let mut holes = Vec::new();
-        for (seat, presence) in presences {
-            if let Some(web) = window.web.get_mut(&seat)
-                && let Err(error) = web.place(&window.compositor, presence)
+        for placement in placements {
+            if let Some(web) = window.web.get_mut(&placement.seat)
+                && let Err(error) =
+                    web.place(&window.compositor, placement.presence, placement.size)
             {
                 eprintln!("BT_WEB place failed: {error}");
             }
-            if let webhost::WebPresence::Shown(bounds) = presence {
+            if let webhost::WebPresence::Shown(bounds) = placement.presence {
                 holes.push(bounds.as_rect());
             }
         }
@@ -56140,23 +56217,46 @@ impl Runtime<'_> {
     /// the tab's existing page if it has one, and a landing preview seat if it
     /// has not.
     fn open_web_page(&mut self, url: &str) -> Result<()> {
-        if let Some(seat) = self.web_seat_of_tab() {
+        let seat = match self.web_seat_of_tab() {
+            Some(seat) => seat,
+            None => {
+                let Some(PreviewSurface::Seat(seat)) = self.preview_landing_surface() else {
+                    eprintln!("BT_WEB no preview seat could be opened for {url}");
+                    return Ok(());
+                };
+                seat
+            }
+        };
+        self.open_web_page_on(seat, url)?;
+        self.focus_seat(seat)
+    }
+
+    /// **Go to a page on one named seat**, without choosing the seat and without
+    /// taking the focus.
+    ///
+    /// [`Self::open_web_page`]'s other half, split off for the door that has both
+    /// answers already: a restored session names the seat *and* the page (see
+    /// [`Self::revive_web_pages`]), and a restore that moved the focus would land
+    /// a window on whichever tab happened to hold a page.
+    ///
+    /// An engine that is already on this seat is *navigated*; one that is not is
+    /// built. Both are the same sentence to the recovery machine — `desired_url`,
+    /// last write wins, nothing loaded until the events are installed — which is
+    /// why the two arms differ only in whether there is a machine yet.
+    fn open_web_page_on(&mut self, seat: SeatId, url: &str) -> Result<()> {
+        if self.window.web.contains_key(&seat) {
             let window = &mut *self.window;
             let outcomes = window
                 .web
                 .get_mut(&seat)
                 .map(|web| web.go(url, &window.compositor))
                 .unwrap_or_default();
-            self.apply_web_outcomes(seat, outcomes)?;
-            return self.focus_seat(seat);
+            return self.apply_web_outcomes(seat, outcomes);
         }
-        let Some(PreviewSurface::Seat(seat)) = self.preview_landing_surface() else {
-            eprintln!("BT_WEB no preview seat could be opened for {url}");
-            return Ok(());
-        };
         let hwnd = window_hwnd(&self.window.window)?;
         let proxy = self.app.event_proxy.clone();
         match webhost::WebSeat::open(
+            seat.0,
             hwnd,
             url,
             Box::new(move || {
@@ -56169,11 +56269,73 @@ impl Runtime<'_> {
                 // it becomes a page: one seat shows one thing, and a buffer left
                 // pointed at from underneath a browser is a switcher row claiming
                 // to be current while a page covers it.
-                self.leave_preview_buffer(PreviewSurface::Seat(seat));
+                //
+                // **Except the buffer that is the page itself**, which a restore
+                // has already put there and which the first commit will put there
+                // again: clearing it would blank the head and the foot for as long
+                // as the engine takes to come up, which on a cold profile is the
+                // better part of a second.
+                if self
+                    .preview_buffer_on(PreviewSurface::Seat(seat))
+                    .is_none_or(|buffer| buffer.source.web_url().is_none())
+                {
+                    self.leave_preview_buffer(PreviewSurface::Seat(seat));
+                }
                 self.clear_preview_image(PreviewSurface::Seat(seat));
-                self.focus_seat(seat)?;
             }
             Err(error) => eprintln!("BT_WEB {error}"),
+        }
+        Ok(())
+    }
+
+    /// **Every page a restored tab was on, put back on the engine** (`plan.md`
+    /// §5 片③ 恢复; §4's state machine does the rest).
+    ///
+    /// `create_tab_state` brings the *buffer* back — that is what makes the head,
+    /// the foot, the switcher row and the tab's name right on the first frame —
+    /// and this is what makes it a page again rather than a picture of one. The
+    /// two are deliberately separate: a buffer is content and belongs to the tab,
+    /// while an engine is a controller on a window's `HWND`, and only this side of
+    /// the restore has a window.
+    ///
+    /// **A session file is not an authorisation either.** The URL goes through
+    /// `webnav::address_bar` exactly as a pin does and for the pin's own reason:
+    /// the document is editable, may have been written by an older build, and may
+    /// name a target this policy no longer allows. What comes back is the
+    /// *normalised* answer, so a restore navigates where a fresh open would.
+    ///
+    /// Asked by index, like [`Self::request_revived_previews`] beside it, because
+    /// a restore builds every tab before it activates any of them.
+    /// [`Self::revive_web_pages`] for every tab this window opened holding.
+    ///
+    /// A loop and not a call on the active tab, for the reason the head reads
+    /// beside it are a loop: a page on a tab nobody is looking at is still a
+    /// page, and a window that only revived the tab it opened on would leave the
+    /// others showing a head and a foot over a hole.
+    fn revive_all_web_pages(&mut self) -> Result<()> {
+        for index in 0..self.window.tabs.len() {
+            self.revive_web_pages(index)?;
+        }
+        Ok(())
+    }
+
+    fn revive_web_pages(&mut self, index: usize) -> Result<()> {
+        let Some(tab) = self.window.tabs.get(index) else {
+            return Ok(());
+        };
+        let pages: Vec<(SeatId, String)> = tab
+            .preview_panes
+            .iter()
+            .filter_map(|(surface, pane)| {
+                let PreviewSurface::Seat(seat) = surface else {
+                    return None;
+                };
+                let url = pane.buffer.as_ref()?.web_url()?;
+                Some((seat, switcher_row_destination(url)?))
+            })
+            .collect();
+        for (seat, url) in pages {
+            self.open_web_page_on(seat, &url)?;
         }
         Ok(())
     }
@@ -56203,11 +56365,30 @@ impl Runtime<'_> {
         };
         let key = webnav::switcher_key(url);
         let source = preview::PreviewSource::Web(key.clone());
-        let name = self
+        let surface = PreviewSurface::Seat(seat);
+        // **This seat's own tab, which is not always the one in front.** A page
+        // commits on whatever tab it lives on, so the row goes in that tab's pool
+        // — see [`Self::preview_tab_index`], which is where the difference is
+        // written down. `open_preview_source_on` is the *browsing* door and reads
+        // the active tab throughout, which is right for every gesture a hand
+        // makes and wrong for an engine answering from behind another tab.
+        let index = self.preview_tab_index(surface);
+        let tab = &mut self.window.tabs[index];
+        let shown = tab.preview_panes.showing();
+        // The name it already had where it has been here before, and its site
+        // where it has not. A title is slice ④'s to read.
+        let name = tab
             .preview_pool
             .get(&source)
             .map_or_else(|| webnav::site_label(&key), |buffer| buffer.name.clone());
-        self.open_preview_source_on(PreviewSurface::Seat(seat), source, name)
+        tab.preview_pool.open(source.clone(), name, &shown);
+        // No caret and no scroll to file or restore: a page's view is the
+        // engine's, and this window has never held one.
+        tab.preview_panes.entry(surface).buffer = Some(source);
+        self.mark_session_dirty(Instant::now());
+        self.refresh_preview_for_layout();
+        self.refresh_chrome();
+        self.present_chrome_change()
     }
 
     /// **Which page a point is inside**, as the pages stand on the glass this

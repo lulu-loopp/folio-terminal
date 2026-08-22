@@ -589,6 +589,21 @@ pub(crate) fn web_presence(body: Option<[f32; 4]>, obstructed: bool) -> WebPrese
     })
 }
 
+impl WebPresence {
+    /// The rectangle, when there is one on the glass.
+    ///
+    /// Read by the one caller that asks [`web_presence`] twice — once with
+    /// nothing standing over the seat, to learn its *size*, and once honestly, to
+    /// learn its *presence*. See [`WebSeat::apply_presence`] for why those are
+    /// two questions.
+    pub(crate) fn bounds(self) -> Option<WebBounds> {
+        match self {
+            Self::Shown(bounds) => Some(bounds),
+            Self::Hidden => None,
+        }
+    }
+}
+
 impl WebBounds {
     /// The rectangle `bt_render::WindowRenderer::set_web_holes` is given, in the
     /// `[left, top, right, bottom]` every chrome rectangle in this program is
@@ -705,6 +720,15 @@ enum BrowserWait {
 
 /// One web seat: the state machine, the engine, and the mint they share.
 pub(crate) struct WebSeat {
+    /// **Which seat's visual this controller renders into.**
+    ///
+    /// The window's compositor holds one visual per seat since W2 slice ③, and a
+    /// controller is pointed at one of them for its whole life
+    /// (`SetRootVisualTarget`). Carrying the key here rather than passing it at
+    /// each call is what makes "this seat's page composes into this seat's box"
+    /// true by construction: the attach, the placement and the detach cannot name
+    /// three different visuals.
+    seat: u64,
     hwnd: std::num::NonZeroIsize,
     folder: PathBuf,
     machine: WebMachine,
@@ -732,6 +756,12 @@ pub(crate) struct WebSeat {
     /// What the engine has actually been told, so a frame that changed nothing
     /// issues no calls.
     presence: Option<WebPresence>,
+    /// **How big this seat's rectangle is**, whether or not the page is on the
+    /// glass — see [`WebSeat::apply_presence`] for why the two are separate
+    /// questions since W2 slice ③.
+    wanted_size: Option<(u32, u32)>,
+    /// And what the engine has actually been told about it.
+    sized: Option<(u32, u32)>,
     /// Which buttons the page believes are down.
     ///
     /// Kept here and nowhere else because it is derived from the very events
@@ -751,6 +781,7 @@ pub(crate) struct WebSeat {
 impl WebSeat {
     /// Open a web seat on this pane and start the engine towards `url`.
     pub(crate) fn open(
+        seat: u64,
         hwnd: std::num::NonZeroIsize,
         url: &str,
         wake: Box<dyn Fn()>,
@@ -776,6 +807,7 @@ impl WebSeat {
             wake,
         );
         let mut web = Self {
+            seat,
             hwnd,
             folder,
             machine: WebMachine::new(),
@@ -785,6 +817,8 @@ impl WebSeat {
             waiting: None,
             wanted: WebPresence::Hidden,
             presence: None,
+            wanted_size: None,
+            sized: None,
             buttons: bt_platform::web_mouse_buttons::NONE,
             last_left_press: None,
         };
@@ -997,8 +1031,8 @@ impl WebSeat {
             WebEffect::InstallEvents => {
                 // The visual first: the controller is told where to render
                 // before it is told to do anything at all.
-                compositor.attach_web_visual()?;
-                self.host.install(compositor)?;
+                compositor.attach_web_visual(self.seat)?;
+                self.host.install(compositor, self.seat)?;
                 // **Before the navigation, never after.** The next line's
                 // acknowledgement produces the first `Navigate`, and a page that
                 // begins loading against the controller's default zero-by-zero
@@ -1065,7 +1099,7 @@ impl WebSeat {
             }
             WebEffect::ReleaseUserDataFolder => {
                 self.waiting = None;
-                let _ = compositor.detach_web_visual();
+                let _ = compositor.detach_web_visual(self.seat);
                 outcomes.push(WebOutcome::Gone);
                 Ok(None)
             }
@@ -1122,23 +1156,49 @@ impl WebSeat {
         &mut self,
         compositor: &bt_platform::Compositor,
         presence: WebPresence,
+        size: Option<(u32, u32)>,
     ) -> Result<(), String> {
         self.wanted = presence;
+        // **The size is not the presence** (W2 slice ③). A seat's rectangle
+        // exists whenever its pane does; whether the page is *on the glass* is a
+        // second question, answered by a modal and by which tab is in front. They
+        // were one answer while a window held one page, because the only page
+        // there was was the one you were looking at.
+        if let Some(size) = size {
+            self.wanted_size = Some(size);
+        }
         self.apply_presence(compositor)
     }
 
     /// Tell the engine where it is, if there is an engine and it does not know
     /// already.
     fn apply_presence(&mut self, compositor: &bt_platform::Compositor) -> Result<(), String> {
-        if !self.host.has_controller() || self.presence == Some(self.wanted) {
+        if !self.host.has_controller() {
+            return Ok(());
+        }
+        // **A page is given its size even while it is hidden**, and this is slice
+        // ①'s own sentence — "the engine has to be given its size before it is
+        // given a URL" — meeting the case slice ③ created. A page can now be born
+        // on a tab nobody is looking at (a restored window with two of them) or
+        // behind a modal (the restore prompt is up at launch), and a page whose
+        // controller was never sized loads against zero by zero. Measured: such a
+        // page never committed at all, so the seat had no identity, no pool row
+        // and nothing in `session.json`.
+        if let Some((width, height)) = self.wanted_size
+            && self.sized != self.wanted_size
+        {
+            self.host.set_size(width, height)?;
+            self.sized = Some((width, height));
+        }
+        if self.presence == Some(self.wanted) {
             return Ok(());
         }
         self.presence = Some(self.wanted);
         match self.wanted {
             WebPresence::Hidden => self.host.set_visible(false),
             WebPresence::Shown(bounds) => {
-                self.host.set_size(bounds.width, bounds.height)?;
                 compositor.place_web_visual(
+                    self.seat,
                     (bounds.x, bounds.y),
                     (0.0, 0.0, bounds.width as f32, bounds.height as f32),
                 )?;
