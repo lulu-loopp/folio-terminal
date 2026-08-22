@@ -142,6 +142,158 @@ pub fn composition_visual_offset(x: i32, y: i32) -> (f32, f32) {
     (x as f32, y as f32)
 }
 
+/// Which end of a DirectComposition child list a new visual is added at.
+///
+/// # The argument does not read like what it does
+///
+/// `IDCompositionVisual::AddVisual(visual, insertAbove, referenceVisual)` with a
+/// **NULL** reference does not mean "above nothing" or "below nothing" the way
+/// the parameter's name suggests. With no reference visual the flag chooses an
+/// end of the child list: `TRUE` inserts at the **beginning** of the list and
+/// `FALSE` appends at the end — and a DirectComposition child list is painted
+/// front to back in list order, so **the beginning of the list is the bottom of
+/// the stack**.
+///
+/// This is not a reading of the documentation, it is a photograph. The W0′
+/// probe built its tree with `TRUE` for both children and got the wgpu overlay
+/// composed *underneath* the web page: a floating panel sliced off at the seat's
+/// left edge, looking for all the world like the airspace failure of a child
+/// HWND — which it was not (`docs/plans/web-preview/plan.md` §0 ④, and
+/// `docs/plans/web-preview/w0p-evidence/evidence.md` §1 gate 1, where the same
+/// ordering is reproduced on the second run).
+///
+/// So the web preview's visual is added [`VisualLayer::Bottom`] and everything
+/// Folio draws itself stays above it, permanently and by construction, rather
+/// than by whoever adds a visual next remembering to append.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VisualLayer {
+    /// Under every sibling already in the list. The web preview's visual, and
+    /// the only place it may ever be.
+    Bottom,
+    /// Over every sibling already in the list.
+    Top,
+}
+
+impl VisualLayer {
+    /// The `insertAbove` argument to pass `AddVisual` **when the reference
+    /// visual is NULL**, which is the only form this program calls it in.
+    #[must_use]
+    pub const fn insert_above_with_null_reference(self) -> bool {
+        match self {
+            Self::Bottom => true,
+            Self::Top => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod visual_layer_tests {
+    use super::VisualLayer;
+
+    /// RED ①, the one the handoff names by hand: the WebView's visual is added
+    /// with `AddVisual(insertAbove = TRUE, NULL)` and therefore lands at the
+    /// bottom of its container — under every pixel Folio draws itself.
+    #[test]
+    fn the_bottom_of_a_child_list_is_reached_with_insert_above_true() {
+        assert!(
+            VisualLayer::Bottom.insert_above_with_null_reference(),
+            "TRUE with a NULL reference inserts at the beginning of the child \
+             list, and the beginning of the list is the bottom of the stack"
+        );
+        assert!(!VisualLayer::Top.insert_above_with_null_reference());
+    }
+
+    /// RED ②: and the compositor spells it that way at the one call site.
+    ///
+    /// A source pin because DirectComposition has no way to ask a visual what
+    /// its children are, in any order — the stacking is observable only as
+    /// pixels, and the pixels are photographed once by the probe (gate 1) and
+    /// once by this slice's own acceptance shots. What a test *can* hold is that
+    /// the product's one web `AddVisual` is the call the photograph was taken
+    /// of.
+    #[test]
+    fn the_compositor_adds_the_web_visual_at_the_bottom_and_nowhere_else() {
+        // Whitespace out, because rustfmt decides where the line breaks in a
+        // three-argument call go and the claim is about the arguments. Every
+        // needle is spelled in pieces so that this test's own source is not one
+        // of the things it finds.
+        let source: String = include_str!("lib.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        let opens_with = concat!("AddVisual", "(&web,");
+        assert_eq!(
+            source.matches(opens_with).count(),
+            1,
+            "exactly one call adds the web visual"
+        );
+        let call = &source[source
+            .find(opens_with)
+            .expect("the call this test just counted")..];
+        assert!(
+            call.starts_with(concat!(
+                "AddVisual",
+                "(&web,VisualLayer::Bottom.insert_above_with_null_reference(),"
+            )),
+            "the web visual's insertion must name the layer it is claiming \
+             rather than a bare boolean: {}",
+            &call[..call.len().min(120)]
+        );
+        assert!(
+            !source.contains(concat!("AddVisual", "(&web,VisualLayer::Top")),
+            "nothing may add the web visual above anything"
+        );
+    }
+
+    /// The third angle, on a real DirectComposition device: the argument pair
+    /// the two tests above are *about* is one the API accepts.
+    ///
+    /// It cannot be asked what order the children ended up in — no
+    /// `IDCompositionVisual` tells anyone that, in any order — so what this
+    /// holds is the half a machine can answer: `AddVisual(child, TRUE, NULL)`
+    /// followed by `AddVisual(child, FALSE, NULL)` on one parent is legal, and
+    /// a clip and an offset on the child that arrived first are legal too. The
+    /// order itself is a photograph, taken twice by the probe (gate 1) and once
+    /// per acceptance run by the product's own shots.
+    #[cfg(windows)]
+    #[test]
+    fn a_real_composition_device_accepts_the_arguments_the_web_visual_is_added_with() {
+        use windows::Win32::Graphics::DirectComposition::{
+            DCompositionCreateDevice3, IDCompositionDesktopDevice, IDCompositionDevice3,
+            IDCompositionVisual,
+        };
+        use windows::core::{IUnknown, Interface as _};
+
+        let device: IDCompositionDesktopDevice =
+            unsafe { DCompositionCreateDevice3(None::<&IUnknown>) }.expect("a composition device");
+        let device3: IDCompositionDevice3 = device.cast().expect("the Device3 face");
+        let visual = || -> IDCompositionVisual {
+            unsafe { device.CreateVisual() }
+                .expect("a visual")
+                .cast()
+                .expect("the base interface")
+        };
+        // Named `above` and `below` rather than `gpu` and `web`: the pin above
+        // counts the calls that add *the* web visual, and there is one of those.
+        let (root, above, below) = (visual(), visual(), visual());
+        unsafe { root.AddVisual(&above, true, None::<&IDCompositionVisual>) }
+            .expect("the first child");
+        unsafe {
+            root.AddVisual(
+                &below,
+                VisualLayer::Bottom.insert_above_with_null_reference(),
+                None::<&IDCompositionVisual>,
+            )
+        }
+        .expect("the second child, at the bottom");
+        unsafe { below.SetOffsetX2(12.0) }.expect("an offset");
+        let clip = unsafe { device3.CreateRectangleClip() }.expect("a rectangle clip");
+        unsafe { clip.SetRight2(320.0) }.expect("a clip edge");
+        unsafe { below.SetClip(&clip) }.expect("the clip on the bottom visual");
+        unsafe { device.Commit() }.expect("a commit");
+    }
+}
+
 /// The parameters `explorer.exe` is handed to **reveal** a path (user ruling,
 /// 2026-08-13).
 ///
@@ -676,10 +828,26 @@ pub fn order_monospace_families(mut families: Vec<MonospaceFamily>) -> Vec<Monos
     families
 }
 
+/// WebView2 in composition hosting — the web preview block's engine (slice ①).
+///
+/// A file of its own rather than another region of [`windows_impl`], because it
+/// is a second unsafe boundary against a second SDK: everything in
+/// `windows_impl` is Win32 through the `windows` crate, and everything here is
+/// WebView2 through `webview2-com`. They share this crate's exemption from
+/// `unsafe_code = "deny"` and nothing else.
+#[cfg(windows)]
+mod webview;
+
+#[cfg(windows)]
+pub use webview::{
+    WebChord, WebEvent, WebHost, WebKey, WebMouseEvent, WebNavigationVerdict,
+    forget_web_environment, web_mouse_buttons, webview2_runtime_version,
+};
+
 #[cfg(windows)]
 mod windows_impl {
     use std::{
-        cell::Cell,
+        cell::{Cell, RefCell},
         ffi::c_void,
         os::windows::ffi::OsStrExt,
         path::{Path, PathBuf},
@@ -709,8 +877,8 @@ mod windows_impl {
         },
         Globalization::{GetUserDefaultUILanguage, GetUserPreferredUILanguages, MUI_LANGUAGE_NAME},
         Graphics::DirectComposition::{
-            DCompositionCreateDevice3, IDCompositionDesktopDevice, IDCompositionTarget,
-            IDCompositionVisual,
+            DCompositionCreateDevice3, IDCompositionDesktopDevice, IDCompositionDevice3,
+            IDCompositionTarget, IDCompositionVisual,
         },
         Graphics::DirectWrite::{
             DWRITE_FACTORY_TYPE_SHARED, DWriteCreateFactory, IDWriteFactory, IDWriteFont1,
@@ -794,7 +962,7 @@ mod windows_impl {
 
     use super::{
         CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, NonZeroIsize, TaskbarProgress,
-        TaskbarProgressState, ThreadPriority, WheelScrollAmount, WindowRect,
+        TaskbarProgressState, ThreadPriority, VisualLayer, WheelScrollAmount, WindowRect,
         composition_visual_offset, custom_frame_hit_test, logical_px_for_dpi,
     };
 
@@ -884,14 +1052,24 @@ mod windows_impl {
     pub struct Compositor {
         /// The one object that commits. See [`Compositor::commit`].
         device: IDCompositionDesktopDevice,
+        /// The same device, narrowed once: `CreateRectangleClip` is only on the
+        /// `Device3` face, and the web visual's clip is the one caller.
+        device3: IDCompositionDevice3,
         /// Held for its lifetime and read by nothing: this handle **is** the
         /// binding between the tree and the HWND, and dropping it unbinds it.
         _target: IDCompositionTarget,
-        /// Likewise: the root is reached through the target from here on, and
-        /// the slice that adds a web visual will reach it through a method
-        /// rather than through this field.
-        _root: IDCompositionVisual,
+        /// The root, reached by [`Compositor::attach_web_visual`] and by nothing
+        /// else — the web preview's visual is the only sibling `gpu` will ever
+        /// have.
+        root: IDCompositionVisual,
         gpu: IDCompositionVisual,
+        /// The web preview's visual, once a seat has asked for one.
+        ///
+        /// `RefCell` because a web seat opens and closes while the window is
+        /// running, and every other operation on this type takes `&self` — the
+        /// present funnel holds the compositor by shared reference and always
+        /// has.
+        web: RefCell<Option<IDCompositionVisual>>,
     }
 
     impl Compositor {
@@ -908,6 +1086,9 @@ mod windows_impl {
             let target = unsafe { device.CreateTargetForHwnd(hwnd, true) }.map_err(|error| {
                 compositor_failure("IDCompositionDesktopDevice::CreateTargetForHwnd", &error)
             })?;
+            let device3: IDCompositionDevice3 = device
+                .cast()
+                .map_err(|error| compositor_failure("IDCompositionDesktopDevice::cast", &error))?;
             let root = Self::create_visual(&device, "root")?;
             let gpu = Self::create_visual(&device, "gpu")?;
             unsafe { root.AddVisual(&gpu, true, None::<&IDCompositionVisual>) }
@@ -916,9 +1097,11 @@ mod windows_impl {
                 .map_err(|error| compositor_failure("IDCompositionTarget::SetRoot", &error))?;
             let compositor = Self {
                 device,
+                device3,
                 _target: target,
-                _root: root,
+                root,
                 gpu,
+                web: RefCell::new(None),
             };
             // The tree exists on screen only once it is committed, and this one
             // is empty until wgpu sets the swapchain on `gpu` — so what this
@@ -979,6 +1162,114 @@ mod windows_impl {
                 .map_err(|error| compositor_failure("IDCompositionVisual::SetOffsetX", &error))?;
             unsafe { self.gpu.SetOffsetY2(y) }
                 .map_err(|error| compositor_failure("IDCompositionVisual::SetOffsetY", &error))
+        }
+
+        /// Build the web preview's visual and put it **under** everything Folio
+        /// draws. Idempotent: a second call on a window that already has one
+        /// changes nothing.
+        ///
+        /// # Where it lands, and why that is the whole of this method
+        ///
+        /// ```text
+        /// target  ← CreateTargetForHwnd(hwnd, topmost = true)
+        ///  └─ root                    ← IDCompositionTarget::SetRoot
+        ///      ├─ web                 ← the WebView2's own visual tree hangs here
+        ///      └─ gpu                 ← the swapchain wgpu hangs here
+        /// ```
+        ///
+        /// The order is not a preference and it is not achieved by adding the
+        /// two in the right sequence — `gpu` was added when the window opened
+        /// and `web` arrives whenever a person opens a page. It is achieved by
+        /// [`VisualLayer::Bottom`]: `AddVisual(insertAbove = TRUE, NULL)` puts a
+        /// child at the *beginning* of the child list, and the beginning of a
+        /// DirectComposition child list is the **bottom** of the stack. So the
+        /// page can only ever be under Folio's own painting, and a later slice
+        /// that adds a third visual cannot get between them by forgetting
+        /// something.
+        ///
+        /// Folio still has to *stop painting* where the page is — see
+        /// `bt_render::WindowRenderer::set_web_holes`. This method decides who
+        /// is on top; the hole decides where the top is transparent.
+        pub fn attach_web_visual(&self) -> Result<(), String> {
+            if self.web.borrow().is_some() {
+                return Ok(());
+            }
+            let web = Self::create_visual(&self.device, "web")?;
+            unsafe {
+                self.root.AddVisual(
+                    &web,
+                    VisualLayer::Bottom.insert_above_with_null_reference(),
+                    None::<&IDCompositionVisual>,
+                )
+            }
+            .map_err(|error| compositor_failure("IDCompositionVisual::AddVisual(web)", &error))?;
+            *self.web.borrow_mut() = Some(web);
+            Ok(())
+        }
+
+        /// Take the web preview's visual back out of the tree.
+        ///
+        /// Called when the last page in this window goes away. Leaving an empty
+        /// visual behind would cost nothing on screen and would still be a lie
+        /// in the tree, which is the thing this file is for.
+        pub fn detach_web_visual(&self) -> Result<(), String> {
+            let Some(web) = self.web.borrow_mut().take() else {
+                return Ok(());
+            };
+            unsafe { self.root.RemoveVisual(&web) }
+                .map_err(|error| compositor_failure("IDCompositionVisual::RemoveVisual", &error))
+        }
+
+        /// The `IUnknown` a `ICoreWebView2CompositionController` is handed as its
+        /// root visual target.
+        pub(crate) fn web_visual(&self) -> Option<IUnknown> {
+            self.web
+                .borrow()
+                .as_ref()
+                .and_then(|visual| visual.cast::<IUnknown>().ok())
+        }
+
+        /// Move and crop the web preview's visual, in **physical** pixels.
+        ///
+        /// Two rectangles and not one, for the reason the preview picture takes
+        /// two (`WindowRenderer::place_preview_image`): `offset` is where the
+        /// page is laid out and `clip` is the box it may appear in. At rest they
+        /// are the same rectangle; mid-FLIP they are not, and a page drawn
+        /// without the second would overhang the pane it is flying into.
+        ///
+        /// `clip` is in the visual's own coordinates — i.e. relative to
+        /// `offset` — which is what the WebView2 side also believes, because its
+        /// bounds are set at the origin (`COREWEBVIEW2_BOUNDS_MODE_USE_RAW_PIXELS`
+        /// with a zero-based rectangle) and the visual carries the placement.
+        pub fn place_web_visual(
+            &self,
+            offset: (i32, i32),
+            clip: (f32, f32, f32, f32),
+        ) -> Result<(), String> {
+            let borrowed = self.web.borrow();
+            let Some(web) = borrowed.as_ref() else {
+                return Ok(());
+            };
+            let (x, y) = composition_visual_offset(offset.0, offset.1);
+            unsafe { web.SetOffsetX2(x) }.map_err(|error| {
+                compositor_failure("IDCompositionVisual::SetOffsetX(web)", &error)
+            })?;
+            unsafe { web.SetOffsetY2(y) }.map_err(|error| {
+                compositor_failure("IDCompositionVisual::SetOffsetY(web)", &error)
+            })?;
+            let rectangle = unsafe { self.device3.CreateRectangleClip() }.map_err(|error| {
+                compositor_failure("IDCompositionDevice3::CreateRectangleClip", &error)
+            })?;
+            unsafe {
+                rectangle
+                    .SetLeft2(clip.0)
+                    .and_then(|()| rectangle.SetTop2(clip.1))
+                    .and_then(|()| rectangle.SetRight2(clip.2))
+                    .and_then(|()| rectangle.SetBottom2(clip.3))
+            }
+            .map_err(|error| compositor_failure("IDCompositionRectangleClip::Set*", &error))?;
+            unsafe { web.SetClip(&rectangle) }
+                .map_err(|error| compositor_failure("IDCompositionVisual::SetClip", &error))
         }
 
         /// Publish this frame. **Call once per presented frame.**

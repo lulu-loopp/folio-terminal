@@ -72,6 +72,7 @@ mod toast;
 mod tooltip;
 mod trace;
 mod watch_clock;
+mod webhost;
 mod wsl;
 
 use anyhow::{Context, Result, anyhow, ensure};
