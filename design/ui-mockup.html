@@ -1218,7 +1218,7 @@
   @media (prefers-reduced-motion: reduce) { .panehead .pane-files { transition: none; } }
 
   /* 2026-08-15 (user ruling) — THE DIVIDER JOINS THE RUN. A pane head reads
-     `⊞ 🗀 ×` from here on, and the `margin-left: auto` that used to sit on the
+     `⌄ 🗀 ×` from here on, and the `margin-left: auto` that used to sit on the
      folder moves to whichever control is first, because the run is what floats
      right, not any one member of it.
 
@@ -1229,12 +1229,22 @@
      and the only obvious one of the three makes a tab you did not want. A verb
      with a keyboard door and no mouse door is a verb half the users never find.
 
-     What it does. Cuts along the pane's LONGER side — wide panes side by side,
-     tall ones stacked, ties to side by side. The same "auto" Windows Terminal's
-     `duplicatePane` takes, and the same measurement the duplicate chord already
-     made. That is why the glyph is the 田 and not one vertical rule: the button
-     does not commit to an axis, so its picture must not either. The two axes
-     are named outright one layer down, in the head's own context menu.
+     THE GLYPH IS THE HOUSE'S `⌄` AND THE PRESS OPENS THE MENU (§7.1.6e, ruled
+     2026-08-16; drawn here since 2026-08-21). It used to be a `⊞` that split on
+     the pane's LONGER side the moment you pressed it — one verb, no axis named,
+     the same "auto" the duplicate chord takes. The ruling replaced that button
+     rather than adding a fifth: a `⌄` anywhere in this window means "there is a
+     list behind me", it opens on a 250ms hover-rest OR on a press, and it closes
+     150ms after the hand has left both the button and the list. Auto-split did
+     not disappear with the glyph — it is `Split right` / `Split down` named
+     outright one layer down, where the axis is a word instead of a guess.
+     THIS SPELLING AND THE LONE PANE'S CORNER GHOST ARE NOW ONE BUTTON: same
+     class (`.pane-chev`), same `data-chev-leaf`, same `openPaneMenu`, same two
+     constants (`CHEV_REST_MS` / `CHEV_GRACE_MS`). What still differs is only
+     dress, and each difference is its own sentence — the head's member sits in a
+     run on opaque panel and takes the run's `--hover` wash; the ghost floats
+     over live output and has to bring its own ground. (The 2026-08-16→21 debt
+     note that stood here is discharged; it said this page still drew the `⊞`.)
 
      Why not a fourth control on the files head. A column has no profile to
      duplicate and no shell to put in the new half, and a preview has neither.
@@ -1242,25 +1252,27 @@
 
      No gap at the joint, exactly like `.pane-files + .pane-close` above. These
      are one run of triggers that reveal together, and a gap inside a run whose
-     other joint has none reads as two runs standing near each other.
-
-     OWED, AND IT IS THIS PAGE'S DEBT RATHER THAN A RULING: §7.1.6e replaced this
-     `⊞` with the house's `⌄` on 2026-08-16 and the native build has drawn the
-     chevron ever since. The split head here still draws the split glyph, so this
-     run and the lone pane's corner ghost are two spellings of one button. That
-     swap is its own ticket; the day it lands, `.pane-split` and `.pane-ghost`
-     become one string of markup. */
-  .panehead .pane-split {
+     other joint has none reads as two runs standing near each other. */
+  /* ── shared by both spellings: the box, the glyph, the pointer ── */
+  .pane-chev {
     flex: none; display: inline-flex; align-items: center; justify-content: center;
-    width: 19px; height: 19px; border-radius: 5px; cursor: pointer; color: var(--ink3);
+    border-radius: 5px; cursor: pointer; color: var(--ink3);
+  }
+  .pane-chev svg { width: 10px; height: 6px; pointer-events: none; }
+  /* THE ARROW DOES NOT TURN (§7.1.6e). This menu lands at the button and may
+     open above it, below it or beside it, so a 180° arrow points past its own
+     list as often as at it. The tab strip's `˅` keeps its turn because its list
+     is always hung straight under it — the two selectors above say so. */
+  .panehead .pane-chev {
+    width: 19px; height: 19px;
     opacity: 0; transition: opacity .12s ease;
   }
-  .panehead .pane-split svg { width: 13px; height: 13px; }
-  .panehead .pane-split + .pane-files { margin-left: 0; }
-  .panehead > .pane-split, .panehead > .pane-files:first-of-type { margin-left: auto; }
-  .pane:hover .panehead .pane-split { opacity: .7; }
-  .pane:hover .panehead .pane-split:hover { opacity: 1; background: var(--hover); color: var(--accent); }
-  @media (prefers-reduced-motion: reduce) { .panehead .pane-split { transition: none; } }
+  .panehead .pane-chev + .pane-files { margin-left: 0; }
+  .panehead > .pane-chev, .panehead > .pane-files:first-of-type { margin-left: auto; }
+  .pane:hover .panehead .pane-chev { opacity: .7; }
+  .pane:hover .panehead .pane-chev:hover,
+  .panehead .pane-chev.open { opacity: 1; background: var(--hover); color: var(--accent); }
+  @media (prefers-reduced-motion: reduce) { .panehead .pane-chev { transition: none; } }
 
   /* ============================================================================
      THE LONE PANE'S VERB SURFACE — THE CORNER GHOST (ruled 2026-08-20)
@@ -1343,15 +1355,16 @@
      caption. An open search capsule takes the corner outright and the ghost
      stands down (`:has(> .srchbar)`) — two instruments, one lane, and the one
      you explicitly opened wins. */
-  /* ── the corner ghost ── */
+  /* ── the corner ghost: the same `.pane-chev`, dressed for open ground ── */
   .pane-ghost {
     position: absolute; top: 10px; right: 11px; z-index: 20;
-    width: 22px; height: 22px; border-radius: 6px; flex: none;
-    display: inline-flex; align-items: center; justify-content: center;
-    color: var(--ink3); cursor: pointer; opacity: .45;   /* = .cmdtick at rest */
+    width: 22px; height: 22px; border-radius: 6px;
+    opacity: .45;   /* = .cmdtick at rest */
     transition: opacity .12s ease, background .12s ease, color .12s ease, box-shadow .12s ease;
   }
-  .pane-ghost svg { width: 11px; height: 7px; pointer-events: none; }
+  /* bigger than the head's 10×6: this one is not in a run, and there is no head
+     under it holding air around it */
+  .pane-ghost svg { width: 11px; height: 7px; }
   .pane:hover .pane-ghost { opacity: .75; }
   /* `--menu` and a shadow, NOT the run's `--hover`: that one is a 5.5% wash of
      ink, which is exactly right on a head (there is opaque panel under it) and
@@ -2886,18 +2899,18 @@
          the sticky group label and the indent were all machinery for saying
          "these panes belong together" — which a tab says by existing.
        · `#fcard-add`, `.fc-cap` (the "4 / 4" whisper), `.fcard-ghost`,
-         `.drop-hot`, `#focus-cards.drop-deny` and `.fcard.grabbed` died a form
-         earlier with the capacity cap, the standby pool and card dragging.
-         The column still refuses file drops (③) and still hosts no tear-out (②),
-         so `.drop-hot` / `#focus-cards.drop-deny` stay dead. `.fcard.grabbed` is
-         a different matter since 2026-08-20: the user reversed ④ and CARD
-         REORDERING SHIPPED NATIVELY that day — the native column fills its run's
-         slots and inherits the strip's grip, clamp, threshold, pinned partition
-         and FLIP whole (DESIGN §7.1.6b′ ④). THIS PROTOTYPE OWES THE GESTURE and
-         owes it as its own slice: the rail rebuilds `#focus-rail`'s innerHTML on
-         every structural change, so the element in hand would be destroyed
-         mid-drag, and that is a real piece of work rather than a selector.
-         Recorded as a debt here so nobody reads this list as a ruling.
+         `.drop-hot` and `#focus-cards.drop-deny` died a form earlier with the
+         capacity cap and the standby pool. The column still refuses file drops
+         (③) and still hosts no tear-out (②), so those two stay dead.
+         `.fcard.grabbed` CAME BACK on 2026-08-21: the user reversed ④ on
+         2026-08-20, card reordering shipped natively the same day, and this page
+         followed. The gesture is not a second engine — `stripEl` / `stripEntrySel`
+         hand the tab strip's own drag the column's boxes and it reorders them
+         without knowing which face it was given (see `trackGrabbed`). The
+         rebuild that looked like the blocker is not one: `#focus-rail`'s
+         innerHTML is rebuilt on every reorder, exactly as the strip's is, and
+         the grip is re-applied by `data-ws` to whichever node now wears it —
+         identity is the tab's id, and the tab's id outlives any node.
        · The per-pane card chrome — `.fcard`, `.fc-head`, `.fc-mini` — SURVIVES,
          because the monitor expansion (§7.1.6b ③) is out-of-mode furniture and
          still unfolds one card per pane under a tab's row. Focus mode's own card
@@ -2931,6 +2944,13 @@
     transition: border-color .12s ease, transform .12s ease;
   }
   .fcard:hover { border-color: var(--accent); transform: translateX(2px); }
+  /* THE CARD IN HAND PASSES OVER THE ONES IT TRAVELS THROUGH, and it needs a
+     `position` to be raised at all — a column of static boxes has no z-order to
+     join. The lift is the rail row's own (`.vtab.grabbed`), one step heavier
+     because a card is a bigger thing to pick up. `trackGrabbed` writes the
+     transform inline, so `:hover`'s 2px nudge cannot fight it. */
+  .fcard.grabbed { position: relative; z-index: 20; box-shadow: 0 6px 18px rgba(0, 0, 0, .18); }
+  body.dark .fcard.grabbed { box-shadow: 0 6px 18px rgba(0, 0, 0, .45); }
   /* THE TAB YOU ARE LOOKING AT, marked in the column rather than removed from it
      — a list of five tabs that shows four is a lie, and after a scroll "where am
      I" is the one question the column has to answer at a glance. Contrast, not
@@ -4244,14 +4264,17 @@
   <symbol id="i-panel" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M6.2 2.5v11" stroke="currentColor" stroke-width="1.1"/></symbol>
   <!-- 2026-08-15 (user ruling) — the split family, struck for this product.
 
-       `#i-split` is the pane head's `⊞`: the same frame `#i-panel` uses, divided
-       on BOTH axes. Both, and both centred, because the button does not commit
-       to an axis — it takes the pane's longer side, which is vertical in a tall
-       pane and horizontal in a wide one. One rule would be a promise broken half
-       the time; the off-centre single rule is already `#i-panel` and means "a
-       pane with a sidebar", which is a statement about contents, not about
-       cutting. The dividers run wall to wall: a rule that stops short floats
-       inside a box, and a division reaches the walls.
+       `#i-split` is the `⊞`: the same frame `#i-panel` uses, divided on BOTH
+       axes. Both, and both centred, because it names the verb without committing
+       to an axis. One rule would be a promise broken half the time; the
+       off-centre single rule is already `#i-panel` and means "a pane with a
+       sidebar", which is a statement about contents, not about cutting. The
+       dividers run wall to wall: a rule that stops short floats inside a box,
+       and a division reaches the walls. IT NO LONGER STANDS ON THE PANE HEAD —
+       §7.1.6e put the house's `⌄` in that slot on 2026-08-16 and this page
+       followed on 2026-08-21 — so its one remaining reader is the `Split with ▸`
+       row of the terminal menu, which is exactly the axis-free reading it was
+       drawn for.
 
        `#i-split-right` and `#i-split-down` are the head menu's two rows, where
        the axis IS committed to — so they draw the result rather than the cut:
@@ -6050,7 +6073,6 @@
   const $ = (id) => document.getElementById(id);
   const closeSvg = `<svg><use href="#i-close"/></svg>`;
   const folderSvg = `<svg><use href="#i-folder"/></svg>`;
-  const splitSvg = `<svg><use href="#i-split"/></svg>`;
   const pinSvg = `<svg class="pinsvg"><use href="#i-pin"/></svg>`;
   const pinnedSvg = `<svg class="pinsvg"><use href="#i-pinned"/></svg>`;
   const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -8544,13 +8566,19 @@
      below opens and closes on them, and a second pair of numbers is how two
      dwells in one window come to disagree about how long a dwell is. */
   const CHEV_REST_MS = 250, CHEV_GRACE_MS = 150;
-  /* The verb surface a pane with no sibling wears (§7.1.6i, ruled 2026-08-20):
-     one `⌄` in the corner, floating over the content, opening the same
-     `openPaneMenu` the split head's own chevron opens. The whole rationale and
-     the rest-state experiment are in the CSS block beside `.pane-ghost`. */
-  function loneVerbHtml(node) {
-    return `<span class="pane-ghost" data-ghost-leaf="${node.id}" title="Pane actions"><svg><use href="#i-chev"/></svg></span>`;
-  }
+  /* THE PANE'S `⌄`, WRITTEN ONCE (§7.1.6e + §7.1.6i). One button with two
+     dresses and no second list: a pane that wears a head gets it as the leading
+     member of that head's run, a pane with no sibling gets it as the corner
+     ghost floating over its own output (§7.1.6i, ruled 2026-08-20). Both carry
+     `.pane-chev` and `data-chev-leaf`, both raise `openPaneMenu` from their own
+     bottom-left, and both run on `CHEV_REST_MS` / `CHEV_GRACE_MS` — so "the two
+     `⌄` agree" is a property of there being one of them, not of two spellings
+     happening to match today. Tip text is the ruling's own: `Split and more`.
+     The rest-state experiment behind the ghost's ink is in the CSS block beside
+     `.pane-ghost`. */
+  const paneChevHtml = (node, cls) =>
+    `<span class="pane-chev ${cls}" data-chev-leaf="${node.id}" title="Split and more"><svg><use href="#i-chev"/></svg></span>`;
+  const loneVerbHtml = (node) => paneChevHtml(node, "pane-ghost");
   /* ── the PowerShell integration notice (user ruling 2026-08-21) ──
      Folio's PowerShell integration is opt-in: there is no argument that would
      hand `pwsh` a second startup file, so the script is dot-sourced from
@@ -8658,7 +8686,7 @@
       return `<div class="pane ${focused ? "focused" : ""}" data-leaf="${node.id}">
         <div class="pane-inner">
           ${multi ? `<div class="panehead" data-leaf="${node.id}">${stateIcon(s, s.busy, s.unread)}<span class="ptitle">${s.cwd}</span>
-            <span class="pane-split" data-split-leaf="${node.id}" title="Split pane">${splitSvg}</span>
+            ${paneChevHtml(node, "")}
             <span class="pane-files" data-flyout-leaf="${node.id}" title="Peek files here">${folderSvg}</span>
             <span class="pane-close" title="Close pane">${closeSvg}</span></div>` : loneVerbHtml(node)}
           ${psNoticeHtml(s, node.id)}
@@ -9538,10 +9566,12 @@
     $("file-menu").classList.remove("show");
     $("pane-menu").classList.remove("show");
     closeSplitWithMenu();
-    /* the lone pane's `⌄` is lit while its menu stands; every path that puts the
-       menu away has to put the light out, or the chevron is left stranded on —
-       the root menu's lesson, obeyed on day one this time */
-    document.querySelectorAll(".pane-ghost.open").forEach(g => g.classList.remove("open"));
+    /* the pane's `⌄` is lit while its menu stands — either spelling of it,
+       head member or corner ghost, since 2026-08-21 they are one class; every
+       path that puts the menu away has to put the light out, or the chevron is
+       left stranded on — the root menu's lesson, obeyed on day one this time */
+    clearPaneChevClocks();
+    document.querySelectorAll(".pane-chev.open").forEach(g => g.classList.remove("open"));
     closePvMenu();
     document.querySelectorAll(".combo.open").forEach(c => c.classList.remove("open"));
   }
@@ -10073,10 +10103,11 @@
   }
 
   /* The column, in strip order — the order the user arranged, and the only order
-     there is. Card dragging landed natively on 2026-08-20 and that sentence did
-     not change: a card reorder rewrites the tab list itself, so there is still
-     no second order to store. (The gesture itself is this prototype's debt —
-     see the `.fcard.grabbed` note in the stylesheet.)
+     there is. Card dragging landed natively on 2026-08-20 and here on
+     2026-08-21, and that sentence did not change: a card reorder rewrites
+     `state.tabs` itself, so there is still no second order to store, nothing to
+     reconcile on the way out of the mode, and nothing extra for the session to
+     save.
      NO HEADING: where the tab list spends a row on the word "Tabs", this column
      spends nothing — the heading and the `Exit` button that stood on it were
      withdrawn on 2026-08-20, and the first card starts at the rail's padding. */
@@ -10466,31 +10497,22 @@
     document.querySelectorAll(".pane").forEach(el =>
       el.addEventListener("click", (e) => {
         if (e.target.closest(".pane-close")) { closePane(+el.dataset.leaf); return; }
-        /* 2026-08-15 (user ruling) — the `⊞`. Cuts along the pane's LONGER side,
-           the same "auto" the duplicate chord takes, measured off the pane's own
-           rectangle rather than guessed. */
-        const ps = e.target.closest(".pane-split");
-        if (ps) {
-          const r = ps.closest(".pane").getBoundingClientRect();
-          splitPane(+ps.dataset.splitLeaf, r.width >= r.height ? "right" : "bottom");
-          return;
-        }
-        /* 2026-08-20 — the lone pane's `⌄`. Both variants raise the SAME menu at
-           the same place: under the button, left-clamped by `openPaneMenu`'s own
-           both-axis clamp, which is why a mark 11px from the window's right edge
-           does not need a right-anchored placement of its own. Second press on
-           the same button puts it away — a control that opens something must also
-           close it (the tab strip's chevron learned this the hard way). */
-        const pg = e.target.closest(".pane-ghost");
+        /* THE PANE'S `⌄`, EITHER SPELLING, ONE PRESS (§7.1.6e/§7.1.6i). The head
+           member and the corner ghost raise the SAME menu at the same place:
+           under the button, left-clamped by `openPaneMenu`'s own both-axis
+           clamp, which is why a mark 11px from the window's right edge does not
+           need a right-anchored placement of its own. Second press on the same
+           button puts it away — a control that opens something must also close
+           it (the tab strip's chevron learned this the hard way), and that is
+           the ruling's own "再点即收".
+           A press is the SECOND door, not the only one: `paneChevGate` below
+           opens the same menu on a 250ms rest and closes it 150ms after the hand
+           has left both the button and the list. */
+        const pg = e.target.closest(".pane-chev");
         if (pg) {
           e.stopPropagation();
-          const wasOpen = pg.classList.contains("open");
-          closeAllPopups();
-          document.querySelectorAll(".pane-ghost.open").forEach(g => g.classList.remove("open"));
-          if (wasOpen) return;
-          const r = pg.getBoundingClientRect();
-          openPaneMenu(+pg.dataset.ghostLeaf, r.left, r.bottom + 4);
-          pg.classList.add("open");
+          if (pg.classList.contains("open")) { closePaneChevMenu(); return; }
+          openPaneChevMenu(pg);
           return;
         }
         const pf = e.target.closest(".pane-files");
@@ -10509,7 +10531,7 @@
       }));
     document.querySelectorAll(".panehead").forEach(el => {
       el.addEventListener("pointerdown", (e) => {
-        if (e.target.closest(".pane-close, .pane-files, .pane-split, .pane-ghost, .pv-tool")) return;
+        if (e.target.closest(".pane-close, .pane-files, .pane-chev, .pv-tool")) return;
         /* NO GUARD HERE ANY MORE (§7.1.6b′ ②③). The stage is the real tree,
            so a pane drags, docks and splits inside focus mode exactly as it does
            outside it — the ruling's plainest sentence is that the mode disables
@@ -10850,11 +10872,7 @@
       if ($("split-with-menu").classList.contains("show")) { closeSplitWithMenu(); return; }
       if ($("term-menu").classList.contains("show")) { $("term-menu").classList.remove("show"); return; }
       if ($("file-menu").classList.contains("show")) { $("file-menu").classList.remove("show"); return; }
-      if ($("pane-menu").classList.contains("show")) {
-        $("pane-menu").classList.remove("show");
-        document.querySelectorAll(".pane-ghost.open").forEach(g => g.classList.remove("open"));
-        return;
-      }
+      if ($("pane-menu").classList.contains("show")) { closePaneChevMenu(); return; }
       if ($("root-menu").classList.contains("show")) { closeRootMenu(); return; }
       if ($("profile-menu").classList.contains("show")) { closeProfileMenu(); return; }
       const openCombo = document.querySelector(".combo.open");
@@ -11271,14 +11289,31 @@
       drag.grabDy = e.clientY - r.top;
     }
   }
-  const stripEl = () => state.layoutMode === "horizontal" ? $("tabstrip") : $("rail");
+  /* THE TAB LIST HAS THREE FACES AND THE DRAG ENGINE KNOWS ONLY ONE (§7.1.6b′ ④,
+     native since 2026-08-20, this page 2026-08-21). Horizontal strip, vertical
+     rail, focus card column: `stripEl` and `stripEntry` are the two questions
+     that tell them apart, and everything downstream — the grip, the viewport
+     clamp, the "past the neighbour's middle plus a margin" threshold, the pinned
+     partition, the FLIP — reads a run of boxes and cannot say which face handed
+     it one. That is the whole of "the column and the strip can never disagree":
+     not two implementations kept in step, one implementation with three callers.
+     Focus mode wins over `layoutMode` because the column REPLACES the tab list
+     from either layout while the mode is on. */
+  const stripEl = () => state.focusMode ? $("rail")
+                      : state.layoutMode === "horizontal" ? $("tabstrip") : $("rail");
+  /* `#focus-rail >` and not `.fcard`: the monitor expansion (§7.1.6b ③) hangs
+     pane cards under a `.vtab`, and those are not tabs in a list. */
+  const stripEntrySel = () => state.focusMode ? "#focus-rail > .fcard" : ".tab, .vtab";
+  /* the column runs down the page from either Tab layout; only the horizontal
+     strip is an x-axis run */
+  const stripIsHorizontal = () => !state.focusMode && state.layoutMode === "horizontal";
 
   /* Preview the tab where the pointer would drop it — any slot, not a fixed one. */
   function stripEntries() {
-    return [...stripEl().querySelectorAll(".tab, .vtab")].filter(el => !el.classList.contains("drop-preview"));
+    return [...stripEl().querySelectorAll(stripEntrySel())].filter(el => !el.classList.contains("drop-preview"));
   }
   function insertIndexAt(e) {
-    const horizontal = state.layoutMode === "horizontal";
+    const horizontal = stripIsHorizontal();
     const pos = horizontal ? e.clientX : e.clientY;
     const entries = stripEntries();
     for (let i = 0; i < entries.length; i++) {
@@ -11389,7 +11424,7 @@
      tab ≈ 21px of dead zone on a 200px tab — twenty times pointer noise, and
      invisible to the hand. */
   const REORDER_MARGIN = 0.1;
-  const stripEls = () => [...stripEl().querySelectorAll(".tab, .vtab")];
+  const stripEls = () => [...stripEl().querySelectorAll(stripEntrySel())];
 
   function snapshotStrip() {
     const m = new Map();
@@ -11414,16 +11449,43 @@
   /* Hold the grabbed tab under the pointer, wherever its slot has moved to, and
      return how far it now sits from that slot — the reorder decides from this,
      not from the pointer. */
+  /* WHAT THE THING IN HAND IS HELD INSIDE. On a strip or a rail that is the
+     run's own box. In the card column it is the LIST's box and not the panel's:
+     the rail's top padding is above the list and the sticky `+` row is under it,
+     and a card that could reach either would be drawn over furniture that does
+     not scroll (native `focus_rail_run`'s `viewport`, and its own red gate).
+     Read fresh on every move because the column scrolls and the `+` row is
+     `position: sticky` — its top edge IS the foot of the scrollport. */
+  function gripClip() {
+    const strip = stripEl();
+    const r = strip.getBoundingClientRect();
+    if (!state.focusMode) return r;
+    const list = strip.querySelector("#focus-rail");
+    if (!list) return r;
+    const lr = list.getBoundingClientRect();
+    const foot = strip.querySelector(".rail-new");
+    const bottom = foot ? Math.min(r.bottom, foot.getBoundingClientRect().top) : r.bottom;
+    return { left: r.left, right: r.right,
+             top: Math.max(r.top, lr.top), bottom: Math.min(bottom, lr.bottom) };
+  }
   function trackGrabbed(e) {
+    /* RE-QUERIED, NEVER REMEMBERED. Every swap runs `render()`, and both the
+       strip and the card column rebuild their innerHTML when the ORDER changes —
+       so the node in hand is destroyed and replaced on the way. This one line is
+       why that costs nothing: identity here is `data-ws`, which survives the
+       rebuild because it is the tab's own id, and the grip is re-applied to
+       whatever node is now wearing it. (That is also why the column needs no
+       "freeze the painter while dragging" rule: freezing it would give the two
+       faces two different painting policies and stop the thumbnails mid-drag.) */
     const el = stripEl().querySelector(`[data-ws="${drag.wsId}"]`);
     if (!el) return null;
     el.classList.add("grabbed");
     el.style.transition = "none";
     el.style.transform = "";
     const nat = el.getBoundingClientRect();       /* its slot, transform cleared */
-    const sr = stripEl().getBoundingClientRect();
+    const sr = gripClip();
     let d;
-    if (state.layoutMode === "horizontal") {
+    if (stripIsHorizontal()) {
       const want = Math.max(sr.left, Math.min(e.clientX - drag.grabDx, sr.right - nat.width));
       d = want - nat.left;
       el.style.transform = `translateX(${d}px)`;
@@ -11476,7 +11538,7 @@
      where a tab is flying rather than where its slot is. offsetLeft is layout —
      the animation cannot lie to it. */
   function reorderWhileDragging(e) {
-    const horizontal = state.layoutMode === "horizontal";
+    const horizontal = stripIsHorizontal();
     const slotMid = (el) => horizontal ? el.offsetLeft + el.offsetWidth / 2
                                        : el.offsetTop + el.offsetHeight / 2;
     let cur = state.tabs.findIndex(w => w.id === drag.wsId);
@@ -11563,24 +11625,32 @@
     }
     /* over the strip? a pane dropped here becomes its own tab again; a tab
        dragged along it reorders live; a FILE becomes a new preview tab */
-    /* in focus mode the card column is the tab list from EITHER Tab layout, so
-       the rect to test is the rail's — `stripEl` would hand back a hidden strip
-       (all zeros) and the refusal below would never be reached */
-    const sr = (state.focusMode ? $("rail") : stripEl()).getBoundingClientRect();
+    /* in focus mode the card column IS the tab list from either Tab layout, and
+       `stripEl` says so since 2026-08-21 — before that it handed back a hidden
+       strip (all zeros) and the guard below was never reached */
+    const sr = stripEl().getBoundingClientRect();
     if (e.clientX >= sr.left && e.clientX <= sr.right && e.clientY >= sr.top && e.clientY <= sr.bottom) {
-      /* FOCUS MODE: THE COLUMN REFUSES DROPS (§7.1.6b′ ⑤). Nothing docks into
-         it — a pane dropped on a list of tabs has no row to land beside, cards
-         do not reorder in v1, and a FILE has no non-arbitrary tab to land in;
-         the door for a file is the one every other view uses (`Ctrl+E`, the
+      /* FOCUS MODE: THE COLUMN REFUSES EVERY DROP, AND REORDERS ITS OWN CARDS.
+         Nothing DOCKS into it (§7.1.6b′ ②③) — a pane dropped on a list of tabs
+         has no row to land beside, and a FILE has no non-arbitrary tab to land
+         in; the door for a file is the one every other view uses (`Ctrl+E`, the
          flyout, the preview pane). One guard replaces the four focus-mode drop
-         paths form A kept here (tab joins the column, card reorders, file joins
-         as a preview card, folder denied): all four belonged to the standby
-         pool, and the pool is two forms dead. */
-      /* §7.1.6k rides on this same guard and needs no second one: ② is a refusal
+         paths form A kept here (tab joins the column, file joins as a preview
+         card, folder denied): they belonged to the standby pool, and the pool is
+         two forms dead.
+         WHAT IT NO LONGER REFUSES IS A CARD IN ITS OWN HAND (§7.1.6b′ ④, user
+         ruling 2026-08-20 reversing the v1 blank). A card is a tab, so a card
+         dragged along the column is `kind: "tab"` and falls through to the tab
+         arm below — the same `reorderWhileDragging`, the same threshold, the
+         same pinned partition, the same FLIP. Nothing here is a second engine;
+         the guard simply stopped standing in front of the first one.
+         §7.1.6k rides on this same guard and needs no second one: ② is a refusal
          of the pane SOURCE, so a card column takes neither of the two offers a
          pane has here — it does not mint a new tab out of one, and it does not
          hand one to a card's tab or spring the column over to it. */
-      if (state.focusMode) { hidePreview(); clearDropPreview(); clearAimed(); drag.target = null; return; }
+      if (state.focusMode && drag.kind !== "tab") {
+        hidePreview(); clearDropPreview(); clearAimed(); drag.target = null; return;
+      }
       if (drag.kind === "pane") {
         /* ── SPRING-LOADED (§7.1.6k, user ruling 2026-08-20) ──
            TWO offers, read off two different questions about one pointer:
@@ -11653,6 +11723,12 @@
     /* left the strip: the tab drops back into its slot, the ghost takes over */
     if (drag.kind === "tab") {
       releaseGrabbed(true);
+      /* AND IN FOCUS MODE THAT IS THE WHOLE OF IT. Off the column there is
+         nothing a card is being offered: ④ granted the REORDER and nothing else,
+         so a card carried onto the stage does not merge its tab into a pane the
+         way a strip tab does. The card settles back into its slot and the drag
+         is over but for the letting go. */
+      if (state.focusMode) { hidePreview(); drag.target = null; return; }
       /* press-activation's counterpart: aiming below the strip flips the view
          back to the tab you set out from, so the merge gesture keeps its
          target — press said "choose A", leaving the strip says "now place A
@@ -13631,6 +13707,66 @@
     menu.style.left = Math.max(6, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + "px";
     menu.style.top = Math.max(6, Math.min(y, window.innerHeight - menu.offsetHeight - 8)) + "px";
   }
+
+  /* ══════ THE PANE `⌄`'S TWO CLOCKS (§7.1.6e; this page 2026-08-21) ══════
+     `⌄` IS THE ONE VERB SURFACE IN THIS WINDOW A HOVER MAY OPEN. Everything
+     else keeps the old law — hover = look (tip/peek), click = do, right-click =
+     options — and the chevron is the named exception: 250ms of rest opens it,
+     150ms after the hand has left BOTH the button and the list closes it, a
+     press opens it too, and a second press puts it away.
+     THE TWO NUMBERS ARE ASYMMETRIC ON PURPOSE and the asymmetry is the whole
+     argument: 250 is a hand making up its mind (shorter, and a pointer merely
+     passing through gets a menu thrown across its path), 150 is a hand that has
+     already gone. They live in `CHEV_REST_MS` / `CHEV_GRACE_MS` beside the split
+     submenu that already reads them, because a second pair is how two dwells in
+     one window come to disagree about how long a dwell is.
+     BUTTON AND LIST ARE ONE REGION FOR THE LEAVE. The menu hangs 4px under the
+     button, so a hand travelling into it crosses ground that is neither — the
+     grace is what carries it across, and re-entering either one cancels the
+     grace rather than arming a second clock.
+     ONE HANDLER PAIR, DELEGATED, because both spellings of the button are
+     rebuilt by `render` whenever their pane redraws: per-element listeners would
+     evaporate under the first line of output. */
+  let chevRestT = 0, chevRestBtn = null, chevGraceT = 0;
+  function clearPaneChevClocks() {
+    clearTimeout(chevRestT); chevRestT = 0; chevRestBtn = null;
+    clearTimeout(chevGraceT); chevGraceT = 0;
+  }
+  function openPaneChevMenu(btn) {
+    const r = btn.getBoundingClientRect();
+    /* `openPaneMenu` puts every other popup away first, this window's chevrons
+       included, so the light goes on AFTER it and never before. */
+    openPaneMenu(+btn.dataset.chevLeaf, r.left, r.bottom + 4);
+    btn.classList.add("open");
+  }
+  function closePaneChevMenu() {
+    clearPaneChevClocks();
+    $("pane-menu").classList.remove("show");
+    document.querySelectorAll(".pane-chev.open").forEach(g => g.classList.remove("open"));
+  }
+  document.addEventListener("pointerover", (e) => {
+    const btn = e.target.closest(".pane-chev");
+    if (!btn && !e.target.closest("#pane-menu")) return;
+    clearTimeout(chevGraceT); chevGraceT = 0;          /* the hand came back */
+    if (!btn || btn.classList.contains("open") || chevRestBtn === btn) return;
+    clearTimeout(chevRestT);
+    chevRestBtn = btn;
+    chevRestT = setTimeout(() => {
+      chevRestT = 0;
+      if (chevRestBtn === btn && btn.isConnected) openPaneChevMenu(btn);
+    }, CHEV_REST_MS);
+  });
+  document.addEventListener("pointerout", (e) => {
+    if (!e.target.closest(".pane-chev, #pane-menu")) return;
+    const to = e.relatedTarget;
+    if (to instanceof Element && to.closest(".pane-chev, #pane-menu")) return;
+    clearTimeout(chevRestT); chevRestT = 0; chevRestBtn = null;
+    clearTimeout(chevGraceT);
+    chevGraceT = setTimeout(() => {
+      chevGraceT = 0;
+      if ($("pane-menu").classList.contains("show")) closePaneChevMenu();
+    }, CHEV_GRACE_MS);
+  });
   function fileMenuFromRow(e, row) {
     const tree = row.closest(".files-tree");
     const leaf = tree ? findLeafIn(activeTab(), +tree.dataset.leaf) : null;
@@ -14128,16 +14264,41 @@
          the tab's ×, so it calls `closeTab`.
        · a PANE CARD (monitor box, `data-ws` + `data-leaf`) — explicit
          navigation to that pane of that tab, which is `stageCard`; it has no ×.
-     There is no pointerdown handler here because THIS PROTOTYPE has no card
-     drag, and with it went the click-squelch that told a finished drag from a
-     click. That is a debt and no longer a ruling: ④ was reversed on 2026-08-20
-     and the native column reorders by card, on the tab strip's own engine (a
-     press, 6px, `begin_tab_drag`, and the same threshold, clamp, pinned
-     partition and FLIP the strip uses). Wiring it here means teaching
-     `paintFocusRail` not to rebuild the element in hand — see the
-     `.fcard.grabbed` note in the stylesheet.
      Delegated, because the column rebuilds its DOM whenever its structure
      changes — per-element wiring would evaporate with it. */
+  /* A CARD IS PICKED UP THE WAY A TAB IS (§7.1.6b′ ④, ruled 2026-08-20; this
+     page 2026-08-21). Same `startDrag`, same `kind: "tab"`, same 180ms
+     press-activation grace, same 6px threshold — because a card IS a tab and
+     the thing being dragged is the tab, not a picture of one. The engine that
+     picks it up from here is the strip's, unchanged and unbranched; all this
+     handler contributes is the press.
+     THE 180ms IS EDGE PARITY AND IT MEANS THE SAME THING HERE: the press
+     chooses the card, the switch lands a beat later, so a hand that presses and
+     immediately drags never flashes a tab it was only using as a handle.
+     NO CLICK-SQUELCH, deliberately, and for the reason the strip needs none: a
+     drag that reorders has already committed to the card in hand (the tab arm
+     calls `selectTab` the moment the column starts reordering), so the `click`
+     that follows the release names the tab that is already on the stage.
+     `.fc-close` is not a handle — pressing an × is closing a tab, not moving
+     one — which is the same exemption `.pin` / `.tab-files` take on a row. */
+  $("rail").addEventListener("pointerdown", (e) => {
+    if (!state.focusMode) return;
+    const card = e.target.closest("#focus-rail > .fcard");
+    if (!card || e.target.closest(".fc-close")) return;
+    const wsId = +card.dataset.ws;
+    let activateT = 0;
+    if (e.button === 0 && wsId !== state.active) {
+      activateT = setTimeout(() => {
+        if (drag && drag.kind === "tab" && drag.wsId === wsId && !drag.started
+            && tabById(wsId)) {
+          selectTab(wsId);
+          drag.pressActivated = true;
+        }
+      }, 180);
+    }
+    startDrag(e, { kind: "tab", wsId, el: card, homeWs: state.active,
+                   pressActivated: false, activateT });
+  });
   /* A NOTCH OVER A CARD'S TERMINAL SEAT AIMS THAT SEAT (user ruling
      2026-08-21). Asked before the column scrolls, which is the sentence this
      product answers everywhere else: the innermost scroller under the pointer
@@ -14187,10 +14348,7 @@
        not be read as a press outside the menu it hangs off */
     if (!e.target.closest("#term-menu, #split-with-menu")) { $("term-menu").classList.remove("show"); closeSplitWithMenu(); }
     if (!e.target.closest("#file-menu")) $("file-menu").classList.remove("show");
-    if (!e.target.closest("#pane-menu")) {
-      $("pane-menu").classList.remove("show");
-      document.querySelectorAll(".pane-ghost.open").forEach(g => g.classList.remove("open"));
-    }
+    if (!e.target.closest("#pane-menu, .pane-chev")) closePaneChevMenu();
     if (!e.target.closest("#pv-menu, .pv-name.switch")) closePvMenu();
   });
 
