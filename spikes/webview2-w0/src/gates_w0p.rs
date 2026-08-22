@@ -205,15 +205,24 @@ pub fn gate4_real_contacts(probe: &mut Probe) -> Result<()> {
         return Ok(());
     }
     let initialized = crate::inject::touch::initialize(2);
+    // **One finger first.** A refusal on a two-contact frame could be about
+    // multi-touch or about injection itself, and the two want different
+    // answers in the report; asking singly first makes the refusal
+    // attributable.
+    let mut single_errors = Vec::new();
     let mut injection_errors = Vec::new();
     let mut pointer_messages = Vec::new();
     if initialized.is_ok() {
         crate::win::clear_wndproc_keys();
         probe.drain_messages();
+        single_errors = crate::inject::touch::drag_together(&[screen], POINT { x: 0, y: -30 });
+        let log = crate::win::pump_for(Duration::from_millis(400), |_| {});
+        pointer_messages = log.pointers;
+        crate::win::clear_wndproc_keys();
         injection_errors =
             crate::inject::touch::drag_together(&[screen, second], POINT { x: 0, y: -30 });
-        let log = crate::win::pump_for(Duration::from_millis(500), |_| {});
-        pointer_messages = log.pointers;
+        let log = crate::win::pump_for(Duration::from_millis(400), |_| {});
+        pointer_messages.extend(log.pointers);
     }
     let mut injected_contacts: Vec<u32> =
         pointer_messages.iter().map(|row| row.pointer_id).collect();
@@ -228,7 +237,8 @@ pub fn gate4_real_contacts(probe: &mut Probe) -> Result<()> {
                 Ok(()) => serde_json::json!("ok"),
                 Err(error) => serde_json::json!({ "error": error }),
             },
-            "InjectTouchInput_errors": injection_errors,
+            "InjectTouchInput_one_contact_errors": single_errors,
+            "InjectTouchInput_two_contact_errors": injection_errors,
             "wm_pointer_messages_at_the_host": pointer_messages,
             "distinct_contacts": injected_contacts,
             "reading": "a WM_POINTER row here is the driver path this machine has no digitizer for; the host still has to translate it into SendPointerInput, which the rows above measure separately",
@@ -317,6 +327,97 @@ pub fn gate5_page_owned_keys(probe: &mut Probe) -> Result<bool> {
     ];
 
     let host_hwnd = probe.window.hwnd.0 as isize;
+
+    // ── keyup and autorepeat, measured where the focus demonstrably is ────
+    //
+    // This lived at the end of gate 5 for two runs and reported zero of
+    // everything both times. It is here instead because this is the one place
+    // in the gate that establishes the focus it needs and checks that it got
+    // it — and because a control press goes first, so "autorepeat produced
+    // nothing" can be told apart from "no key produced anything".
+    probe.drain_messages();
+    let before = probe.evidence.borrow().accelerators.len();
+    let control_sent = crate::win::send_chord(false, false, false, b'K' as u16);
+    probe.pump(Duration::from_millis(250));
+    let control_records = probe.evidence.borrow().accelerators[before..].to_vec();
+    let control_page = probe
+        .drain_messages()
+        .into_iter()
+        .filter(|message| message.get("kind").and_then(|kind| kind.as_str()) == Some("key"))
+        .count();
+
+    // **And then a key the callback is allowed to see.** A plain letter never
+    // reaches `AcceleratorKeyPressed` — the control above is the proof — so
+    // repeating one measures the page and nothing else. `F5` is not a
+    // character, so the host sees it, and its `PhysicalKeyStatus.RepeatCount`
+    // is the only place the engine says a press was a repeat.
+    let before = probe.evidence.borrow().accelerators.len();
+    let letter_sent =
+        crate::win::send_autorepeat_spaced(b'K' as u16, 6, Duration::from_millis(35), || {
+            crate::win::pump_for(Duration::from_millis(15), |_| {});
+        });
+    probe.pump(Duration::from_millis(400));
+    let letter_records = probe.evidence.borrow().accelerators[before..].to_vec();
+    let letter_page = probe.drain_messages();
+    let letter_downs = letter_page
+        .iter()
+        .filter(|message| {
+            message.get("kind").and_then(|kind| kind.as_str()) == Some("key")
+                && message.get("type").and_then(|value| value.as_str()) == Some("keydown")
+        })
+        .count();
+
+    let before = probe.evidence.borrow().accelerators.len();
+    let repeat_sent =
+        crate::win::send_autorepeat_spaced(0x74, 6, Duration::from_millis(35), || {
+            crate::win::pump_for(Duration::from_millis(15), |_| {});
+        });
+    probe.pump(Duration::from_millis(400));
+    let repeat_records = probe.evidence.borrow().accelerators[before..].to_vec();
+    let page = probe.drain_messages();
+    let page_downs = page
+        .iter()
+        .filter(|message| {
+            message.get("kind").and_then(|kind| kind.as_str()) == Some("key")
+                && message.get("type").and_then(|value| value.as_str()) == Some("keydown")
+        })
+        .count();
+    let page_repeat_flags: Vec<bool> = page
+        .iter()
+        .filter(|message| message.get("kind").and_then(|kind| kind.as_str()) == Some("key"))
+        .filter_map(|message| message.get("repeat").and_then(serde_json::Value::as_bool))
+        .collect();
+    emit(
+        5,
+        "keyup-and-autorepeat",
+        serde_json::json!({
+            "control_one_press": {
+                "sendinput_events": control_sent,
+                "accelerator_kinds": control_records.iter().map(|record| record.kind).collect::<Vec<_>>(),
+                "page_key_events": control_page,
+            },
+            "autorepeat_of_a_plain_letter": {
+                "key": "K",
+                "sendinput_events": letter_sent,
+                "accelerator_records": letter_records.len(),
+                "page_keydowns": letter_downs,
+                "page_key_events": letter_page.iter().filter(|message| message.get("kind").and_then(|kind| kind.as_str()) == Some("key")).count(),
+            },
+            "autorepeat_of_a_key_the_host_can_see": {
+                "key": "F5",
+                "sendinput_events": repeat_sent,
+                "accelerator_records": repeat_records.len(),
+                "accelerator_kinds": repeat_records.iter().map(|record| record.kind).collect::<Vec<_>>(),
+                "engine_repeat_flags": repeat_records.iter().map(|record| record.repeat).collect::<Vec<_>>(),
+                "page_keydowns": page_downs,
+                "page_repeat_flags": page_repeat_flags,
+            },
+            "kind_legend": "0 = KEY_DOWN, 1 = KEY_UP, 2 = SYSTEM_KEY_DOWN, 3 = SYSTEM_KEY_UP",
+            "reading": "a KEY_UP kind in either list is the keyup contract: AcceleratorKeyPressed sees releases as well as presses, so a host can hold a chord open and close it",
+            "the_control_press_is_the_finding": "a bare printable key produces no AcceleratorKeyPressed at all while the page receives it — the callback is for keys that could be accelerators, and a plain letter is not one. Folio cannot bind a bare letter while a preview has the focus; BINDINGS has no such row, so nothing is lost, but a future one would silently never fire",
+        }),
+    );
+
     let mut measured = Vec::new();
     for row in &rows {
         if !probe.window.is_foreground() {
@@ -402,6 +503,21 @@ pub fn gate5_clipboard_round_trip(probe: &mut Probe) -> Result<()> {
     // Whatever the person had is put back at the end of this function.
     let theirs = crate::inject::clipboard::text();
 
+    // **Start from a page, not from wherever the matrix left off.** The matrix
+    // above ends with `Alt+Left`, which the engine takes as Back — so by this
+    // line the document may be a different one, its field gone and the focus
+    // with it. The first run of this row read `selected: 0` for a `Ctrl+A` that
+    // was fired at nothing.
+    let url = probe.server.url("/");
+    probe.navigate(&url, Duration::from_secs(20));
+    probe.pump(Duration::from_millis(400));
+    if !probe.window.is_foreground() {
+        probe.window.focus_self();
+        probe.pump(Duration::from_millis(150));
+    }
+    probe.host.move_focus_into_web()?;
+    probe.pump(Duration::from_millis(200));
+
     const TYPED: &str = "w0p clipboard round trip";
     probe.tell_page(&format!("set-field:{TYPED}"));
     probe.pump(Duration::from_millis(250));
@@ -415,6 +531,11 @@ pub fn gate5_clipboard_round_trip(probe: &mut Probe) -> Result<()> {
         .drain_messages()
         .into_iter()
         .find(|message| message.get("kind").and_then(|kind| kind.as_str()) == Some("field"));
+    let selected = after_select_all
+        .as_ref()
+        .and_then(|message| message.get("selected"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
 
     crate::inject::clipboard::set_text("w0p clipboard was not written");
     crate::win::send_chord(true, false, false, b'C' as u16);
@@ -447,6 +568,7 @@ pub fn gate5_clipboard_round_trip(probe: &mut Probe) -> Result<()> {
         serde_json::json!({
             "typed_into_the_page": TYPED,
             "after_ctrl_a": after_select_all,
+            "select_all_worked": selected as usize == TYPED.len(),
             "clipboard_after_ctrl_c": after_copy,
             "copy_worked": after_copy.as_deref() == Some(TYPED),
             "host_put_on_the_clipboard": PASTED,

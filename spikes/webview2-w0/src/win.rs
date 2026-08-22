@@ -330,13 +330,31 @@ pub fn send_chord(ctrl: bool, shift: bool, alt: bool, vk: u16) -> u32 {
 
 /// Hold one key down `count` times without releasing it — autorepeat, as the
 /// keyboard driver would produce it.
-pub fn send_autorepeat(vk: u16, count: u32) -> u32 {
-    let mut batch = Vec::new();
+///
+/// **The presses are spaced, and that is not a detail.** Sent as one `SendInput`
+/// batch the six presses arrive with one timestamp between them, and the engine
+/// answers with a single callback for the release — which reads as "autorepeat
+/// does not reach the host" and is really "that was not autorepeat". A real
+/// driver repeats at the system rate, tens of milliseconds apart, so this waits
+/// between presses and lets the caller pump.
+pub fn send_autorepeat_spaced(vk: u16, count: u32, gap: Duration, mut pump: impl FnMut()) -> u32 {
+    let mut sent = 0;
     for _ in 0..count {
-        batch.push(key_input(VIRTUAL_KEY(vk), false));
+        sent += unsafe {
+            SendInput(
+                &[key_input(VIRTUAL_KEY(vk), false)],
+                size_of::<INPUT>() as i32,
+            )
+        };
+        pump();
+        std::thread::sleep(gap);
     }
-    batch.push(key_input(VIRTUAL_KEY(vk), true));
-    unsafe { SendInput(&batch, size_of::<INPUT>() as i32) }
+    sent + unsafe {
+        SendInput(
+            &[key_input(VIRTUAL_KEY(vk), true)],
+            size_of::<INPUT>() as i32,
+        )
+    }
 }
 
 /// The top-level window that owns the pixels at a screen point.

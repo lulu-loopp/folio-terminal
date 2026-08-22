@@ -116,6 +116,12 @@ pub mod touch {
                 right: at.x + 2,
                 bottom: at.y + 2,
             },
+            rcContactRaw: RECT {
+                left: at.x - 2,
+                top: at.y - 2,
+                right: at.x + 2,
+                bottom: at.y + 2,
+            },
             ..Default::default()
         }
     }
@@ -133,8 +139,14 @@ pub mod touch {
                 .iter()
                 .enumerate()
                 .map(|(index, at)| {
+                    // **Zero-based, and below the count `initialize` was given.**
+                    // `InjectTouchInput` requires every contact's id to fall in
+                    // `[0, maxCount)`; ids starting at one put the last finger
+                    // out of range and the whole frame comes back
+                    // `E_INVALIDARG`, which reads as "this machine cannot
+                    // inject touch" when it is an off-by-one.
                     contact(
-                        index as u32 + 1,
+                        index as u32,
                         POINT {
                             x: at.x + offset.x,
                             y: at.y + offset.y,

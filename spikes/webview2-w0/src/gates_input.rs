@@ -779,56 +779,6 @@ pub fn gate5(probe: &mut Probe) -> Result<()> {
         }),
     );
 
-    // ── keyup and autorepeat ──────────────────────────────────────────────
-    //
-    // Focus has to be put *back* into the page first: the Tab walk above ended
-    // by leaving through MoveFocusRequested, which the host handled, so the
-    // keyboard is Folio's again at this point. Without this the autorepeat is
-    // measured against the host window and reads as a page that saw nothing.
-    //
-    // And the foreground has to be *checked*, not assumed. The first W0′ run
-    // recorded this row as zero accelerators and zero page keys — which reads
-    // as "autorepeat does not reach the page" and was in fact "the probe was no
-    // longer the foreground window and the keys went somewhere else". A row
-    // that cannot tell those apart is not a reading.
-    if !probe.window.is_foreground() {
-        probe.window.focus_self();
-        probe.pump(Duration::from_millis(150));
-    }
-    let foreground = probe.window.is_foreground();
-    probe.host.move_focus_into_web()?;
-    probe.pump(Duration::from_millis(200));
-    probe.tell_page("focus-field");
-    probe.pump(Duration::from_millis(200));
-    probe.drain_messages();
-    let accelerators_before = probe.evidence.borrow().accelerators.len();
-    crate::win::send_autorepeat(b'K' as u16, 6);
-    probe.pump(Duration::from_millis(300));
-    let evidence = probe.evidence.borrow();
-    let repeat_records: Vec<_> = evidence.accelerators[accelerators_before..].to_vec();
-    drop(evidence);
-    let page_repeats = probe
-        .drain_messages()
-        .into_iter()
-        .filter(|message| {
-            message.get("kind").and_then(|kind| kind.as_str()) == Some("key")
-                && message.get("type").and_then(|value| value.as_str()) == Some("keydown")
-        })
-        .count();
-    emit(
-        5,
-        "autorepeat-and-keyup",
-        serde_json::json!({
-            "accelerator_records": repeat_records.len(),
-            "kinds": repeat_records.iter().map(|record| record.kind).collect::<Vec<_>>(),
-            "page_keydowns": page_repeats,
-            "repeat_flags": repeat_records.iter().map(|record| record.repeat).collect::<Vec<_>>(),
-            "measured": foreground,
-            "note": "kind 0 = KEY_DOWN, 1 = KEY_UP, 2 = SYSTEM_KEY_DOWN, 3 = SYSTEM_KEY_UP",
-            "if_not_measured": "`measured: false` means the probe did not hold the foreground and the keys were never this window's to receive",
-        }),
-    );
-
     // ── the keys the page owns, and the clipboard behind two of them ──────
     let page_keys_measured = crate::gates_w0p::gate5_page_owned_keys(probe)?;
     if page_keys_measured {
