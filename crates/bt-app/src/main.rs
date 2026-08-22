@@ -56607,6 +56607,16 @@ impl Runtime<'_> {
             self.app.forget_window(id, now);
         }
         self.window.ime_system_caret.destroy();
+        // **The page's controller is closed here, beside the children.** A
+        // controller merely dropped leaves a browser process nobody points at
+        // for as long as the environment lives — which for the last window is
+        // no time at all, and for one window among several is the rest of the
+        // session. The wait for that browser to go is the state machine's, and
+        // this window is not around for it: what is owed at this door is the
+        // close, and the process tree goes when the environment does.
+        if let Some(web) = self.window.web.as_mut() {
+            let _ = web.close(&self.window.compositor);
+        }
         for tab in &mut self.window.tabs {
             for (_, leaf) in tab.leaves_mut() {
                 if let Some(pty) = leaf.pty.as_mut() {
