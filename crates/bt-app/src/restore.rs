@@ -352,9 +352,7 @@ impl RestoreRow {
             // that site this is. The mark comes through the one door every
             // preview row asks (`marks::preview_row_mark`).
             Seed::Preview { path, source } => (
-                crate::marks::preview_row_mark(
-                    *source == bt_persist::PreviewSourceV1::Url,
-                ),
+                crate::marks::preview_row_mark(*source == bt_persist::PreviewSourceV1::Url),
                 match source {
                     bt_persist::PreviewSourceV1::File => {
                         crate::cwd_leaf(Path::new(path)).unwrap_or_else(|| path.clone())

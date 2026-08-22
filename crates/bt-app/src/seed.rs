@@ -1113,4 +1113,63 @@ mod tests {
             assert!(!rule.resulting_pin(false), "nothing invents a pin");
         }
     }
+
+    /// **A closed page is a row in this vault, and it is not the row a file
+    /// would be** (W2 slice ③, user ruling 2026-08-22).
+    ///
+    /// The reason the seed was extended at all is in the ruling's own sentence:
+    /// without it, closing a web tab would be the one close in this window with
+    /// no way back. So the shape has to survive the wire *and* keep its own
+    /// dedup key — a page and a file spelled the same string are two rows, and
+    /// the third slot is where that is said.
+    ///
+    /// Red gate: give the page arm of `recent_key` the file's `||{path}` and the
+    /// two seeds collide, so pinning one evicts the other.
+    #[test]
+    fn a_closed_page_is_its_own_row_in_the_vault_and_survives_the_wire() {
+        let page = Seed::Preview {
+            path: "http://localhost:5173/app?tab=logs#top".to_owned(),
+            source: PreviewSourceV1::Url,
+        };
+        let file = Seed::Preview {
+            path: "http://localhost:5173/app?tab=logs#top".to_owned(),
+            source: PreviewSourceV1::File,
+        };
+        assert_ne!(
+            page.recent_key(),
+            file.recent_key(),
+            "a page and a file that happen to be spelled alike are two places"
+        );
+        assert_eq!(
+            file.recent_key(),
+            "||http://localhost:5173/app?tab=logs#top",
+            "and the file's key is the one every vault on every disk already holds"
+        );
+        assert!(page.names_itself() && !page.can_be_named());
+        assert_eq!(page.window_tabs(), None);
+
+        let mut vault = SeedVault::default();
+        vault.record(
+            page.clone(),
+            vec![RecentPreviewV1::Page {
+                url: "http://localhost:5173/app?tab=logs#top".to_owned(),
+            }],
+            at(0),
+        );
+        vault.record(file.clone(), Vec::new(), at(60));
+        assert_eq!(vault.len(), 2, "two rows, not one");
+        let reloaded = SeedVault::from_persisted(&vault.to_persisted());
+        assert_eq!(
+            reloaded, vault,
+            "and both come back through the wire unchanged, which is what the \
+             schema v11 field bought"
+        );
+        assert_eq!(
+            reloaded.entries()[1].previews,
+            vec![RecentPreviewV1::Page {
+                url: "http://localhost:5173/app?tab=logs#top".to_owned()
+            }],
+            "the page the tab was on rides with it, as a file's path always has"
+        );
+    }
 }

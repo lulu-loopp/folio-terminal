@@ -17,11 +17,11 @@ use std::path::PathBuf;
 use bt_persist::{
     BackgroundFitV1, DegradationReport, FilesViewV1, LanguageV1, LayoutNodeV1, LeafNodeV1,
     MinimumContrastV1, PreviewLeafV1, PreviewPaneV1, PreviewPoolEntryV1, PreviewSourceV1,
-    PsReadLineInviteV1,
-    ReadReport, RecentPreviewV1, RecentSeedV1, SESSION_SCHEMA_VERSION, SETTINGS_SCHEMA_VERSION,
-    SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1,
-    SessionWindowV1, SettingsV1, SplitDirectionV1, TabPreviewV1, TabV1, TermLeafV1, ThemeModeV1,
-    read_session, read_settings, write_session_atomic, write_settings_atomic,
+    PsReadLineInviteV1, ReadReport, RecentPreviewV1, RecentSeedV1, SESSION_SCHEMA_VERSION,
+    SETTINGS_SCHEMA_VERSION, SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1,
+    SessionThemeV1, SessionV1, SessionWindowV1, SettingsV1, SplitDirectionV1, TabPreviewV1, TabV1,
+    TermLeafV1, ThemeModeV1, read_session, read_settings, write_session_atomic,
+    write_settings_atomic,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -2097,9 +2097,12 @@ fn a_v10_document_arrives_at_v11_reading_every_preview_row_as_a_file() {
     let raw: serde_json::Value =
         serde_json::from_slice(&std::fs::read(fixture_path("session_v10_pages.json")).unwrap())
             .unwrap();
-    assert_eq!(raw["schema_version"], 10);
+    let recorded = raw["schema_version"]
+        .as_u64()
+        .expect("the fixture records a version");
+    assert_eq!(recorded, 10);
     assert!(
-        SESSION_SCHEMA_VERSION > 10,
+        recorded < u64::from(SESSION_SCHEMA_VERSION),
         "v11 is this slice's version — see the persistence clause in `session.rs`"
     );
 

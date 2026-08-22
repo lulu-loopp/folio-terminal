@@ -16541,9 +16541,7 @@ fn persisted_preview_pages(tab: &TabV1) -> Vec<bt_persist::RecentPreviewV1> {
         .filter_map(|pane| {
             let cur = pane.cur.as_ref()?;
             Some(match pane.cur_source {
-                bt_persist::PreviewSourceV1::File => {
-                    bt_persist::RecentPreviewV1::File(cur.clone())
-                }
+                bt_persist::PreviewSourceV1::File => bt_persist::RecentPreviewV1::File(cur.clone()),
                 bt_persist::PreviewSourceV1::Url => {
                     bt_persist::RecentPreviewV1::Page { url: cur.clone() }
                 }
@@ -17895,10 +17893,7 @@ fn create_tab_state(
             // committed once.
             let name = match source.file_path() {
                 Some(path) => files_row_display_name(path),
-                None => source
-                    .web_url()
-                    .map(webnav::site_label)
-                    .unwrap_or_default(),
+                None => source.web_url().map(webnav::site_label).unwrap_or_default(),
             };
             preview_pool.insert(preview::PreviewBuffer::new(source.clone(), name));
         }
@@ -56114,7 +56109,7 @@ impl Runtime<'_> {
         let Some(url) = webhost::development_target() else {
             return Ok(());
         };
-        self.open_web_page(&url.to_owned())
+        self.open_web_page(url)
     }
 
     /// **The web seat this tab already has, if it has one** — the singleton rule

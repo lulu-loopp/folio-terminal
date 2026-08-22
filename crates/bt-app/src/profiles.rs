@@ -4435,9 +4435,7 @@ fn recent_label(seed: &Seed) -> std::borrow::Cow<'_, str> {
         // themselves never reaches the vault (`Seed::names_itself`), so the
         // fallback is a shape nothing constructs; it answers the empty string
         // because that is what an unnameable row already answers above.
-        Seed::Window { .. } => seed
-            .first_tab()
-            .map_or(Cow::Borrowed(""), recent_label),
+        Seed::Window { .. } => seed.first_tab().map_or(Cow::Borrowed(""), recent_label),
     }
 }
 
@@ -15500,5 +15498,41 @@ mod tests {
         assert_eq!(of("wsl"), "wsl.exe --cd ~");
         assert_eq!(of("gitbash"), "bash.exe --login -i");
         assert_eq!(of("cmd"), "cmd.exe");
+    }
+
+    /// **A page's Recent row is a Recent row** (W2 slice ③; `docs/DESIGN.md`
+    /// §7.7 ⑥ — 「预览戴它那块 pane 自己的记号」).
+    ///
+    /// Same list, same three questions, two different answers where the two
+    /// genuinely differ: the mark, which is the web class's globe through the one
+    /// door every preview row asks, and the caption, which is the page's *site*
+    /// because this vault stores a place and never a title. The tip is the whole
+    /// address either way, which is where this list has always put what a caption
+    /// crops.
+    ///
+    /// Red gate: answer `ChromeMark::File` for both and the first assertion
+    /// fails; caption a page with `cwd_leaf` and the second answers the whole URL,
+    /// because a URL has no backslash for that rule to split on.
+    #[test]
+    fn a_recent_row_for_a_page_wears_the_globe_and_is_captioned_by_its_site() {
+        const URL: &str = "http://localhost:5173/app?tab=logs#top";
+        let page = Seed::Preview {
+            path: URL.to_owned(),
+            source: bt_persist::PreviewSourceV1::Url,
+        };
+        let file = Seed::Preview {
+            path: r"D:\work\folio\README.md".to_owned(),
+            source: bt_persist::PreviewSourceV1::File,
+        };
+        assert_eq!(recent_mark(&page), ChromeMark::Globe);
+        assert_eq!(
+            recent_mark(&file),
+            ChromeMark::File,
+            "and the file beside it is unchanged"
+        );
+        assert_eq!(recent_label(&page), "localhost:5173");
+        assert_eq!(recent_label(&file), "README.md");
+        assert_eq!(recent_tip(&page), URL, "the tip is the whole address");
+        assert_eq!(recent_tip(&file), r"D:\work\folio\README.md");
     }
 }

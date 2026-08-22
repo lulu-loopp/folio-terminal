@@ -5257,7 +5257,11 @@ mod tests {
         assert!(!buffer.claim_head_read());
         assert!(!buffer.is_editable(false) && !buffer.is_editable(true));
         assert!(matches!(buffer.save(), SaveOutcome::Failed(_)));
-        assert_eq!(buffer.body_notice(), None, "and it is not an empty document");
+        assert_eq!(
+            buffer.body_notice(),
+            None,
+            "and it is not an empty document"
+        );
         assert_eq!(buffer.refusal(), None, "nor a refused one");
     }
 
