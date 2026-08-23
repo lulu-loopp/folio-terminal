@@ -566,6 +566,17 @@ impl WebHost {
             settings
                 .SetIsWebMessageEnabled(false)
                 .map_err(|error| failure("SetIsWebMessageEnabled", &error))?;
+            // **The other half of the bridge** (W2 slice 5, plan section 3's
+            // controlled file entry). `IsWebMessageEnabled` closes the page's
+            // way *out*; this closes the host's way *in*. Both are off for the
+            // same sentence: a local page opened out of the files column is
+            // read, and nothing in this product offers it an object, a method
+            // or a channel. Neither is conditional on where the page came from,
+            // because a switch that is only thrown for `file:` pages is a
+            // switch somebody has to remember to throw.
+            settings
+                .SetAreHostObjectsAllowed(false)
+                .map_err(|error| failure("SetAreHostObjectsAllowed", &error))?;
             settings
                 .SetIsStatusBarEnabled(false)
                 .map_err(|error| failure("SetIsStatusBarEnabled", &error))?;

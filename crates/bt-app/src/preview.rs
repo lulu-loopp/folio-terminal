@@ -114,7 +114,15 @@ impl PreviewFtype {
 const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "svg", "gif", "webp"];
 
 /// Extensions that name something this window can show as text (3093).
-const TEXT_EXTENSIONS: [&str; 14] = [
+///
+/// **`htm` sits beside `html`** (W2 slice 5, paying the account
+/// `docs/HANDOFF-2026-08-21.md` section 5 item 18 opened): the shortened
+/// spelling is the same object - Windows registers both against the same
+/// handler, and `names_an_html_page` has read both since the day it was
+/// written. This table listing only one of them is what made a `.htm` file draw
+/// the "no preview for this file type" card and the head's hand-off arrow at
+/// the same time.
+const TEXT_EXTENSIONS: [&str; 15] = [
     "rs",
     "py",
     "js",
@@ -122,6 +130,7 @@ const TEXT_EXTENSIONS: [&str; 14] = [
     "json",
     "toml",
     "html",
+    "htm",
     "txt",
     "gitignore",
     "lock",
@@ -1813,6 +1822,19 @@ pub struct PreviewBuffer {
     /// through one door ([`Self::claim_head_read`]) and closed by the answer
     /// ([`Self::accept`], [`Self::decline`]).
     head_asked: bool,
+    /// **The disk moved under this body** (W2 slice 5, `preview_watch`).
+    ///
+    /// A third bit beside the load and beside [`Self::head_asked`], for the
+    /// reason that one is a bit rather than a state: `PreviewLoad::Pending` is
+    /// what makes the pane print "Loading <name>", and a file saved in an editor
+    /// must not make the body it is already showing flash away and come back.
+    /// So a re-read is asked for *without* unloading what is on the glass - the
+    /// old paragraphs stay until the new ones land, which is the whole of what a
+    /// reader wants from a page that refreshes itself.
+    ///
+    /// Written through one door ([`Self::mark_stale`]) and closed by the answer
+    /// ([`Self::accept`], [`Self::decline`]), exactly as `head_asked` is.
+    stale: bool,
     /// The widest line of [`Self::content`], in drawn columns.
     ///
     /// Derived once, when the body lands, rather than per frame: it is what the
@@ -1903,6 +1925,7 @@ impl PreviewBuffer {
             disk_mtime: None,
             load,
             head_asked: false,
+            stale: false,
             max_columns: 0,
         }
     }
@@ -1917,7 +1940,7 @@ impl PreviewBuffer {
     /// not a read to ask for — see [`Self::head_asked`].
     pub fn wants_head_read(&self) -> bool {
         self.source.file_path().is_some()
-            && self.load == PreviewLoad::Pending
+            && (self.load == PreviewLoad::Pending || self.stale)
             && !self.head_asked
             && matches!(
                 self.ftype,
@@ -1940,6 +1963,38 @@ impl PreviewBuffer {
             return false;
         }
         self.head_asked = true;
+        true
+    }
+
+    /// **The file behind this buffer was written by somebody else** (W2 slice
+    /// 5) - ask the disk again, without taking down what is on the glass.
+    ///
+    /// The one door onto [`Self::stale`], on [`Self::claim_head_read`]'s own
+    /// reasoning: the bit is the whole of "this body is behind the disk", and a
+    /// caller that set it without meaning it is a file read on a beat.
+    ///
+    /// **A buffer with unsaved edits is not re-read, and that is a ruling.**
+    /// The person's text is the newer of the two, and a watcher that overwrote
+    /// it would make an editor's save in another window destroy work in this
+    /// one. The disagreement itself is not lost: it is what ruling 8-9's
+    /// `disk_mtime` check reports at the moment of saving, which is the moment
+    /// somebody can answer it.
+    ///
+    /// Answers whether anything was owed, so that a caller can tell a file that
+    /// moved from a file that moved under something with nothing to re-read -
+    /// a picture, whose pixels come down the decode lane, and a git-backed
+    /// document, which has no disk to ask.
+    pub fn mark_stale(&mut self) -> bool {
+        if self.dirty || self.stale || self.source.file_path().is_none() {
+            return false;
+        }
+        if !matches!(
+            self.ftype,
+            PreviewFtype::Text | PreviewFtype::Markdown | PreviewFtype::Table
+        ) {
+            return false;
+        }
+        self.stale = true;
         true
     }
 
@@ -2146,6 +2201,7 @@ impl PreviewBuffer {
         self.revision += 1;
         // The question is closed by its answer, whichever lane answered it.
         self.head_asked = false;
+        self.stale = false;
         self.content = None;
         self.truncated = false;
         self.max_columns = 0;
@@ -2162,6 +2218,8 @@ impl PreviewBuffer {
         // "a read is out", which is what a reader of it has to be able to
         // believe.
         self.head_asked = false;
+        // And so is the watcher's: the body on the glass is the disk's again.
+        self.stale = false;
         match outcome {
             HeadOutcome::Read {
                 text,
@@ -3745,6 +3803,119 @@ mod tests {
         // The table is case-insensitive on the extension.
         assert_eq!(preview_ftype("A.PNG"), PreviewFtype::Image);
         assert_eq!(preview_ftype("A.RS"), PreviewFtype::Text);
+    }
+
+    /// PIN (W2 slice 5) - **the disk moved under a body, so the body is read
+    /// again - without being taken off the glass, and never over unsaved work.**
+    ///
+    /// Three claims, and each is a separate decision this slice had to make:
+    ///
+    /// 1. a stale buffer wants a head read again, so the watcher's news joins
+    ///    the same one-question lane every other door uses;
+    /// 2. its `load` stays `Ready` and its `content` stays where it is, because
+    ///    `PreviewLoad::Pending` is what makes the pane print "Loading <name>"
+    ///    and a file saved in an editor must not make the page flash away and
+    ///    come back sixty milliseconds later;
+    /// 3. **a buffer with unsaved edits is not re-read.** The person's text is
+    ///    the newer of the two, and a watcher that overwrote it would let a save
+    ///    in another window destroy work in this one. The disagreement is
+    ///    reported by ruling 8-9's `disk_mtime` check at the moment of saving,
+    ///    which is the moment somebody can answer it.
+    ///
+    /// RED GATE: make `mark_stale` set `load = Pending` and the second claim
+    /// fails; drop its `dirty` guard and the third does.
+    #[test]
+    fn a_saved_file_is_read_again_without_unloading_it_and_never_over_an_edit() {
+        let mut buffer = PreviewBuffer::new(PreviewSource::file(r"D:\notes\a.md"), "a.md".into());
+        assert!(buffer.claim_head_read(), "the opening read");
+        buffer.accept(HeadOutcome::Read {
+            text: "# one\n".into(),
+            truncated: false,
+            mtime: None,
+        });
+        assert_eq!(buffer.load, PreviewLoad::Ready);
+        assert!(!buffer.wants_head_read(), "nothing is owed");
+
+        assert!(buffer.mark_stale(), "the disk moved");
+        assert!(buffer.wants_head_read(), "so the head is owed again");
+        assert_eq!(
+            buffer.load,
+            PreviewLoad::Ready,
+            "and the pane is not sent back to `Loading`"
+        );
+        assert_eq!(
+            buffer.content.as_deref(),
+            Some("# one\n"),
+            "the body stays on the glass until the new one lands"
+        );
+        assert!(
+            !buffer.mark_stale(),
+            "and a second notification about the same unread change owes nothing new"
+        );
+
+        assert!(buffer.claim_head_read());
+        assert!(!buffer.wants_head_read(), "one question, once");
+        buffer.accept(HeadOutcome::Read {
+            text: "# two\n".into(),
+            truncated: false,
+            mtime: None,
+        });
+        assert!(!buffer.wants_head_read(), "and the answer closes it");
+
+        // The edited buffer. The disk is not the authority here.
+        buffer.edit_content(|content| {
+            content.push_str("mine\n");
+            true
+        });
+        assert!(buffer.dirty);
+        assert!(
+            !buffer.mark_stale(),
+            "a buffer with unsaved edits is not re-read from underneath"
+        );
+        assert!(!buffer.wants_head_read());
+    }
+
+    /// PIN (W2 slice 5) - **the lanes with no head to read say so.**
+    ///
+    /// `mark_stale` answers whether anything was owed, and three kinds of
+    /// content owe nothing however loudly the folder they live in speaks: a
+    /// picture, whose pixels come down the decode lane; a name this window has
+    /// no reader for; and a page, which is not a file at all and takes an
+    /// engine `Reload` instead (that half is `WebMachine::reload`).
+    #[test]
+    fn a_picture_a_page_and_an_unreadable_name_owe_no_re_read() {
+        let mut picture =
+            PreviewBuffer::new(PreviewSource::file(r"D:\shots\a.png"), "a.png".into());
+        assert!(!picture.mark_stale());
+        let mut unknown = PreviewBuffer::new(PreviewSource::file(r"D:\bin\a.exe"), "a.exe".into());
+        assert!(!unknown.mark_stale());
+        let mut page = PreviewBuffer::new(
+            PreviewSource::Web("http://localhost:5173/app".into()),
+            "App".into(),
+        );
+        assert!(!page.mark_stale());
+        assert!(!page.wants_head_read(), "there is no disk to ask");
+    }
+
+    /// PIN (W2 slice 5) - **`.htm` and `.html` are one object in every table.**
+    ///
+    /// The account this pays was opened by the head's hand-off arrow and
+    /// recorded in `docs/HANDOFF-2026-08-21.md` section 5, item 18:
+    /// `names_an_html_page` has read both spellings since the day it was
+    /// written (Windows registers them against the same handler) while this
+    /// table listed only `html`. So a `.htm` file drew the "no preview for this
+    /// file type" card *and* the head's hand-off arrow at the same time: one
+    /// pane, two buttons, one door.
+    ///
+    /// MUTATION: take `"htm"` back out of [`TEXT_EXTENSIONS`].
+    #[test]
+    fn the_two_spellings_of_a_page_are_one_file_type() {
+        assert_eq!(preview_ftype("timeline.htm"), PreviewFtype::Text);
+        assert_eq!(preview_ftype("timeline.html"), PreviewFtype::Text);
+        assert_eq!(preview_ftype("TIMELINE.HTM"), PreviewFtype::Text);
+        // And the neighbour that must not be swept up with them: an extension is
+        // the real one and never a substring.
+        assert_eq!(preview_ftype("index.htmlx"), PreviewFtype::Unknown);
     }
 
     /// ④ `editable` names the surface that actually edits.

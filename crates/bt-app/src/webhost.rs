@@ -280,6 +280,26 @@ impl WebMachine {
         WebEffect::RebuildFromScratch
     }
 
+    /// **Read this page again** (W2 slice 5, `preview_watch`).
+    ///
+    /// A door and not a second `request`, because they are two different
+    /// sentences: `request` says *go here*, which starts a navigation and would
+    /// truncate the page's own history; this says *the bytes behind where you
+    /// already are have changed*, which is what a static file saved on disk is
+    /// and is exactly what the engine's own `Reload` means. The plan's words for
+    /// it are "网页座位刷新 = 一次正常 `Reload`(不是重新导航)".
+    ///
+    /// Nothing at all unless the engine is up and the events are installed - a
+    /// seat still building has a `desired_url` waiting for it and needs no help
+    /// remembering it, and a seat that is closing is not a seat to reload.
+    pub(crate) fn reload(&mut self) -> WebEffect {
+        if self.state == WebState::Ready && self.events_installed {
+            WebEffect::Reload
+        } else {
+            WebEffect::Ignore
+        }
+    }
+
     /// Only the render process died. The controller survives.
     pub(crate) fn on_render_process_failed(&mut self) -> WebEffect {
         if self.state == WebState::Ready {
@@ -347,7 +367,7 @@ fn is_blank(url: &str) -> bool {
 // move: `WebSeat` calls the same function with the same arguments it always
 // did. What did move is why the development target is allowed — the stub
 // admitted it by name, and §3’s loopback rule admits it now (DESIGN §7.8 ⑦).
-use crate::webnav::{BLANK_PAGE, Decision, Mint, navigation_starting};
+use crate::webnav::{BLANK_PAGE, Decision, Mint, Origin, check, navigation_starting};
 
 // ── The development entry ──────────────────────────────────────────────────
 
@@ -776,6 +796,21 @@ pub(crate) struct WebSeat {
     /// a page a `click` and never a `dblclick`, so selecting a word by
     /// double-clicking it would silently not work.
     last_left_press: Option<(Instant, (i32, i32))>,
+    /// **What the host minted for this seat**, carried from the call that asked
+    /// for the navigation to the moment the navigation is issued (W2 slice 5).
+    ///
+    /// It is *carried* rather than derived from the URL at the point of issue,
+    /// and the difference is the whole of `webnav`'s 2: a mint is a note the
+    /// host wrote about its own intention, and a rule that read `file:` off the
+    /// front of a string and concluded "the host must have meant this" would
+    /// turn that note back into a property of the string. The recovery machine
+    /// is why it has to survive the request: a browser that crashes is rebuilt
+    /// and re-navigated to `desired_url`, and that second navigation is as much
+    /// the host's own as the first was.
+    ///
+    /// Last write wins, mirroring section 4's `desired_url`, because it is the
+    /// same fact seen from the policy's side.
+    minted: Mint,
 }
 
 impl WebSeat {
@@ -784,6 +819,7 @@ impl WebSeat {
         seat: u64,
         hwnd: std::num::NonZeroIsize,
         url: &str,
+        minted: Mint,
         wake: Box<dyn Fn()>,
     ) -> Result<Self, String> {
         let folder = user_data_folder().ok_or_else(|| {
@@ -821,6 +857,7 @@ impl WebSeat {
             sized: None,
             buttons: bt_platform::web_mouse_buttons::NONE,
             last_left_press: None,
+            minted,
         };
         let effect = web.machine.request(url);
         debug_assert_eq!(effect, WebEffect::Ignore, "an engine that is not up yet");
@@ -846,9 +883,22 @@ impl WebSeat {
     pub(crate) fn go(
         &mut self,
         url: &str,
+        minted: Mint,
         compositor: &bt_platform::Compositor,
     ) -> Vec<WebOutcome> {
+        self.minted = minted;
         let effect = self.machine.request(url);
+        let mut outcomes = Vec::new();
+        self.apply(effect, compositor, &mut outcomes);
+        outcomes
+    }
+
+    /// **Read the page again** - the file behind it was saved (W2 slice 5).
+    ///
+    /// [`WebMachine::reload`] is the sentence; this is that plus the compositor
+    /// the effect needs, exactly as [`Self::go`] is `request` plus it.
+    pub(crate) fn reload(&mut self, compositor: &bt_platform::Compositor) -> Vec<WebOutcome> {
+        let effect = self.machine.reload();
         let mut outcomes = Vec::new();
         self.apply(effect, compositor, &mut outcomes);
         outcomes
@@ -1047,11 +1097,37 @@ impl WebSeat {
                 // `NavigationStarting` can fire before `Navigate` has returned,
                 // and a gate asked about a target the pane has not yet admitted
                 // to minting would cancel the pane's own navigation.
-                *self.mint.borrow_mut() = if url.eq_ignore_ascii_case(BLANK_PAGE) {
+                //
+                // Three answers and not two, since slice 5: the seat's own blank
+                // page, the one `file:` URL a controlled file entry minted and
+                // handed in with the request, and - for every ordinary address -
+                // nothing at all. The carried mint is honoured only for the URL
+                // it was made for, so a mint left over from a page that has since
+                // been navigated away from admits nothing.
+                let minted = if url.eq_ignore_ascii_case(BLANK_PAGE) {
                     Mint::Blank
+                } else if self.minted.target() == Some(url.as_str()) {
+                    self.minted.clone()
                 } else {
                     Mint::Nothing
                 };
+                // **The third door** (`webnav` 6): what the host mints, the host
+                // asks about before it issues it, so that "every navigation this
+                // product starts has been through a gate" has no exception in it.
+                // An ordinary address has no mint and was gated at its call site
+                // by `webnav::address_bar`; there is nothing here for it to
+                // answer.
+                if minted != Mint::Nothing {
+                    match check(url, Origin::HostMinted(&minted)) {
+                        Decision::Navigate(target) if target == *url => {}
+                        verdict => {
+                            return Err(format!(
+                                "the host declined to issue its own navigation to {url}: {verdict:?}"
+                            ));
+                        }
+                    }
+                }
+                *self.mint.borrow_mut() = minted;
                 self.host.navigate(url)?;
                 Ok(None)
             }
@@ -1289,6 +1365,19 @@ impl WebSeat {
         self.host.focus_page()
     }
 
+    /// **Whether this seat has been asked to go** (W2 slice 5).
+    ///
+    /// A controller that is closing has nothing on the glass - `host.close()`
+    /// took its visual out of the tree - but the wait for its browser process to
+    /// end runs for as long as ten seconds (`w0p-evidence.md` 4.2). The window
+    /// asks this so that it stops cutting a hole in its own surface for a page
+    /// that is not there: without it, replacing a page with a document leaves a
+    /// transparent rectangle over the document until the browser exits, which is
+    /// the desktop showing through a pane (found on the machine, W2 slice 5).
+    pub(crate) fn is_closing(&self) -> bool {
+        self.machine.state() == WebState::Closing
+    }
+
     /// The seat is going away: close the controller and start the wait.
     pub(crate) fn close(&mut self, compositor: &bt_platform::Compositor) -> Vec<WebOutcome> {
         if self.machine.state() == WebState::Closing {
@@ -1368,6 +1457,87 @@ mod machine_tests {
         assert_eq!(
             preview.on_environment(current, true),
             WebEffect::CreateController
+        );
+    }
+
+    /// PIN (W2 slice 5) - **a reload is not a navigation**, and it is nothing
+    /// at all until the engine is up.
+    ///
+    /// The plan's sentence for what a saved file does to a page: "网页座位刷新 =
+    /// 一次正常 `Reload`(不是重新导航)". A `request` would truncate the page's
+    /// own history for an address that has not changed.
+    #[test]
+    fn a_reload_is_only_owed_by_a_page_that_is_already_up() {
+        let mut preview = WebMachine::new();
+        assert_eq!(
+            preview.reload(),
+            WebEffect::Ignore,
+            "a seat with no engine has nothing to read again"
+        );
+        preview.request("https://example.com/page");
+        assert_eq!(
+            preview.reload(),
+            WebEffect::Ignore,
+            "and neither has one whose environment is still coming up"
+        );
+        boot(&mut preview, "https://example.com/page");
+        assert_eq!(preview.reload(), WebEffect::Reload);
+        assert_eq!(
+            preview.recoverable_url(),
+            None,
+            "and it moves nothing: a reload is not a commit"
+        );
+        preview.close();
+        assert_eq!(
+            preview.reload(),
+            WebEffect::Ignore,
+            "a closing seat is not a seat to reload"
+        );
+    }
+
+    /// PIN (W2 slice 5) - **every navigation this host issues has been through a
+    /// door, and the mint it is issued under is one the host carried rather than
+    /// one read off the URL.**
+    ///
+    /// A source pin, because the alternative is a live browser: the effect this
+    /// is about is applied inside `WebSeat::step`, which needs a compositor and a
+    /// controller. What a machine can hold is the shape of those eight lines -
+    /// that the mint installed is the carried one, matched against the URL being
+    /// issued, and that `Origin::HostMinted` is asked before `navigate` is
+    /// called.
+    ///
+    /// RED GATE: derive the mint from the URL instead (`file:` prefix implies
+    /// `Mint::File`) and the first needle disappears; drop the `check` and the
+    /// second does.
+    #[test]
+    fn the_host_asks_its_own_gate_before_it_issues_its_own_navigation() {
+        let source: String = include_str!("webhost.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        assert!(
+            source.contains(concat!(
+                "}elseifself.minted.target()==Some(url.as",
+                "_str()){self.minted.clone()"
+            )),
+            "the mint installed is the one the caller carried, honoured only for \
+             the URL it was made for"
+        );
+        let gate = concat!("check(url,Origin::Host", "Minted(&minted))");
+        assert_eq!(
+            source.matches(gate).count(),
+            1,
+            "exactly one host-minted gate"
+        );
+        let after_gate = &source[source.find(gate).expect("the gate just counted")..];
+        let navigate = concat!("self.host.na", "vigate(url)?;");
+        assert!(
+            after_gate.contains(navigate),
+            "and it stands in front of the navigation rather than behind it"
+        );
+        assert!(
+            !source[..source.find(gate).expect("the gate just counted")].contains(navigate),
+            "nothing navigates before the gate"
         );
     }
 

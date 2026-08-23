@@ -55,7 +55,7 @@
 //! calls [`Mint::file`].
 #![cfg_attr(not(test), allow(dead_code))]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The one blank page the host mints for itself, spelled once.
 pub const BLANK_PAGE: &str = "about:blank";
@@ -163,6 +163,61 @@ impl Mint {
             }
         }
         Ok(Self::File(url))
+    }
+
+    /// **The path a URL this door minted was made from, and whatever the page
+    /// added to it** (W2 slice 5).
+    ///
+    /// [`Self::file`] read backwards, and deliberately no further: it undoes the
+    /// four percent escapes that encoder writes and turns `/` back into `\`.
+    /// It is **not** a `file:` URL parser and must never become one. Its whole
+    /// job is to let a row in the switcher, a line in `session.json` and a pin
+    /// be taken back to the *disk* — where the path is canonicalised and minted
+    /// again, exactly as the files column does it — so that a stored string is
+    /// never the thing that authorises a load. A string this cannot read
+    /// answers `None`, and `None` means "this did not come out of that door".
+    ///
+    /// The tail is the `?query` and `#fragment` the *page* is answerable for
+    /// ([`Self::admits`]): a local report's table of contents is `report.html#ch3`,
+    /// and a row that dropped the fragment would reopen the report at the top.
+    #[must_use]
+    pub fn path_and_tail_of_file_url(url: &str) -> Option<(PathBuf, String)> {
+        let rest = url
+            .get(..8)
+            .filter(|head| head.eq_ignore_ascii_case("file:///"))
+            .map(|_| &url[8..])?;
+        let cut = rest.find(['?', '#']).unwrap_or(rest.len());
+        let (body, tail) = rest.split_at(cut);
+        let mut path = String::with_capacity(body.len());
+        let mut bytes = body.chars();
+        while let Some(character) = bytes.next() {
+            match character {
+                '/' => path.push('\\'),
+                '%' => {
+                    let escape: String = [bytes.next()?, bytes.next()?].into_iter().collect();
+                    // Only the four this door writes. Anything else is a URL
+                    // somebody else built, and guessing at it is how a path
+                    // comes out of a string that never named one.
+                    path.push(match escape.to_ascii_uppercase().as_str() {
+                        "25" => '%',
+                        "23" => '#',
+                        "3F" => '?',
+                        "20" => ' ',
+                        _ => return None,
+                    });
+                }
+                other => path.push(other),
+            }
+        }
+        // A drive-absolute path and nothing else: the mint was made from a
+        // canonicalised path, so anything relative, anything with a `..` in it
+        // and anything spelled as a share is a string that did not come from
+        // here. The disk is asked again by the caller either way.
+        let path = PathBuf::from(path);
+        if !path.is_absolute() || path.components().any(|part| part.as_os_str() == "..") {
+            return None;
+        }
+        Some((path, tail.to_owned()))
     }
 
     /// The URL this mint stands for, which is what the host navigates to.
@@ -535,6 +590,73 @@ pub fn site_label(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PIN (W2 slice 5) - **the file door read backwards is the file door read
+    /// forwards.**
+    ///
+    /// `Mint::path_and_tail_of_file_url` exists so that a URL this window wrote
+    /// into a switcher row, a session file or a pin can be taken back to a
+    /// *path* and minted again from the disk - never so that the string itself
+    /// can authorise anything. So the only thing it has to be is the exact
+    /// inverse of the encoder, and the only thing it must never be is a general
+    /// `file:` parser: everything it cannot read answers `None`, which sends the
+    /// caller back to the disk with nothing.
+    #[test]
+    fn a_minted_file_url_reads_back_as_the_path_it_was_minted_from() {
+        for original in [
+            r"C:\Users\x\report.html",
+            r"C:\a b\p#1.html",
+            r"D:\notes\100% done?.htm",
+            r"C:\reports\Q3.pdf",
+        ] {
+            let path = Path::new(original);
+            let Mint::File(url) = Mint::file(path).expect("a local path mints") else {
+                panic!("`Mint::file` makes a file mint");
+            };
+            assert_eq!(
+                Mint::path_and_tail_of_file_url(&url),
+                Some((PathBuf::from(original), String::new())),
+                "{original}"
+            );
+        }
+
+        // The tail the *page* is answerable for comes back separately, because
+        // it is not part of the path and the disk must never be asked about it.
+        let minted = Mint::file(Path::new(r"C:\site\report.html")).expect("mints");
+        let url = minted.target().expect("a file mint names its URL");
+        assert_eq!(
+            Mint::path_and_tail_of_file_url(&format!("{url}#chapter-3")),
+            Some((
+                PathBuf::from(r"C:\site\report.html"),
+                "#chapter-3".to_owned()
+            ))
+        );
+        assert_eq!(
+            Mint::path_and_tail_of_file_url(&format!("{url}?page=2#top")),
+            Some((
+                PathBuf::from(r"C:\site\report.html"),
+                "?page=2#top".to_owned()
+            ))
+        );
+
+        // And everything this door did not write.
+        for foreign in [
+            "http://localhost:5173/app",
+            "file://server/share/page.html",
+            "file:///C:/site/../secret.html",
+            "file:///relative/path.html",
+            "file:///C:/site/%C3%A9.html",
+            "file:///C:/site/%2",
+            "file:///",
+            "",
+        ] {
+            assert_eq!(
+                Mint::path_and_tail_of_file_url(foreign),
+                None,
+                "not a string this door minted: {foreign}"
+            );
+        }
+    }
 
     // ---- the twelve carried over from the W0′ probe (spikes/webview2-w0) ----
 
