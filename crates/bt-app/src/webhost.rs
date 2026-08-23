@@ -1097,6 +1097,18 @@ pub(crate) enum WebOutcome {
     HandOff(String),
     /// The find session's tally, on its way to the search capsule.
     FindMatches { count: i32, active: i32 },
+    /// **A `CapturePreview` came back** (W2 slice ⑥) — the encoded PNG, or
+    /// `None` if the engine refused, together with the viewport size it is a
+    /// picture of.
+    ///
+    /// The size rides along rather than being read at the far end because the
+    /// seat may be re-sized between the ask and the answer, and a picture
+    /// labelled with the wrong shape is a picture that will be drawn stretched
+    /// and never noticed.
+    Captured {
+        png: Option<Vec<u8>>,
+        source: Option<(u32, u32)>,
+    },
 }
 
 /// Why the driver is waiting for a browser process to go.
@@ -1209,6 +1221,14 @@ pub(crate) struct WebSeat {
     /// The term the session that is running was started with, so that a second
     /// ask on the same term is a walk rather than a fresh search.
     found: String,
+    /// **Whether a `CapturePreview` is out and unanswered** (W2 slice ⑥).
+    ///
+    /// One at a time, and the reason is the measurement: the ask costs the
+    /// asking thread 0.115 ms and the answer takes 33–85 ms to come back, so a
+    /// second ask made before the first landed would be a queue growing at the
+    /// frame rate against a drain running at twelve a second. It is kept here
+    /// and not in the store because the engine is what is busy.
+    capturing: bool,
     /// The page's zoom as this window last set it.
     ///
     /// Kept here as well as in the controller because `Ctrl`+wheel steps from
@@ -1280,6 +1300,7 @@ impl WebSeat {
             found: String::new(),
             fault: None,
             refusal,
+            capturing: false,
             zoom: 1.0,
         };
         let effect = web.machine.request(url);
@@ -1539,6 +1560,23 @@ impl WebSeat {
                 outcomes.push(WebOutcome::FindMatches {
                     count: *count,
                     active: *active,
+                });
+                WebEffect::Ignore
+            }
+            // **The picture of this page a card asked for** (W2 slice ⑥). The
+            // seat is the messenger and nothing else: what the bytes are decoded
+            // to, at what size, and which card draws them are `web_thumb`'s, and
+            // a failed capture travels as a `None` so that the store can let go
+            // of the slot it was holding for it.
+            WebEvent::Captured { png } => {
+                self.capturing = false;
+                outcomes.push(WebOutcome::Captured {
+                    png: png.clone(),
+                    // The size the engine was last told, which is the size the
+                    // picture is of — asked here rather than at the far end,
+                    // because by the time the bytes are decoded the seat may
+                    // have been given another rectangle.
+                    source: self.sized,
                 });
                 WebEffect::Ignore
             }
@@ -2106,6 +2144,56 @@ impl WebSeat {
     /// the desktop showing through a pane (found on the machine, W2 slice 5).
     pub(crate) fn is_closing(&self) -> bool {
         self.machine.state() == WebState::Closing
+    }
+
+    /// **Everything a card's capture decision is made of, read off the seat**
+    /// (W2 slice ⑥).
+    ///
+    /// Assembled here rather than at the call site because every one of the five
+    /// is this type's own state, and a caller that reached in for them one at a
+    /// time would be four opportunities to ask a stale question. The *decision*
+    /// is not here: it is `web_thumb::WebThumbs::due`, which is a pure function
+    /// over these facts and is tested without an engine.
+    pub(crate) fn capture_facts(&self) -> crate::web_thumb::SeatFacts {
+        crate::web_thumb::SeatFacts {
+            // **The engine's own answer and not a re-derivation.** A hidden
+            // WebView never completes a capture — measured three times over two
+            // re-verification runs — so this is the gate the whole lane stands
+            // on, and the only honest source for it is what the controller was
+            // last actually told.
+            on_glass: matches!(self.presence, Some(WebPresence::Shown(_))),
+            closing: self.is_closing(),
+            // A seat showing a failure card has no page behind it to picture,
+            // and a seat that has never committed a document has nothing on its
+            // glass but the blank page this host minted for itself.
+            committed: self.machine.recoverable_url().is_some() && self.fault.is_none(),
+            capturing: self.capturing,
+            size: self.sized,
+        }
+    }
+
+    /// **Ask the engine for a picture of this page** (W2 slice ⑥).
+    ///
+    /// The mechanism only. Whether this seat should be asked at all was decided
+    /// by [`crate::web_thumb::WebThumbs::due`] out of [`Self::capture_facts`];
+    /// what comes back travels as [`WebOutcome::Captured`].
+    pub(crate) fn capture_page(&mut self) -> Result<(), String> {
+        debug_assert!(
+            !self.capturing,
+            "the store issues one capture per seat at a time"
+        );
+        self.capturing = true;
+        match self.host.capture_preview() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // The engine never took the ask, so no completion is coming and
+                // the flag must not be left standing — a seat stuck on "a
+                // capture is out" is a seat whose card can never be refreshed
+                // again.
+                self.capturing = false;
+                Err(error)
+            }
+        }
     }
 
     /// The seat is going away: close the controller and start the wait.

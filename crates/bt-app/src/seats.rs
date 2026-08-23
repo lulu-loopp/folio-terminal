@@ -4527,6 +4527,25 @@ pub enum MiniSeatContent {
     /// The two facts that tell you which pane this is when there is nothing to
     /// read: its name, and what kind of thing it is.
     Face { name: String, kind: String },
+    /// **A page, as pixels** (W2 slice ⑥, `DESIGN.md` §7.11) — the last frame
+    /// that seat's page was on the glass with, already resampled to the box it
+    /// is drawn in.
+    ///
+    /// The one content here that is not text, and the one this file could not
+    /// have built even if it were allowed to: a page's pixels come out of the
+    /// engine's own readback, arrive tens of milliseconds later, and cannot be
+    /// had at all while the page is hidden. `web_thumb` owns every part of that;
+    /// what arrives here is a texture and its identity, in the same shape
+    /// [`crate::marks::OverlayLayer::images`] already carries a picture in.
+    ///
+    /// A web seat with **no** frame is a [`Self::Face`] and always was.
+    Page {
+        /// The shared texture cache's identity for these pixels.
+        key: String,
+        rgba: std::sync::Arc<[u8]>,
+        width_px: u32,
+        height_px: u32,
+    },
 }
 
 /// One card's thumbnail: the tab's tree, and what each of its seats is showing.
@@ -6507,6 +6526,20 @@ pub struct ChromeGroup {
     pub quads: Vec<ChromeQuad>,
     pub labels: Vec<ChromeLabel>,
     pub sprites: Vec<ChromeSprite>,
+    /// **Pixels that arrived from somewhere else already sized** — the fourth
+    /// channel, and the only one nothing in this file rasterizes (W2 slice 6,
+    /// `DESIGN.md` 7.11).
+    ///
+    /// A [`ChromeSprite`] is an *identity* — this mark, this size, this ink —
+    /// and `ChromeMarkRasters` turns a fixed set of those into textures. A page's
+    /// last frame is not one of those: it is one seat's pixels, resampled by a
+    /// worker to one box, and there is nothing to name and nothing to rasterize.
+    /// So it skips the rasterizer and joins the same draw list on the other side,
+    /// exactly as `marks::OverlayLayer::images` already does for the glance
+    /// card's thumbnail — this is that slot, reached from this side.
+    ///
+    /// Empty in every group but the focus column's.
+    pub images: Vec<bt_render::ChromeIcon>,
 }
 
 impl ChromeGroup {
@@ -7687,6 +7720,10 @@ pub fn build_chrome_for_tabs(
     // so a pane head's caption still printed through the rail's face. It goes in
     // its own group instead — see [`WindowChrome`].
     let mut rail_group = ChromeGroup::default();
+    // The column's fourth channel, gathered beside the other three because
+    // `ChromeGroup::as_output` hands out the three that are *built* here and this
+    // one is only ever moved through — see [`ChromeGroup::images`].
+    let mut focus_images: Vec<bt_render::ChromeIcon> = Vec::new();
     let surface_height = layout
         .rects
         .iter()
@@ -7717,7 +7754,9 @@ pub fn build_chrome_for_tabs(
             },
             palette,
             rail_group.as_output(),
+            &mut focus_images,
         );
+        rail_group.images = focus_images;
     } else {
         rail_chrome(
             surface_height,
@@ -7743,6 +7782,9 @@ pub fn build_chrome_for_tabs(
             quads,
             labels,
             sprites,
+            // The pane layer draws no pictures: the one tenant of this channel
+            // is a focus card, and a focus card lives in the column.
+            images: Vec::new(),
         },
         rail: rail_group,
     }
@@ -10101,6 +10143,7 @@ fn focus_rail_chrome(
         &mut Vec<ChromeLabel>,
         &mut Vec<ChromeSprite>,
     ),
+    images: &mut Vec<bt_render::ChromeIcon>,
 ) {
     let FocusRail {
         tabs,
@@ -10266,6 +10309,7 @@ fn focus_rail_chrome(
             palette,
             [list_top, list_bottom],
             (quads, labels, sprites),
+            images,
         );
 
         // ── the mark slot: the strip's machinery, unchanged ──
@@ -10654,6 +10698,7 @@ fn focus_card_mini_chrome(
         &mut Vec<ChromeLabel>,
         &mut Vec<ChromeSprite>,
     ),
+    images: &mut Vec<bt_render::ChromeIcon>,
 ) {
     let (quads, labels, sprites) = output;
     let [list_top, list_bottom] = viewport;
@@ -10746,7 +10791,14 @@ fn focus_card_mini_chrome(
                     });
                 }
             }
-            focus_mini_seat_content(content, inner, viewport, scale, palette, labels, sprites);
+            focus_mini_seat_content(
+                content,
+                inner,
+                viewport,
+                scale,
+                palette,
+                (labels, sprites, images),
+            );
         }
         // A seat the projection has nothing for: its hairline is drawn and its
         // inside is left empty, which is the honest picture of a pane that has
@@ -10805,9 +10857,13 @@ fn focus_mini_seat_content(
     viewport: [f32; 2],
     scale: f32,
     palette: ChromePalette,
-    labels: &mut Vec<ChromeLabel>,
-    sprites: &mut Vec<ChromeSprite>,
+    output: (
+        &mut Vec<ChromeLabel>,
+        &mut Vec<ChromeSprite>,
+        &mut Vec<bt_render::ChromeIcon>,
+    ),
 ) {
+    let (labels, sprites, images) = output;
     let [list_top, list_bottom] = viewport;
     let in_list = |rect: [f32; 4]| rect[3] > list_top && rect[1] < list_bottom;
     let clip_to_list = |rect: [f32; 4]| {
@@ -10939,6 +10995,36 @@ fn focus_mini_seat_content(
                         false,
                     );
                 }
+            }
+        }
+        // **A page, drawn as the picture it is** (W2 slice ⑥, §7.11). The one
+        // arm of this match with no line height, no cut and no face: it states a
+        // box and a texture, and the crop is `ChromeIcon::clip` — the same slot,
+        // and for the same reason, a preview float's zoomed image uses.
+        //
+        // The box is the seat's own rectangle **this frame** and the texture is
+        // whatever size the worker last produced. They part company whenever a
+        // card has been resized since the last capture, and the sampler carries
+        // the difference on purpose: a page that has gone into the background
+        // can never be re-photographed, so a card that refused to draw a picture
+        // of the wrong shape would be a card that went permanently blank the
+        // first time somebody dragged the window wider.
+        MiniSeatContent::Page {
+            key,
+            rgba,
+            width_px,
+            height_px,
+        } => {
+            if inner[2] > inner[0] && inner[3] > inner[1] && in_list(inner) {
+                images.push(bt_render::ChromeIcon {
+                    key: key.clone(),
+                    rect: inner,
+                    rgba: std::sync::Arc::clone(rgba),
+                    width_px: *width_px,
+                    height_px: *height_px,
+                    opacity: 1.0,
+                    clip: Some(clip_to_list(inner)),
+                });
             }
         }
         MiniSeatContent::Face { name, kind } => {
@@ -30732,6 +30818,112 @@ mod tests {",
                 "card {index}'s name is laid out in the head and nowhere else"
             );
         }
+    }
+
+    /// **Red gate (W2 slice ⑥): a page's last frame reaches the column as a
+    /// picture, in the cell's own box, cropped to the list.**
+    ///
+    /// Three claims, and each is one the text channels cannot make: the pixels
+    /// arrive in `ChromeGroup::images` rather than as a mark to be rasterized,
+    /// the box they are drawn in is the seat's own rectangle this frame rather
+    /// than the texture's size, and the crop is the column's viewport — so a
+    /// card half scrolled off the top shows half a picture instead of one
+    /// hanging over the tab strip's head.
+    ///
+    /// Red gate: send the same seat through as a `Face` and `images` is empty.
+    #[test]
+    fn a_pages_last_frame_reaches_the_column_as_a_picture_in_its_cells_box() {
+        let tabs = vec![card_tab("localhost", 1, TabMarkState::default(), false)];
+        let tree = lone_seat_tree(SeatKind::Preview);
+        let page = BTreeMap::from([(
+            SeatId(1),
+            MiniSeatContent::Page {
+                key: "web-thumb:1:7".to_owned(),
+                rgba: std::sync::Arc::from(vec![0x80; 4 * 4 * 4]),
+                width_px: 4,
+                height_px: 4,
+            },
+        )]);
+        let state = focus_rail(TabLayoutMode::Vertical);
+        let with_picture = window_chrome_with_thumbnails_in(
+            TALL_FIXTURE_HEIGHT,
+            &tabs,
+            0,
+            state,
+            None,
+            &[Some(FocusThumbnail {
+                tree: &tree,
+                focused: SeatId(1),
+                seats: &page,
+            })],
+            1.0,
+        )
+        .rail;
+        let [picture] = with_picture.images.as_slice() else {
+            panic!(
+                "a card with a page on it drew {} pictures",
+                with_picture.images.len()
+            );
+        };
+        assert_eq!(picture.key, "web-thumb:1:7");
+        assert_eq!((picture.width_px, picture.height_px), (4, 4));
+        let geometry = focus_of_in(TALL_FIXTURE_HEIGHT, state, tabs.len());
+        let card = &geometry.cards[0];
+        let cell = focus_mini_seats(&tree, card.mini, 1.0)[0].rect;
+        assert!(
+            picture.rect[0] >= cell[0]
+                && picture.rect[1] >= cell[1]
+                && picture.rect[2] <= cell[2]
+                && picture.rect[3] <= cell[3],
+            "the picture {:?} left its cell {cell:?}",
+            picture.rect
+        );
+        assert!(
+            picture.rect[2] - picture.rect[0] > f32::from(picture.width_px as u16),
+            "a card-sized box was not filled by the texture it names — the \
+             sampler carries the difference and the box is the cell's"
+        );
+        let clip = picture.clip.expect("a picture is cropped to the list");
+        assert!(
+            clip[1] >= geometry.viewport[0] && clip[3] <= geometry.viewport[1],
+            "the crop {clip:?} runs outside the column's own viewport {:?}",
+            geometry.viewport
+        );
+
+        // The same seat with nothing photographed: no picture at all, and the
+        // face it always drew instead.
+        let face = BTreeMap::from([(
+            SeatId(1),
+            MiniSeatContent::Face {
+                name: "127.0.0.1:8080".to_owned(),
+                kind: "Page".to_owned(),
+            },
+        )]);
+        let without = window_chrome_with_thumbnails_in(
+            TALL_FIXTURE_HEIGHT,
+            &tabs,
+            0,
+            state,
+            None,
+            &[Some(FocusThumbnail {
+                tree: &tree,
+                focused: SeatId(1),
+                seats: &face,
+            })],
+            1.0,
+        )
+        .rail;
+        assert!(
+            without.images.is_empty(),
+            "a page nobody has photographed drew a picture out of nothing"
+        );
+        assert!(
+            without
+                .labels
+                .iter()
+                .any(|label| label.text == "127.0.0.1:8080"),
+            "and it stopped saying which page it is"
+        );
     }
 
     /// **A preview seat draws its document's lines, from the top, in the face the

@@ -73,6 +73,7 @@ mod toast;
 mod tooltip;
 mod trace;
 mod watch_clock;
+mod web_thumb;
 mod webhost;
 mod webnav;
 mod websheet;
@@ -4989,6 +4990,22 @@ struct WindowRuntime {
     /// ever projects its own tabs, so a second window costs the first nothing and
     /// closing one takes its projections with it.
     focus_thumbs: focus_thumb::FocusThumbnails,
+    /// **The last frame each of this window's pages was on the glass with**, and
+    /// the clock that refreshes them (§7.11, `web_thumb`).
+    ///
+    /// Beside `focus_thumbs` and not inside it, because the two are governed by
+    /// different rules and the difference is forced by the medium: a projection
+    /// is thrown away when its card scrolls out of the column and rebuilt from
+    /// memory when it comes back, and a page's pixels exist only while the page
+    /// is on the glass — so a picture dropped on a scroll could never be
+    /// replaced. The picture belongs to the seat; the *asking* belongs to the
+    /// card.
+    web_thumbs: web_thumb::WebThumbs,
+    /// The thread that turns a captured page into card-sized pixels.
+    ///
+    /// Lazily started, because a window that never opens a page never needs one
+    /// — and most windows never open a page.
+    web_shrinker: Option<web_thumb::PageShrinker>,
     /// What `BT_PREVIEW_TRACE`'s frame station last said about this window, so
     /// that a still pane writes one line and not sixty a second.
     preview_trace_echo: preview_trace::FrameEcho,
@@ -7272,7 +7289,26 @@ impl TabState {
     ///
     /// `None` for a seat whose content this tab has no table entry for, which is
     /// the one frame between a seat being minted and its content being created.
-    fn mini_source(&self, seat: SeatId, kind: SeatKind) -> Option<focus_thumb::SeatSource<'_>> {
+    fn mini_source<'a>(
+        &'a self,
+        seat: SeatId,
+        kind: SeatKind,
+        // **The page's last frame, when this seat has one** (W2 slice ⑥,
+        // §7.11). Handed in rather than looked up, because the store it comes
+        // from belongs to the *window* and this type is a tab: a page travels
+        // with its seat when a pane is moved between tabs, and a tab that kept
+        // its own pictures would be the second account of that.
+        //
+        // `None` is not a special case. A web seat without a frame falls through
+        // every arm below exactly as it did before this slice — `PreviewView::Web`
+        // has no lines to quote, so `mini_document_face` answers `None` and the
+        // seat is a face. That is the honest picture and not a fallback: a page
+        // nobody has looked at has never had a frame on any glass.
+        page: Option<&'a web_thumb::Picture>,
+    ) -> Option<focus_thumb::SeatSource<'a>> {
+        if let Some(picture) = page {
+            return Some(focus_thumb::SeatSource::Page { picture });
+        }
         match kind {
             SeatKind::Terminal => {
                 let leaf = self.sessions.get(&seat)?;
@@ -14366,16 +14402,36 @@ fn dump_chrome_frame(chrome: &seats::ChromeGroup) {
 /// the column and `visible` drops while `dropped` ticks; leave the window alone
 /// and `projections` stops moving while `unchanged` climbs; press `Exit` and the
 /// line stops being written at all, because there is no budget left to spend.
-fn dump_focus_thumb_frame(visible: usize, stats: focus_thumb::ThumbStats) {
+fn dump_focus_thumb_frame(
+    visible: usize,
+    stats: focus_thumb::ThumbStats,
+    pages: web_thumb::WebThumbStats,
+) {
     let Some(path) = std::env::var_os("BT_FOCUS_THUMB_DUMP") else {
         return;
     };
+    // **The page lane on the same line and not on a second switch** (W2 slice
+    // ⑥). It is the same budget seen from the one seat whose content this
+    // window cannot compute, and a reader watching a card fill in wants the
+    // projection counters and the capture counters against one another: a
+    // `captures` that never moves beside a `hidden` that climbs is the whole
+    // story of a column full of background tabs, and two files could not say it.
     let line = format!(
-        "focus-thumb visible={visible} projections={} unchanged={} throttled={} dropped={}\n",
+        "focus-thumb visible={visible} projections={} unchanged={} throttled={} dropped={} \
+         captures={} pictures={} page-hidden={} page-closing={} page-blank={} page-inflight={} \
+         page-throttled={} page-stale={}\n",
         stats.projections,
         stats.skipped_unchanged,
         stats.skipped_throttled,
         stats.dropped_offscreen,
+        pages.captures,
+        pages.pictures,
+        pages.skipped_hidden,
+        pages.skipped_closing,
+        pages.skipped_blank,
+        pages.skipped_in_flight,
+        pages.skipped_throttled,
+        pages.dropped_stale,
     );
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
@@ -19582,6 +19638,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         focus_mini_advance: 0.0,
         focus_mini_face_advance: 0.0,
         focus_thumbs: focus_thumb::FocusThumbnails::default(),
+        web_thumbs: web_thumb::WebThumbs::default(),
+        web_shrinker: None,
         preview_trace_echo: preview_trace::FrameEcho::default(),
         card_aim: None,
         table_paints: HashMap::new(),
@@ -54517,6 +54575,13 @@ impl Runtime<'_> {
         // because the sending needs `&mut self` and the walking holds `&self`.
         let mut unread_documents: Vec<(usize, preview::PreviewSource)> = Vec::new();
         let mut unread_dirs: Vec<(usize, focus_thumb::UnreadDir)> = Vec::new();
+        // **And the web seats of the cards that are in the column** (§7.11).
+        // Gathered for the same reason and spent the same way: the decision is
+        // `web_thumb::WebThumbs::due`'s, the asking needs `&mut self`, and the
+        // walk below holds the tab list immutably.
+        let mut wanted_pictures: Vec<web_thumb::PageDemand> = Vec::new();
+        let pages = &self.window.web;
+        let page_pictures = &self.window.web_thumbs;
         for (index, card) in geometry.cards.iter().enumerate() {
             if card.body[3] <= list_top || card.body[1] >= list_bottom {
                 continue;
@@ -54545,7 +54610,26 @@ impl Runtime<'_> {
                         {
                             unread_documents.push((index, source));
                         }
-                        let source = tab.mini_source(seat.id, seat.kind)?;
+                        // **The page on this seat, if it is one** (§7.11). Two
+                        // separate readings, and the split is the same one
+                        // `unread_card_document` makes one line above: the
+                        // picture it *has* goes into the projection, and the
+                        // picture it is *owed* goes on a list the caller acts
+                        // on past the walk. Neither is a question the
+                        // projection may ask.
+                        if let Some(web) = pages.get(&seat.id) {
+                            wanted_pictures.push(web_thumb::PageDemand {
+                                seat: seat.id,
+                                url: web.identity().unwrap_or_default().to_owned(),
+                                facts: web.capture_facts(),
+                                target: (
+                                    (seat.rect[2] - seat.rect[0]).round().max(0.0) as u32,
+                                    (seat.rect[3] - seat.rect[1]).round().max(0.0) as u32,
+                                ),
+                            });
+                        }
+                        let source =
+                            tab.mini_source(seat.id, seat.kind, page_pictures.picture(seat.id))?;
                         // **The seat's own face decides both counts.** A row's
                         // height and a column's width are two readings of the
                         // same face, so they are taken from one table
@@ -54575,8 +54659,41 @@ impl Runtime<'_> {
             );
         }
         self.window.focus_thumbs.retain_visible(&visible);
-        dump_focus_thumb_frame(visible.len(), self.window.focus_thumbs.stats());
+        self.photograph_pages(wanted_pictures, now);
+        dump_focus_thumb_frame(
+            visible.len(),
+            self.window.focus_thumbs.stats(),
+            self.window.web_thumbs.stats(),
+        );
         self.arm_card_reads(unread_documents, unread_dirs);
+    }
+
+    /// **Go and photograph the pages the cards could not draw** — the web half
+    /// of [`Self::arm_card_reads`], and the whole of W2 slice ⑥'s asking side
+    /// (§7.11).
+    ///
+    /// Split out for the same reason its two siblings are: the walk above holds
+    /// the tab list immutably and every one of these calls is `&mut`. The
+    /// *decision* is not here — `web_thumb::WebThumbs::due` is a pure function
+    /// over facts read off each engine, and every refusal it can make is red
+    /// tested without a browser. What is here is the four things that need the
+    /// window: the engine to ask, the error to report, and nothing else.
+    ///
+    /// The whole of the cost this adds to a frame is one syscall per seat asked,
+    /// measured at **0.115 ms** and made at most once every
+    /// `web_thumb::CAPTURE_INTERVAL` (gate 11). The answer arrives on a later
+    /// turn of the loop and is decoded on another thread.
+    fn photograph_pages(&mut self, demands: Vec<web_thumb::PageDemand>, now: Instant) {
+        if demands.is_empty() {
+            return;
+        }
+        for seat in self.window.web_thumbs.due(&demands, now) {
+            if let Some(web) = self.window.web.get_mut(&seat)
+                && let Err(error) = web.capture_page()
+            {
+                eprintln!("BT_WEB capture failed: {error}");
+            }
+        }
     }
 
     /// **Go and get what the cards could not draw** — the sending half of
@@ -57349,6 +57466,11 @@ impl Runtime<'_> {
         for (seat, outcomes) in outcomes {
             self.apply_web_outcomes(seat, outcomes)?;
         }
+        // **And the pictures the worker finished.** Read on the same beat the
+        // engine's own words are read on, because the shrinker wakes the loop
+        // through the very same event: a card with a new frame is a page having
+        // spoken, one thread further out.
+        self.collect_page_pictures();
         // **Everything the head, the foot and the cards read arrives here**
         // (§7.7 ②, ③, ④, W2 slice ④): the title, the address, the two history
         // flags, the hover line, the failure. Slice ① needed no repaint because
@@ -57363,6 +57485,38 @@ impl Runtime<'_> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// This window's thumbnail shrinker, started the first time a page is
+    /// actually photographed.
+    ///
+    /// Lazy because most windows never open a page and a thread that decodes
+    /// nothing is still a thread; and per window for `web_thumbs`' reason — a
+    /// seat id names a seat of *this* window.
+    fn page_shrinker(&mut self) -> &web_thumb::PageShrinker {
+        self.window.web_shrinker.get_or_insert_with(|| {
+            let proxy = self.app.event_proxy.clone();
+            web_thumb::PageShrinker::start(move || {
+                // The same nudge the engine's own callbacks use: a picture that
+                // finished while the window was idle would otherwise sit unread
+                // until somebody moved the mouse.
+                let _ = proxy.send_event(AppEvent::WebPageSpoke);
+            })
+        })
+    }
+
+    /// **Take in every picture the shrinker has finished.** Returns whether any
+    /// card owes a repaint.
+    fn collect_page_pictures(&mut self) -> bool {
+        let Some(shrinker) = self.window.web_shrinker.as_ref() else {
+            return false;
+        };
+        let finished = shrinker.collect();
+        let mut changed = false;
+        for picture in finished {
+            changed |= self.window.web_thumbs.settle(picture);
+        }
+        changed
     }
 
     fn apply_web_outcomes(
@@ -57399,12 +57553,38 @@ impl Runtime<'_> {
                 // of the URL the engine actually loaded — which is why a redirect
                 // leaves one row and not two, and why a navigation that never
                 // committed leaves none at all.
-                webhost::WebOutcome::Committed => self.commit_web_page(seat)?,
+                webhost::WebOutcome::Committed => {
+                    // **A different page is a different picture** (§7.11). Said
+                    // here because this is the one outcome that means the seat's
+                    // identity moved, and a card that went on showing the last
+                    // page's frame would be the only surface in the column
+                    // saying something that is not true of the tab it names.
+                    self.window.web_thumbs.invalidate(seat);
+                    self.commit_web_page(seat)?;
+                }
                 webhost::WebOutcome::Gone => {
                     self.window.web.remove(&seat);
                     self.window.web_cursor = None;
+                    let live: BTreeSet<SeatId> = self.window.web.keys().copied().collect();
+                    self.window.web_thumbs.retain(&live);
                     if self.window.web.is_empty() {
                         self.window.renderer.set_web_holes(Vec::new());
+                    }
+                }
+                // **A capture came back.** The bytes go to the worker; nothing
+                // is decoded on this thread, because a page-sized PNG measured
+                // 18 ms to decode and resample and the whole projection budget
+                // is 3.0 (gate 11).
+                webhost::WebOutcome::Captured { png, source } => {
+                    let url = self
+                        .window
+                        .web
+                        .get(&seat)
+                        .and_then(webhost::WebSeat::identity)
+                        .unwrap_or_default()
+                        .to_owned();
+                    if let Some(job) = self.window.web_thumbs.arrived(seat, &url, png, source) {
+                        self.page_shrinker().send(job);
                     }
                 }
                 // Still said out loud, and now also drawn where §7.7 ④ says: the
@@ -59368,12 +59548,24 @@ mod focus_mode_door_tests {
     /// worker.
     #[test]
     fn the_projection_still_takes_its_text_only_from_memory() {
-        let source = body("    fn mini_source(");
+        // The signature carries a lifetime since W2 slice 6 handed the page's
+        // last frame in, so the needle stops at the name: a pin that matched the
+        // parenthesis would fall through to this very literal further down the
+        // file and read a body that is not the one it means to.
+        let source = body("    fn mini_source");
         assert!(
             source.contains("buffer.content.is_some()"),
             "the red line is 'is there text here already, without asking a disk'"
         );
-        for fetch in ["claim_head_read", "preview_worker", "files_worker"] {
+        // And the page arm, added by W2 slice 6, is under the same line: a
+        // picture is *handed in*, and nothing here starts a capture.
+        for fetch in [
+            "claim_head_read",
+            "preview_worker",
+            "files_worker",
+            "capture_page",
+            "web_thumbs",
+        ] {
             assert!(
                 !source.contains(fetch),
                 "the projection reached for {fetch}, which is it going looking"
@@ -62292,7 +62484,11 @@ fn panel_opacity(state: seats::RailState, fold: f32) -> f32 {
 }
 
 fn rail_overlay_layer(rail: &seats::ChromeGroup, fold: f32) -> Vec<marks::OverlayLayer> {
-    if rail.quads.is_empty() && rail.labels.is_empty() && rail.sprites.is_empty() {
+    if rail.quads.is_empty()
+        && rail.labels.is_empty()
+        && rail.sprites.is_empty()
+        && rail.images.is_empty()
+    {
         return Vec::new();
     }
     let (grounds, quads): (Vec<bt_render::ChromeQuad>, Vec<bt_render::ChromeQuad>) = rail
@@ -62317,6 +62513,11 @@ fn rail_overlay_layer(rail: &seats::ChromeGroup, fold: f32) -> Vec<marks::Overla
             .collect(),
         labels: rail.labels.clone(),
         sprites: rail.sprites.clone(),
+        // The cards' page pictures, which are not marks and are never
+        // rasterized — see `seats::ChromeGroup::images`. They join the icon
+        // channel *after* the column's own marks, which is the order they must
+        // paint in: a picture is content and the marks around it are chrome.
+        images: rail.images.clone(),
         opacity: fold.clamp(0.0, 1.0),
         ..marks::OverlayLayer::default()
     }]
@@ -73471,6 +73672,7 @@ mod tests {
             ],
             labels: Vec::new(),
             sprites: Vec::new(),
+            images: Vec::new(),
         };
         let layers = rail_overlay_layer(&rail, 1.0);
         let [layer] = layers.as_slice() else {

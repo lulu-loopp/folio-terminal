@@ -35,6 +35,10 @@ windows = { version = "0.62.2", features = [
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    # `CreateStreamOnHGlobal`: the buffer `ICoreWebView2::CapturePreview` writes
+    # a page's picture into (W2 slice 6). A memory stream and not a file, because
+    # a thumbnail routed through the disk would be measuring the disk.
+    "Win32_System_Com_StructuredStorage",
     # `AttachConsole` / `WriteConsoleW`: the only way a Windows program with no
     # console of its own can answer `--help` on the console that started it.
     "Win32_System_Console",

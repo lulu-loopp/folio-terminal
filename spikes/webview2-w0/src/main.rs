@@ -22,6 +22,7 @@ mod gates_pixels;
 mod gates_policy;
 mod gates_system;
 mod gates_w0p;
+mod gates_w2s6;
 mod gfx;
 mod host;
 mod inject;
@@ -76,6 +77,9 @@ fn parse_arguments() -> Arguments {
             "--scenario" => scenario = arguments.next(),
             "--hold" => hold = true,
             "--bounds-at-seat" => origin = BoundsOrigin::AtSeat,
+            // For a gate that injects nothing: do not pull the window out from
+            // under whoever is using the machine.
+            "--no-activate" => win::leave_the_foreground_alone(),
             other => eprintln!("ignoring unknown argument {other}"),
         }
     }
@@ -196,6 +200,9 @@ fn run() -> Result<()> {
             (8, _) => gates_system::gate8(&mut probe),
             (9, _) => gates_policy::gate9(&mut probe),
             (10, _) => gates_policy::gate10(&mut probe),
+            // Not in `all`: the W2 slice 6 measurement, asked when that
+            // slice is being designed and not on every re-verification run.
+            (11, _) => gates_w2s6::gate_w2_slice6(&mut probe),
             _ => Ok(()),
         };
         if let Err(error) = result {
