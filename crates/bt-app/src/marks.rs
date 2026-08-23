@@ -249,19 +249,27 @@ pub enum ChromeMark {
     ProfileGeneric { colour: MarkColour },
     /// `#i-file`.
     File,
-    /// `#i-globe` — **the web class's own mark** (Web 预览块 W2 片③).
+    /// `#i-globe` — **the web class's own mark** (Web 预览块 W2 片③, 片④).
     ///
-    /// What a page wears wherever a preview buffer is drawn small: the switcher
-    /// row, the Recent row, the restore prompt's row. `docs/DESIGN.md` §7.7 ⑤
-    /// puts it in the *same* box as `#i-file` so that the two kinds of row line
-    /// up down one left edge and neither reads as the guest — which is why it is
-    /// asked for at the file mark's own size and not at one of its own.
+    /// What a page wears wherever it is drawn small: the switcher row, the
+    /// Recent row, the restore prompt's row, the page's own head and the strip
+    /// row above it. `docs/DESIGN.md` §7.7 ⑤ puts it in the *same* box as
+    /// `#i-file` so that the two kinds of row line up down one left edge and
+    /// neither reads as the guest — which is why it is asked for at the file
+    /// mark's own size and not at one of its own. The rows reach it through
+    /// [`preview_row_mark`] and the head and strip through `seats::pane_mark`,
+    /// so there is one glyph and a named place it is chosen.
     ///
-    /// A site's own favicon is slice ⑥'s: that is a raster fetched per origin
-    /// with a cache and a failure state, while this is the class's drawing and is
-    /// what every row wears until one arrives.
+    /// **The site's own favicon is not this mark and is not drawn yet.** §7.7 ②
+    /// asks for the favicon where a site has one and this globe where it has
+    /// not, and the two halves are not the same kind of work: every variant of
+    /// this enum is a vector symbol struck from a path list and cached by name,
+    /// and a favicon is a raster the engine fetches at runtime — a second
+    /// pipeline into the chrome atlas that no mark has. It is slice ⑥'s, and is
+    /// recorded as an open item rather than faked: a coloured square with a
+    /// letter in it would be this window inventing an icon for somebody else's
+    /// site.
     Globe,
-    // `Globe`'s one door is [`preview_row_mark`], below the enum.
     /// `#i-folder`.
     Folder,
     /// `#i-panel` — a pane whose kind this build cannot name.
@@ -664,21 +672,6 @@ pub enum ChromeMark {
     /// corner to corner it would lose half its width to the edge of its own
     /// raster at both ends, which reads as an edge that goes thin exactly where
     /// it meets the line it is joining.
-    /// `#i-globe` — **the web content class's own mark** (§7.7 ②, W2 slice ④).
-    ///
-    /// A page's head, the strip row above it, the preview switcher's line and
-    /// Recent's row all draw the seat's mark, and they all draw it through
-    /// `seats::pane_mark`, so there is one glyph and one place it is chosen.
-    ///
-    /// **The site's own favicon is not this mark and is not drawn yet.** §7.7 ②
-    /// asks for the favicon where a site has one and this globe where it has
-    /// not, and the two halves are not the same kind of work: every variant of
-    /// this enum is a vector symbol struck from a path list and cached by name,
-    /// and a favicon is a raster the engine fetches at runtime — a second
-    /// pipeline into the chrome atlas that no mark has. Recorded as an open item
-    /// rather than faked: a coloured square with a letter in it would be this
-    /// window inventing an icon for somebody else's site.
-    Globe,
     GraphCurve {
         stroke_px: u32,
         /// The dot is at the box's right rather than its left — the edge runs
@@ -759,7 +752,6 @@ impl ChromeMark {
             Self::GitMergeCurve => "git-merge-curve",
             // One id for four mirrorings and every span, exactly as the chevron
             // has one id for every angle: `mark_key` adds the rest.
-            Self::Globe => "i-globe",
             Self::GraphCurve { .. } => "graph-curve",
         }
     }
@@ -1601,7 +1593,6 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::ProfileCmd => 14,
         ChromeMark::Float => 17,
         ChromeMark::External => 40,
-        ChromeMark::Globe => 41,
         ChromeMark::DockLeft => 18,
         ChromeMark::DockRight => 26,
         ChromeMark::ResizeGrip => 19,

@@ -44,6 +44,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use bt_persist::SearchEngineV1;
 use bt_platform::{WebChord, WebEvent, WebHost, WebNavigationVerdict};
 use winit::keyboard::{ModifiersState, NamedKey};
 
@@ -1918,7 +1919,12 @@ impl WebSeat {
     /// the buttons are dimmed and inert when the stack has no more to give, and
     /// a call that went through anyway would be the window acting on a history
     /// the person is not looking at.
-    pub(crate) fn go(&mut self, forwards: bool) -> Result<(), String> {
+    ///
+    /// **Not [`Self::go`]**, which is a different sentence that slice ③ named
+    /// first: that one is the one door a *new* address takes into this seat, and
+    /// this one asks the page for a place it has already been. Two verbs, two
+    /// names.
+    pub(crate) fn walk_history(&mut self, forwards: bool) -> Result<(), String> {
         if forwards {
             if !self.page.can_go_forward {
                 return Ok(());

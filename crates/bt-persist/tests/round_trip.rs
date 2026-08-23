@@ -17,11 +17,11 @@ use std::path::PathBuf;
 use bt_persist::{
     BackgroundFitV1, DegradationReport, FilesViewV1, LanguageV1, LayoutNodeV1, LeafNodeV1,
     MinimumContrastV1, PreviewLeafV1, PreviewPaneV1, PreviewPoolEntryV1, PreviewSourceV1,
-    PsReadLineInviteV1, SearchEngineV1, ReadReport, RecentPreviewV1, RecentSeedV1, SESSION_SCHEMA_VERSION,
-    SETTINGS_SCHEMA_VERSION, SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1,
-    SessionThemeV1, SessionV1, SessionWindowV1, SettingsV1, SplitDirectionV1, TabPreviewV1, TabV1,
-    TermLeafV1, ThemeModeV1, read_session, read_settings, write_session_atomic,
-    write_settings_atomic,
+    PsReadLineInviteV1, ReadReport, RecentPreviewV1, RecentSeedV1, SESSION_SCHEMA_VERSION,
+    SETTINGS_SCHEMA_VERSION, SearchEngineV1, SessionCursorStyleV1, SessionSidebarModeV1,
+    SessionTabLayoutV1, SessionThemeV1, SessionV1, SessionWindowV1, SettingsV1, SplitDirectionV1,
+    TabPreviewV1, TabV1, TermLeafV1, ThemeModeV1, read_session, read_settings,
+    write_session_atomic, write_settings_atomic,
 };
 
 fn fixture_path(name: &str) -> PathBuf {

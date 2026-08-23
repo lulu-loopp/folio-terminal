@@ -6801,13 +6801,16 @@ impl TabState {
     /// as [`Self::display_title`]'s: giving a folder tab a second glyph, chosen
     /// somewhere else, is how a strip row and the pane under it start describing
     /// two different things.
-    /// `page` is the seat this **window** has a page on, when it has one
-    /// (§7.7 ②, W2 slice ④) — the one fact about a leaf's content that a tab
-    /// cannot answer for itself in this build, because the page is not in the
-    /// preview pool yet (slice ③ puts it there and this parameter goes away).
-    /// A tab whose identity seat is that seat wears the globe, exactly as the
-    /// head above it does, through the same `seats::pane_mark`.
-    fn tab_mark(&self, page: Option<SeatId>) -> marks::ChromeMark {
+    /// `pages` is every seat this **window** is hosting a page on (§7.7 ②, W2
+    /// slice ③ ④) — the one fact about a leaf's content that a tab cannot answer
+    /// for itself, because the hosts live on the window and a tab knows only its
+    /// own tree. A tab whose identity seat is one of them wears the globe,
+    /// exactly as the head above it does, through the same `seats::pane_mark`.
+    /// A set and not one seat: slice ③ gave the window a page per seat, and a
+    /// window with two pages open in two tabs has to answer for both strip rows.
+    /// Seats are unique across the window, so membership is already the per-tab
+    /// question — no tab can hold another tab's seat.
+    fn tab_mark(&self, pages: &BTreeSet<SeatId>) -> marks::ChromeMark {
         let seat = if self.sessions.contains_key(&self.focused_leaf) {
             self.focused_leaf
         } else {
@@ -6827,7 +6830,7 @@ impl TabState {
         // ignored the argument.
         let content = match kind {
             bt_layout::SeatKind::Terminal => Some(profiles::mark(self.leaf_profile(seat))),
-            bt_layout::SeatKind::Preview if page == Some(seat) => Some(marks::ChromeMark::Globe),
+            bt_layout::SeatKind::Preview if pages.contains(&seat) => Some(marks::ChromeMark::Globe),
             _ => None,
         };
         let (mark, _, _) = seats::pane_mark(kind, content, bt_render::chrome_palette());
@@ -21703,10 +21706,10 @@ impl Runtime<'_> {
             .drag
             .as_ref()
             .and_then(|drag| drag.tab_carry().map(|carry| carry.offset));
-        // The seat this window has a page on, threaded into the strip so that a
-        // tab whose identity pane is that seat wears the globe (§7.7 ②) — the
+        // The seats this window has pages on, threaded into the strip so that a
+        // tab whose identity pane is one of them wears the globe (§7.7 ②) — the
         // same glyph the head under it wears, through the same `pane_mark`.
-        let page_seat = self.window.web.as_ref().map(|web| web.seat);
+        let page_seats: BTreeSet<SeatId> = self.window.web.keys().copied().collect();
         let grabbed = self.window.drag.as_ref().and_then(|drag| {
             let tab = drag.tab()?;
             self.window
@@ -21742,7 +21745,7 @@ impl Runtime<'_> {
                 (
                     tab.display_title(),
                     pane_count,
-                    tab.tab_mark(page_seat),
+                    tab.tab_mark(&page_seats),
                     tab.mark_state(
                         index == self.window.active_tab,
                         now,
@@ -21901,14 +21904,15 @@ impl Runtime<'_> {
         // meaning is "which content is this leaf holding", which is the one
         // thing `seats::pane_mark` cannot work out from a `SeatKind`.
         let mut leaf_marks = self.leaf_marks();
-        if let Some((seat, page)) = self.window.web.as_ref().map(|web| (web.seat, web.page())) {
+        for (seat, web) in &self.window.web {
+            let page = web.page();
             // **While a navigation is in flight the mark spins in place**
             // (§7.7 ②): no progress hairline, no second row, and no second
             // glyph — the seat gains nothing for a state that lasts a second,
             // and the arc it borrows is the one this window already turns on a
             // working tab. `stroke_px` is the mock-up's own 1.4.
             leaf_marks.insert(
-                seat,
+                *seat,
                 match page.loading_since.filter(|_| page.loading) {
                     Some(since) => marks::ChromeMark::ProgressRing {
                         start_milliturns: indeterminate_start_milliturns(
@@ -23846,17 +23850,17 @@ impl Runtime<'_> {
     /// **The page on one seat, and the one door to it** — every reader of a
     /// hosted page goes through this pair.
     ///
-    /// It is a pair of one-line functions on purpose: `WindowRuntime::web` is
-    /// one page today because `BT_WEB_DEV` is the only way to reach one, and it
-    /// becomes a map keyed by seat the moment a preview buffer can be a page
-    /// (slice ③). Every caller already asks "the page on *this* seat", so when
-    /// that day comes the lookup changes here and in no other place.
+    /// It is a pair of one-line functions on purpose: it was written when
+    /// `WindowRuntime::web` was one page, because `BT_WEB_DEV` was the only way
+    /// to reach one, and every caller already asked "the page on *this* seat".
+    /// Slice ③ made the field a map keyed by seat, and that day the lookup
+    /// changed here and in no other place — which is what the pair was for.
     fn web_on(&self, seat: SeatId) -> Option<&webhost::WebSeat> {
-        self.window.web.as_ref().filter(|web| web.seat == seat)
+        self.window.web.get(&seat)
     }
 
     fn web_on_mut(&mut self, seat: SeatId) -> Option<&mut webhost::WebSeat> {
-        self.window.web.as_mut().filter(|web| web.seat == seat)
+        self.window.web.get_mut(&seat)
     }
 
     /// Which toggles the capsule's current host can honour (§7.7 ②).
@@ -24040,10 +24044,7 @@ impl Runtime<'_> {
             // machine, 2026-08-22: the matches lit up and the count stayed
             // blank). What the seat was asked is the one place that knows.
             let asked = self
-                .window
-                .web
-                .as_ref()
-                .filter(|web| web.seat == seat)
+                .web_on(seat)
                 .map(|web| web.found().to_owned())
                 .unwrap_or_default();
             if asked != query {
@@ -24779,11 +24780,14 @@ impl Runtime<'_> {
     /// box you can press has to be the box that was drawn.
     fn web_sheet_layers(&mut self) -> Vec<marks::OverlayLayer> {
         self.window.web_sheet_layout = None;
+        // **This tab's page and no other** (`plan.md` §0 ②「每 tab 单例」). The
+        // map spans the window, and a sheet is drawn over the page it came from:
+        // a page open on a tab that is not on the glass has no body rectangle
+        // here to stand on.
         let Some((seat, say, detail, verb)) = self
-            .window
-            .web
-            .as_ref()
-            .and_then(|web| web.fault().map(|fault| (web.seat, fault)))
+            .web_seat_of_tab()
+            .and_then(|seat| self.web_on(seat).map(|web| (seat, web)))
+            .and_then(|(seat, web)| web.fault().map(|fault| (seat, fault)))
             .filter(|(_, fault)| fault.stands_over_the_page())
             .map(|(seat, fault)| {
                 (
@@ -24797,7 +24801,8 @@ impl Runtime<'_> {
             return Vec::new();
         };
         let scale = self.window.renderer.metrics().scale_factor as f32;
-        let Some(body) = seats::preview_body_rect(&self.seats, &self.seat_layout, scale) else {
+        let Some(body) = seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)
+        else {
             return Vec::new();
         };
         let width = self.window.renderer.measure_chrome_text(
@@ -26454,7 +26459,7 @@ impl Runtime<'_> {
                     // strip draws it with — a ghost is a picture of the tab it
                     // was lifted out of, so the two must not disagree about what
                     // that tab is.
-                    tab.tab_mark(self.window.web.as_ref().map(|web| web.seat)),
+                    tab.tab_mark(&self.window.web.keys().copied().collect()),
                     bt_render::WINDOW_TAB_MARK_LOGICAL_PX,
                     palette.accent,
                     tab.display_title(),
@@ -48381,12 +48386,8 @@ impl Runtime<'_> {
         // pinned at twelve o'clock, so the arc is a still picture and asks for
         // no frames at all, which is what keeps `Reduced` a genuinely idle
         // window rather than a fast animation.
-        let page_loading = motion != Motion::Reduced
-            && self
-                .window
-                .web
-                .as_ref()
-                .is_some_and(|web| web.page().loading);
+        let page_loading =
+            motion != Motion::Reduced && self.window.web.values().any(|web| web.page().loading);
         [
             (tabs_moving
                 || chevron_turning
@@ -52685,8 +52686,7 @@ impl Runtime<'_> {
                     let window = &mut *self.window;
                     window
                         .web
-                        .as_mut()
-                        .filter(|web| web.seat == seat)
+                        .get_mut(&seat)
                         .map(|web| web.go_to(&editor.text, engine, &window.compositor))
                 };
                 if let Some((taken, outcomes)) = compositor_outcomes {
@@ -52695,7 +52695,7 @@ impl Runtime<'_> {
                         self.refresh_chrome();
                         return self.present_chrome_change();
                     }
-                    self.apply_web_outcomes(outcomes)?;
+                    self.apply_web_outcomes(seat, outcomes)?;
                 }
             }
             self.refresh_chrome();
@@ -57188,6 +57188,10 @@ impl Runtime<'_> {
     fn sync_web_page(&mut self, now: Instant) {
         if self.window.web.is_empty() {
             self.window.renderer.set_web_holes(Vec::new());
+            // Nothing is covered when there is nothing to cover, and saying so
+            // keeps the edge below honest: a page opened later under a modal
+            // must still see the rising edge that takes the keyboard back.
+            self.window.web_covered = false;
             return;
         }
         let scale = self.window.renderer.metrics().scale_factor as f32;
@@ -57251,19 +57255,56 @@ impl Runtime<'_> {
                         ]
                     },
                 );
+            // **A seat showing a card has no page to show** (§7.7 ④, W2 slice
+            // ④). Four of the five failures replace the seat's content, and the
+            // card is drawn as ordinary pane chrome — which the transparency
+            // hole would erase, since it is punched over everything the seats
+            // draw (§7.8 ②). So the page goes first and the hole with it, which
+            // is also the honest account: a WebView that is dead, absent or
+            // refused has nothing to put there. Asked of *this* seat's own
+            // fault, because a card is a seat's state and not the window's.
+            let carded = self
+                .window
+                .web
+                .get(&seat)
+                .and_then(webhost::WebSeat::fault)
+                .is_some_and(|fault| !fault.stands_over_the_page());
             // The size comes off the rectangle whatever is standing over it; the
             // presence is the second question, and a page on a tab nobody is
             // looking at answers it the same way a page under a modal does.
             let size = webhost::web_presence(body, false)
                 .bounds()
                 .map(|bounds| (bounds.width, bounds.height));
-            let presence = webhost::web_presence(body, obstructed || index != active);
+            let presence = webhost::web_presence(body, obstructed || index != active || carded);
             placements.push(WebPlacement {
                 seat,
                 presence,
                 size,
             });
         }
+        // **Whatever stands over the page takes the keyboard from it** (§7.7 ④,
+        // W2 slice ④). A page keeps every key this window's table does not claim
+        // — Escape included — so a scrim or a sheet that could only be dismissed
+        // with Escape would be a surface with no way out. On the edge, so that a
+        // dialog with a field of its own is not fought for the keys every frame.
+        //
+        // **Any seat**, and not the focused one: the window has one keyboard and
+        // any page in it can be holding it, so the question a per-seat map turns
+        // this into is whether *something* stands over *some* page.
+        //
+        // A fault is the whole of the second half. The five failure states split
+        // into the four that *replace* the seat (a card, `carded` above) and the
+        // one that stands over the page (the download sheet), and both are this
+        // window raising a surface over a page — so "carded, or a sheet" is
+        // "this seat has a fault at all", said once instead of twice.
+        let covered = obstructed || self.window.web.values().any(|web| web.fault().is_some());
+        if covered
+            && !self.window.web_covered
+            && let Ok(hwnd) = window_hwnd(&self.window.window)
+        {
+            let _ = bt_platform::take_keyboard_focus(hwnd);
+        }
+        self.window.web_covered = covered;
         let window = &mut *self.window;
         let mut holes = Vec::new();
         for placement in placements {
@@ -57729,8 +57770,8 @@ impl Runtime<'_> {
             return Ok(());
         };
         let outcome = match verb {
-            WebHeadVerb::Back => web.go(false),
-            WebHeadVerb::Forward => web.go(true),
+            WebHeadVerb::Back => web.walk_history(false),
+            WebHeadVerb::Forward => web.walk_history(true),
             WebHeadVerb::Reload => web.reload_or_stop(),
             WebHeadVerb::DevTools => Ok(()),
         };
@@ -57763,9 +57804,7 @@ impl Runtime<'_> {
             // sheet — so what is handed over is the address it is standing on.
             webhost::WebFaultVerb::OpenPageInBrowser => {
                 let page = self
-                    .window
-                    .web
-                    .as_ref()
+                    .web_on(seat)
                     .map(|web| web.page().url.clone())
                     .unwrap_or_default();
                 self.hand_url_to_the_browser(&page)
@@ -57790,59 +57829,20 @@ impl Runtime<'_> {
 
     /// Take the download sheet away. The one card with an Escape, and the
     /// reason is that there is a page under it to come back to.
+    ///
+    /// Asked of this tab's page, on `web_sheet_layers`' own argument: the sheet
+    /// that an Escape can be about is the sheet that is on the glass, and the
+    /// window's map spans tabs nobody is looking at.
     fn dismiss_web_sheet(&mut self) -> Result<bool> {
         let dismissed = self
-            .window
-            .web
-            .as_mut()
+            .web_seat_of_tab()
+            .and_then(|seat| self.web_on_mut(seat))
             .is_some_and(webhost::WebSeat::dismiss_sheet);
         if dismissed {
             self.refresh_chrome();
             self.present_chrome_change()?;
         }
         Ok(dismissed)
-    }
-
-    /// Whether a point is inside the page as it stands on the glass this frame.
-    ///
-    /// **Less whatever this window has standing on it** (§7.7 ②, ④, W2 slice
-    /// ④). Two of this window's own surfaces are drawn *over* a page — the
-    /// search capsule in the pane's top-right corner, and the download sheet —
-    /// and both are overlay layers, which is above the transparency hole and
-    /// therefore above the page (§7.8 ②). One subtraction here rather than four
-    /// guards, because the press, the wheel, the hover and the cursor all ask
-    /// this same question: a pointer that is over the capsule is not over the
-    /// page, whatever the rectangles say.
-    fn point_is_on_the_web_page(&self, position: PhysicalPosition<f64>) -> bool {
-        let Some(bounds) = self
-            .window
-            .web
-            .as_ref()
-            .and_then(webhost::WebSeat::shown_at)
-        else {
-            return false;
-        };
-        let (x, y) = (position.x as f32, position.y as f32);
-        let inside = |box_: [f32; 4]| x >= box_[0] && x < box_[2] && y >= box_[1] && y < box_[3];
-        if self
-            .window
-            .web_sheet_layout
-            .as_ref()
-            .is_some_and(|(_, layout)| websheet::covers(layout, x, y))
-        {
-            return false;
-        }
-        if self
-            .window
-            .search_layout
-            .is_some_and(|capsule| self.window.search.is_open() && inside(capsule.frame))
-        {
-            return false;
-        }
-        position.x >= f64::from(bounds.x)
-            && position.y >= f64::from(bounds.y)
-            && position.x < f64::from(bounds.x + bounds.width as i32)
-            && position.y < f64::from(bounds.y + bounds.height as i32)
     }
 
     fn revive_web_pages(&mut self, index: usize) -> Result<()> {
@@ -57925,7 +57925,36 @@ impl Runtime<'_> {
     /// the layout, which is the same rule the single-page version kept: a page
     /// hidden behind a modal is not somewhere a click can land, and the engine's
     /// own bounds are the only account of that which cannot be a frame stale.
+    ///
+    /// **Less whatever this window has standing on it** (§7.7 ②, ④, W2 slice
+    /// ④). Two of this window's own surfaces are drawn *over* a page — the
+    /// search capsule in the pane's top-right corner, and the download sheet —
+    /// and both are overlay layers, which is above the transparency hole and
+    /// therefore above the page (§7.8 ②). One subtraction here rather than four
+    /// guards, because the press, the wheel, the hover and the cursor all ask
+    /// this same question: a pointer that is over the capsule is not over the
+    /// page, whatever the rectangles say. The subtraction is at this door and
+    /// not at [`Self::point_is_on_the_web_page`]'s, so that the forwarders which
+    /// ask *which* page also get it — a click on the capsule that is forwarded
+    /// to the page underneath is the same bug read the other way round.
     fn web_page_at(&self, position: PhysicalPosition<f64>) -> Option<SeatId> {
+        let (x, y) = (position.x as f32, position.y as f32);
+        if self
+            .window
+            .web_sheet_layout
+            .as_ref()
+            .is_some_and(|(_, layout)| websheet::covers(layout, x, y))
+        {
+            return None;
+        }
+        let inside = |box_: [f32; 4]| x >= box_[0] && x < box_[2] && y >= box_[1] && y < box_[3];
+        if self
+            .window
+            .search_layout
+            .is_some_and(|capsule| self.window.search.is_open() && inside(capsule.frame))
+        {
+            return None;
+        }
         self.window.web.iter().find_map(|(seat, web)| {
             let bounds = web.shown_at()?;
             (position.x >= f64::from(bounds.x)
@@ -58069,7 +58098,10 @@ impl Runtime<'_> {
         // The notch is not forwarded as well. A page that received both would
         // scroll while it zoomed, which is the one combination no browser does.
         if self.window.modifiers.control_key() && y != 0.0 {
-            if let Some(web) = self.window.web.as_mut()
+            // The page under the pointer, which is the page the notch was aimed
+            // at — the same question every other wheel event on this path asks.
+            if let Some(seat) = self.web_page_at(position)
+                && let Some(web) = self.web_on_mut(seat)
                 && let Err(error) = web.zoom_by(y > 0.0)
             {
                 eprintln!("BT_WEB {error}");
@@ -84257,7 +84289,7 @@ mod tests {
             "B14: named by its folder's last segment, the same string its head prints"
         );
         assert_eq!(
-            torn.tab_mark(None),
+            torn.tab_mark(&BTreeSet::new()),
             marks::ChromeMark::Folder,
             "and wearing the same folder mark, not a shell's"
         );
@@ -84322,7 +84354,7 @@ mod tests {
             "P15: named by the file, the same string the pane head prints"
         );
         assert_eq!(
-            torn.tab_mark(None),
+            torn.tab_mark(&BTreeSet::new()),
             marks::ChromeMark::File,
             "and wearing the file mark"
         );
@@ -84431,7 +84463,7 @@ mod tests {
             "there is still nothing to type into, which is the honest reading"
         );
         assert_eq!(tab.display_title(), "folio");
-        assert_eq!(tab.tab_mark(None), marks::ChromeMark::Folder);
+        assert_eq!(tab.tab_mark(&BTreeSet::new()), marks::ChromeMark::Folder);
         assert_eq!(
             tab.mark_state(
                 true,
@@ -85156,7 +85188,7 @@ mod tests {
              because the profile rides on the session that moved"
         );
         assert_eq!(
-            torn.tab_mark(None),
+            torn.tab_mark(&BTreeSet::new()),
             profiles::mark(gitbash),
             "so the strip draws the new tab as the shell actually running in it"
         );
