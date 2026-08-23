@@ -56,6 +56,7 @@ mod preview_trace;
 mod preview_watch;
 mod profiles;
 mod psreadline;
+mod quit;
 mod restore;
 mod scheme_watch;
 mod schemes;
@@ -4912,6 +4913,22 @@ struct App {
     /// and queues the other two, and an accepted restore prompt can queue as many
     /// as the file described.
     pending_new_windows: Vec<NewWindowPlan>,
+    /// **A quit this application has been asked for and has not begun**
+    /// (multiwindow slice E2).
+    ///
+    /// [`Self::pending_new_windows`]'s shape for its reason, one verb over:
+    /// `Ctrl+Shift+Q` is answered inside a `Runtime`, which is one window by
+    /// construction, and the first thing a quit has to do is read *every* window.
+    /// So the chord records a debt and [`FolioApp`] spends it at the door, where
+    /// the windows all are.
+    quit_requested: bool,
+    /// **The quit that is under way**, if one is (multiwindow slice E2, §2.8).
+    ///
+    /// On `App` and not on a window, because it is the process leaving: one card,
+    /// one photograph of every window, one write, one wait. See [`crate::quit`]
+    /// for why it is a state machine the loop advances rather than a function the
+    /// chord calls.
+    quit: Option<quit::Quit>,
 }
 
 /// **What a window that has been asked for should open as** (multiwindow slice
@@ -16634,6 +16651,27 @@ struct WindowLaunchPlan {
     pending: Vec<SessionWindowV1>,
 }
 
+/// **Every window the file describes** — the ones that are open, in the order
+/// they opened, then the ones this launch has not opened at all (multiwindow
+/// slice D).
+///
+/// The second half is §7.1.4's "未答复计划并回 lastSession, 不得丢失" read one
+/// level up: a window waiting on the one restore question is a window nobody has
+/// declined, and leaving it out would be this process answering "no" on the
+/// reader's behalf. `window_snapshot` keeps the same promise for the tabs of a
+/// window that *is* open; this keeps it for a window that is not.
+///
+/// A free function so that the property can be tested: `App::session_document`
+/// needs a `GpuContext`, four workers and a store, and the claim here — that a
+/// quit writes **every** window and that an unanswered one survives it — is
+/// about neither.
+fn session_windows<'a>(
+    open: impl Iterator<Item = &'a SessionWindowV1>,
+    unopened: &[SessionWindowV1],
+) -> Vec<SessionWindowV1> {
+    open.cloned().chain(unopened.iter().cloned()).collect()
+}
+
 /// Split the saved windows into the one that opens, the ones that follow it, and
 /// the ones the prompt is about.
 ///
@@ -20513,6 +20551,8 @@ impl Runtime<'_> {
             pending_restore_answer: None,
             pending_application_change: None,
             pending_new_windows: Vec::new(),
+            quit_requested: false,
+            quit: None,
         };
         // **The rest of the file's windows, queued at the door.** A window that
         // held a pinned tab opens straight away, through the very same door
@@ -26075,7 +26115,20 @@ impl Runtime<'_> {
         // it could have: it is the only surface in this window that stands in
         // front of something already happening, so nothing may cover it. Every
         // other member of the chain below floats over a window that still works.
-        stack.modal = if let Some(layout) = self.dirty_gate_layout() {
+        // **The quit card is above the gate**, which is the one ordering *it*
+        // could have: the gate stands in front of one window's shut and this
+        // stands in front of the whole process leaving. It is also the only
+        // surface in this window that is drawn from a fact none of the others
+        // can see — the application's — so a window whose own gate happened to
+        // be up must still show what is being asked of all of them.
+        stack.modal = if let Some(layout) = self.quit_card_layout() {
+            let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+            restore::quit_build(
+                &layout,
+                (width as f32, height as f32),
+                self.app.quit.as_ref().and_then(quit::Quit::hover),
+            )
+        } else if let Some(layout) = self.dirty_gate_layout() {
             let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
             restore::gate_build(
                 &layout,
@@ -31376,6 +31429,15 @@ impl Runtime<'_> {
                 self.app.pending_new_windows.push(NewWindowPlan::fresh(id));
                 Ok(())
             }
+            // **A debt recorded, for the reason above it and one more**
+            // (multiwindow slice E2). Opening a window needs the event loop;
+            // *quitting* needs every window at once, and a `Runtime` is one
+            // window by construction. The loop spends this at its own door — see
+            // [`FolioApp::settle_quit`].
+            shortcuts::Action::Quit => {
+                self.app.quit_requested = true;
+                Ok(())
+            }
             // I103's chain lives inside `close_pane`: the last pane of a tab
             // closes the tab, and the last tab hands off to the window's own
             // shut flow rather than leaving an empty window behind.
@@ -34266,7 +34328,8 @@ impl Runtime<'_> {
                 .git_menu
                 .as_ref()
                 .is_some_and(|menu| menu.prompt.is_some()),
-            menu_or_dialog: self.window.dirty_gate.is_open()
+            menu_or_dialog: self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
+                || self.window.dirty_gate.is_open()
                 || self.window.psreadline_invite.is_open()
                 || self.window.settings.is_open()
                 || self.window.file_menu.is_some()
@@ -41063,6 +41126,276 @@ impl Runtime<'_> {
             ),
         };
         Some(restore::gate_layout(&content, width, height, scale))
+    }
+
+    // ── quitting (multiwindow slice E2, `DESIGN.md` §2.8) ───────────────────
+
+    /// **What this window would lose if the process left now**, by name.
+    ///
+    /// One window's contribution to the summary card's one list. Two classes,
+    /// and the boundary between them is *what outlives the quit*:
+    ///
+    /// * **Dirty preview buffers.** A pool carries paths and never bodies
+    ///   (P151), so an edited buffer that is not written back is gone the moment
+    ///   the process is — the same fact the shut gate is built on, asked about
+    ///   every window instead of this one.
+    /// * **An open editor whose draft is an actual edit** — see
+    ///   [`Self::uncommitted_edit_name`].
+    ///
+    /// Every tab's pool and not the active tab's, on the shut gate's own
+    /// reasoning: a dirty buffer on a tab nobody is looking at is still a dirty
+    /// buffer.
+    fn quit_dirty_names(&self) -> Vec<String> {
+        self.window
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.preview_pool.dirty_names(None))
+            .map(str::to_owned)
+            .chain(self.uncommitted_edit_name())
+            .collect()
+    }
+
+    /// **The draft in this window's open editor, when committing it would change
+    /// something that outlives the quit** (v3 复审 ④-a：非文件缓冲).
+    ///
+    /// The two that qualify, and what `Save` means for each:
+    ///
+    /// * [`RenameSubject::Tab`] — the manual name, which is written into
+    ///   `session.json` and comes back next launch. `Save` = Enter.
+    /// * [`RenameSubject::PreviewName`] — a file moving on disk. `Save` = Enter
+    ///   again, and a rename the filesystem refuses raises its own card
+    ///   (`rename_preview_file`) rather than holding the quit up: what is in
+    ///   front of the reader afterwards is the window they still have.
+    ///
+    /// **[`RenameSubject::WebAddress`] is deliberately not one of them.** What
+    /// committing that draft does is *navigate*, and the page it would navigate
+    /// is the page this quit is closing — so there is nothing for it to lose, and
+    /// a card that listed it would be naming a loss that cannot happen. It is
+    /// still settled with the other two when the answer arrives, because a draft
+    /// abandoned by `Discard` must not then be committed at the door.
+    ///
+    /// A draft equal to what is already committed is **not** an edit: the
+    /// commonest way out of this editor is opening it, changing your mind and
+    /// clicking away (`finish_rename`'s own note), and a card raised over that
+    /// would be asking about a keystroke nobody made.
+    fn uncommitted_edit_name(&self) -> Option<String> {
+        let editor = self.window.rename.as_ref()?;
+        match &editor.subject {
+            RenameSubject::Tab(id) => {
+                let was = self
+                    .window
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == *id)
+                    .and_then(|tab| tab.manual_name.clone());
+                let draft = editor.committed_name();
+                (draft != was).then(|| draft.unwrap_or_else(|| editor.text.clone()))
+            }
+            RenameSubject::PreviewName { source, .. } => {
+                let was = source
+                    .file_path()
+                    .and_then(std::path::Path::file_name)
+                    .map(|name| name.to_string_lossy().into_owned());
+                let draft = editor.text.trim().to_owned();
+                (!draft.is_empty() && Some(&draft) != was.as_ref()).then_some(draft)
+            }
+            RenameSubject::WebAddress { .. } => None,
+        }
+    }
+
+    /// **Write this window's half of the save branch back** (slice E2 phase ①,
+    /// v3).
+    ///
+    /// Item by item through the pool's own [`preview::PreviewPool::save_dirty`],
+    /// which is `Ctrl+S`'s conflict check and `Ctrl+S`'s atomic write; then the
+    /// open editor, committed exactly as Enter commits it. What went through and
+    /// what did not are both reported, because a save that half worked leaves a
+    /// state no single sentence describes.
+    ///
+    /// A conflict is a failure *here* even though it is not one at the pane
+    /// (`SaveOutcome`'s own note: "the disk moved and the window is declining to
+    /// guess"). The difference is what happens next: at the pane the buffer
+    /// survives and the reader can look; at a quit the process was about to
+    /// leave, and leaving would take the buffer with it.
+    fn quit_save(&mut self) -> Result<quit::SaveReport> {
+        let mut report = quit::SaveReport::default();
+        for tab in &mut self.window.tabs {
+            for (name, outcome) in tab.preview_pool.save_dirty() {
+                match outcome {
+                    preview::SaveOutcome::Saved => report.saved.push(name),
+                    preview::SaveOutcome::Conflict => report
+                        .failed
+                        .push((name, preview::preview_conflict_notice().to_owned())),
+                    preview::SaveOutcome::Failed(error) => {
+                        eprintln!("recoverable preview save failure: {error}");
+                        report.failed.push((name, error));
+                    }
+                }
+            }
+        }
+        if let Some(name) = self.uncommitted_edit_name() {
+            self.finish_rename(true)?;
+            report.saved.push(name);
+        }
+        // **The failures are named where they happened.** One card per window
+        // holding one, rather than a single card in whichever window the chord
+        // was pressed in: a notice belongs where the attention already is, and
+        // the buffers this sentence is about are in *this* window.
+        if !report.failed.is_empty() {
+            let names = report.failed_names().join(", ");
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                i18n::quit_not_saved(&names),
+            )?;
+        }
+        // The panes that were showing those buffers are looking at what is now on
+        // the disk, and the ones that failed are still dirty and still say so.
+        self.repaint_preview()?;
+        Ok(report)
+    }
+
+    /// **Throw this window's in-memory modifications away** (slice E2 phase ①).
+    ///
+    /// `discard_dirty` and not `clear`, which is the shut gate's own distinction
+    /// and holds for the same reason one level up: every tab in every window is
+    /// about to be written to `session.json`, and its pool goes with it as the
+    /// list of files the switcher will offer next launch. Emptying the pools here
+    /// would answer "discard my unsaved changes" by also discarding a browsing
+    /// history nobody was asked about.
+    ///
+    /// The open editor is abandoned rather than committed — Escape's verb, which
+    /// is what `Discard` means said about a draft.
+    fn quit_discard(&mut self) -> Result<()> {
+        for tab in &mut self.window.tabs {
+            tab.preview_pool.discard_dirty();
+        }
+        self.finish_rename(false)
+    }
+
+    /// **Commit whatever this window still has open, and take its picture**
+    /// (slice E2 phase ②).
+    ///
+    /// Read-only about everything except the editor, and the editor is §7.1.4's
+    /// standing rule: "未提交的重命名在序列化前提交（blur 语义）". Before the
+    /// snapshot and not after it, which is where `close_window` puts it and for
+    /// the same reason — the name has to be on the tab by the time the tab is
+    /// written down. By the time this runs the card's answer has already settled
+    /// any editor it named, so what is left here is the draft nobody was asked
+    /// about, which blur has always committed.
+    ///
+    /// **Nothing is torn down.** That is the whole of what separates this from
+    /// `close_window`, and it is acceptance gate 2.
+    fn photograph_for_quit(&mut self) -> Result<()> {
+        self.finish_rename(true)?;
+        self.mark_session_dirty(Instant::now());
+        Ok(())
+    }
+
+    /// **Take this window off the screen and let go of everything it holds**
+    /// (slice E2 phase ④).
+    ///
+    /// [`Self::close_window`]'s second half with its first half deliberately
+    /// absent. The picture has been taken and the document is on the disk; a
+    /// window that photographed itself again here would be re-recording after the
+    /// teardown of the windows before it had already begun — the interleaving
+    /// §2.8 exists to forbid — and would hand the store a second document after
+    /// the one this quit already judged.
+    ///
+    /// Hidden rather than dropped, because the loop is still running: the wait
+    /// for the browsers to go needs windows to keep turning
+    /// ([`Self::advance_retirement`]), and a reader must not be looking at three
+    /// dead terminals while it does.
+    fn retire_window(&mut self) -> Result<()> {
+        self.window.window.set_visible(false);
+        self.let_go_of_this_window()
+    }
+
+    /// Whether every page in this window has let go of its browser.
+    fn pages_are_gone(&self) -> bool {
+        self.window.web.is_empty()
+    }
+
+    /// **Turn only the clock the retirement is waiting on**, and say when it next
+    /// needs turning.
+    ///
+    /// Not `turn`: that runs thirty clocks over a window that has shells to drain
+    /// and frames to publish, and this window has neither — its children are shut
+    /// and it is off the screen. What is left owed is one thing, the browser-exit
+    /// wait, which is the only reason the loop is still running at all.
+    fn advance_retirement(&mut self, now: Instant) -> Result<Option<Instant>> {
+        let window = &mut *self.window;
+        let ticked: Vec<(SeatId, Vec<webhost::WebOutcome>)> = window
+            .web
+            .iter_mut()
+            .map(|(seat, web)| (*seat, web.tick(now, &window.compositor)))
+            .collect();
+        for (seat, outcomes) in ticked {
+            self.apply_web_outcomes(seat, outcomes)?;
+        }
+        Ok(self
+            .window
+            .web
+            .values()
+            .filter_map(webhost::WebSeat::next_deadline)
+            .min())
+    }
+
+    /// The summary card's box this frame, or `None` when no quit is asking.
+    ///
+    /// [`Self::dirty_gate_layout`]'s shape with one difference that matters: the
+    /// names are read off the transaction rather than re-derived from the pools,
+    /// because they span every window and this borrow holds one. See
+    /// [`quit::Quit::names`].
+    fn quit_card_layout(&mut self) -> Option<restore::QuitLayout> {
+        let quit = self.app.quit.as_ref()?;
+        if !quit.is_asking() {
+            return None;
+        }
+        let message = i18n::quit_unsaved_message(&quit.names().join(", "));
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let (width, height) = (width as f32, height as f32);
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let room = restore::content_width(width, scale);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let message_lines = restore::wrap(&message, room, |line| {
+            renderer.measure_chrome_text(gpu, line, restore::SUB_FONT_LOGICAL_PX * scale)
+        });
+        let content = restore::QuitContent {
+            message_lines,
+            save_text_width: renderer.measure_chrome_text(
+                gpu,
+                restore::quit_save_text(),
+                restore::BUTTON_FONT_LOGICAL_PX * scale,
+            ),
+            cancel_text_width: renderer.measure_chrome_text(
+                gpu,
+                restore::gate_cancel_text(),
+                restore::BUTTON_FONT_LOGICAL_PX * scale,
+            ),
+            discard_text_width: renderer.measure_chrome_text(
+                gpu,
+                restore::gate_discard_text(),
+                restore::BUTTON_FONT_LOGICAL_PX * scale,
+            ),
+        };
+        Some(restore::quit_layout(&content, width, height, scale))
+    }
+
+    /// Spend the summary card's one answer, whichever window it was pressed in.
+    fn answer_quit_card(&mut self, answer: quit::QuitAnswer) -> Result<()> {
+        let Some(quit) = self.app.quit.as_mut() else {
+            return Ok(());
+        };
+        if !quit.is_asking() {
+            return Ok(());
+        }
+        quit.answer(answer);
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 
     // ── the preview's filename switcher (P130-P137) ─────────────────────────
@@ -50480,6 +50813,7 @@ impl Runtime<'_> {
         // pointer, so a scrim never leaves a bar lit behind it.
         let free = self.settings_layout().is_none()
             && self.dirty_gate_layout().is_none()
+            && !self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
             && self.chrome_target_at(position).is_none();
         self.note_preview_body_hover(free.then_some(position))?;
         // The lane the pointer is in — the fact that lights one pane's mark and
@@ -50526,6 +50860,22 @@ impl Runtime<'_> {
             if self.window.settings.set_hover(Some(hover)) && self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
+            return Ok(());
+        }
+        // The quit card takes the pointer outright, scrim and all, in the order
+        // it is drawn.
+        if let Some(layout) = self.quit_card_layout() {
+            let over = restore::quit_hit(&layout, position.x, position.y);
+            let moved = self
+                .app
+                .quit
+                .as_mut()
+                .is_some_and(|quit| quit.set_hover(Some(over)));
+            if moved && self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+            self.note_tooltip(None)?;
+            self.update_chrome_hover_target(None)?;
             return Ok(());
         }
         // The gate takes the pointer outright, on its scrim as well as on its box.
@@ -53821,7 +54171,20 @@ impl Runtime<'_> {
                 self.after_search_change()?;
             }
         }
-        // The gate first, and it is the strictest modal in the window: every
+        // The quit card first, in the order it is drawn: every press is
+        // swallowed, its own scrim included, and the answer is the application's
+        // whichever window it was pressed in.
+        if let (Some(layout), Some(position)) = (self.quit_card_layout(), self.window.pointer_position)
+        {
+            if state == ElementState::Pressed && button == MouseButton::Left {
+                let target = restore::quit_hit(&layout, position.x, position.y);
+                if let Some(answer) = restore::quit_answer(target) {
+                    self.answer_quit_card(answer)?;
+                }
+            }
+            return Ok(());
+        }
+        // The gate next, and it is the strictest modal the *window* has: every
         // press is swallowed, including the ones that land on its own scrim,
         // because the action it is standing in front of is already under way.
         if let (Some(layout), Some(position)) =
@@ -56315,6 +56678,26 @@ impl Runtime<'_> {
         {
             return Ok(());
         }
+        // **The quit card owns the keyboard outright, in every window**, above
+        // the gate for the reason it is drawn above it. Enter answers with the
+        // focused button, which is `Cancel`, and Esc answers the same way — a
+        // question about losing work can only be dismissed as "not that", and
+        // this one is asked of the whole application, so no window may go on
+        // taking keys while it stands.
+        if self.app.quit.as_ref().is_some_and(quit::Quit::is_asking) {
+            if !event.repeat {
+                match &event.logical_key {
+                    Key::Named(NamedKey::Enter) => {
+                        self.answer_quit_card(quit::QUIT_FOCUSED_ANSWER)?;
+                    }
+                    Key::Named(NamedKey::Escape) => {
+                        self.answer_quit_card(quit::QuitAnswer::Cancel)?;
+                    }
+                    _ => {}
+                }
+            }
+            return Ok(());
+        }
         // **The gate owns the keyboard outright**, above the settings dialog for
         // the reason it is drawn above it. Enter answers with the focused button,
         // which is `Cancel` — the answer that changes nothing — and Esc answers
@@ -57694,7 +58077,8 @@ impl Runtime<'_> {
     /// rectangle; a scrim covers every rectangle, and a hole punched through one
     /// would be a page read clearly through a dimmed window.
     fn a_modal_covers_the_window(&self) -> bool {
-        self.window.dirty_gate.is_open()
+        self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
+            || self.window.dirty_gate.is_open()
             || self.window.psreadline_invite.is_open()
             || self.window.settings.is_open()
             || self.window.restore_prompt.is_open()
@@ -59310,25 +59694,49 @@ impl Runtime<'_> {
             let id = self.window.window.id();
             self.app.forget_window(id, now);
         }
+        self.let_go_of_this_window()
+    }
+
+    /// **Everything this window is holding on to, let go** — the shut's second
+    /// half, said once.
+    ///
+    /// Split out by multiwindow slice E2 so that a quit can spend it without the
+    /// first half: [`Self::close_window`] decides where the window's *record*
+    /// goes and then calls this, and [`Self::retire_window`] calls this alone,
+    /// because a quit has already recorded every window at once.
+    ///
+    /// **Every child is told, whatever the one before it answered**, and the
+    /// first refusal is what comes back. A loop that stopped at the first
+    /// failure would leave the shells after it running behind a window nobody
+    /// can see — the one outcome worse than an error, and the reason `fail`'s
+    /// own comment says so about windows.
+    fn let_go_of_this_window(&mut self) -> Result<()> {
         self.window.ime_system_caret.destroy();
         // **The page's controller is closed here, beside the children.** A
         // controller merely dropped leaves a browser process nobody points at
         // for as long as the environment lives — which for the last window is
         // no time at all, and for one window among several is the rest of the
-        // session. The wait for that browser to go is the state machine's, and
-        // this window is not around for it: what is owed at this door is the
-        // close, and the process tree goes when the environment does.
+        // session. The wait for that browser to go is the state machine's; on
+        // the ordinary shut this window is not around for it, and on a quit the
+        // loop is deliberately still turning so that it can be.
         for web in self.window.web.values_mut() {
             let _ = web.close(&self.window.compositor);
         }
+        let mut refused = None;
         for tab in &mut self.window.tabs {
             for (_, leaf) in tab.leaves_mut() {
-                if let Some(pty) = leaf.pty.as_mut() {
-                    pty.shutdown().context("shut down child process")?;
+                if let Some(pty) = leaf.pty.as_mut()
+                    && let Err(error) = pty.shutdown().context("shut down child process")
+                    && refused.is_none()
+                {
+                    refused = Some(error);
                 }
             }
         }
-        Ok(())
+        match refused {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// **Put this window in the vault as one row** (multiwindow slice D, ruling
@@ -59397,22 +59805,10 @@ impl App {
             schema_version: SESSION_SCHEMA_VERSION,
             theme: session_theme_mode(self.theme_mode),
             cursor_style: session_cursor_style(current_cursor_style()),
-            windows: self
-                .window_pictures
-                .iter()
-                .map(|(_, window)| window.clone())
-                .chain(
-                    // **A window the launch has not opened yet is still in the
-                    // file** (multiwindow slice D). It is waiting on one question
-                    // and an unanswered question is not a "no" — the same
-                    // sentence §7.1.4 already says about a tab, which
-                    // `window_snapshot` keeps for the window that *is* open.
-                    // Without this line, closing the last window while the prompt
-                    // still stands would answer it "no" on the reader's behalf,
-                    // and the windows they never declined would be gone.
-                    self.pending_restore_windows.iter().cloned(),
-                )
-                .collect(),
+            windows: session_windows(
+                self.window_pictures.iter().map(|(_, window)| window),
+                &self.pending_restore_windows,
+            ),
             recent: self.recent.to_persisted(),
         }
     }
@@ -60222,6 +60618,299 @@ mod multiwindow_session_tests {
     }
 }
 
+/// **Quitting** (multiwindow slice E2, `DESIGN.md` §2.8).
+///
+/// The transaction's own order and verdicts are pinned in `quit.rs`, against the
+/// state machine that holds them. What is pinned here is the half that only this
+/// file can answer: what the document ends up holding, what does **not** end up
+/// in the vault, and that the loop's two doors spend the transaction the way the
+/// transaction asked to be spent.
+#[cfg(test)]
+mod quit_transaction_tests {
+    use super::{SessionWindowV1, TabV1, quit, restore, seed, session_windows};
+    use std::time::SystemTime;
+
+    /// This file, read as text — the witness for the claims below that are about
+    /// *where* something is and is not written.
+    const SOURCE: &str = include_str!("main.rs");
+
+    fn window(cwd: &str) -> SessionWindowV1 {
+        SessionWindowV1 {
+            tabs: vec![super::seeded_tab(&seed::Seed::Term {
+                profile_id: "pwsh".to_owned(),
+                cwd: cwd.to_owned(),
+                manual_name: None,
+            })],
+            ..SessionWindowV1::default()
+        }
+    }
+
+    /// The body of one function of this file, as text.
+    ///
+    /// The signature is handed over **in pieces and joined here**, on
+    /// `only_one_line_in_this_file_hands_the_store_a_document`'s own rule: this
+    /// module stands earlier in the file than the code it reads, so a needle
+    /// written out whole would find *this test's own prose* first and every
+    /// assertion below would be about a string literal.
+    fn body(signature: &[&str]) -> &'static str {
+        let signature = signature.concat();
+        let start = SOURCE
+            .find(signature.as_str())
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+    }
+
+    /// RED (multiwindow slice E2, acceptance gate: 「三窗 Quit → 文件 windows[] =
+    /// 3、Recent 零新增窗口种子」) — **a quit writes every window and vaults
+    /// none.**
+    ///
+    /// The whole behavioural claim of the slice, in one case with its own
+    /// contrast group. Quitting three windows leaves three paragraphs in the file
+    /// and nothing at all in Recent; closing those same three one at a time
+    /// leaves **one** paragraph and **two** vault rows, because two of those
+    /// shuts were the user closing a window and this product files those away
+    /// (slice D ruling ②).
+    ///
+    /// The difference between the two is one fork, and this test drives it: a
+    /// quit never reaches `close_window`'s `else` branch, because it never
+    /// reaches `close_window` at all — [`Runtime::retire_window`] is the teardown
+    /// half without the record half. The pin below holds that structurally; this
+    /// holds what it *produces*.
+    ///
+    /// Red gate: let a quit go through `FolioApp::close` per window — the obvious
+    /// implementation, and the one the plan exists to forbid — and the first two
+    /// windows land in Recent and leave the file, which is the second half of
+    /// this case exactly.
+    #[test]
+    fn quit_writes_every_window_and_vaults_none() {
+        let open = [window(r"D:\a"), window(r"D:\b"), window(r"D:\c")];
+
+        // The quit: every picture is still in the list when the document is
+        // assembled, and the vault was never opened.
+        let mut vault = seed::SeedVault::default();
+        let quit_document = session_windows(open.iter(), &[]);
+        assert_eq!(
+            quit_document.len(),
+            3,
+            "every window the reader had open is in the file"
+        );
+        assert_eq!(quit_document, open, "and each of them says what it said");
+        assert_eq!(vault.len(), 0, "not one seed goes into the vault");
+
+        // The contrast group: the same three windows, closed one at a time.
+        // `App::forget_window` takes the picture out and `Runtime::close_window`
+        // puts the row in, for every shut but the last.
+        let mut pictures: Vec<SessionWindowV1> = open.to_vec();
+        while pictures.len() > 1 {
+            let closed = pictures.remove(0);
+            let seeds: Vec<seed::Seed> = closed.tabs.iter().map(super::restore_row_seed).collect();
+            vault.record(seed::Seed::Window { seeds }, Vec::new(), SystemTime::now());
+        }
+        assert_eq!(
+            session_windows(pictures.iter(), &[]).len(),
+            1,
+            "closing windows one at a time leaves the file describing what is open"
+        );
+        assert_eq!(vault.len(), 2, "and the two that were closed in Recent");
+    }
+
+    /// RED — **an unanswered restore question survives a quit** (§7.1.4:
+    /// 「未答复计划并回 lastSession, 不得丢失」).
+    ///
+    /// A launch that found a saved window with nothing pinned has not opened it
+    /// and has not been told to forget it. Quitting before the prompt is answered
+    /// must write it back, exactly as it would be written back by the last window
+    /// closing — an unanswered question is not a "no", and a quit is not an
+    /// answer either.
+    ///
+    /// Red gate: drop the `unopened` half of `session_windows` and the window the
+    /// reader never declined is gone.
+    #[test]
+    fn a_question_nobody_answered_survives_the_quit() {
+        let open = [window(r"D:\open")];
+        let waiting = [window(r"D:\never-opened")];
+        let document = session_windows(open.iter(), &waiting);
+        assert_eq!(document.len(), 2);
+        assert_eq!(
+            document[1], waiting[0],
+            "the window that was never opened is written back as it came out"
+        );
+    }
+
+    /// PIN — **the vault has one door and a quit does not go through it.**
+    ///
+    /// The structural half of `quit_writes_every_window_and_vaults_none`, checked
+    /// where it can actually be broken: `vault_this_window` is called from
+    /// exactly one place in this file, that place is the branch `close_window`
+    /// takes when the shut is *not* the process ending, and the quit's own
+    /// teardown names neither it nor the store.
+    ///
+    /// Red gate: put a `vault_this_window` in `retire_window` and the count is 3;
+    /// move the existing call out of the `else` and the second assertion goes.
+    #[test]
+    fn the_only_door_into_the_vault_is_a_window_the_user_closed() {
+        let door = ["vault_this_", "window("].concat();
+        assert_eq!(
+            SOURCE.matches(door.as_str()).count(),
+            2,
+            "one definition and one call site"
+        );
+        let close = body(&[
+            "    fn close_",
+            "window(&mut self, ending: bool) -> Result<()> {",
+        ]);
+        assert!(
+            close.contains(&["} else {\n            self.", door.as_str()].concat()),
+            "the vault is the branch a shut that is *not* the process ending takes"
+        );
+        let retire = body(&["    fn retire_", "window(&mut self) -> Result<()> {"]);
+        assert!(
+            !retire.contains("vault") && !retire.contains("mark_session_dirty"),
+            "a quit's teardown neither files a window away nor re-records one"
+        );
+    }
+
+    /// PIN (方案 ③) — **the quit judges the write, and the ordinary paths do
+    /// not have to.**
+    ///
+    /// `flush_judged` exists for exactly one caller and this is the check that it
+    /// still is that caller: the `Write` arm hands its answer to
+    /// `Quit::written`, which is where "a document that did not reach the disk
+    /// keeps the windows open" is decided (pinned in `quit.rs`).
+    ///
+    /// Red gate: swallow the result with `let _ =` and this goes red one line
+    /// before the process starts hiding windows over a file it never wrote.
+    #[test]
+    fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
+        let settle = body(&[
+            "    fn settle_",
+            "quit(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {",
+        ]);
+        assert!(
+            settle.contains("app.session_store.flush_judged()"),
+            "the quit's write is the judged one"
+        );
+        assert!(
+            settle.contains("quit.written(landed.is_ok())"),
+            "and the answer is what the transaction is told"
+        );
+        assert!(
+            settle.contains("i18n::Text::QuitSessionNotWritten"),
+            "a write that did not land is said out loud on every window"
+        );
+    }
+
+    /// PIN (審 #7) — **a quit does not go through `exiting`, and `exiting` is
+    /// unchanged.**
+    ///
+    /// The two are different machines for different events and the plan's whole
+    /// §E2 rests on keeping them apart: `exiting` runs after the loop has stopped
+    /// and shuts every window with `for_each_window`, which stops at the first
+    /// failure and interleaves each window's picture with its own teardown. A
+    /// quit that reused it would photograph window three after window one's
+    /// browser had already been told to go.
+    ///
+    /// Red gate: point `QuitStep::Exit` at `close_window` and this names the
+    /// call.
+    #[test]
+    fn the_quit_and_the_loops_own_backstop_stay_two_machines() {
+        let settle = body(&[
+            "    fn settle_",
+            "quit(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {",
+        ]);
+        let shut = ["close_", "window"].concat();
+        assert!(
+            !settle.contains(shut.as_str()),
+            "a quit never spends the per-window shut"
+        );
+        let exiting = body(&["    fn exit", "ing(&mut self, _event_loop: &ActiveEventLoop) {"]);
+        assert!(
+            exiting.contains(&[shut.as_str(), "(true)"].concat()),
+            "and the backstop for a loop stopped by something else is untouched"
+        );
+    }
+
+    /// PIN — **the card's three answers are the three the transaction knows**,
+    /// and the pointer can reach each of them.
+    ///
+    /// The drawing and the machine are in two files, so the one thing that can
+    /// silently part company between them is which presses produce which answer.
+    ///
+    /// Red gate: make `quit_answer` return `Some(Cancel)` for the panel and a
+    /// press on the scrim quietly abandons a quit the reader was still reading.
+    #[test]
+    fn every_button_on_the_card_answers_and_the_face_answers_nothing() {
+        use quit::{QuitAnswer, QuitTarget};
+        assert_eq!(restore::quit_answer(QuitTarget::Save), Some(QuitAnswer::Save));
+        assert_eq!(
+            restore::quit_answer(QuitTarget::Discard),
+            Some(QuitAnswer::Discard)
+        );
+        assert_eq!(
+            restore::quit_answer(QuitTarget::Cancel),
+            Some(QuitAnswer::Cancel)
+        );
+        assert_eq!(restore::quit_answer(QuitTarget::Panel), None);
+        assert_eq!(
+            quit::QUIT_FOCUSED_ANSWER,
+            QuitAnswer::Cancel,
+            "Enter presses the answer that changes nothing"
+        );
+    }
+
+    /// PIN — **the card's three buttons are three rectangles that do not
+    /// overlap**, in the order the gate already taught the reader.
+    ///
+    /// `Discard` hard right where the gate puts it, `Cancel` to its left where
+    /// the gate puts it, and `Save` to the left of both.
+    #[test]
+    fn the_three_buttons_stand_in_the_order_the_gate_taught() {
+        let content = restore::QuitContent {
+            message_lines: vec!["Unsaved: a.txt, b.md".to_owned()],
+            save_text_width: 30.0,
+            cancel_text_width: 40.0,
+            discard_text_width: 50.0,
+        };
+        let layout = restore::quit_layout(&content, 1600.0, 900.0, 1.0);
+        let save = restore::quit_hit(&layout, 0.0, 0.0);
+        assert_eq!(save, quit::QuitTarget::Panel, "the scrim is the face");
+        let centre = |rect: [f32; 4]| {
+            (
+                f64::from((rect[0] + rect[2]) / 2.0),
+                f64::from((rect[1] + rect[3]) / 2.0),
+            )
+        };
+        let (save, cancel, discard) = restore::quit_button_rects(&layout);
+        assert!(save[2] <= cancel[0], "Save is left of Cancel");
+        assert!(cancel[2] <= discard[0], "Cancel is left of Discard");
+        for (rect, target) in [
+            (save, quit::QuitTarget::Save),
+            (cancel, quit::QuitTarget::Cancel),
+            (discard, quit::QuitTarget::Discard),
+        ] {
+            let (x, y) = centre(rect);
+            assert_eq!(restore::quit_hit(&layout, x, y), target);
+        }
+    }
+
+    /// PIN — **a tab whose seeds round-trip is what these fixtures rely on.**
+    ///
+    /// Guards the fixture rather than the product: if `seeded_tab` ever stopped
+    /// producing a tab `restore_row_seed` can read back, the contrast group above
+    /// would be counting rows that say nothing.
+    #[test]
+    fn the_fixtures_windows_carry_a_place() {
+        let one = window(r"D:\a");
+        assert!(matches!(
+            super::restore_row_seed(&one.tabs[0]),
+            seed::Seed::Term { .. }
+        ));
+        assert_eq!(one.tabs.len(), 1);
+        let _: &TabV1 = &one.tabs[0];
+    }
+}
+
 #[cfg(test)]
 mod application_change_tests {
     use super::ApplicationChange;
@@ -60399,6 +61088,15 @@ impl FolioApp {
         if !self.windows.contains(id) {
             return Ok(());
         }
+        // **A quit answers this door for every window at once, so no window may
+        // answer it for itself while one is under way** (multiwindow slice E2).
+        // Two different things would go wrong if it did: the shut of a window
+        // that is not the last one files its tabs in Recent, which is exactly
+        // what quitting must not do — 「一颗种子都不进 Recent」 — and its picture
+        // would leave a document the quit may already have written.
+        if self.app.as_ref().is_some_and(|app| app.quit.is_some()) {
+            return Ok(());
+        }
         // **Asked before the window is told, because it decides what the close
         // means** (multiwindow slice D, ruling ②). The last window's shut is the
         // process ending and its picture stays in the file; any other window's is
@@ -60541,6 +61239,191 @@ impl FolioApp {
             app.record_session(Instant::now());
         }
         Ok(())
+    }
+
+    /// **Spend the quit** (multiwindow slice E2, `DESIGN.md` §2.8).
+    ///
+    /// The one driver of [`quit::Quit`], and it holds no policy of its own: it
+    /// performs whichever step the transaction asks for, reports what happened,
+    /// and asks again. What the phases are and what may follow what is
+    /// [`quit`]'s, which is how "every window is photographed before anything is
+    /// torn down" ends up being a property with a test rather than an ordering
+    /// somebody has to keep noticing in seventy thousand lines.
+    ///
+    /// Spent at the loop's two doors, exactly as the pending window is and for
+    /// the same reason: it needs the `ActiveEventLoop` and every window at once,
+    /// and a `Runtime` has never held either.
+    fn settle_quit(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        self.begin_quit_if_asked()?;
+        loop {
+            let Some(step) = self
+                .app
+                .as_ref()
+                .and_then(|app| app.quit.as_ref())
+                .map(quit::Quit::step)
+            else {
+                return Ok(());
+            };
+            match step {
+                // Both of these are waits, and the loop has to go back round for
+                // them: one for a press, one for a browser process.
+                quit::QuitStep::Ask | quit::QuitStep::WaitForPages => return Ok(()),
+                quit::QuitStep::Save => {
+                    let mut report = quit::SaveReport::default();
+                    self.for_each_window(|runtime| {
+                        let theirs = runtime.quit_save()?;
+                        report.saved.extend(theirs.saved);
+                        report.failed.extend(theirs.failed);
+                        Ok(())
+                    })?;
+                    self.report_to_quit(|quit| quit.saved(&report));
+                }
+                quit::QuitStep::Discard => {
+                    self.for_each_window(|runtime| runtime.quit_discard())?;
+                    self.report_to_quit(quit::Quit::discarded);
+                }
+                // **Read-only, over every window, before anything else happens.**
+                quit::QuitStep::Photograph => {
+                    self.for_each_window(|runtime| runtime.photograph_for_quit())?;
+                    self.report_to_quit(quit::Quit::photographed);
+                }
+                quit::QuitStep::Write => {
+                    let landed = match self.app.as_mut() {
+                        Some(app) => app.session_store.flush_judged(),
+                        None => return Ok(()),
+                    };
+                    if let Err(error) = &landed {
+                        eprintln!("{APP_NAME} did not quit: {error}");
+                        // Said on every window, because the failure is the
+                        // process's and the reader is looking at one of them.
+                        self.for_each_window(|runtime| {
+                            runtime.toast(
+                                toast::ToastKind::Error,
+                                toast::ToastAnchor::Window,
+                                None,
+                                i18n::Text::QuitSessionNotWritten.text(),
+                            )
+                        })?;
+                    }
+                    self.report_to_quit(|quit| quit.written(landed.is_ok()));
+                }
+                quit::QuitStep::Retire => {
+                    // **Not `for_each_window`**, and this is the one place in the
+                    // loop where that matters: it stops at the first failure, and
+                    // here every window has to be told whatever the one before it
+                    // answered. A child that refused to die is said out loud and
+                    // changes nothing about the picture, which is already on the
+                    // disk (方案 ④: 「PTY teardown 任一报错不影响已写的照片」).
+                    for index in 0..self.windows.len() {
+                        if let Some(mut runtime) = self.runtime_at(index)
+                            && let Err(error) = runtime.retire_window()
+                        {
+                            eprintln!("{APP_NAME} quit, and a child did not go: {error:#}");
+                        }
+                    }
+                    let now = Instant::now();
+                    self.report_to_quit(|quit| quit.retired(now));
+                }
+                quit::QuitStep::Exit => {
+                    // The run's sentinel, dropped once — `App::finish`, spent
+                    // here for the reason `FolioApp::close` spends it there: this
+                    // is where "there are no windows left" becomes true.
+                    if let Some(app) = self.app.as_mut() {
+                        app.quit = None;
+                        app.finish();
+                    }
+                    self.windows.clear();
+                    event_loop.exit();
+                    return Ok(());
+                }
+                quit::QuitStep::Abandon => {
+                    if let Some(app) = self.app.as_mut() {
+                        app.quit = None;
+                    }
+                    // The card has gone and the windows are exactly as they were.
+                    return self.for_each_window(|runtime| {
+                        if runtime.refresh_overlay() {
+                            runtime.present_chrome_change()
+                        } else {
+                            Ok(())
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    /// Open the transaction, if a chord asked for one and none is under way.
+    ///
+    /// **The scan is the first thing that happens and it reads every window**,
+    /// which is the whole reason this lives here: the card names one list, and no
+    /// borrow inside a `Runtime` can see past its own window to build it.
+    fn begin_quit_if_asked(&mut self) -> Result<()> {
+        let asked = self
+            .app
+            .as_mut()
+            .is_some_and(|app| std::mem::take(&mut app.quit_requested) && app.quit.is_none());
+        if !asked {
+            return Ok(());
+        }
+        let mut names = Vec::new();
+        self.for_each_window(|runtime| {
+            names.extend(runtime.quit_dirty_names());
+            Ok(())
+        })?;
+        let Some(app) = self.app.as_mut() else {
+            return Ok(());
+        };
+        app.quit = Some(quit::Quit::begin(names));
+        // The card, on every window — one question, and no window left taking
+        // keys behind it. A quit with nothing to ask about raises none, so this
+        // costs a rebuilt overlay stack only when there is something to draw.
+        if self
+            .app
+            .as_ref()
+            .is_some_and(|app| app.quit.as_ref().is_some_and(quit::Quit::is_asking))
+        {
+            self.for_each_window(|runtime| {
+                if runtime.refresh_overlay() {
+                    runtime.present_chrome_change()
+                } else {
+                    Ok(())
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Hand the transaction one report, if there is a transaction to hand it to.
+    fn report_to_quit(&mut self, report: impl FnOnce(&mut quit::Quit) -> quit::QuitStep) {
+        if let Some(quit) = self.app.as_mut().and_then(|app| app.quit.as_mut()) {
+            report(quit);
+        }
+    }
+
+    /// Turn the retirement's one clock over every window, and say when it next
+    /// needs turning.
+    ///
+    /// The whole of what a hidden window is still owed: its shells are shut and
+    /// it is off the screen, so the thirty clocks `turn` reads have nothing left
+    /// to read.
+    fn advance_retirement(&mut self, now: Instant) -> Result<Option<Instant>> {
+        let mut deadline = None;
+        for index in 0..self.windows.len() {
+            let Some(mut runtime) = self.runtime_at(index) else {
+                continue;
+            };
+            deadline = earliest_deadline([deadline, runtime.advance_retirement(now)?]);
+        }
+        Ok(deadline)
+    }
+
+    /// Whether every page in every window has let go of its browser.
+    fn every_page_has_gone(&mut self) -> bool {
+        (0..self.windows.len()).all(|index| {
+            self.runtime_at(index)
+                .is_none_or(|runtime| runtime.pages_are_gone())
+        })
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: anyhow::Error) {
@@ -60717,6 +61600,19 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         if !self.windows.contains(window_id) {
             return;
         }
+        // **A retiring window answers nothing** (multiwindow slice E2 phase ④).
+        // It is hidden, its shells are shut and its picture is written; whatever
+        // the platform still has queued for it is about a window that is on its
+        // way out, and running a redraw or a key through it would be this process
+        // doing work on behalf of something that no longer exists.
+        if self
+            .app
+            .as_ref()
+            .and_then(|app| app.quit.as_ref())
+            .is_some_and(quit::Quit::is_retiring)
+        {
+            return;
+        }
         let Some(mut runtime) = self.runtime(window_id) else {
             return;
         };
@@ -60871,6 +61767,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         // open another, and asking in this order means a failure to open never
         // leaves a window that should have been shut standing.
         let result = result.and_then(|()| self.open_pending_window(event_loop));
+        // And the whole application's own door, last: `Ctrl+Shift+Q` records a
+        // debt inside one window and what it starts belongs to the process.
+        // After the shut above, on that door's own reasoning — a chord cannot
+        // both close this window and quit — and after the open, so that a window
+        // queued by the same turn is in the registry before it is photographed.
+        let result = result.and_then(|()| self.settle_quit(event_loop));
         if let Err(error) = result {
             self.fail(event_loop, error);
         }
@@ -60880,10 +61782,47 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         if self.app.is_none() {
             return;
         }
+        // **The retirement's own turn, and nothing else's** (multiwindow slice
+        // E2 phase ④). Past this point every window is hidden, its shells are
+        // shut and its picture is on the disk; the only thing the loop is still
+        // running for is the wait for the browsers to let go, so that is the only
+        // clock it turns. Falling through to the sweep below would drain shut
+        // shells and publish frames for windows nobody can see.
+        if self
+            .app
+            .as_ref()
+            .and_then(|app| app.quit.as_ref())
+            .is_some_and(quit::Quit::is_retiring)
+        {
+            let now = Instant::now();
+            let waking = match self.advance_retirement(now) {
+                Ok(deadline) => deadline,
+                Err(error) => {
+                    self.fail(event_loop, error);
+                    return;
+                }
+            };
+            let gone = self.every_page_has_gone();
+            self.report_to_quit(|quit| quit.pages(gone, now));
+            if let Err(error) = self.settle_quit(event_loop) {
+                self.fail(event_loop, error);
+                return;
+            }
+            let bound = self
+                .app
+                .as_ref()
+                .and_then(|app| app.quit.as_ref())
+                .and_then(quit::Quit::deadline);
+            event_loop.set_control_flow(
+                earliest_deadline([waking, bound]).map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
+            );
+            return;
+        }
         if let Err(error) = self
             .settle_application_change()
             .and_then(|()| self.settle_restore_answer())
             .and_then(|()| self.open_pending_window(event_loop))
+            .and_then(|()| self.settle_quit(event_loop))
         {
             self.fail(event_loop, error);
             return;

@@ -2569,6 +2569,11 @@ mod keyboard_tests {
     const EXPECTED_CHORDS: &[(&str, &str)] = &[
         ("new-tab", "Ctrl+Shift+n"),
         ("new-window", "Ctrl+Shift+m"),
+        // **One arrived on 2026-08-23** (multiwindow slice E2): the whole
+        // application leaving. It is claimed back off a focused page like every
+        // other window verb — a page that swallowed it would be a page a reader
+        // cannot quit out of.
+        ("quit", "Ctrl+Shift+q"),
         ("close-pane", "Ctrl+Shift+w"),
         ("next-tab", "Ctrl+Tab"),
         ("prev-tab", "Ctrl+Shift+Tab"),
@@ -2624,7 +2629,7 @@ mod keyboard_tests {
     }
 
     /// RED — the reconciliation. The table the window dispatches on and the list
-    /// the web host takes back from a focused page are the same 30 rows.
+    /// the web host takes back from a focused page are the same rows.
     #[test]
     fn the_chord_table_the_web_seat_claims_is_the_table_the_window_ships() {
         let spelled: Vec<(&str, String)> = BINDINGS
@@ -2636,7 +2641,7 @@ mod keyboard_tests {
             .map(|(id, chord)| (*id, (*chord).to_owned()))
             .collect();
         assert_eq!(spelled, expected);
-        assert_eq!(spelled.len(), 33);
+        assert_eq!(spelled.len(), 34);
     }
 
     /// RED — and every one of them reaches a virtual key, because
@@ -2646,7 +2651,7 @@ mod keyboard_tests {
         let claims = claimable_chords(&Shortcuts::defaults(), every_focus());
         assert_eq!(
             claims.len(),
-            33,
+            34,
             "a chord this window owns that the web host cannot name in Win32 is \
              a chord that silently stops working while a page has the focus"
         );

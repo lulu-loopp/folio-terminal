@@ -2474,6 +2474,30 @@ impl PreviewPool {
             .map(|buffer| buffer.name.as_str())
     }
 
+    /// **Write every dirty buffer in this pool back**, in the pool's own order,
+    /// and report what each one came to (multiwindow slice E2 phase ①).
+    ///
+    /// One door for the quit card's `Save`, and it goes through [`
+    /// PreviewBuffer::save`] — the same conflict check and the same atomic write
+    /// `Ctrl+S` uses, per buffer. A second spelling of "write the pool back"
+    /// would be a second answer to what a save *is*, and the one that got the
+    /// mtime comparison wrong would be the one nobody pressed often enough to
+    /// notice.
+    ///
+    /// **Every dirty buffer is tried, including the ones after a failure.**
+    /// Stopping at the first refusal would hand the reader a list they cannot
+    /// act on: half of it saved, half of it never attempted, and no way to tell
+    /// which is which.
+    ///
+    /// [`PreviewBuffer::save`]: PreviewBuffer::save
+    pub fn save_dirty(&mut self) -> Vec<(String, SaveOutcome)> {
+        self.buffers
+            .iter_mut()
+            .filter(|buffer| buffer.dirty)
+            .map(|buffer| (buffer.name.clone(), buffer.save()))
+            .collect()
+    }
+
     /// Forget everything. The two gates that take a pool's *home* away call it
     /// once the user has said the edits may go (P123/P124): closing the last
     /// preview pane strands the pool, and closing the tab is the pool's owner
@@ -5014,6 +5038,93 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(on_disk(&buffer)).unwrap(),
             "as it was read\nand as it was edited\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RED (multiwindow slice E2 phase ①, acceptance gate 1 + v3 复审 ④-a) —
+    /// **the quit's save branch tries every dirty buffer, and reports what each
+    /// one came to.**
+    ///
+    /// Three buffers and three fates, injected the way the two cases already
+    /// pinned above inject theirs — a stamp the disk has moved past, and a
+    /// staging path a directory is sitting on — so nothing here is mocked: the
+    /// real conflict check refuses one and the real `atomic_write` refuses
+    /// another.
+    ///
+    /// What the case holds is the three sentences the ruling is made of. **The
+    /// one that could be written is honestly clean** — it is not rolled back to
+    /// make the report tidy, and its bytes are on the disk. **The two that could
+    /// not are still dirty and still named**, so the window that stays open goes
+    /// on showing them. And **the third buffer was tried at all**, which is the
+    /// half a loop that stopped at the first failure would silently lose.
+    ///
+    /// Red gate: make `save_dirty` stop at the first non-`Saved` outcome and the
+    /// list is one long; skip the dirty filter and the clean buffer appears in a
+    /// report about unsaved work.
+    #[test]
+    fn the_quits_save_branch_tries_every_dirty_buffer_and_names_what_refused() {
+        let dir = scratch("quit-save");
+        let mut pool = PreviewPool::default();
+
+        let mut lands = opened(&dir, "lands.txt", "one\n");
+        lands.edit_content(|content| {
+            content.push_str("two\n");
+            true
+        });
+        // Somebody else wrote this one after the buffer read it.
+        let mut conflicted = opened(&dir, "conflicted.txt", "theirs\n");
+        conflicted.edit_content(|content| {
+            content.push_str("mine\n");
+            true
+        });
+        conflicted.disk_mtime = Some(SystemTime::UNIX_EPOCH);
+        // And this one's staging path is occupied, so the atomic write refuses.
+        let mut refused = opened(&dir, "refused.txt", "as it was\n");
+        refused.edit_content(|content| {
+            content.push_str("and as it is\n");
+            true
+        });
+        std::fs::create_dir_all(preview_temp_path(on_disk(&refused))).unwrap();
+        // A clean buffer, which a save branch has no business writing at all.
+        let untouched = opened(&dir, "clean.txt", "unchanged\n");
+
+        for buffer in [lands, conflicted, refused, untouched] {
+            pool.insert(buffer);
+        }
+
+        let report = pool.save_dirty();
+        assert_eq!(
+            report
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["lands.txt", "conflicted.txt", "refused.txt"],
+            "every dirty buffer is tried, in the pool's own order, and no clean one is"
+        );
+        assert_eq!(report[0].1, SaveOutcome::Saved);
+        assert_eq!(report[1].1, SaveOutcome::Conflict);
+        assert!(matches!(report[2].1, SaveOutcome::Failed(_)));
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("lands.txt")).unwrap(),
+            "one\ntwo\n",
+            "what could be written is on the disk"
+        );
+        assert_eq!(
+            pool.dirty_names(None).collect::<Vec<_>>(),
+            ["conflicted.txt", "refused.txt"],
+            "and only what could not is still dirty and still named"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("conflicted.txt")).unwrap(),
+            "theirs\n",
+            "the other writer's file is still theirs"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("refused.txt")).unwrap(),
+            "as it was\n",
+            "and the file the write could not reach was never opened"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
