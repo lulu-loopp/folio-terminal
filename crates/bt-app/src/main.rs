@@ -4826,6 +4826,9 @@ struct App {
     /// one: nothing, because a tab was never a fact about a window — only about
     /// which window it is standing in this second.
     tab_ids: TabIds,
+    /// F1b's acceptance harness, when `BT_TRANSFER_DEV` asked for one — see
+    /// [`TransferProbe`]. `None` in every run nobody asked, which is every run.
+    transfer_probe: Option<TransferProbe>,
     event_proxy: EventLoopProxy<AppEvent>,
     math_worker: MathWorker,
     math_worker_running: bool,
@@ -7025,6 +7028,73 @@ struct TabTransfer {
     /// Whether the window the tab left was emptied by the move and asked to
     /// close.
     source_emptied: bool,
+}
+
+/// **`BT_TRANSFER_DEV=<seconds>` — F1b's acceptance harness, and nothing a
+/// person can press.**
+///
+/// The transaction has no gesture: the drag across a window boundary is F1c's
+/// and the menu row is F2's, and this slice was told not to invent either. But a
+/// transaction whose only evidence is a unit test is a transaction that has
+/// never handed a live browser and a live ConPTY between two real windows, and
+/// three of the four things it has to get right — the page keeps its document,
+/// the shell keeps talking, the source window goes — are only true on a machine.
+///
+/// So this is the door the acceptance uses, on `BT_WEB_DEV`'s own terms: an
+/// environment variable read once at startup, reachable by nothing else, that
+/// scripts one move and prints what it found. It opens a second window, waits
+/// the number of seconds it was given for the page and the shell to have
+/// something to say, moves the first window's tab into the second, and reports.
+///
+/// Two numbers separated by a comma when the second is wanted:
+/// `BT_TRANSFER_DEV=6,4` moves after six seconds and prints the moved shell's
+/// scrollback again four seconds later — which is the whole of the wake-up
+/// acceptance, because by then the window that shell was started in has gone and
+/// the loop has nothing else to wake it for.
+#[derive(Clone, Copy, Debug)]
+enum TransferProbe {
+    /// Waiting to ask for the second window.
+    Arming {
+        at: Instant,
+        settle: Duration,
+    },
+    /// The second window is on order; move once it is open and settled.
+    Opening {
+        at: Instant,
+    },
+    /// Moved; print the shell's tail once more at this moment, then stop.
+    Listening {
+        at: Instant,
+        tab: TabId,
+    },
+    Done,
+}
+
+impl TransferProbe {
+    /// `None` unless the variable is set — the whole of the gate.
+    fn from_environment(now: Instant) -> Option<Self> {
+        let value = std::env::var("BT_TRANSFER_DEV").ok()?;
+        let mut parts = value.split(',');
+        let before = parts
+            .next()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .unwrap_or(6);
+        let after = parts
+            .next()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .unwrap_or(4);
+        Some(Self::Arming {
+            at: now + Duration::from_secs(before),
+            settle: Duration::from_secs(after),
+        })
+    }
+
+    fn deadline(self) -> Option<Instant> {
+        match self {
+            Self::Arming { at, .. } | Self::Opening { at } | Self::Listening { at, .. } => Some(at),
+            Self::Done => None,
+        }
+    }
 }
 
 /// The two answers [`FolioApp::transfer_tab`] can give.
@@ -21703,6 +21773,7 @@ impl Runtime<'_> {
         let mut app = App {
             gpu,
             tab_ids,
+            transfer_probe: TransferProbe::from_environment(Instant::now()),
             event_proxy: proxy.clone(),
             git_watch: git_watch::GitWatch::default(),
             math_worker,
@@ -62831,6 +62902,180 @@ impl FolioApp {
     /// pane still asking is issued a new ticket by the target's own counter on
     /// its next turn — which is the sentence "you have not answered this yet"
     /// said in the new window's own words.
+    /// Turn F1b's acceptance harness one step — see [`TransferProbe`], which is
+    /// where the whole of "why this exists" is written. A no-op in every run that
+    /// did not ask for it.
+    fn advance_transfer_probe(&mut self, now: Instant) -> Result<()> {
+        let Some(probe) = self.app.as_ref().and_then(|app| app.transfer_probe) else {
+            return Ok(());
+        };
+        let next = match probe {
+            TransferProbe::Arming { at, settle } if now >= at => {
+                let Some(first) = self.windows.key_at(0) else {
+                    return Ok(());
+                };
+                eprintln!("BT_TRANSFER opening a second window");
+                if let Some(app) = self.app.as_mut() {
+                    app.pending_new_windows.push(NewWindowPlan::fresh(first));
+                }
+                TransferProbe::Opening {
+                    at: now + settle.max(Duration::from_secs(1)),
+                }
+            }
+            TransferProbe::Opening { at } if now >= at => {
+                let (Some(from), Some(into)) = (self.windows.key_at(0), self.windows.key_at(1))
+                else {
+                    eprintln!("BT_TRANSFER the second window never arrived");
+                    TransferProbe::Done.deadline();
+                    return self.set_transfer_probe(TransferProbe::Done);
+                };
+                let Some(tab) = self.windows.get_mut(from).and_then(|window| {
+                    window
+                        .tabs
+                        .get(window.active_tab)
+                        .map(|tab| (tab.id, tab.sessions.len()))
+                }) else {
+                    return self.set_transfer_probe(TransferProbe::Done);
+                };
+                let (tab, shells) = tab;
+                eprintln!(
+                    "BT_TRANSFER before: moving {tab:?} ({shells} shell(s)) out of {from:?} into \
+                     {into:?}"
+                );
+                self.report_transfer_shape("before");
+                self.report_transfer_tail(tab, "before");
+                let outcome = self.transfer_tab(tab, into)?;
+                eprintln!("BT_TRANSFER report: {outcome:?}");
+                self.report_transfer_shape("after");
+                self.report_transfer_tail(tab, "after");
+                match outcome {
+                    TransferOutcome::Moved(moved) => {
+                        // **Give the moved shell something to say, later.** An
+                        // idle prompt says nothing, and "the output arrived" is
+                        // half the acceptance; the sleep is what makes it arrive
+                        // after the source window has already gone.
+                        self.speak_into_transfer_probe_tab(
+                            moved.tab,
+                            b"Start-Sleep -Seconds 2; Write-Output BT-TRANSFER-ALIVE\r",
+                        );
+                        TransferProbe::Listening {
+                            at: now + Duration::from_secs(6),
+                            tab: moved.tab,
+                        }
+                    }
+                    TransferOutcome::Refused(_) => TransferProbe::Done,
+                }
+            }
+            TransferProbe::Listening { at, tab } if now >= at => {
+                // **The wake-up acceptance, and the only assertion it needs.**
+                // The window this shell was started in has gone; the loop has
+                // been idle; if the tail below has grown, the shell woke a window
+                // it was not born in.
+                self.report_transfer_tail(tab, "settled");
+                TransferProbe::Done
+            }
+            standing => standing,
+        };
+        self.set_transfer_probe(next)
+    }
+
+    /// Print which window holds which tab, and where each page is composing.
+    fn report_transfer_shape(&mut self, when: &str) {
+        for index in 0..self.windows.len() {
+            let Some(id) = self.windows.key_at(index) else {
+                continue;
+            };
+            let Some(window) = self.windows.get_mut(id) else {
+                continue;
+            };
+            let tabs: Vec<u64> = window.tabs.iter().map(|tab| tab.id.0).collect();
+            // **The title and not the address**, because a page reloaded to the
+            // same address looks exactly like a page that never moved: F1a's
+            // whole method, read out of the same place. The probe page writes
+            // `boot=<id> tick=<n>` into `document.title` every 250ms, so an
+            // unchanged id across the move is "no navigation happened" and a
+            // climbing tick is "the same JS heap kept running".
+            let pages: Vec<String> = window
+                .web
+                .iter()
+                .map(|(seat, page)| {
+                    format!(
+                        "seat {} -> {} [{}]",
+                        seat.0,
+                        page.page().url,
+                        page.page().title
+                    )
+                })
+                .collect();
+            eprintln!("BT_TRANSFER {when}: {id:?} tabs={tabs:?} pages={pages:?}");
+        }
+    }
+
+    /// Type one line into every shell of one tab, wherever that tab now is.
+    fn speak_into_transfer_probe_tab(&mut self, tab: TabId, line: &[u8]) {
+        let Some(id) = self.owner_of(tab) else {
+            return;
+        };
+        let Some(window) = self.windows.get_mut(id) else {
+            return;
+        };
+        let Some(state) = window.tabs.iter_mut().find(|open| open.id == tab) else {
+            return;
+        };
+        for (_, leaf) in state.leaves_mut() {
+            if let Some(pty) = leaf.pty.as_mut() {
+                let _ = pty.write(line);
+            }
+        }
+    }
+
+    /// How much every shell of one tab has said, wherever that tab now is.
+    fn report_transfer_tail(&mut self, tab: TabId, when: &str) {
+        let Some(id) = self.owner_of(tab) else {
+            eprintln!("BT_TRANSFER tail {when}: {tab:?} is in no window");
+            return;
+        };
+        let Some(window) = self.windows.get_mut(id) else {
+            return;
+        };
+        let bit = Arc::clone(&window.pty_wake.raised);
+        let Some(state) = window.tabs.iter_mut().find(|open| open.id == tab) else {
+            return;
+        };
+        for (seat, leaf) in state.leaves_mut() {
+            // **The measurement the wake-up acceptance is actually about**: does
+            // this shell's reader thread nudge the window the tab is standing in
+            // now, or the one it was started in — which by this line has closed.
+            let nudges_this_window = leaf
+                .wake
+                .as_ref()
+                .is_some_and(|wake| Arc::ptr_eq(&wake.bit(), &bit));
+            eprintln!(
+                "BT_TRANSFER wake {when}: {tab:?} seat {} nudges the window it is in = \
+                 {nudges_this_window}",
+                seat.0
+            );
+            // Two counts and not one picture: `output_revision` is how many times
+            // the loop has *drained* this shell, so it only climbs if something
+            // woke the window to drain it, and the frozen line count is what
+            // arrived. Together they are the whole of the wake-up acceptance.
+            let drains = leaf.output_revision;
+            let lines = leaf.session.transcript().frozen().len();
+            eprintln!(
+                "BT_TRANSFER tail {when}: {tab:?} seat {} in {id:?} drains={drains} \
+                 frozen_lines={lines}",
+                seat.0
+            );
+        }
+    }
+
+    fn set_transfer_probe(&mut self, next: TransferProbe) -> Result<()> {
+        if let Some(app) = self.app.as_mut() {
+            app.transfer_probe = Some(next);
+        }
+        Ok(())
+    }
+
     #[allow(dead_code, reason = "F1c's drag and F2's menu row are the gestures")]
     fn transfer_tab(&mut self, tab: TabId, into: WindowId) -> Result<TransferOutcome> {
         // ── Prepare ───────────────────────────────────────────────────────────
@@ -63006,22 +63251,50 @@ impl FolioApp {
         let source_emptied = source.tabs.is_empty();
 
         // ── One accounting ────────────────────────────────────────────────────
+        //
+        // **The window that was emptied is not asked to re-solve or to sit for a
+        // picture**, and the first machine run is what wrote this line: a
+        // `Runtime` reaches its active tab through `tabs[active_tab]`, and a
+        // window with no tabs has no such index — measured as
+        // `index out of bounds: the len is 0 but the index is 0` the first time
+        // a tab was moved out of a one-tab window. Its record leaves the file
+        // through `close_window`, which is the door it is about to go through
+        // anyway, and which already knows how to file a window's seed into
+        // Recent. So the accounting here is the target's, plus the source's only
+        // while the source still is one.
         let now = Instant::now();
-        for id in [from, into] {
-            if let Some(mut runtime) = self.runtime(id) {
+        let settling: &[WindowId] = if source_emptied {
+            &[into]
+        } else {
+            &[from, into]
+        };
+        for id in settling {
+            if let Some(mut runtime) = self.runtime(*id) {
                 runtime.settle_seat_set_change()?;
                 let picture = runtime.window_snapshot();
-                runtime.app.record_window(id, picture, now);
+                runtime.app.record_window(*id, picture, now);
             }
         }
         if source_emptied {
-            // The window the tab left has nothing in it, which is the same
-            // sentence closing its last tab already says: it goes, through the
-            // one door a window closes through.
-            if let Some(runtime) = self.runtime(from) {
-                let hwnd = window_hwnd(&runtime.window.window)?;
-                bt_platform::request_window_close(hwnd).map_err(|error| anyhow!(error))?;
+            // **The window the tab left goes now, not on the next message.**
+            // Closing its last tab already says this; what this cannot do is ask
+            // Windows to post a `WM_CLOSE` and carry on, because `about_to_wait`
+            // runs before that message is answered and it gives every window in
+            // the map a turn — and a window with no tabs has no active tab to
+            // give one to. So the shut is spent here, on
+            // [`FolioApp::close`]'s own two lines.
+            //
+            // `ending = false`: this is a window going, not the process. It
+            // cannot be the last one — the window the tab moved into is open by
+            // construction — so the process's own sentinel is not touched and
+            // there is no `event_loop.exit()` to owe. Its seed does not reach
+            // Recent either, and by the right rule rather than by omission:
+            // [`Runtime::vault_this_window`] records nothing for a window with no
+            // tabs, which is what an emptied window is.
+            if let Some(mut runtime) = self.runtime(from) {
+                runtime.close_window(false)?;
             }
+            self.windows.remove(from);
         }
         Ok(TransferOutcome::Moved(TabTransfer {
             tab,
@@ -63947,8 +64220,23 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 }
             }
         }
-        event_loop
-            .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+        // **F1b's acceptance harness, and only when it was asked for.** Its
+        // deadline joins the loop's own on purpose: the last step of the script
+        // runs on an otherwise idle loop, which is exactly the condition the
+        // wake-up acceptance is about.
+        if let Err(error) = self.advance_transfer_probe(now) {
+            self.fail(event_loop, error);
+            return;
+        }
+        let probe_deadline = self
+            .app
+            .as_ref()
+            .and_then(|app| app.transfer_probe)
+            .and_then(TransferProbe::deadline);
+        event_loop.set_control_flow(
+            earliest_deadline([wake_deadline, probe_deadline])
+                .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
+        );
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
