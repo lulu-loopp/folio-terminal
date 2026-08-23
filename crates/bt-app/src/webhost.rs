@@ -341,6 +341,20 @@ impl WebMachine {
         }
     }
 
+    /// **The controller was closed to get out of a half-finished rehost**
+    /// (F1a's lossy branch).
+    ///
+    /// The same shape as a version change, and for the same reason: the browser
+    /// process is *alive* — only the controller went — so a new environment
+    /// cannot be built over the folder until it has let go. What is different is
+    /// only what the caller does first, which is to move the seat's address, so
+    /// that the page this returns comes back in the window the person moved it
+    /// to and not the one it left.
+    #[allow(dead_code, reason = "F1b's transfer transaction is the caller")]
+    pub(crate) fn on_rehost_lost(&mut self) -> WebEffect {
+        self.on_new_browser_version_available()
+    }
+
     /// A newer runtime is installed and the running one is now the old one.
     pub(crate) fn on_new_browser_version_available(&mut self) -> WebEffect {
         if self.state == WebState::Closing {
@@ -1126,18 +1140,62 @@ enum BrowserWait {
     Rebuild,
 }
 
+/// **Where a web seat lives**: the window that owns it, and the key of the
+/// visual inside that window's tree that its page composes into.
+///
+/// The two travel together because they are one fact. The window's compositor
+/// holds one visual per seat since W2 slice ③, and a controller is pointed at
+/// one of them for its whole life (`SetRootVisualTarget`) under one parent HWND
+/// (`put_ParentWindow`). Keeping them as one value rather than two fields is
+/// what makes "this seat's page composes into this seat's box, in this seat's
+/// window" true by construction: the attach, the placement, the detach and the
+/// controller the next rebuild asks for cannot name four different places.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SeatAddress {
+    pub(crate) seat: u64,
+    pub(crate) hwnd: std::num::NonZeroIsize,
+}
+
+/// How one [`WebSeat::rehost`] ended, in the caller's own vocabulary.
+///
+/// Four answers and not two, because a tear-out has to be told three different
+/// things: that it may move its tab and the page went with it whole, that it may
+/// move its tab and the page will come back rebuilt, and that it may **not**
+/// move its tab at all.
+/// **No caller in the tree yet, on purpose.** F1a is the spike and this narrow
+/// contract; F1b is the App-level transfer transaction that presses it. The
+/// convention is `git.rs`'s: an item a named later slice will call carries the
+/// allow rather than being held out of the build until then, because the thing
+/// the slice has to get right is the contract and the contract is what a test
+/// can hold today.
+#[allow(dead_code, reason = "F1b's transfer transaction is the caller")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RehostReport {
+    /// The live page moved: same document, same history, same heap, no
+    /// navigation. The caller moves its tab.
+    Moved,
+    /// There was nothing to hand over — the seat is still coming up, is on its
+    /// way out, or is already where it was asked to go. Its address is now the
+    /// target's, so whatever it builds next builds there. The caller moves its
+    /// tab.
+    AddressOnly,
+    /// **Nothing moved.** The page is still on the source window at the bounds
+    /// it had, and the caller's tab stays where it is. The string is where the
+    /// handoff refused.
+    SourceKept(String),
+    /// The handoff could not be undone, so the controller was closed. The
+    /// address has moved and the seat is rebuilding at its last good URL **in
+    /// the target window**; the page's in-document state is gone, and this
+    /// answer says so rather than calling itself a move.
+    Rebuilding(String),
+}
+
 /// One web seat: the state machine, the engine, and the mint they share.
 pub(crate) struct WebSeat {
-    /// **Which seat's visual this controller renders into.**
-    ///
-    /// The window's compositor holds one visual per seat since W2 slice ③, and a
-    /// controller is pointed at one of them for its whole life
-    /// (`SetRootVisualTarget`). Carrying the key here rather than passing it at
-    /// each call is what makes "this seat's page composes into this seat's box"
-    /// true by construction: the attach, the placement and the detach cannot name
-    /// three different visuals.
-    seat: u64,
-    hwnd: std::num::NonZeroIsize,
+    /// Which window and which visual this page belongs to **right now** — the
+    /// one thing [`WebSeat::rehost`] moves, and the one thing every rebuild
+    /// reads.
+    address: SeatAddress,
     folder: PathBuf,
     machine: WebMachine,
     host: WebHost,
@@ -1280,8 +1338,7 @@ impl WebSeat {
             wake,
         );
         let mut web = Self {
-            seat,
-            hwnd,
+            address: SeatAddress { seat, hwnd },
             folder,
             machine: WebMachine::new(),
             host,
@@ -1637,14 +1694,14 @@ impl WebSeat {
             WebEffect::Ignore => Ok(None),
             WebEffect::CreateController => {
                 self.host
-                    .request_controller(self.hwnd, self.machine.generation())?;
+                    .request_controller(self.address.hwnd, self.machine.generation())?;
                 Ok(None)
             }
             WebEffect::InstallEvents => {
                 // The visual first: the controller is told where to render
                 // before it is told to do anything at all.
-                compositor.attach_web_visual(self.seat)?;
-                self.host.install(compositor, self.seat)?;
+                compositor.attach_web_visual(self.address.seat)?;
+                self.host.install(compositor, self.address.seat)?;
                 // **Before the navigation, never after.** The next line's
                 // acknowledgement produces the first `Navigate`, and a page that
                 // begins loading against the controller's default zero-by-zero
@@ -1737,7 +1794,7 @@ impl WebSeat {
             }
             WebEffect::ReleaseUserDataFolder => {
                 self.waiting = None;
-                let _ = compositor.detach_web_visual(self.seat);
+                let _ = compositor.detach_web_visual(self.address.seat);
                 outcomes.push(WebOutcome::Gone);
                 Ok(None)
             }
@@ -1836,13 +1893,181 @@ impl WebSeat {
             WebPresence::Hidden => self.host.set_visible(false),
             WebPresence::Shown(bounds) => {
                 compositor.place_web_visual(
-                    self.seat,
+                    self.address.seat,
                     (bounds.x, bounds.y),
                     (0.0, 0.0, bounds.width as f32, bounds.height as f32),
                 )?;
                 self.host.set_visible(true)
             }
         }
+    }
+
+    // ── Moving one seat to another window (F1a) ────────────────────────────
+
+    /// **Where this seat lives.** Read by everything that builds a controller.
+    #[allow(dead_code, reason = "F1b's transfer transaction is the caller")]
+    pub(crate) fn address(&self) -> SeatAddress {
+        self.address
+    }
+
+    /// **Move this seat, and the live page on it, into another window.**
+    ///
+    /// The narrow contract `plan.md`'s v3 增补 names: `WebSeat` caches its own
+    /// seat key and HWND, so moving only the window's map entry would leave the
+    /// *next* rebuild — a browser crash, an Evergreen update, a failed handoff —
+    /// asking for a controller on the window this page has left. This is the one
+    /// door that writes that cache, and it writes it in the same call that moves
+    /// the page.
+    ///
+    /// # Three phases, and only the middle one can half-happen
+    ///
+    /// **Prepare** builds the target window's visual: it can fail, and when it
+    /// does nothing has been asked of the controller at all. **The platform
+    /// handoff** is [`bt_platform::WebHost::rehost`], every step of which has a
+    /// written compensation. **The model commit** is this function's own last
+    /// few lines — the address, the presence caches and the source window's now
+    /// empty visual — and by the time it runs there is nothing left that can
+    /// fail.
+    ///
+    /// # What the old window is owed first
+    ///
+    /// A page that was mid-drag believes buttons are down and the pointer is
+    /// inside it. Both are facts about a window it is leaving, so both are
+    /// settled against the old host before the parent changes: every held button
+    /// is released and the pointer is moved out of the page — which is how this
+    /// product says "leave" at all, `SendMouseInput(LEAVE)` being refused by the
+    /// engine in every spelling (`w0p-evidence.md` §1 gate 3).
+    ///
+    /// # Focus follows the tab
+    ///
+    /// `take_focus` puts the keyboard back into the page in its new window. The
+    /// caller passes it when the moved tab is the one in front, because a person
+    /// whose hand just carried this page somewhere has said where they are
+    /// looking.
+    #[allow(dead_code, reason = "F1b's transfer transaction is the caller")]
+    pub(crate) fn rehost(
+        &mut self,
+        from: &bt_platform::Compositor,
+        to: &bt_platform::Compositor,
+        address: SeatAddress,
+        take_focus: bool,
+        outcomes: &mut Vec<WebOutcome>,
+    ) -> RehostReport {
+        if address == self.address {
+            return RehostReport::AddressOnly;
+        }
+        // Prepare. The one resource that must exist before the controller is
+        // touched, and the one whose failure costs the source window nothing.
+        if let Err(error) = to.attach_web_visual(address.seat) {
+            return RehostReport::SourceKept(error);
+        }
+        // A seat whose controller has not arrived — or has already gone — has no
+        // page to hand over and still has to follow its tab. Its next controller
+        // is built on the window it is in now, which is exactly what moving the
+        // address means.
+        if !self.host.has_controller() {
+            self.adopt(from, address);
+            return RehostReport::AddressOnly;
+        }
+        self.settle_input_for_handoff();
+        let size = self.sized.or(self.wanted_size).unwrap_or((0, 0));
+        let visible = matches!(self.wanted, WebPresence::Shown(_));
+        let outcome = self.host.rehost(
+            &bt_platform::RehostSide {
+                compositor: from,
+                seat: self.address.seat,
+                hwnd: self.address.hwnd,
+            },
+            &bt_platform::RehostSide {
+                compositor: to,
+                seat: address.seat,
+                hwnd: address.hwnd,
+            },
+            size,
+            visible,
+        );
+        match outcome {
+            bt_platform::RehostOutcome::Moved => {
+                self.adopt(from, address);
+                if take_focus {
+                    let _ = self.host.focus_page();
+                }
+                RehostReport::Moved
+            }
+            bt_platform::RehostOutcome::KeptSource {
+                failed_at, error, ..
+            } => {
+                // The target's visual was built for a page that is not coming.
+                let _ = to.detach_web_visual(address.seat);
+                RehostReport::SourceKept(format!("{failed_at:?}: {error}"))
+            }
+            bt_platform::RehostOutcome::Lost {
+                failed_at,
+                error,
+                compensation_error,
+            } => {
+                // **The address moves first.** The rebuild that follows asks for
+                // a controller, and the whole of this branch is that it must ask
+                // for one on the window the person put the tab in.
+                self.adopt(from, address);
+                let effect = self.machine.on_rehost_lost();
+                self.apply(effect, to, outcomes);
+                RehostReport::Rebuilding(format!(
+                    "{failed_at:?}: {error}; the compensation failed too: {compensation_error}"
+                ))
+            }
+        }
+    }
+
+    /// The model commit, plus the source window's now empty visual.
+    ///
+    /// The detach is best-effort and deliberately last: an empty visual left in
+    /// a tree costs nothing on screen, and a page that has already arrived
+    /// somewhere else must not be reported as not having moved.
+    fn adopt(&mut self, from: &bt_platform::Compositor, address: SeatAddress) {
+        let _ = from.detach_web_visual(self.address.seat);
+        let _ = from.commit();
+        self.take_address(address);
+    }
+
+    /// **This seat is now that seat, in that window** — the whole of the model
+    /// commit, and the half that needs no compositor.
+    ///
+    /// The two presence caches go with the address, because they record what *an
+    /// engine in the old window* had already been told. Left standing, the next
+    /// frame would decide it had nothing to say and the page would sit at the
+    /// old window's rectangle inside the new one.
+    fn take_address(&mut self, address: SeatAddress) {
+        self.address = address;
+        self.presence = None;
+        self.sized = None;
+    }
+
+    /// Give the window being left a page that believes nothing is pressed and
+    /// the pointer is elsewhere.
+    fn settle_input_for_handoff(&mut self) {
+        use bt_platform::WebMouseEvent as Event;
+        use bt_platform::web_mouse_buttons as bit;
+        for (mask, up) in [
+            (bit::LEFT, Event::LeftUp),
+            (bit::RIGHT, Event::RightUp),
+            (bit::MIDDLE, Event::MiddleUp),
+            (bit::X1, Event::XUp(1)),
+            (bit::X2, Event::XUp(2)),
+        ] {
+            if self.buttons & mask != 0 {
+                self.buttons &= !mask;
+                let _ = self.host.send_mouse(up, (-1, -1), self.buttons);
+            }
+        }
+        // Outside the page on both axes, which is this product's only working
+        // spelling of "the pointer left".
+        let _ = self
+            .host
+            .send_mouse(Event::Move, (-1, -1), bt_platform::web_mouse_buttons::NONE);
+        // A press that was interrupted by a window change is not half of a
+        // double click.
+        self.last_left_press = None;
     }
 
     /// Where the page is this frame, or `None` when it is not on the glass.
@@ -2839,6 +3064,192 @@ mod folder_tests {
             folder,
             Path::new(r"C:\Users\x\AppData\Local\Folio\WebView2")
         );
+    }
+}
+
+/// **Where a moved seat comes back** (F1a, `plan.md` v3 增补).
+///
+/// The narrow contract's whole reason: `WebSeat` caches its own seat key and
+/// HWND, so a transfer that moved only the window's map entry would leave the
+/// *next* controller — the one a browser crash asks for — being built on the
+/// window this page has left. None of these needs a browser, because the fact
+/// under test is which address the seat names.
+#[cfg(test)]
+mod rehost_address_tests {
+    use super::*;
+
+    fn hwnd(value: isize) -> std::num::NonZeroIsize {
+        std::num::NonZeroIsize::new(value).expect("a non-zero window handle")
+    }
+
+    /// A seat with an address, a machine and an engine that has never been
+    /// started. **No environment is requested**, which is what keeps these
+    /// tests browserless.
+    fn detached(address: SeatAddress) -> WebSeat {
+        WebSeat {
+            address,
+            folder: PathBuf::from(r"C:\nowhere"),
+            machine: WebMachine::new(),
+            host: bt_platform::WebHost::new(
+                Box::new(|_| bt_platform::WebNavigationVerdict::Proceed),
+                Box::new(|| {}),
+            ),
+            mint: Rc::new(RefCell::new(Mint::Nothing)),
+            claims: Vec::new(),
+            waiting: None,
+            wanted: WebPresence::Hidden,
+            presence: None,
+            wanted_size: None,
+            sized: None,
+            buttons: bt_platform::web_mouse_buttons::NONE,
+            last_left_press: None,
+            minted: Mint::Nothing,
+            page: PageFacts::default(),
+            finding: false,
+            found: String::new(),
+            fault: None,
+            refusal: Rc::new(RefCell::new(None)),
+            capturing: false,
+            zoom: 1.0,
+        }
+    }
+
+    /// RED — **a seat that moved window rebuilds in the window it moved to.**
+    ///
+    /// The acceptance gate `plan.md` v3 增补 F1a names in one line: 「红测 = 迁移
+    /// 后注入 browser process failure,页面在**目标**窗原位重建」. The rebuild asks
+    /// for a controller on [`WebSeat::address`] and attaches to its seat key, so
+    /// this is the fact the whole contract rests on.
+    ///
+    /// MUTATIONS:
+    /// ① let `rehost` move the window's map entry and not this cache — the
+    ///    second assertion goes red and the page rebuilds in the old window;
+    /// ② move only the HWND and leave the seat key — the rebuild would build a
+    ///    controller on the right window pointed at a visual in the wrong one.
+    #[test]
+    fn a_rehosted_seat_rebuilds_in_the_window_it_moved_to() {
+        let source = SeatAddress {
+            seat: 3,
+            hwnd: hwnd(0x1111),
+        };
+        let target = SeatAddress {
+            seat: 9,
+            hwnd: hwnd(0x2222),
+        };
+        let mut seat = detached(source);
+        seat.machine.request("https://example.com/");
+        let generation = seat.machine.generation();
+        seat.machine.on_environment(generation, true);
+        seat.machine.on_controller(generation, true);
+        seat.machine.on_events_installed(generation);
+        seat.machine
+            .on_navigation_completed(generation, "https://example.com/", true);
+        assert_eq!(seat.address(), source);
+
+        seat.take_address(target);
+
+        // The browser dies under the moved seat.
+        assert_eq!(
+            seat.machine.on_browser_process_failed(),
+            WebEffect::RebuildFromScratch
+        );
+        assert_eq!(
+            seat.address(),
+            target,
+            "the rebuild is asked for on the window the seat moved to"
+        );
+        assert_eq!(seat.machine.recoverable_url(), Some("https://example.com/"));
+    }
+
+    /// RED — and a compensation that could not run leaves the seat rebuilding
+    /// **in the target**, not in the window it half left.
+    ///
+    /// The lossy branch is allowed to lose the document; it is not allowed to
+    /// lose the window.
+    #[test]
+    fn a_handoff_that_could_not_be_undone_rebuilds_in_the_target_window() {
+        let target = SeatAddress {
+            seat: 9,
+            hwnd: hwnd(0x2222),
+        };
+        let mut seat = detached(SeatAddress {
+            seat: 3,
+            hwnd: hwnd(0x1111),
+        });
+        seat.machine.request("https://example.com/");
+        let generation = seat.machine.generation();
+        seat.machine.on_environment(generation, true);
+        seat.machine.on_controller(generation, true);
+        seat.machine.on_events_installed(generation);
+        seat.machine
+            .on_navigation_completed(generation, "https://example.com/", true);
+
+        seat.take_address(target);
+        assert_eq!(
+            seat.machine.on_rehost_lost(),
+            WebEffect::RebuildForNewVersion
+        );
+        assert_eq!(seat.address(), target);
+        assert_eq!(seat.machine.recoverable_url(), Some("https://example.com/"));
+    }
+
+    /// RED — **the new window is told the rectangle again.**
+    ///
+    /// `apply_presence` says nothing when what it wants is what it last said,
+    /// and what it last said was said to an engine in another window. A seat
+    /// that carried those two caches across would sit at the old window's
+    /// rectangle, correct only after the next resize.
+    #[test]
+    fn a_moved_seat_forgets_what_the_old_window_was_told() {
+        let mut seat = detached(SeatAddress {
+            seat: 3,
+            hwnd: hwnd(0x1111),
+        });
+        seat.wanted_size = Some((800, 600));
+        seat.sized = Some((800, 600));
+        seat.presence = Some(WebPresence::Shown(WebBounds {
+            x: 10,
+            y: 20,
+            width: 800,
+            height: 600,
+        }));
+
+        seat.take_address(SeatAddress {
+            seat: 9,
+            hwnd: hwnd(0x2222),
+        });
+
+        assert_eq!(seat.sized, None, "the new engine has been told no size");
+        assert_eq!(
+            seat.presence, None,
+            "the new engine has been told no presence"
+        );
+        assert_eq!(
+            seat.wanted_size,
+            Some((800, 600)),
+            "what the window wants is unchanged; only what was said is forgotten"
+        );
+    }
+
+    /// RED — **the window being left gets a page with nothing pressed.**
+    ///
+    /// A page torn out mid-drag believes a button is down and the pointer is
+    /// inside it. Both are facts about a window it is leaving, and a page that
+    /// arrived in a new window still holding them would be a page whose next
+    /// click is a drag-select from wherever the last one started.
+    #[test]
+    fn the_old_window_is_paid_its_buttons_before_the_parent_changes() {
+        let mut seat = detached(SeatAddress {
+            seat: 3,
+            hwnd: hwnd(0x1111),
+        });
+        seat.buttons = bt_platform::web_mouse_buttons::LEFT | bt_platform::web_mouse_buttons::X1;
+        seat.last_left_press = Some((Instant::now(), (40, 40)));
+
+        seat.settle_input_for_handoff();
+
+        assert_eq!(seat.buttons, bt_platform::web_mouse_buttons::NONE);
+        assert_eq!(seat.last_left_press, None);
     }
 }
 
