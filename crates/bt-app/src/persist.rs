@@ -614,7 +614,9 @@ mod tests {
         // written and the atomic write's own temporary has nowhere to live.
         let mut refused = SessionStore::at(root.join("session.json"), root.join("session.lock"));
         let mut document = SessionV1::default();
-        document.windows.push(bt_persist::SessionWindowV1::default());
+        document
+            .windows
+            .push(bt_persist::SessionWindowV1::default());
         refused.record(document.clone(), Instant::now());
         let verdict = refused.flush_judged();
         assert!(

@@ -387,7 +387,11 @@ mod tests {
     /// The witness for the ordering claims below: what a driver was *told* to do,
     /// in the order it was told, with no window and no GPU anywhere near it.
     fn walk(answer: Option<QuitAnswer>, write_lands: bool) -> Vec<QuitStep> {
-        let mut quit = Quit::begin(if answer.is_some() { names() } else { Vec::new() });
+        let mut quit = Quit::begin(if answer.is_some() {
+            names()
+        } else {
+            Vec::new()
+        });
         let mut seen = vec![quit.step()];
         if let Some(answer) = answer {
             seen.push(quit.answer(answer));

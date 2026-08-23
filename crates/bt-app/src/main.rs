@@ -54174,7 +54174,8 @@ impl Runtime<'_> {
         // The quit card first, in the order it is drawn: every press is
         // swallowed, its own scrim included, and the answer is the application's
         // whichever window it was pressed in.
-        if let (Some(layout), Some(position)) = (self.quit_card_layout(), self.window.pointer_position)
+        if let (Some(layout), Some(position)) =
+            (self.quit_card_layout(), self.window.pointer_position)
         {
             if state == ElementState::Pressed && button == MouseButton::Left {
                 let target = restore::quit_hit(&layout, position.x, position.y);
@@ -60678,10 +60679,12 @@ mod quit_transaction_tests {
     /// half without the record half. The pin below holds that structurally; this
     /// holds what it *produces*.
     ///
-    /// Red gate: let a quit go through `FolioApp::close` per window — the obvious
-    /// implementation, and the one the plan exists to forbid — and the first two
-    /// windows land in Recent and leave the file, which is the second half of
-    /// this case exactly.
+    /// Red gate: drop a window from `session_windows` — the one function both
+    /// halves are assembled by — and the quit's count is no longer three while
+    /// the contrast group's is still one, which is the failure "the file forgot a
+    /// window I had open" looks like from here. The structural half — that a quit
+    /// cannot reach the vault at all — is the pin below, because a model cannot
+    /// prove the absence of a call.
     #[test]
     fn quit_writes_every_window_and_vaults_none() {
         let open = [window(r"D:\a"), window(r"D:\b"), window(r"D:\c")];
@@ -60824,7 +60827,10 @@ mod quit_transaction_tests {
             !settle.contains(shut.as_str()),
             "a quit never spends the per-window shut"
         );
-        let exiting = body(&["    fn exit", "ing(&mut self, _event_loop: &ActiveEventLoop) {"]);
+        let exiting = body(&[
+            "    fn exit",
+            "ing(&mut self, _event_loop: &ActiveEventLoop) {",
+        ]);
         assert!(
             exiting.contains(&[shut.as_str(), "(true)"].concat()),
             "and the backstop for a loop stopped by something else is untouched"
@@ -60842,7 +60848,10 @@ mod quit_transaction_tests {
     #[test]
     fn every_button_on_the_card_answers_and_the_face_answers_nothing() {
         use quit::{QuitAnswer, QuitTarget};
-        assert_eq!(restore::quit_answer(QuitTarget::Save), Some(QuitAnswer::Save));
+        assert_eq!(
+            restore::quit_answer(QuitTarget::Save),
+            Some(QuitAnswer::Save)
+        );
         assert_eq!(
             restore::quit_answer(QuitTarget::Discard),
             Some(QuitAnswer::Discard)
@@ -61814,7 +61823,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 .and_then(|app| app.quit.as_ref())
                 .and_then(quit::Quit::deadline);
             event_loop.set_control_flow(
-                earliest_deadline([waking, bound]).map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
+                earliest_deadline([waking, bound])
+                    .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
             );
             return;
         }
