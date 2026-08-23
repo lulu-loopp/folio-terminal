@@ -1177,6 +1177,8 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 
 **装不下就不亮。** 目标那棵树塞不进这枚 pane 时(H93),tab **不点亮**,而不是亮着等你松手然后什么都不发生——M147 说拒绝必须看得见,而 tab 条没有虚线形可穿,所以它的诚实拒绝就是不画。判断在**每一次指针移动**上重跑 `plan_drop`(不是记住上一次的答案:窗口在静止的手底下被缩小就会让一个亮着的承诺变成假话),提交时**再问一遍**——`commit_layout_drop` 那条纪律,一个计划是「此刻松手会得到什么」,算出来的,永不是记住的图。且**装不下不回落到撕出**:同一枚指针在同一枚 tab 上,在小窗口里意思是「做个新 tab」而在大窗口里意思是「放进这间屋」,是一种含义取决于没人看得见的算术的手势——小样对中心区那条禁令的原话,换个表面照读。
 
+**拖拽中的 Icons 栏照常滚开(2026-08-23 落地;小样构造性既有,文档此前失记)。** 小样的 rail 区域判定是 document 级、无守卫的 pointermove(`evalRailZone`,`railBusy()` 三条子句无一提拖拽)——拖着 pane 走到左缘,图标栏照常滚开、名字露出、行变宽可命中;原生此前没有,因为 `drive_drag` 吞掉每次移动后 `update_chrome_hover` 一次不跑,rail 的区域判定在拖拽这条路上根本不存在。修法与裁决同句:**区域判定是「指针在哪」的事实,不因手里有东西而失效**——`drive_rail_zone` 提到 `pointer_moved` 门口,排在一切会吞移动的手势(pane 拖、divider 拖、float 拖、选区)之前,dwell 0、与空手同一区域、overlay 展开不重排舞台(`terminal_inset_logical_px` 在 Icons 下恒为 `RAIL_PARK`,拖拽中手上的坐标系不跳)。落点引擎本来就读 rail 此刻的实际几何(`survey_drop`→`rail_geometry_now`),停靠态 46px 的行早就能命中能 spring——欠的只是「哪个是哪个」的可读性,这一扇门补上即还清。钉子:`the_rail_zone_is_asked_before_a_gesture_can_swallow_the_move`。`RAIL_REACH`/`RAIL_KEEP` 宽容带仍挂在 sidebar ticket 上未落地。
+
 **聚焦卡片列不接,且是拒绝了**源**而不是拒绝了动词。** §7.1.6b′ ② 原本写作「pane 拖到卡列不得撕成新 tab」,承载它的 `TabRun::hosts_tear_out` 因此改名 `hosts_pane_drop`:一枚 pane 在 tab 清单上的两个 offer——撕成新 tab、交给清单里的某一个 tab——被卡片列一并拒绝,由**同一枚位**拒绝,悬停也因此永不上弦(spring 读的是 survey 的答案而不是指针的坐标,所以这条拒绝不必被说第二遍)。
 
 **离家的 pane 在这张舞台上没有落点,这是政策位不是墙(§7.0 法则③)。** spring 把另一个 tab 的布局放到了一枚仍握着原 tab 的 pane 的指针底下。裁决给的跨 tab 门只有一扇并且指名了位置——「松在 **tab** 上」,不是松在 tab 底下的布局上——所以边缘/中心/rim 一概不给、不画框、松手是 J120 的干净的什么都没有。写在 survey 里而不是让计划去拒:`DropCargo::Pane` 指的是**正在被计划的那棵树里的**一个座位,一枚从别的 tab 来的 pane 根本不是这个类型能承的载荷。要把那扇门开出来是它自己的一片(从一棵树里摘下、落进另一棵),现在是**未做**而不是做不了。

@@ -50435,6 +50435,31 @@ impl Runtime<'_> {
         // below consumes — including the ones inside the menu it opened, which
         // is the state the grace exists to tell apart from having left.
         self.observe_chevrons(Some(position), Instant::now());
+        // **And the icon rail's zone, before anything returns** — the third
+        // instrument with the argument above, and it is the same argument
+        // (user report, 2026-08-23: a pane carried towards another tab found a
+        // rail of unlabelled icons and no way to make it open).
+        //
+        // The zone is *not* a hover. It asks where the pointer is, and where the
+        // pointer is stays a fact while something is being carried — so it must
+        // not be filed below the branches that own the pointer, all of which
+        // return before `update_chrome_hover` and the second asker inside it.
+        // A drag is only the loudest of them; a divider, a float and a selection
+        // all travel across the left edge too.
+        //
+        // The mock-up says this by construction rather than by a clause:
+        // `evalRailZone` is a `document`-level `pointermove` listener, and
+        // neither it nor `railBusy` mentions a drag — so the panel rolls out
+        // under a laden hand exactly as it does under an empty one, and
+        // `stripEl()` then hands the drop engine the rectangle it grew into.
+        // Nothing about the landing needs writing for that: `tab_run` measures
+        // the rail as it currently stands, so the rows widen with the panel.
+        //
+        // Two askers and no second answer: [`Self::drive_rail_zone`] re-aims
+        // nothing when the target has not moved, and the one inside
+        // `update_chrome_hover` is for that function's *other* callers — the
+        // doors where the answer changed with no pointer move at all.
+        self.drive_rail_zone(Some(position));
         // The glance card's thumb, ahead of everything: it is the topmost thing
         // on the glass, and a gesture in flight is not a hover. It owns the
         // pointer outside the card too — a drag that let go the moment it left
@@ -74185,6 +74210,111 @@ mod tests {
         // And a pointer that has left the window entirely.
         assert!(!rail_zone_wants_open(None, rail_right, rail_top, pane_peek));
         assert!(rail_zone_wants_open(None, rail_right, rail_top, tab_peek));
+    }
+
+    /// **PIN (user report, 2026-08-23): a pane being carried to another tab has
+    /// to be able to read the rail's names.**
+    ///
+    /// Under `Sidebar: Icons` the rail rests as a 46px strip of icons. Its rows
+    /// are already drop targets in that state — [`Runtime::tab_run`] hands the
+    /// survey whatever the rail currently measures, so nothing about the landing
+    /// needed writing — but a parked row *is* an icon and nothing else, and a
+    /// hand cannot tell which tab it is about to hand the pane to. The rail's own
+    /// zone is the answer that already existed: reach the left edge and the panel
+    /// rolls out over the terminal, names and all.
+    ///
+    /// **What was broken was the door, not the zone.** `pointer_moved` gives the
+    /// pointer to whichever gesture is in flight — "a gesture in flight is not a
+    /// hover" — and [`Runtime::drive_drag`] answers `true` for every move of a
+    /// drag, so everything below it went unasked for the whole gesture:
+    /// `update_chrome_hover`, and the [`Runtime::drive_rail_zone`] inside it.
+    /// The rail therefore stayed parked at exactly the moment its names were
+    /// wanted.
+    ///
+    /// **The zone is not a hover, and that is why it belongs above the returns**
+    /// — beside the two questions that already carry this argument in this very
+    /// function. `drive_web_pointer` and `observe_chevrons` are both facts about
+    /// *where the pointer is*, and a fact about where the pointer is does not
+    /// stop being true because something is being carried. The mock-up says the
+    /// same by construction: `evalRailZone` is a `document`-level `pointermove`
+    /// listener, and neither it nor `railBusy` has a drag clause in it — so
+    /// dragging across the left edge rolls the panel out there too, and its
+    /// `stripEl()` then hands the drop engine the wider rectangle.
+    ///
+    /// Read as **text**, for
+    /// [`both_pointer_doors_tell_the_chevron_clocks_where_the_hand_is`]' reason
+    /// and only that one: what went wrong is *an asker that never runs*, and no
+    /// state machine can be driven into a state nobody ever puts it in. What the
+    /// answer buys is then asserted against the geometry itself.
+    ///
+    /// Red gate: put the call back under `drive_drag` — which is where it was —
+    /// or delete it, and the ordering assertions fail by name.
+    #[test]
+    fn the_rail_zone_is_asked_before_a_gesture_can_swallow_the_move() {
+        const SOURCE: &str = include_str!("main.rs");
+        const SIGNATURE: &str = "    fn pointer_moved(";
+        let start = SOURCE
+            .find(SIGNATURE)
+            .expect("pointer_moved is declared in this file");
+        let rest = &SOURCE[start + SIGNATURE.len()..];
+        let body = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
+
+        let asked = body
+            .find("self.drive_rail_zone(Some(position));")
+            .expect("the move door asks the rail's zone where the hand is");
+        let swallowed = body
+            .find("if self.drive_drag(position)? {")
+            .expect("a drag in flight consumes the move");
+        assert!(
+            asked < swallowed,
+            "the zone is asked before a drag swallows the move — otherwise the \
+             icon rail stays parked for the whole gesture, which is precisely \
+             when a hand needs to read its names (user report 2026-08-23)"
+        );
+        let first_return = body
+            .find("return Ok(());")
+            .expect("some branch of this function owns the pointer outright");
+        assert!(
+            asked < first_return,
+            "and before *every* branch that owns the pointer, not merely the \
+             drag: a divider, a float and a selection all travel across the \
+             left edge too, and the rail's zone is a question about where the \
+             pointer is rather than a hover"
+        );
+
+        // What the open panel buys, and the whole of why the report is a bug:
+        // the row grows a run of title to be read by. The rows are hit in both
+        // states — this is about telling them apart, not about reaching them.
+        let icon_rail = |open: f32| seats::RailState {
+            layout: seats::TabLayoutMode::Vertical,
+            mode: seats::RailMode::Icons,
+            open,
+            text_opacity: open,
+            ..seats::RailState::default()
+        };
+        let trailers = vec![seats::TabTrailer::default(); 3];
+        let title_run = |open: f32| {
+            let geometry = seats::rail_geometry(600.0, 1.0, &trailers, 0, 0.0, icon_rail(open))
+                .expect("an icon rail is on screen in a vertical layout");
+            let title = geometry.tabs[0].title;
+            title[1] - title[0]
+        };
+        assert!(
+            title_run(1.0) > title_run(0.0) + 100.0,
+            "an opened icon rail gives every row a name to aim at ({} against \
+             {} logical px)",
+            title_run(1.0),
+            title_run(0.0)
+        );
+        // And the stage does not move while it opens (Q179): the panel is an
+        // overlay, so the coordinates the hand is aiming with do not jump under
+        // it at the moment the names arrive. This is what makes opening the rail
+        // mid-drag safe at all.
+        assert_eq!(
+            icon_rail(0.0).terminal_inset_logical_px(),
+            icon_rail(1.0).terminal_inset_logical_px(),
+            "the panel opens over the terminal, so nothing being aimed at moves"
+        );
     }
 
     /// Every rail state the settings dialog can ask for arrives with both of the
