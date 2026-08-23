@@ -660,12 +660,33 @@ impl MathWorker {
         let (result_tx, result_rx) = mpsc::channel::<MathWorkerResult>();
         let scale_result_tx = result_tx.clone();
         let scale_proxy = proxy.clone();
+        // Read here rather than handed down: the lane is spawned before there is
+        // a `Runtime` to own the flag, and this is the same question
+        // [`Runtime::trace_perf`] asks of the same variable.
+        let trace_perf = std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty());
         bt_platform::spawn_at_priority(
             "bt-image-scale-worker",
             bt_platform::ThreadPriority::BelowNormal,
             move || {
                 run_scale_worker(scale_rx, |request| {
+                    // **What a Lanczos3 pass actually costs on this machine**,
+                    // beside the size that provoked it. The lane is the one
+                    // suspect in a sticky zoom that the event thread cannot time
+                    // for itself, because it runs on another thread and answers
+                    // whenever it answers.
+                    let started = trace_perf.then(Instant::now);
+                    let purpose = request.purpose();
+                    let (width, height) = {
+                        let task = request.task();
+                        (task.display_width_px, task.display_height_px)
+                    };
                     let (leaf, completion) = request.completion();
+                    if let Some(started) = started {
+                        eprintln!(
+                            "BT_PERF_TRACE image_scale purpose={purpose:?} size={width}x{height} lanczos_us={}",
+                            started.elapsed().as_micros(),
+                        );
+                    }
                     if scale_result_tx
                         .send(MathWorkerResult { leaf, completion })
                         .is_ok()
@@ -10323,9 +10344,17 @@ struct PreviewImageState {
     /// it a decoder cannot answer: a decode knows how many pixels there are, not
     /// how many bytes they arrived in.
     bytes: Option<u64>,
-    /// The shared resize quiet boundary. Geometry follows every pointer event, but the expensive
-    /// exact-size resample is asked only after this instant lands without another resize.
-    resize_scale_deadline: Option<Instant>,
+    /// **The boundary this picture is still settling towards**, shared by the two
+    /// gestures that change how many of its pixels are shown: a window or pane
+    /// resize, and a zoom.
+    ///
+    /// Geometry follows every pointer event, so the picture never lags the hand;
+    /// the expensive exact-size resample is asked only once the gesture has been
+    /// quiet for `WINDOW_RESIZE_QUIET`. Both gestures arrive as a *run* of
+    /// events — a drag is a run of moves and a wheel is a run of notches — and a
+    /// resample costs hundreds of milliseconds on a large decode, so a question
+    /// per event is a question about a size the hand has already left.
+    scale_settle_deadline: Option<Instant>,
     /// **Where this picture stands this frame**, in physical pixels of the whole
     /// surface — [`image_destination`]'s answer against the body its host gave
     /// it, and `None` while there is nowhere for it to stand at all (the decode
@@ -10352,7 +10381,7 @@ impl PreviewImageState {
             failure: None,
             native: None,
             bytes: None,
-            resize_scale_deadline: None,
+            scale_settle_deadline: None,
             drawn: None,
         }
     }
@@ -10397,16 +10426,23 @@ impl PreviewImageState {
         true
     }
 
-    fn defer_resize_scale(&mut self, observed_at: Instant) {
-        self.resize_scale_deadline = Some(observed_at + WINDOW_RESIZE_QUIET);
+    /// **This picture's size just moved again**, so the exact-size raster is not
+    /// owed until `WINDOW_RESIZE_QUIET` after the last time it did.
+    ///
+    /// Every event of a gesture pushes the boundary out, so the question is put
+    /// once per gesture rather than once per event — and it is put about the
+    /// size the gesture *ended* on, which is the only size anybody asked to
+    /// look at.
+    fn defer_scale_settle(&mut self, observed_at: Instant) {
+        self.scale_settle_deadline = Some(observed_at + WINDOW_RESIZE_QUIET);
     }
 
-    fn finish_resize_scale_if_quiet(&mut self, now: Instant) -> bool {
+    fn finish_scale_settle_if_quiet(&mut self, now: Instant) -> bool {
         if self
-            .resize_scale_deadline
+            .scale_settle_deadline
             .is_some_and(|deadline| now >= deadline)
         {
-            self.resize_scale_deadline = None;
+            self.scale_settle_deadline = None;
             true
         } else {
             false
@@ -10667,6 +10703,23 @@ fn image_zoom_notch(
         mode: ImageZoomMode::Scale(new),
         pan: zoom_about(point, old, new, zoom.pan),
     }
+}
+
+/// **Does this move change how many of the picture's pixels are on screen?**
+///
+/// The one question [`Runtime::set_preview_image_zoom`] has to answer before it
+/// decides whether the exact-size raster is owed again, and it is asked of the
+/// *mode* rather than of the whole zoom because the two halves of an
+/// [`ImageZoom`] are answered by two different machines. The **mode** is how big
+/// the picture is drawn, which is what the resample lane is for; the **pan** is
+/// where inside its body it stands, which the sampler does for free out of a
+/// raster it is already holding.
+///
+/// So a drag across a zoomed picture — a run of dozens of pointer moves, each
+/// one a new pan — asks the lane nothing at all, while a wheel that moves the
+/// scale by any amount starts the settle again.
+fn image_zoom_settles(held: ImageZoom, wanted: ImageZoom) -> bool {
+    held.mode != wanted.mode
 }
 
 /// The notches that have arrived since the loop last acted on one.
@@ -36432,19 +36485,67 @@ impl Runtime<'_> {
     /// Returns whether anything changed, so the gestures above can stay silent
     /// on a notch spent at the end of the road — a wheel at 800% that
     /// republished the frame would be a repaint per notch for no pixels.
+    ///
+    /// **A scale that moved is a picture still settling** ([`Self::defer_preview_resample`]'s
+    /// boundary, reached by its second gesture). The exact-size raster is a
+    /// question about *where the picture came to rest*, and a wheel is a run of
+    /// notches, so asking it once per notch asks it about sizes the hand is
+    /// still travelling through. Measured on a 4000×3000 PNG, ten detents of
+    /// zoom put seven questions to the resample lane, of which the lane had time
+    /// to answer three — each a Lanczos3 pass of 240–480ms over a size the
+    /// picture had already left. The two that landed early were not sharper
+    /// pictures arriving, they were *older* pictures arriving: the reader saw
+    /// the raster jump twice on its way to the one it should have had.
+    ///
+    /// So the scale defers exactly as a resize does, through the very same
+    /// deadline, and the one pass that runs is the one the gesture ended on.
+    /// **The pan does not**, and that asymmetry is the whole of the rule: a pan
+    /// moves the picture across its body without changing how many pixels of it
+    /// are shown, so the raster it is already holding is still the exact right
+    /// one and there is nothing to settle.
     fn set_preview_image_zoom(&mut self, surface: PreviewSurface, zoom: ImageZoom) -> Result<bool> {
-        if !surface_takes_image_zoom(surface) || self.preview_image_zoom(surface) == zoom {
+        let held = self.preview_image_zoom(surface);
+        if !surface_takes_image_zoom(surface) || held == zoom {
             return Ok(false);
         }
+        if image_zoom_settles(held, zoom) {
+            let now = Instant::now();
+            if let Some(picture) = self.preview_picture_mut(surface) {
+                picture.defer_scale_settle(now);
+            }
+        }
         self.preview_pane_mut(surface).zoom = zoom;
+        // **What one notch costs, split by the layer that spends it.** The zoom
+        // gesture is the one place three whole-window rebuilds are run back to
+        // back off a single input event, so "zooming is a little sticky" has
+        // three candidate authors and no way to tell them apart from the
+        // outside. Printed under the same switch every other latency on this
+        // window is printed under.
+        let started = self.app.trace_perf.then(Instant::now);
         self.refresh_preview_for_layout();
+        let laid_out = started.map(|_| Instant::now());
         self.refresh_chrome();
+        let chromed = started.map(|_| Instant::now());
         // The zoom is the only thing that decides whether the picture can be
         // carried, so a notch is the one event that changes the hand's shape
         // under a pointer that never moved — the chrome hover, which is what
         // ordinarily reapplies it, has nothing new to notice here.
         self.apply_pointer_cursor();
         self.present_chrome_change()?;
+        if let (Some(started), Some(laid_out), Some(chromed)) = (started, laid_out, chromed) {
+            let scale = self
+                .preview_image_geometry(surface)
+                .map_or(f32::NAN, |(body, image_px)| {
+                    image_zoom_scale(body, image_px, zoom)
+                });
+            eprintln!(
+                "BT_PERF_TRACE image_zoom scale={scale:.4} layout_us={} chrome_us={} present_us={} total_us={}",
+                (laid_out - started).as_micros(),
+                (chromed - laid_out).as_micros(),
+                chromed.elapsed().as_micros(),
+                started.elapsed().as_micros(),
+            );
+        }
         Ok(true)
     }
 
@@ -36525,32 +36626,34 @@ impl Runtime<'_> {
         }
     }
 
-    /// The earliest resize-quiet boundary any picture on screen is waiting on.
+    /// The earliest settle boundary any picture on screen is waiting on.
     ///
     /// Plural for [`Self::preview_picture_hosts`]' reason: a window resize defers
     /// every picture's exact-size resample at once, and a wake scheduled off the
     /// first of them only would leave the others soft until something else
-    /// happened to redraw.
+    /// happened to redraw. A zoom defers one picture — the one under the wheel —
+    /// but it is read from the same place, because the question a wake answers
+    /// is "is any picture owed a raster yet", not "which gesture owes it".
     fn preview_resample_deadline(&self) -> Option<Instant> {
         self.preview_picture_hosts()
             .into_iter()
-            .filter_map(|surface| self.preview_picture(surface)?.resize_scale_deadline)
+            .filter_map(|surface| self.preview_picture(surface)?.scale_settle_deadline)
             .min()
     }
 
     fn defer_preview_resample(&mut self, observed_at: Instant) {
         for surface in self.preview_picture_hosts() {
             if let Some(picture) = self.preview_picture_mut(surface) {
-                picture.defer_resize_scale(observed_at);
+                picture.defer_scale_settle(observed_at);
             }
         }
     }
 
-    fn finish_preview_resize_if_quiet(&mut self, now: Instant) -> Result<()> {
+    fn finish_preview_scale_if_quiet(&mut self, now: Instant) -> Result<()> {
         let mut due = false;
         for surface in self.preview_picture_hosts() {
             if let Some(picture) = self.preview_picture_mut(surface) {
-                due |= picture.finish_resize_scale_if_quiet(now);
+                due |= picture.finish_scale_settle_if_quiet(now);
             }
         }
         if due {
@@ -36838,10 +36941,27 @@ impl Runtime<'_> {
             return;
         }
         if self.preview_picture(surface).is_some_and(|picture| {
-            picture.pending.as_ref() == Some(&target) || picture.resize_scale_deadline.is_some()
+            picture.pending.as_ref() == Some(&target) || picture.scale_settle_deadline.is_some()
         }) || !self.app.math_worker_running
         {
             return;
+        }
+        // **Every exact-size question this surface puts to the resample lane.**
+        // One line per Lanczos3 pass asked for, with the size asked and the size
+        // the last answer came back at, so a gesture's appetite can be counted
+        // from the outside instead of guessed at.
+        if self.app.trace_perf {
+            let held_at = self
+                .preview_picture(surface)
+                .and_then(|picture| picture.raster.as_ref())
+                .map_or_else(
+                    || "none".to_owned(),
+                    |raster| format!("{}x{}", raster.width_px, raster.height_px),
+                );
+            eprintln!(
+                "BT_PERF_TRACE image_resample want={}x{} held={held_at} display={display_width}x{display_height}",
+                raster_width, raster_height,
+            );
         }
         let task = peek_scale_task(&target, rgba, native_width, native_height);
         if self
@@ -59586,7 +59706,7 @@ impl Runtime<'_> {
         self.offer_ime_caret(None);
         self.flush_ime_cursor_area(now);
         self.finish_resize_if_quiescent(now)?;
-        self.finish_preview_resize_if_quiet(now)?;
+        self.finish_preview_scale_if_quiet(now)?;
         self.advance_live_math_if_due(now)?;
         self.activate_hyperlink_hover_if_due(now)?;
         self.activate_peek_if_due(now)?;
@@ -73114,18 +73234,61 @@ mod tests {
         let start = Instant::now();
         let last = start + Duration::from_millis(90);
         let mut preview = PreviewImageState::new(PathBuf::from("storm.png"));
-        preview.defer_resize_scale(start);
-        preview.defer_resize_scale(start + Duration::from_millis(40));
-        preview.defer_resize_scale(last);
+        preview.defer_scale_settle(start);
+        preview.defer_scale_settle(start + Duration::from_millis(40));
+        preview.defer_scale_settle(last);
 
         assert!(
-            !preview.finish_resize_scale_if_quiet(
+            !preview.finish_scale_settle_if_quiet(
                 last + WINDOW_RESIZE_QUIET - Duration::from_millis(1)
             )
         );
-        assert!(preview.finish_resize_scale_if_quiet(last + WINDOW_RESIZE_QUIET));
-        assert_eq!(preview.resize_scale_deadline, None);
-        assert!(!preview.finish_resize_scale_if_quiet(last + WINDOW_RESIZE_QUIET));
+        assert!(preview.finish_scale_settle_if_quiet(last + WINDOW_RESIZE_QUIET));
+        assert_eq!(preview.scale_settle_deadline, None);
+        assert!(!preview.finish_scale_settle_if_quiet(last + WINDOW_RESIZE_QUIET));
+    }
+
+    /// **A zoom is a settle and a pan is not**, which is what keeps a drag off
+    /// the resample lane and a wheel on it.
+    ///
+    /// Measured before this was wired up (4000×3000 PNG, ten detents): seven
+    /// exact-size questions went to the lane, it had time to answer three, and
+    /// two of the three were sizes the gesture had already travelled past — so
+    /// the raster on screen jumped twice on its way to the one that was asked
+    /// for. Deferring the question to the boundary the resize gesture already
+    /// keeps leaves exactly one pass, at the size the hand stopped on.
+    #[test]
+    fn a_scale_starts_the_settle_again_and_a_pan_never_does() {
+        let fit = ImageZoom::FIT;
+        let bigger = ImageZoom::scaled(1.25);
+        assert!(
+            image_zoom_settles(fit, bigger),
+            "a wheel that changed the scale owes a new exact-size raster"
+        );
+        assert!(
+            image_zoom_settles(bigger, fit),
+            "and so does one that gave it back"
+        );
+
+        let carried = ImageZoom {
+            pan: [40.0, -18.0],
+            ..bigger
+        };
+        assert!(
+            !image_zoom_settles(bigger, carried),
+            "a drag moves the picture across a raster it already holds, so the \
+             lane is asked nothing"
+        );
+        assert!(
+            !image_zoom_settles(
+                carried,
+                ImageZoom {
+                    pan: [-7.0, 3.0],
+                    ..bigger
+                }
+            ),
+            "and the next move of the same drag asks it nothing either"
+        );
     }
 
     // ── ticket #60: the picture zooms and pans ──────────────────────────────
@@ -73314,6 +73477,61 @@ mod tests {
             ),
             ImageZoom::scaled(IMAGE_ZOOM_MAX),
             "a notch at the end of the road is spent on nothing and moves nothing"
+        );
+    }
+
+    /// **A detent delivered in pieces is worth exactly one detent** — the claim
+    /// `docs/HANDOFF-2026-08-21.md` §5 ⑮/⑳ made against this gesture, checked
+    /// rather than inherited.
+    ///
+    /// That report reasoned by analogy from the focus card's aim, which shares
+    /// [`wheel_zoom_notches`] and *did* lose the remainder: the aim spends whole
+    /// rows, so it takes `trunc` and had to grow [`CardAim`] to carry the
+    /// fraction over. The picture's zoom has no such floor. It is continuous in
+    /// the notch count — `IMAGE_ZOOM_STEP.powf(notches)` — and `s^a · s^b =
+    /// s^(a+b)`, so the six twenty-unit reports a precision touchpad sends per
+    /// detent compose into the same 125% the one report of a mouse gets, with
+    /// nothing carried and nothing dropped.
+    ///
+    /// Confirmed on the machine as well as here (`ui-probe wheel -Step 20`, six
+    /// reports): 0.9832 → 1.0204 → 1.0591 → 1.0992 → 1.1409 → 1.1841 → 1.2290,
+    /// which is 0.9832 × 1.25 to four figures, and every report moved the
+    /// picture rather than six of them moving it once.
+    #[test]
+    fn a_detent_delivered_in_pieces_zooms_exactly_as_one_detent() {
+        let image = [400_u32, 300];
+        let pointer = [900.0, 300.0];
+        let whole = image_zoom_notch(ImageZoom::FIT, 1.0, ZOOM_BODY, image, pointer);
+
+        // What Win32 sends when a high-resolution wheel or a precision touchpad
+        // turns one detent: six reports of twenty, not one of a hundred and
+        // twenty.
+        let piece = MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 20.0));
+        let mut stepped = ImageZoom::FIT;
+        for report in 0..6 {
+            let moved = image_zoom_notch(
+                stepped,
+                wheel_zoom_notches(piece),
+                ZOOM_BODY,
+                image,
+                pointer,
+            );
+            assert_ne!(
+                moved, stepped,
+                "report {report} of the detent moved the picture by nothing"
+            );
+            stepped = moved;
+        }
+
+        let (ImageZoomMode::Scale(whole), ImageZoomMode::Scale(stepped)) =
+            (whole.mode, stepped.mode)
+        else {
+            panic!("a notch out of Fit resolves to a scale");
+        };
+        assert_close(
+            stepped,
+            whole,
+            "six pieces of a detent are the detent, with no remainder thrown away",
         );
     }
 
