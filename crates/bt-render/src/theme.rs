@@ -2985,6 +2985,16 @@ impl CursorStyleState {
     }
 }
 
+/// **One caret shape for the process, by ruling** (`docs/DESIGN.md` §2.8,
+/// multiwindow slice E1).
+///
+/// The spike's slice E offered to move this into `App` as a field; the ruling
+/// is that it stays a process static, for the same three reasons the theme
+/// does. What slice E1 changed is not where the value lives but who is told it
+/// moved: `Runtime::apply_cursor_style` now records an `ApplicationChange` and
+/// every open window re-derives from this static in the same event-loop round,
+/// instead of only the window whose settings row was pressed publishing a
+/// frame.
 fn process_cursor_style() -> &'static CursorStyleState {
     static CURSOR_STYLE: CursorStyleState = CursorStyleState::new();
     &CURSOR_STYLE
@@ -3122,6 +3132,19 @@ impl ThemeState {
     }
 }
 
+/// **One theme for the process, by ruling** (`docs/DESIGN.md` §2.8, multiwindow
+/// slice E1).
+///
+/// Three reasons, and the first is not this crate's: the Win32 class brush a
+/// window's background is painted from is *class* state and winit gives every
+/// window in a process one class, so a second theme is a second registered
+/// window class; the choice arrives from `settings.json`, which is the
+/// application's file and not a window's; and the glyph atlas and the composed
+/// row cache are shared across windows and keyed on [`theme_revision`], so
+/// per-theme copies of both would be paid for by every process, including the
+/// overwhelming majority that only ever want one theme. A per-window theme is
+/// its own slice's ticket, and this static stays where it is until somebody
+/// writes it.
 fn process_theme() -> &'static ThemeState {
     static THEME: OnceLock<ThemeState> = OnceLock::new();
     THEME.get_or_init(|| ThemeState::from_environment(std::env::var_os("BT_BG").as_deref(), true))

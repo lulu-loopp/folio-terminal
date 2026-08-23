@@ -1094,6 +1094,13 @@ mod windows_impl {
 
     /// GDI brush currently owned by this process and installed on winit's shared window class.
     /// The class itself outlives individual windows; theme switches replace this handle in place.
+    ///
+    /// **One brush for the process, by ruling** (`docs/DESIGN.md` §2.8, multiwindow slice E1). This
+    /// is the static the spike named as the one that would hit a wall under a per-window theme
+    /// (spike-multiwindow Q5 item 1): every winit window in a process shares one window class, so
+    /// a second theme needs a second registered class — its own slice, and nobody has asked for it.
+    /// Until somebody does, "the theme is the application's" is what makes one handle here correct
+    /// rather than a simplification, and this static stays where it is.
     static WINDOW_CLASS_BACKGROUND: OnceLock<Mutex<Option<isize>>> = OnceLock::new();
     const CF_UNICODETEXT: u32 = 13;
     const CLIPBOARD_OPEN_RETRY_DELAYS: [std::time::Duration; 4] = [
