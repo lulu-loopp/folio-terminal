@@ -834,10 +834,15 @@ fn path_list_value(text: &str) -> Option<std::ops::Range<usize>> {
             continue;
         }
         let head = &text[..offset];
+        // `get` and not indexing: the label is matched by **bytes** from the end, and the byte that
+        // many places back is a UTF-8 continuation byte in every line whose field is written in
+        // another script (`路径=D:\bin`). Slicing there is a panic; asking for the slice is a `None`.
         if PATH_LIST_FIELDS.iter().any(|field| {
-            head.len() >= field.len()
-                && head[head.len() - field.len()..].eq_ignore_ascii_case(field)
-                && candidate_start_boundary(text, head.len() - field.len())
+            head.len().checked_sub(field.len()).is_some_and(|start| {
+                head.get(start..)
+                    .is_some_and(|tail| tail.eq_ignore_ascii_case(field))
+                    && candidate_start_boundary(text, start)
+            })
         }) {
             return Some(offset + 1..text.len());
         }
@@ -1865,6 +1870,15 @@ mod tests {
             ),
             [("D:\\bin", "file:///D:/bin".to_owned())]
         );
+        // The label is matched by bytes from the `=` backwards, so a field written in another
+        // script lands mid-character. Reading it must be a refusal and not a panic.
+        assert_eq!(
+            linked(&links, "路径=D:\\bin;D:\\case", None),
+            [],
+            "no list context, so the value is one name that carries a semicolon — and that name is \
+             not on the disk, so neither half of it is offered in its place"
+        );
+        assert_eq!(linked(&links, "P=D:\\bin", None).len(), 1);
     }
 
     /// Every link one line offers **on a disk that says yes to everything it is asked**.
