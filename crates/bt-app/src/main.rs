@@ -21582,10 +21582,7 @@ impl Runtime<'_> {
             .into_iter()
             .filter_map(|seat| {
                 if let Some(fault) = self
-                    .window
-                    .web
-                    .as_ref()
-                    .filter(|web| web.seat == seat)
+                    .web_on(seat)
                     .and_then(webhost::WebSeat::fault)
                     .filter(|fault| !fault.stands_over_the_page())
                 {
@@ -22027,12 +22024,7 @@ impl Runtime<'_> {
             // the boxes are `None` and nothing is pushed.
             let previews: Vec<SeatId> = self.seats.preview_seats();
             for seat in previews {
-                let loading = self
-                    .window
-                    .web
-                    .as_ref()
-                    .filter(|web| web.seat == seat)
-                    .is_some_and(|web| web.page().loading);
+                let loading = self.web_on(seat).is_some_and(|web| web.page().loading);
                 for (tool, box_, text) in [
                     (
                         tooltip::WebNavTool::Back,
@@ -23396,7 +23388,23 @@ impl Runtime<'_> {
     /// its own seat, and when the preview pool learns about pages this becomes a
     /// question about the buffer on the seat.
     fn seat_holds_a_page(&self, seat: SeatId) -> bool {
-        self.window.web.as_ref().is_some_and(|web| web.seat == seat)
+        self.web_on(seat).is_some()
+    }
+
+    /// **The page on one seat, and the one door to it** — every reader of a
+    /// hosted page goes through this pair.
+    ///
+    /// It is a pair of one-line functions on purpose: `WindowRuntime::web` is
+    /// one page today because `BT_WEB_DEV` is the only way to reach one, and it
+    /// becomes a map keyed by seat the moment a preview buffer can be a page
+    /// (slice ③). Every caller already asks "the page on *this* seat", so when
+    /// that day comes the lookup changes here and in no other place.
+    fn web_on(&self, seat: SeatId) -> Option<&webhost::WebSeat> {
+        self.window.web.as_ref().filter(|web| web.seat == seat)
+    }
+
+    fn web_on_mut(&mut self, seat: SeatId) -> Option<&mut webhost::WebSeat> {
+        self.window.web.as_mut().filter(|web| web.seat == seat)
     }
 
     /// Which toggles the capsule's current host can honour (§7.7 ②).
@@ -23479,7 +23487,7 @@ impl Runtime<'_> {
         // A page keeps its own highlights, so putting the capsule away has to
         // tell the engine as well — otherwise the marks stay on a document
         // nobody is searching any more.
-        if let Some(web) = self.window.web.as_mut().filter(|web| web.seat == seat)
+        if let Some(web) = self.web_on_mut(seat)
             && let Err(error) = web.find_stop()
         {
             eprintln!("BT_WEB {error}");
@@ -23590,7 +23598,7 @@ impl Runtime<'_> {
                 self.window.search.forget_engine_matches();
             }
             if query.is_empty()
-                && let Some(web) = self.window.web.as_mut().filter(|web| web.seat == seat)
+                && let Some(web) = self.web_on_mut(seat)
                 && let Err(error) = web.find_stop()
             {
                 eprintln!("BT_WEB {error}");
@@ -23733,7 +23741,7 @@ impl Runtime<'_> {
         {
             let query = self.window.search.query().to_owned();
             let case_sensitive = self.window.search.flags().case_sensitive;
-            if let Some(web) = self.window.web.as_mut().filter(|web| web.seat == seat)
+            if let Some(web) = self.web_on_mut(seat)
                 && let Err(error) = web.find_or_step(&query, case_sensitive, forwards)
             {
                 eprintln!("BT_WEB {error}");
@@ -31671,12 +31679,7 @@ impl Runtime<'_> {
         // asked before the buffer: this build's page does not live in the pool
         // yet (slice ③), and a seat with a page and no buffer would otherwise
         // draw an empty caption over a live document.
-        let page = self
-            .window
-            .web
-            .as_ref()
-            .filter(|web| web.seat == seat)
-            .map(|web| web.page().clone());
+        let page = self.web_on(seat).map(|web| web.page().clone());
         let (name, tools, dirty, flip_to_source) = match self.preview_buffer_on(surface) {
             Some(buffer) => (
                 buffer.name.clone(),
@@ -31714,10 +31717,7 @@ impl Runtime<'_> {
         // the one cell that says what this seat is about is blank while the card
         // under it names the address in full.
         let refused_address = self
-            .window
-            .web
-            .as_ref()
-            .filter(|web| web.seat == seat)
+            .web_on(seat)
             .and_then(webhost::WebSeat::fault)
             .and_then(webhost::WebFault::refused_address);
         let (name, tools, dirty, flip_to_source) = match &page {
@@ -31884,12 +31884,7 @@ impl Runtime<'_> {
         // a new ruling: it is the 2026-08-20 one about a terminal's hover line,
         // landing on the surface that already had a hover line — and it is
         // stamped with the very same words, from `Text::HyperlinkBlockedSuffix`.
-        let page = self
-            .window
-            .web
-            .as_ref()
-            .filter(|web| web.seat == seat)
-            .map(|web| web.page().clone());
+        let page = self.web_on(seat).map(|web| web.page().clone());
         if let Some(page) = page {
             let hovering = !page.hover.is_empty();
             let target = if hovering { &page.hover } else { &page.url };
@@ -31990,13 +31985,7 @@ impl Runtime<'_> {
         // **A page's band hands the page over instead** (§7.7 ③): 「外链一律外
         // 交」, and this is the one place a web seat has to say it. The flash is
         // the same flash — one band, one confirmation, one duration.
-        if let Some(url) = self
-            .window
-            .web
-            .as_ref()
-            .filter(|web| web.seat == seat)
-            .map(|web| web.page().url.clone())
-        {
+        if let Some(url) = self.web_on(seat).map(|web| web.page().url.clone()) {
             self.hand_url_to_the_browser(&url)?;
             self.window.revealed_foot = Some((RevealedFoot::Preview(seat), Instant::now()));
             self.refresh_chrome();
@@ -56793,13 +56782,7 @@ impl Runtime<'_> {
     }
 
     fn open_web_address_on(&mut self, seat: SeatId) -> Result<()> {
-        let Some(url) = self
-            .window
-            .web
-            .as_ref()
-            .filter(|web| web.seat == seat)
-            .map(|web| web.page().url.clone())
-        else {
+        let Some(url) = self.web_on(seat).map(|web| web.page().url.clone()) else {
             return Ok(());
         };
         self.finish_rename(true)?;
@@ -56832,7 +56815,7 @@ impl Runtime<'_> {
     }
 
     fn open_web_dev_tools_on(&mut self, seat: SeatId) -> Result<()> {
-        if let Some(web) = self.window.web.as_ref().filter(|web| web.seat == seat)
+        if let Some(web) = self.web_on(seat)
             && let Err(error) = web.open_dev_tools()
         {
             eprintln!("BT_WEB {error}");
@@ -56845,7 +56828,7 @@ impl Runtime<'_> {
         if verb == WebHeadVerb::DevTools {
             return self.open_web_dev_tools_on(seat);
         }
-        let Some(web) = self.window.web.as_mut().filter(|web| web.seat == seat) else {
+        let Some(web) = self.web_on_mut(seat) else {
             return Ok(());
         };
         let outcome = match verb {
@@ -56864,10 +56847,7 @@ impl Runtime<'_> {
     /// The one verb on the failure card this seat is showing (§7.7 ④).
     fn run_web_fault_verb(&mut self, seat: SeatId) -> Result<()> {
         let Some(verb) = self
-            .window
-            .web
-            .as_ref()
-            .filter(|web| web.seat == seat)
+            .web_on(seat)
             .and_then(|web| web.fault())
             .map(webhost::WebFault::verb)
         else {

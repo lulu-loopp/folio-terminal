@@ -368,3 +368,97 @@ pub fn covers(layout: &SheetLayout, x: f32, y: f32) -> bool {
 fn inside(box_: [f32; 4], x: f32, y: f32) -> bool {
     x >= box_[0] && x < box_[2] && y >= box_[1] && y < box_[3]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BODY: [f32; 4] = [960.0, 88.0, 1920.0, 1150.0];
+
+    /// PIN (§7.7 ④) — **the card is centred on the seat's body and stacks its
+    /// four rows in one order**: mark, sentence, fact, verb.
+    ///
+    /// MUTATION: hold the fact's gap open when there is no fact and the last
+    /// assertion goes red — a card that reserves room for a line it has not got
+    /// is a card with a hole in it.
+    #[test]
+    fn a_sheet_stacks_its_rows_and_stands_in_the_middle_of_the_body() {
+        let laid = lay_out(BODY, 180.0, 1, true, 1.0);
+        assert!(laid.mark[3] <= laid.say[0][1]);
+        assert!(laid.say[0][3] <= laid.detail[1]);
+        assert!(laid.detail[3] <= laid.verb[1]);
+        // Inside the body, and centred in it.
+        assert!(laid.frame[1] >= BODY[1] && laid.frame[3] <= BODY[3]);
+        let card_middle = (laid.frame[1] + laid.frame[3]) / 2.0;
+        let body_middle = (BODY[1] + BODY[3]) / 2.0;
+        assert!((card_middle - body_middle).abs() < 1.5);
+        let centre = (BODY[0] + BODY[2]) / 2.0;
+        assert!(((laid.frame[0] + laid.frame[2]) / 2.0 - centre).abs() < 1.5);
+        // No fact, no line and no gap held open for one.
+        let plain = lay_out(BODY, 180.0, 1, false, 1.0);
+        assert_eq!(plain.detail[3] - plain.detail[1], 0.0);
+        assert!(plain.frame[3] - plain.frame[1] < laid.frame[3] - laid.frame[1]);
+    }
+
+    /// PIN (§7.7 ④) — **a sentence that wraps makes the card taller and moves
+    /// nothing else out of order.**
+    ///
+    /// The download's sentence is two sentences long in the ruling's own table,
+    /// so the card has to hold more than one line: at one line it was cut in
+    /// half on the real window (2026-08-22).
+    #[test]
+    fn a_wrapped_sentence_makes_the_card_taller_and_keeps_its_order() {
+        let one = lay_out(BODY, 180.0, 1, true, 1.0);
+        let two = lay_out(BODY, 180.0, 2, true, 1.0);
+        assert_eq!(one.say.len(), 1);
+        assert_eq!(two.say.len(), 2);
+        assert!(two.frame[3] - two.frame[1] > one.frame[3] - one.frame[1]);
+        assert!(two.say[0][3] <= two.say[1][1], "the lines stack");
+        assert!(two.say[1][3] <= two.detail[1], "and the fact follows them");
+    }
+
+    /// PIN (§7.7 ④) — **the verb answers and the scrim swallows.**
+    ///
+    /// A press on the scrim is not a dismissal: the one thing a reader must not
+    /// be able to lose by accident is the only notice saying a file they asked
+    /// for did not arrive. Escape is the way out and it is the only one.
+    ///
+    /// MUTATION: let `covers` answer `false` outside the card and a press beside
+    /// the sheet reaches the page under it, which is a scrim that is not one.
+    #[test]
+    fn the_verb_answers_and_the_scrim_swallows() {
+        let laid = lay_out(BODY, 180.0, 1, true, 1.0);
+        let seat = SeatId(2);
+        let centre = |box_: [f32; 4]| ((box_[0] + box_[2]) / 2.0, (box_[1] + box_[3]) / 2.0);
+        let (x, y) = centre(laid.verb);
+        assert_eq!(
+            hit(&laid, seat, x, y),
+            Some(ChromeTarget::PreviewFaultVerb(seat))
+        );
+        assert!(covers(&laid, x, y));
+        // The card's own ground, above the verb: no target, still covered.
+        let (x, y) = centre(laid.mark);
+        assert_eq!(hit(&laid, seat, x, y), None);
+        assert!(covers(&laid, x, y));
+        // The scrim, well clear of the card: no target, still covered.
+        let corner = (BODY[0] + 4.0, BODY[1] + 4.0);
+        assert_eq!(hit(&laid, seat, corner.0, corner.1), None);
+        assert!(covers(&laid, corner.0, corner.1));
+        // And outside the seat's body it is nobody's.
+        assert!(!covers(&laid, BODY[0] - 4.0, BODY[1] + 4.0));
+    }
+
+    /// PIN — **the sentence is wrapped to the card's own column**, not to the
+    /// seat: a card sized by its longest error message is a card that changes
+    /// shape per failure.
+    #[test]
+    fn the_sentence_is_wrapped_to_the_card_and_not_to_the_seat() {
+        let column = say_width(BODY, 1.0);
+        let laid = lay_out(BODY, 180.0, 1, true, 1.0);
+        assert!(column < BODY[2] - BODY[0]);
+        assert!((column - (laid.say[0][2] - laid.say[0][0])).abs() < 1.0);
+        // A narrow seat gives a narrower column rather than overflowing it.
+        let narrow = [0.0, 0.0, 300.0, 400.0];
+        assert!(say_width(narrow, 1.0) < column);
+    }
+}
