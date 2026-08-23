@@ -3642,6 +3642,79 @@ fn preview_open_lane(path: &Path) -> PreviewOpenLane {
     PreviewOpenLane::Document
 }
 
+/// **The path a preview source is really a page for** (user ruling 2026-08-23,
+/// 「一个名字只该有一个含义」; `docs/DESIGN.md` §7.10 ⑥).
+///
+/// [`preview_open_lane`] answers for a path somebody is *opening*; this answers
+/// for an identity that is already in hand — a row from the switcher, a line
+/// from `session.json`, a seed from the vault, a file dropped on a pane — and it
+/// is deliberately the same question, asked through the same function, because
+/// the ruling is precisely that there is only one.
+///
+/// It is what `Runtime::open_preview_source_on` consults, and that is the whole
+/// mechanism: **the pool's own door is the one door**, so a `.html` cannot land
+/// as a document by arriving through a gesture nobody thought to fork. The doors
+/// that used to have to remember are the drop (`open_preview_onto`), the
+/// switcher's pool row (`choose_preview_row`), the files column's double click
+/// and the scheme editor; not one of them mentions a page.
+///
+/// A source with no file behind it is not a page however it is spelled — a git
+/// diff of `design/ui-mockup.html` is a reading of a repository — and
+/// [`preview::PreviewSource::Web`] is already one, so it is not here either.
+fn source_opens_as_a_page(source: &preview::PreviewSource) -> Option<PathBuf> {
+    let path = source.file_path()?;
+    (preview_open_lane(path) == PreviewOpenLane::Page).then(|| path.to_path_buf())
+}
+
+/// **Which of the glance card's four bodies a row earns** — see
+/// [`Runtime::file_peek_layer`], which is the one caller.
+///
+/// Lifted out of that function's `match` so the ladder can be asked without a
+/// window and without a font: it is a claim about a name, a path and one bit
+/// read off the buffer, and every one of those is answerable on its own.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PeekBodyKind {
+    /// The decoded picture, fitted into the card's frame.
+    Picture,
+    /// The one line that says nothing will be shown.
+    Refused,
+    /// The one line that says what opening the row *will* do (user ruling
+    /// 2026-08-23).
+    Page,
+    /// The preview pane's own body, laid out at the card's width.
+    Document,
+}
+
+/// [`PeekBodyKind`] for one glance.
+///
+/// **The page arm asks [`preview_open_lane`] and not the name alone**, which is
+/// the whole of "the card says what the double click does": the row and the card
+/// are two readings of one gesture, so they read it through one function. A page
+/// on a share is not a page — the mint refuses it — and the card that appears
+/// there is the refusal the seat would have shown, which is the answer it gave
+/// before this ruling and still gives.
+///
+/// A composed document has no path, so it is never a page however its name is
+/// spelled: a git diff of `design/ui-mockup.html` is a reading of a repository,
+/// exactly as [`preview_page_hand_off`] has always said.
+fn peek_body_kind(
+    ftype: preview::PreviewFtype,
+    path: Option<&Path>,
+    refused: bool,
+) -> PeekBodyKind {
+    match (ftype, path) {
+        (preview::PreviewFtype::Image, Some(_)) => PeekBodyKind::Picture,
+        (preview::PreviewFtype::Image | preview::PreviewFtype::Unknown, _) => PeekBodyKind::Refused,
+        (preview::PreviewFtype::Web, Some(path))
+            if preview_open_lane(path) == PreviewOpenLane::Page =>
+        {
+            PeekBodyKind::Page
+        }
+        _ if refused => PeekBodyKind::Refused,
+        _ => PeekBodyKind::Document,
+    }
+}
+
 /// The files column a stored [`LeafId`] still names on the tab in front of you.
 ///
 /// The whole of D47's self-healing, in one place and answerable without a
@@ -11165,11 +11238,16 @@ fn hyperlink_activation(
             };
         }
         return match intent {
-            // The page arm, and the whole of what is special about a page: this
-            // window can only show its *source*, and a link to a page is a
-            // reference to the page. So the plain half stays empty until W2 fills
-            // it, rather than answering with the one thing that was not asked for.
-            ClickIntent::Here if names_an_html_page(&path) => HyperlinkActivation::None,
+            // **The page arm is gone, and its own words say why** (user ruling
+            // 2026-08-23). It read: "this window can only show its *source*, and
+            // a link to a page is a reference to the page. So the plain half
+            // stays empty until W2 fills it" — and §7.1.5j ⑦(e) said the same
+            // thing forwards, that the arm is what changes when W2 lands. W2 has
+            // landed: `open_preview_at` sends a page down the engine's lane, so
+            // a plain click on a link to a page now opens the page, which is
+            // what was asked for. The table is back to one sentence with no
+            // exception in it — 平点 = the destination inside this window,
+            // Ctrl+click = hand it to the system.
             ClickIntent::Here => HyperlinkActivation::Preview(path, at),
             ClickIntent::System => HyperlinkActivation::External(path),
         };
@@ -11218,8 +11296,28 @@ fn names_an_html_page(path: &Path) -> bool {
 /// what names a page. So a document this window composed out of a repository
 /// answers `None` however its path inside the repo is spelled: it is not a file,
 /// so it is not a page.
-fn preview_page_hand_off(source: &preview::PreviewSource) -> Option<&Path> {
-    source.file_path().filter(|path| names_an_html_page(path))
+///
+/// **And a page that is being *rendered* is still a file** (user ruling
+/// 2026-08-23). Until that ruling the arrow was drawn over a `.html` shown as
+/// source and went out the moment the same file rendered — the source view was
+/// the only thing the seat could do with a page, so `PreviewSource::Web` had
+/// never needed an answer here. Now the render is what a double click gets, and
+/// a seat with no way to the real browser would be §7.1.5g ②″'s complaint
+/// upside down: a reader shut out of the page's own front. So a `file:` page
+/// answers with the path underneath it, taken back off the URL by the one
+/// function that reads a URL this window minted
+/// ([`webnav::Mint::path_and_tail_of_file_url`]) — never by string surgery, and
+/// never for an address from anywhere else, which is why a page on `http` still
+/// answers `None`: it has no file to hand anybody.
+fn preview_page_hand_off(source: &preview::PreviewSource) -> Option<PathBuf> {
+    if let Some(url) = source.web_url() {
+        let (path, _tail) = webnav::Mint::path_and_tail_of_file_url(url)?;
+        return names_an_html_page(&path).then_some(path);
+    }
+    source
+        .file_path()
+        .filter(|path| names_an_html_page(path))
+        .map(Path::to_path_buf)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -17074,6 +17172,35 @@ fn page_destination(target: &str) -> Option<(String, webnav::Mint)> {
         return Some((url, mint));
     }
     Some((switcher_row_destination(target)?, webnav::Mint::Nothing))
+}
+
+/// **What a restored pane's identity comes back as, when it comes back as a
+/// page** — the two stored spellings of one thing (user ruling 2026-08-23).
+///
+/// A session file, a Recent seed and a pinned row can all name a local page two
+/// ways: as the URL a page committed to (`PreviewSourceV1::Url`, written by
+/// every page opened since W2 slice ⑤) and as the path a document was opened
+/// from (`PreviewSourceV1::File`, which is what a `.html` dropped on a pane or
+/// chosen in the switcher wrote while `.html` was still text). **Both are the
+/// same file and both come back as the page**, which is this ruling in the one
+/// place a restore can apply it — the pool is seeded before a window exists, so
+/// `open_preview_source_on`'s fork is not on this path.
+///
+/// Neither spelling is trusted as a permission. The URL arm is
+/// [`page_destination`] unchanged — decode, canonicalise, mint again — and the
+/// path arm is those same three steps with no string to decode first, which is
+/// exactly what `Runtime::open_preview_web_file` does for a double click. A file
+/// that has been moved or deleted comes back as nothing at all, which is the
+/// answer §7.9 ⑤ already gives for a row this window would not navigate to now.
+fn revived_page_of(source: &preview::PreviewSource) -> Option<(String, webnav::Mint)> {
+    if let Some(url) = source.web_url() {
+        return page_destination(url);
+    }
+    let path = source_opens_as_a_page(source)?;
+    let canonical = std::fs::canonicalize(path).ok()?;
+    let mint = webnav::Mint::file(&canonical).ok()?;
+    let url = mint.target()?.to_owned();
+    Some((url, mint))
 }
 
 fn switcher_pin_is_allowed(kind: bt_persist::PinKind, target: &str) -> bool {
@@ -32148,20 +32275,56 @@ impl Runtime<'_> {
             Ok(canonical) => canonical,
             Err(error) => {
                 self.mouse_trace(|| format!("open_preview_web_file leave=no-disk error={error}"));
-                return self.open_preview_file(path);
+                // "一个不在那里的路径不是一张网页" (§7.10 ①), and the card it
+                // earns is the disk's own sentence — which this door is holding
+                // and the document lane is not (user ruling 2026-08-23).
+                return self.land_page_refusal(
+                    path,
+                    preview::PreviewRefusal::Fault(preview::PreviewFault::from_io(&error)),
+                );
             }
         };
         let mint = match webnav::Mint::file(&canonical) {
             Ok(mint) => mint,
             Err(refusal) => {
                 // A share, reached through a canonicalised path that turned out
-                // to be one. The document lane's `NetworkPath` card is section
+                // to be one — a junction can make a local-looking path into a
+                // UNC one, which is why this is asked after `canonicalize` and
+                // not only at [`preview_open_lane`]. `NetworkPath` is section
                 // 7.1.3's own refusal and the one this window has always shown.
                 self.mouse_trace(|| format!("open_preview_web_file leave=refused {refusal:?}"));
-                return self.open_preview_file(path);
+                return self.land_page_refusal(path, preview::PreviewRefusal::NetworkPath);
             }
         };
         self.open_minted_page(mint)
+    }
+
+    /// **The page lane asked the disk and the disk said no** — the file on the
+    /// seat, with the reason on it (user ruling 2026-08-23).
+    ///
+    /// It used to be `open_preview_file`, and that was right while `.html` was
+    /// text: the document lane would read the file, fail, and print the fault
+    /// itself. It cannot be that any more for two reasons at once — the fork on
+    /// the pool's door would send it straight back here, and a page-named file
+    /// is not read as text by anything in this window, so nothing downstream
+    /// would ever produce the sentence.
+    ///
+    /// So the reason travels the one hop from where it was learned to the buffer
+    /// that has to say it. `PreviewBuffer::accept` is the same door a head read's
+    /// refusal comes through; there is no second way for a buffer to be refused.
+    fn land_page_refusal(&mut self, path: PathBuf, refusal: preview::PreviewRefusal) -> Result<()> {
+        let Some(surface) = self.preview_landing_surface() else {
+            self.mouse_trace(|| "land_page_refusal leave=no-landing-surface".to_owned());
+            return Ok(());
+        };
+        let name = files_row_display_name(&path);
+        let source = preview::PreviewSource::file(path);
+        self.land_preview_source_on(surface, source.clone(), name)?;
+        if let Some(buffer) = self.preview_pool.get_mut(&source) {
+            buffer.accept(preview::HeadOutcome::Refused(refusal));
+        }
+        self.refresh_preview_body();
+        self.present_chrome_change()
     }
 
     /// **Issue one navigation the host itself minted** — step 3 and step 4 of
@@ -32201,6 +32364,38 @@ impl Runtime<'_> {
     /// way: everything below this line is about a buffer and a view of it, and
     /// nothing below it asks where the bytes are.
     fn open_preview_source_on(
+        &mut self,
+        surface: PreviewSurface,
+        source: preview::PreviewSource,
+        name: String,
+    ) -> Result<()> {
+        // **A name that says page opens as a page, whichever door it came
+        // through** (user ruling 2026-08-23; §7.10 ⑥). This is the pool's own
+        // door, so it is the door every *document* arrives by — a drop, a
+        // switcher row, a Recent seed, a restored `cur`, a double click in the
+        // files column — and putting the fork here rather than at each of them
+        // is what makes "从任何入口进来都开成渲染页" true by construction
+        // instead of by six call sites remembering.
+        //
+        // The seat is the singleton rule's rather than the one the caller
+        // chose, exactly as it is for a double click (`open_preview_at`): a tab
+        // has one page, and a drop aimed at a second pane does not buy a second
+        // browser.
+        if let Some(path) = source_opens_as_a_page(&source) {
+            return self.open_preview_web_file(path);
+        }
+        self.land_preview_source_on(surface, source, name)
+    }
+
+    /// [`Self::open_preview_source_on`] with the fork already answered — **the
+    /// document lane itself**.
+    ///
+    /// One caller other than that door: [`Self::land_page_refusal`], which is
+    /// the arm where the page lane has *already* asked the disk and been
+    /// refused. Sending it back through the fork would be an infinite loop, and
+    /// the loop is the honest shape of the thing being avoided — the page lane
+    /// and the document lane each believing the other one has the answer.
+    fn land_preview_source_on(
         &mut self,
         surface: PreviewSurface,
         source: preview::PreviewSource,
@@ -32448,7 +32643,15 @@ impl Runtime<'_> {
                 seats::PreviewHeadTools {
                     save: false,
                     flip: false,
-                    browser: false,
+                    // **`browser` is not forced off here** (user ruling
+                    // 2026-08-23). It used to be, and it was right while a page
+                    // could only come from an address: an arrow marked "hand
+                    // this file over" has nothing to give for `localhost:5173`.
+                    // A local page is a file, `preview_page_hand_off` says so
+                    // off the seat's own buffer, and the seat that renders a
+                    // `.html` is now the seat that used to show its source with
+                    // that arrow lit — §7.1.5g ②″'s reason has not changed
+                    // hands, only which view it is answering for.
                     web: true,
                     ..tools
                 },
@@ -32767,7 +32970,6 @@ impl Runtime<'_> {
         let Some(path) = self
             .preview_buffer_on(PreviewSurface::Seat(seat))
             .and_then(|buffer| preview_page_hand_off(&buffer.source))
-            .map(Path::to_path_buf)
         else {
             return Ok(());
         };
@@ -40010,25 +40212,31 @@ impl Runtime<'_> {
         // *capped* height, and the scroll bar's arithmetic needs the uncapped one
         // to know what share of it is showing.
         let mut document = 0.0_f32;
-        let body_kind = match (subject.ftype, subject.path.as_deref()) {
-            // A picture is a picture of a *file*; nothing composed is one.
-            (preview::PreviewFtype::Image, Some(path)) => self.file_peek_picture(path, scale),
-            (preview::PreviewFtype::Image | preview::PreviewFtype::Unknown, _) => {
-                file_peek::PeekBody::Refused
-            }
-            _ if subject.refused => file_peek::PeekBody::Refused,
-            _ => {
-                let probe = [
-                    0.0,
-                    0.0,
-                    file_peek::body_width(scale),
-                    file_peek::body_max_height(scale),
-                ];
-                self.rebuild_preview_document(PreviewSurface::Peek, probe, scale);
-                document = self.preview_surface_document_height(PreviewSurface::Peek, probe, scale);
-                file_peek::PeekBody::Document(document.min(probe[3]))
-            }
-        };
+        let body_kind =
+            match peek_body_kind(subject.ftype, subject.path.as_deref(), subject.refused) {
+                // A picture is a picture of a *file*; nothing composed is one.
+                PeekBodyKind::Picture => {
+                    let path = subject
+                        .path
+                        .clone()
+                        .expect("a picture body is only chosen for a file");
+                    self.file_peek_picture(&path, scale)
+                }
+                PeekBodyKind::Refused => file_peek::PeekBody::Refused,
+                PeekBodyKind::Page => file_peek::PeekBody::Page,
+                PeekBodyKind::Document => {
+                    let probe = [
+                        0.0,
+                        0.0,
+                        file_peek::body_width(scale),
+                        file_peek::body_max_height(scale),
+                    ];
+                    self.rebuild_preview_document(PreviewSurface::Peek, probe, scale);
+                    document =
+                        self.preview_surface_document_height(PreviewSurface::Peek, probe, scale);
+                    file_peek::PeekBody::Document(document.min(probe[3]))
+                }
+            };
         let content = file_peek::PeekContent {
             name: subject.name,
             ftype: subject.ftype.label().to_owned(),
@@ -58038,8 +58246,7 @@ impl Runtime<'_> {
                 let PreviewSurface::Seat(seat) = surface else {
                     return None;
                 };
-                let url = pane.buffer.as_ref()?.web_url()?;
-                let (url, minted) = page_destination(url)?;
+                let (url, minted) = revived_page_of(pane.buffer.as_ref()?)?;
                 Some((seat, url, minted))
             })
             .collect();
@@ -69261,11 +69468,11 @@ mod tests {
         // A folder is no longer one of them: since the folder ruling of
         // 2026-08-21 its plain half names a pane *inside* this window, so it
         // leaves this list the way a readable file was never in it.
-        for uri in [
-            "https://example.test/path",
-            "file:///C:/page.html",
-            "mailto:person@example.test",
-        ] {
+        //
+        // A page is no longer one of them either: since the ruling of
+        // 2026-08-23 its plain half names this window's own seat, and the seat
+        // draws the page rather than its source.
+        for uri in ["https://example.test/path", "mailto:person@example.test"] {
             assert_eq!(
                 hyperlink_activation(false, true, uri, &|path| path
                     == Path::new(r"C:\some\folder")),
@@ -69273,6 +69480,13 @@ mod tests {
                 "a plain click on a target that leaves this window: {uri:?}"
             );
         }
+        assert_eq!(
+            hyperlink_activation(false, true, "file:///C:/page.html", &|path| path
+                == Path::new(r"C:\some\folder")),
+            HyperlinkActivation::Preview(PathBuf::from(r"C:\page.html"), None),
+            "and a page is a destination inside this window now, so it is not on \
+             that list"
+        );
         assert_eq!(
             hyperlink_activation(false, true, "file:///C:/some/folder", &|path| path
                 == Path::new(r"C:\some\folder")),
@@ -69373,8 +69587,14 @@ mod tests {
                 "file:///C:/Users/me/phd-application-timeline.html",
                 &no_directories
             ),
-            HyperlinkActivation::None,
-            "a plain click on a page opens nothing: the seat could only show its source"
+            HyperlinkActivation::Preview(
+                PathBuf::from(r"C:\Users\me\phd-application-timeline.html"),
+                None
+            ),
+            "a plain click on a page opens the page, on the seat that renders \
+             one (user ruling 2026-08-23). It used to open nothing, because the \
+             seat could only have shown the source of the thing the link was \
+             pointing past"
         );
         assert_eq!(
             hyperlink_activation(
@@ -69449,43 +69669,66 @@ mod tests {
     }
 
     /// PIN — **a printed `file:` link to a local page never opens its source**
-    /// (§7.1.5g, user ruling 2026-08-20).
+    /// (§7.1.5g, user rulings 2026-08-20 and 2026-08-23).
     ///
-    /// The reported gap: `html` is in `preview::TEXT_EXTENSIONS`, so the arm that
-    /// had just been opened for `file:` handed a `.html` to the preview seat and
-    /// the user — who had pressed a link *to a page* — got the page's source.
-    /// Until the Web block (W2) has a seat that renders one, this window has no
-    /// answer of its own for a page: the plain half is empty and `Ctrl` sends it
-    /// to the machine's own handler, which for a page is its browser.
+    /// The reported gap: `html` was in `preview::TEXT_EXTENSIONS`, so the arm
+    /// that had just been opened for `file:` handed a `.html` to the preview seat
+    /// and the user — who had pressed a link *to a page* — got the page's source.
+    /// The 2026-08-20 answer was to leave the plain half empty until W2 had a
+    /// seat that renders one; W2 landed, and **the plain half now opens the
+    /// page**, which is the same sentence with the exception taken out of it
+    /// (§7.1.5j ⑦(e) wrote it forwards: "W2 落地时改的仍是那张表的臂"). What has
+    /// not changed by a letter is the half this test is named for — a press on a
+    /// link to a page never yields the page's *source*, and nothing that merely
+    /// reads like a page is treated as one.
     ///
     /// MUTATIONS:
     /// ① compare the extension by `ends_with`/`contains` instead of by
-    ///    `Path::extension` and `report.html.txt` — a text file — stops being
-    ///    openable at all;
-    /// ② put the page test *before* the directory test and a folder named
+    ///    `Path::extension` and `report.html.txt` — a text file — is opened on
+    ///    the engine's lane;
+    /// ② let the page arm run before the directory test and a folder named
     ///    `site.html` stops opening in Explorer;
-    /// ③ let the page test see a share and a cold `\\server\…\index.html` is
+    /// ③ let the page arm see a share and a cold `\\server\…\index.html` is
     ///    handed to a synchronous `ShellExecuteW` instead of meeting §7.1.3's
     ///    network card — and, worse, does so having asked the network first.
     #[test]
     fn a_local_html_page_opens_as_a_page_and_nothing_that_merely_reads_like_one_does() {
-        for uri in [
-            "file:///C:/Users/me/timeline.html",
-            "file:///C:/Users/me/TIMELINE.HTM",
-            "file:///C:/Program%20Files/report.html",
-            "file:///D:/%E4%B8%AD%E6%96%87/%E9%A1%B5.html",
+        for (uri, path) in [
+            (
+                "file:///C:/Users/me/timeline.html",
+                r"C:\Users\me\timeline.html",
+            ),
+            (
+                "file:///C:/Users/me/TIMELINE.HTM",
+                r"C:\Users\me\TIMELINE.HTM",
+            ),
+            (
+                "file:///C:/Program%20Files/report.html",
+                r"C:\Program Files\report.html",
+            ),
+            (
+                "file:///D:/%E4%B8%AD%E6%96%87/%E9%A1%B5.html",
+                r"D:\中文\页.html",
+            ),
         ] {
             assert_eq!(
                 hyperlink_activation(false, true, uri, &no_directories),
-                HyperlinkActivation::None,
-                "a plain click never shows a page's source: {uri:?}"
+                HyperlinkActivation::Preview(PathBuf::from(path), None),
+                "a plain click opens the page in this window: {uri:?}"
+            );
+            // And what it opens it *as* is the engine's lane, never the document
+            // pool — which is the half of this test's name that did not move.
+            assert_eq!(
+                preview_open_lane(Path::new(path)),
+                PreviewOpenLane::Page,
+                "and the seat draws the page rather than its source: {uri:?}"
             );
             assert!(
                 matches!(
                     hyperlink_activation(true, true, uri, &no_directories),
                     HyperlinkActivation::External(_)
                 ),
-                "and Ctrl opens the page itself: {uri:?}"
+                "and Ctrl still hands the page to this machine: {uri:?}"
             );
         }
         assert_eq!(
@@ -69514,6 +69757,14 @@ mod tests {
                 HyperlinkActivation::Preview(PathBuf::from(path), None),
                 "not a page, so a plain click is still the preview seat's: {uri:?}"
             );
+            // Both halves of the table reach the seat now, so this is where the
+            // difference between them is: a template dialect and a text file go
+            // through the pool and are read, not rendered.
+            assert_eq!(
+                preview_open_lane(Path::new(path)),
+                PreviewOpenLane::Document,
+                "and it is read as a document: {uri:?}"
+            );
         }
         assert_eq!(
             hyperlink_activation(true, true, "file:///C:/sites/archive.html", &|path| path
@@ -69530,6 +69781,12 @@ mod tests {
                 "a share meets the network card it always met, without a round trip"
             );
         }
+        assert_eq!(
+            preview_open_lane(Path::new(r"\\server\share\index.html")),
+            PreviewOpenLane::Document,
+            "and a page on a share is not a page: the mint refuses to make one, \
+             so the card that says so is the document lane's"
+        );
     }
 
     /// PIN — **the head's `↗` hands over the seat's own file, and only when that
@@ -69550,6 +69807,12 @@ mod tests {
     ///    at all, and the press has nothing to give the shell;
     /// ③ spell the extension test with `ends_with` — `report.html.txt`, a text
     ///    file, is handed to a browser.
+    ///
+    /// **④ (2026-08-23) drop the `web_url` arm** and the arrow goes out the
+    /// moment a local page starts *rendering* instead of showing its source —
+    /// which, since the ruling of that day, is always. The seat would then have
+    /// no way to the page's own front at all, which is §7.1.5g ②″'s complaint
+    /// with the two views swapped.
     #[test]
     fn only_a_page_with_a_file_behind_it_is_handed_over_to_a_browser() {
         for name in [
@@ -69560,8 +69823,39 @@ mod tests {
             let source = preview::PreviewSource::file(name);
             assert_eq!(
                 preview_page_hand_off(&source),
-                Some(Path::new(name)),
+                Some(PathBuf::from(name)),
                 "a page hands over its own path: {name:?}"
+            );
+        }
+        // **And the same file while the engine is drawing it.** A local page's
+        // identity is the `file:` URL this window minted, so the path is taken
+        // back off it by the one function that reads such a URL — and a page
+        // that is not a local file has nothing to hand anybody.
+        for (url, path) in [
+            (
+                "file:///D:/Developer/BetterTerminal/design/ui-mockup.html",
+                r"D:\Developer\BetterTerminal\design\ui-mockup.html",
+            ),
+            (
+                "file:///C:/Program%20Files/report.htm",
+                r"C:\Program Files\report.htm",
+            ),
+        ] {
+            assert_eq!(
+                preview_page_hand_off(&preview::PreviewSource::Web(url.to_owned())),
+                Some(PathBuf::from(path)),
+                "a rendered local page hands over the file under it: {url:?}"
+            );
+        }
+        for url in [
+            "http://localhost:5173/app",
+            "https://example.test/index.html",
+            "file://server/share/page.html",
+        ] {
+            assert_eq!(
+                preview_page_hand_off(&preview::PreviewSource::Web(url.to_owned())),
+                None,
+                "a page with no local file behind it has nothing to hand over: {url:?}"
             );
         }
         // Everything else the seat can show. The extension is the real one and
@@ -70113,9 +70407,12 @@ mod tests {
                 HyperlinkActivation::External(readable.clone()),
             ),
             (
+                // A printed page is a destination inside this window since the
+                // ruling of 2026-08-23: plainly it is the seat that renders it,
+                // `Ctrl` still hands it to the machine.
                 page_column,
                 page.clone(),
-                HyperlinkActivation::None,
+                HyperlinkActivation::Preview(page.clone(), None),
                 HyperlinkActivation::External(page.clone()),
             ),
             // The prompt's own cwd is a directory that is really there, so it
@@ -78609,8 +78906,9 @@ mod tests {
     /// ruling it is no longer a fact about `Ctrl` at all. A link to a readable
     /// file wears it plainly, because a plain press opens it — and since
     /// 2026-08-21 so does a folder, because a plain press points the files column
-    /// at it. A web address and a page do not, because a plain press on those
-    /// does nothing — and holding `Ctrl` lights exactly those up, which is how
+    /// at it, and since 2026-08-23 so does a page, because a plain press draws it
+    /// on the seat. A web address does not, because a plain press on one does
+    /// nothing — and holding `Ctrl` lights exactly those up, which is how
     /// the rule is discovered. It must be the *same* expression the verb is spent from: a
     /// pointer promising a press the release then declines is 7.1.5f's complaint
     /// wearing a different shape.
@@ -78628,7 +78926,7 @@ mod tests {
             ("file:///C:/notes.md", true, true),
             ("https://example.test/path", false, true),
             ("file:///C:/repo/docs", true, true),
-            ("file:///C:/page.html", false, true),
+            ("file:///C:/page.html", true, true),
         ] {
             for (control, expected) in [(false, plainly), (true, under_control)] {
                 assert_eq!(
@@ -88365,6 +88663,231 @@ mod tests {
                 "{document}"
             );
         }
+    }
+
+    /// PIN (user ruling 2026-08-23, 「一个名字只该有一个含义」;
+    /// `docs/DESIGN.md` §7.10 ⑥) — **every door that lands a source opens a page
+    /// as a page.**
+    ///
+    /// This is the ticket's 正题 and the cost slice ⑤ named when it left the
+    /// account open: teaching `preview_ftype` to answer `Web` by name turns every
+    /// `PreviewSource::File` whose name is a page into a buffer the document pool
+    /// has no reader for. The answer is not to soften the classification, it is
+    /// that **no such buffer is ever landed** — the pool's own door turns it back
+    /// onto the engine's lane, and the pool's own door is the one every document
+    /// arrives by.
+    ///
+    /// The four sources below are the four the ticket names, built the way their
+    /// doors build them: a drop and a files-column double click hand a path
+    /// straight to `PreviewSource::file`; a switcher row hands back the pool's
+    /// own identity; a session line and a Recent seed come through
+    /// [`preview_source_of`] and [`preview_source_of_recent`]. One predicate
+    /// answers for all four because they are all one question.
+    ///
+    /// RED GATE: delete the `source_opens_as_a_page` arm from
+    /// `Runtime::open_preview_source_on` — the source pin at the end of this test
+    /// fails, and on the machine a dropped `.html` draws the "no preview for this
+    /// file type" card that this ruling exists to abolish.
+    #[test]
+    fn every_door_that_lands_a_source_opens_a_page_as_a_page() {
+        let page = r"D:\site\index.html";
+        let pdf = r"D:\reports\report.pdf";
+        let document = r"D:\notes\notes.md";
+        // ① a drop on a pane, and ② a double click in the files column: both
+        // hand a path to `PreviewSource::file` and nothing else.
+        for target in [page, pdf] {
+            assert_eq!(
+                source_opens_as_a_page(&preview::PreviewSource::file(target)),
+                Some(PathBuf::from(target)),
+                "a dropped or double-clicked page is a page: {target}"
+            );
+        }
+        assert_eq!(
+            source_opens_as_a_page(&preview::PreviewSource::file(document)),
+            None,
+            "and a document is untouched, which is the regression half"
+        );
+        // ③ a switcher row, which hands back the pool's own identity — including
+        // a legacy row an older build wrote while `.html` was still text.
+        assert_eq!(
+            source_opens_as_a_page(&preview::PreviewSource::file(page)),
+            Some(PathBuf::from(page))
+        );
+        // ④ a `session.json` line and ⑤ a Recent seed, through the one pair that
+        // reads a stored row back into an identity.
+        assert_eq!(
+            source_opens_as_a_page(&preview_source_of(page, bt_persist::PreviewSourceV1::File)),
+            Some(PathBuf::from(page)),
+            "a restored `cur` naming a page is a page"
+        );
+        assert_eq!(
+            source_opens_as_a_page(&preview_source_of_recent(
+                &bt_persist::RecentPreviewV1::File(page.to_owned())
+            )),
+            Some(PathBuf::from(page)),
+            "and so is a Recent seed"
+        );
+        // A page already stored as a page is not this predicate's business — it
+        // never reaches the document pool at all — and a composed document is
+        // not a page however its path inside a repository is spelled.
+        assert_eq!(
+            source_opens_as_a_page(&preview::PreviewSource::Web(
+                "file:///D:/site/index.html".to_owned()
+            )),
+            None
+        );
+        assert_eq!(
+            source_opens_as_a_page(&preview::PreviewSource::GitDiff {
+                root: PathBuf::from(r"D:\repo"),
+                path: "design/ui-mockup.html".to_owned(),
+                against: preview::GitDiffAgainst::WorkingTree,
+            }),
+            None,
+            "a reading of a repository has no file, so it is not a page"
+        );
+        // A share is not a page, so it keeps the document lane's network card —
+        // the one refusal §7.1.3 has always shown for it.
+        assert_eq!(
+            source_opens_as_a_page(&preview::PreviewSource::file(r"\\server\share\index.html")),
+            None
+        );
+
+        // **And the door really asks.** The predicate above is worth nothing if
+        // the one function every document lands through does not consult it, and
+        // that is a fact about this file rather than about a value — the same
+        // reason `both_preview_openers_write_a_line_when_nothing_opens` reads the
+        // source it is about.
+        const SOURCE: &str = include_str!("main.rs");
+        const SIGNATURE: &str = "    fn open_preview_source_on(";
+        let start = SOURCE
+            .find(SIGNATURE)
+            .expect("the pool's own door is declared in this file");
+        let rest = &SOURCE[start + SIGNATURE.len()..];
+        let door = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
+        assert!(
+            door.contains("source_opens_as_a_page(&source)")
+                && door.contains("self.open_preview_web_file(path)"),
+            "the pool's own door does not turn a page-named source back onto the \
+             engine's lane, so a `.html` can still land as a document:\n{door}"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-23) — **a page comes back from a session file as
+    /// a page, whichever of the two ways it was stored.**
+    ///
+    /// The restore path is the one door `open_preview_source_on` is not on: a
+    /// tab's pool is seeded before the window that could host an engine exists,
+    /// so the turn-around happens where the pages are revived instead. Two
+    /// spellings reach it and both are the same file — the `Url` row every page
+    /// has written since W2 slice ⑤, and the `File` row a `.html` dropped on a
+    /// pane wrote while `.html` was still a document.
+    ///
+    /// A real file in a real directory, because `canonicalize` is the step under
+    /// test — the row is a name and never a permission, so what authorises the
+    /// load is a mint made from the disk this instant.
+    ///
+    /// RED GATE: drop the `source_opens_as_a_page` arm from [`revived_page_of`]
+    /// and the `File` half answers `None` — a restored tab comes back showing the
+    /// "no preview for this file type" card over a page it had rendered before
+    /// the restart.
+    #[test]
+    fn a_restored_page_comes_back_as_a_page_however_it_was_stored() {
+        let dir = std::env::temp_dir().join(format!(
+            "folio-page-revival-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let page = dir.join("report.html");
+        std::fs::write(&page, b"<h1>x</h1>").expect("a page on a disk");
+        let canonical = std::fs::canonicalize(&page).expect("canonicalise it");
+        let minted = webnav::Mint::file(&canonical).expect("a local path mints");
+        let url = minted.target().expect("a mint names its URL").to_owned();
+
+        assert_eq!(
+            revived_page_of(&preview::PreviewSource::Web(url.clone())),
+            Some((url.clone(), minted.clone())),
+            "a page stored as a page comes back as one, exactly as it always did"
+        );
+        assert_eq!(
+            revived_page_of(&preview::PreviewSource::file(&page)),
+            Some((url.clone(), minted)),
+            "and a page stored as a file comes back as the same page, minted \
+             from the same disk"
+        );
+        // A document is not a page and is revived by the head-read lane, so this
+        // door answers nothing for it.
+        let notes = dir.join("notes.md");
+        std::fs::write(&notes, b"# notes\n").expect("a document on a disk");
+        assert_eq!(revived_page_of(&preview::PreviewSource::file(&notes)), None);
+        // And a row naming a file that is not there goes nowhere, which is the
+        // answer §7.9 ⑤ already gives for a row this window would not navigate to.
+        std::fs::remove_file(&page).expect("take the file away");
+        assert_eq!(revived_page_of(&preview::PreviewSource::file(&page)), None);
+        assert_eq!(revived_page_of(&preview::PreviewSource::Web(url)), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// PIN (user ruling 2026-08-23) — **the glance card says what the row opens
+    /// as.**
+    ///
+    /// The defect this closes was visible without running anything: a `.pdf` row
+    /// drew "No preview — binary or unrecognized type." under a resting pointer
+    /// and opened a rendered page under a double click. The card and the row are
+    /// two readings of one gesture, so they read it through one function
+    /// ([`preview_open_lane`]) and the card can no longer contradict the door.
+    ///
+    /// RED GATE: delete the `Web` arm of [`peek_body_kind`] — `.pdf` falls to the
+    /// refusal arm (its buffer has no reader) and `.html` falls to the document
+    /// arm, which is the card drawing a page's *source* under a pointer while a
+    /// double click draws the page.
+    #[test]
+    fn the_glance_card_says_what_the_row_opens_as() {
+        let kind = |name: &str, refused: bool| {
+            let path = PathBuf::from(format!(r"D:\site\{name}"));
+            peek_body_kind(preview::preview_ftype(name), Some(&path), refused)
+        };
+        for name in ["index.html", "index.htm", "INDEX.HTM", "report.pdf"] {
+            assert_eq!(
+                kind(name, false),
+                PeekBodyKind::Page,
+                "a name that opens as a page says so on the card: {name}"
+            );
+            // And it says so whatever the buffer behind it happens to hold: the
+            // card is about what the row *does*, and a page-named file in the
+            // document pool is one the page lane already refused.
+            assert_eq!(kind(name, true), PeekBodyKind::Page, "{name}");
+        }
+        // The regression half — every other class draws exactly what it drew.
+        assert_eq!(kind("notes.md", false), PeekBodyKind::Document);
+        assert_eq!(kind("main.rs", false), PeekBodyKind::Document);
+        assert_eq!(kind("notes.md", true), PeekBodyKind::Refused);
+        assert_eq!(kind("a.exe", false), PeekBodyKind::Refused);
+        assert_eq!(kind("shot.png", false), PeekBodyKind::Picture);
+        assert_eq!(kind("index.htmlx", false), PeekBodyKind::Refused);
+        assert_eq!(kind("report.html.txt", false), PeekBodyKind::Document);
+        // A page on a share is not a page: the mint refuses it, so the card is
+        // the refusal the seat would have shown.
+        assert_eq!(
+            peek_body_kind(
+                preview::PreviewFtype::Web,
+                Some(Path::new(r"\\server\share\index.html")),
+                true
+            ),
+            PeekBodyKind::Refused
+        );
+        // A composed document has no path, so it is drawn as the document it is
+        // however its name is spelled.
+        assert_eq!(
+            peek_body_kind(preview::PreviewFtype::Web, None, false),
+            PeekBodyKind::Document
+        );
+        assert_eq!(
+            peek_body_kind(preview::PreviewFtype::Image, None, false),
+            PeekBodyKind::Refused,
+            "and a picture with no file is still a picture nothing can decode"
+        );
     }
 
     /// PIN (W2 slice 5) - **one seat shows one thing, in both directions.**
