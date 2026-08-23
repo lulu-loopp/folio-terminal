@@ -13494,19 +13494,21 @@
      on a lone pane it closes the TAB, and a row that quietly means something
      bigger than it says is the edge a hand finds by accident — the tab's own `×`
      and Ctrl+W already say it out loud.
-     `Move pane to new tab` IS DRAWN BECAUSE THE TICKET NAMES IT, and it is the
-     row this file would cut: a lone pane is already the whole of its tab, so the
-     verb has nothing to move and nowhere to move it. Its honest sibling in this
-     layout is `Move pane to new window` (multi-window block C shipped the second
-     window), which is a real displacement and a real answer to "get this off
-     here". Flagged, not silently substituted. */
+     `Move pane to new tab` WAS DRAWN HERE AND THE RULING CUT IT (§7.1.6i, ruled
+     when the segment landed natively, 2026-08-23). This file drew it because the
+     ticket named it, and flagged it in the same breath as the row it would cut:
+     a lone pane is already the whole of its tab, so the verb has nothing to move
+     and nowhere to move it — `closePane` + `wsFromLeaf` returned having done
+     nothing, which was the finding drawn rather than argued. The ruling read the
+     flag and agreed. Its honest sibling in this layout is `Move pane to new
+     window`, and that one is multi-window F's (tear-out) to deliver and to place.
+     Flagged, then cut — not silently substituted. */
   function loneVerbSegmentHtml(w) {
     if (paneCount(w) !== 1) return "";
     return `<div class="tm-sep"></div>
        <div class="tm-item" data-act="splitwith"><svg><use href="#i-split"/></svg><span>Split with</span><svg class="sub-chev"><use href="#i-chev"/></svg></div>
        <div class="tm-item" data-act="newfolder"><svg><use href="#i-folder"/></svg><span>New terminal in folder…</span></div>
-       <div class="tm-item" data-act="dupe"><svg><use href="#i-split-right"/></svg><span>Duplicate pane</span></div>
-       <div class="tm-item" data-act="movetab"><svg><use href="#i-float"/></svg><span>Move pane to new tab</span></div>`;
+       <div class="tm-item" data-act="dupe"><svg><use href="#i-split-right"/></svg><span>Duplicate pane</span></div>`;
   }
   function closeSplitWithMenu() {
     $("split-with-menu").classList.remove("show");
@@ -13608,21 +13610,11 @@
         return;
       }
       if (act === "dupe") { splitPaneSeeded(leafId, null, null); return; }
-      if (act === "movetab") {
-        /* the flagged row. `wsFromLeaf` + detach is the real verb; on a lone pane
-           there is nothing to detach FROM, so this returns having done nothing —
-           which is the finding, drawn rather than argued. */
-        const w = activeTab();
-        if (paneCount(w) <= 1) return;
-        const leaf = findLeafIn(w, leafId);
-        if (!leaf) return;
-        closePane(leafId);
-        const nw = wsFromLeaf(leaf);
-        state.tabs.push(nw);
-        state.active = nw.id;
-        render();
-        return;
-      }
+      /* `movetab` was here and left with its row (§7.1.6i, 2026-08-23): the only
+         menu that ever printed it is the one this segment is drawn in, and that
+         menu is only ever drawn on a lone pane — where the verb has nothing to
+         move. The head's own `⌄` keeps the row and keeps its handler; nothing was
+         lost here except a door onto a no-op. */
       if (act === "copy") {
         const sel = String(window.getSelection() || "");
         if (sel) navigator.clipboard?.writeText(sel);

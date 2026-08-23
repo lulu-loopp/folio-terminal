@@ -6408,6 +6408,106 @@ pub const TERM_MENU_ROWS: [TermMenuRow; 7] = [
 /// from a `destroys()` predicate would be a second list agreeing with this one.
 pub const TERM_MENU_SEPARATOR_AFTER: usize = 3;
 
+// ── §7.1.6i's floor: the lone pane's pane-verb segment ─────────────────────
+//
+// **`docs/DESIGN.md` §7.1.6i, 「两案共同、且不随选型摇摆的一件」.** The corner
+// ghost makes the door *visible*; this makes it not need finding. Every other
+// route into a pane's verbs has to be discovered — a chord somebody has to teach
+// you, a mark you have to notice — and a right click inside a terminal is the
+// one gesture this operating system has already taught every hand.
+//
+// **It is drawn only on a lone pane.** A pane with a sibling wears its head, the
+// same verbs are eighteen pixels away in it, and a menu that repeats what is
+// already visible beside it is how two lists come to disagree.
+//
+// **Two of the `⌄` menu's six rows are ruled out, and by the ruling rather than
+// by this file**: `Close pane` closes the whole *tab* on a lone pane, which is a
+// row that quietly means something bigger than it says, and the tab's own `×`
+// and `Ctrl+W` say it out loud; `Move pane to new tab` has nothing to move and
+// nowhere to move it, since a lone pane already *is* the whole tab. Its honest
+// sibling in this layout is `Move pane to new window`, which is multi-window F's
+// to deliver. The mock-up still prints that row and flags it in its own comment
+// as "the row this file would cut" — §7.1.6i cut it, and `loneVerbSegmentHtml`
+// has been brought into line with the ruling.
+
+/// The pane verbs a lone pane's right click carries, in the `⌄` menu's own
+/// order.
+///
+/// [`PaneMenuRow`] values and not a parallel list of words: the rows a hand
+/// finds by right-clicking and the rows it finds in the head are **the same
+/// rows**, so the day one of them is renamed there is nowhere for the other to
+/// disagree from. The verbs behind them are one implementation too — see
+/// `Runtime::run_pane_verb`.
+pub const TERM_MENU_LONE_PANE_ROWS: [PaneMenuRow; 3] = [
+    PaneMenuRow::SplitWith,
+    PaneMenuRow::NewInFolder,
+    PaneMenuRow::Duplicate,
+];
+
+/// One entry of the terminal's context menu.
+///
+/// Two arms rather than three more variants of [`TermMenuRow`], because the
+/// second half of this menu is not a second list of terminal verbs — it is the
+/// pane menu's own rows, standing in a second doorway. A `TermMenuRow::SplitWith`
+/// would be exactly the duplicate §7.1.6e forbids: one verb, two doors, two
+/// spellings, and a rename that lands on one of them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TermMenuEntry {
+    /// A verb about the shell in this pane — the seven of [`TERM_MENU_ROWS`].
+    Term(TermMenuRow),
+    /// A verb about the pane itself, borrowed whole from the `⌄` menu.
+    Pane(PaneMenuRow),
+}
+
+impl TermMenuEntry {
+    /// What the entry says — each arm's own row, asked.
+    #[must_use]
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Term(row) => row.text(),
+            Self::Pane(row) => row.text(),
+        }
+    }
+
+    /// The mark in the entry's 14-pixel column.
+    fn mark(self) -> Option<ChromeMark> {
+        match self {
+            Self::Term(row) => row.mark(),
+            Self::Pane(row) => row.mark(),
+        }
+    }
+
+    /// Whether this entry hangs a child list off itself.
+    ///
+    /// `Split with ▸` and nothing else, which is the pane menu's own answer read
+    /// through the same function.
+    #[must_use]
+    pub fn has_submenu(self) -> bool {
+        matches!(self, Self::Pane(row) if row.has_submenu())
+    }
+}
+
+/// The menu, top to bottom, for a pane that has a sibling or has not.
+///
+/// A function rather than two `const` lists, because the difference between the
+/// two menus is one fact about the tree and a list that repeated the seven would
+/// be a second place for the seven to change.
+#[must_use]
+pub fn term_menu_entries(lone: bool) -> Vec<TermMenuEntry> {
+    let mut entries: Vec<TermMenuEntry> = TERM_MENU_ROWS
+        .into_iter()
+        .map(TermMenuEntry::Term)
+        .collect();
+    if lone {
+        entries.extend(
+            TERM_MENU_LONE_PANE_ROWS
+                .into_iter()
+                .map(TermMenuEntry::Pane),
+        );
+    }
+    entries
+}
+
 /// What the pane under the menu can answer for (ticket #62, item 4).
 ///
 /// Three facts and no pane, because none of the three is a *pointer* to
@@ -6486,17 +6586,39 @@ pub fn term_menu_row_available(row: TermMenuRow, subject: TermMenuSubject) -> bo
     }
 }
 
+/// Whether an entry can do what it says, on this pane.
+///
+/// The pane verbs are never greyed, and that is `pane_menu_build`'s own
+/// argument carried across with them: a split the solver has no room for is
+/// refused *after* the press exactly as the chord's is, and the chooser
+/// `New terminal in folder…` opens is Windows', which this window does not get
+/// to promise about in advance. Nothing in the segment is a promise this build
+/// knows it cannot keep.
+#[must_use]
+pub fn term_menu_entry_available(entry: TermMenuEntry, subject: TermMenuSubject) -> bool {
+    match entry {
+        TermMenuEntry::Term(row) => term_menu_row_available(row, subject),
+        TermMenuEntry::Pane(_) => true,
+    }
+}
+
 /// The row a keyboard step lands on, **skipping the ones that answer nothing** —
 /// [`git_menu_step`]'s rule and [`FileMenuRow::step`]'s clamp, on this list.
+///
+/// The rule between the two halves is not a stop: the walk crosses it, because
+/// a separator is punctuation and a keyboard that halted at one would make the
+/// segment reachable only by pointer — which is the discoverability hole this
+/// whole floor exists to fill, dug again one surface down.
 #[must_use]
 pub fn term_menu_step(
-    current: Option<TermMenuRow>,
+    current: Option<TermMenuEntry>,
     subject: TermMenuSubject,
     forwards: bool,
-) -> Option<TermMenuRow> {
-    let walkable: Vec<TermMenuRow> = TERM_MENU_ROWS
+    lone: bool,
+) -> Option<TermMenuEntry> {
+    let walkable: Vec<TermMenuEntry> = term_menu_entries(lone)
         .into_iter()
-        .filter(|row| term_menu_row_available(*row, subject))
+        .filter(|entry| term_menu_entry_available(*entry, subject))
         .collect();
     if walkable.is_empty() {
         return None;
@@ -6559,11 +6681,40 @@ impl TermMenuRow {
     }
 }
 
+/// What is lit on the terminal menu — the pointer's hover and the keyboard's
+/// cursor, which are one thing in a menu ([`PaneMenuHover`]'s own sentence).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TermMenuHover {
+    /// A row of the menu proper, on either side of the rule.
+    Row(TermMenuEntry),
+    /// A row of the open `Split with` child, by its index into [`PROFILES`].
+    Submenu(usize),
+}
+
+/// What a point in one of the terminal menu's surfaces is over.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TermMenuHit {
+    /// A row that can answer. A greyed one is **not** reported: the pointer
+    /// falls through it onto the menu's own body.
+    Row(TermMenuEntry),
+    /// A row of the open child, by its index into [`PROFILES`].
+    Submenu(usize),
+    /// Inside one of the surfaces but on no row: the padding, either rule, a
+    /// greyed row.
+    Surface,
+}
+
 /// Everything the terminal menu needs to lay itself out and draw.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TermMenuLook {
     pub subject: TermMenuSubject,
-    pub hover: Option<TermMenuRow>,
+    pub hover: Option<TermMenuHover>,
+    /// Whether the pane this menu was raised on is the only one in its tab —
+    /// the one fact §7.1.6i's segment turns on.
+    pub lone: bool,
+    /// Whether the `Split with` child is up. Only ever true with [`Self::lone`],
+    /// because the row it hangs from is only ever drawn then.
+    pub submenu_open: bool,
 }
 
 /// Every rectangle the terminal's context menu draws and hit-tests.
@@ -6573,6 +6724,44 @@ pub struct TermMenuLayout {
     frame: [f32; 4],
     items: Vec<TermMenuItem>,
     separator: [f32; 4],
+    /// The second rule — the one §7.1.6i's segment brings with it — or `None` on
+    /// a pane with a sibling, which has no segment to divide off.
+    lone_separator: Option<[f32; 4]>,
+    /// The `Split with` child's frame and rows, when it is open.
+    ///
+    /// [`PaneSubmenuLayout`] itself, laid out by [`pane_submenu_layout`]: the
+    /// child hanging off this menu's heading is the *same* child that hangs off
+    /// the head's, down to the seam it meets its parent on and the profile list
+    /// it draws, so it is the same type placed by the same function.
+    submenu: Option<PaneSubmenuLayout>,
+}
+
+impl TermMenuLayout {
+    /// The child's border box, when one is up.
+    #[must_use]
+    pub fn submenu_frame(&self) -> Option<[f32; 4]> {
+        self.submenu.as_ref().map(|submenu| submenu.frame)
+    }
+
+    /// The child's row boxes, when one is up.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn submenu_rows(&self) -> Option<&[[f32; 4]]> {
+        self.submenu
+            .as_ref()
+            .map(|submenu| submenu.items.as_slice())
+    }
+
+    /// **Whether this point is on the child at all** — its rows, its padding,
+    /// its border. [`PaneMenuLayout::on_submenu`]'s reason verbatim: the hit
+    /// answers `Surface` for both menus' padding, so the safety triangle cannot
+    /// tell "on the child" from "not on the child" out of the hit alone.
+    #[must_use]
+    pub fn on_submenu(&self, x: f32, y: f32) -> bool {
+        self.submenu
+            .as_ref()
+            .is_some_and(|submenu| contains(submenu.frame, x, y))
+    }
 }
 
 /// One laid-out row of the terminal menu.
@@ -6583,7 +6772,7 @@ pub struct TermMenuLayout {
 /// the one call site each.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TermMenuItem {
-    pub row: TermMenuRow,
+    pub entry: TermMenuEntry,
     pub rect: [f32; 4],
     pub available: bool,
 }
@@ -6599,6 +6788,12 @@ const TERM_MENU_MIN_WIDTH_LOGICAL_PX: f32 = 172.0;
 /// rectangle can be re-solved by a split, a divider drag or a window resize while
 /// the menu stands, and a menu that re-found its pane every frame would walk
 /// across the window while the reader was reading it.
+///
+/// **The second rule and the child are `look`'s to ask for**, exactly as the
+/// pane menu's child is `submenu_open`'s: where they go is a fact about *this*
+/// frame — the segment falls under the seven, the child hangs off one of its
+/// rows and flips when this frame is near the window's edge — so a second entry
+/// point would be a second opinion about where the parent is.
 #[must_use]
 pub fn term_menu_layout(
     point: [f32; 2],
@@ -6616,20 +6811,40 @@ pub fn term_menu_layout(
     let separator_block = 2.0 * separator_margin + separator_thickness;
     let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
 
-    let row_width = |row: TermMenuRow, measure: &mut dyn FnMut(&str, f32) -> f32| {
+    let entries = term_menu_entries(look.lone);
+    // The `▸` claims the same slot the profile picker's `default` hint claims,
+    // and it is reserved on **every** row of a menu that has a submenu at all
+    // rather than on the one that wears it — `pane_menu_layout`'s own rule, for
+    // its reason: a menu whose width depended on which rows had children would
+    // change width the day a second row grew one. A menu with no segment has no
+    // child anywhere in it and reserves nothing, which is why the seven rows are
+    // the width they always were on a pane with a sibling.
+    let indicator = if look.lone {
+        px(SUBMENU_INDICATOR_LOGICAL_PX) + px(ITEM_GAP_LOGICAL_PX)
+    } else {
+        0.0
+    };
+    let row_width = |entry: TermMenuEntry, measure: &mut dyn FnMut(&str, f32) -> f32| {
         px(ITEM_ICON_COLUMN_LOGICAL_PX)
             + px(ITEM_GAP_LOGICAL_PX)
-            + measure(row.text(), px(ITEM_FONT_LOGICAL_PX))
+            + measure(entry.text(), px(ITEM_FONT_LOGICAL_PX))
+            + indicator
     };
-    let content = TERM_MENU_ROWS
-        .iter()
-        .fold(px(TERM_MENU_MIN_WIDTH_LOGICAL_PX) - chrome, |wide, row| {
-            wide.max(row_width(*row, measure))
-        });
+    let content = entries.iter().fold(
+        px(TERM_MENU_MIN_WIDTH_LOGICAL_PX) - chrome,
+        |wide, entry| wide.max(row_width(*entry, measure)),
+    );
     #[allow(clippy::cast_precision_loss)]
-    let rows_height = TERM_MENU_ROWS.len() as f32 * item_height;
+    let rows_height = entries.len() as f32 * item_height;
+    // One block per rule that is actually drawn: the segment brings its own, and
+    // a height that counted a rule the walk below does not lay out would be a
+    // menu with a stripe of window at its foot.
+    let separator_blocks: f32 = if look.lone { 2.0 } else { 1.0 };
     let height = 2.0f32
-        .mul_add(border + padding, rows_height + separator_block)
+        .mul_add(
+            border + padding,
+            separator_blocks.mul_add(separator_block, rows_height),
+        )
         .round();
     let width = (chrome + content).round();
 
@@ -6645,13 +6860,32 @@ pub fn term_menu_layout(
     let content_right = frame[2] - border - padding;
     let mut cursor = frame[1] + border + padding;
 
-    let mut items = Vec::with_capacity(TERM_MENU_ROWS.len());
+    let mut items = Vec::with_capacity(entries.len());
     let mut separator = [0.0_f32; 4];
-    for (at, row) in TERM_MENU_ROWS.iter().enumerate() {
+    let mut lone_separator = None;
+    let mut heading = None;
+    for (at, entry) in entries.iter().enumerate() {
+        // The segment's rule falls where the *subject* changes — the last thing
+        // this menu says about the shell, then the first thing it says about the
+        // pane — so it is placed by the entry it precedes rather than by an
+        // index, which would be a second statement of how long the first list is.
+        if matches!(entry, TermMenuEntry::Pane(_)) && lone_separator.is_none() {
+            lone_separator = Some([
+                content_left,
+                cursor + separator_margin,
+                content_right,
+                cursor + separator_margin + separator_thickness,
+            ]);
+            cursor += separator_block;
+        }
+        let rect = [content_left, cursor, content_right, cursor + item_height];
+        if entry.has_submenu() {
+            heading = Some(rect);
+        }
         items.push(TermMenuItem {
-            row: *row,
-            rect: [content_left, cursor, content_right, cursor + item_height],
-            available: term_menu_row_available(*row, look.subject),
+            entry: *entry,
+            rect,
+            available: term_menu_entry_available(*entry, look.subject),
         });
         cursor += item_height;
         if at == TERM_MENU_SEPARATOR_AFTER {
@@ -6664,33 +6898,79 @@ pub fn term_menu_layout(
             cursor += separator_block;
         }
     }
+    // Placed by `pane_submenu_layout` and not by a second copy of it: the child
+    // that hangs off this menu's heading is the same child that hangs off the
+    // head's, so the seam it meets its parent on, the side it flips to and the
+    // rows it holds are one derivation. Only the parent it is measured against
+    // differs, which is the argument that function already takes.
+    let submenu = heading.filter(|_| look.submenu_open).map(|heading| {
+        pane_submenu_layout(
+            frame,
+            heading,
+            surface,
+            scale,
+            border,
+            padding,
+            item_height,
+            measure,
+        )
+    });
     TermMenuLayout {
         scale,
         frame,
         items,
         separator,
+        lone_separator,
+        submenu,
     }
 }
 
-/// What a point is over, with the same three answers every other menu gives: a
-/// row, the menu's own padding, or nothing at all.
+/// What a point is over, with the same answers every other menu gives: a row,
+/// the menu's own padding, or nothing at all.
 ///
 /// A row that cannot do what it says is **not** offered — the pointer falls
 /// through it onto the menu's body, so it neither lights nor answers a press.
+///
+/// **The child is asked first**, because it is drawn over the parent and
+/// overlaps it: a point in the strip where the two frames cross belongs to the
+/// child, exactly as the topmost window owns a point everywhere else in this
+/// program. [`pane_menu_hit`]'s sentence, on this menu's two surfaces.
 #[must_use]
-pub fn term_menu_hit(layout: &TermMenuLayout, x: f64, y: f64) -> Option<Option<TermMenuRow>> {
+pub fn term_menu_hit(layout: &TermMenuLayout, x: f64, y: f64) -> Option<TermMenuHit> {
     let (x, y) = (x as f32, y as f32);
+    if let Some(submenu) = layout.submenu.as_ref()
+        && contains(submenu.frame, x, y)
+    {
+        for (row, rect) in submenu.items.iter().enumerate() {
+            if contains(*rect, x, y) {
+                return Some(TermMenuHit::Submenu(submenu.profiles[row]));
+            }
+        }
+        return Some(TermMenuHit::Surface);
+    }
     for item in &layout.items {
         if item.available && contains(item.rect, x, y) {
-            return Some(Some(item.row));
+            return Some(TermMenuHit::Row(item.entry));
         }
     }
-    contains(layout.frame, x, y).then_some(None)
+    contains(layout.frame, x, y).then_some(TermMenuHit::Surface)
 }
 
-/// The menu as one overlay layer.
+/// The menu, and its `Split with` child when one is up, as overlay layers.
+///
+/// `current_profile` and `programs` are the child's, and they are taken whether
+/// or not one is open for [`pane_menu_build`]'s reason: which profile this pane
+/// is running is a fact about the pane the menu was raised on, and a signature
+/// that only asked for it sometimes would be a caller deciding when the answer
+/// matters.
 #[must_use]
-pub fn term_menu_build(layout: &TermMenuLayout, look: &TermMenuLook) -> Vec<OverlayLayer> {
+pub fn term_menu_build(
+    layout: &TermMenuLayout,
+    look: &TermMenuLook,
+    current_profile: Option<usize>,
+    programs: &ProfilePrograms,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
     let scale = layout.scale;
     let px = |value: f32| value * scale;
@@ -6714,14 +6994,15 @@ pub fn term_menu_build(layout: &TermMenuLayout, look: &TermMenuLook) -> Vec<Over
         alpha(palette.menu_border_alpha),
     );
     for item in &layout.items {
+        let hovered = look.hover == Some(TermMenuHover::Row(item.entry)) && item.available;
         push_row(
             &Row {
                 rect: item.rect,
-                mark: item.row.mark(),
-                name: item.row.text(),
+                mark: item.entry.mark(),
+                name: item.entry.text(),
                 hint: None,
                 hint_ink: None,
-                hovered: look.hover == Some(item.row) && item.available,
+                hovered,
                 available: item.available,
                 pin: None,
             },
@@ -6731,18 +7012,57 @@ pub fn term_menu_build(layout: &TermMenuLayout, look: &TermMenuLook) -> Vec<Over
             &mut labels,
             &mut sprites,
         );
+        if item.entry.has_submenu() {
+            // The `▸`, drawn by the same three lines the head's heading draws it
+            // with: `#i-tri` at rest, in the row's trailing padding, lit with the
+            // row. A second angle or a written `▸` would be the fifth
+            // close-enough triangle `ChromeMark::TreeDisclosure` argues against.
+            let size = px(SUBMENU_INDICATOR_LOGICAL_PX).round().max(1.0);
+            let right = item.rect[2] - px(ITEM_PADDING_X_LOGICAL_PX);
+            let top = ((item.rect[1] + item.rect[3] - size) / 2.0).round();
+            sprites.push(ChromeSprite::new(
+                ChromeMark::TreeDisclosure { turned_degrees: 0 },
+                [right - size, top, right, top + size],
+                if hovered {
+                    palette.menu_item_text_selected
+                } else {
+                    palette.menu_item_hint_text
+                },
+            ));
+        }
     }
-    quads.push(OverlayQuad {
-        rect: layout.separator,
-        color: palette.menu_border,
-        alpha: separator_alpha(palette.menu_border),
-    });
-    vec![OverlayLayer {
+    for rule in std::iter::once(layout.separator).chain(layout.lone_separator) {
+        quads.push(OverlayQuad {
+            rect: rule,
+            color: palette.menu_border,
+            alpha: separator_alpha(palette.menu_border),
+        });
+    }
+    let mut layers = vec![OverlayLayer {
         quads,
         labels,
         sprites,
         ..Default::default()
-    }]
+    }];
+    if let Some(submenu) = layout.submenu.as_ref() {
+        // The head's own child, drawn by the head's own function. The hover is
+        // translated at the boundary rather than shared as a type: what is lit on
+        // *this* menu is this menu's fact, and the child only ever needs the one
+        // arm of it that names one of its rows.
+        let hover = match look.hover {
+            Some(TermMenuHover::Submenu(index)) => Some(PaneMenuHover::Submenu(index)),
+            _ => None,
+        };
+        layers.extend(push_submenu(
+            submenu,
+            scale,
+            hover,
+            current_profile,
+            programs,
+            measure,
+        ));
+    }
+    layers
 }
 
 // ── the `⌄` open policy, shared by every chevron in the house ───────────────
@@ -14157,17 +14477,21 @@ mod tests {
     #[test]
     fn the_terminal_menus_walk_skips_the_greyed_rows_and_stops_at_both_ends() {
         use TermMenuRow as R;
+        let row = TermMenuEntry::Term;
         let idle = TermMenuSubject::default();
-        assert_eq!(term_menu_step(None, idle, true), Some(R::Paste));
-        assert_eq!(term_menu_step(None, idle, false), Some(R::RestartShell));
+        assert_eq!(term_menu_step(None, idle, true, false), Some(row(R::Paste)));
         assert_eq!(
-            term_menu_step(Some(R::Paste), idle, false),
-            Some(R::Paste),
+            term_menu_step(None, idle, false, false),
+            Some(row(R::RestartShell))
+        );
+        assert_eq!(
+            term_menu_step(Some(row(R::Paste)), idle, false, false),
+            Some(row(R::Paste)),
             "the top of the walk is the top of what is walkable"
         );
         assert_eq!(
-            term_menu_step(Some(R::RestartShell), idle, true),
-            Some(R::RestartShell),
+            term_menu_step(Some(row(R::RestartShell)), idle, true, false),
+            Some(row(R::RestartShell)),
             "and the bottom clamps rather than wrapping"
         );
 
@@ -14176,15 +14500,18 @@ mod tests {
             restart_in_flight: true,
             ..idle
         };
-        assert_eq!(term_menu_step(None, mid_restart, true), Some(R::Copy));
         assert_eq!(
-            term_menu_step(Some(R::ClearScrollback), mid_restart, true),
-            Some(R::ClearScrollback),
+            term_menu_step(None, mid_restart, true, false),
+            Some(row(R::Copy))
+        );
+        assert_eq!(
+            term_menu_step(Some(row(R::ClearScrollback)), mid_restart, true, false),
+            Some(row(R::ClearScrollback)),
             "a restart in flight makes Clear scrollback the last walkable row"
         );
         assert_eq!(
-            term_menu_step(None, mid_restart, false),
-            Some(R::ClearScrollback)
+            term_menu_step(None, mid_restart, false, false),
+            Some(row(R::ClearScrollback))
         );
     }
 
@@ -14207,7 +14534,7 @@ mod tests {
         assert!(frame[1] >= MENU_EDGE_MARGIN_LOGICAL_PX);
 
         let last = *layout.items.last().expect("the last row is laid out");
-        assert_eq!(last.row, TermMenuRow::RestartShell);
+        assert_eq!(last.entry, TermMenuEntry::Term(TermMenuRow::RestartShell));
         assert!(last.rect[3] <= frame[3], "the last row is inside the frame");
         assert_eq!(
             term_menu_hit(
@@ -14215,7 +14542,9 @@ mod tests {
                 f64::from(last.rect[0] + 1.0),
                 f64::from((last.rect[1] + last.rect[3]) / 2.0),
             ),
-            Some(Some(TermMenuRow::RestartShell))
+            Some(TermMenuHit::Row(TermMenuEntry::Term(
+                TermMenuRow::RestartShell
+            )))
         );
     }
 
@@ -14243,7 +14572,7 @@ mod tests {
             *layout
                 .items
                 .iter()
-                .find(|item| item.row == wanted)
+                .find(|item| item.entry == TermMenuEntry::Term(wanted))
                 .expect("every row is laid out")
         };
         let find = row(TermMenuRow::Find);
@@ -14262,7 +14591,7 @@ mod tests {
                 f64::from(copy.rect[0] + 1.0),
                 f64::from((copy.rect[1] + copy.rect[3]) / 2.0),
             ),
-            Some(None),
+            Some(TermMenuHit::Surface),
             "the pointer falls through a greyed row onto the menu's own body"
         );
         assert_eq!(
@@ -14273,13 +14602,213 @@ mod tests {
 
         // Drawn all the same, which is the other half of "greyed, not hidden":
         // one label per entry, whatever each of them can answer.
-        let layers = term_menu_build(&layout, &look);
+        let layers = term_menu_build(&layout, &look, None, &equipped(), &mut fake_measure);
         assert_eq!(layers.len(), 1);
         assert_eq!(
             layers[0].labels.len(),
             TERM_MENU_ROWS.len(),
             "every row is painted, including the ones that cannot answer"
         );
+    }
+
+    // ── §7.1.6i's floor: the lone pane's pane-verb segment ──────────────────
+
+    /// PIN (§7.1.6i, 「两案共同、且不随选型摇摆的一件」) — **a lone pane's right
+    /// click carries three pane verbs under a rule of their own, and a pane with
+    /// a sibling carries none.**
+    ///
+    /// The three are `docs/DESIGN.md`'s own list — `Split with ▸` / `New
+    /// terminal in folder…` / `Duplicate pane` — and they are asserted as
+    /// [`PaneMenuRow`] values rather than as words, which is the whole claim: it
+    /// is the `⌄` menu's own list borrowed, not a second list that agrees with
+    /// it today. `Move pane to new tab` and `Close pane` are named in the
+    /// negative because the ruling names them in the negative: on a lone pane
+    /// the first has nothing to move and nowhere to move it, and the second
+    /// closes the whole tab while saying it closes a pane.
+    ///
+    /// Red gate: the shipped menu is seven rows whatever the tree looks like, so
+    /// the first assertion fails on the length.
+    #[test]
+    fn a_lone_panes_terminal_menu_carries_the_pane_verbs_and_a_split_one_does_not() {
+        use PaneMenuRow as P;
+        use TermMenuEntry as E;
+        let lone = term_menu_entries(true);
+        assert_eq!(
+            lone,
+            TERM_MENU_ROWS
+                .into_iter()
+                .map(E::Term)
+                .chain([
+                    E::Pane(P::SplitWith),
+                    E::Pane(P::NewInFolder),
+                    E::Pane(P::Duplicate)
+                ])
+                .collect::<Vec<_>>(),
+            "the seven terminal verbs, then the pane menu's three making verbs \
+             in the pane menu's own order"
+        );
+        assert_eq!(
+            term_menu_entries(false),
+            TERM_MENU_ROWS.into_iter().map(E::Term).collect::<Vec<_>>(),
+            "a pane with a sibling has its head eighteen pixels away, and a menu \
+             that repeats it is where two lists start to disagree"
+        );
+        for cut in [P::MoveToNewTab, P::ClosePane] {
+            assert!(
+                !lone.contains(&E::Pane(cut)),
+                "{cut:?} is ruled out of the segment by §7.1.6i"
+            );
+        }
+        // Borrowed whole: the words and the marks are the `⌄` menu's, asked of
+        // the `⌄` menu's own row. A segment that spelled its own would be the
+        // two-lists failure this test exists to forbid.
+        for row in TERM_MENU_LONE_PANE_ROWS {
+            assert_eq!(E::Pane(row).text(), row.text());
+            assert_eq!(E::Pane(row).mark(), row.mark());
+        }
+        assert!(
+            E::Pane(P::SplitWith).has_submenu(),
+            "the segment's first row is a heading, exactly as it is in the head"
+        );
+    }
+
+    /// PIN (§7.1.6i) — **the segment stands under a rule of its own, and the
+    /// `Split with` heading hangs the profile list off itself.**
+    ///
+    /// The second rule is the load-bearing half: without it the three pane verbs
+    /// run on from `Restart shell…` as though they were more things to do to a
+    /// shell, and the menu stops saying that the list changed subject.
+    ///
+    /// The submenu is asserted through [`term_menu_hit`] rather than through its
+    /// rectangle alone, because the child is drawn *over* the parent and a hit
+    /// test that answered the row underneath would be a child nothing can press.
+    ///
+    /// Red gate: today there is no second rule, no heading and no child.
+    #[test]
+    fn the_lone_segment_stands_under_its_own_rule_and_opens_the_profile_list() {
+        let look = TermMenuLook {
+            lone: true,
+            submenu_open: true,
+            ..TermMenuLook::default()
+        };
+        let layout = term_menu_layout(
+            [200.0, 120.0],
+            (960.0, 600.0),
+            1.0,
+            &look,
+            &mut fake_measure,
+        );
+        let entry = |wanted: TermMenuEntry| {
+            *layout
+                .items
+                .iter()
+                .find(|item| item.entry == wanted)
+                .expect("every entry is laid out")
+        };
+        let restart = entry(TermMenuEntry::Term(TermMenuRow::RestartShell));
+        let heading = entry(TermMenuEntry::Pane(PaneMenuRow::SplitWith));
+        let rule = layout
+            .lone_separator
+            .expect("the segment brings a rule of its own");
+        assert!(
+            restart.rect[3] <= rule[1] && rule[3] <= heading.rect[1],
+            "the second rule stands between the shell's verbs and the pane's"
+        );
+        assert!(
+            rule[1] > layout.separator[1],
+            "and below the first, which is still where it always was"
+        );
+
+        let child = layout
+            .submenu_frame()
+            .expect("an open submenu has a frame of its own");
+        assert!(
+            child[0] >= heading.rect[0],
+            "it hangs beside its heading, not under it"
+        );
+
+        for index in 0..count() {
+            let rect = layout.submenu_rows().expect("an open submenu has rows")[index];
+            assert_eq!(
+                term_menu_hit(
+                    &layout,
+                    f64::from((rect[0] + rect[2]) / 2.0),
+                    f64::from((rect[1] + rect[3]) / 2.0),
+                ),
+                Some(TermMenuHit::Submenu(index)),
+                "the child wins the pixels where the two frames overlap"
+            );
+        }
+        assert_eq!(
+            term_menu_hit(
+                &layout,
+                f64::from(heading.rect[0] + 1.0),
+                f64::from((heading.rect[1] + heading.rect[3]) / 2.0),
+            ),
+            Some(TermMenuHit::Row(TermMenuEntry::Pane(
+                PaneMenuRow::SplitWith
+            ))),
+        );
+
+        // Two layers, as the pane menu's own child draws: what covers what is a
+        // statement rather than an accident of loop order.
+        let layers = term_menu_build(&layout, &look, Some(0), &equipped(), &mut fake_measure);
+        assert_eq!(layers.len(), 2);
+    }
+
+    /// PIN (§7.1.6i) — **the keyboard walks into the segment and stops at its
+    /// end, and the pane verbs are never greyed.**
+    ///
+    /// The three borrowed rows carry `pane_menu_build`'s own availability
+    /// argument with them: a split the solver has no room for is refused after
+    /// the press, and the folder chooser is Windows' to answer for. Nothing here
+    /// is a promise this build knows it cannot keep, so nothing here greys.
+    ///
+    /// Red gate: today the walk ends at `Restart shell…` on every tree.
+    #[test]
+    fn the_walk_runs_on_into_the_lone_segment_and_stops_at_its_last_row() {
+        use PaneMenuRow as P;
+        use TermMenuEntry as E;
+        let idle = TermMenuSubject::default();
+        assert_eq!(
+            term_menu_step(None, idle, false, false),
+            Some(E::Term(TermMenuRow::RestartShell)),
+            "with no segment the walk still ends where it always did"
+        );
+        assert_eq!(
+            term_menu_step(None, idle, false, true),
+            Some(E::Pane(P::Duplicate)),
+            "and with one it ends at the segment's last row"
+        );
+        assert_eq!(
+            term_menu_step(Some(E::Term(TermMenuRow::RestartShell)), idle, true, true),
+            Some(E::Pane(P::SplitWith)),
+            "the rule is not a stop — the walk crosses it"
+        );
+        assert_eq!(
+            term_menu_step(Some(E::Pane(P::Duplicate)), idle, true, true),
+            Some(E::Pane(P::Duplicate)),
+            "and clamps at the bottom rather than wrapping"
+        );
+        assert_eq!(
+            term_menu_step(Some(E::Pane(P::SplitWith)), idle, false, true),
+            Some(E::Term(TermMenuRow::RestartShell)),
+            "back across the rule the same way"
+        );
+
+        // Never greyed, whatever the pane is doing.
+        for subject in [
+            idle,
+            TermMenuSubject {
+                has_selection: true,
+                restart_in_flight: true,
+                can_search: false,
+            },
+        ] {
+            for row in TERM_MENU_LONE_PANE_ROWS {
+                assert!(term_menu_entry_available(E::Pane(row), subject));
+            }
+        }
     }
 
     // ── the table, the file and the page (§7.1.6c-6) ───────────────────────
