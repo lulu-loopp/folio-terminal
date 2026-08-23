@@ -116,3 +116,19 @@ E(E1+E2,可并行两线)→ F1a spike → F1b/F1c(主线)→ F2+F4。每片照�
 ## 验收门增补(复审第二节 7 条全部并入)
 
 重挂四注错点(断旧 target / 换 parent / 设新 target / 目标 commit)各自补偿或显式降级;重挂后 browser-process failure 原位重建;100↔150↔200 双向含 context menu/IME/accessibility;同号在途回执不落新叶;Quit 保存注入磁盘冲突与原子写失败;跨窗 spring 无 motion 到点;幽灵 `⌄` 两路开菜单含新行且与拖出同一事务。
+
+---
+
+# v4 增补(2026-08-23,按窄复核;意见见 codex-final.md。只动身份簇,其余三簇已通过)
+
+## 身份簇的三处闭合
+
+**① App 级单次 drain + 按 owner 投递。** 窄复核纠正了一个我盘点时看漏的事实:`apply_*_results` 是每窗对**共享 receiver** `try_recv` 到空——第一扇被遍历的窗把整条队列吃光,别窗的结果被它 `continue` 丢弃。全局 `TabId` 只把「可能误投」变成「确定误丢」。**修法**:worker 完成的 drain 升到 `App` 级,**只 drain 一次**,按全局 `TabId` 查唯一 owner window 分桶进每窗 mailbox,runtime 只消费自己的桶;不以 tab 为 owner 的 host(浮窗等)保持既有路由,不塞进 `TabId` 分支。E 的第一条红测**改写**(不再是「先证明是否活缺陷」——代码结构已经证明了):结果排成「窗 B、窗 A、窗 B」,App 一次 drain 后三项各落唯一 owner;窗口遍历顺序反转结果不变;任何窗不吞别窗的结果。
+
+**② pane 升格换号的活性另一半。** 升格时源 tab 通常**没有死**,「旧号回执随源 tab 之死自然失配」不成立(v3 此句作废)。窄合同:升格 = 旧 `LeafId` 的在途回执**丢弃**(安全)+ 随 `LeafSession` 搬走的 pending/in-flight 标记**清掉并以新 `LeafId` 重新索取**(活性)。红测:从仍有兄弟 pane 的 tab 抽一叶、旧任务未完成时升格——旧完成不落任何叶,新叶以新 ID 重发并最终完成。
+
+**③ 验收门第 4 条被本节覆盖**(v2 那条「源/目标故意同号」在 A 案下不可构造,作废),换成两条:
+1. App allocator 在恢复、新窗、新 tab、pane 升格全部铸号点上进程内永不复用;跨窗移动保持原 `TabId`。
+2. dead `LeafId` 的旧完成被丢弃;live 全局 ID 的完成由 App router 精确投递;pane 换号后 pending 清空并重新索取。
+
+窄复核明言「完成这三处即可通过,无需第三次扩大审阅」——本增补即为闭合,方案定稿开工。
