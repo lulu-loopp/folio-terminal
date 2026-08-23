@@ -60963,27 +60963,19 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             AppEvent::PtyOutput => Ok(()),
             AppEvent::MathReady => {
                 let (mut batch, gone) = self.drain_math_answers();
-                let applied =
-                    self.for_each_window(|runtime| runtime.apply_math_results(&mut batch, gone));
-                applied
+                self.for_each_window(|runtime| runtime.apply_math_results(&mut batch, gone))
             }
             AppEvent::FilesReady => {
                 let (mut batch, gone) = self.drain_files_answers();
-                let applied =
-                    self.for_each_window(|runtime| runtime.apply_files_results(&mut batch, gone));
-                applied
+                self.for_each_window(|runtime| runtime.apply_files_results(&mut batch, gone))
             }
             AppEvent::PreviewReady => {
                 let (mut batch, gone) = self.drain_preview_answers();
-                let applied =
-                    self.for_each_window(|runtime| runtime.apply_preview_results(&mut batch, gone));
-                applied
+                self.for_each_window(|runtime| runtime.apply_preview_results(&mut batch, gone))
             }
             AppEvent::GitReady => {
                 let (mut batch, gone) = self.drain_git_answers();
-                let applied =
-                    self.for_each_window(|runtime| runtime.apply_git_results(&mut batch, gone));
-                applied
+                self.for_each_window(|runtime| runtime.apply_git_results(&mut batch, gone))
             }
             // Nothing is done here. The news has already been stamped into the
             // watcher's own mailbox by the thread that heard it; this only
