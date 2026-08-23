@@ -6782,6 +6782,78 @@ mod worker_answer_routing_tests {
             "and what nobody claimed is what a closed window left behind"
         );
     }
+
+    /// One application-level drain, offered to the windows in `order` — the
+    /// shape of `AppEvent::*Ready`, with [`FolioApp::for_each_window`]'s loop
+    /// written out so a test can turn it round.
+    fn deal(mut batch: Vec<(WindowId, String)>, order: &[u64]) -> Vec<(u64, Vec<String>)> {
+        let mut dealt: Vec<(u64, Vec<String>)> = order
+            .iter()
+            .map(|window| {
+                let mine = answers_for(&mut batch, WindowId::from(*window), |(window, _)| *window);
+                (
+                    *window,
+                    mine.into_iter().map(|(_, name)| name).collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert!(
+            batch.is_empty(),
+            "every answer in this batch is addressed to a window that is open, so \
+             nothing may be left standing: {batch:?}"
+        );
+        dealt.sort_by_key(|(window, _)| *window);
+        dealt
+    }
+
+    /// PIN (`docs/plans/multiwindow-ef/codex-final.md` §2) — **one drain, and
+    /// every answer lands with its one owner whichever way the windows are
+    /// walked.**
+    ///
+    /// The narrow review nailed this shape rather than a two-answer one because
+    /// two answers cannot tell a *consuming* drain from a routing one: with a
+    /// window's answers contiguous, "the first window took everything" and "the
+    /// first window took its own" produce the same first bucket. Interleaving
+    /// them — window B, window A, window B — makes the two answers differ in the
+    /// first window walked, and walking the windows in the other order makes them
+    /// differ again.
+    ///
+    /// Three assertions, and the third is the one the incident was:
+    /// each window comes away with exactly its own, in the lane's own order;
+    /// reversing the traversal changes nothing; and the batch is empty at the end
+    /// because three answers were claimed and not because one window swallowed
+    /// the queue.
+    ///
+    /// MUTATION: have `answers_for` return `batch.drain(..).collect()` and the
+    /// window walked first comes away with all three while the other comes away
+    /// with none — in both directions, which is how a *symmetric* wrong answer
+    /// still fails an asymmetric test.
+    #[test]
+    fn three_answers_in_b_a_b_order_each_land_with_their_one_owner() {
+        let interleaved = || {
+            vec![
+                answer(2, "b-first"),
+                answer(1, "a-only"),
+                answer(2, "b-second"),
+            ]
+        };
+        let expected = vec![
+            (1_u64, vec!["a-only".to_owned()]),
+            (2_u64, vec!["b-first".to_owned(), "b-second".to_owned()]),
+        ];
+        let oldest_first = deal(interleaved(), &[1, 2]);
+        assert_eq!(
+            oldest_first, expected,
+            "each window takes its own out of one drain, in the order the lane \
+             answered in"
+        );
+        let newest_first = deal(interleaved(), &[2, 1]);
+        assert_eq!(
+            newest_first, oldest_first,
+            "and which window is walked first is a fact about the opening order, \
+             not about whose answer this is"
+        );
+    }
 }
 
 fn active_item<T>(items: &[T], active: usize) -> &T {
