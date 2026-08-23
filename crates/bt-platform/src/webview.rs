@@ -57,6 +57,7 @@ use webview2_com::{
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::core::{BOOL, HSTRING, IUnknown, Interface as _, PCWSTR, PWSTR};
 
+use super::PageVisual;
 use super::windows_impl::Compositor;
 
 // ── Reading out-parameters ─────────────────────────────────────────────────
@@ -539,11 +540,11 @@ pub enum RehostOutcome {
     },
 }
 
-/// One end of a rehost: which window, which seat, and the compositor that owns
+/// One end of a rehost: which window, which page, and the compositor that owns
 /// that window's visual tree.
 pub struct RehostSide<'a> {
     pub compositor: &'a Compositor,
-    pub seat: u64,
+    pub page: PageVisual,
     pub hwnd: NonZeroIsize,
 }
 
@@ -790,7 +791,7 @@ impl WebHost {
     /// and policies are all installed before the first navigation, because a
     /// navigation started a moment earlier would run before `NavigationStarting`
     /// existed to check it.
-    pub fn install(&mut self, compositor: &Compositor, seat: u64) -> Result<(), String> {
+    pub fn install(&mut self, compositor: &Compositor, page: PageVisual) -> Result<(), String> {
         let pending = self
             .pending_controller
             .take()
@@ -811,8 +812,8 @@ impl WebHost {
         self.attach_events()?;
         self.attach_environment_events()?;
         let visual = compositor
-            .web_visual(seat)
-            .ok_or_else(|| String::from("this seat has no web visual to render into"))?;
+            .web_visual(page)
+            .ok_or_else(|| String::from("this page has no web visual to render into"))?;
         unsafe { self.composition().SetRootVisualTarget(&visual) }
             .map_err(|error| failure("SetRootVisualTarget", &error))
     }
@@ -874,16 +875,16 @@ impl WebHost {
                 "this controller was not made by the process's one environment, and a controller cannot cross environments",
             ));
         }
-        let Some(target_visual) = to.compositor.web_visual(to.seat) else {
+        let Some(target_visual) = to.compositor.web_visual(to.page) else {
             return refuse(format!(
-                "the target window has no web visual for seat {}",
-                to.seat
+                "the target window has no web visual for tab {} seat {}",
+                to.page.tab, to.page.seat
             ));
         };
-        let Some(source_visual) = from.compositor.web_visual(from.seat) else {
+        let Some(source_visual) = from.compositor.web_visual(from.page) else {
             return refuse(format!(
-                "the source window has no web visual for seat {}, so a failed handoff could not be put back",
-                from.seat
+                "the source window has no web visual for tab {} seat {}, so a failed handoff could not be put back",
+                from.page.tab, from.page.seat
             ));
         };
         let restore = Restore {

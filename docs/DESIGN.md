@@ -344,7 +344,9 @@ target  ← CreateTargetForHwnd(hwnd, topmost = true)
 
 **PTY 唤醒重绑,而失败模式是沉默不是错画(审阅 #9)。** reader 线程在 spawn 那一刻拿到它的 `OutputWake` 并终生持有;此前那是某一扇窗 `PtyWakeSignal` 的克隆。信号是一个位,由 drain 放下;一个 tab 已经搬进 B 窗的 shell 仍然举 A 窗的位,**而抽走最后一个 tab 的移交会把 A 窗关掉,一个关掉的窗再没有人替它放下那个位**——于是那之后第一次举起发出一条消息、之后每一次都在 `swap` 处返回,循环没有别的事可做就坐在 `ControlFlow::Wait` 里,而 B 窗里的 shell 正往一个没人读的环里打字。所以指向多加一层,粒度是**每片叶**(叶才是会动的东西:升格成 tab、移进别的 tab、随 tab 换窗):`LeafWake` 是 reader 线程闭包与 `LeafSession` 共同指名的那个格子,`rebind` 是它唯一的写者,跑在不许失败的 model commit 里。`PtyWakeSignal` 也因此不再发闭包——**一个 shell 劝不动的唤醒,正是让搬走的 shell 继续叫一扇它已经离开的窗的那个东西**。
 
-**这一片停在一件事上,写在这里而不是抹平。** 窗级的两样按 pane 存放的活状态——`web`(一个座位一个引擎)与 `web_thumbs`(一个座位一帧)——是拿**裸 `SeatId`** 做键的,而 `SeatId` 只在它的 tab 内唯一:每一个被抽出来成 tab 的 pane 都从 `SeatId(1)` 重新起号(`seats::Seats::lone_seat`)。所以一扇窗的两个 tab 可以各有一个 `SeatId(1)`,而那张 map 只装得下一个。**这是今天就活着的缺陷,不是移交引入的**:把一个 `.html` 开进独立 tab 两次,第二个 tab 的地址会去导航**第一个** tab 的页——因为 `open_web_page_on` 复查的是 `window.web.contains_key(&seat)`,旁边没有 tab。修法是把这两张表、以及它们下面 compositor 的 visual 表一起改成按 `LeafId` 做键,那是**网页块**的改动而不是这条事务的。F1b 不把它悄悄弄得更糟:一次叫不出名字的移交**被拒绝**(`TransferRefusal::AmbiguousPage`),拒绝本身就是那笔前置欠账的说明。判定是一个纯函数 `page_key_collision`,两种叫不出名字的方式——号在源窗挂着页而源窗另一个 tab 也有这个号(说不出那台引擎是谁的),或号在目标窗已经挂着页(搬进去会顶掉它)。钉:`a_page_that_cannot_be_named_refuses_the_move`。
+**这一片停在一件事上,写在这里而不是抹平。** 窗级的两样按 pane 存放的活状态——`web`(一个座位一个引擎)与 `web_thumbs`(一个座位一帧)——是拿**裸 `SeatId`** 做键的,而 `SeatId` 只在它的 tab 内唯一:每一个被抽出来成 tab 的 pane 都从 `SeatId(1)` 重新起号(`seats::Seats::lone_seat`)。所以一扇窗的两个 tab 可以各有一个 `SeatId(1)`,而那张 map 只装得下一个。**这是今天就活着的缺陷,不是移交引入的**:把一个 `.html` 开进独立 tab 两次,第二个 tab 的地址会去导航**第一个** tab 的页——因为 `open_web_page_on` 复查的是 `window.web.contains_key(&seat)`,旁边没有 tab。修法是把这两张表、以及它们下面 compositor 的 visual 表一起改成按 `LeafId` 做键,那是**网页块**的改动而不是这条事务的。F1b 不把它悄悄弄得更糟:一次叫不出名字的移交**被拒绝**(`TransferRefusal::AmbiguousPage`),拒绝本身就是那笔前置欠账的说明。
+
+> **2026-08-23 结清:§7.12 把三张表都按 `LeafId` 做了键,这条拒绝随之撤销。** `TransferRefusal::AmbiguousPage` 与纯函数 `page_key_collision` 一起删掉了——不是留成一道打不响的门,而是因为「叫得出名字」现在是**键的性质**而不是这条事务能测的一件事:`TabId` 由进程铸一次且永不回收(`TabIds`),`LeafId` 两半都相等才相等,而一张 tab 只站在一扇窗的 strip 里。所以一张要搬的 tab 的每一片叶,与源窗其余 tab 的叶、与目标窗的叶,都不可能重名,无论座位号怎么排。原来的钉 `a_page_that_cannot_be_named_refuses_the_move` 翻成正断言 `every_page_of_a_moving_tab_can_be_named`(三张 tab 各把自己的座位从 1 起号、三张都挂着页,两窗的 map 各自成立、搬进去谁也没顶掉谁),`transfer_tab` 的形状钉相应改问 `let moving: BTreeSet<LeafId>`。
 
 **红测与钉。** 窄复核 §2 钉死的那条 drain 红测(结果排成「窗 B、窗 A、窗 B」,App 一次 drain 后三项各落唯一 owner,窗口遍历序反转结果不变)**写下来时就是绿的——它已被 routing 线(`6932e5a`)提前偿付**,如实记档而不造假红;钉子照收(`three_answers_in_b_a_b_order_each_land_with_their_one_owner`),并且用它自己写下的 MUTATION 验过会红(让 `answers_for` 整队取走 → 先被遍历的窗拿到三项、另一扇拿到零项,两个方向都是)。真红的三条:身份簇(`TabIds` 不存在的编译错误)、pane 升格活性(`wanted` 是 `[]` 而应为 `[""]`)、事务形状(`transfer_tab` 不存在)。
 
@@ -352,7 +354,7 @@ target  ← CreateTargetForHwnd(hwnd, topmost = true)
 
 ![移交之后的目标窗:两个 tab,搬过来的 shell 还在说话,同一张页还是同一个 boot id](spikes/artifacts/tab-transfer/moved-tab-in-the-target-window.png)
 
-**欠账三笔,都记在这里。** ① 上面那条 `web` / `web_thumbs` 按 `LeafId` 重新做键的前置改动(网页块的单),在它清掉之前,同号页的移交是拒绝而不是搬运;② 一张**首次解码**还在飞的内嵌图片,在 pane 升格时不会被重新索取——装它的队列没有自己的在途账本可清,字节随任务走了,图片要等源码重印才回来(`DualPlaneSession::forget_work_in_flight` 的 doc 写着这一条);③ `BT_TRANSFER_DEV` 这道验收门是这一片的脚手架,F1c 把真手势接上以后它该退役。
+**欠账三笔,都记在这里。** ① ~~上面那条 `web` / `web_thumbs` 按 `LeafId` 重新做键的前置改动(网页块的单),在它清掉之前,同号页的移交是拒绝而不是搬运~~ —— **2026-08-23 由 §7.12 结清**,同号页的移交现在照搬;② 一张**首次解码**还在飞的内嵌图片,在 pane 升格时不会被重新索取——装它的队列没有自己的在途账本可清,字节随任务走了,图片要等源码重印才回来(`DualPlaneSession::forget_work_in_flight` 的 doc 写着这一条);③ `BT_TRANSFER_DEV` 这道验收门是这一片的脚手架,F1c 把真手势接上以后它该退役。
 
 ## 3. 内容模型
 
@@ -1831,7 +1833,9 @@ W0′ 的双向矩阵在这里落成三条:
 
 **① `PreviewSource::Web(String)`,字符串是切换器键,而且只有一本账。** 这一臂拿的是 `webnav::switcher_key` 规范化之后的完整 URL——query 与 fragment 参与身份(§3 切换器确定性三则),只丢默认端口。它从哪儿来是本片最要紧的一句话:**`webnav::switcher_identity(webhost::WebMachine::recoverable_url())`,而 `recoverable_url` 只被 `NavigationCompleted(IsSuccess)` 写**。§3 说「切换器身份 = 最后一次成功提交的 URL」,§4 说「失败页/about:blank/取消不覆盖可恢复 URL」——**这两句是同一件事**,所以它们是同一个字段:池的键、切换器的行、`session.json` 的 `cur`、Recent 的种子,四个读者全部读它。`WebOutcome::Committed` 因此**不带字符串**:带一份拷贝就是让第二本账上路,而两本账迟早会对「重启回哪一页」给出两个答案。一次从未提交的导航没有身份,所以也没有缓冲——在途的页面是一个还没有行的座位,而不是一行指向从未存在过的页面。
 
-**② `WindowRuntime::web` 从 `Option` 变成 map,而 DirectComposition 的那一个 visual 也跟着变。** §7.8 的注释预告过这件事;真做的时候暴露出的是它的另一半:**`Compositor` 的 web visual 也是单数的**,而一个 controller 的 `SetRootVisualTarget` 是终身的。实机拍到:从 Recent 重开一页时,上一页还在等它的 browser 退出,新页面被指到同一个 visual 上,**约三百毫秒后旧座位的收尾把那个 visual 从树里摘走**——屏幕上是一个后面什么都没有的洞。所以 `Compositor::{attach,detach,place,web}_visual` 四扇门现在都带座位号,`bt_platform` 里每座位一个 visual;`every_web_visual_belongs_to_one_seat_and_is_reached_by_naming_it` 是那条源码钉。**键是座位不是 tab**:一个 controller 渲染进一个矩形,而「每 tab 单例」是上一层的事——`web_seat_among` 走的是**这张 tab 自己的**座位表,所以另一张 tab 上的页面不会被这张 tab 的按键操走。
+**② `WindowRuntime::web` 从 `Option` 变成 map,而 DirectComposition 的那一个 visual 也跟着变。** §7.8 的注释预告过这件事;真做的时候暴露出的是它的另一半:**`Compositor` 的 web visual 也是单数的**,而一个 controller 的 `SetRootVisualTarget` 是终身的。实机拍到:从 Recent 重开一页时,上一页还在等它的 browser 退出,新页面被指到同一个 visual 上,**约三百毫秒后旧座位的收尾把那个 visual 从树里摘走**——屏幕上是一个后面什么都没有的洞。所以 `Compositor::{attach,detach,place,web}_visual` 四扇门现在都带页面名,`bt_platform` 里每页一个 visual;`every_web_visual_belongs_to_one_page_and_is_reached_by_naming_it` 是那条源码钉。**键是 pane 不是 tab**:一个 controller 渲染进一个矩形,而「每 tab 单例」是上一层的事——`web_seat_among` 走的是**这张 tab 自己的**座位表。
+
+> **这一段的「座位号」在 2026-08-23 被 §7.12 收回了。** 上面写着「键是座位」的那句话只对了一半:座位号只在**它自己那张 tab 内**唯一,而这三张表跨整扇窗。原文那句「另一张 tab 上的页面不会被这张 tab 的按键操走」当时就不成立——`web_seat_among` 确实走本 tab 的座位表,但它拿这些号去问的是一张窗级的、按裸号做键的集合。修法与实机见 §7.12。
 
 **③ 尺寸和露面是两个问题,从这一片起。** §7.8 记过「引擎必须先拿到尺寸再拿到 URL」;当一个窗口只有一页时,那一页永远就是你正在看的那一页,于是「有多大」和「在不在玻璃上」是一个答案。现在不是了:一页可以生在没人看的 tab 上,也可以生在模态背后(启动时恢复提示压着)。实机结果是那一页**从未提交过**——零尺寸的 controller 不完成导航——于是座位没有身份、池里没有行、`session.json` 里什么都没有。修法是把两个问题分开:每个座位按**它自己那张 tab 的树**量矩形(`WebPlacement`),尺寸照给,露面另判(模态、或不是当前 tab)。隐藏本身一毫米没松:隐藏的 WebView 仍然是 CPU 0、rAF 0(§7.8 ⑧)。
 
@@ -1920,7 +1924,7 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 
 **④ 四道门管「问」,图本身归座位——这是本片唯一一条新规矩,而且是被介质逼出来的。** `focus_thumb` 的门 1(模式关着不跑)与门 2(卡不在裁剪框里不跑)照旧管着**要不要去照相**。它们不管**那张图**,理由是:一根终端座位的投影滚出视野就丢、滚回来当场重投,因为它画的那个网格一直在内存里、随时可以再问一次;**一张网页的像素只在页面站在玻璃上时存在**。照门 2 的字面把网页图也丢掉,等于「聚焦列滚一下,所有网页卡永久变白」——没有任何东西能再把它们填回来。所以**图挂在座位上,不挂在卡上**:座位没了才没,页面换了才换。红测 `a_page_that_left_the_glass_keeps_its_last_frame` 钉这一半。
 
-**⑤ 抓帧的生命周期,四件事。** **触发**:每帧那一趟投影 pass 里,对**在裁剪框里的卡**上的每个网页座位问一次 `web_thumb::WebThumbs::due`——一个只吃事实的纯函数,事实由 `WebSeat::capture_facts` 一次读齐(在不在玻璃上、是不是正在关、有没有提交过文档、有没有一张照片还没回来、引擎最后拿到的尺寸)。**频率**:`CAPTURE_INTERVAL` **2 秒**一张,每座位同时只有一张在飞;十倍慢于投影的 10Hz,因为唯一照得到的那张卡就是舞台上那一张的缩图,它没有任何只能从缩图上读到的东西。**缓存**:`WindowRuntime::web_thumbs`,一座位一张,已经缩到卡片格子大小的 RGBA + 一个身份串(`web-thumb:<seat>:<serial>`),走 `ChromeGroup::images` 这条不经光栅器的通道(与 glance 卡缩图同一个槽)。**作废**四个时机:ⓐ 导航提交了另一条 URL(`WebOutcome::Committed` 与下一趟 demand 的 URL 各说一次,红测两条);ⓑ 答案回来时座位已经不在那条 URL 上(丢弃,记 `page-stale`);ⓒ 座位关掉/网页座位消失(`retain`,像素在这里释放);ⓓ **pane 换了形状**——这一条**不作废,而是当场欠一张新的**:老像素是一个已经不在的排版的真实照片,而丢掉它对一个已经下台的页面就是永久变白,两害相权取轻,红测 `a_reshaped_pane_is_photographed_without_waiting_for_the_clock`。
+**⑤ 抓帧的生命周期,四件事。** **触发**:每帧那一趟投影 pass 里,对**在裁剪框里的卡**上的每个网页座位问一次 `web_thumb::WebThumbs::due`——一个只吃事实的纯函数,事实由 `WebSeat::capture_facts` 一次读齐(在不在玻璃上、是不是正在关、有没有提交过文档、有没有一张照片还没回来、引擎最后拿到的尺寸)。**频率**:`CAPTURE_INTERVAL` **2 秒**一张,每座位同时只有一张在飞;十倍慢于投影的 10Hz,因为唯一照得到的那张卡就是舞台上那一张的缩图,它没有任何只能从缩图上读到的东西。**缓存**:`WindowRuntime::web_thumbs`,一片叶一张,已经缩到卡片格子大小的 RGBA + 一个身份串(`web-thumb:<tab>:<seat>:<serial>`,tab 那一段是 §7.12 加的),走 `ChromeGroup::images` 这条不经光栅器的通道(与 glance 卡缩图同一个槽)。**作废**四个时机:ⓐ 导航提交了另一条 URL(`WebOutcome::Committed` 与下一趟 demand 的 URL 各说一次,红测两条);ⓑ 答案回来时座位已经不在那条 URL 上(丢弃,记 `page-stale`);ⓒ 座位关掉/网页座位消失(`retain`,像素在这里释放);ⓓ **pane 换了形状**——这一条**不作废,而是当场欠一张新的**:老像素是一个已经不在的排版的真实照片,而丢掉它对一个已经下台的页面就是永久变白,两害相权取轻,红测 `a_reshaped_pane_is_photographed_without_waiting_for_the_clock`。
 
 **⑥ 门 3 也够到了网页,只是够到的方式不同。** 终端座位被问「你的屏幕动了没有」,答一个整数;**网页在被照下来之前根本无法被问**。所以这道门下移到照片回来之后、18ms 解码与一兆纹理上传之前:**编码字节与上一张逐字节相同就整张丢掉**(记 `page-unchanged`)。于是一个不动的页面除了每两秒一次 `CapturePreview` 之外什么也不花——不解码、不缩放、不上传、卡片也不重投。40KB 的 memcmp 换 18ms,而且它只可能是优化:编码若不确定性,它就永不命中。红测 `a_page_that_has_not_changed_costs_nothing_after_its_first_frame`。
 
@@ -1935,6 +1939,38 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 **第二跑专门验 ⑥ 那道门,因为它要的是真的编码器而不是测试里的字节。** 同一张页,只多一句`setInterval` 改 `document.title`——标题不在页面上画,所以窗口一直在转帧(`DocumentTitleChanged` → chrome 重建 → 一趟投影)而页面的像素一个没动。一分钟后那一行:`visible=1 projections=6 unchanged=253 throttled=1 dropped=0 captures=27 pictures=1 page-hidden=0 page-closing=0 page-blank=16 page-inflight=1 page-throttled=82 page-unchanged=26 page-stale=0`——**照了 27 张相,存下 1 张,26 张逐字节相同被扔在解码之前**；`projections=6` 而不是 27,即卡片也没为它们重投。两跑 stderr 上都没有 `BT_WEB` 故障,收尾后本进程 0 个残留 folio、0 个残留 msedgewebview2。
 
 **⑪ 欠账。** ⓐ **favicon 仍然没有**:§7.7 的头写的是「favicon/地球标」,今天两处画的都是地球标;没有图的网页卡因此说的是标题 + 类型词而不是标题 + favicon,这跟本片是两件事(引擎侧要接 `FaviconChanged`),归片④ 的后续。ⓑ **第一次进聚焦模式时,除当前 tab 外的网页卡都是面**——它们的页面从没在「有人看着」的时候站上过玻璃。这是门 1 的价钱,不是缺陷;真要抹掉它,得让模式关着的时候也照相,那是另一条裁决。ⓒ **卡片改高之后,已下台页面的那张图会被拉伸**(纹理是旧尺寸、框是这一帧的格子),直到它再一次上台;拒绝画反而会让它永久变白,见 ④。
+
+### 7.12 一张页由它的 pane 叫出名字（Web 预览块 F1b′，2026-08-23，已落地；`crates/bt-platform/src/{lib,webview}.rs`、`crates/bt-app/src/{main,webhost,web_thumb}.rs`）
+
+**这一片只改了一件事:窗级的三张网页表从按裸 `SeatId` 做键改成按 `LeafId{tab,seat}` 做键。** 三张是 `WindowRuntime::web`(一个 pane 一台引擎)、`WindowRuntime::web_thumbs`(一个 pane 最后一帧)、以及它们下面 `bt_platform::Compositor` 的 visual 表。§7.9 ② 当时写的是「键是座位」,那句话只对了一半——**座位号只在它自己那张 tab 内唯一**:每一个被抽出来成 tab 的 pane 都从 `SeatId(1)` 重新起号(`seats::Seats::lone_seat`),而这三张表跨整扇窗。
+
+**① 缺陷不是移交引入的,它一直活着。** 把一个 `.html` 开进独立 tab 两次:第二个 tab 走 `web_seat_of_tab` → `web_seat_among`,那个函数**确实**只走本 tab 的座位表,但它拿这些号去问的是一张按裸号做键的窗级集合;第一个 tab 的页恰好也在 `SeatId(2)` 上,于是它答「你有页」,`open_web_page_on` 复查 `window.web.contains_key(&seat)` 也答「有」,第二个 tab 的地址就去**导航第一个 tab 的引擎**。同一个错误另外两处也在:一张后台 tab 的页会把地球标发给前台 tab 里恰好同号的那个 pane(`tab_mark` / `leaf_marks`),而两个同号 pane 的缩略图共用一个格子、一个纹理键、一口两秒的钟。
+
+**② 修法是把名字补齐,不是在读的地方加过滤。** `LeafId` 两半都相等才相等,`TabId` 由进程铸一次且永不回收(§2.10 `TabIds`),所以一个 `LeafId` 在整个进程里唯一。三张表的键、`WebSeat` 的 `SeatAddress`、`RehostSide`、`PageDemand`、`ShrinkJob`/`ShrunkPicture`、缩略图的纹理键(`web-thumb:<tab>:<seat>:<serial>`)一路跟着换。平台层拿到的是 `bt_platform::PageVisual{tab,seat}`——两个裸整数,因为 compositor 只要求「同一扇窗里同时活着的两张页永不同名」,tab 号从哪来是应用层的事。
+
+**F1a 的 `SeatAddress` 一并收敛,理由写在类型上。** 它是**平台层地址**,唯一的职责是「这张页在它现在这扇窗里叫什么」;那张 visual 表一旦不能用座位号索引,这个地址也就不能。带着 tab 走的理由只有这一条:这里没有一行读它,而这里的每一样都按它归档——attach / install / place / detach 四步不许指向四个地方,而一个只带座位号的地址会让它们**保证**指错,而不只是可能。
+
+**③ `AmbiguousPage` 撤了,而且是删掉不是留成哑门。** 见 §2.10 的结清段:叫得出名字现在是键的性质,不是这条事务能测的一件事,所以 `page_key_collision` 与那一臂拒绝一起删,钉翻成正断言 `every_page_of_a_moving_tab_can_be_named`。
+
+**④ 实机上发现的第二个缺陷,由这次重键**暴露**出来,当场补掉。** `PreviewSurface::Seat` 拿的是座位号,而读它的三扇门要么问**前台那张 tab**(`preview_buffer_on`),要么问**第一张树里有这个号的 tab**(`preview_pane_mut`、`preview_tab_index`)——两者都不是这张页自己的 tab。代价在实机上量到:一扇窗恢复出两张各带一页的 tab,`open_web_page_on` 把**第一张** tab 的 buffer 清了两次,第二张 tab 的文件 buffer 就那么留在它自己的引擎底下;`advance_web_page` 读到那本 buffer,判为「别的东西落到这个 pane 上了」,把刚开出来的页当场关掉——两张页里有一张在它到达的下一帧就没了。修法是让 `open_web_page_on` 用 `leaf.tab` 直接定位 tab,走 `leave_preview_buffer_in` 与新的 `clear_preview_image_in`(后者是前者的孪生,连同它「只有台前那张 tab 有权动 renderer 手里那张图」的那半)。重键之前这条被裸号的 `any` 掩着:任何一张 tab 都能替这个号作保。
+
+**红测与钉。** 四条,每一条都用它自己写下的 MUTATION 验过会红,四条同时红的那一跑留档:
+- `a_page_in_another_tab_is_not_this_tabs_page_however_the_seats_are_numbered`(`web_seat_among`,拿掉 tab → `Some(SeatId(1))`,即缺陷本身);
+- `a_tab_identified_by_a_seat_that_is_hosting_a_page_wears_the_globe` 的第三断言改成**同号异 tab**(拿掉 tab → 文件夹 tab 戴上浏览器的地球);
+- `web_thumb::tests::one_seat_number_in_two_tabs_is_two_pictures`(按 `leaf.seat` 做键 → 两张页共一格、共一个纹理键、互相挡钟);
+- `bt_platform::visual_layer_tests::one_seat_number_in_two_tabs_is_two_page_visuals`,加上源码钉 `every_web_visual_belongs_to_one_page_and_is_reached_by_naming_it` 四扇门的签名。
+
+**实机(2026-08-23,debug,`APPDATA`/`LOCALAPPDATA`/UDF 全隔离到临时目录,`BT_PTY_DUMP`,两张本地 `.html`,不访问外网,`BT_TRANSFER_DEV` 脚本一次移交)。** 会话种子是一扇窗两张 tab,各一根终端加一个预览 pane,**两张 tab 的页都落在 `SeatId(2)` 上**——正是从前只装得下一张的那个形状。
+
+- **两张页同时活着,各是各的**:`tab 1 seat 2 -> …/alpha.html [ALPHA boot=8U0Q0AHX tick=25]`、`tab 2 seat 2 -> …/beta.html [BETA boot=E8IKSS0X tick=99]`。两个 boot id 就是两台真的引擎;重键之前这里只会有一行,而且是 beta —— 第二张 tab 的恢复会把第一张 tab 的引擎导航过去。
+- **移交不再被拒**:`report: Moved(TabTransfer { tab: TabId(2), pages: [(LeafId { tab: TabId(2), seat: SeatId(2) }, Moved)], … })`。同一组入参在 F1b 下是 `page_key_collision(moving={seat 2}, others_in_source={seat 1,2}, hosted_in_source={seat 2}) = Some(SeatId(2))`,也就是 `Refused(AmbiguousPage(SeatId(2)))`。
+- **页是搬过去的不是重建的**:`boot=E8IKSS0X` 跨越移交一字未变(F1a 立的取证法),照片上它已经 `tick=274` 还在走,同一根 shell 在移交之后打出了 `BT-TRANSFER-ALIVE`。
+- **留下的那张 tab 什么也没被动**:移交之后源窗仍是 `tab 1 seat 2 -> …/alpha.html [ALPHA boot=8U0Q0AHX]`,照片上 `tick=201` 仍在走。
+- 收尾:属于本次运行的 `folio` 与 `msedgewebview2` **各 0 个**。
+
+![移交之后的两扇窗:左窗是搬进去的 TAB-TWO(PAGE BETA,boot 未变,shell 打出 BT-TRANSFER-ALIVE),右窗是留下的 TAB-ONE(PAGE ALPHA,boot 未变)](spikes/artifacts/page-keys/two-tabs-two-pages-and-one-of-them-moved.png)
+
+**欠账两笔。** ⓐ **`transfer_tab` 不修 pin 分区**:把一张**钉住的** tab 搬进一扇 tab 没钉住的窗,目标窗的 strip 就成了「未钉在前、已钉在后」,`tab_trailers` 的 `debug_assert!` 当场喊 F57(实机撞到过一次,debug 档才响)。这是 F1b 的 model commit 少调一次 `settle_pin_partition`,不是本片引入的,也不在本片的地界里——记在这里给接手 `transfer_tab` 的那一片。ⓑ **`PreviewSurface::Seat` 本身还是一个座位号**:④ 只把网页这条道上的三处按叶定位了,预览块其余按 `preview_tab_index` 找 tab 的读者仍然是「第一张有这个号的 tab」。要根治得把预览表面也按叶寻址,那是预览块的单。
 
 ## 8. 依赖策略
 
