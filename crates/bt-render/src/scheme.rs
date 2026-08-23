@@ -512,6 +512,10 @@ impl ChromePalette {
             tab_badge_text_on_resting_tab: ink2(rail_active),
             tab_badge_text_on_hovered_tab: ink2(pill_on_hovered_tab),
             menu_item_hint_text: ink3(menu),
+            // Half of `--ink3` over the same ground — the ladder
+            // `.pv-nav.off`'s `opacity: .22` walks down, said as a colour
+            // because the thing walking it is a run of text. See the field.
+            menu_item_unavailable_text: ink_over(menu, source, canvas.ink3 / 2),
             status_err,
             status_warn,
             status_pause,
@@ -903,6 +907,7 @@ mod tests {
             tab_badge_text_on_resting_tab,
             tab_badge_text_on_hovered_tab,
             menu_item_hint_text,
+            menu_item_unavailable_text,
             status_err,
             status_warn,
             status_pause,

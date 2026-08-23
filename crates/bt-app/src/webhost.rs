@@ -728,6 +728,20 @@ impl WebFault {
         }
     }
 
+    /// The address a refused navigation was aimed at, when that is what this
+    /// card is about.
+    ///
+    /// The head's name cell reads it when there is nothing else to put there: a
+    /// seat whose one navigation was refused has no document title and no
+    /// committed URL, and a blank cell over a card that names the address in
+    /// full would be the head saying less than the body under it.
+    pub(crate) fn refused_address(&self) -> Option<String> {
+        match self {
+            Self::Blocked { url, .. } => Some(url.clone()),
+            _ => None,
+        }
+    }
+
     /// Whether this card stands on a scrim **over a page that is still there**,
     /// rather than being the whole of what the seat holds.
     ///
@@ -1094,6 +1108,16 @@ pub(crate) struct WebSeat {
     /// 「导航被拦」 card name a reason **the door actually gave** rather than one
     /// re-derived afterwards from a mint that may have moved on.
     refusal: Rc<RefCell<Option<(String, Refusal)>>>,
+    /// Whether a find session has actually been started on this page.
+    ///
+    /// `ICoreWebView2::Find` is not free to ask for: reaching the session at all
+    /// makes the engine take the keyboard (measured, 2026-08-22 — see
+    /// [`WebSeat::find`]), so a capsule opened with an empty query must not
+    /// touch it, and a capsule closed without one must not either.
+    finding: bool,
+    /// The term the session that is running was started with, so that a second
+    /// ask on the same term is a walk rather than a fresh search.
+    found: String,
     /// The page's zoom as this window last set it.
     ///
     /// Kept here as well as in the controller because `Ctrl`+wheel steps from
@@ -1157,6 +1181,8 @@ impl WebSeat {
             buttons: bt_platform::web_mouse_buttons::NONE,
             last_left_press: None,
             page: PageFacts::default(),
+            finding: false,
+            found: String::new(),
             fault: None,
             refusal,
             zoom: 1.0,
@@ -1786,20 +1812,68 @@ impl WebSeat {
 
     /// Search this page for `term`. The counts come back as
     /// [`WebOutcome::FindMatches`].
-    pub(crate) fn find(&self, term: &str, case_sensitive: bool) -> Result<(), String> {
+    /// **The engine takes the keyboard when this is called**, measured on the
+    /// machine (2026-08-22): a capsule opened over a page and typed into
+    /// received exactly one character, because the first keystroke started a
+    /// find and the find moved the focus into the page. The caller takes it
+    /// back — see `Runtime::refresh_search` — and this half's job is to not ask
+    /// at all when there is nothing to ask about, which is every keystroke of an
+    /// empty field and every close of a capsule nobody typed in.
+    pub(crate) fn find(&mut self, term: &str, case_sensitive: bool) -> Result<(), String> {
         if term.is_empty() {
-            return self.host.find_stop();
+            self.found.clear();
+            return self.find_stop();
         }
+        self.finding = true;
+        self.found = term.to_owned();
         self.host.find(term, case_sensitive)
     }
 
-    /// Walk to the next match, or the previous one.
-    pub(crate) fn find_step(&self, forwards: bool) -> Result<(), String> {
-        self.host.find_step(forwards)
+    /// The term the running find session was started with, or empty.
+    ///
+    /// What tells a keystroke that has moved the query from one that has not —
+    /// and therefore whether the tally on the glass still belongs to what is in
+    /// the field.
+    pub(crate) fn found(&self) -> &str {
+        &self.found
+    }
+
+    /// **Ask, or walk** — one door, because on a page they are one gesture.
+    ///
+    /// A terminal's capsule searches on every keystroke because the search is
+    /// this window's own regex over its own transcript and touches nothing else.
+    /// A page's cannot: `ICoreWebView2Find::Start` **moves the keyboard into the
+    /// page**, measured on the machine (2026-08-22 — a live find over a page
+    /// took exactly one character and then typed into the document), and there
+    /// is no way to ask it not to. So on a page the find runs when the reader
+    /// asks for it — `Enter`, the two walk buttons, `F3` — and what the ask
+    /// means depends on whether the term has moved since the last one: a new
+    /// term starts a session, the same term steps through it.
+    pub(crate) fn find_or_step(
+        &mut self,
+        term: &str,
+        case_sensitive: bool,
+        forwards: bool,
+    ) -> Result<(), String> {
+        if term.is_empty() {
+            self.found.clear();
+            return self.find_stop();
+        }
+        if self.finding && self.found == term {
+            // The walk itself, inlined rather than given a door of its own: on
+            // a page there is no second caller — an ask on the same term *is*
+            // the walk, which is what this function's own name says.
+            return self.host.find_step(forwards);
+        }
+        self.find(term, case_sensitive)
     }
 
     /// End the session and take the page's highlights off.
-    pub(crate) fn find_stop(&self) -> Result<(), String> {
+    pub(crate) fn find_stop(&mut self) -> Result<(), String> {
+        if !self.finding {
+            return Ok(());
+        }
+        self.finding = false;
         self.host.find_stop()
     }
 

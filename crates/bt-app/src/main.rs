@@ -11942,6 +11942,13 @@ fn read_motion_preference() -> Motion {
 
 /// `.pring.indeterminate { animation: pring-spin 1.1s linear infinite }`.
 ///
+/// **`flex: 1 1 auto` said in one number** (§7.7 ②): a width no head can grant,
+/// so `seats::preview_head_geometry`'s own clamp gives the address field
+/// everything the tools left it. Finite rather than `f32::MAX` because the
+/// geometry adds the switcher's trimmings to it before clamping, and an infinity
+/// with something added to it is not a number.
+const ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD: f32 = 1.0e6;
+
 /// `.preview-head .pv-fav.loading { border: 1.4px }` — the stroke the page's own
 /// spinner is drawn at, which is thinner than a tab ring's two because the box
 /// it turns in is fourteen pixels rather than eighteen.
@@ -23433,6 +23440,26 @@ impl Runtime<'_> {
             self.clear_search_highlights(previous);
         }
         self.window.search.open(seat);
+        // Which kind of host is under it, so the counter knows whether an empty
+        // tally means "none" or "nobody has been asked".
+        self.window
+            .search
+            .set_counts_its_own(self.seat_holds_a_page(seat));
+        // **The capsule takes the keyboard back from a page** (§7.7 ②), and it
+        // has to for the address field's reason one door over: a page keeps
+        // every key this window's table does not claim, and §7.8 ④ measured that
+        // **a bare printable key never enters `AcceleratorKeyPressed` at all**.
+        // A field raised over a page that still holds the keys is a field you
+        // can open, switch and close, and never type in.
+        //
+        // Only over a page. A terminal never had the Win32 focus to begin with,
+        // and calling `SetFocus` on the window it is already in would be this
+        // window taking something from itself.
+        if self.seat_holds_a_page(seat)
+            && let Ok(hwnd) = window_hwnd(&self.window.window)
+        {
+            let _ = bt_platform::take_keyboard_focus(hwnd);
+        }
         self.refresh_search(true)?;
         self.after_search_change()
     }
@@ -23452,7 +23479,7 @@ impl Runtime<'_> {
         // A page keeps its own highlights, so putting the capsule away has to
         // tell the engine as well — otherwise the marks stay on a document
         // nobody is searching any more.
-        if let Some(web) = self.window.web.as_ref().filter(|web| web.seat == seat)
+        if let Some(web) = self.window.web.as_mut().filter(|web| web.seat == seat)
             && let Err(error) = web.find_stop()
         {
             eprintln!("BT_WEB {error}");
@@ -23535,14 +23562,36 @@ impl Runtime<'_> {
         // host owes is the term and the one flag the engine can honour, and the
         // count arrives later as `WebOutcome::FindMatches`.
         if self.seat_holds_a_page(seat) {
+            // **Typing does not search a page** (§7.7 ②, ruled 2026-08-22 on the
+            // machine). A terminal's capsule searches on every keystroke because
+            // the search is this window's own regex over its own transcript and
+            // touches nothing; `ICoreWebView2Find::Start` **moves the keyboard
+            // into the page**, and there is no option that says otherwise — so a
+            // live find over a page is a field that takes one character and then
+            // types into the document. What runs the find is the ask: `Enter`,
+            // the two walk buttons, `F3`. See `WebSeat::find_or_step`.
+            //
+            // What a keystroke *does* do is take the last answer down: a tally
+            // is about a term, and the term has just changed.
             let query = self.window.search.query().to_owned();
-            let case_sensitive = self.window.search.flags().case_sensitive;
-            // The tally the last query produced is not this query's answer, and
-            // between the keystroke and the engine's reply the honest count is
-            // no count at all.
-            self.window.search.forget_engine_matches();
-            if let Some(web) = self.window.web.as_ref().filter(|web| web.seat == seat)
-                && let Err(error) = web.find(&query, case_sensitive)
+            // **Only when the term has actually moved.** This runs on the quiet
+            // path too — once per published frame — and a tally forgotten every
+            // frame is a counter that can never be filled in (found on the
+            // machine, 2026-08-22: the matches lit up and the count stayed
+            // blank). What the seat was asked is the one place that knows.
+            let asked = self
+                .window
+                .web
+                .as_ref()
+                .filter(|web| web.seat == seat)
+                .map(|web| web.found().to_owned())
+                .unwrap_or_default();
+            if asked != query {
+                self.window.search.forget_engine_matches();
+            }
+            if query.is_empty()
+                && let Some(web) = self.window.web.as_mut().filter(|web| web.seat == seat)
+                && let Err(error) = web.find_stop()
             {
                 eprintln!("BT_WEB {error}");
             }
@@ -23682,8 +23731,10 @@ impl Runtime<'_> {
         if let Some(seat) = self.window.search.seat()
             && self.seat_holds_a_page(seat)
         {
-            if let Some(web) = self.window.web.as_ref().filter(|web| web.seat == seat)
-                && let Err(error) = web.find_step(forwards)
+            let query = self.window.search.query().to_owned();
+            let case_sensitive = self.window.search.flags().case_sensitive;
+            if let Some(web) = self.window.web.as_mut().filter(|web| web.seat == seat)
+                && let Err(error) = web.find_or_step(&query, case_sensitive, forwards)
             {
                 eprintln!("BT_WEB {error}");
             }
@@ -23696,7 +23747,25 @@ impl Runtime<'_> {
     }
 
     /// The engine answered a find (§7.7 ②).
+    ///
+    /// **And the keyboard comes back here, not merely at the call.** Starting a
+    /// find moves the Win32 focus into the page, and it does so *asynchronously*
+    /// — measured on the machine, 2026-08-22: a capsule over a page took exactly
+    /// one character, the one that started the find, and every keystroke after
+    /// it went to the document. A `SetFocus` issued beside `Find::Start` loses
+    /// that race; one issued when the engine has answered does not, because the
+    /// answer is the engine having finished.
+    ///
+    /// Only while the caret is in the field. B81's second stance — search open,
+    /// hands back on the surface — is a reader who has deliberately given the
+    /// page the keyboard, and taking it away from them once per match count
+    /// would be this window arguing with a click.
     fn web_find_reported(&mut self, count: i32, active: i32) -> Result<()> {
+        if self.window.search.is_focused()
+            && let Ok(hwnd) = window_hwnd(&self.window.window)
+        {
+            let _ = bt_platform::take_keyboard_focus(hwnd);
+        }
         if !self.window.search.report_engine_matches(count, active) {
             return Ok(());
         }
@@ -24276,12 +24345,23 @@ impl Runtime<'_> {
             &verb,
             websheet::verb_font_px(scale),
         );
-        let layout = websheet::lay_out(body, width, !detail.is_empty(), scale);
+        // **The sentence is wrapped before the card is laid out**, because how
+        // many lines it takes is what decides how tall the card is. The wrap is
+        // `restore::wrap` — the one in this window that knows a Latin word may
+        // not be broken and a run of ideographs may — because a second one would
+        // be a second answer about where a line ends.
+        let say_font = websheet::say_font_px(scale);
+        let say_width = websheet::say_width(body, scale);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let say_lines = restore::wrap(&say, say_width, |text| {
+            renderer.measure_chrome_text(gpu, text, say_font)
+        });
+        let layout = websheet::lay_out(body, width, say_lines.len(), !detail.is_empty(), scale);
         let palette = bt_render::chrome_palette();
         let layer = websheet::build(
             &layout,
             websheet::SheetContent {
-                say: &say,
+                say: &say_lines,
                 detail: &detail,
                 verb: &verb,
                 verb_hovered: self.window.seat_pointer.hover
@@ -28966,11 +29046,23 @@ impl Runtime<'_> {
             .as_ref()
             .map(|editor| editor.text.clone())
             .unwrap_or_default();
+        // **A file's box is the width of its name; an address's box is the head's
+        // remaining room** (§7.7 ②), and the difference is what is in it: 「URL
+        // 不是标签」. `preview_head_geometry` already clamps a wanted width to
+        // what is left after the tools, so asking for more than the head has is
+        // exactly how a field takes the rest of it.
+        let editing_an_address = matches!(
+            self.window.rename.as_ref().map(|editor| &editor.subject),
+            Some(RenameSubject::WebAddress { .. })
+        );
         let tools = seats::PreviewHeadTools {
-            name_width: self
-                .window
-                .renderer
-                .measure_chrome_text(&mut self.app.gpu, &draft, font),
+            name_width: if editing_an_address {
+                ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD
+            } else {
+                self.window
+                    .renderer
+                    .measure_chrome_text(&mut self.app.gpu, &draft, font)
+            },
             ..tools
         };
         let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
@@ -30557,7 +30649,7 @@ impl Runtime<'_> {
             // §7.1.5d. Both chords of the row arrive here — the alias is a
             // second chord, never a second verb — and so will the `Find…` a
             // menu will one day carry.
-            shortcuts::Action::OpenSearch => self.open_search(self.focused_leaf),
+            shortcuts::Action::OpenSearch => self.open_search(self.search_host_seat()),
             // B81's second stance: the capsule is up, the hands are back on the
             // shell, and the function key still walks. `Enter` cannot do this —
             // it belongs to the shell the moment the caret leaves the box.
@@ -31617,9 +31709,24 @@ impl Runtime<'_> {
         // dirty slot stays structurally present and structurally empty: a page
         // has no unsaved text, and an empty cell is what this window looks like
         // when it has no ledger to speak from (§7.1.6h, the same sentence).
+        // A seat whose one navigation was refused has no title and no committed
+        // address, and the head must still name what it was handed — otherwise
+        // the one cell that says what this seat is about is blank while the card
+        // under it names the address in full.
+        let refused_address = self
+            .window
+            .web
+            .as_ref()
+            .filter(|web| web.seat == seat)
+            .and_then(webhost::WebSeat::fault)
+            .and_then(webhost::WebFault::refused_address);
         let (name, tools, dirty, flip_to_source) = match &page {
             Some(page) => (
-                page.name().to_owned(),
+                if page.name().is_empty() {
+                    refused_address.unwrap_or_default()
+                } else {
+                    page.name().to_owned()
+                },
                 seats::PreviewHeadTools {
                     save: false,
                     flip: false,
@@ -33143,15 +33250,28 @@ impl Runtime<'_> {
     /// Whether a hosted page is the thing typing goes into right now.
     ///
     /// Two facts and both are needed: this window has a page, and the seat it
-    /// stands on is the focused one. The engine's own `GotFocus` is *not* asked,
-    /// and that is deliberate — it arrives one message pump later than the click
-    /// that caused it, so a chord pressed in the same breath as the click would
-    /// be judged against the focus the window had before it.
+    /// stands on is the one holding the keyboard. The engine's own `GotFocus` is
+    /// *not* asked, and that is deliberate — it arrives one message pump later
+    /// than the click that caused it, so a chord pressed in the same breath as
+    /// the click would be judged against the focus the window had before it.
+    ///
+    /// **The layout's focus and never `focused_leaf`** (found on the machine,
+    /// 2026-08-22: clicking inside a page and pressing `Ctrl+L` did nothing).
+    /// `focused_leaf` names *the shell the keyboard falls back to* — it is only
+    /// ever written for a seat that is in `sessions`, which is to say for a
+    /// terminal — so a preview seat can never be it, and a predicate written
+    /// against it answers `false` on every page there has ever been. What names
+    /// the pane a press put the keyboard in is `focused_preview_seat`, which is
+    /// the same reading `Focus::preview` one line above already takes.
     fn page_holds_the_keyboard(&self) -> bool {
-        self.window
-            .web
-            .as_ref()
-            .is_some_and(|web| web.seat == self.focused_leaf)
+        let Some(seat) = self.focused_preview_seat() else {
+            return false;
+        };
+        // And not while the quick edit or a float has it: those are answered by
+        // `preview_keyboard_surface` above and are a different surface's
+        // keyboard, whatever seat is focused underneath them.
+        self.preview_keyboard_surface() == Some(PreviewSurface::Seat(seat))
+            && self.seat_holds_a_page(seat)
     }
 
     /// **Whether a shell is the one holding the keyboard** — `InputOwner ==
@@ -33326,6 +33446,23 @@ impl Runtime<'_> {
     /// Travel keys honour repeats and nothing else does, which is the same line
     /// the tree draws: holding an arrow is one continuous "further".
     fn preview_browse_key(&mut self, event: &KeyEvent) -> Result<bool> {
+        // **A field standing over this surface is asked before it** (§7.7 ②,
+        // B69: 「search keys are the search box's」).
+        //
+        // This function ends in `_ => return Ok(true)`: a focused preview
+        // swallows every key it does not use, which was written when the only
+        // thing under it was a shell. The search capsule's second host is a
+        // **page**, and a page's seat is a focused preview — so with the capsule
+        // up on one, every character typed into it was being eaten here. Found
+        // on the machine, 2026-08-22: `Ctrl+F` over a page raised a capsule
+        // nothing could be typed into.
+        //
+        // The condition is the caret's, not the capsule's: B81's second stance —
+        // search open, hands back on the surface — is exactly the state in which
+        // this surface should go on swallowing.
+        if self.window.search.is_focused() {
+            return Ok(false);
+        }
         let Some(surface) = self.preview_keyboard_surface() else {
             return Ok(false);
         };
@@ -56444,7 +56581,21 @@ impl Runtime<'_> {
             .as_mut()
             .map(|web| web.drive(&window.compositor))
             .unwrap_or_default();
-        self.apply_web_outcomes(outcomes)
+        self.apply_web_outcomes(outcomes)?;
+        // **Everything the head, the foot and the cards read arrives here**
+        // (§7.7 ②, ③, ④, W2 slice ④): the title, the address, the two history
+        // flags, the hover line, the failure. Slice ① needed no repaint because
+        // no chrome read the page; every one of those is chrome now, and an
+        // engine that speaks between frames would otherwise be a head that says
+        // what was true a navigation ago.
+        //
+        // Asked of `refresh_chrome` rather than tracked per field: it already
+        // answers "did anything move", which is the same question and one
+        // answer.
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 
     fn apply_web_outcomes(&mut self, outcomes: Vec<webhost::WebOutcome>) -> Result<()> {
@@ -56599,13 +56750,32 @@ impl Runtime<'_> {
         let _ = recoverable_clipboard_write(result, "web address copy");
     }
 
-    /// The seat this window's page is on, when that seat is the focused one.
+    /// **Which seat `Ctrl+F` opens the capsule on** (§7.7 ②, W2 slice ④).
+    ///
+    /// `focused_leaf` names the shell the keyboard falls back to and is only
+    /// ever written for a seat that is in `sessions` — so on a window whose
+    /// keyboard is in a page it still names the terminal beside it, and a
+    /// capsule opened through it lands on the wrong pane (found on the machine,
+    /// 2026-08-22: `Ctrl+F` over a page opened a search on the shell next door).
+    /// The capsule has two hosts now, so the question has two answers and this
+    /// is where they are chosen between.
+    fn search_host_seat(&self) -> SeatId {
+        self.focused_web_seat().unwrap_or(self.focused_leaf)
+    }
+
+    /// The seat this window's page is on, when that seat is the one holding the
+    /// keyboard.
+    ///
+    /// **`focused_preview_seat` and never `focused_leaf`**, for
+    /// [`Self::page_holds_the_keyboard`]'s reason and found the same way: the
+    /// latter only ever names a seat that is in `sessions`, so it is never a
+    /// preview seat and a chord routed through it never fires. One predicate,
+    /// asked twice, is how the two came to differ in the first place — so this
+    /// is now that predicate.
     fn focused_web_seat(&self) -> Option<SeatId> {
-        self.window
-            .web
-            .as_ref()
-            .map(|web| web.seat)
-            .filter(|seat| *seat == self.focused_leaf)
+        self.page_holds_the_keyboard()
+            .then(|| self.focused_preview_seat())
+            .flatten()
     }
 
     /// **`Ctrl+L`, and the double click on the name cell** — the address
@@ -56633,6 +56803,20 @@ impl Runtime<'_> {
             return Ok(());
         };
         self.finish_rename(true)?;
+        // **The field takes the keyboard back from the page, and it has to**
+        // (found on the machine, 2026-08-22: `Ctrl+L` opened a field nothing
+        // could be typed into). A page keeps every key this window's table does
+        // not claim, and §7.8 ④ measured the shape of that exactly: **a bare
+        // printable key never enters `AcceleratorKeyPressed` at all**. So a
+        // field raised over a page that still holds the keys is a field that can
+        // be opened, selected and dismissed, and never typed in.
+        //
+        // The same sentence the download sheet and a modal already make, said at
+        // the third surface this window stands over a page with: whatever is
+        // asking for keys takes them.
+        if let Ok(hwnd) = window_hwnd(&self.window.window) {
+            let _ = bt_platform::take_keyboard_focus(hwnd);
+        }
         self.window.rename = Some(TabRename::open_address(seat, &url));
         self.window.rename_blink.reset(Instant::now());
         self.refresh_chrome();
@@ -56714,7 +56898,7 @@ impl Runtime<'_> {
 
     /// A press anywhere on the download sheet. Returns whether it landed there.
     fn press_web_sheet(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let Some((seat, layout)) = self.window.web_sheet_layout else {
+        let Some((seat, layout)) = self.window.web_sheet_layout.clone() else {
             return Ok(false);
         };
         let (x, y) = (position.x as f32, position.y as f32);
@@ -56766,7 +56950,8 @@ impl Runtime<'_> {
         if self
             .window
             .web_sheet_layout
-            .is_some_and(|(_, layout)| websheet::covers(&layout, x, y))
+            .as_ref()
+            .is_some_and(|(_, layout)| websheet::covers(layout, x, y))
         {
             return false;
         }
@@ -56834,6 +57019,18 @@ impl Runtime<'_> {
             // The seat takes the layout focus exactly as any pane does when it
             // is pressed (D40), and then the keyboard goes inside the page.
             self.focus_pane_at(position)?;
+            // **A station, because this is a `return` nobody can see from
+            // outside** (`BT_MOUSE_TRACE`'s own rule). Which seat the press
+            // landed the focus on is the whole of whether `Ctrl+L` and `F12`
+            // are claimed from the page a moment later.
+            self.mouse_trace(|| {
+                format!(
+                    "press_web_page focus={:?} page_seat={:?} holds={}",
+                    self.seats.focus(),
+                    self.window.web.as_ref().map(|web| web.seat),
+                    self.page_holds_the_keyboard()
+                )
+            });
             if let Some(web) = self.window.web.as_ref()
                 && let Err(error) = web.focus_page()
             {

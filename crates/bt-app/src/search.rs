@@ -383,6 +383,13 @@ pub struct SearchState {
     /// `None` means "this host counts through [`Self::hits`]", which is what
     /// keeps a terminal's capsule byte-identical to what it was.
     engine_matches: Option<(i32, i32)>,
+    /// Whether the host under this capsule counts its own matches at all.
+    ///
+    /// Separate from [`Self::engine_matches`] because the two say different
+    /// things and the difference is a number on the glass: a page that has not
+    /// been asked yet has **no** count, and `0/0` on it would be the capsule
+    /// claiming an answer nobody has given.
+    counts_its_own: bool,
 }
 
 impl SearchState {
@@ -469,6 +476,12 @@ impl SearchState {
     /// `n/m`, `0/0` — are the same four wherever the capsule is standing.
     #[must_use]
     pub fn counter(&self) -> String {
+        if self.counts_its_own && self.engine_matches.is_none() {
+            // Asked for and not yet answered. Empty is what the capsule already
+            // says for a query nobody has typed, and it means the same thing
+            // here: there is no count, as against a count of none.
+            return String::new();
+        }
         if let Some((count, active)) = self.engine_matches {
             return counter_text(
                 self.field.is_empty(),
@@ -502,6 +515,11 @@ impl SearchState {
     /// `12/40` cannot survive the query that produced it.
     pub fn forget_engine_matches(&mut self) {
         self.engine_matches = None;
+    }
+
+    /// Say whether the host under this capsule counts its own matches.
+    pub fn set_counts_its_own(&mut self, counts: bool) {
+        self.counts_its_own = counts;
     }
 
     /// Open on a pane, or re-focus the one already open there.
@@ -1253,7 +1271,7 @@ pub fn build(
         // buttons, one surface over), and it stops reading as something to
         // press.
         let ink = if !offered {
-            palette.menu_border
+            palette.menu_item_unavailable_text
         } else if on {
             palette.accent
         } else if hovered {

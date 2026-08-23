@@ -83,14 +83,36 @@ pub fn verb_font_px(scale: f32) -> f32 {
     VERB_FONT_LOGICAL_PX * scale
 }
 
+/// The width the sentence is wrapped to — the card less its own padding.
+///
+/// Handed out so the caller can wrap before it lays out, which is the one order
+/// that works: how many lines the sentence takes is what decides how tall the
+/// card is.
+#[must_use]
+pub fn say_width(body: [f32; 4], scale: f32) -> f32 {
+    let px = |logical: f32| logical * scale;
+    let margin = px(MARGIN_LOGICAL_PX).round();
+    let available = (body[2] - body[0] - margin * 2.0).max(1.0);
+    (available.min(px(MAX_WIDTH_LOGICAL_PX)).max(1.0) - px(PADDING_LOGICAL_PX).round() * 2.0)
+        .max(1.0)
+}
+
+/// The size the sentence is measured at.
+#[must_use]
+pub fn say_font_px(scale: f32) -> f32 {
+    SAY_FONT_LOGICAL_PX * scale
+}
+
 /// One sheet's boxes, in physical pixels of the whole surface.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SheetLayout {
     /// The seat's body — what the scrim covers, and what the card is centred in.
     pub body: [f32; 4],
     pub frame: [f32; 4],
     pub mark: [f32; 4],
-    pub say: [f32; 4],
+    /// One box per line of the sentence — a card's sentence wraps, and the
+    /// download's is two sentences long in §7.7 ④'s own table.
+    pub say: Vec<[f32; 4]>,
     /// Empty (zero height) when the fault has no fact worth quoting.
     pub detail: [f32; 4],
     pub verb: [f32; 4],
@@ -103,7 +125,13 @@ pub struct SheetLayout {
 /// holding a font can answer — `seats::preview_card_geometry`'s own division,
 /// and for its reason.
 #[must_use]
-pub fn lay_out(body: [f32; 4], verb_width: f32, has_detail: bool, scale: f32) -> SheetLayout {
+pub fn lay_out(
+    body: [f32; 4],
+    verb_width: f32,
+    say_lines: usize,
+    has_detail: bool,
+    scale: f32,
+) -> SheetLayout {
     let px = |logical: f32| logical * scale;
     let padding = px(PADDING_LOGICAL_PX).round();
     let gap = px(GAP_LOGICAL_PX).round();
@@ -124,9 +152,10 @@ pub fn lay_out(body: [f32; 4], verb_width: f32, has_detail: bool, scale: f32) ->
     // card sized by its longest error message is a card that changes shape per
     // failure.
     let width = available.min(px(MAX_WIDTH_LOGICAL_PX)).max(1.0);
+    let says = say_lines.max(1) as f32;
     let content_height = mark
         + gap
-        + say_line
+        + say_line * says
         + if has_detail { gap + detail_line } else { 0.0 }
         + gap
         + verb_height;
@@ -143,11 +172,12 @@ pub fn lay_out(body: [f32; 4], verb_width: f32, has_detail: bool, scale: f32) ->
     let column_right = frame[2] - padding;
     let mark_top = frame[1] + padding;
     let say_top = mark_top + mark + gap;
-    let detail_top = say_top + say_line + gap;
+    let say_bottom = say_top + say_line * says;
+    let detail_top = say_bottom + gap;
     let verb_top = if has_detail {
         detail_top + detail_line + gap
     } else {
-        say_top + say_line + gap
+        say_bottom + gap
     };
     SheetLayout {
         body,
@@ -158,7 +188,12 @@ pub fn lay_out(body: [f32; 4], verb_width: f32, has_detail: bool, scale: f32) ->
             centre_x + mark / 2.0,
             mark_top + mark,
         ],
-        say: [column_left, say_top, column_right, say_top + say_line],
+        say: (0..say_lines.max(1))
+            .map(|line| {
+                let top = say_top + say_line * line as f32;
+                [column_left, top, column_right, top + say_line]
+            })
+            .collect(),
         detail: if has_detail {
             [
                 column_left,
@@ -182,7 +217,8 @@ pub fn lay_out(body: [f32; 4], verb_width: f32, has_detail: bool, scale: f32) ->
 /// What one sheet says.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SheetContent<'a> {
-    pub say: &'a str,
+    /// The sentence, already wrapped to [`SheetLayout::say`]'s boxes.
+    pub say: &'a [String],
     /// The one line of fact, or empty.
     pub detail: &'a str,
     pub verb: &'a str,
@@ -227,19 +263,21 @@ pub fn build(
         ChromeSprite::new(ChromeMark::Globe, layout.mark, palette.files_row_muted)
             .with_opacity(MARK_OPACITY),
     ];
-    labels.push(ChromeLabel {
-        mono: false,
-        text: content.say.to_owned(),
-        rect: layout.say,
-        font_size_px: px(SAY_FONT_LOGICAL_PX),
-        color: palette.menu_item_text,
-        align_right: false,
-        align_center: true,
-        letter_spacing_em: 0.0,
-        weight: ChromeLabelWeight::Regular,
-        tabular_numerals: false,
-        clip: Some(layout.say),
-    });
+    for (line, rect) in content.say.iter().zip(layout.say.iter()) {
+        labels.push(ChromeLabel {
+            mono: false,
+            text: line.clone(),
+            rect: *rect,
+            font_size_px: px(SAY_FONT_LOGICAL_PX),
+            color: palette.menu_item_text,
+            align_right: false,
+            align_center: true,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: Some(*rect),
+        });
+    }
     if !content.detail.is_empty() {
         labels.push(ChromeLabel {
             mono: true,

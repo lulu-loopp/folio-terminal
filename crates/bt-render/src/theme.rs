@@ -1134,6 +1134,22 @@ pub struct ChromePalette {
     /// and part by six levels in the dark one — which is precisely the kind of
     /// error a shared name hides.
     pub menu_item_hint_text: [u8; 3],
+    /// **A control that is present and has nothing behind it here** — the search
+    /// capsule's `ab` and `.*` while the capsule is standing on a page
+    /// (`docs/DESIGN.md` §7.7 ②).
+    ///
+    /// Its own entry rather than an alpha on the label, because a `ChromeLabel`
+    /// has no alpha: this palette's whole discipline is that a muted ink is
+    /// pre-composited against the ground it will be drawn on, which is what
+    /// `menu_item_hint_text` two lines up already is. This is that ink again at
+    /// half the strength — the ladder `.pv-nav.off`'s `opacity: .22` walks down,
+    /// said in a colour because the thing walking it is a run of text.
+    ///
+    /// It must be *fainter* than the resting ink and not merely different: the
+    /// first draft borrowed `menu_border`, which is an alpha-blended hairline
+    /// colour whose opaque value is pure white — so the two toggles that could
+    /// not be pressed came out brighter than the one that could.
+    pub menu_item_unavailable_text: [u8; 3],
 
     // ── Status semantics (mock-up lines 20-46, 74) ──
     //
@@ -1589,6 +1605,8 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     tab_badge_text_on_hovered_tab: [0xab, 0xab, 0xab],
     // `--ink3` (white .38) over `--menu` #2A2A2A: 42 + 213×.38 = 122.9.
     menu_item_hint_text: [0x7b, 0x7b, 0x7b],
+    // The same ink at half that: 42 + 213×.19 = 82.5.
+    menu_item_unavailable_text: [0x52, 0x52, 0x52],
     // Two of the mock-up's status semantics live in `:root` and `body.dark`
     // overrides neither, so the dark canvas wears the same two literals.
     status_warn: [0xd9, 0x82, 0x2b],
@@ -1862,6 +1880,8 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     // `--ink3` (the ink at .45) over `--menu` #FFFFFF — which in this theme is
     // the same white as `--win`, so it agrees with `dialog_muted_text` exactly.
     menu_item_hint_text: [0xa5, 0xa4, 0xa1],
+    // The same ink at half that: white less half of what `--ink3` took off it.
+    menu_item_unavailable_text: [0xd2, 0xd2, 0xd0],
     // Opaque in the mock-up's `:root`, and not overridden by either canvas.
     status_warn: [0xd9, 0x82, 0x2b],
     status_pause: [0xc1, 0x9c, 0x00],
