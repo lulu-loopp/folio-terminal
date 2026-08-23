@@ -6239,11 +6239,14 @@ struct WindowRuntime {
 /// arrived with.
 /// **A change to the application that its windows have still to re-derive.**
 ///
-/// Two flags rather than one, because the two cost different things: a face
-/// change re-measures every cell and re-sizes every shell, and a palette change
-/// repaints. A window that owes only the second must not pay the first — a
-/// redundant PTY resize is the one thing this codebase spends real care not to
-/// send. See [`App::pending_application_change`].
+/// Three flags rather than one, because they cost different things: a face
+/// change re-measures every cell and re-sizes every shell, a palette change
+/// repaints out of a rebuilt chrome, and a caret change is a repaint and
+/// nothing else. A window that owes only the last must not pay either of the
+/// others — a redundant PTY resize is the one thing this codebase spends real
+/// care not to send, and re-keying the math layout for a caret shape would
+/// throw away every formula raster in a window that only has to draw a
+/// different four pixels. See [`App::pending_application_change`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ApplicationChange {
     /// The grid's face or its size moved on the shared `FontSystem`.
@@ -6251,6 +6254,9 @@ struct ApplicationChange {
     /// The palette, one of the two schemes, or the language moved in a process
     /// static.
     look: bool,
+    /// The focused caret's shape moved in `bt-render`'s `CURSOR_STYLE`
+    /// (multiwindow slice E1).
+    caret: bool,
     /// The window whose verb made the change and which has therefore already
     /// re-derived it — or `None` when two windows changed things between drains
     /// and no one window has had both.
@@ -6265,11 +6271,24 @@ impl ApplicationChange {
             Some(previous) => Self {
                 font: self.font || previous.font,
                 look: self.look || previous.look,
+                caret: self.caret || previous.caret,
                 paid_by: (previous.paid_by == self.paid_by)
                     .then_some(self.paid_by)
                     .flatten(),
             },
         }
+    }
+
+    /// **Whether the window `id` has still to re-derive this**, which is the
+    /// whole of the sweep's decision (multiwindow slice E1).
+    ///
+    /// Named because it is a claim and not a condition: `paid_by` is "has
+    /// already re-derived *all* of this", so every other open window owes the
+    /// change — including a window that made an earlier, different change,
+    /// which is why `merged_with` drops `paid_by` to `None` when two windows
+    /// contributed.
+    fn owed_by(self, id: WindowId) -> bool {
+        self.paid_by != Some(id)
     }
 }
 
@@ -28621,16 +28640,47 @@ impl Runtime<'_> {
         }
     }
 
+    /// **Put a caret shape in force for the process** (multiwindow slice E1).
+    ///
+    /// `CURSOR_STYLE` is one `AtomicU64` for the whole process — there is one
+    /// caret shape the way there is one theme, and for the same reason (§2.8).
+    /// So this is the third verb whose door is a settings row in one window and
+    /// whose effect is every window's, and it goes down the channel the other
+    /// two go down rather than publishing a frame for the window the row
+    /// happened to be pressed in and leaving its siblings drawing the old
+    /// shape. The file is marked dirty here and only here: the caret shape is a
+    /// top-level key of `session.json` (§2.7), so it is written once no matter
+    /// how many windows redraw for it.
     fn apply_cursor_style(&mut self, style: CursorStyle) -> Result<bool> {
         if !set_cursor_style(style) {
             return Ok(false);
         }
         self.mark_session_dirty(Instant::now());
+        self.note_application_change(ApplicationChange {
+            font: false,
+            look: false,
+            caret: true,
+            paid_by: Some(self.window.window.id()),
+        });
+        self.adopt_new_cursor_style()?;
+        Ok(true)
+    }
+
+    /// **What one window owes a caret change** — a frame, and nothing else.
+    ///
+    /// Its own verb for [`Self::adopt_terminal_font`]'s reason: it is owed
+    /// twice, once by the window whose settings row was pressed and once by
+    /// every other window, and one body is what keeps those two from becoming
+    /// two answers. The body is a whole-window publish rather than the chrome
+    /// present [`Self::publish_chrome_frame`] would take, because the caret is
+    /// drawn into the terminal picture: the shape is read at draw time out of
+    /// the process static (`bt_render::cursor_pixel_bounds`), so the picture on
+    /// the glass is the one thing that is now wrong.
+    fn adopt_new_cursor_style(&mut self) -> Result<()> {
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
-        })?;
-        Ok(true)
+        })
     }
 
     /// Point "Default profile" at the profile called `id` (mock-up 7708-7712).
@@ -29091,6 +29141,7 @@ impl Runtime<'_> {
         self.note_application_change(ApplicationChange {
             font: false,
             look: true,
+            caret: false,
             paid_by: Some(self.window.window.id()),
         });
         self.sync_math_layout_key();
@@ -29119,6 +29170,7 @@ impl Runtime<'_> {
         self.note_application_change(ApplicationChange {
             font: false,
             look: true,
+            caret: false,
             paid_by: Some(self.window.window.id()),
         });
         // The window's own colours moved, so what the window has told DWM about
@@ -30640,6 +30692,7 @@ impl Runtime<'_> {
         self.note_application_change(ApplicationChange {
             font: true,
             look: false,
+            caret: false,
             paid_by: Some(self.window.window.id()),
         });
         self.adopt_terminal_font()?;
@@ -30706,6 +30759,16 @@ impl Runtime<'_> {
         }
         if change.look {
             self.adopt_new_palette()?;
+        }
+        // **A caret change costs a frame, and the two branches above each end in
+        // one.** The shape is read at draw time out of the process static, so a
+        // frame published for a new face or a new palette already has the new
+        // caret in it; asking for a second would compose the same picture twice
+        // in one round. This is the one place the flags interact, and it is
+        // stated rather than relied on: neither branch above may stop
+        // publishing without this line being read again.
+        if change.caret && !(change.font || change.look) {
+            self.adopt_new_cursor_style()?;
         }
         Ok(())
     }
@@ -60255,10 +60318,57 @@ mod application_change_tests {
     const A: fn() -> WindowId = || WindowId::from(1_u64);
     const B: fn() -> WindowId = || WindowId::from(2_u64);
 
+    /// This file, read as text — the witness for the claims below that are
+    /// about *which function reaches which channel*. There is no value a unit
+    /// test could be handed for those: a `WindowRuntime` is a surface, a
+    /// compositor and four Win32 bridges, so "the other window redrew" is not a
+    /// sentence this process can say without a screen. What can be said without
+    /// one is that the verb hands its change to the application rather than
+    /// keeping it, and that the loop spends it before it sleeps.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The body of a method declared at an `impl`'s own indentation, which is
+    /// the shape of every function named below.
+    fn fn_body(name: &str) -> &'static str {
+        let head = format!("\n    fn {name}(");
+        let start = SOURCE
+            .find(&head)
+            .unwrap_or_else(|| panic!("`fn {name}` is declared as a method"))
+            + head.len();
+        let end = start
+            + SOURCE[start..]
+                .find("\n    }\n")
+                .expect("a method is closed by a `}` at its `impl`'s indentation");
+        &SOURCE[start..end]
+    }
+
+    /// The `bool` fields of [`ApplicationChange`], read off its declaration.
+    ///
+    /// Read rather than written out, because a list of flags kept beside the
+    /// record is a list that stops matching it: the point of the pin below is
+    /// that a *fourth* flag cannot be added without the sweep learning to spend
+    /// it, and a hand-written list would go green on the day that happened.
+    fn flags() -> Vec<&'static str> {
+        let head = "\nstruct ApplicationChange {\n";
+        let start = SOURCE
+            .find(head)
+            .expect("`struct ApplicationChange` is declared at the top level")
+            + head.len();
+        let end = start
+            + SOURCE[start..]
+                .find("\n}\n")
+                .expect("a top-level struct is closed by a `}` in column zero");
+        SOURCE[start..end]
+            .lines()
+            .filter_map(|line| line.trim_start().strip_suffix(": bool,"))
+            .collect()
+    }
+
     fn font(paid_by: WindowId) -> ApplicationChange {
         ApplicationChange {
             font: true,
             look: false,
+            caret: false,
             paid_by: Some(paid_by),
         }
     }
@@ -60267,6 +60377,16 @@ mod application_change_tests {
         ApplicationChange {
             font: false,
             look: true,
+            caret: false,
+            paid_by: Some(paid_by),
+        }
+    }
+
+    fn caret(paid_by: WindowId) -> ApplicationChange {
+        ApplicationChange {
+            font: false,
+            look: false,
+            caret: true,
             paid_by: Some(paid_by),
         }
     }
@@ -60308,6 +60428,133 @@ mod application_change_tests {
         let merged = look(B()).merged_with(Some(font(A())));
         assert!(merged.font && merged.look);
         assert_eq!(merged.paid_by, None);
+        assert!(
+            merged.owed_by(A()) && merged.owed_by(B()),
+            "neither window has had both, so the sweep hands it to both"
+        );
+    }
+
+    /// PIN (multiwindow slice E1) — **the caret's shape is the application's,
+    /// and it costs a repaint.**
+    ///
+    /// The slice's whole behavioural claim, said about the record. The window
+    /// whose settings row was pressed has already drawn the new caret; every
+    /// other open window has not, and owes exactly one frame for it — not a
+    /// re-measured grid (no face moved) and not a rebuilt chrome with a new
+    /// math layout key (no palette, scheme or language moved). Red gate: fold
+    /// the caret into `look` and a caret switch throws away every formula
+    /// raster in every other window to draw four different pixels.
+    #[test]
+    fn a_cursor_style_switch_costs_the_other_windows_a_repaint_and_nothing_else() {
+        let merged = caret(A()).merged_with(None);
+        assert!(merged.caret);
+        assert!(!merged.font, "nothing touched the font database");
+        assert!(!merged.look, "no palette, scheme or language moved");
+        assert!(
+            merged.owed_by(B()),
+            "the second window draws its caret out of the same process static"
+        );
+        assert!(
+            !merged.owed_by(A()),
+            "the window whose row was pressed drew it when the row was pressed"
+        );
+    }
+
+    /// PIN (multiwindow slice E1) — **a theme switch is settled over the second
+    /// window in the round the first one flipped it.**
+    ///
+    /// Not a new behaviour — slice C's channel already carried it — and pinned
+    /// here because slice E1's contract is about *both* process statics: what
+    /// the caret change had to be taught is what the palette change has always
+    /// done, and a regression in the shared half would otherwise only show as a
+    /// second window wearing yesterday's colours.
+    #[test]
+    fn a_theme_switch_is_owed_to_the_window_that_did_not_flip_it() {
+        let merged = look(A()).merged_with(None);
+        assert!(merged.look);
+        assert!(!merged.font && !merged.caret);
+        assert!(merged.owed_by(B()));
+        assert!(!merged.owed_by(A()));
+    }
+
+    /// PIN (multiwindow slice E1) — **the sweep spends every flag the record
+    /// can carry.**
+    ///
+    /// The general form of the fault this slice fixes. `apply_cursor_style`
+    /// moved a process static and published one frame — its own — so a second
+    /// window kept the old caret until something else happened to it. The
+    /// specific bug is gone; what this pin forbids is the *next* one, which is
+    /// a fourth flag added to the record and never read by the sweep. The flag
+    /// list is read off the declaration, so it cannot drift away from it.
+    ///
+    /// Red gate: delete the `change.caret` arm of `adopt_application_change`.
+    #[test]
+    fn the_sweep_spends_every_flag_the_record_can_carry() {
+        let sweep = fn_body("adopt_application_change");
+        let flags = flags();
+        assert!(
+            flags.contains(&"caret"),
+            "the caret is one of the record's flags"
+        );
+        for flag in flags {
+            assert!(
+                sweep.contains(&format!("change.{flag}")),
+                "`adopt_application_change` never reads `change.{flag}`, so a \
+                 window that owes it is handed nothing"
+            );
+        }
+    }
+
+    /// PIN (multiwindow slice E1) — **every verb that moves a process static
+    /// hands it to the other windows.**
+    ///
+    /// §2.5's rule, said about its four call sites at once rather than about
+    /// one of them. Red gate: this is the test that was red before the slice —
+    /// `apply_cursor_style` set `CURSOR_STYLE` and published a frame for the
+    /// window it was called on, and no other window was ever told.
+    #[test]
+    fn every_verb_that_moves_a_process_static_hands_it_to_the_other_windows() {
+        for verb in [
+            "adopt_new_palette",
+            "adopt_new_language",
+            "apply_terminal_font",
+            "apply_cursor_style",
+        ] {
+            assert!(
+                fn_body(verb).contains("note_application_change"),
+                "`{verb}` moves a process static, so it owes every other window \
+                 a re-derivation"
+            );
+        }
+    }
+
+    /// PIN (multiwindow slice E1) — **no window is still holding yesterday when
+    /// the loop goes to sleep.**
+    ///
+    /// The verifiable half of "the same frame". What this program can promise
+    /// is a *round*: the change is settled over every window before the loop
+    /// computes its next wake-up, so there is no window left owing one when
+    /// `ControlFlow::WaitUntil` is set. What it deliberately does not promise is
+    /// an atomic present across two swapchains — two windows have two of them
+    /// and the platform offers no such synchronisation, so nothing here is
+    /// written as though it did.
+    ///
+    /// Red gate: move the settle below the per-window turn and a caret switch
+    /// reaches the second window one wake-up late.
+    #[test]
+    fn no_window_is_left_holding_yesterday_when_the_loop_goes_to_sleep() {
+        let door = fn_body("about_to_wait");
+        let settled = door
+            .find("settle_application_change")
+            .expect("the loop settles what the application changed");
+        let waited = door
+            .find("wake_deadline")
+            .expect("the loop asks every window for its next wake-up");
+        assert!(
+            settled < waited,
+            "a window is handed the change before the loop decides when to wake, \
+             not after"
+        );
     }
 }
 
@@ -60469,7 +60716,7 @@ impl FolioApp {
             let Some(id) = self.windows.key_at(index) else {
                 break;
             };
-            if change.paid_by == Some(id) {
+            if !change.owed_by(id) {
                 continue;
             }
             if let Some(mut runtime) = self.runtime(id) {
