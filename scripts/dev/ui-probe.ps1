@@ -65,6 +65,26 @@
 #   — the first draft sprayed keystrokes at whatever was foreground; never
 #   again). A refusal means the window did not take the foreground, not that the
 #   key failed.
+# KNOWN LIMIT, measured 2026-08-23 — A DESKTOP CAN REFUSE INJECTED POINTER INPUT
+# ALTOGETHER, and it does so silently. On the session this was measured in,
+# `SetCursorPos` returned FALSE and `SendInput` returned 1 (accepted) while the
+# cursor did not move a pixel: injection is taken and discarded somewhere below
+# this file. Every pointer verb here goes dead at once, and the symptom is not an
+# error — it is an app that simply does not react, which reads exactly like the
+# feature under test being broken. **Check `SetCursorPos` before believing a
+# "nothing happened".** What still worked, and is what an acceptance photograph
+# was got out of that session:
+#   * `PostMessage`/`SendMessage` of WM_*BUTTON* straight at the window reaches
+#     winit and therefore bt-app. The constants are the trap: WM_RBUTTONDOWN is
+#     **0x0204** and WM_RBUTTONUP is 0x0205 — off by one from the left pair, and
+#     posting 0x0205 for a press gets a *release* delivered, which looks like the
+#     press being swallowed.
+#   * An injected WM_MOUSEMOVE did **not** produce a `CursorMoved`, so
+#     `pointer_position` stayed `None` and every verb that reads it declined. The
+#     way to move bt-app's pointer with no pointer is to move the WINDOW under
+#     the stationary real cursor (`SetWindowPos` with SWP_NOACTIVATE): the OS
+#     sends a genuine move to whatever slid under it, so placing the control you
+#     want at `cursor - client_offset` puts the pointer on it exactly.
 # - Still true: BT_PROBE_INPUT is the right tool for rendering-path probes that
 #   want bytes rather than keys — bt-app feeds the file straight into Term at
 #   startup without starting ConPTY. The M1 fixture is
@@ -654,14 +674,24 @@ switch ($Cmd) {
     "clicked ($px, $py) = window+($X, $Y) mods=$Mods on pid=$ProcId (pixel ownership verified)"
   }
   "rightclick" {
+    # **Pixel ownership, not foreground** — `click`'s law, which this block was
+    # left out of when that one was corrected (2026-08-19). It is the same
+    # gesture with a different button: a right press lands on whoever owns the
+    # screen pixel, so that is what decides where it goes, and the foreground
+    # lock denying a *request* is not evidence that the press would land
+    # somewhere else. Measured again 2026-08-23 driving a probe-launched window
+    # from a shell that was not itself foreground: every `SetForegroundWindow`
+    # was refused while the pixel under the target's own rectangle plainly
+    # belonged to the target.
     $h = Get-AppWindow $ProcId
-    if (-not [Probe]::BringToFront($h)) { throw "REFUSED: target window did not take foreground — not clicking blind" }
+    [Probe]::BringToFront($h) | Out-Null
     $r = New-Object PRECT
     [Probe]::GetWindowRect($h, [ref]$r) | Out-Null
     $px = if ($X -lt 0) { $r.R + $X } else { $r.L + $X }
     $py = if ($Y -lt 0) { $r.B + $Y } else { $r.T + $Y }
+    if (-not [Probe]::PointBelongsTo($px, $py, $ProcId)) { throw "REFUSED: ($px, $py) is not over pid=$ProcId — not clicking blind" }
     [Probe]::RightClick($px, $py)
-    "right-clicked ($px, $py) = window+($X, $Y) on pid=$ProcId (foreground verified)"
+    "right-clicked ($px, $py) = window+($X, $Y) on pid=$ProcId (pixel ownership verified)"
   }
   "dblclick" {
     # Two presses inside the multi-click interval, from *one* process. Two
