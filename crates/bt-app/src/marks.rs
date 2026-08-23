@@ -392,6 +392,32 @@ pub enum ChromeMark {
     /// keys on `ChromeMark::id`: sharing an id would share a cache slot, and
     /// the second pin on screen would silently wear the first one's pixels.
     Pin { filled: bool },
+    /// `#i-lock` / `#i-locked` — the preview pane's own control (§7.7 ⑧,
+    /// Claude 定 2026-08-23), and the reason it is not a second pin.
+    ///
+    /// **A pin in this window means one thing, said twice.** A tab's pin keeps
+    /// that tab across a launch and refuses to close before it is taken off; a
+    /// row's pin keeps that file, folder or page at the top of a list. Both are
+    /// *membership*: this one stays in the list. The preview pane's control is
+    /// not about membership at all — it says "do not reuse this pane", and the
+    /// list it is not in is the reader's own. One drawing for both was the
+    /// finding W1 filed and left open: same glyph, same word, two hundred pixels
+    /// apart on the same head, meaning two different things.
+    ///
+    /// **A padlock, because that is the idiom for "held as it is".** The state
+    /// rides on TWO axes at once and deliberately so, unlike [`Self::Pin`],
+    /// whose angle Windows 11 fixed and whose state therefore had only the fill
+    /// left: the shackle opens or closes AND the body goes from outline to
+    /// fill. Fluent 2's reading of the fill axis is unchanged — regular is the
+    /// action ("you could lock this"), filled is the state ("it is locked") —
+    /// and the shackle says the same thing a second time, at fourteen pixels,
+    /// where one axis is thin evidence.
+    ///
+    /// **The body is the same rectangle in both**, so the two rasters differ
+    /// only where the meaning does. Two variants and not one flag read at draw
+    /// time, for [`Self::Pin`]'s reason: `mark_key` keys on [`Self::id`], and a
+    /// shared id would hand the second lock on screen the first one's pixels.
+    Lock { engaged: bool },
     /// `#i-save` — the preview header's explicit save (mock-up 2252, P27).
     ///
     /// The floppy, which is the one idiom in this whole interface that names a
@@ -725,6 +751,8 @@ impl ChromeMark {
             Self::Check => "i-check",
             Self::Pin { filled: false } => "i-pin",
             Self::Pin { filled: true } => "i-pinned",
+            Self::Lock { engaged: false } => "i-lock",
+            Self::Lock { engaged: true } => "i-locked",
             Self::Save => "i-save",
             Self::Eye => "i-eye",
             Self::Code => "i-code",
@@ -1588,6 +1616,8 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::Chevron { .. } => 9,
         ChromeMark::Pin { filled: false } => 10,
         ChromeMark::Pin { filled: true } => 11,
+        ChromeMark::Lock { engaged: false } => 42,
+        ChromeMark::Lock { engaged: true } => 43,
         ChromeMark::ProfileUbuntu => 12,
         ChromeMark::ProfileGit => 13,
         ChromeMark::ProfileCmd => 14,
@@ -1660,7 +1690,7 @@ pub fn preview_row_mark(is_page: bool) -> ChromeMark {
 
 const PROFILE_CHASSIS_VIEW_BOX: &str = "0 0 16 16";
 
-const SYMBOL_VIEW_BOX: [&str; 42] = [
+const SYMBOL_VIEW_BOX: [&str; 44] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -1741,11 +1771,17 @@ const SYMBOL_VIEW_BOX: [&str; 42] = [
     // does, down one left edge with it (§7.7 ⑤), so it has to be cut in the same
     // units or it sits at a different optical weight in the same column.
     "0 0 16 16",
+    // `#i-lock` and `#i-locked`, the house sixteen: they stand in the preview
+    // head's run beside `#i-save` and `#i-float`, which are cut there, and a
+    // mark in a run has to share the run's units or it sits at a different
+    // weight in the same row.
+    "0 0 16 16",
+    "0 0 16 16",
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 42] = [
+const SYMBOL_BODY: [&str; 44] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min
@@ -2009,6 +2045,25 @@ const SYMBOL_BODY: [&str; 42] = [
         r#"<circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.15"/>"#,
         r#"<path d="M2.6 6.2h10.8M2.6 9.8h10.8" stroke="currentColor" stroke-width="1.15" stroke-linecap="round"/>"#,
         r#"<ellipse cx="8" cy="8" rx="2.7" ry="6" fill="none" stroke="currentColor" stroke-width="1.15"/>"#,
+    ),
+    // `#i-lock` — the action, "you could lock this". The shackle is OPEN: it
+    // stands on the body's right-hand leg only and leans away, which is how
+    // every padlock in every icon set says the thing is not shut. Outline body,
+    // per Fluent 2's fill axis, and stroke 1.25 — the pin's weight, because the
+    // two are read in the same window at the same size and a lock drawn lighter
+    // would read as a lock in a different mood rather than a different glyph.
+    concat!(
+        r#"<path d="M10.4 7.2V5a2.4 2.4 0 014.8 0v1" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>"#,
+        r#"<rect x="3.1" y="7.2" width="9.8" height="6.6" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.25"/>"#,
+    ),
+    // `#i-locked` — the state, "it is locked". SAME BODY RECTANGLE, so the two
+    // rasters differ only where the meaning does; the shackle comes down over
+    // it and the body fills. Two axes for one fact, deliberately: at fourteen
+    // pixels the fill alone is what the pin has to live on because Windows fixed
+    // its angle, and a padlock has a second axis available, so it is spent.
+    concat!(
+        r#"<path d="M5.6 7.2V5a2.4 2.4 0 014.8 0v2.2" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>"#,
+        r#"<rect x="3.1" y="7.2" width="9.8" height="6.6" rx="1.6" fill="currentColor"/>"#,
     ),
 ];
 
@@ -2537,6 +2592,11 @@ mod tests {
             // survive a 45° turn, and both cost silhouette.
             (ChromeMark::Pin { filled: false }, 13.0),
             (ChromeMark::Pin { filled: true }, 13.0),
+            // The preview head's own control, in the 13px the head's tools wear
+            // — it stands in a run with `#i-save` and `#i-float` and is read
+            // with them or not at all.
+            (ChromeMark::Lock { engaged: false }, 13.0),
+            (ChromeMark::Lock { engaged: true }, 13.0),
         ];
         for (mark, size) in cases {
             for scale in [1.0_f32, 1.5, 2.0] {
@@ -3755,6 +3815,111 @@ mod tests {
             alpha_at(outline, cx, cy),
             0,
             "the action pin is a hollow outline"
+        );
+    }
+
+    /// **THE PREVIEW PANE'S CONTROL IS A LOCK AND NOT A THIRD PIN** (§7.7 ⑧,
+    /// Claude 定 2026-08-23, on the naming ticket W1 filed and left open).
+    ///
+    /// The finding was that one drawing and one word were carrying two meanings
+    /// two hundred pixels apart: a tab's pin and a switcher row's both say "this
+    /// one stays in the list", and the preview head's said "do not reuse this
+    /// pane". This test holds the answer's picture.
+    ///
+    /// Red gate, three ways, because there are three ways to lose it:
+    /// ① **it is not the pin** — the two ids differ, so a `Lock` that fell back
+    ///    to `"i-pin"` would take the pin's cache slot and its pixels with it;
+    /// ② **the shackle carries the state** — read the band ABOVE the body and
+    ///    left of centre: the open shackle stands on the body's right leg alone
+    ///    and puts nothing there, the shut one comes down over the body and
+    ///    does. Draw both shackles alike and this goes red while the fill still
+    ///    passes, which is the failure that leaves a reader guessing at 13px;
+    /// ③ **the fill carries it too**, Fluent 2's axis, [`ink_mass`]'s reading —
+    ///    coverage summed rather than pixels touched, because a stroke lands on
+    ///    more pixels than the fill it surrounds.
+    /// The body is asserted identical between the two, because "same body,
+    /// different shackle" is the whole of what makes the pair readable as one
+    /// control in two states rather than as two marks.
+    #[test]
+    fn the_lock_says_its_state_on_the_shackle_as_well_as_the_fill() {
+        assert_ne!(
+            ChromeMark::Lock { engaged: false }.id(),
+            ChromeMark::Pin { filled: false }.id(),
+            "the preview pane's control may not share the pin's identity — that \
+             is the collision this ruling exists to end"
+        );
+        let ink = [0xed, 0xed, 0xec];
+        let mut rasters = ChromeMarkRasters::default();
+        let icons = rasters.resolve(&[
+            sprite(ChromeMark::Lock { engaged: false }, 32.0, 32.0, ink),
+            sprite(ChromeMark::Lock { engaged: true }, 32.0, 32.0, ink),
+        ]);
+        assert_eq!(
+            icons.len(),
+            2,
+            "two locks, not one shared by a colliding key"
+        );
+        let (open, shut) = (&icons[0], &icons[1]);
+        assert_ne!(open.key, shut.key, "the action and the state need two keys");
+        assert_ne!(open.rgba, shut.rgba, "the two locks rasterized the same");
+
+        // ② The shackle. The body's top edge is at 7.2 of the 16-unit box and
+        // its 1.25 stroke straddles that, so the body reaches up to 6.575; rows
+        // above **6** units are shackle and nothing else. Centre is 8.
+        let side = open.width_px;
+        let band = (side * 6) / 16;
+        let left_of_centre_above_the_body = |icon: &ChromeIcon| -> u32 {
+            (0..band)
+                .flat_map(|y| (0..side / 2).map(move |x| (x, y)))
+                .filter(|&(x, y)| alpha_at(icon, x, y) > 0)
+                .count() as u32
+        };
+        assert_eq!(
+            left_of_centre_above_the_body(open),
+            0,
+            "an OPEN shackle stands on the body's right-hand leg alone and \
+             reaches nothing to the left of centre"
+        );
+        assert!(
+            left_of_centre_above_the_body(shut) > 0,
+            "a SHUT shackle comes down over the body and crosses its left half"
+        );
+
+        // ③ The fill, and the body that must not move under it.
+        assert!(
+            ink_mass(shut) > ink_mass(open),
+            "the state lock carries more ink than the action lock, saw {} against {}",
+            ink_mass(shut),
+            ink_mass(open)
+        );
+        let body_row = (side * 11) / 16;
+        let inked_columns = |icon: &ChromeIcon| -> (u32, u32) {
+            let mut first = None;
+            let mut last = 0;
+            for x in 0..side {
+                if alpha_at(icon, x, body_row) > 0 {
+                    first.get_or_insert(x);
+                    last = x;
+                }
+            }
+            (first.expect("the body crosses this row"), last)
+        };
+        // ONE BODY IN BOTH, read the only way a raster can say it: a stroke
+        // straddles the path it follows, so the outlined body spills half a
+        // stroke wider than the filled one draws — the fill lies INSIDE the
+        // outline, and the two share a centre. Asserting the two spans equal
+        // would be asserting that a stroke has no width.
+        let (open_first, open_last) = inked_columns(open);
+        let (shut_first, shut_last) = inked_columns(shut);
+        assert!(
+            open_first <= shut_first && shut_last <= open_last,
+            "the filled body must lie inside the outlined one, saw \
+             {shut_first}..={shut_last} against {open_first}..={open_last}"
+        );
+        assert_eq!(
+            open_first + open_last,
+            shut_first + shut_last,
+            "the body did not move between the two states — only its paint did"
         );
     }
 

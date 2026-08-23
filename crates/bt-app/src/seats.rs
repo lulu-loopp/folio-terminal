@@ -656,15 +656,24 @@ impl Seats {
             .collect()
     }
 
-    /// Whether this seat is a pinned preview.
-    pub fn preview_is_pinned(&self, seat: SeatId) -> bool {
+    /// Whether this seat is a locked preview — one that is not the reuse target.
+    ///
+    /// **This is where the rename stops** (§7.7 ⑧). Everything above this line
+    /// is what the reader sees and is named for the padlock they see;
+    /// [`bt_layout::Seat::pinned`] below it is the tree's durable flag and the
+    /// key `session.json` writes, and it keeps the old word on purpose — a disk
+    /// key is versioned vocabulary nobody reads, and renaming it would cost a
+    /// session-schema version and a migration to change nothing on screen. Two
+    /// vocabularies meeting at one function is a translation; two of them
+    /// meeting nowhere in particular is a drift.
+    pub fn preview_is_locked(&self, seat: SeatId) -> bool {
         self.tree
             .find_seat(seat)
             .is_some_and(|found| found.kind == SeatKind::Preview && found.pinned)
     }
 
-    /// Turn the pin over. Returns whether anything changed.
-    pub fn toggle_preview_pin(&mut self, seat: SeatId) -> bool {
+    /// Turn the lock over. Returns whether anything changed.
+    pub fn toggle_preview_lock(&mut self, seat: SeatId) -> bool {
         self.tree.toggle_preview_pin(seat)
     }
 
@@ -2287,11 +2296,21 @@ pub enum ChromeTarget {
     /// **It moves the presentation, not the buffer.** The buffer stays in its
     /// tab's pool, so nothing is lost and no dirty gate fires; what leaves the
     /// tree is the pane that was showing it. Which is why it is a sibling of the
-    /// pin rather than of the `×`: both are about where a buffer is *shown*.
+    /// lock rather than of the `×`: both are about where a buffer is *shown*.
     PreviewPopOut(SeatId),
-    /// `.pv-tool.pv-pin` — "keep this pane; the next file opens a new preview"
-    /// (P30/P95), the one route to a second preview pane.
-    PreviewPin(SeatId),
+    /// `.pv-tool.pv-lock` — "keep this pane; what opens next opens in a new
+    /// preview" (P30/P95), the one route to a second preview pane.
+    ///
+    /// **It was called a pin until 2026-08-23 and it is not one** (§7.7 ⑧,
+    /// Claude 定, on the naming ticket W1 filed and left open). This window has
+    /// two pins and they mean one thing: a tab's pin and a row's pin both say
+    /// "this one stays in the list". This says "do not reuse this pane", which
+    /// is not membership in anything, and it was wearing the other two's word
+    /// and the other two's glyph two hundred pixels from one of them. It is a
+    /// padlock now, and it registers a tip — see [`crate::marks::ChromeMark`]'s
+    /// `Lock`, and [`crate::tooltip::TooltipAnchorId::PreviewLock`] for why a
+    /// padlock is the one thing in this head that has to say what it does.
+    PreviewLock(SeatId),
     /// `.preview-pane .files-foot` — the full path along the bottom of a preview
     /// pane, whose whole strip reveals the file in Explorer (P32-P35).
     PreviewFoot(SeatId),
@@ -11599,7 +11618,15 @@ pub struct PreviewHeadContent<'a> {
     /// Whether the flip would take you to the source (`#i-code`) rather than back
     /// to the render (`#i-eye`) — the glyph names the *destination*.
     pub flip_to_source: bool,
-    pub pinned: bool,
+    /// Whether this pane is locked — "do not reuse this one" (§7.7 ⑧).
+    ///
+    /// The seat's durable flag is still spelled `pinned` in [`bt_layout::Seat`]
+    /// and in `session.json`, and that is where the old word stops: the disk's
+    /// key is versioned vocabulary nobody reads, and renaming it would buy a
+    /// session-schema version and a migration to change nothing on screen. What
+    /// the reader sees is a lock, and everything the reader's hand touches is
+    /// named for one — see [`ChromeTarget::PreviewLock`].
+    pub locked: bool,
     /// Whether this pane's switcher is open, which turns the chevron over.
     pub menu_open: bool,
     /// **The page on this seat, when there is one** (§7.7 ②, W2 slice ④).
@@ -11743,7 +11770,9 @@ pub struct PreviewHeadGeometry {
     pub devtools: Option<[f32; 4]>,
     /// `.pv-tool.pv-popout` (P29) — the slice-5 arrival the note below reserved.
     pub popout: Option<[f32; 4]>,
-    pub pin: Option<[f32; 4]>,
+    /// `.pv-tool.pv-lock` (P30/P95) — "do not reuse this pane". Named for the
+    /// padlock it draws since §7.7 ⑧; it was `pin` until 2026-08-23.
+    pub lock: Option<[f32; 4]>,
 }
 
 /// Lay one preview head's contents out inside the common head it rides on.
@@ -11790,13 +11819,14 @@ pub fn preview_head_geometry(
         })
     };
 
-    // The pin is always offered: it is the one control that is a *state* as well
-    // as an action, and P95 makes it the only route to a second preview pane.
-    let pin = take_wide(true, box_, box_);
-    // Offered as unconditionally as the pin, and for the mirror of its reason:
-    // the pin is how a buffer stops being replaceable *in* the tree, and this is
-    // how it leaves the tree altogether. Neither is a property of the content, so
-    // neither can be earned or lost by it.
+    // The lock is always offered: it is the one control that is a *state* as
+    // well as an action, and P95 makes it the only route to a second preview
+    // pane.
+    let lock = take_wide(true, box_, box_);
+    // Offered as unconditionally as the lock, and for the mirror of its reason:
+    // the lock is how a buffer stops being replaceable *in* the tree, and this
+    // is how it leaves the tree altogether. Neither is a property of the
+    // content, so neither can be earned or lost by it.
     let popout = take_wide(true, box_, box_);
     // Last of the per-type verbs, so it is the first of them off the right — see
     // the note above for why a page's verb sits with `Save` and the flip rather
@@ -11805,8 +11835,8 @@ pub fn preview_head_geometry(
     // [reload] │ [devtools]` — taken off the right, so they come off the left of
     // the run first exactly as every other control here does. The developer
     // tools are outermost of the four because they are the one that fades: a
-    // hover tool that sat *between* the three resident buttons and the pin would
-    // pull them sideways every time the pointer arrived.
+    // hover tool that sat *between* the three resident buttons and the lock
+    // would pull them sideways every time the pointer arrived.
     let devtools = take_wide(tools.web, box_, box_);
     // The rule is not a 22px box. `.pv-sep` is one physical pixel wide with a
     // pixel of margin on each side and fourteen of height, which is why it needs
@@ -11830,7 +11860,7 @@ pub fn preview_head_geometry(
     let save = take_wide(tools.save, box_, box_);
 
     let run_left = [
-        save, flip, browser, back, forward, reload, separator, devtools, popout, pin,
+        save, flip, browser, back, forward, reload, separator, devtools, popout, lock,
     ]
     .into_iter()
     .flatten()
@@ -11917,7 +11947,7 @@ pub fn preview_head_geometry(
         separator,
         devtools,
         popout,
-        pin,
+        lock,
     }
 }
 
@@ -12851,8 +12881,8 @@ pub fn hit_preview_head(
         if hit(geometry.popout) {
             return Some(ChromeTarget::PreviewPopOut(placement.id));
         }
-        if hit(geometry.pin) {
-            return Some(ChromeTarget::PreviewPin(placement.id));
+        if hit(geometry.lock) {
+            return Some(ChromeTarget::PreviewLock(placement.id));
         }
         // **The name answers the pointer whether or not it is a switcher** (user
         // ruling 2026-08-19). The pill exists only while the pool holds more
@@ -13653,13 +13683,18 @@ fn push_preview_head(
         pane_hovered,
         scale,
         palette,
-        geometry.pin,
-        ChromeTarget::PreviewPin(seat),
-        ChromeMark::Pin {
-            // Fluent 2's fill axis: regular is the action, filled is the state.
-            filled: content.pinned,
+        geometry.lock,
+        ChromeTarget::PreviewLock(seat),
+        // A PADLOCK AND NOT A PIN (§7.7 ⑧). The two pins this window keeps —
+        // the tab's and the menu row's — both mean "this one stays in the
+        // list"; this one means "do not reuse this pane", and it was wearing
+        // their word and their drawing within reach of one of them.
+        ChromeMark::Lock {
+            // Fluent 2's fill axis, which the shackle says a second time:
+            // regular and open is the action, filled and shut is the state.
+            engaged: content.locked,
         },
-        content.pinned,
+        content.locked,
     );
 }
 
@@ -16563,13 +16598,13 @@ mod tests {
     fn each_preview_pane_says_its_own_sentence_and_only_its_own() {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
-        let pinned = seats
+        let locked = seats
             .add_preview(&metrics)
             .expect("the first preview lands");
-        assert!(seats.toggle_preview_pin(pinned));
+        assert!(seats.toggle_preview_lock(locked));
         let second = seats
             .add_preview(&metrics)
-            .expect("a pinned pane is not a reuse target");
+            .expect("a locked pane is not a reuse target");
         let layout = solved(&seats, viewport_of(1920, 1080, 1_000), &metrics);
         let marks = all_powershell(&seats);
         let tabs = [TabContent::default()];
@@ -16626,7 +16661,7 @@ mod tests {
 
         let both = notices(
             &[
-                (pinned, "Loading README.md\u{2026}"),
+                (locked, "Loading README.md\u{2026}"),
                 (second, "Loading todo.txt\u{2026}"),
             ],
             &[],
@@ -16656,7 +16691,7 @@ mod tests {
             button_text_px: 120.0,
             button_hovered: false,
         };
-        let mixed = notices(&[(second, "Loading todo.txt\u{2026}")], &[(pinned, card)]);
+        let mixed = notices(&[(second, "Loading todo.txt\u{2026}")], &[(locked, card)]);
         assert_eq!(mixed, vec!["Loading todo.txt\u{2026}".to_owned()]);
     }
 
@@ -16735,7 +16770,7 @@ mod tests {
         for mark in [
             ChromeMark::Save,
             ChromeMark::Eye,
-            ChromeMark::Pin { filled: false },
+            ChromeMark::Lock { engaged: false },
         ] {
             assert!(
                 !sprites.iter().any(|sprite| sprite.mark == mark),
@@ -16757,7 +16792,7 @@ mod tests {
         for mark in [
             ChromeMark::Save,
             ChromeMark::Eye,
-            ChromeMark::Pin { filled: false },
+            ChromeMark::Lock { engaged: false },
         ] {
             let drawn = sprites
                 .iter()
@@ -16768,20 +16803,47 @@ mod tests {
                 "`.pane:hover .pv-tool {{ opacity: .7 }}`"
             );
         }
-        // ③ A pinned pin stands at rest, in the accent, at full strength.
+        // ③ An engaged lock stands at rest, in the accent, at full strength.
         let (_, _, sprites) = preview_chrome(
             PreviewHeadContent {
-                pinned: true,
+                locked: true,
                 ..plain_preview_head("notes.md")
             },
             ChromePointer::default(),
         );
-        let pin = sprites
+        let lock = sprites
             .iter()
-            .find(|sprite| sprite.mark == ChromeMark::Pin { filled: true })
-            .expect("a pinned pin is a state, and a state does not hide");
-        assert_eq!(pin.opacity, 1.0);
-        assert_eq!(pin.color, chrome_palette().accent);
+            .find(|sprite| sprite.mark == ChromeMark::Lock { engaged: true })
+            .expect("a shut lock is a state, and a state does not hide");
+        assert_eq!(lock.opacity, 1.0);
+        assert_eq!(lock.color, chrome_palette().accent);
+        // **AND NOT A PIN, IN EITHER STATE** (§7.7 ⑧, Claude 定 2026-08-23).
+        //
+        // The naming ticket W1 filed was that one drawing carried two meanings:
+        // a tab's pin and a switcher row's both say "this one stays in the
+        // list", and this control says "do not reuse this pane" — from the same
+        // head that raises the list the row-pin lives in, two hundred pixels
+        // away. The head may draw a pin again the day it means membership, and
+        // it does not.
+        //
+        // Red gate: put `ChromeMark::Pin` back in the tool call and this goes
+        // red in both states, which is the failure the ruling names.
+        for content in [
+            plain_preview_head("notes.md"),
+            PreviewHeadContent {
+                locked: true,
+                ..plain_preview_head("notes.md")
+            },
+        ] {
+            let (_, _, sprites) = preview_chrome(content, hovered);
+            assert!(
+                !sprites
+                    .iter()
+                    .any(|sprite| matches!(sprite.mark, ChromeMark::Pin { .. })),
+                "no pin stands in a preview head — the pin means membership and \
+                 this head has nothing to be a member of"
+            );
+        }
     }
 
     /// PIN (P16) — **the dot's slot is reserved, so appearing does not shove the
@@ -16891,12 +16953,13 @@ mod tests {
     /// answer is both, named apart.
     ///
     /// MUTATIONS:
-    /// ① drop the `!seat.pinned` clause — the second assertion goes red and a pin
-    ///    stops meaning anything;
-    /// ② let `toggle_preview_pin` write a pin on any kind — the last assertion
-    ///    goes red, and a terminal acquires durable state it can never show.
+    /// ① drop the `!seat.pinned` clause — the second assertion goes red and a
+    ///    lock stops meaning anything;
+    /// ② let `toggle_preview_lock` write the flag on any kind — the last
+    ///    assertion goes red, and a terminal acquires durable state it can never
+    ///    show.
     #[test]
-    fn a_pinned_preview_stops_being_the_seat_a_new_file_would_replace() {
+    fn a_locked_preview_stops_being_the_seat_a_new_file_would_replace() {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
         seats.add_preview(&metrics).expect("the preview seat lands");
@@ -16904,12 +16967,12 @@ mod tests {
         assert_eq!(
             seats.landing_preview(),
             Some(seat),
-            "unpinned, it is the one"
+            "unlocked, it is the one"
         );
-        assert!(!seats.preview_is_pinned(seat));
+        assert!(!seats.preview_is_locked(seat));
 
-        assert!(seats.toggle_preview_pin(seat));
-        assert!(seats.preview_is_pinned(seat));
+        assert!(seats.toggle_preview_lock(seat));
+        assert!(seats.preview_is_locked(seat));
         assert_eq!(
             seats.preview(),
             Some(seat),
@@ -16921,15 +16984,15 @@ mod tests {
             "but nothing lands on it any more (P95)"
         );
 
-        assert!(seats.toggle_preview_pin(seat));
+        assert!(seats.toggle_preview_lock(seat));
         assert_eq!(
             seats.landing_preview(),
             Some(seat),
-            "and unpinning gives it back"
+            "and unlocking gives it back"
         );
-        // Nothing else has a pin to turn over.
-        assert!(!seats.toggle_preview_pin(seats.identity()));
-        assert!(!seats.preview_is_pinned(seats.identity()));
+        // Nothing else has a lock to turn over.
+        assert!(!seats.toggle_preview_lock(seats.identity()));
+        assert!(!seats.preview_is_locked(seats.identity()));
     }
 
     /// PIN (P95, slice 5) — **the pin's other half: a second preview leaf.**
@@ -16965,10 +17028,10 @@ mod tests {
         );
         assert_eq!(seats.preview_seats(), vec![first], "and nothing was minted");
 
-        assert!(seats.toggle_preview_pin(first));
+        assert!(seats.toggle_preview_lock(first));
         let second = seats
             .add_preview(&metrics)
-            .expect("a pinned preview does not block the next file");
+            .expect("a locked preview does not block the next file");
         assert_ne!(second, first, "the next file opens beside it, not over it");
         assert_eq!(
             seats.preview_seats(),
@@ -16976,8 +17039,8 @@ mod tests {
             "two preview leaves, in tree order"
         );
         assert!(
-            seats.preview_is_pinned(first) && !seats.preview_is_pinned(second),
-            "the pin belongs to the pane that was pinned and travels to nothing"
+            seats.preview_is_locked(first) && !seats.preview_is_locked(second),
+            "the lock belongs to the pane that was locked and travels to nothing"
         );
         assert_eq!(
             seats.landing_preview(),
@@ -17163,7 +17226,7 @@ mod tests {
             (geometry.save, ChromeTarget::PreviewSave(seat)),
             (geometry.flip, ChromeTarget::PreviewFlip(seat)),
             (geometry.popout, ChromeTarget::PreviewPopOut(seat)),
-            (geometry.pin, ChromeTarget::PreviewPin(seat)),
+            (geometry.lock, ChromeTarget::PreviewLock(seat)),
             (geometry.pill, ChromeTarget::PreviewName(seat)),
         ] {
             let (x, y) = centre(box_.expect("a head this wide seats every control"));
@@ -17178,8 +17241,8 @@ mod tests {
         let save = geometry.save.expect("a save box");
         let flip = geometry.flip.expect("a flip box");
         let popout = geometry.popout.expect("a pop-out box");
-        let pin = geometry.pin.expect("a pin box");
-        assert!(save[2] <= flip[0] && flip[2] <= popout[0] && popout[2] <= pin[0]);
+        let lock = geometry.lock.expect("a lock box");
+        assert!(save[2] <= flip[0] && flip[2] <= popout[0] && popout[2] <= lock[0]);
         assert!(geometry.pill.expect("a pill")[2] <= save[0]);
 
         // **A head with no switcher still answers on its name** (user ruling
@@ -17242,9 +17305,9 @@ mod tests {
             .browser
             .expect("a page's head seats the hand-off arrow");
         let popout = geometry.popout.expect("a pop-out box");
-        let pin = geometry.pin.expect("a pin box");
+        let lock = geometry.lock.expect("a lock box");
         assert!(
-            browser[2] <= popout[0] && popout[2] <= pin[0],
+            browser[2] <= popout[0] && popout[2] <= lock[0],
             "the arrow stands ahead of the three every pane has"
         );
         assert_eq!(
@@ -17284,8 +17347,8 @@ mod tests {
         let plain = preview_head_geometry(&head, 1.0, plain);
         assert_eq!(plain.browser, None, "no page, no arrow");
         assert_eq!(
-            (plain.popout, plain.pin),
-            (geometry.popout, geometry.pin),
+            (plain.popout, plain.lock),
+            (geometry.popout, geometry.lock),
             "and the run's other boxes are where they always were"
         );
         // ④ **A seat that is *rendering* a local page wears both ways out**
@@ -17723,7 +17786,7 @@ mod tests {",
                     count: "2",
                     others_dirty: false,
                     flip_to_source: true,
-                    pinned: false,
+                    locked: false,
                     menu_open: false,
                     web: None,
                     edit,
@@ -33248,7 +33311,7 @@ mod tests {",
         let reload = page.reload.expect("a reload box");
         let rule = page.separator.expect("a separator box");
         let popout = page.popout.expect("a pop-out box");
-        let pin = page.pin.expect("a pin box");
+        let pin = page.lock.expect("a lock box");
         assert!(back[2] <= forward[0], "back is left of forward");
         assert!(forward[2] <= reload[0], "forward is left of reload");
         assert!(reload[2] <= rule[0], "the rule stands after the three");
@@ -33336,7 +33399,7 @@ mod tests {",
                 count: "",
                 others_dirty: false,
                 flip_to_source: false,
-                pinned: false,
+                locked: false,
                 menu_open: false,
                 web: Some(web),
                 edit: None,

@@ -73,6 +73,8 @@
   4. **一条网页要不要进 Recent / session**。小样已按「网页与文件同权」+ 五加项「URL 进会话恢复」把 preview 种子的 `path` 写成 URL 并画了那一行;但原生 `RecentSeedV1::Preview { path }` 与 session schema 今天只承诺文件路径,**扩不扩到 URL 是 W2 片③ 的 schema 决定**。**推荐扩**(同一形,加一个字段区分),否则关掉一张网页 tab 会是全窗唯一没有退路的关闭。
   5. **`.pv-pin` 与 `row-pin` 两个「钉」同框**。头上的 `pin` 是「钉住这个 pane(下一个文件另开)」,切换器行上的 `pin` 是「收藏这个文件/网页」——两枚同一个图形、同一个词、相距 200px。**这不是本片引入的**(files 小单起就并存),但网页行让它更常同时出现。**建议单独起一个命名小单**,本片未动。
 
+     **那张小单已结(2026-08-23,Claude 定,用户可否决;`DESIGN.md §7.7 ⑧`)**:两枚确实不同,而且落单的是头上那一枚——tab 的钉与行的钉说的是同一句「这一个留在列表里」,pane 那一枚说的是「别复用这块 pane」。它改名 `Lock`、改图挂锁(`ChromeMark::Lock`,同锁体、锁梁与填充双轴带状态),并因此长出一条随状态换字的 tooltip;`pins.json` 与 tab 那两枚一个字未动,`session.json` 的 `pinned` 键也留着旧词(磁盘的键是带版本的词汇,没有读者)。字符串表 450 → 452。
+
   **发现但未清的账**:①`.foot-path` 的截断方向本片按内容分了岔(路径截头、URL 截尾),files pane 的脚未受影响但两处规则现在写在两个地方;②小样的搜索胶囊在网页宿主上没有命令轨对应物(终端有),这是内容差异不是缺陷,但「胶囊开着时轨变结果轨」这句话在网页座位上只对了一半;③演示页里的 `#/…` 路由是小样自造的假页面,W2 片④ 落地时页内导航栈的真实行为(`CanGoBack`/`CanGoForward` 事件驱动)要以引擎为准,不要照抄小样的 420ms 假节拍。
 - **W2**(条件 GO,持 W0′ 证据逐片开):①platform host/input;②navigation/security/UDF;③preview/session model(schema 扩展+向后兼容);④chrome commands(地址/三钮/查找/缩放/DevTools);⑤file/PDF/watch(通用 preview-file watcher);⑥F2 capture(低频缩略图,**独立性能片**)。
 - 排期:Windows 落地块之后;F2-live/远程投影不在本块。

@@ -1490,6 +1490,30 @@ pub enum Text {
     /// there, so the only way to know the quit did not silently half-happen is to
     /// be told.
     QuitSessionNotWritten,
+
+    // ── the preview pane's lock (§7.7 ⑧, Claude 定 2026-08-23) ─────────────
+    //
+    // One contiguous block at the end, per this table's standing rule. **Two
+    // entries, and the reason there are any is the naming ticket W1 filed**:
+    // this control drew a pin and answered to the word `pin`, and so do two
+    // other controls in this window that mean the opposite kind of thing —
+    // a tab's pin and a switcher row's both say "this one stays in the list".
+    // It is a padlock now, and a padlock in a preview head is the one mark
+    // there this product has not taught elsewhere, so it says what it does.
+    //
+    // TWO STRINGS AND NOT ONE, on `PreviewWebReload`/`PreviewWebStop`'s own
+    // precedent: the button changes, so the tip changes with it. A single tip
+    // reading `Lock` over an engaged lock would be the head describing what it
+    // was a press ago.
+    //
+    // THEY SAY WHAT HAPPENS AND STOP, per the copy ruling of 2026-08-17 — what
+    // the press does and what follows from it, no first person and no advice.
+    // Neither says "file" or "page": a preview seat holds either, and a tip
+    // that named one would be wrong on the other half of the seats.
+    /// The tip while the pane is unlocked — the action.
+    PreviewLock,
+    /// The tip while the pane is locked — the state, and the way out of it.
+    PreviewUnlock,
 }
 
 impl Text {
@@ -2489,6 +2513,18 @@ impl Text {
                 "session.json could not be written. Nothing was closed.",
                 "session.json 写入失败。没有关闭任何窗口。",
             ),
+
+            // ── the preview pane's lock (§7.7 ⑧) ───────────────────────────
+            Self::PreviewLock => pick(
+                lang,
+                "Lock this pane — what opens next opens in a new preview",
+                "锁定此窗格 —— 接下来打开的内容会开在新的预览里",
+            ),
+            Self::PreviewUnlock => pick(
+                lang,
+                "Unlock — this pane becomes the reusable preview again",
+                "解锁 —— 此窗格重新成为可复用的预览",
+            ),
             Self::GitDocumentEmpty => pick(lang, "No changes to show", "没有可显示的改动"),
 
             // ── a drag's landing caption ───────────────────────────────────
@@ -2707,7 +2743,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 450] = [
+    pub const ALL: [Self; 452] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3158,6 +3194,8 @@ impl Text {
         Self::QuitTitle,
         Self::QuitSave,
         Self::QuitSessionNotWritten,
+        Self::PreviewLock,
+        Self::PreviewUnlock,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
@@ -5207,6 +5245,64 @@ mod tests {
             Text::DescLanguage.in_lang(Lang::Chinese),
             "English、中文，或跟随系统设置"
         );
+    }
+
+    /// **THE WORD `pin` BELONGS TO THE TWO VERBS THAT MEAN MEMBERSHIP, AND THE
+    /// PREVIEW PANE'S CONTROL IS NOT ONE OF THEM** (§7.7 ⑧, Claude 定
+    /// 2026-08-23).
+    ///
+    /// The naming ticket W1 filed and left open (`docs/plans/web-preview/plan.md`
+    /// §5) was that one word and one glyph carried two meanings two hundred
+    /// pixels apart: a tab's pin keeps that tab across a launch, a switcher
+    /// row's keeps that place in a list, and the preview head's held a *pane*
+    /// against reuse. The first two are one idea said twice; the third is a
+    /// different idea, and it is a lock now.
+    ///
+    /// Red gate, both directions, because a rename can fail either way:
+    /// ① the lock's two tips carry no `pin`/`钉` — put the word back and this
+    ///    goes red, which is the collision itself;
+    /// ② the two real pins still say `Pin` and `PINNED` — a rename that swept
+    ///    them along would have taken the word away from the verbs it is right
+    ///    for, and left the window with no word for membership at all.
+    /// ③ neither tip names a *file* or a *page*: a preview seat holds either,
+    ///    and a tip that named one would be wrong on half the seats.
+    /// The tips are also asserted to name what follows from the press, because
+    /// "Lock" alone would be a control explaining its own noun.
+    #[test]
+    fn the_preview_panes_control_says_lock_and_leaves_pin_to_the_two_it_belongs_to() {
+        for entry in [Text::PreviewLock, Text::PreviewUnlock] {
+            for lang in Lang::ALL {
+                let said = entry.in_lang(lang);
+                for needle in ["pin", "Pin", "钉"] {
+                    assert!(
+                        !said.contains(needle),
+                        "{entry:?} in {lang:?} still says {needle:?} — {said:?}"
+                    );
+                }
+                for needle in ["file", "page", "文件", "网页"] {
+                    assert!(
+                        !said.contains(needle),
+                        "{entry:?} in {lang:?} names {needle:?}, and a preview \
+                         seat holds either kind — {said:?}"
+                    );
+                }
+                assert!(
+                    said.contains("preview") || said.contains("预览"),
+                    "{entry:?} in {lang:?} says what follows from the press \
+                     rather than naming itself — {said:?}"
+                );
+            }
+        }
+        assert!(Text::PreviewLock.in_lang(Lang::English).starts_with("Lock"));
+        assert!(
+            Text::PreviewUnlock
+                .in_lang(Lang::English)
+                .starts_with("Unlock")
+        );
+        // ② The word is not gone from the window; it went home.
+        assert_eq!(Text::Pin.in_lang(Lang::English), "Pin");
+        assert!(Text::Unpin.in_lang(Lang::English).starts_with("Unpin"));
+        assert_eq!(Text::PinnedSection.in_lang(Lang::English), "PINNED");
     }
 
     /// PIN — **the tail's value-carrying sentences read in both languages too.**

@@ -21801,7 +21801,7 @@ impl Runtime<'_> {
             };
             preview_cur.insert(seat, preview_source_of_recent(page));
             if !is_last {
-                seats.toggle_preview_pin(seat);
+                seats.toggle_preview_lock(seat);
             }
         }
         let preview = PreviewRestore::from_pages(preview_cur);
@@ -23110,6 +23110,26 @@ impl Runtime<'_> {
                     tooltip::TooltipAnchorId::PreviewBrowser(seat),
                     rect,
                     i18n::Text::PreviewOpenInBrowser.text(),
+                );
+            }
+            // **The padlock**, in the same pass and inside the same guard
+            // (§7.7 ⑧). It is offered on every preview head rather than on the
+            // pages' heads only, so unlike the arrow above every preview seat
+            // registers — and the tip is the button's own state, because the
+            // button changes.
+            let previews: Vec<SeatId> = self.seats.preview_seats();
+            for seat in previews {
+                let Some(rect) = self.preview_lock_box(seat) else {
+                    continue;
+                };
+                anchors.push(
+                    tooltip::TooltipAnchorId::PreviewLock(seat),
+                    rect,
+                    if self.seats.preview_is_locked(seat) {
+                        i18n::Text::PreviewUnlock.text()
+                    } else {
+                        i18n::Text::PreviewLock.text()
+                    },
                 );
             }
             // **A page's four**, in the same pass and inside the same guard
@@ -33279,7 +33299,7 @@ impl Runtime<'_> {
                 dirty,
                 others_dirty,
                 flip_to_source,
-                pinned: self.seats.preview_is_pinned(seat),
+                locked: self.seats.preview_is_locked(seat),
                 menu_open: self.window.preview_menu.seat() == Some(seat),
                 web: page.as_ref().map(|page| seats::WebHeadState {
                     can_go_back: page.can_go_back,
@@ -33581,16 +33601,22 @@ impl Runtime<'_> {
         self.repaint_preview()
     }
 
-    /// Pin or unpin the preview pane (P30/P95).
+    /// Lock or unlock the preview pane (P30/P95).
     ///
-    /// **The pin is the only route to a second preview pane** — "this pane keeps
-    /// its buffers and stops being the reuse target; the NEXT file opens a fresh
-    /// preview beside it" — and it is deliberately the only one: editing does not
-    /// promote (`DESIGN.md` §7.1.3, user ruling 2026-07-17, which overturned the
-    /// same day's earlier "编辑即转正"). The state is durable, because it is a
-    /// fact about the pane and not about this session's pointer.
-    fn toggle_preview_pin(&mut self, seat: SeatId) -> Result<()> {
-        if !self.seats.toggle_preview_pin(seat) {
+    /// **The lock is the only route to a second preview pane** — "this pane
+    /// keeps its buffers and stops being the reuse target; what opens NEXT opens
+    /// in a fresh preview beside it" — and it is deliberately the only one:
+    /// editing does not promote (`DESIGN.md` §7.1.3, user ruling 2026-07-17,
+    /// which overturned the same day's earlier "编辑即转正"). The state is
+    /// durable, because it is a fact about the pane and not about this session's
+    /// pointer.
+    ///
+    /// **It was called a pin until 2026-08-23** (§7.7 ⑧): this window's two real
+    /// pins both mean "this one stays in the list", and holding a pane against
+    /// reuse is not that. The durable flag under it keeps the old word, which is
+    /// [`seats::Seats::preview_is_locked`]'s own note.
+    fn toggle_preview_lock(&mut self, seat: SeatId) -> Result<()> {
+        if !self.seats.toggle_preview_lock(seat) {
             return Ok(());
         }
         self.mark_session_dirty(Instant::now());
@@ -42013,8 +42039,8 @@ impl Runtime<'_> {
     /// **Go to a page, having asked whether this window may** — the second of
     /// the pin's two validations (`plan.md` §3「钉不是授权」).
     ///
-    /// The first is at the moment of pinning ([`Self::toggle_preview_pin`]); this
-    /// is the one at the moment of *using*, and both are the same door
+    /// The first is at the moment of pinning ([`Self::toggle_switcher_pin`]);
+    /// this is the one at the moment of *using*, and both are the same door
     /// (`webnav::address_bar`) because a store that could grant permission is a
     /// store whose permission is "whatever that file says". A pin written by an
     /// older build, edited by hand, or made before the policy tightened is
@@ -42056,13 +42082,16 @@ impl Runtime<'_> {
     /// right for as long as the switcher held only files: one list holding two
     /// categories cannot have one category written into it.
     ///
-    /// Named for the *switcher* and not for the preview, because this window has
-    /// two pins two hundred pixels apart and they mean different things:
-    /// [`Self::toggle_preview_pin`] pins the **pane** (the next file opens
-    /// beside it), and this pins the **row** (keep this place across restarts).
-    /// The naming ticket is W1's fifth open question and is not this slice's; what
-    /// is this slice's is that the two functions cannot be confused at a call
-    /// site.
+    /// Named for the *switcher* and not for the preview, because this window
+    /// used to have two "pins" two hundred pixels apart meaning different
+    /// things. **That naming ticket — W1's fifth open question — is closed**
+    /// (§7.7 ⑧, 2026-08-23): the pane's control is a **lock** now, with its own
+    /// word, its own glyph and its own tip
+    /// ([`Self::toggle_preview_lock`]), and what is left called a pin in this
+    /// window is this row and a tab, which mean one thing between them — "this
+    /// one stays in the list". This function's name was already the half of the
+    /// fix a slice could make on its own: two verbs that cannot be confused at a
+    /// call site.
     ///
     /// **The first of the pin's two validations** (`plan.md` §3「钉不是授权」): a
     /// page is written into `pins.json` only if this window would navigate to it
@@ -44177,6 +44206,20 @@ impl Runtime<'_> {
         let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
         let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
         seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat)).browser
+    }
+
+    /// The padlock's box on one preview seat (§7.7 ⑧).
+    ///
+    /// [`Self::preview_browser_box`]'s derivation, for its reason: one
+    /// computation for the paint, the hit test and the tip, because a tip
+    /// anchored on a second one stands beside the button rather than on it.
+    /// Unlike the arrow this control is offered on every preview head, so the
+    /// only way this is `None` is a head with no room for it.
+    fn preview_lock_box(&self, seat: SeatId) -> Option<[f32; 4]> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
+        let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
+        seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat)).lock
     }
 
     /// The box one of a page's four head verbs is drawn in (§7.7 ②).
@@ -54877,10 +54920,10 @@ impl Runtime<'_> {
                 self.window.files_row_clicks.interrupt();
                 self.run_web_fault_verb(seat)?;
             }
-            seats::ChromeTarget::PreviewPin(seat) => {
+            seats::ChromeTarget::PreviewLock(seat) => {
                 self.window.tab_clicks.interrupt();
                 self.window.files_row_clicks.interrupt();
-                self.toggle_preview_pin(seat)?;
+                self.toggle_preview_lock(seat)?;
             }
             seats::ChromeTarget::PreviewPopOut(seat) => {
                 self.window.tab_clicks.interrupt();
@@ -67575,7 +67618,7 @@ mod tests {
         let pinned = seats
             .add_preview(&metrics)
             .expect("the first preview lands");
-        assert!(seats.toggle_preview_pin(pinned));
+        assert!(seats.toggle_preview_lock(pinned));
         let landing = seats
             .add_preview(&metrics)
             .expect("a pinned pane is not a reuse target, so a second lands beside it");
@@ -67901,7 +67944,7 @@ mod tests {
         let pinned = seats
             .add_preview(&metrics)
             .expect("the first preview lands");
-        assert!(seats.toggle_preview_pin(pinned));
+        assert!(seats.toggle_preview_lock(pinned));
         let second = seats
             .add_preview(&metrics)
             .expect("a pinned pane is not a reuse target");
@@ -90429,9 +90472,9 @@ mod tests {
         let PreviewSurface::Seat(pinned) = first else {
             unreachable!("the landing surface is a seat");
         };
-        assert!(seats.toggle_preview_pin(pinned));
+        assert!(seats.toggle_preview_lock(pinned));
         let second = open(&mut seats, &mut panes, "c.rs");
-        assert_ne!(second, first, "a pinned pane is not the reuse target");
+        assert_ne!(second, first, "a locked pane is not the reuse target");
 
         assert_eq!(
             panes.get(first).expect("a view").buffer.as_ref(),
