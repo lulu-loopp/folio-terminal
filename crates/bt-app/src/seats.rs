@@ -17195,6 +17195,39 @@ mod tests {
             (geometry.popout, geometry.pin),
             "and the run's other boxes are where they always were"
         );
+        // ④ **A seat that is *rendering* a local page wears both ways out**
+        // (user ruling 2026-08-23). The seat used to show a page's source with
+        // this arrow lit; it draws the page now, and the two doors the ruling
+        // says a reader keeps — `</>` for the source and `↗` for the machine's
+        // own browser — have to be able to stand in one head at one time. They
+        // are separate slots, so this is a fact about the layout and not about a
+        // policy, which is exactly why it is asserted here.
+        let rendering = PreviewHeadTools {
+            browser: true,
+            web: true,
+            name_width: 60.0,
+            ..PreviewHeadTools::default()
+        };
+        let rendering = preview_head_geometry(&head, 1.0, rendering);
+        let arrow = rendering
+            .browser
+            .expect("a rendered local page keeps its way out to a browser");
+        let devtools = rendering
+            .devtools
+            .expect("and its way in to the page's own source");
+        assert!(
+            arrow[2] <= rendering.back.expect("a page's back button")[0],
+            "the arrow is still the last of the per-type verbs, ahead of the \
+             three a page always carries"
+        );
+        assert!(
+            rendering.reload.expect("a reload box")[2] <= devtools[0],
+            "and the developer tools are outermost of a page's four"
+        );
+        assert!(
+            arrow[2] <= devtools[0],
+            "the two ways out of a page never overlap"
+        );
     }
 
     /// PAGE — **the arrow answers the pointer for its own rectangle, and it is
