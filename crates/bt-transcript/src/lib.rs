@@ -42,14 +42,7 @@ pub fn detect_http_urls(text: &str) -> Vec<HyperlinkRange> {
         while end < bytes.len() && !is_url_terminator(bytes[end]) {
             end += 1;
         }
-        while end > cursor + scheme_len
-            && matches!(
-                bytes[end - 1],
-                b')' | b'.' | b',' | b';' | b':' | b'!' | b'?'
-            )
-        {
-            end -= 1;
-        }
+        end = release_url_tail(&text[cursor..end]) + cursor;
         if bare_http_url_is_valid(&text[cursor..end], scheme_len) {
             ranges.push(HyperlinkRange {
                 byte_start: cursor,
@@ -61,6 +54,69 @@ pub fn detect_http_urls(text: &str) -> Vec<HyperlinkRange> {
         }
     }
     ranges
+}
+
+/// Where every `http(s)://` token on one line **starts and stops**, whether or not it turns out to
+/// be an address this window would offer.
+///
+/// Ownership, not recognition (§7.1.5k ④). A scheme declares that the text behind it is addressed
+/// the scheme's way, and that declaration stands even when the address is one we refuse: the
+/// `D:\case\a.txt` inside `http://localhost:3000/?file=D:\case\a.txt` is a query parameter of
+/// somebody else's server and is not this machine's file, so no path scan may claim it. Reading
+/// that off [`detect_http_urls`] instead would be exactly wrong — that scan drops the address here,
+/// which is precisely when the nested claim would appear.
+#[must_use]
+pub fn http_scheme_spans(text: &str) -> Vec<HyperlinkRange> {
+    let bytes = text.as_bytes();
+    let mut spans = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        let Some(scheme_len) = http_scheme_len(&bytes[cursor..]) else {
+            cursor += 1;
+            continue;
+        };
+        if cursor != 0 && !is_url_leading_boundary(bytes[cursor - 1]) {
+            cursor += scheme_len;
+            continue;
+        }
+        let mut end = cursor + scheme_len;
+        while end < bytes.len() && !is_url_terminator(bytes[end]) {
+            end += 1;
+        }
+        spans.push(HyperlinkRange {
+            byte_start: cursor,
+            byte_end: end,
+        });
+        cursor = end.max(cursor + scheme_len);
+    }
+    spans
+}
+
+/// Release the prose an address swallowed at its end: sentence punctuation, and a closing bracket
+/// **only when it closes one the address never opened**.
+///
+/// Stripping every trailing `)` is what turned `see (https://host/a_(b)?x=(c)).` into a link to
+/// `https://host/a_(b)?x=(c` — a shorter address that works and goes somewhere else. Counting is
+/// the whole fix: an address that opened a bracket may close it, and the one left over belongs to
+/// the sentence.
+fn release_url_tail(candidate: &str) -> usize {
+    let bytes = candidate.as_bytes();
+    let mut end = candidate.len();
+    while end > 0 {
+        match bytes[end - 1] {
+            b'.' | b',' | b';' | b':' | b'!' | b'?' => end -= 1,
+            b')' => {
+                let opened = bytes[..end].iter().filter(|byte| **byte == b'(').count();
+                let closed = bytes[..end].iter().filter(|byte| **byte == b')').count();
+                if closed <= opened {
+                    break;
+                }
+                end -= 1;
+            }
+            _ => break,
+        }
+    }
+    end
 }
 
 fn http_scheme_len(bytes: &[u8]) -> Option<usize> {

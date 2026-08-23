@@ -709,6 +709,211 @@ fn is_uri_byte(byte: u8) -> bool {
         )
 }
 
+/// The refusals §7.1.5k ④ lays **on top of** the boundary table's lexical reading, without altering
+/// a word of it.
+///
+/// Every one of them answers the same question in the same direction: the text is shaped like a
+/// reference, and something else on the line says the reference is not this window's to promise.
+/// They live here rather than inside the scans because the boundary table's 23 rows are a settled
+/// account of where a *token* stops, and none of these is about where a token stops — they are
+/// about who owns it, what expanded it, and whether the name reaches an object a click can open.
+///
+/// `scheme_spans` is passed in because it is one answer for the whole line and would otherwise be
+/// recomputed once per candidate.
+fn is_promisable(
+    text: &str,
+    candidate: &PrintedPathCandidate,
+    scheme_spans: &[HyperlinkRange],
+) -> bool {
+    // A scheme owns its own text — including the drive-rooted path somebody put in a query string.
+    if scheme_spans
+        .iter()
+        .any(|span| span.byte_start < candidate.byte_end && candidate.byte_start < span.byte_end)
+    {
+        return false;
+    }
+    let path = candidate.path_text(text);
+    let before = text[..candidate.byte_start].chars().next_back();
+    // `$HOME/docs/a.md`: the tail of a variable expression is shaped exactly like a bare relative
+    // name, and joining it to this window's working directory invents a place nobody named. The
+    // other spellings (`${…}`, `%…%`, `$env:…`) are already refused by the boundary rules.
+    if before == Some('$') {
+        return false;
+    }
+    // A candidate that stopped at a **space** inside an opening quote has not reached the end of
+    // what was quoted — the quote said where the reference ends and the candidate is short of it.
+    // A candidate that stopped at the closing quote itself is complete and is left alone.
+    if let Some(opening) = before
+        && let Some(closing) = matching_quote(opening)
+        && text[candidate.byte_end..]
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace)
+        && text[candidate.byte_end..].contains(closing)
+    {
+        return false;
+    }
+    // Git's diff namespace. `a/` and `b/` are not directories in the working tree, and a tree that
+    // happens to hold one of them would otherwise be pointed at instead of the file being diffed.
+    if (text.starts_with("--- a/") || text.starts_with("+++ b/")) && candidate.byte_start == 4 {
+        return false;
+    }
+    match candidate.spelling {
+        // A URI's printed text is not a path; its target is what a decoder already read, and that
+        // decoder has refused an interior empty segment since it was written.
+        PrintedPathSpelling::Uri => file_uri_to_local_reference(path)
+            .is_none_or(|decoded| !names_a_dos_device(&decoded.to_string_lossy())),
+        // `D:\\case\\src\\main.rs` on the screen is a serialized string, not a path literal.
+        // Windows may collapse the repeats onto the same file, but that is a coincidence of the API
+        // rather than something the printed text said, and one round of unescaping is a guess about
+        // which producer wrote it.
+        //
+        // A DOS device name is refused for the neighbouring reason: metadata succeeds on it, and
+        // whatever opens it afterwards may reach an entirely different kind of object.
+        _ => !has_interior_empty_component(path) && !names_a_dos_device(path),
+    }
+}
+
+/// The closing partner of an opening quote, for the quotes that come in pairs and are **not**
+/// already boundary characters. ASCII `"` is absent because it declares extent by itself and is
+/// read by the scans; `'` is absent as a closer because it doubles as an apostrophe.
+fn matching_quote(opening: char) -> Option<char> {
+    match opening {
+        '\'' => Some('\''),
+        '\u{201c}' => Some('\u{201d}'), // “ ”
+        '\u{2018}' => Some('\u{2019}'), // ‘ ’
+        _ => None,
+    }
+}
+
+/// Whether a path carries an empty component somewhere other than at its very end — `D:\\a\\b`,
+/// `docs//a.md`. A single trailing separator is a directory's own and is not one of these.
+fn has_interior_empty_component(path: &str) -> bool {
+    let rest = if is_windows_drive_absolute(path) {
+        &path[3..]
+    } else {
+        path
+    };
+    let mut segments = rest.split(['/', '\\']).collect::<Vec<_>>();
+    segments.pop();
+    segments.iter().any(|segment| segment.is_empty())
+}
+
+/// Whether a path's last component is one of the names Windows reserves for devices, with or
+/// without an extension: `D:\case\CON`, `D:\case\NUL.txt`.
+fn names_a_dos_device(path: &str) -> bool {
+    const DEVICES: [&str; 6] = ["CON", "PRN", "AUX", "NUL", "COM", "LPT"];
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let stem = name.split('.').next().unwrap_or(name);
+    DEVICES.iter().any(|device| {
+        stem.eq_ignore_ascii_case(device)
+            || (matches!(*device, "COM" | "LPT")
+                && stem.len() == device.len() + 1
+                && stem[..device.len()].eq_ignore_ascii_case(device)
+                && stem.as_bytes()[device.len()].is_ascii_digit()
+                && stem.as_bytes()[device.len()] != b'0')
+    })
+}
+
+/// The fields whose value this window will read as a Windows **search path** rather than as one
+/// name — §7.1.5k ③.
+///
+/// It is a short, explicit list and not a rule about semicolons, because a semicolon is a perfectly
+/// legal character in a Windows filename: `"D:\case\real;D:\case\missing"` may be one file that
+/// does not exist, and splitting it because the whole string was not found would light up
+/// `D:\case\real` — turning "this is not here" into a promise about somewhere the writer never
+/// named. Only a field that has *said* the value is a list is evidence that it is one.
+const PATH_LIST_FIELDS: [&str; 2] = ["PATH", "PSMODULEPATH"];
+
+/// The `NAME=` field a path list is declared by, if this line declares one: the byte range of its
+/// value, which runs to the end of the logical line.
+fn path_list_value(text: &str) -> Option<std::ops::Range<usize>> {
+    let bytes = text.as_bytes();
+    for (offset, byte) in bytes.iter().enumerate() {
+        if *byte != b'=' {
+            continue;
+        }
+        let head = &text[..offset];
+        if PATH_LIST_FIELDS.iter().any(|field| {
+            head.len() >= field.len()
+                && head[head.len() - field.len()..].eq_ignore_ascii_case(field)
+                && candidate_start_boundary(text, head.len() - field.len())
+        }) {
+            return Some(offset + 1..text.len());
+        }
+    }
+    None
+}
+
+/// The segments of a declared path list, as candidates in the line's own byte space.
+///
+/// Windows list syntax and nothing more: segments separated by `;`, each optionally carrying its
+/// own quotes, and — because the whole value is often quoted once around a list rather than once
+/// per segment — one pair of quotes around the entire value stripped first. **The semicolon is
+/// never part of a candidate**, and neither are the quotes.
+///
+/// The first version links only a literal drive-rooted segment. An empty segment is Windows'
+/// spelling of "the current directory", a `%VAR%` segment is the *printing* process's environment
+/// and not this one's, and a relative segment is measured from a directory nobody reported — three
+/// different unknowns, none of which a single name can be promised for.
+fn detect_path_list_candidates(text: &str) -> Vec<PrintedPathCandidate> {
+    let Some(value) = path_list_value(text) else {
+        return Vec::new();
+    };
+    // An unbalanced quote is an incomplete value: the line was cut, or the field is not what it
+    // looks like. Either way the syntax is not complete and the list is not read.
+    if text[value.clone()]
+        .bytes()
+        .filter(|byte| *byte == b'"')
+        .count()
+        % 2
+        != 0
+    {
+        return Vec::new();
+    }
+    let mut span = value.clone();
+    if text[span.clone()].len() >= 2
+        && text[span.clone()].starts_with('"')
+        && text[span.clone()].ends_with('"')
+        && !text[span.start + 1..span.end - 1].contains('"')
+    {
+        span = span.start + 1..span.end - 1;
+    }
+    let mut candidates = Vec::new();
+    let mut cursor = span.start;
+    let mut quoted = false;
+    let mut segment = span.start;
+    let bytes = text.as_bytes();
+    while cursor <= span.end {
+        let ends = cursor == span.end || (bytes[cursor] == b';' && !quoted);
+        if !ends {
+            if bytes[cursor] == b'"' {
+                quoted = !quoted;
+            }
+            cursor += 1;
+            continue;
+        }
+        let mut start = segment;
+        let mut end = cursor;
+        if end > start + 1 && bytes[start] == b'"' && bytes[end - 1] == b'"' {
+            start += 1;
+            end -= 1;
+        }
+        if is_local_absolute_path(Path::new(&text[start..end])) && !text[start..end].contains('"') {
+            candidates.push(PrintedPathCandidate {
+                byte_start: start,
+                path_byte_end: end,
+                byte_end: end,
+                spelling: PrintedPathSpelling::Absolute,
+                location: None,
+            });
+        }
+        cursor += 1;
+        segment = cursor;
+    }
+    candidates
+}
+
 /// Whether a trailing `/` is a directory's own slash or an empty final name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TrailingSlash {
@@ -1091,6 +1296,17 @@ impl PrintedPathLinks {
             candidates.extend(detect_relative_path_candidates(text, &|_| true));
         }
         candidates.extend(detect_file_uri_candidates(text));
+        // §7.1.5k ③. A declared search path owns its whole value: inside it the ordinary reading —
+        // "one unquoted token, semicolons and all" — is not a second opinion worth keeping, it is
+        // the wrong one, and leaving it in would put a link on `D:\bin;;%SystemRoot%\System32`.
+        if let Some(value) = path_list_value(text) {
+            candidates.retain(|candidate| {
+                candidate.byte_start >= value.end || candidate.byte_end <= value.start
+            });
+            candidates.extend(detect_path_list_candidates(text));
+        }
+        let scheme_spans = crate::http_scheme_spans(text);
+        candidates.retain(|candidate| is_promisable(text, candidate, &scheme_spans));
         candidates.sort_by_key(|candidate| candidate.byte_start);
         candidates
     }
@@ -1566,6 +1782,550 @@ mod tests {
             unknown,
             BTreeSet::from([PathBuf::from("D:\\case\\very\\long\\path\\file.rs")]),
             "the line number is never part of what is asked about"
+        );
+    }
+
+    /// §7.1.5k ③ (scenarios 48, 49, 51, 73): a semicolon is a legal character in a Windows
+    /// filename, so it is split on **only** where a field has said the value is a search path —
+    /// and then per segment, with the semicolon itself never drawn.
+    #[test]
+    fn a_semicolon_is_split_on_only_inside_a_declared_path_list() {
+        let links = ledger(
+            "D:\\case",
+            &[
+                ("D:\\mods\\A", true),
+                ("D:\\mods\\B", true),
+                ("D:\\Program Files\\Mods", true),
+                ("D:\\case\\real", true),
+                ("D:\\a", true),
+            ],
+        );
+        // Scenario 49: one quoted value, two segments, and neither the quotes nor the `;` drawn.
+        assert_eq!(
+            linked(&links, "PSModulePath=\"D:\\mods\\A;D:\\mods\\B\"", None),
+            [
+                ("D:\\mods\\A", "file:///D:/mods/A".to_owned()),
+                ("D:\\mods\\B", "file:///D:/mods/B".to_owned()),
+            ]
+        );
+        // Scenario 51: the quoting is per segment, not "the first pair of quotes is the value".
+        assert_eq!(
+            linked(
+                &links,
+                "PSModulePath=\"D:\\Program Files\\Mods\";D:\\mods\\B",
+                None
+            ),
+            [
+                (
+                    "D:\\Program Files\\Mods",
+                    "file:///D:/Program%20Files/Mods".to_owned()
+                ),
+                ("D:\\mods\\B", "file:///D:/mods/B".to_owned()),
+            ]
+        );
+        // Scenario 48: no field, no list. The whole quoted string is one name, and it is not on
+        // the disk, so the segment that happens to be is **not** offered in its place.
+        assert_eq!(
+            linked(&links, "\"D:\\case\\real;D:\\case\\missing\"", None),
+            []
+        );
+        // Scenario 73: the same, for a single file whose name really carries a semicolon.
+        assert_eq!(linked(&links, "\"D:\\a;b\\c.md\"", None), []);
+    }
+
+    /// §7.1.5k ③, the segments the first version refuses (scenario 50): an empty segment means
+    /// "the current directory" to Windows, a `%VAR%` segment is the *printing* process's
+    /// environment, and a relative segment is measured from a directory this window was never told
+    /// about. Only a literal drive-rooted segment resolves to one file on its own.
+    #[test]
+    fn a_path_list_links_only_its_literal_drive_rooted_segments() {
+        let links = ledger(
+            "D:\\case",
+            &[
+                ("D:\\bin", true),
+                ("D:\\case", true),
+                ("D:\\case\\tools", true),
+                ("C:\\Windows\\System32", true),
+            ],
+        );
+        assert_eq!(
+            linked(
+                &links,
+                "PATH=D:\\bin;;%SystemRoot%\\System32;.\\tools",
+                None
+            ),
+            [("D:\\bin", "file:///D:/bin".to_owned())]
+        );
+    }
+
+    /// Every link one line offers **on a disk that says yes to everything it is asked**.
+    ///
+    /// It is the harshest fixture in the matrix and the one most of these rows run under: a refusal
+    /// that only holds because the dangerous prefix happened not to exist is not a refusal, it is
+    /// luck, and this makes luck impossible. Two passes — the first collects the questions, the
+    /// second answers them all and reads the links back.
+    fn linked_on_a_full_disk<'line>(
+        working_directory: Option<&str>,
+        line: &'line str,
+    ) -> Vec<(&'line str, String)> {
+        let base = working_directory.map(PathBuf::from);
+        let mut unknown = BTreeSet::new();
+        PrintedPathLinks::new(base.clone(), BTreeMap::new()).links_in(line, None, &mut unknown);
+        let links =
+            PrintedPathLinks::new(base, unknown.into_iter().map(|path| (path, true)).collect());
+        linked(&links, line, None)
+    }
+
+    /// Group A of the scenario list, rows 5 to 15 — quoting, provider prefixes and the position
+    /// syntaxes a compiler, a linter, a traceback and `grep -n` print.
+    ///
+    /// Every one of them runs on a disk that says yes to everything it is asked, so a row that
+    /// comes back empty came back empty on the strength of the **lexer** and not of a fixture. The
+    /// rows the current contract does not spell out — MSVC's `(12,34)`, .NET's `:line 42`, `grep`'s
+    /// `path:line:text` — are pinned as "nothing", which is the scenario list's own requirement:
+    /// until the explicit syntax exists, the honest answer is no link at all rather than a link
+    /// over some prefix of it.
+    #[test]
+    fn group_a_quoting_provider_prefixes_and_position_syntax() {
+        let cwd = Some("D:\\case");
+        // 5 — ASCII quotes declare the extent, and neither quote nor comma is inside it.
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "File \"D:\\Program Files\\app.py\", line 3, in f"),
+            [(
+                "D:\\Program Files\\app.py",
+                "file:///D:/Program%20Files/app.py".to_owned()
+            )]
+        );
+        // 6 — a serialized JSON value is not a path literal, and one round of unescaping is a guess.
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "{\"file\":\"D:\\\\case\\\\src\\\\main.rs\"}"),
+            []
+        );
+        // 7, 8, 9, 10 — the position syntaxes this contract does not spell out. Their fixture is
+        // the scenario list's own: **the named file exists**, and the answer is still no link,
+        // because a link over `…main.cpp(12,34` would point at a name nobody printed.
+        let named = ledger(
+            "D:\\case",
+            &[
+                ("D:\\case\\src\\main.cpp", true),
+                ("D:\\case\\src\\app.ts", true),
+                ("D:\\case\\Foo.cs", true),
+                ("D:\\case\\src\\main.rs", true),
+            ],
+        );
+        for line in [
+            "D:\\case\\src\\main.cpp(12,34): error C2143",
+            "src/app.ts(7,19): error TS2322",
+            "at Foo in D:\\case\\Foo.cs:line 42",
+            "src/main.rs:12:let x = 1",
+        ] {
+            assert_eq!(
+                linked(&named, line, None),
+                [],
+                "{line} has no settled position syntax, so it has no link at all"
+            );
+        }
+        // 11, 12 — the two position shapes that *are* unambiguous today.
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "--> src/main.rs:12:5"),
+            [(
+                "src/main.rs:12:5",
+                "file:///D:/case/src/main.rs#L12C5".to_owned()
+            )]
+        );
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "at f (D:\\case\\app.js:10:2)"),
+            [(
+                "D:\\case\\app.js:10:2",
+                "file:///D:/case/app.js#L10C2".to_owned()
+            )]
+        );
+        // 13 — a PowerShell provider qualifier is not part of the target.
+        assert_eq!(
+            linked_on_a_full_disk(
+                cwd,
+                "Microsoft.PowerShell.Core\\FileSystem::D:\\case\\a.ps1:12"
+            ),
+            [("D:\\case\\a.ps1:12", "file:///D:/case/a.ps1#L12".to_owned())]
+        );
+        // 14, 15 — a non-filesystem provider is not a disk path, and its tail is not a relative one.
+        assert_eq!(linked_on_a_full_disk(cwd, "HKLM:\\Software\\Vendor"), []);
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "Cert:\\CurrentUser\\My\\ABCDEF"),
+            []
+        );
+    }
+
+    /// Group A rows 3 and 4: an opening quote of **any** script declares an extent, so a candidate
+    /// that stopped at a space *inside* one has not reached the end of what was quoted.
+    ///
+    /// The gate is about the space, not about the quote character: `“D:\x\a.md”` stops at the
+    /// closing quote itself and is an ordinary, complete reference, which is why the second half of
+    /// this row is asserted beside the first.
+    #[test]
+    fn a_candidate_cut_by_a_space_inside_an_opening_quote_is_not_drawn() {
+        // The scenario list's fixture: the dangerous prefix and the whole script both exist.
+        let links = ledger(
+            "D:\\case",
+            &[
+                ("D:\\Program", true),
+                ("D:\\Program Files\\Tool\\run.ps1", true),
+                ("D:\\x\\a.md", true),
+            ],
+        );
+        assert_eq!(
+            linked(&links, "'D:\\Program Files\\Tool\\run.ps1'", None),
+            []
+        );
+        assert_eq!(
+            linked(&links, "“D:\\Program Files\\Tool\\run.ps1”", None),
+            []
+        );
+        assert_eq!(
+            linked(&links, "“D:\\x\\a.md”", None),
+            [("D:\\x\\a.md", "file:///D:/x/a.md".to_owned())],
+            "a quoted reference that reaches its own closing quote was never cut"
+        );
+    }
+
+    /// Group B of the scenario list (16 to 26): **one span, one owner.** A scheme's text belongs to
+    /// the scheme, so no second, differently-rooted link is ever built out of a query parameter.
+    #[test]
+    fn group_b_urls_file_uris_and_span_ownership() {
+        let cwd = Some("D:\\case");
+        // 18, 19 — the two shapes that used to grow a nested file link inside an address.
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "https://host:8080/open?next=docs/a.md#L2"),
+            []
+        );
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "http://localhost:3000/?file=D:\\case\\a.txt"),
+            []
+        );
+        // 21, 22 — local file URIs, decoded exactly once.
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "file:///D:/case/a%20b.txt"),
+            [(
+                "file:///D:/case/a%20b.txt",
+                "file:///D:/case/a%20b.txt".to_owned()
+            )]
+        );
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "file://localhost/D:/case/a.txt"),
+            [(
+                "file://localhost/D:/case/a.txt",
+                "file:///D:/case/a.txt".to_owned()
+            )]
+        );
+        // 23, 24 — somebody else's machine, and a root this one has no letter for. Neither may
+        // decay into the relative reference hiding inside it.
+        assert_eq!(linked_on_a_full_disk(cwd, "file://server/share/a.txt"), []);
+        assert_eq!(linked_on_a_full_disk(cwd, "file:///etc/passwd"), []);
+        // 25 — one round of percent decoding, so `%2520` is a literal `%20` in a filename.
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "file:///D:/case/a%2520b.txt")
+                .into_iter()
+                .map(|(_, uri)| uri)
+                .collect::<Vec<_>>(),
+            ["file:///D:/case/a%2520b.txt".to_owned()],
+            "the decoded name carries a literal %20, and folding it back escapes the percent"
+        );
+        // 26 — a query and a printed position on one URI have no settled order of resolution, so
+        // the reference is read whole, asked about whole, and never quietly rewritten into the
+        // file beside it. Fixture: `D:\case\a.txt` is on the disk and the welded name is not.
+        assert_eq!(
+            linked(
+                &ledger("D:\\case", &[("D:\\case\\a.txt", true)]),
+                "file:///D:/case/a.txt:12?raw=1",
+                None
+            ),
+            []
+        );
+    }
+
+    /// Group B rows 16, 17 and 20, which are about the **address** rather than about a file: an
+    /// address owns its port, its query and its fragment, and a bracket it opened itself.
+    #[test]
+    fn group_b_addresses_keep_their_own_punctuation() {
+        for line in [
+            "https://host.invalid:8080/a/b?q=x%2Fy#frag",
+            "https://[2001:db8::1]:8443/a?q=b",
+        ] {
+            assert_eq!(
+                inferred_url_ranges(line, None)
+                    .into_iter()
+                    .map(|range| &line[range.byte_start..range.byte_end])
+                    .collect::<Vec<_>>(),
+                [line]
+            );
+        }
+        let line = "see (https://host.invalid/a_(b)?x=(c)).";
+        assert_eq!(
+            inferred_url_ranges(line, None)
+                .into_iter()
+                .map(|range| &line[range.byte_start..range.byte_end])
+                .collect::<Vec<_>>(),
+            ["https://host.invalid/a_(b)?x=(c)"],
+            "the brackets the address opened are its own; the prose's last one is not"
+        );
+    }
+
+    /// Group C of the scenario list (27 to 41): variable expansions, UNC, the extended namespace,
+    /// drive-relative paths, case folding, and the two Windows corners where a name means more than
+    /// one object.
+    #[test]
+    fn group_c_variables_unc_long_paths_and_windows_corners() {
+        let cwd = Some("D:\\case");
+        for line in [
+            // 27 to 31 — an expansion is the printing process's, never this window's.
+            "$HOME/docs/a.md",
+            "${HOME}/docs/a.md",
+            "%USERPROFILE%\\docs\\a.md",
+            "$env:USERPROFILE\\docs\\a.md",
+            "~\\docs\\a.md",
+            // 32 — `C:foo` is relative to C:'s own current directory, which nobody reported.
+            "C:foo\\bar.txt",
+            // 33 to 36 — UNC, the extended namespace and device objects, none of which may be
+            // reached by stripping a prefix off the front.
+            "\\\\server\\share\\dir\\a.txt",
+            "\\\\?\\D:\\case\\a.txt",
+            "\\\\?\\UNC\\server\\share\\a.txt",
+            "\\\\.\\PIPE\\build-daemon",
+            // 39 — a trailing space under the extended namespace is a different real name.
+            "\"\\\\?\\D:\\case\\a.txt \"",
+            // 41 — a DOS device name is not a file, whatever metadata says.
+            "D:\\case\\CON",
+            "D:\\case\\NUL.txt",
+        ] {
+            assert_eq!(
+                linked_on_a_full_disk(cwd, line),
+                [],
+                "{line} names nothing this window may promise"
+            );
+        }
+        // 37 — case folding belongs to the filesystem, not to the lexer: the printed spelling is
+        // the span and the printed spelling is the target.
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "d:\\CASE\\SRC\\MAIN.rs"),
+            [(
+                "d:\\CASE\\SRC\\MAIN.rs",
+                "file:///d:/CASE/SRC/MAIN.rs".to_owned()
+            )]
+        );
+        // 38 — the accepted Win32 compatibility: a trailing ASCII dot names the same file, so it
+        // stays inside the span (boundary table row 16).
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "D:\\case\\a.txt."),
+            [("D:\\case\\a.txt.", "file:///D:/case/a.txt.".to_owned())]
+        );
+        // 40 — a positive integer behind a colon is a **position**, fixed by contract, so a
+        // machine that happens to hold an alternate data stream named `12` cannot change it.
+        assert_eq!(
+            linked_on_a_full_disk(cwd, "D:\\case\\a.txt:12"),
+            [("D:\\case\\a.txt:12", "file:///D:/case/a.txt#L12".to_owned())]
+        );
+    }
+
+    /// Group D of the scenario list (42 to 47): a synthesized name is not a filename. `a/` and `b/`
+    /// are git's diff namespace, `{old => new}` is its rename compression, `\346\226\207` is its
+    /// quoted-path encoding, and `webpack://` and `node:` name modules rather than files.
+    #[test]
+    fn group_d_git_and_virtual_schemes() {
+        let cwd = Some("D:\\case");
+        for line in [
+            "--- a/src/main.rs",
+            "+++ b/src/main.rs",
+            "src/{old => new}/main.rs",
+            "\"a/\\346\\226\\207.txt\"",
+            "webpack://app/src/main.ts:7:2",
+            "node:internal/modules/cjs/loader:123:4",
+        ] {
+            assert_eq!(
+                linked_on_a_full_disk(cwd, line),
+                [],
+                "{line} is a synthesized name and not this working tree's"
+            );
+        }
+    }
+
+    /// Group G of the scenario list (68 to 73) — **the boundary table's new placement axis.**
+    ///
+    /// Not one of the 23 rows changes a word. What changes is that each of them is now asked twice:
+    /// once with the reference inside the row, where it answers exactly what it always answered,
+    /// and once with the reference's last cell **being** the row's last cell, where §7.1.5k ①
+    /// presses it down. The rows that keep their answer at both placements keep it because their
+    /// candidate never reached the end — a closing bracket, a full-width stop or a closing quote
+    /// stands there instead, and that is evidence of a complete reference rather than of a cut one.
+    #[test]
+    fn group_g_every_boundary_table_row_is_asked_at_both_placements() {
+        let links = ledger(
+            "D:\\case",
+            &[
+                ("D:\\Developer\\BetterTerminal\\README.md", true),
+                ("D:\\Developer\\BetterTerminal\\test.md", true),
+                ("D:\\case\\docs\\HANDOFF-2026-08-20.md", true),
+                ("D:\\case\\test.md", true),
+                ("D:\\x\\a.md", true),
+                ("D:\\x\\a.md.", true),
+                ("D:\\case\\docs\\a.md", true),
+                ("C:\\12", true),
+                ("D:\\case\\docs\\plans\\x\\plan.md", true),
+                ("D:\\a b\\c.md", true),
+            ],
+        );
+        // Rows 1, 2, 10, 11, 13, 15, 16, 18, 20 and 23: the reference runs to the end of the line,
+        // so at the edge it is pressed down and inside the row it is untouched.
+        for line in [
+            "D:\\Developer\\BetterTerminal\\README.md",
+            "D:/Developer/BetterTerminal/README.md",
+            "docs/HANDOFF-2026-08-20.md",
+            "./test.md",
+            "file:///D:/Developer/BetterTerminal/test.md",
+            "file://localhost/D:/x/a.md",
+            "见 D:\\x\\a.md.",
+            "docs/a.md:13",
+            "C:\\12",
+            "  docs/plans/x/plan.md",
+        ] {
+            assert_eq!(
+                linked(&links, line, None).len(),
+                1,
+                "{line} is one link inside the row"
+            );
+            assert_eq!(
+                linked(&links, line, last_cell_of(line)),
+                [],
+                "{line} is pressed down when its own last cell is the row's"
+            );
+        }
+        // Row 12 is the same ruling for an address (scenario 69). Its printed host has one label,
+        // which this window never offered, so the row is asked at a host it would.
+        let row_12 = "https://host.invalid:8080/img/x.png";
+        assert_eq!(inferred_url_ranges(row_12, None).len(), 1);
+        assert_eq!(inferred_url_ranges(row_12, last_cell_of(row_12)), []);
+        // Rows 3, 5, 6, 17 and 22 (scenarios 70, 71, 72): the last cell is a delimiter the prose
+        // owns, so the candidate never reached it and both placements answer alike.
+        for line in [
+            "\"D:\\a b\\c.md\"",
+            "(D:\\x\\a.md)",
+            "（D:\\x\\a.md）",
+            "见 D:\\x\\a.md。",
+            "方案写完（docs/plans/x/plan.md）。",
+        ] {
+            assert_eq!(
+                linked(&links, line, None),
+                linked(&links, line, last_cell_of(line)),
+                "{line} answers alike at both placements"
+            );
+            assert_eq!(linked(&links, line, last_cell_of(line)).len(), 1);
+        }
+        // Rows 4, 8, 9, 14, 19 and 21 had no link at either placement and still have none: a gate
+        // that presses candidates down cannot turn "nothing" into one.
+        for line in [
+            "D:\\a b\\c.md",
+            "中文D:\\x\\a.md",
+            "README",
+            "file://server/share/a.md",
+            "见 D:\\x\\a.md，然后",
+            "docs/a.md:abc",
+        ] {
+            assert_eq!(linked(&links, line, None), []);
+            assert_eq!(linked(&links, line, last_cell_of(line)), []);
+        }
+    }
+
+    /// Scenario 1 and 2 — **a conflict, recorded rather than worked around.**
+    ///
+    /// `At D:\Program Files\Tool\run.ps1:12 char:3` cuts at the space and leaves `D:\Program`,
+    /// which on a great many machines is a real directory; the same shape comes out of `npm ERR!
+    /// path …`. The scenario list wants no link at all, and this window still draws one.
+    ///
+    /// It is not fixed here because every lexical rule that would fix it contradicts a ruling this
+    /// module already carries. Boundary table row 4 settles that an unquoted space ends a token and
+    /// that what follows it is a reference of its own, so "a candidate followed by a space and more
+    /// path-shaped text is suspect" would darken every `ls`-style line that prints two real paths
+    /// side by side. The discriminating fact is semantic and not lexical — `D:\Program` is a
+    /// *directory* and the reference continues into it — and reading it means probing the longer
+    /// candidates as well, which is disk work this slice is explicitly not allowed to add
+    /// (§7.1.5j's probe budget). Rows 3 and 4 of the same group *are* fixed, because an opening
+    /// quote is a declaration of extent and gives the evidence a bare space cannot.
+    #[test]
+    #[ignore = "§7.1.5k conflict: an unquoted space-cut prefix needs either a rule that contradicts \
+                boundary table row 4 or extra disk probes the budget forbids; see the doc comment"]
+    fn an_unquoted_path_cut_at_a_space_does_not_link_its_prefix() {
+        let links = ledger(
+            "D:\\case",
+            &[
+                ("D:\\Program", true),
+                ("D:\\Program Files\\Tool\\run.ps1", true),
+                ("D:\\Program Files\\nodejs\\node_modules\\x", true),
+            ],
+        );
+        assert_eq!(
+            linked(
+                &links,
+                "At D:\\Program Files\\Tool\\run.ps1:12 char:3",
+                None
+            ),
+            []
+        );
+        assert_eq!(
+            linked(
+                &links,
+                "npm ERR! path D:\\Program Files\\nodejs\\node_modules\\x",
+                None
+            ),
+            []
+        );
+    }
+
+    /// Scenario 64 — **a conflict, recorded rather than worked around.**
+    ///
+    /// A relative reference printed while the shell stood in `D:\repoA` must keep naming
+    /// `D:\repoA\src\main.rs` after the shell moves to `D:\repoB`, even though the old line is
+    /// still on the screen. [`PrintedPathLinks`] holds **one** working directory — the last one
+    /// reported — and every line on the screen is measured from it, so the old line re-points.
+    /// Carrying a resolution base per *line* means the transcript recording the directory each line
+    /// was printed under, which is a change to what a line is and not to how one is read.
+    #[test]
+    #[ignore = "§7.1.5k conflict: a per-line resolution base does not exist yet; the ledger holds \
+                one working directory for the whole screen"]
+    fn a_scrollback_relative_reference_keeps_the_directory_it_was_printed_under() {
+        let printed_under_a = ledger("D:\\repoA", &[("D:\\repoA\\src\\main.rs", true)]);
+        let moved_to_b = ledger(
+            "D:\\repoB",
+            &[
+                ("D:\\repoA\\src\\main.rs", true),
+                ("D:\\repoB\\src\\main.rs", true),
+            ],
+        );
+        assert_eq!(
+            linked(&printed_under_a, "src/main.rs", None),
+            linked(&moved_to_b, "src/main.rs", None),
+            "the old line names the file it named when it was printed"
+        );
+    }
+
+    /// Scenario 65 — **a conflict with a ruling shipped one day earlier.**
+    ///
+    /// A name the disk denied is never asked about again, which is what keeps a repainting screen's
+    /// bounded question budget for the names that need it (§7.1.5j, user report 2026-08-23, and the
+    /// test `a_path_the_disk_has_denied_is_never_asked_about_again` directly above). The scenario
+    /// list asks for the opposite: a file that did not exist at first print and is built afterwards
+    /// should become a link when the same text is printed again. Both cannot be true of a ledger
+    /// keyed by `PathBuf` alone; reconciling them needs a generation or an expiry on the negative
+    /// answer, which is a change to the ledger's contract rather than to this pass.
+    #[test]
+    #[ignore = "§7.1.5k conflict: a negative verdict is permanent by the 2026-08-23 budget ruling; \
+                giving it an expiry is a ledger change, not a lexer change"]
+    fn a_file_built_after_its_first_mention_can_still_become_a_link() {
+        let links = ledger("D:\\case", &[("D:\\case\\generated\\out.js", false)]);
+        let mut unknown = BTreeSet::new();
+        links.links_in("generated/out.js", None, &mut unknown);
+        assert_eq!(
+            unknown,
+            BTreeSet::from([PathBuf::from("D:\\case\\generated\\out.js")]),
+            "a second sighting is allowed to ask again"
         );
     }
 
