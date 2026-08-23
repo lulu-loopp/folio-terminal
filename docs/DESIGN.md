@@ -293,6 +293,8 @@ target  ← CreateTargetForHwnd(hwnd, topmost = true)
 
 **验收。** 全套测试绿（bt-app 2129，workspace 全绿），clippy `-D warnings` 与 `fmt --check` 干净。红测先红后绿逐条验过（红证记在片单里）：`answer(Discard)` 直接进 `Retiring` → 拍照步骤从走查里消失；`written` 忽略参数 → 写不下去也照样藏窗；`deadline` 返回 `None` → 浏览器不报到就永远等下去；`save_dirty` 停在第一个失败 → 名单短一项；`session_windows` 丢掉未答复的那一半 → 没人拒绝过的窗不见了；`retire_window` 里加一句 `vault_this_window` → 金库的门从一个变成两个；`flush_judged` 恒返回 `Ok` → 退出无从得知文档没落地；三个按钮的矩形互换 → 位置断言变红。
 
+**实机（debug 版，`APPDATA` + `LOCALAPPDATA` 隔离，`BT_PTY_DUMP`，本地静态服务不出外网）。** 三窗（`Ctrl+Shift+M` 开出两扇），一窗挂 `BT_WEB_DEV` 的本地页面 —— `Ctrl+Shift+Q` → 进程退、`session.json` 里 `windows` = **3**、`recent` = **0**、`session.lock` 被摘掉；重启后恢复卡列出另外两扇窗的 tab，按 Restore 三窗按各自的矩形（98/246/294）全部回来，第三扇顶着它被 blur 提交的手动名。带一份脏预览再来一次：卡画在**每一扇**窗上，写着 `Save changes before quitting?` / `Unsaved: notes.txt`，三个按钮 `Save｜Cancel｜Discard`；Esc **取消** → 卡消失、三窗一扇没动、脏点还在、磁盘原样、恢复卡回到原位继续问；再 `Ctrl+Shift+Q` 按 **Discard** → 进程退、磁盘上的 `notes.txt` 一个字节没变、`windows` = **5**（三扇开着的 + 两扇没人答复的，「未答复不算否」照钉活着）、`recent` 仍是 **0**；同一路按 **Save** → 进程退、`notes.txt` 在磁盘上真的带上了刚才敲进去的字。收尾：属于本次运行的 `msedgewebview2` **0 个**。**探针教训一条**：`tasklist` 与 `Win32_Process` 会把已经退出、但句柄还被别人握着的进程照常列出来（连内存数字一起），`Process.GetProcessById` 才是权威 —— 差点据此误报一次「退出挂死」。
+
 ## 3. 内容模型
 
 ### 3.1 内容生命周期事件表（v3.7：单一所有权版）
