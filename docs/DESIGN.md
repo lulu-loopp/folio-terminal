@@ -318,6 +318,42 @@ target  ← CreateTargetForHwnd(hwnd, topmost = true)
 
 **实机（debug 版，`APPDATA` + `LOCALAPPDATA` 隔离，`BT_PTY_DUMP`，本地静态服务不出外网）。** 三窗（`Ctrl+Shift+M` 开出两扇），一窗挂 `BT_WEB_DEV` 的本地页面 —— `Ctrl+Shift+Q` → 进程退、`session.json` 里 `windows` = **3**、`recent` = **0**、`session.lock` 被摘掉；重启后恢复卡列出另外两扇窗的 tab，按 Restore 三窗按各自的矩形（98/246/294）全部回来，第三扇顶着它被 blur 提交的手动名。带一份脏预览再来一次：卡画在**每一扇**窗上，写着 `Save changes before quitting?` / `Unsaved: notes.txt`，三个按钮 `Save｜Cancel｜Discard`；Esc **取消** → 卡消失、三窗一扇没动、脏点还在、磁盘原样、恢复卡回到原位继续问；再 `Ctrl+Shift+Q` 按 **Discard** → 进程退、磁盘上的 `notes.txt` 一个字节没变、`windows` = **5**（三扇开着的 + 两扇没人答复的，「未答复不算否」照钉活着）、`recent` 仍是 **0**；同一路按 **Save** → 进程退、`notes.txt` 在磁盘上真的带上了刚才敲进去的字。收尾：属于本次运行的 `msedgewebview2` **0 个**。**探针教训一条**：`tasklist` 与 `Win32_Process` 会把已经退出、但句柄还被别人握着的进程照常列出来（连内存数字一起），`Process.GetProcessById` 才是权威 —— 差点据此误报一次「退出挂死」。
 
+### 2.10 一个 tab 换一扇窗：App 级身份与移交事务（多窗块 片 F1b，2026-08-23，已落地；`crates/bt-app/src/{main,files,git,preview,web_thumb}.rs`、`crates/bt-term/src/session.rs`）
+
+**`TabId` 由 App 铸号,进程内永不复用;`SeatId` 保持 tab 内局部。** 方案的 A 案原样落地(`plan.md` v3 增补「身份 A 案」)。此前 `TabId` 来自 `WindowRuntime::next_tab_id`——**每扇窗一个从 1 开始的计数器**,于是 `TabId(1)` 在每扇窗里都存在;这在"tab 不能离开它出生的那扇窗"成立时是够用的,F1b 让它不成立。改法是把计数器升一层(`App::tab_ids: TabIds`),八扇门(进程首窗、`open_window`、新 tab、撤销关闭/Recent、恢复卡的"是"、合并顶出、跨 tab 移动顶出、抽叶升格)全部向它要号。**永不复用是一条比唯一更贵的性质**:一个发给了随后被放弃的 tab 的号(合并没顶出任何东西、布局拒绝了抽叶)**作废而不回收**——号段留个洞不花钱,而一个发出去两次的号是一条还在飞的回执落进另一个 tab。`TabIds` 因此**没有归还的门**,这个缺席就是那条规则本身。
+
+**「谁是权威」写死:tab 站在哪扇窗的 strip 里,就是那扇窗的。** 这一片要把两条线收敛成一套。`6932e5a` 把四条 worker 答案通道改成「App 抽一次 + 答案自带 `window: WindowId`,每扇窗按它取件」;方案 v4 ① 要的是「App 抽一次 + 按全局 `TabId` 找唯一 owner 投递」。冲突点是**在途回执**:请求上写的窗是**问题从哪里来**,而 tab 可以在问与答之间被搬走,那时候那扇窗恰恰是答案**不该**去的那一扇。所以裁决是——
+
+- **权威 = strip**。`Runtime::owns` 直接问"这个 tab 在我这儿吗",而 strip 是唯一写这件事的东西(开 tab、关 tab、移交)。`FolioApp::owner_of` 是它的 App 侧读法,**线性扫描而不是一张 `HashMap<TabId, WindowId>`**:一张表是同一个事实的第二个作者,要靠每一个动词记得同步,而它错的那一天不会有人发现。
+- **派生 = 回执上的 `window`**。它不再对任何"属于某个 tab"的答案有发言权。
+- 但它没有被删掉,因为**不是每个答案都属于一个 tab**。`AnswerOwner` 因此有两支:`Tab(TabId)` 与 `Window(WindowId)`。走 `Window` 的三样各有同一个理由——**它们落进去的东西不跟着 tab 走**:浮窗的 epoch 由开它的那扇窗铸、按裁决横跨该窗的所有 tab(§7.1.2),所以没有哪个 tab 能被问"你还在吗"(这正是窄复核「浮窗等不以 tab 为 owner 的 host 必须保持既有 epoch/窗口路由」的字面执行);hover 的 peek cache 与飞出卡的待答账本挂在 `WindowRuntime` 上,tab 走了它们不走,答案跑去别处等于留下一条永远 `Pending`,而一个问题永远悬着的图片就是一张永远不会到的图片。
+
+**在途回执的三条合同,各自一条钉。**
+
+1. **整 tab 跨窗:回执随 tab 到新窗。** 由上面那条权威直接给出——`answers_for` 现在问的是「这是我的吗」而不是「这写的是我吗」。钉:`an_answer_follows_the_tab_that_asked_it_into_another_window`。
+2. **dead `LeafId` 的旧回执丢弃。** 号不回收,所以「没有任何 strip 认领」只有一种读法:那个 tab 关了。丢弃就是关 tab 一直以来的取消,以一条掉在地上的结果的形式到达。钉:`an_answer_for_a_tab_that_has_closed_is_claimed_by_nobody`。
+3. **pane 升格换号:旧的丢 + pending 清 + 以新 `LeafId` 重发。** v3 说"旧号的在途回执随源 tab 之死自然失配",而**源 tab 通常没有死**——一个 pane 只有在它的 tab 还有别的 pane 时才升得了格,所以那句话作废(窄复核 §2 点破)。安全那一半仍然由构造给出:旧 tab 已经没有那个 seat。**活性那一半是这一片补的**:说「已经问过了」的四本账全都跟着 pane 走——目录缓存里的 `DirNode::Pending`、git 缓存里的 `GitSlot::Pending`、buffer 上已花掉的 `claim_head_read`、session 自己的在途集合——一本活过一个永远不来的答案的账,就是一列永远停在「Loading …」的文件列。`forget_work_in_flight_for_seat` 在 leaf 换号的那一刻(`move_seat_content` 与 `pane_into_new_tab` 两处,都用**落地后**的 seat)把四本账清掉,寻常的每帧提问于是用新名字重新问一遍。**只清 pending,不清已有的答案**:一个只是换了 tab 的列不该闪回「Loading …」再重跑一次 `git status`。钉:`a_pane_promoted_into_its_own_tab_asks_its_outstanding_questions_again`。
+
+**移交本体 = App 级事务,三段,只有中间那段能半途而废。** `FolioApp::transfer_tab(tab, into)` 是那扇门,而且刻意是一个只收两个 id 的普通函数:手势不是这一片的(拖拽是 F1c 的、菜单动词是 F2 的),测试与它们从同一扇门进。**源窗不是参数**——`owner_of` 是它唯一的权威,让调用方说等于请来第二个。
+
+- **prepare** 回答一切不必触碰任何东西就能回答的问题:tab 在不在、目标窗在不在、是不是已经在那儿、以及**每一张页在两侧都叫不叫得出名字**(见下)。这里的拒绝什么都没改。
+- **平台交接**是逐座位的 `WebSeat::rehost`(F1a 的窄合同,这一片是它写明在案的调用方),也是唯一一段动了东西之后还能失败的。引擎拒绝交出的那张页由平台自己的补偿放回源窗(`RehostReport::SourceKept`),然后**本函数把已经过去的那几张按相反顺序送回来**,再拒绝。`Rebuilding` 不算失败:页内状态确实没了、报告如实说了,但地址已经是目标窗的,tab 必须跟着它走。
+- **model commit** 之后没有任何可失败的一步:剪 strip、搬两张按 pane 存放的窗级活状态(引擎与它们的最后一帧)、重绑唤醒、丢掉队列位置、一次记账。
+
+**七张表不用搬,因为 tab 就是那个结构体。** shell、文件列、读过的目录、仓库、Git 滚动位置、提交图、整个预览视图全都是 `TabState` 的字段,`Vec<TabState>` 一挪它们就到了。**预览 watcher 也不用安排**:`watched_preview_files` 走的是自己那扇窗的每一个 tab,所以目标窗下一轮自己把文件收进来、源窗自己把它们放掉——验证而不是安排,这是更好的那一种。**注意力券丢掉而不是带走**:一张券是**某一扇窗**队列里的位置,由那扇窗的序号铸出、意思是"在这里,它等了你多久";带进另一扇窗它就是一个比那扇窗发过的任何号都老的序号,会插到它刚加入的队伍前面去。响铃本身没动,所以还在等的 pane 下一轮由目标窗自己的计数器发一张新的——这是同一句"你还没答复它",用新窗自己的话说。
+
+**PTY 唤醒重绑,而失败模式是沉默不是错画(审阅 #9)。** reader 线程在 spawn 那一刻拿到它的 `OutputWake` 并终生持有;此前那是某一扇窗 `PtyWakeSignal` 的克隆。信号是一个位,由 drain 放下;一个 tab 已经搬进 B 窗的 shell 仍然举 A 窗的位,**而抽走最后一个 tab 的移交会把 A 窗关掉,一个关掉的窗再没有人替它放下那个位**——于是那之后第一次举起发出一条消息、之后每一次都在 `swap` 处返回,循环没有别的事可做就坐在 `ControlFlow::Wait` 里,而 B 窗里的 shell 正往一个没人读的环里打字。所以指向多加一层,粒度是**每片叶**(叶才是会动的东西:升格成 tab、移进别的 tab、随 tab 换窗):`LeafWake` 是 reader 线程闭包与 `LeafSession` 共同指名的那个格子,`rebind` 是它唯一的写者,跑在不许失败的 model commit 里。`PtyWakeSignal` 也因此不再发闭包——**一个 shell 劝不动的唤醒,正是让搬走的 shell 继续叫一扇它已经离开的窗的那个东西**。
+
+**这一片停在一件事上,写在这里而不是抹平。** 窗级的两样按 pane 存放的活状态——`web`(一个座位一个引擎)与 `web_thumbs`(一个座位一帧)——是拿**裸 `SeatId`** 做键的,而 `SeatId` 只在它的 tab 内唯一:每一个被抽出来成 tab 的 pane 都从 `SeatId(1)` 重新起号(`seats::Seats::lone_seat`)。所以一扇窗的两个 tab 可以各有一个 `SeatId(1)`,而那张 map 只装得下一个。**这是今天就活着的缺陷,不是移交引入的**:把一个 `.html` 开进独立 tab 两次,第二个 tab 的地址会去导航**第一个** tab 的页——因为 `open_web_page_on` 复查的是 `window.web.contains_key(&seat)`,旁边没有 tab。修法是把这两张表、以及它们下面 compositor 的 visual 表一起改成按 `LeafId` 做键,那是**网页块**的改动而不是这条事务的。F1b 不把它悄悄弄得更糟:一次叫不出名字的移交**被拒绝**(`TransferRefusal::AmbiguousPage`),拒绝本身就是那笔前置欠账的说明。判定是一个纯函数 `page_key_collision`,两种叫不出名字的方式——号在源窗挂着页而源窗另一个 tab 也有这个号(说不出那台引擎是谁的),或号在目标窗已经挂着页(搬进去会顶掉它)。钉:`a_page_that_cannot_be_named_refuses_the_move`。
+
+**红测与钉。** 窄复核 §2 钉死的那条 drain 红测(结果排成「窗 B、窗 A、窗 B」,App 一次 drain 后三项各落唯一 owner,窗口遍历序反转结果不变)**写下来时就是绿的——它已被 routing 线(`6932e5a`)提前偿付**,如实记档而不造假红;钉子照收(`three_answers_in_b_a_b_order_each_land_with_their_one_owner`),并且用它自己写下的 MUTATION 验过会红(让 `answers_for` 整队取走 → 先被遍历的窗拿到三项、另一扇拿到零项,两个方向都是)。真红的三条:身份簇(`TabIds` 不存在的编译错误)、pane 升格活性(`wanted` 是 `[]` 而应为 `[""]`)、事务形状(`transfer_tab` 不存在)。
+
+**验收。** 全套测试绿(workspace `--no-fail-fast` 全绿,bt-app 2158),clippy `-D warnings` 与 `fmt --check` 干净。**实机(debug 版,`APPDATA`/`LOCALAPPDATA`/UDF 全隔离到临时目录,`BT_PTY_DUMP`,本地静态服务不出外网,`BT_TRANSFER_DEV` 脚本一次移交)**:A 窗一个 tab、终端 + 一张活页(`boot=JTXDU75L tick=6`),B 窗一个 tab;移交后 `Moved(TabTransfer { pages: [(SeatId(2), Moved)], source_emptied: true })`——**页是 `Moved` 而不是重建**,而 `boot id` 跨越移交**一字未变**(重建会换一个,这是 F1a 立的取证法);移交后进程只剩一扇窗(相机自己作证:`two-window-shot.ps1` 拒绝拍照,理由是"pid 只有 1 扇真窗");搬过去的 shell 的唤醒在三个取样点都指着它当下所在的那扇窗;drain 计数 5 → 5 → **36**,即源窗已经不在之后那个 shell 仍被抽了三十一次,`BT_PTY_DUMP` 里 `BT-TRANSFER-ALIVE` 与随后的提示符都在。照片是移交之后的目标窗:strip 上两个 tab,左边是搬过来的终端(命令与它的输出),右边是同一张页,`boot id` 仍是 `JTXDU75L`、`ticks` 353、`performance.now()` 100949(**没有归零**)。收尾:属于本次运行的 `folio` 与 `msedgewebview2` **各 0 个**。
+
+![移交之后的目标窗:两个 tab,搬过来的 shell 还在说话,同一张页还是同一个 boot id](spikes/artifacts/tab-transfer/moved-tab-in-the-target-window.png)
+
+**欠账三笔,都记在这里。** ① 上面那条 `web` / `web_thumbs` 按 `LeafId` 重新做键的前置改动(网页块的单),在它清掉之前,同号页的移交是拒绝而不是搬运;② 一张**首次解码**还在飞的内嵌图片,在 pane 升格时不会被重新索取——装它的队列没有自己的在途账本可清,字节随任务走了,图片要等源码重印才回来(`DualPlaneSession::forget_work_in_flight` 的 doc 写着这一条);③ `BT_TRANSFER_DEV` 这道验收门是这一片的脚手架,F1c 把真手势接上以后它该退役。
+
 ## 3. 内容模型
 
 ### 3.1 内容生命周期事件表（v3.7：单一所有权版）

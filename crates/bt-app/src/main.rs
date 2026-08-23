@@ -426,6 +426,55 @@ impl BackgroundDecodeMailbox {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct TabId(u64);
 
+/// **Every tab this process opens, numbered once — and no number given out
+/// twice** (F1b; `plan.md` 的 v3 增补「身份 A 案」, closed by v4 ①).
+///
+/// A `TabId` used to come off `WindowRuntime::next_tab_id`, a counter that
+/// started again in every window, so `TabId(1)` named a tab in each of them at
+/// once. That was survivable for exactly as long as two things held: a tab could
+/// not leave the window it was opened in, and every address travelling on a
+/// worker lane carried the [`WindowId`] it had been asked from. F1b ends the
+/// first, and the second cannot be repaired by carrying the window harder — a
+/// tab that moves *while an answer is in flight* makes the window it was asked
+/// from the wrong window by the time the answer lands.
+///
+/// So the counter comes up a layer, and two properties follow:
+///
+/// * **Unique across the process.** This is what lets an answer be routed by the
+///   tab it names and nothing else — [`Runtime::owns`] claims an answer because
+///   the tab is standing in this window *now*, not because a `WindowId` stamped
+///   at request time still agrees. The window on the wire stops being an
+///   authority over anything a tab owns.
+/// * **Never reused, for the life of the process.** A number handed to a tab
+///   that was then abandoned — a merge that ejected nothing, a tear-out the
+///   layout refused — is *spent*, not returned. A gap in the numbering costs
+///   nothing; a number given out again is an answer still in flight for a closed
+///   tab landing in whichever tab inherited its number. There is deliberately no
+///   door here for giving one back, and the absence is the whole of the rule.
+///
+/// `SeatId` is untouched and stays local to its tab ([`LeafId`] says so): a seat
+/// only ever has to be unique among the seats of the tab it moves with, and a
+/// tab moves whole.
+struct TabIds {
+    next: u64,
+}
+
+impl TabIds {
+    /// The first tab this process opens is `TabId(1)`, exactly as it always has
+    /// been. The numbering starts where it started; it just no longer starts
+    /// over in every window.
+    fn new() -> Self {
+        Self { next: 1 }
+    }
+
+    /// One number, and it is gone.
+    fn mint(&mut self) -> TabId {
+        let id = TabId(self.next);
+        self.next += 1;
+        id
+    }
+}
+
 /// Which shell a unit of decoration work belongs to.
 ///
 /// A tab was a sufficient address while a tab was one shell. Since U12 it is a tree of them, and
@@ -439,17 +488,20 @@ struct LeafId {
     seat: SeatId,
 }
 
-/// One shell, addressed from **outside the window it stands in**.
+/// One shell, and the window it was standing in **when it asked**.
 ///
-/// [`LeafId`] says a seat is only unique inside its tab. This says the next
-/// sentence of the same paragraph: a [`TabId`] is minted by a counter that starts
-/// again in every window, so a `LeafId` names one shell in *each* window at once.
-/// The decoration lanes are the application's (§2.4 rule 1) and each has one
-/// answer channel for the whole process, so what travels on them has to carry the
-/// window as well — otherwise a window matching an answer against its own tab of
-/// that number takes work that was never its own and throws it away, which is the
-/// 2026-08-23 report: in every window but the first, no printed path was ever
-/// verified and no hovered picture ever decoded.
+/// [`LeafId`] says a seat is only unique inside its tab; since F1b a [`TabId`] is
+/// unique in the process ([`TabIds`]), so the leaf alone names one shell
+/// anywhere. The window beside it is therefore no longer a disambiguator, and
+/// carrying it is not a second opinion about where the answer goes: it is there
+/// for the completions on this lane that are the **window's** own — the peek
+/// cache and the hover flyout, whose pending ledgers sit on `WindowRuntime` and
+/// stay put when a tab leaves. [`MathWorkerResult::owner`] is where the two are
+/// told apart, and it is the only reader of this field that decides anything.
+///
+/// It records where the question came from, not where the answer must go. A tab
+/// that moves between the asking and the answering makes those two different
+/// windows, and the one that matters is the second.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct ShellAddress {
     window: WindowId,
@@ -459,6 +511,37 @@ struct ShellAddress {
 struct MathWorkerResult {
     leaf: ShellAddress,
     completion: DecorationWorkerCompletion,
+}
+
+impl MathWorkerResult {
+    /// **Who this answer belongs to**, which on this lane is a question about
+    /// the *completion* and not about the address.
+    ///
+    /// The four that land in a [`bt_term::DualPlaneSession`] — a formula, a
+    /// decoded picture, a resampled raster, a verified path — belong to the pane
+    /// that asked, and a pane travels inside its tab. The two hover completions
+    /// belong to the window: `apply_math_results` already says so in the comment
+    /// above them ("the window's, not a seat's"), and this is that sentence made
+    /// into the routing rather than left as a note beside it.
+    ///
+    /// A preview's resample is a tab's: it is claimed by whichever pane of this
+    /// window's tabs is holding that exact target, so it has to reach the window
+    /// those tabs are in.
+    fn owner(&self) -> AnswerOwner {
+        match self.completion {
+            DecorationWorkerCompletion::PeekImage { .. }
+            | DecorationWorkerCompletion::PeekScaledImage { .. } => {
+                AnswerOwner::Window(self.leaf.window)
+            }
+            DecorationWorkerCompletion::Math { .. }
+            | DecorationWorkerCompletion::InlineImage { .. }
+            | DecorationWorkerCompletion::ScaleInlineImage { .. }
+            | DecorationWorkerCompletion::PreviewScaledImage { .. }
+            | DecorationWorkerCompletion::VerifiedPath { .. } => {
+                AnswerOwner::Tab(self.leaf.leaf.tab)
+            }
+        }
+    }
 }
 
 enum MathWorkerRequest {
@@ -4114,6 +4197,19 @@ struct DpiSnapshot {
 /// seat, and `bt-app` — the one crate allowed to know both — holds the pairing.
 struct LeafSession {
     pty: Option<PtySession>,
+    /// **Which window this shell nudges when it has spoken** — see [`LeafWake`].
+    ///
+    /// Held here rather than only inside the reader thread's closure because it
+    /// is the one end a transfer can reach: the thread was handed its wake-up at
+    /// spawn and will never be handed another, so the cell both of them name is
+    /// where "which window" is allowed to change.
+    ///
+    /// `Some` exactly when [`Self::pty`] is: a wake-up is the other end of a
+    /// reader thread, so a pane driven by `BT_PROBE_INPUT` — which has no ConPTY
+    /// behind it — has nothing to re-point and says so, rather than holding a
+    /// cell no thread reads.
+    #[allow(dead_code, reason = "F1c's drag and F2's menu row press the transfer")]
+    wake: Option<Arc<LeafWake>>,
     /// Which of [`profiles::PROFILES`] this pane's shell was started from.
     ///
     /// **Here, and not on the tab.** It is a fact about the process — this is
@@ -4642,13 +4738,11 @@ impl PtyWakeSignal {
         }
     }
 
-    /// One shell's wake-up. Every shell in this window shares the one bit,
-    /// because the loop's answer to any of them is the same: drain them all.
-    fn wake(&self) -> OutputWake {
-        let signal = self.clone();
-        Arc::new(move || signal.raise())
-    }
-
+    /// Every shell **currently** in this window shares the one bit, because the
+    /// loop's answer to any of them is the same: drain them all. Which shells
+    /// those are is [`LeafWake`]'s question since F1b, and this type no longer
+    /// hands out a closure of its own — a wake-up a shell could not be talked out
+    /// of is exactly what made a moved shell go on nudging a window it had left.
     fn raise(&self) {
         if !self.raised.swap(true, Ordering::AcqRel) {
             let _ = self.proxy.send_event(AppEvent::PtyOutput);
@@ -4660,6 +4754,78 @@ impl PtyWakeSignal {
     /// on the next turn instead of waiting for something else to happen.
     fn accept(&self) {
         self.raised.store(false, Ordering::Release);
+    }
+}
+
+/// **One shell's wake-up, pointed at a window that can change** (F1b, `plan.md`
+/// F1b「PTY wake 重绑」, 审阅 #9).
+///
+/// A reader thread is handed its [`OutputWake`] once, at spawn, and holds it for
+/// the life of the shell. Until F1b that was a clone of one window's
+/// [`PtyWakeSignal`], and it was right for as long as a shell could not leave the
+/// window it was started in.
+///
+/// **What goes wrong without this is not "the wrong window is nudged" — it is
+/// that nothing is.** The signal is a bit that a drain lowers. A shell whose tab
+/// has moved into window B goes on raising window A's bit; if A is still open
+/// this is merely wasteful, because `about_to_wait` drains every shell of every
+/// window on every turn. But a tear-out that empties A closes it, and nobody
+/// lowers a closed window's bit again. So the first raise after that posts one
+/// message and every raise after it returns at the `swap` — and the loop, with
+/// nothing else to do, sits in `ControlFlow::Wait` while a shell in B prints
+/// into a ring nobody reads. The failure is *silence*, and the review's own
+/// sentence for the acceptance is exactly that shape: a quiet shell in the target
+/// window, delayed output, an otherwise idle loop.
+///
+/// The fix is one indirection and it is per **leaf**, not per tab or per window,
+/// because a leaf is what moves: promoted into a tab of its own, moved into
+/// another tab, carried between windows inside its tab. The closure the reader
+/// thread holds captures this cell; the cell says which window's bit to raise;
+/// [`Self::rebind`] is the only writer, and it runs in the model commit of a
+/// transfer where nothing may fail.
+struct LeafWake {
+    signal: std::sync::Mutex<PtyWakeSignal>,
+}
+
+impl LeafWake {
+    fn bound_to(signal: &PtyWakeSignal) -> Arc<Self> {
+        Arc::new(Self {
+            signal: std::sync::Mutex::new(signal.clone()),
+        })
+    }
+
+    /// The closure the reader thread is given, once and for the life of the
+    /// shell — it names this cell and never a window.
+    fn output(self: &Arc<Self>) -> OutputWake {
+        let cell = Arc::clone(self);
+        Arc::new(move || {
+            cell.signal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .raise();
+        })
+    }
+
+    /// **This shell now nudges that window.**
+    #[allow(dead_code, reason = "F1c's drag and F2's menu row press the transfer")]
+    fn rebind(&self, signal: &PtyWakeSignal) {
+        *self
+            .signal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = signal.clone();
+    }
+
+    /// Which bit this shell is raising — the identity, so a transfer can assert
+    /// it has actually moved the wake-up and not merely intended to.
+    #[allow(dead_code, reason = "F1c's drag and F2's menu row press the transfer")]
+    fn bit(&self) -> Arc<AtomicBool> {
+        Arc::clone(
+            &self
+                .signal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .raised,
+        )
     }
 }
 
@@ -4693,6 +4859,14 @@ struct App {
     /// window — which would have made every later window's device the property
     /// of whichever window happened to open first.
     gpu: GpuContext,
+    /// **The one counter that numbers tabs** (F1b). See [`TabIds`] for why it is
+    /// here and not on the window, and for what a window gives up by not having
+    /// one: nothing, because a tab was never a fact about a window — only about
+    /// which window it is standing in this second.
+    tab_ids: TabIds,
+    /// F1b's acceptance harness, when `BT_TRANSFER_DEV` asked for one — see
+    /// [`TransferProbe`]. `None` in every run nobody asked, which is every run.
+    transfer_probe: Option<TransferProbe>,
     event_proxy: EventLoopProxy<AppEvent>,
     math_worker: MathWorker,
     math_worker_running: bool,
@@ -5076,7 +5250,6 @@ struct WindowRuntime {
     renderer: WindowRenderer,
     tabs: Vec<TabState>,
     active_tab: usize,
-    next_tab_id: u64,
     /// The one bit every shell in this window nudges the loop through. See
     /// [`PtyWakeSignal`].
     pty_wake: PtyWakeSignal,
@@ -5814,7 +5987,8 @@ struct WindowRuntime {
     focus_reveal: RevealTween,
     /// **The next place in the attention queue** (§7.1.5b P1-8).
     ///
-    /// The window's own counter, like `next_tab_id` above it, and per window for
+    /// The window's own counter — and, since F1b took the tab numbering up to
+    /// [`TabIds`], the only one left down here. Per window for
     /// the reason the badge is per title bar: a queue is a claim on *your*
     /// attention in *this* window, and two windows sharing one counter would make
     /// "who has been waiting longest" a question about a program rather than
@@ -6685,10 +6859,14 @@ struct {name} {{
     ///
     /// The four decoration lanes are the application's (§2.4 rule 1) and each has
     /// one answer channel for the whole process, while every address travelling on
-    /// them is minted by a counter that starts again in every window: `TabId` off
-    /// `WindowRuntime::next_tab_id`, a float's epoch off that window's own
-    /// `FloatHost`, and the [`LeafId`] built out of the first. So `TabId(1)` names
-    /// a tab in *every* window at once.
+    /// them was, on the day this was reported, minted by a counter that started
+    /// again in every window: `TabId` off the window's own `next_tab_id`, a
+    /// float's epoch off that window's own `FloatHost`, and the [`LeafId`] built
+    /// out of the first. So `TabId(1)` named a tab in *every* window at once.
+    /// (F1b took the tab numbering up to the application — see [`TabIds`] — and a
+    /// float's epoch is still the window's, which is why
+    /// [`AnswerOwner`] has two cases. The rule below is unchanged by that: it is
+    /// about who may drain, not about how an address is spelled.)
     ///
     /// While each window called `try_recv` on those receivers in turn, the first
     /// window in the opening order took **every** pending answer, matched the ones
@@ -6724,17 +6902,50 @@ struct {name} {{
             );
         }
     }
+
+    /// PIN (F1b) — **no lane claims an answer by the window it was asked
+    /// from.**
+    ///
+    /// The half the routing line could not pay, because until [`TabIds`] there
+    /// was nothing else to claim by. A `WindowId` written onto a request is a
+    /// record of where the question came from; a tab that moves while the answer
+    /// is out makes that the one window the answer must *not* go to. Every lane
+    /// therefore asks [`Runtime::owns`], which reads the claim off the strip.
+    ///
+    /// MUTATION: put `|response| response.window` back into any one of the four
+    /// and that lane stops following its tab, silently — every window still works
+    /// perfectly on its own, and only a tear-out shows it.
+    #[test]
+    fn no_lane_claims_an_answer_by_the_window_it_was_asked_from() {
+        for lane in [
+            "apply_preview_results",
+            "apply_files_results",
+            "apply_git_results",
+            "apply_math_results",
+        ] {
+            let body = fn_body(lane);
+            assert!(
+                body.contains("self.owns("),
+                "`{lane}` takes its own out of the batch by asking whether this \
+                 window owns the answer, and there is one such question"
+            );
+            assert!(
+                !body.contains(".window)"),
+                "`{lane}` may not read the window off the answer: that field \
+                 records where the question came from, not where the answer goes"
+            );
+        }
+    }
 }
 
 /// **Take one window's answers out of the batch, and leave every other window's
 /// exactly where they were** (user report, 2026-08-23).
 ///
 /// The four decoration lanes are the application's (§2.4 rule 1) and each has one
-/// answer channel for the whole process, while every address travelling on them —
-/// a [`TabId`], a float's epoch, the [`LeafId`] built out of the first — is minted
-/// by a counter that starts again in every window. So the application is what
-/// drains a lane, once, and this is the step each window then performs on what
-/// came out.
+/// answer channel for the whole process. So the application is what drains a
+/// lane, once, and this is the step each window then performs on what came out —
+/// [`AnswerOwner`] is what "its own" means, and since F1b that is a question
+/// about the tab an answer names rather than about the window it was asked from.
 ///
 /// A window that *drained* instead took every pending answer, matched the ones
 /// belonging to another window's `TabId(1)` against its own tab of that number,
@@ -6749,22 +6960,240 @@ struct {name} {{
 /// The order of what is taken is preserved, and so is the order of what is left:
 /// a lane's answers are a sequence and re-ordering them here would be a second
 /// place that decides which of two reads of one directory is the newer.
-fn answers_for<T>(
-    batch: &mut Vec<T>,
-    window: WindowId,
-    address: impl Fn(&T) -> WindowId,
-) -> Vec<T> {
-    let mut mine = Vec::new();
+fn answers_for<T>(batch: &mut Vec<T>, mine: impl Fn(&T) -> bool) -> Vec<T> {
+    let mut taken = Vec::new();
     let mut theirs = Vec::with_capacity(batch.len());
     for answer in batch.drain(..) {
-        if address(&answer) == window {
-            mine.push(answer);
+        if mine(&answer) {
+            taken.push(answer);
         } else {
             theirs.push(answer);
         }
     }
     *batch = theirs;
-    mine
+    taken
+}
+
+/// **Who an answer belongs to** — and therefore which window may take it out of
+/// the one batch the application drained (F1b).
+///
+/// Two owners and not one, because two different things ask these four lanes.
+///
+/// Until F1b the answer was always "the window that asked", stamped on the
+/// request and read back off the response, because a `TabId` came off a counter
+/// that started again in every window and so named nothing on its own. That
+/// stopped being an answer the moment a tab could move: between a question going
+/// out and its answer coming back, the reader can carry the tab into another
+/// window, and the window that asked is then the one window the answer must
+/// *not* go to. [`TabIds`] is what makes the better address available — a
+/// process-unique number that names one tab wherever it is standing.
+///
+/// So the `WindowId` on the wire stops being an authority over anything a tab
+/// owns, and becomes what it always literally was: the name of a window, for the
+/// answers that are a *window's* own. There is one author for each fact — the
+/// strip a tab is standing in says which window has that tab, and nothing else
+/// gets a vote.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AnswerOwner {
+    /// **A tab**, which stands in exactly one window at a time and carries its
+    /// outstanding answers with it when it moves. A number no window's strip
+    /// holds is a tab that has closed — never one that was renumbered, because
+    /// [`TabIds`] does not hand a number back — so an answer nobody claims is the
+    /// cancellation a closed tab already was, arriving as a dropped result.
+    Tab(TabId),
+    /// **A window itself.** Three kinds of answer land here and each has the same
+    /// reason: what they land *in* does not travel with a tab.
+    ///
+    /// A **float**'s epoch is minted by the window that opened it and it floats
+    /// across that window's tabs by ruling (§7.1.2), so there is no tab that can
+    /// be asked whether it is still there — this is `codex-final.md` §2's
+    /// instruction that a host which is not a tab keeps its existing window
+    /// routing rather than being pressed into the `TabId` branch. The **peek
+    /// cache** and the **hover flyout** keep their pending ledgers on
+    /// `WindowRuntime`; an answer that went somewhere else would leave a
+    /// `PeekCacheEntry::Pending` standing for good, and a picture whose question
+    /// is permanently outstanding is a picture that never arrives.
+    Window(WindowId),
+}
+
+/// **May this window take this answer?**
+///
+/// Free and total so the rule can be read without a `Runtime` — the only two
+/// facts it needs are the window's name and the tabs standing in its strip, and
+/// [`Runtime::owns`] is the one caller that supplies them.
+fn claimed_by(owner: AnswerOwner, window: WindowId, tabs: impl IntoIterator<Item = TabId>) -> bool {
+    match owner {
+        AnswerOwner::Tab(tab) => tabs.into_iter().any(|open| open == tab),
+        AnswerOwner::Window(id) => id == window,
+    }
+}
+
+/// **Why a tab was not moved into another window** (F1b).
+///
+/// Every one of these is decided in the transaction's *prepare*, before anything
+/// has been asked of a compositor or a controller — except the last, which is the
+/// platform saying no and putting the page back where it was.
+#[allow(dead_code, reason = "F1c's drag and F2's menu row are the callers")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TransferRefusal {
+    /// No open window holds that tab. It closed while the gesture was in the
+    /// air, which is a timing the platform is entitled to and not a defect.
+    NoSuchTab(TabId),
+    /// The window it was to move into is not open.
+    NoSuchWindow(WindowId),
+    /// It is already there.
+    AlreadyThere,
+    /// **A page could not be told apart from another tab's** — see
+    /// [`page_key_collision`], the one thing this slice stopped at.
+    AmbiguousPage(SeatId),
+    /// The platform refused the handoff and compensated: the page is still on
+    /// the source window at the bounds it had, so the tab stays where it is
+    /// ([`webhost::RehostReport::SourceKept`]).
+    PageKept(SeatId, String),
+}
+
+/// **What one tab's move between windows came to** (F1b).
+#[allow(dead_code, reason = "F1c's drag and F2's menu row are the callers")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TabTransfer {
+    tab: TabId,
+    from: WindowId,
+    into: WindowId,
+    /// What each page on the tab did, in seat order. `Moved` is the whole page;
+    /// `Rebuilding` is an honest loss reported rather than smoothed; `AddressOnly`
+    /// is a seat that had no live page to hand over.
+    pages: Vec<(SeatId, webhost::RehostReport)>,
+    /// Whether the window the tab left was emptied by the move and asked to
+    /// close.
+    source_emptied: bool,
+}
+
+/// **`BT_TRANSFER_DEV=<seconds>` — F1b's acceptance harness, and nothing a
+/// person can press.**
+///
+/// The transaction has no gesture: the drag across a window boundary is F1c's
+/// and the menu row is F2's, and this slice was told not to invent either. But a
+/// transaction whose only evidence is a unit test is a transaction that has
+/// never handed a live browser and a live ConPTY between two real windows, and
+/// three of the four things it has to get right — the page keeps its document,
+/// the shell keeps talking, the source window goes — are only true on a machine.
+///
+/// So this is the door the acceptance uses, on `BT_WEB_DEV`'s own terms: an
+/// environment variable read once at startup, reachable by nothing else, that
+/// scripts one move and prints what it found. It opens a second window, waits
+/// the number of seconds it was given for the page and the shell to have
+/// something to say, moves the first window's tab into the second, and reports.
+///
+/// Two numbers separated by a comma when the second is wanted:
+/// `BT_TRANSFER_DEV=6,4` moves after six seconds and prints the moved shell's
+/// scrollback again four seconds later — which is the whole of the wake-up
+/// acceptance, because by then the window that shell was started in has gone and
+/// the loop has nothing else to wake it for.
+#[derive(Clone, Copy, Debug)]
+enum TransferProbe {
+    /// Waiting to ask for the second window.
+    Arming {
+        at: Instant,
+        settle: Duration,
+    },
+    /// The second window is on order; move once it is open and settled.
+    Opening {
+        at: Instant,
+    },
+    /// Moved; print the shell's tail once more at this moment, then stop.
+    Listening {
+        at: Instant,
+        tab: TabId,
+    },
+    Done,
+}
+
+impl TransferProbe {
+    /// `None` unless the variable is set — the whole of the gate.
+    fn from_environment(now: Instant) -> Option<Self> {
+        let value = std::env::var("BT_TRANSFER_DEV").ok()?;
+        let mut parts = value.split(',');
+        let before = parts
+            .next()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .unwrap_or(6);
+        let after = parts
+            .next()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .unwrap_or(4);
+        Some(Self::Arming {
+            at: now + Duration::from_secs(before),
+            settle: Duration::from_secs(after),
+        })
+    }
+
+    fn deadline(self) -> Option<Instant> {
+        match self {
+            Self::Arming { at, .. } | Self::Opening { at } | Self::Listening { at, .. } => Some(at),
+            Self::Done => None,
+        }
+    }
+}
+
+/// The two answers [`FolioApp::transfer_tab`] can give.
+///
+/// A refusal is not an error: every one of them is an ordinary state of the
+/// world — a tab that closed, a window that closed, a page the engine would not
+/// let go of — and a `Result` would put them beside "the OS could not tell us
+/// this window's handle", which is not the same kind of thing at all.
+///
+/// **No gesture calls this yet, on purpose.** F1b is the transaction and its
+/// identity; the drag across a window boundary is F1c's and the menu row is
+/// F2's. The convention is `git.rs`'s, and `webhost.rs` used it one slice ago to
+/// hold `WebSeat::rehost` for exactly this caller: an item a named later slice
+/// will press carries the allow rather than being held out of the build, because
+/// what the slice has to get right is the contract and the contract is what a
+/// test can hold today.
+#[allow(dead_code, reason = "F1c's drag and F2's menu row are the callers")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TransferOutcome {
+    Moved(TabTransfer),
+    Refused(TransferRefusal),
+}
+
+/// Whether a tab's pages can be told apart from every other tab's on both sides
+/// of a move — and if not, which seat number is the one that cannot.
+///
+/// **This is where F1b stopped, and the reason is written here rather than
+/// smoothed over.** A window's two pieces of live per-pane state — `web` (one
+/// engine per seat) and `web_thumbs` (one last frame per seat) — are keyed by a
+/// bare `SeatId`, and a `SeatId` is only unique inside its tab: every tab a pane
+/// is torn out into starts its numbering at `SeatId(1)` again
+/// (`seats::Seats::lone_seat`). So two tabs of one window can each have a
+/// `SeatId(1)`, and if both are pages the map holds one of them.
+///
+/// **That is a live defect today and not something this move introduces**: open
+/// a `.html` file into a tab of its own twice and the second tab's address
+/// navigates the *first* tab's page, because `open_web_page_on` re-checks
+/// `window.web.contains_key(&seat)` with no tab beside it. The repair is to key
+/// both maps — and the compositor's visual table under them — by [`LeafId`], and
+/// it is a change to the web block rather than to this transaction. F1b will not
+/// make it silently worse: rather than clobber, a move that cannot name a page
+/// unambiguously is **refused**, in writing, and the refusal is what says the
+/// prerequisite is owed.
+///
+/// Two ways a seat number fails to be a name:
+///
+/// * it hosts a page in the source window and *another* tab of that window has
+///   the same number — nobody can say whose engine that entry is;
+/// * it hosts a page in the target window already — moving one in would take the
+///   other's place.
+#[allow(dead_code, reason = "F1c's drag and F2's menu row press the transfer")]
+fn page_key_collision(
+    moving: &BTreeSet<SeatId>,
+    others_in_source: &BTreeSet<SeatId>,
+    hosted_in_source: &BTreeSet<SeatId>,
+    hosted_in_target: &BTreeSet<SeatId>,
+) -> Option<SeatId> {
+    moving.iter().copied().find(|seat| {
+        (hosted_in_source.contains(seat) && others_in_source.contains(seat))
+            || hosted_in_target.contains(seat)
+    })
 }
 
 #[cfg(test)]
@@ -6795,7 +7224,7 @@ mod worker_answer_routing_tests {
             answer(1, "first-b"),
             answer(2, "second-b"),
         ];
-        let first = answers_for(&mut batch, WindowId::from(1_u64), |(window, _)| *window);
+        let first = answers_for(&mut batch, |(window, _)| *window == WindowId::from(1_u64));
         assert_eq!(
             first
                 .iter()
@@ -6813,12 +7242,527 @@ mod worker_answer_routing_tests {
             ["second-a", "second-b"],
             "the other window's answers are still there for the window they are for"
         );
-        let second = answers_for(&mut batch, WindowId::from(2_u64), |(window, _)| *window);
+        let second = answers_for(&mut batch, |(window, _)| *window == WindowId::from(2_u64));
         assert_eq!(second.len(), 2);
         assert!(
             batch.is_empty(),
             "and what nobody claimed is what a closed window left behind"
         );
+    }
+
+    /// One application-level drain, offered to the windows in `order` — the
+    /// shape of `AppEvent::*Ready`, with [`FolioApp::for_each_window`]'s loop
+    /// written out so a test can turn it round.
+    fn deal(mut batch: Vec<(WindowId, String)>, order: &[u64]) -> Vec<(u64, Vec<String>)> {
+        let mut dealt: Vec<(u64, Vec<String>)> = order
+            .iter()
+            .map(|window| {
+                let taken = answers_for(&mut batch, |(asked, _)| *asked == WindowId::from(*window));
+                (
+                    *window,
+                    taken.into_iter().map(|(_, name)| name).collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert!(
+            batch.is_empty(),
+            "every answer in this batch is addressed to a window that is open, so \
+             nothing may be left standing: {batch:?}"
+        );
+        dealt.sort_by_key(|(window, _)| *window);
+        dealt
+    }
+
+    /// PIN (`docs/plans/multiwindow-ef/codex-final.md` §2) — **one drain, and
+    /// every answer lands with its one owner whichever way the windows are
+    /// walked.**
+    ///
+    /// The narrow review nailed this shape rather than a two-answer one because
+    /// two answers cannot tell a *consuming* drain from a routing one: with a
+    /// window's answers contiguous, "the first window took everything" and "the
+    /// first window took its own" produce the same first bucket. Interleaving
+    /// them — window B, window A, window B — makes the two answers differ in the
+    /// first window walked, and walking the windows in the other order makes them
+    /// differ again.
+    ///
+    /// Three assertions, and the third is the one the incident was:
+    /// each window comes away with exactly its own, in the lane's own order;
+    /// reversing the traversal changes nothing; and the batch is empty at the end
+    /// because three answers were claimed and not because one window swallowed
+    /// the queue.
+    ///
+    /// MUTATION: have `answers_for` return `batch.drain(..).collect()` and the
+    /// window walked first comes away with all three while the other comes away
+    /// with none — in both directions, which is how a *symmetric* wrong answer
+    /// still fails an asymmetric test.
+    #[test]
+    fn three_answers_in_b_a_b_order_each_land_with_their_one_owner() {
+        let interleaved = || {
+            vec![
+                answer(2, "b-first"),
+                answer(1, "a-only"),
+                answer(2, "b-second"),
+            ]
+        };
+        let expected = vec![
+            (1_u64, vec!["a-only".to_owned()]),
+            (2_u64, vec!["b-first".to_owned(), "b-second".to_owned()]),
+        ];
+        let oldest_first = deal(interleaved(), &[1, 2]);
+        assert_eq!(
+            oldest_first, expected,
+            "each window takes its own out of one drain, in the order the lane \
+             answered in"
+        );
+        let newest_first = deal(interleaved(), &[2, 1]);
+        assert_eq!(
+            newest_first, oldest_first,
+            "and which window is walked first is a fact about the opening order, \
+             not about whose answer this is"
+        );
+    }
+
+    fn window_a() -> WindowId {
+        WindowId::from(1_u64)
+    }
+
+    fn window_b() -> WindowId {
+        WindowId::from(2_u64)
+    }
+
+    /// PIN (F1b, `plan.md` v4 增补 ③ contract 2) — **an answer follows the tab
+    /// that asked it, into whichever window that tab is standing in when the
+    /// answer lands.**
+    ///
+    /// The first of the three in-flight contracts, and the one that says why the
+    /// `WindowId` stamped on a request stopped being an authority. The question
+    /// went out from window A. Between the asking and the answering the reader
+    /// carried the tab into window B. There is exactly one right place for the
+    /// answer and it is not the window that asked.
+    ///
+    /// MUTATION: route on the window the answer carries — `owner` returning
+    /// `AnswerOwner::Window(response.window)` for a docked column — and window A
+    /// takes an answer for a tab it no longer has while window B waits for one
+    /// that will never come. Which is exactly the shape of the 2026-08-23 report,
+    /// one window over.
+    #[test]
+    fn an_answer_follows_the_tab_that_asked_it_into_another_window() {
+        let moved = TabId(7);
+        let asked_from_a = files::DirResponse {
+            window: window_a(),
+            host: files::FilesHost::Docked(LeafId {
+                tab: moved,
+                seat: SeatId(1),
+            }),
+            key: String::new(),
+            outcome: files::DirOutcome::Listed(files::DirListing::default()),
+        };
+        let owner = asked_from_a.owner();
+        assert!(
+            !claimed_by(owner, window_a(), [TabId(3)]),
+            "the window that asked no longer has the tab, and an answer is not \
+             owed to whoever posted the question"
+        );
+        assert!(
+            claimed_by(owner, window_b(), [moved, TabId(9)]),
+            "the window the tab is standing in now is the one place the answer \
+             has to go"
+        );
+    }
+
+    /// PIN (F1b, `plan.md` v4 增补 ③ contract 2) — **an answer for a tab that
+    /// has closed is claimed by nobody.**
+    ///
+    /// The safety half. `TabIds` never reuses a number, so a `TabId` that is in
+    /// no window's strip is a tab that is gone rather than a tab that has moved,
+    /// and there is no second reading of it: the answer is dropped, which is the
+    /// cancellation a closed tab already was.
+    #[test]
+    fn an_answer_for_a_tab_that_has_closed_is_claimed_by_nobody() {
+        let dead = AnswerOwner::Tab(TabId(7));
+        assert!(!claimed_by(dead, window_a(), [TabId(3), TabId(4)]));
+        assert!(!claimed_by(dead, window_b(), [TabId(8), TabId(9)]));
+    }
+
+    /// PIN (F1b; `codex-final.md` §2, "浮窗等不以 tab 为 owner 的 host … 保持其
+    /// 既有 epoch/窗口路由") — **each lane says who owns its answer, and the two
+    /// kinds are not confused.**
+    ///
+    /// Two owners and not one, because two things ask these lanes. A tab moves
+    /// between windows and takes its answers with it. A **float** does not: its
+    /// epoch is minted by the window it belongs to, it floats *across* that
+    /// window's tabs by ruling (§7.1.2), and there is no tab that can be asked
+    /// whether it is still there. The same is true of the peek cache and the
+    /// hover flyout, whose pending ledgers sit on `WindowRuntime` and stay put
+    /// when a tab leaves.
+    ///
+    /// MUTATION: give a float's answer `AnswerOwner::Tab(..)` and it lands in
+    /// whichever window holds the tab the float was born beside — which after a
+    /// tear-out is not the window the float is in, so the page it belongs to is
+    /// never told anything.
+    #[test]
+    fn every_lane_names_the_owner_of_its_answer() {
+        let tab = TabId(7);
+        let seat = SeatId(1);
+        let leaf = LeafId { tab, seat };
+        let docked = files::DirResponse {
+            window: window_a(),
+            host: files::FilesHost::Docked(leaf),
+            key: String::new(),
+            outcome: files::DirOutcome::Listed(files::DirListing::default()),
+        };
+        assert_eq!(docked.owner(), AnswerOwner::Tab(tab));
+        let floating = files::DirResponse {
+            host: files::FilesHost::Float(3),
+            ..docked.clone()
+        };
+        assert_eq!(floating.owner(), AnswerOwner::Window(window_a()));
+
+        let column = git::GitResponse {
+            window: window_a(),
+            host: git::GitHost::Column(leaf),
+            answer: git::GitAnswer::Repo {
+                dir: PathBuf::from("/repo"),
+                outcome: Ok(PathBuf::from("/repo")),
+            },
+        };
+        assert_eq!(column.owner(), AnswerOwner::Tab(tab));
+        let graph = git::GitResponse {
+            host: git::GitHost::Graph {
+                tab,
+                root: PathBuf::from("/repo"),
+            },
+            ..column.clone()
+        };
+        assert_eq!(graph.owner(), AnswerOwner::Tab(tab));
+        let popped_out = git::GitResponse {
+            host: git::GitHost::Float { id: 3, tab },
+            ..column.clone()
+        };
+        assert_eq!(popped_out.owner(), AnswerOwner::Window(window_a()));
+
+        let head = preview::PreviewResponse {
+            window: window_a(),
+            tab,
+            source: preview::PreviewSource::File(PathBuf::from("/notes.md")),
+            answer: preview::PreviewAnswer::Size(None),
+        };
+        assert_eq!(head.owner(), AnswerOwner::Tab(tab));
+
+        let address = ShellAddress {
+            window: window_a(),
+            leaf,
+        };
+        let verified = MathWorkerResult {
+            leaf: address,
+            completion: DecorationWorkerCompletion::VerifiedPath {
+                path: PathBuf::from("/notes.md"),
+                exists: true,
+            },
+        };
+        assert_eq!(
+            verified.owner(),
+            AnswerOwner::Tab(tab),
+            "a verdict lands in the pane's own session, and a pane travels inside \
+             its tab"
+        );
+        let peeked = MathWorkerResult {
+            leaf: address,
+            completion: DecorationWorkerCompletion::PeekScaledImage {
+                scaled: bt_term::ScaledInlineImage {
+                    occurrence_id: 0,
+                    content_key: String::new(),
+                    key: String::new(),
+                    rgba: Arc::from(&[][..]),
+                    width_px: 1,
+                    height_px: 1,
+                },
+            },
+        };
+        assert_eq!(
+            peeked.owner(),
+            AnswerOwner::Window(window_a()),
+            "the flyout's pending slot is the window's and does not move when a \
+             tab does"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tab_identity_tests {
+    use super::*;
+
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// [`layer_shape_tests::fn_body`]'s reader, kept beside the pins that use it
+    /// for the reason that module keeps its own: a shape pin that reaches into
+    /// another module for its witness is a pin that moves when that module does.
+    fn fn_body(name: &str) -> &'static str {
+        let head = format!(
+            "
+    fn {name}("
+        );
+        let start = SOURCE
+            .find(&head)
+            .unwrap_or_else(|| panic!("`fn {name}` is declared once in an `impl`"))
+            + head.len();
+        let end = start
+            + SOURCE[start..]
+                .find(
+                    "
+    }
+",
+                )
+                .expect("a method is closed by a `}` at the `impl`'s indentation");
+        &SOURCE[start..end]
+    }
+
+    /// The field lines of a top-level `struct <name> { … }`, prose taken out —
+    /// [`layer_shape_tests::struct_fields`]'s reader, and its reason for
+    /// dropping the doc comments: these pins read the body as text, and a
+    /// sentence *about* a field that has gone reads exactly like the field.
+    fn struct_fields(name: &str) -> String {
+        let head = format!(
+            "
+struct {name} {{
+"
+        );
+        let start = SOURCE
+            .find(&head)
+            .unwrap_or_else(|| panic!("`struct {name}` is declared at the top level"))
+            + head.len();
+        let end = start
+            + SOURCE[start..]
+                .find(
+                    "
+}
+",
+                )
+                .expect("a top-level struct is closed by a `}` in column zero");
+        SOURCE[start..end]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// PIN (F1b, `plan.md` v4 增补 ③ contract 1) — **the application mints every
+    /// tab number, and a number it has spent never comes back.**
+    ///
+    /// The A-case ruling in one test. Uniqueness is what lets an answer be routed
+    /// by the tab it names; never-reused is what makes that routing safe *over
+    /// time*, because an answer still in flight for a tab that has since closed
+    /// must find nobody rather than find whoever inherited its number.
+    ///
+    /// MUTATION: give `TabIds` a way to hand a number back — `fn release`, or a
+    /// `next` that is recomputed from the tabs that exist — and the strict climb
+    /// below is what says so.
+    #[test]
+    fn the_application_mints_every_tab_number_and_never_a_second_time() {
+        let mut ids = TabIds::new();
+        let minted: Vec<TabId> = (0..1024).map(|_| ids.mint()).collect();
+        assert_eq!(
+            minted.first().copied(),
+            Some(TabId(1)),
+            "the numbering starts where it always started — it just no longer \
+             starts again in every window"
+        );
+        let distinct: std::collections::HashSet<TabId> = minted.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            minted.len(),
+            "a number handed out twice is a live answer landing in a tab that is \
+             not the tab that asked"
+        );
+        assert!(
+            minted.windows(2).all(|pair| pair[0] < pair[1]),
+            "and it only ever climbs: a tab abandoned before it was ever shown \
+             spends its number, it does not return it"
+        );
+    }
+
+    /// PIN (F1b) — **no window keeps a tab counter of its own.**
+    ///
+    /// The whole of the A case is that there is one allocator. A second one, on
+    /// a window, is `TabId(1)` naming a tab in every window again — and it would
+    /// not announce itself, because every window would still work perfectly on
+    /// its own.
+    ///
+    /// MUTATION: put `next_tab_id` back on `WindowRuntime` — or on the parts a
+    /// window is assembled from — and this test names it before any window is
+    /// opened.
+    #[test]
+    fn no_window_keeps_a_tab_counter_of_its_own() {
+        for layer in ["WindowRuntime", "NewWindowParts"] {
+            let fields = struct_fields(layer);
+            assert!(
+                !fields.contains("next_tab_id"),
+                "a per-window tab counter is the defect this slice removed, and \
+                 the only witness to its absence is the text of `{layer}`"
+            );
+        }
+        assert!(
+            struct_fields("App").contains("tab_ids: TabIds"),
+            "and the one that replaced it is the application's"
+        );
+    }
+
+    /// PIN (F1b) — **a page this move could not name unambiguously refuses the
+    /// move; one it can does not.**
+    ///
+    /// The place this slice stopped, said as a test so that the stop is a
+    /// behaviour and not a paragraph. See [`page_key_collision`] for the defect
+    /// underneath it — a window's `web` map keyed by a `SeatId` that is only
+    /// unique inside a tab — and for why the repair is the web block's and not
+    /// this transaction's.
+    ///
+    /// Three cases, and the first is the ordinary one: two tabs whose seat
+    /// numbers coincide are perfectly fine to move as long as the number is not
+    /// also a page. It becomes a refusal only when an *engine* hangs off the
+    /// ambiguous number.
+    #[test]
+    fn a_page_that_cannot_be_named_refuses_the_move() {
+        let one = SeatId(1);
+        let two = SeatId(2);
+        let moving = BTreeSet::from([one, two]);
+        let empty = BTreeSet::new();
+        assert_eq!(
+            page_key_collision(&moving, &BTreeSet::from([one]), &empty, &empty),
+            None,
+            "two tabs may share a seat number all day: it is only a name that has \
+             to be unique, and nothing is filed under this one"
+        );
+        assert_eq!(
+            page_key_collision(
+                &moving,
+                &BTreeSet::from([one]),
+                &BTreeSet::from([one]),
+                &empty
+            ),
+            Some(one),
+            "but a page filed under a number two of this window's tabs both have \
+             is a page nobody can say the owner of"
+        );
+        assert_eq!(
+            page_key_collision(&moving, &empty, &BTreeSet::from([two]), &empty),
+            None,
+            "the same number carrying a page is fine when no other tab here has \
+             it — that is the whole ordinary case"
+        );
+        assert_eq!(
+            page_key_collision(&moving, &empty, &empty, &BTreeSet::from([two])),
+            Some(two),
+            "and a number that already names a page in the window it is moving \
+             into would take that page's place"
+        );
+    }
+
+    /// PIN (F1b) — **the transfer is one transaction with three phases, and its
+    /// commit holds nothing that can fail.**
+    ///
+    /// A shape pin rather than a value one, because what this is about is an
+    /// *order*: the questions that refuse are asked before anything is touched,
+    /// the one step that can half-happen compensates, and the strip surgery
+    /// happens after both. The obligations below are each a thing the review's
+    /// migration list names, and each of them, left out, is invisible until
+    /// somebody moves a tab on a real machine.
+    ///
+    /// MUTATION: take any one line out of the commit — the wake, the pages, the
+    /// pictures, the ticket, the accounting — and it is named here.
+    #[test]
+    fn the_transfer_is_a_transaction_and_its_commit_pays_every_debt() {
+        let body = fn_body("transfer_tab");
+        for (owed, why) in [
+            (
+                "owner_of(tab)",
+                "the window a tab is in is not a parameter — one authority, asked",
+            ),
+            (
+                "page_key_collision(",
+                "a page that cannot be named unambiguously refuses the move rather \
+                 than taking another tab's place",
+            ),
+            (
+                ".rehost(",
+                "a live page is handed over, not rebuilt (F1a's whole finding)",
+            ),
+            (
+                "RehostReport::SourceKept",
+                "and a handoff the engine refuses keeps the tab where it is",
+            ),
+            (
+                "wake.rebind(",
+                "a moved shell nudges the window it is now in, or its output is \
+                 never read again",
+            ),
+            (
+                "attention_ticket = None",
+                "a place in one window's queue is not a place in another's",
+            ),
+            (
+                "web_thumbs.take(",
+                "the last frame belongs to the seat and travels with it",
+            ),
+            (
+                "record_window(",
+                "and the move is written down once, for both windows",
+            ),
+        ] {
+            assert!(
+                body.contains(owed),
+                "the transfer owes `{owed}`: {why}\n{body}"
+            );
+        }
+        let commit = body
+            .split_once("── The model commit ")
+            .expect("the commit is the last of the three phases and says so")
+            .1;
+        assert!(
+            !commit.contains("return Ok(TransferOutcome::Refused"),
+            "nothing in the commit may refuse: by then the strip has been cut and \
+             a page has changed windows, and there is no way back that does not \
+             have to be able to fail too"
+        );
+    }
+
+    /// PIN (F1b, `plan.md` v4 增补 ③ contract 1) — **all six doors that open a
+    /// tab ask the application for its number.**
+    ///
+    /// The ruling's own list: restore, a new window, a new tab, and a pane
+    /// promoted into one. The last is three doors in this file rather than one,
+    /// because a pane becomes a tab by being torn out, by being ejected from a
+    /// merge, and by being ejected from a cross-tab move.
+    ///
+    /// MUTATION: mint one of them from a literal or from `tabs.len() + 1` and the
+    /// door is named here.
+    #[test]
+    fn every_door_that_opens_a_tab_asks_the_application_for_its_number() {
+        for door in [
+            // Restore, and the process's first window.
+            "create",
+            // A second window — `Ctrl+Shift+M`, a Recent window seed, a restored
+            // window that was not the one the process opened with.
+            "open_window",
+            // A new tab.
+            "new_tab_with_profile",
+            // Undo-close and the Recent list.
+            "reopen_recent",
+            // The restore card's "yes".
+            "answer_restore",
+            // A merge that pushed a pane out.
+            "absorb_tab",
+            // A cross-tab pane move that pushed a pane out.
+            "move_pane_across_tabs",
+            // A pane torn out over the strip.
+            "extract_pane_into_new_tab",
+        ] {
+            let body = fn_body(door);
+            assert!(
+                body.contains("tab_ids.mint()"),
+                "`{door}` opens a tab, so the number it opens with is the \
+                 application's to give: {body}"
+            );
+        }
     }
 }
 
@@ -18368,7 +19312,12 @@ fn apply_stored_terminal_font(
 fn create_leaf_session(
     renderer: &WindowRenderer,
     body: bt_render::SeatViewport,
-    wake: OutputWake,
+    // **The window this shell is born in, not a closure over it** (F1b). The
+    // closure the reader thread keeps is minted here, off a [`LeafWake`] this
+    // leaf holds the other end of, so that a later transfer has something to
+    // rewrite — see that type for what a shell nudging a closed window's bit
+    // costs.
+    wake: &PtyWakeSignal,
     probe_input: Option<&[u8]>,
     seed: &LeafSeed,
     programs: &profiles::ProfilePrograms,
@@ -18415,6 +19364,7 @@ fn create_leaf_session(
         &bt_pty::SystemShellEnvironment,
     );
     let spawn_place = place.directory.clone();
+    let wake = LeafWake::bound_to(wake);
     let mut resolved_program = None;
     let mut pty = if probe_input.is_none() {
         // **The line the picker was missing.** Choosing a profile used to change
@@ -18466,7 +19416,7 @@ fn create_leaf_session(
                 &command.arguments,
                 &command.environment,
                 pty_size(grid, PhysicalSize::new(body.width, body.height)),
-                wake,
+                wake.output(),
                 place.working_directory,
             )
             .with_context(|| {
@@ -18563,6 +19513,9 @@ fn create_leaf_session(
     session.set_spawn_directory(spawn_place.clone());
     let projection = session.new_projection(session.layout_key());
     Ok(LeafSession {
+        // A wake-up is the other end of a reader thread, and there is no thread
+        // when there is no ConPTY — see the field.
+        wake: pty.is_some().then_some(wake),
         pty,
         profile,
         program: resolved_program,
@@ -18624,7 +19577,8 @@ fn create_tab_state(
     seats: seats::Seats,
     renderer: &WindowRenderer,
     render_physical: PhysicalSize<u32>,
-    wake: OutputWake,
+    // The window this tab's shells are born in — see [`create_leaf_session`].
+    wake: &PtyWakeSignal,
     probe_input: Option<&[u8]>,
     leaves: &BTreeMap<SeatId, LeafSeed>,
     // What each Files leaf of this tree is a view of, when the caller has one
@@ -18683,7 +19637,7 @@ fn create_tab_state(
         let leaf = create_leaf_session(
             renderer,
             body,
-            Arc::clone(&wake),
+            wake,
             (seat == terminal_seat_id).then_some(probe_input).flatten(),
             &leaves.get(&seat).cloned().unwrap_or(LeafSeed {
                 profile: default_profile,
@@ -19112,6 +20066,9 @@ fn pane_into_new_tab(
     tab.git_trees = git_trees;
     tab.git_scroll = git_scroll;
     tab.preview_views = preview_views;
+    // The pane is a different leaf now, so everything it had out with a worker
+    // is addressed to a leaf that has gone — see [`forget_work_in_flight_for_seat`].
+    forget_work_in_flight_for_seat(&mut tab, key);
     debug_assert!(
         from.sessions_match_terminals(),
         "item 6: the tab a pane left still matches its own tree"
@@ -19281,6 +20238,53 @@ fn move_seat_content(
         if brought_a_picture {
             target.preview_raster.get_or_insert(arrived);
         }
+    }
+    forget_work_in_flight_for_seat(target, now);
+}
+
+/// **A pane that has just been given a new address gives up on the answers owed
+/// to its old one** (F1b; `plan.md` v4 增补 ②, `codex-final.md` §2's "pane 升格
+/// 换号的活性仍缺一半").
+///
+/// Every question this pane put to a worker travels as a [`LeafId`] — its tab
+/// and its seat — and both change when it is promoted into a tab of its own or
+/// moved into another one. **Safety** is already had, and had by construction:
+/// the tab it left no longer has that seat, so an answer addressed to the old
+/// leaf finds nothing and is dropped. The v3 draft stopped there, on the ground
+/// that "the old address fails to match once the source tab dies" — but the
+/// source tab does not die. A pane is only promotable out of a tab that has
+/// another one, so the tab it left is still open, still drawing, and the answers
+/// it drops are silently gone.
+///
+/// **Liveness** is this. Four ledgers say "already asked" and all four travel
+/// with the pane — a `Pending` directory node, a `Pending` git slot, a claimed
+/// head read, and a session's own in-flight sets — so each of them would go on
+/// suppressing the question that would have been re-asked, for the rest of the
+/// session. Cleared here, at the one moment the address changes, they let the
+/// ordinary per-frame asking ask again under the leaf the pane now is.
+///
+/// **The seat given here is the one it landed under**, never the one it left:
+/// the whole point is to reach the tables *after* they have been re-keyed.
+fn forget_work_in_flight_for_seat(tab: &mut TabState, seat: SeatId) {
+    if let Some(leaf) = tab.sessions.get_mut(&seat) {
+        leaf.session.forget_work_in_flight();
+    }
+    if let Some(cache) = tab.file_trees.get_mut(&seat) {
+        cache.forget_pending();
+    }
+    if let Some(cache) = tab.git_trees.get_mut(&seat) {
+        cache.forget_pending();
+    }
+    // A preview pane's question is held by the *buffer* it is showing, which is
+    // the tab's and not the pane's (§7.1.3) — so it is reached through the pane,
+    // and only the one this seat is looking at.
+    if let Some(source) = tab
+        .preview_panes
+        .get(PreviewSurface::Seat(seat))
+        .and_then(|pane| pane.buffer.clone())
+        && let Some(buffer) = tab.preview_pool.get_mut(&source)
+    {
+        buffer.forget_head_read();
     }
 }
 
@@ -20147,7 +21151,6 @@ struct NewWindowParts {
     renderer: WindowRenderer,
     tabs: Vec<TabState>,
     active_tab: usize,
-    next_tab_id: u64,
     pty_wake: PtyWakeSignal,
     translucency_available: bool,
     custom_window_frame: bt_platform::CustomWindowFrame,
@@ -20182,7 +21185,6 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         renderer,
         tabs,
         active_tab,
-        next_tab_id,
         pty_wake,
         translucency_available,
         custom_window_frame,
@@ -20202,7 +21204,6 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         renderer,
         tabs,
         active_tab,
-        next_tab_id,
         pty_wake,
         // Resting values; the caller that knows what a new window opens as
         // (settings.focus_mode, §7.1.6b′ ①) sets the bit right after assembly.
@@ -20725,7 +21726,7 @@ impl Runtime<'_> {
         // it produces here is computed fresh against this machine's DPI.
         let probe_input = load_probe_input()?;
         let pty_wake = PtyWakeSignal::new(proxy.clone());
-        let wake = pty_wake.wake();
+        let wake = &pty_wake;
         let phase_started = Instant::now();
         // Pinned tabs are an answer already given, so they simply open; the rest
         // become a question the prompt will ask over a window that already works.
@@ -20795,16 +21796,21 @@ impl Runtime<'_> {
             }
             roots
         };
+        // **The process's tab numbering starts here, once** (F1b). Built before
+        // the `App` it will live in, because the first window's tabs are numbered
+        // before there is an `App` to ask — and numbered by the same allocator
+        // every later window asks, which is the whole of the A case.
+        let mut tab_ids = TabIds::new();
         let mut tabs = Vec::with_capacity(restored_roots.len());
         let mut conpty_sources = Vec::with_capacity(restored_roots.len());
         for (index, (seats, seed, leaves, files, preview)) in restored_roots.into_iter().enumerate()
         {
             let (tab, conpty_source) = create_tab_state(
-                TabId(index as u64 + 1),
+                tab_ids.mint(),
                 seats,
                 &renderer,
                 render_physical,
-                Arc::clone(&wake),
+                wake,
                 if index == 0 {
                     probe_input.as_deref()
                 } else {
@@ -20877,6 +21883,8 @@ impl Runtime<'_> {
         let git_worker = git::GitWorker::spawn(proxy.clone())?;
         let mut app = App {
             gpu,
+            tab_ids,
+            transfer_probe: TransferProbe::from_environment(Instant::now()),
             event_proxy: proxy.clone(),
             git_watch: git_watch::GitWatch::default(),
             math_worker,
@@ -20979,7 +21987,6 @@ impl Runtime<'_> {
             renderer,
             tabs,
             active_tab,
-            next_tab_id: conpty_sources.len() as u64 + 1,
             pty_wake,
             translucency_available,
             custom_window_frame,
@@ -21205,7 +22212,7 @@ impl Runtime<'_> {
         ensure_swapchain_matches_inner(&renderer, physical)?;
         let render_physical = presentation_physical_size(renderer.presentation_geometry());
         let pty_wake = PtyWakeSignal::new(app.event_proxy.clone());
-        let wake = pty_wake.wake();
+        let wake = &pty_wake;
         // **The rail this window opens wearing** (multiwindow slice D). The strip
         // and the sidebar became per-window facts with schema v9, so there is no
         // longer one answer in the file to read: a window the file described
@@ -21264,13 +22271,13 @@ impl Runtime<'_> {
                 )]
             });
         let mut tabs = Vec::with_capacity(roots.len());
-        for (index, (seats, seed, leaves, files, preview)) in roots.into_iter().enumerate() {
+        for (seats, seed, leaves, files, preview) in roots {
             let (tab, _) = create_tab_state(
-                TabId(index as u64 + 1),
+                app.tab_ids.mint(),
                 seats,
                 &renderer,
                 render_physical,
-                Arc::clone(&wake),
+                wake,
                 None,
                 &leaves,
                 &files,
@@ -21288,7 +22295,6 @@ impl Runtime<'_> {
             )?;
             tabs.push(tab);
         }
-        let next_tab_id = tabs.len() as u64 + 1;
         let active_tab = plan_launched
             .as_ref()
             .and_then(|plan| plan.active_open)
@@ -21298,7 +22304,13 @@ impl Runtime<'_> {
             .as_ref()
             .map(|plan| plan.ask.clone())
             .unwrap_or_default();
-        let placeholder = plan_launched.as_ref().is_some_and(|plan| plan.placeholder);
+        // **Which tab, and not which number** — read off the tab that was built
+        // rather than written as `TabId(1)`, which stopped being this window's
+        // first tab the day the numbering became the application's (F1b).
+        let placeholder_tab = plan_launched
+            .as_ref()
+            .is_some_and(|plan| plan.placeholder)
+            .then(|| tabs[0].id);
         let (_, _, terminal_seat, seat_viewport) = solve_seats(
             &tabs[active_tab].seats,
             &renderer,
@@ -21313,7 +22325,6 @@ impl Runtime<'_> {
             renderer,
             tabs,
             active_tab,
-            next_tab_id,
             pty_wake,
             translucency_available,
             custom_window_frame,
@@ -21338,7 +22349,7 @@ impl Runtime<'_> {
             // Only a shell opened *because there was no answer* is scaffolding —
             // the launch's own rule, kept here because this door now takes the
             // same plan the launch does.
-            placeholder_tab: placeholder.then_some(TabId(1)),
+            placeholder_tab,
         });
         window.focus_mode = app.settings_store.loaded().focus_mode;
         window.focus_reveal =
@@ -21483,9 +22494,8 @@ impl Runtime<'_> {
         debug_assert!(profile < profiles::count());
         let render_physical =
             presentation_physical_size(self.window.renderer.presentation_geometry());
-        let wake = self.window.pty_wake.wake();
-        let id = TabId(self.window.next_tab_id);
-        self.window.next_tab_id += 1;
+        let wake = &self.window.pty_wake;
+        let id = self.app.tab_ids.mint();
         // Both facts are read off the *same* leaf — the focused session, which is
         // also what `working_directory()` is asked of. A profile taken from one
         // pane and a directory from another would be the exact mismatch the rule
@@ -21666,9 +22676,8 @@ impl Runtime<'_> {
         let mut pages = entry.previews;
         let render_physical =
             presentation_physical_size(self.window.renderer.presentation_geometry());
-        let wake = self.window.pty_wake.wake();
-        let id = TabId(self.window.next_tab_id);
-        self.window.next_tab_id += 1;
+        let wake = &self.window.pty_wake;
+        let id = self.app.tab_ids.mint();
         // **The one seat the entry names, whichever of the three shapes it is**
         // (§7.1.6h). Everything after this point is shape-blind: the pages, the
         // pins, the `create_tab_state` call and the pin ruling are the same three
@@ -21949,9 +22958,8 @@ impl Runtime<'_> {
         let first_revived = self.window.tabs.len();
         for tab in &pending {
             let (seats, seed, leaves, files, preview) = revive_plan(tab);
-            let wake = self.window.pty_wake.wake();
-            let id = TabId(self.window.next_tab_id);
-            self.window.next_tab_id += 1;
+            let wake = &self.window.pty_wake;
+            let id = self.app.tab_ids.mint();
             let (revived, _) = create_tab_state(
                 id,
                 seats,
@@ -32120,7 +33128,7 @@ impl Runtime<'_> {
             .get(&source)
             .map(|leaf| seed.applied(leaf.profile, leaf.session.working_directory()))
             .unwrap_or_default();
-        let wake = self.window.pty_wake.wake();
+        let wake = &self.window.pty_wake;
         let formulas = FormulaSwitches::from_settings(self.app.settings_store.loaded());
         let scrollback = scrollback_quota(self.app.settings_store.loaded().scrollback_lines);
         let leaf = create_leaf_session(
@@ -37532,6 +38540,21 @@ impl Runtime<'_> {
         self.window.window.id()
     }
 
+    /// **May this window take that answer out of the application's batch?**
+    /// (F1b — see [`AnswerOwner`].)
+    ///
+    /// The one place the two facts meet, and the reason there is only one: the
+    /// strip is the sole author of "which window this tab is in", so a claim is
+    /// read straight off it rather than off a `WindowId` some request wrote down
+    /// earlier and no longer speaks for.
+    fn owns(&self, owner: AnswerOwner) -> bool {
+        claimed_by(
+            owner,
+            self.window_id(),
+            self.window.tabs.iter().map(|tab| tab.id),
+        )
+    }
+
     /// [`Self::focused_leaf_id`] with the window on the front of it.
     fn focused_shell_address(&self) -> ShellAddress {
         ShellAddress {
@@ -37579,7 +38602,7 @@ impl Runtime<'_> {
         // as a head read does — see the tail of [`Self::apply_preview_results`]
         // for what asking `refresh_chrome` alone costs.
         let mut body = false;
-        for response in answers_for(batch, self.window_id(), |response| response.window) {
+        for response in answers_for(batch, |response| self.owns(response.owner())) {
             let host = response.host;
             // **The asker has to still be there.** A column that closed,
             // a graph that was shut and a window that was dismissed are
@@ -37942,7 +38965,7 @@ impl Runtime<'_> {
         lane_gone: bool,
     ) -> Result<()> {
         let mut changed = lane_gone;
-        for response in answers_for(batch, self.window_id(), |response| response.window) {
+        for response in answers_for(batch, |response| self.owns(response.owner())) {
             let Some(index) = self
                 .window
                 .tabs
@@ -39882,7 +40905,7 @@ impl Runtime<'_> {
         lane_gone: bool,
     ) -> Result<()> {
         let mut changed = lane_gone;
-        for response in answers_for(batch, self.window_id(), |response| response.window) {
+        for response in answers_for(batch, |response| self.owns(response.owner())) {
             match response.host {
                 // A tab or a column that closed while its read was in flight
                 // has nowhere to put the answer, and that is not a failure —
@@ -44017,7 +45040,7 @@ impl Runtime<'_> {
         else {
             return Ok(());
         };
-        let wake = self.window.pty_wake.wake();
+        let wake = &self.window.pty_wake;
         let formulas = FormulaSwitches::from_settings(self.app.settings_store.loaded());
         let scrollback = scrollback_quota(self.app.settings_store.loaded().scrollback_lines);
         self.window.restarting = Some(seat);
@@ -48170,7 +49193,7 @@ impl Runtime<'_> {
                 *self.preview_panes.entry(surface) = pane;
                 return Ok(());
             };
-            let wake = self.window.pty_wake.wake();
+            let wake = &self.window.pty_wake;
             let formulas = FormulaSwitches::from_settings(self.app.settings_store.loaded());
             let scrollback = scrollback_quota(self.app.settings_store.loaded().scrollback_lines);
             // The **default** profile, which is what a stand-in is: it is not
@@ -49019,7 +50042,7 @@ impl Runtime<'_> {
         lane_gone: bool,
     ) -> Result<()> {
         let mut changed = lane_gone;
-        for completion in answers_for(batch, self.window_id(), |result| result.leaf.window) {
+        for completion in answers_for(batch, |result| self.owns(result.owner())) {
             let leaf = completion.leaf.leaf;
             let target_index = self.window.tabs.iter().position(|tab| tab.id == leaf.tab);
             let target_active = target_index == Some(self.window.active_tab);
@@ -53837,7 +54860,12 @@ impl Runtime<'_> {
             index, self.window.active_tab,
             "K129: a tab cannot merge into the layout it is already showing"
         );
-        let id = TabId(self.window.next_tab_id);
+        // **Minted whether or not the merge ejects anything** (F1b). This used to
+        // be a reservation that only became a number when a pane was pushed out;
+        // under an allocator that never reuses, a number handed back is a number
+        // that can arrive twice, so an unspent one is simply spent. A gap in the
+        // numbering is invisible and free.
+        let id = self.app.tab_ids.mint();
         let render_physical =
             presentation_physical_size(self.window.renderer.presentation_geometry());
         let renderer = &self.window.renderer;
@@ -53857,9 +54885,6 @@ impl Runtime<'_> {
             self.window.tabs[index].sessions.is_empty(),
             "T226: the absorbed tab is leaving with shells still filed under it"
         );
-        if ejected.is_some() {
-            self.window.next_tab_id += 1;
-        }
         absorb_tab_into_strip(
             &mut self.window.tabs,
             &mut self.window.active_tab,
@@ -53955,11 +54980,14 @@ impl Runtime<'_> {
             return Ok(false);
         }
         let metrics = self.seat_metrics();
+        // Spent whether or not the arrival pushes a pane out — [`Runtime::absorb_tab`]'s
+        // reason, and the same allocator.
+        let ejected_id = self.app.tab_ids.mint();
         let arrival = PaneArrival {
             metrics: &metrics,
             viewport: self.window.seat_viewport,
             aim,
-            ejected_id: TabId(self.window.next_tab_id),
+            ejected_id,
         };
         let watching = self.window.tabs[self.window.active_tab].id;
         let render_physical =
@@ -53987,9 +55015,6 @@ impl Runtime<'_> {
             self.window.tabs[into].seats.tree().contains(moved.landed),
             "§7.1.6k: the pane landed under an id its new tree does not have"
         );
-        if moved.ejected.is_some() {
-            self.window.next_tab_id += 1;
-        }
         if moved.source_emptied {
             // The tab did not close — it was emptied by a move, and `close_tab`
             // would file a still-running shell into Recent and shut it down. This
@@ -54053,7 +55078,9 @@ impl Runtime<'_> {
     /// implementation is exactly how a move quietly becomes a respawn.
     fn extract_pane_into_new_tab(&mut self, leaf: LeafId, slot: usize) -> Result<bool> {
         let metrics = self.seat_metrics();
-        let id = TabId(self.window.next_tab_id);
+        // Spent whether or not the layout lets the pane out — [`Runtime::absorb_tab`]'s
+        // reason, and the same allocator.
+        let id = self.app.tab_ids.mint();
         let render_physical =
             presentation_physical_size(self.window.renderer.presentation_geometry());
         let renderer = &self.window.renderer;
@@ -54083,7 +55110,6 @@ impl Runtime<'_> {
         let Some(torn) = torn else {
             return Ok(false);
         };
-        self.window.next_tab_id += 1;
         // The survey already clamped this against the same strip (N158); the
         // `min` is the ordinary bound on an insertion index, not a second opinion
         // about the partition.
@@ -60861,6 +61887,22 @@ impl<K: Copy + Eq + std::hash::Hash, W> Windows<K, W> {
         self.open.get_mut(&key)
     }
 
+    /// **Two windows at once, both mutable** — what a transfer needs and cannot
+    /// otherwise have, for [`two_tabs_mut`]'s reason one layer up.
+    ///
+    /// `None` when either is not open or when they are the same window; the
+    /// second is the caller having asked a question with no answer rather than a
+    /// case to degrade into, because a tab moving into the window it is already
+    /// in is refused three layers up ([`FolioApp::transfer_tab`]).
+    #[allow(dead_code, reason = "F1c's drag and F2's menu row press the transfer")]
+    fn two_mut(&mut self, a: K, b: K) -> Option<(&mut W, &mut W)> {
+        if a == b {
+            return None;
+        }
+        let [first, second] = self.open.get_disjoint_mut([&a, &b]);
+        Some((first?, second?))
+    }
+
     fn contains(&self, key: K) -> bool {
         self.open.contains_key(&key)
     }
@@ -62192,6 +63234,481 @@ impl FolioApp {
         Ok(())
     }
 
+    /// **Which window this tab is standing in** (F1b).
+    ///
+    /// The whole of the ownership table, and the reason there is no table: a tab
+    /// is in exactly one window's strip, the strip is the only thing that writes
+    /// that, and a `HashMap<TabId, WindowId>` beside it would be a second author
+    /// of a fact that already has one — kept in step by every verb that opens,
+    /// closes or moves a tab, and wrong the first time one of them forgot.
+    ///
+    /// Linear, over a handful of windows holding tens of tabs, on a lane that
+    /// runs when a worker answers. If that ever stops being cheap the answer is
+    /// an index derived from the strips and rebuilt when they change — not a
+    /// second place to write it down.
+    #[allow(dead_code, reason = "F1c's drag and F2's menu row press the transfer")]
+    fn owner_of(&mut self, tab: TabId) -> Option<WindowId> {
+        (0..self.windows.len()).find_map(|index| {
+            let id = self.windows.key_at(index)?;
+            let window = self.windows.get_mut(id)?;
+            window.tabs.iter().any(|open| open.id == tab).then_some(id)
+        })
+    }
+
+    /// **Move one whole tab into another window** — the application-level
+    /// transaction (F1b; `plan.md` F1b「移交 = App 级事务」).
+    ///
+    /// This is the door, and it is deliberately a plain function taking two ids.
+    /// The gestures are not this slice's — a drag across a window boundary is
+    /// F1c's, a menu row is F2's — and both of them, and every test, come through
+    /// here. Nothing above it decides anything: which window the tab is *in* is
+    /// not a parameter, because [`Self::owner_of`] is the only authority on that
+    /// and asking the caller would be inviting a second one.
+    ///
+    /// # Three phases, and only the middle one can half-happen
+    ///
+    /// **Prepare** answers every question that can be answered without touching
+    /// anything: is the tab open, is the target open, is it already there, and
+    /// can every page on the tab be named unambiguously on both sides
+    /// ([`page_key_collision`] — the one thing this slice stopped at, and its doc
+    /// says why). A refusal here has changed nothing at all.
+    ///
+    /// **The platform handoff** is [`webhost::WebSeat::rehost`] per page, and it
+    /// is the only part that can fail after something has moved. A page the
+    /// engine refuses to hand over is put back by the platform's own
+    /// compensation ([`webhost::RehostReport::SourceKept`]) — and then *this*
+    /// function puts back the pages that had already gone, in reverse, before
+    /// refusing. `Rebuilding` is not a failure: the page's in-document state is
+    /// gone and the report says so, but its address is already the target's and
+    /// the tab must follow it.
+    ///
+    /// **The model commit** is everything after, and by the time it runs nothing
+    /// left can fail: the strip surgery, the two window-level maps that hold live
+    /// per-pane state, the wake-ups, the attention tickets, and one session
+    /// write.
+    ///
+    /// # What travels, and what is left behind on purpose
+    ///
+    /// A tab is a `TabState`, so its seven tables of content — the shells, the
+    /// columns, the directories read, the repository, the Git scroll, the graph,
+    /// the whole preview view — travel because the struct does. The window-level
+    /// state that has to be *carried* is the state a window keeps per pane rather
+    /// than per tab: the engines and their last frames. The preview watcher needs
+    /// nothing: `watched_preview_files` walks every tab of its own window, so the
+    /// target picks the files up on its next turn and the source drops them on
+    /// its own — verified rather than arranged, which is the better kind.
+    ///
+    /// **Attention tickets are dropped, not carried.** A ticket is a place in
+    /// *one window's* queue, minted from that window's serial and meaning "how
+    /// long has this been waiting for you, here". Carried into another window it
+    /// would be an older serial than anything that window has issued and would
+    /// jump the queue it just joined. The bell that earned it is untouched, so a
+    /// pane still asking is issued a new ticket by the target's own counter on
+    /// its next turn — which is the sentence "you have not answered this yet"
+    /// said in the new window's own words.
+    /// Turn F1b's acceptance harness one step — see [`TransferProbe`], which is
+    /// where the whole of "why this exists" is written. A no-op in every run that
+    /// did not ask for it.
+    fn advance_transfer_probe(&mut self, now: Instant) -> Result<()> {
+        let Some(probe) = self.app.as_ref().and_then(|app| app.transfer_probe) else {
+            return Ok(());
+        };
+        let next = match probe {
+            TransferProbe::Arming { at, settle } if now >= at => {
+                let Some(first) = self.windows.key_at(0) else {
+                    return Ok(());
+                };
+                eprintln!("BT_TRANSFER opening a second window");
+                if let Some(app) = self.app.as_mut() {
+                    app.pending_new_windows.push(NewWindowPlan::fresh(first));
+                }
+                TransferProbe::Opening {
+                    at: now + settle.max(Duration::from_secs(1)),
+                }
+            }
+            TransferProbe::Opening { at } if now >= at => {
+                let (Some(from), Some(into)) = (self.windows.key_at(0), self.windows.key_at(1))
+                else {
+                    eprintln!("BT_TRANSFER the second window never arrived");
+                    TransferProbe::Done.deadline();
+                    return self.set_transfer_probe(TransferProbe::Done);
+                };
+                let Some(tab) = self.windows.get_mut(from).and_then(|window| {
+                    window
+                        .tabs
+                        .get(window.active_tab)
+                        .map(|tab| (tab.id, tab.sessions.len()))
+                }) else {
+                    return self.set_transfer_probe(TransferProbe::Done);
+                };
+                let (tab, shells) = tab;
+                eprintln!(
+                    "BT_TRANSFER before: moving {tab:?} ({shells} shell(s)) out of {from:?} into \
+                     {into:?}"
+                );
+                self.report_transfer_shape("before");
+                self.report_transfer_tail(tab, "before");
+                let outcome = self.transfer_tab(tab, into)?;
+                eprintln!("BT_TRANSFER report: {outcome:?}");
+                self.report_transfer_shape("after");
+                self.report_transfer_tail(tab, "after");
+                match outcome {
+                    TransferOutcome::Moved(moved) => {
+                        // **Give the moved shell something to say, later.** An
+                        // idle prompt says nothing, and "the output arrived" is
+                        // half the acceptance; the sleep is what makes it arrive
+                        // after the source window has already gone.
+                        self.speak_into_transfer_probe_tab(
+                            moved.tab,
+                            b"Start-Sleep -Seconds 2; Write-Output BT-TRANSFER-ALIVE\r",
+                        );
+                        TransferProbe::Listening {
+                            at: now + Duration::from_secs(6),
+                            tab: moved.tab,
+                        }
+                    }
+                    TransferOutcome::Refused(_) => TransferProbe::Done,
+                }
+            }
+            TransferProbe::Listening { at, tab } if now >= at => {
+                // **The wake-up acceptance, and the only assertion it needs.**
+                // The window this shell was started in has gone; the loop has
+                // been idle; if the tail below has grown, the shell woke a window
+                // it was not born in.
+                self.report_transfer_tail(tab, "settled");
+                TransferProbe::Done
+            }
+            standing => standing,
+        };
+        self.set_transfer_probe(next)
+    }
+
+    /// Print which window holds which tab, and where each page is composing.
+    fn report_transfer_shape(&mut self, when: &str) {
+        for index in 0..self.windows.len() {
+            let Some(id) = self.windows.key_at(index) else {
+                continue;
+            };
+            let Some(window) = self.windows.get_mut(id) else {
+                continue;
+            };
+            let tabs: Vec<u64> = window.tabs.iter().map(|tab| tab.id.0).collect();
+            // **The title and not the address**, because a page reloaded to the
+            // same address looks exactly like a page that never moved: F1a's
+            // whole method, read out of the same place. The probe page writes
+            // `boot=<id> tick=<n>` into `document.title` every 250ms, so an
+            // unchanged id across the move is "no navigation happened" and a
+            // climbing tick is "the same JS heap kept running".
+            let pages: Vec<String> = window
+                .web
+                .iter()
+                .map(|(seat, page)| {
+                    format!(
+                        "seat {} -> {} [{}]",
+                        seat.0,
+                        page.page().url,
+                        page.page().title
+                    )
+                })
+                .collect();
+            eprintln!("BT_TRANSFER {when}: {id:?} tabs={tabs:?} pages={pages:?}");
+        }
+    }
+
+    /// Type one line into every shell of one tab, wherever that tab now is.
+    fn speak_into_transfer_probe_tab(&mut self, tab: TabId, line: &[u8]) {
+        let Some(id) = self.owner_of(tab) else {
+            return;
+        };
+        let Some(window) = self.windows.get_mut(id) else {
+            return;
+        };
+        let Some(state) = window.tabs.iter_mut().find(|open| open.id == tab) else {
+            return;
+        };
+        for (_, leaf) in state.leaves_mut() {
+            if let Some(pty) = leaf.pty.as_mut() {
+                let _ = pty.write(line);
+            }
+        }
+    }
+
+    /// How much every shell of one tab has said, wherever that tab now is.
+    fn report_transfer_tail(&mut self, tab: TabId, when: &str) {
+        let Some(id) = self.owner_of(tab) else {
+            eprintln!("BT_TRANSFER tail {when}: {tab:?} is in no window");
+            return;
+        };
+        let Some(window) = self.windows.get_mut(id) else {
+            return;
+        };
+        let bit = Arc::clone(&window.pty_wake.raised);
+        let Some(state) = window.tabs.iter_mut().find(|open| open.id == tab) else {
+            return;
+        };
+        for (seat, leaf) in state.leaves_mut() {
+            // **The measurement the wake-up acceptance is actually about**: does
+            // this shell's reader thread nudge the window the tab is standing in
+            // now, or the one it was started in — which by this line has closed.
+            let nudges_this_window = leaf
+                .wake
+                .as_ref()
+                .is_some_and(|wake| Arc::ptr_eq(&wake.bit(), &bit));
+            eprintln!(
+                "BT_TRANSFER wake {when}: {tab:?} seat {} nudges the window it is in = \
+                 {nudges_this_window}",
+                seat.0
+            );
+            // Two counts and not one picture: `output_revision` is how many times
+            // the loop has *drained* this shell, so it only climbs if something
+            // woke the window to drain it, and the frozen line count is what
+            // arrived. Together they are the whole of the wake-up acceptance.
+            let drains = leaf.output_revision;
+            let lines = leaf.session.transcript().frozen().len();
+            eprintln!(
+                "BT_TRANSFER tail {when}: {tab:?} seat {} in {id:?} drains={drains} \
+                 frozen_lines={lines}",
+                seat.0
+            );
+        }
+    }
+
+    fn set_transfer_probe(&mut self, next: TransferProbe) -> Result<()> {
+        if let Some(app) = self.app.as_mut() {
+            app.transfer_probe = Some(next);
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code, reason = "F1c's drag and F2's menu row are the gestures")]
+    fn transfer_tab(&mut self, tab: TabId, into: WindowId) -> Result<TransferOutcome> {
+        // ── Prepare ───────────────────────────────────────────────────────────
+        let Some(from) = self.owner_of(tab) else {
+            return Ok(TransferOutcome::Refused(TransferRefusal::NoSuchTab(tab)));
+        };
+        if from == into {
+            return Ok(TransferOutcome::Refused(TransferRefusal::AlreadyThere));
+        }
+        if !self.windows.contains(into) {
+            return Ok(TransferOutcome::Refused(TransferRefusal::NoSuchWindow(
+                into,
+            )));
+        }
+        let target_hwnd = {
+            let target = self
+                .windows
+                .get_mut(into)
+                .expect("checked open one line above");
+            window_hwnd(&target.window)?
+        };
+        let Some((source, target)) = self.windows.two_mut(from, into) else {
+            // `from != into`, both were open a statement ago, and nothing between
+            // here and there can close a window.
+            unreachable!("both windows were open and they are not the same window");
+        };
+        let Some(index) = source.tabs.iter().position(|open| open.id == tab) else {
+            unreachable!("`owner_of` said this window holds this tab");
+        };
+        let moving: BTreeSet<SeatId> = source.tabs[index]
+            .seats
+            .tree()
+            .seats_in_order()
+            .into_iter()
+            .map(|seat| seat.id)
+            .collect();
+        let others_in_source: BTreeSet<SeatId> = source
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| *slot != index)
+            .flat_map(|(_, other)| {
+                other
+                    .seats
+                    .tree()
+                    .seats_in_order()
+                    .into_iter()
+                    .map(|seat| seat.id)
+            })
+            .collect();
+        let hosted_in_source: BTreeSet<SeatId> = source.web.keys().copied().collect();
+        let hosted_in_target: BTreeSet<SeatId> = target.web.keys().copied().collect();
+        if let Some(seat) = page_key_collision(
+            &moving,
+            &others_in_source,
+            &hosted_in_source,
+            &hosted_in_target,
+        ) {
+            return Ok(TransferOutcome::Refused(TransferRefusal::AmbiguousPage(
+                seat,
+            )));
+        }
+
+        // ── The platform handoff ──────────────────────────────────────────────
+        // In seat order, so that the compensation below can be read as "the ones
+        // before this one", and so that two runs of the same move do the same
+        // things in the same order.
+        let carrying: Vec<SeatId> = moving
+            .iter()
+            .copied()
+            .filter(|seat| hosted_in_source.contains(seat))
+            .collect();
+        let mut moved: Vec<(SeatId, webhost::RehostReport)> = Vec::new();
+        let mut outcomes = Vec::new();
+        let mut refused = None;
+        let source_hwnd = window_hwnd(&source.window)?;
+        let front = source.tabs[index].seats.identity();
+        // Two disjoint fields of one window, borrowed apart, because the page
+        // being handed over and the tree it is being handed out of are both the
+        // source window's.
+        let WindowRuntime {
+            web: source_web,
+            compositor: source_compositor,
+            ..
+        } = &mut *source;
+        for seat in carrying {
+            let Some(page) = source_web.get_mut(&seat) else {
+                continue;
+            };
+            let report = page.rehost(
+                source_compositor,
+                &target.compositor,
+                webhost::SeatAddress {
+                    seat: seat.0,
+                    hwnd: target_hwnd,
+                },
+                // **The keyboard goes with the tab**, and only for the pane the
+                // tab is standing on: a page in a background pane of a moved tab
+                // has not been pointed at by anybody.
+                front == seat,
+                &mut outcomes,
+            );
+            match report {
+                webhost::RehostReport::SourceKept(why) => {
+                    refused = Some(TransferRefusal::PageKept(seat, why));
+                    break;
+                }
+                report => moved.push((seat, report)),
+            }
+        }
+        if let Some(refusal) = refused {
+            // **Bring back the ones that had already gone**, in reverse, so the
+            // source window is holding exactly what it was holding before this
+            // function was called. The entry never left `source_web` — only its
+            // *address* did — so the way home is the same call with the two sides
+            // exchanged. A page that will not come home says so in its own report
+            // and there is nothing further to do about it here: the tab is not
+            // moving, and a page that ends up rebuilding rebuilds on the window
+            // its tab is still in, which is where this puts its address.
+            for (seat, _) in moved.iter().rev() {
+                if let Some(page) = source_web.get_mut(seat) {
+                    let _ = page.rehost(
+                        &target.compositor,
+                        source_compositor,
+                        webhost::SeatAddress {
+                            seat: seat.0,
+                            hwnd: source_hwnd,
+                        },
+                        false,
+                        &mut outcomes,
+                    );
+                }
+            }
+            return Ok(TransferOutcome::Refused(refusal));
+        }
+
+        // ── The model commit ──────────────────────────────────────────────────
+        // From here nothing may fail.
+        let mut carried = source.tabs.remove(index);
+        if source.active_tab >= source.tabs.len() {
+            source.active_tab = source.tabs.len().saturating_sub(1);
+        }
+        if source.placeholder_tab == Some(tab) {
+            // The scaffolding left the window it was scaffolding.
+            source.placeholder_tab = None;
+        }
+        for (seat, _) in &moved {
+            if let Some(page) = source.web.remove(seat) {
+                target.web.insert(*seat, page);
+            }
+            if let Some(picture) = source.web_thumbs.take(*seat) {
+                target.web_thumbs.put(*seat, picture);
+            }
+        }
+        for (_, leaf) in carried.leaves_mut() {
+            // **The wake-up is re-pointed here and nowhere else** — see
+            // [`LeafWake`] for what a shell nudging the bit of a window that has
+            // closed costs, which is silence rather than a wrong picture.
+            if let Some(wake) = leaf.wake.as_ref() {
+                wake.rebind(&target.pty_wake);
+                debug_assert!(
+                    Arc::ptr_eq(&wake.bit(), &target.pty_wake.raised),
+                    "F1b: a moved shell must nudge the window it is now in"
+                );
+            }
+            // A place in a queue this pane has left — see this function's own
+            // doc. The bell is untouched, so a pane still asking is issued a new
+            // one by the window it arrived in.
+            leaf.attention_ticket = None;
+        }
+        target.tabs.push(carried);
+        target.active_tab = target.tabs.len() - 1;
+        let source_emptied = source.tabs.is_empty();
+
+        // ── One accounting ────────────────────────────────────────────────────
+        //
+        // **The window that was emptied is not asked to re-solve or to sit for a
+        // picture**, and the first machine run is what wrote this line: a
+        // `Runtime` reaches its active tab through `tabs[active_tab]`, and a
+        // window with no tabs has no such index — measured as
+        // `index out of bounds: the len is 0 but the index is 0` the first time
+        // a tab was moved out of a one-tab window. Its record leaves the file
+        // through `close_window`, which is the door it is about to go through
+        // anyway, and which already knows how to file a window's seed into
+        // Recent. So the accounting here is the target's, plus the source's only
+        // while the source still is one.
+        let now = Instant::now();
+        let settling: &[WindowId] = if source_emptied {
+            &[into]
+        } else {
+            &[from, into]
+        };
+        for id in settling {
+            if let Some(mut runtime) = self.runtime(*id) {
+                runtime.settle_seat_set_change()?;
+                let picture = runtime.window_snapshot();
+                runtime.app.record_window(*id, picture, now);
+            }
+        }
+        if source_emptied {
+            // **The window the tab left goes now, not on the next message.**
+            // Closing its last tab already says this; what this cannot do is ask
+            // Windows to post a `WM_CLOSE` and carry on, because `about_to_wait`
+            // runs before that message is answered and it gives every window in
+            // the map a turn — and a window with no tabs has no active tab to
+            // give one to. So the shut is spent here, on
+            // [`FolioApp::close`]'s own two lines.
+            //
+            // `ending = false`: this is a window going, not the process. It
+            // cannot be the last one — the window the tab moved into is open by
+            // construction — so the process's own sentinel is not touched and
+            // there is no `event_loop.exit()` to owe. Its seed does not reach
+            // Recent either, and by the right rule rather than by omission:
+            // [`Runtime::vault_this_window`] records nothing for a window with no
+            // tabs, which is what an emptied window is.
+            if let Some(mut runtime) = self.runtime(from) {
+                runtime.close_window(false)?;
+            }
+            self.windows.remove(from);
+        }
+        Ok(TransferOutcome::Moved(TabTransfer {
+            tab,
+            from,
+            into,
+            pages: moved,
+            source_emptied,
+        }))
+    }
+
     /// **The preview lane, drained once for the whole process** (user report,
     /// 2026-08-23).
     ///
@@ -63107,8 +64624,23 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 }
             }
         }
-        event_loop
-            .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+        // **F1b's acceptance harness, and only when it was asked for.** Its
+        // deadline joins the loop's own on purpose: the last step of the script
+        // runs on an otherwise idle loop, which is exactly the condition the
+        // wake-up acceptance is about.
+        if let Err(error) = self.advance_transfer_probe(now) {
+            self.fail(event_loop, error);
+            return;
+        }
+        let probe_deadline = self
+            .app
+            .as_ref()
+            .and_then(|app| app.transfer_probe)
+            .and_then(TransferProbe::deadline);
+        event_loop.set_control_flow(
+            earliest_deadline([wake_deadline, probe_deadline])
+                .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
+        );
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
@@ -87517,6 +89049,79 @@ mod tests {
         );
     }
 
+    /// PIN (F1b, `plan.md` v4 增补 ②; `codex-final.md` §2 "pane 升格换号的活性
+    /// 仍缺一半") — **a pane promoted into a tab of its own asks its outstanding
+    /// questions again, under the name it now has.**
+    ///
+    /// A pane is addressed by [`LeafId`], which is its tab and its seat. Promote
+    /// it and both change, so everything already out with a worker is addressed
+    /// to a leaf that no longer exists — and, crucially, **the tab it left is
+    /// still open**, because it had a sibling. The v3 draft said the old answers
+    /// would "naturally fail to match once the source tab died"; the source tab
+    /// does not die, and that sentence is void.
+    ///
+    /// Safety is had by construction: the old tab no longer has that seat, so an
+    /// answer addressed to the old leaf is dropped. This test is the other half,
+    /// **liveness**. Every ledger that says "already asked" travels with the pane
+    /// — `DirNode::Pending` in its directory cache, a claimed head read on its
+    /// buffer, a path already out for verification — and a ledger that survives
+    /// an answer that never comes is a column that stays on "Loading …" for the
+    /// rest of the session. So the promotion clears them, and the ordinary
+    /// per-frame asking asks again under the new leaf: `wanted` is exactly what
+    /// [`files::tree_view`] puts a key on when the cache has never heard of it.
+    ///
+    /// MUTATION: drop the `forget_work_in_flight_for_seat` call out of
+    /// `pane_into_new_tab` and the torn-out column keeps its `Pending` node,
+    /// `wanted` comes back empty, and nothing ever asks again.
+    #[test]
+    fn a_pane_promoted_into_its_own_tab_asks_its_outstanding_questions_again() {
+        let mut source = tab_with_a_files_column(1, "D:\\work\\folio");
+        let column = source.seats.files()[0];
+        // One read is out with the worker, addressed to `LeafId { tab: 1, seat:
+        // column }`, and the cache says so.
+        source
+            .file_trees
+            .entry(column)
+            .or_default()
+            .mark_pending("");
+        assert!(
+            files::tree_view(&source.files[&column].clone(), &source.file_trees[&column])
+                .wanted
+                .is_empty(),
+            "a directory already asked about is not asked about twice — which is \
+             the ledger this test is about"
+        );
+
+        let torn = tear_pane_into_tab(
+            &mut source,
+            &cross_metrics(),
+            column,
+            TabId(9),
+            Instant::now(),
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("a files column may become a tab of its own");
+        let landed = torn.seats.files()[0];
+
+        assert!(
+            !source.files.contains_key(&column),
+            "safety: the tab it left no longer has that seat, so the answer to \
+             the old question lands nowhere"
+        );
+        assert!(
+            !source.sessions.is_empty(),
+            "and it is still open, which is why the old address failing to match \
+             is not enough on its own"
+        );
+        assert_eq!(
+            files::tree_view(&torn.files[&landed].clone(), &torn.file_trees[&landed]).wanted,
+            vec![String::new()],
+            "liveness: the promoted column wants its root read again, under the \
+             leaf it now is"
+        );
+    }
+
     /// **T5 — a preview torn into the strip is a tab identified by its file.**
     ///
     /// The second shape, and the half that had to carry more than a root: a
@@ -87963,6 +89568,8 @@ mod tests {
         };
         LeafSession {
             pty: None,
+            // No ConPTY, so no reader thread, so nothing to wake — see the field.
+            wake: None,
             // Aimed at the tail, like every shell that has not been aimed.
             card_skip: 0,
             // A shell-less fixture is not a shell of some other kind: these

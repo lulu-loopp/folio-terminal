@@ -144,8 +144,13 @@ pub struct Picture {
 }
 
 /// What one seat's slot holds.
+///
+/// Public only as an **opaque** value, so that [`WebThumbs::take`] and
+/// [`WebThumbs::put`] can carry one whole record between two windows without
+/// anything outside this module being able to read or write a field of it — a
+/// slot half-copied is exactly how an ask in flight lands on the wrong page.
 #[derive(Debug)]
-struct Entry {
+pub struct Entry {
     /// The URL the picture — or the ask in flight — is of.
     url: String,
     picture: Option<Picture>,
@@ -447,6 +452,28 @@ impl WebThumbs {
     /// picture with it — which is also the only place the memory is released.
     pub fn retain(&mut self, live: &BTreeSet<SeatId>) {
         self.seats.retain(|seat, _| live.contains(seat));
+    }
+
+    /// **Hand this seat's whole record over** — a tab moving to another window
+    /// (Folio F1b), and the only reason a picture ever leaves one of these
+    /// without being dropped.
+    ///
+    /// The *whole* entry and not just the picture: an ask in flight, the serial
+    /// that dates it and the page it was of are all facts about this seat, and
+    /// leaving any of them behind would let the answer to an outstanding ask land
+    /// in a window the page has left. The v3 增补's rule for the frame itself is
+    /// settled elsewhere and is untouched by this — the entry travels, and
+    /// whether the frame it carries is still current is the caller's question.
+    #[allow(dead_code, reason = "F1c's drag and F2's menu row press the transfer")]
+    #[must_use]
+    pub fn take(&mut self, seat: SeatId) -> Option<Entry> {
+        self.seats.remove(&seat)
+    }
+
+    /// [`Self::take`]'s other half, on the window the seat arrived in.
+    #[allow(dead_code, reason = "F1c's drag and F2's menu row press the transfer")]
+    pub fn put(&mut self, seat: SeatId, entry: Entry) {
+        self.seats.insert(seat, entry);
     }
 }
 

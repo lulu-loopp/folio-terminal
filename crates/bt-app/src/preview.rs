@@ -2025,6 +2025,19 @@ impl PreviewBuffer {
         true
     }
 
+    /// **Give up on the read that is still out** (F1b, `plan.md` v4 增补 ②).
+    ///
+    /// The pane showing this buffer has been given a new [`crate::LeafId`] — the
+    /// tab is not the tab it asked from — so the answer is addressed to a pool
+    /// that no longer holds it and is dropped where it lands. Nothing asks twice
+    /// while `head_asked` stands, so this is the bit that lets the next frame ask
+    /// again; without it the pane draws its head, its foot and the two hairlines
+    /// between them for the rest of the session, which is exactly the 2026-08-23
+    /// report one gesture over.
+    pub fn forget_head_read(&mut self) {
+        self.head_asked = false;
+    }
+
     /// **The file behind this buffer was written by somebody else** (W2 slice
     /// 5) - ask the disk again, without taking down what is on the glass.
     ///
@@ -2601,11 +2614,23 @@ impl PreviewRequest {
 /// What the worker found.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewResponse {
-    /// The window the asking tab is in — see [`PreviewRequest::window`].
+    /// The window the asking tab was in — see [`PreviewRequest::window`].
     pub window: WindowId,
     pub tab: TabId,
     pub source: PreviewSource,
     pub answer: PreviewAnswer,
+}
+
+impl PreviewResponse {
+    /// **Who this answer belongs to** (F1b): the tab whose pool or whose glance
+    /// slot is holding the question, wherever that tab is standing now.
+    ///
+    /// This lane has only the one owner. A head read is claimed by a buffer in a
+    /// tab's pool (§7.1.3), and the hover glance that has no pool entry is still
+    /// checked against a tab of *this* window before it is offered the answer.
+    pub fn owner(&self) -> crate::AnswerOwner {
+        crate::AnswerOwner::Tab(self.tab)
+    }
 }
 
 /// One answer to one [`PreviewWant`].

@@ -122,11 +122,23 @@ impl DirRequest {
 /// What the worker found.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirResponse {
-    /// The window the asking tree is in — see [`DirRequest::window`].
+    /// The window the asking tree was in — see [`DirRequest::window`].
     pub window: WindowId,
     pub host: FilesHost,
     pub key: String,
     pub outcome: DirOutcome,
+}
+
+impl DirResponse {
+    /// **Who this answer belongs to** (F1b) — a docked column belongs to its
+    /// tab and travels with it between windows; a float belongs to the window
+    /// that minted its epoch and cannot travel at all.
+    pub fn owner(&self) -> crate::AnswerOwner {
+        match self.host {
+            FilesHost::Docked(leaf) => crate::AnswerOwner::Tab(leaf.tab),
+            FilesHost::Float(_) => crate::AnswerOwner::Window(self.window),
+        }
+    }
 }
 
 /// A directory either lists or it does not, and both are answers.
@@ -301,6 +313,28 @@ impl DirCache {
     pub fn mark_pending(&mut self, key: &str) {
         self.dirs.insert(key.to_owned(), DirNode::Pending);
         self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// **Give up on every read that is still out** (F1b, `plan.md` v4 增补 ②).
+    ///
+    /// Called when the column this cache belongs to is given a new [`crate::LeafId`]
+    /// — a pane promoted into a tab of its own, or moved into another tab. Every
+    /// question it has out carries the old address and will be dropped when it
+    /// lands, so the ledger that stops it being asked twice has to stop saying it
+    /// was asked at all: `Pending` becomes *unheard of*, which is what
+    /// [`tree_view`] turns into a `wanted` entry.
+    ///
+    /// **Only the pending nodes.** A directory already listed is an answer in
+    /// hand, and throwing it away would blink a column that merely changed tabs
+    /// back to "Loading …" — the flicker `pane_into_new_tab` carries these caches
+    /// across tabs to prevent.
+    pub fn forget_pending(&mut self) {
+        let before = self.dirs.len();
+        self.dirs
+            .retain(|_, node| !matches!(node, DirNode::Pending));
+        if self.dirs.len() != before {
+            self.revision = self.revision.wrapping_add(1);
+        }
     }
 
     /// Take an answer from the worker.
