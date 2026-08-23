@@ -8717,13 +8717,16 @@ enum MouseRoute {
     /// A press handed to the program, and **the encoding it was handed over in**
     /// (DESIGN §7.1.5i).
     ///
-    /// `sgr` is latched at the press rather than read again at the release
-    /// because the two halves of one click are one message to the program: a
-    /// prompt arriving between them retires `1006` (§7.1.5i), and a release read
-    /// from the modes at that moment would answer an SGR press with an X10
-    /// release the program cannot pair with anything it is holding. The button is
-    /// latched for the same reason it always was — a release reports the button
-    /// that went down.
+    /// `sgr` is latched at the press rather than read again, because a press,
+    /// the moves made under it and the release that ends it are **one message**
+    /// to the program: a prompt arriving mid-click retires `1006` (§7.1.5i) and a
+    /// program can drop it on its own with `\e[?1006l`, and any of the three read
+    /// from the modes at that moment would answer an SGR press with X10 bytes the
+    /// program cannot pair with anything it is holding. Both the release
+    /// ([`route_forwarded_mouse_button`]) and the moves
+    /// ([`route_forwarded_mouse_motion`]) answer from here. The button is latched
+    /// for the same reason it always was — a release, and a drag report, name the
+    /// button that went down.
     Forward {
         button: input::MouseProtocolButton,
         sgr: bool,
@@ -8891,6 +8894,44 @@ fn route_forwarded_mouse_button(
                 hit.column,
                 modifiers,
             ))
+        }
+        _ => None,
+    }
+}
+
+/// The encoding and the button a pointer move is reported in, or `None` when
+/// this move is not the program's to hear.
+///
+/// **A move made with a button down is part of that button's gesture, so it is
+/// spelled the way that button's press was spelled** (DESIGN §7.1.5i) — the
+/// same latch the release arm of [`route_forwarded_mouse_button`] answers from,
+/// for the same reason. `\e[?1006l` is a mode of its own: a program can drop the
+/// encoding while keeping its tracking level, and motion that re-read
+/// `modes.sgr_mouse` would hand the child an SGR press, a run of X10 moves and
+/// an SGR release — one drag in two protocols, with the moves the half it cannot
+/// pair to the button it is holding. The prompt-start retirement is the case
+/// this used to be argued from and the only one it covered: it takes tracking
+/// with it, so the guard below returns before any encoding question is asked.
+///
+/// **With no press in flight the modes are read as they are**, because there is
+/// no press to owe anything to — a mode change is a fact about the next gesture,
+/// and the press that begins it latches whatever the modes say then.
+fn route_forwarded_mouse_motion(
+    route: Option<&MouseRoute>,
+    modes: TerminalModes,
+    modifiers: ModifiersState,
+) -> Option<(bool, input::MouseProtocolButton)> {
+    if modifiers.shift_key() || modes.mouse_tracking == MouseTracking::Off {
+        return None;
+    }
+    match route {
+        Some(MouseRoute::Forward { button, sgr })
+            if modes.mouse_tracking != MouseTracking::Click =>
+        {
+            Some((*sgr, *button))
+        }
+        None if modes.mouse_tracking == MouseTracking::Motion => {
+            Some((modes.sgr_mouse, input::MouseProtocolButton::None))
         }
         _ => None,
     }
@@ -52001,26 +52042,15 @@ impl Runtime<'_> {
             return Ok(());
         };
         let modes = self.leaf_terminal_modes(seat);
-        if self.window.modifiers.shift_key() || modes.mouse_tracking == MouseTracking::Off {
+        let Some((sgr, button)) = route_forwarded_mouse_motion(
+            self.window.mouse_route.as_ref(),
+            modes,
+            self.window.modifiers,
+        ) else {
             return Ok(());
-        }
-        let button = match self.window.mouse_route {
-            // Motion reads the *current* encoding rather than the latch's, and is
-            // right to: a retirement puts `mouse_tracking` at `Off`, which the
-            // guard above has already turned into a return. Motion never faces
-            // the split the release arm latches against.
-            Some(MouseRoute::Forward { button, .. })
-                if modes.mouse_tracking != MouseTracking::Click =>
-            {
-                button
-            }
-            None if modes.mouse_tracking == MouseTracking::Motion => {
-                input::MouseProtocolButton::None
-            }
-            _ => return Ok(()),
         };
         let bytes = input::mouse_bytes(
-            modes.sgr_mouse,
+            sgr,
             button,
             input::MouseProtocolEvent::Motion,
             hit.row,
@@ -77975,6 +78005,158 @@ mod tests {
             "the release answers the press, not the modes"
         );
         assert!(route.is_none());
+    }
+
+    /// **The moves in the middle of the click belong to the press too.** The
+    /// release arm has answered in the press's encoding since 2026-08-21; motion
+    /// argued its way out of the same latch on the grounds that the only way to
+    /// lose `1006` mid-click was the prompt-start retirement (§7.1.5i), which
+    /// takes `1000`/`1002`/`1003` with it and so returns at the tracking guard
+    /// before any encoding question is asked.
+    ///
+    /// That is true of the retirement and false in general: `\e[?1006l` is one
+    /// mode of its own, and a program that drops it while keeping its tracking
+    /// level leaves motion reading a `sgr_mouse` its own press did not go out
+    /// in. The drag then arrives at the child as an SGR press, a run of X10
+    /// six-byte moves, and an SGR release — one gesture spelled in two
+    /// protocols, with the moves the half the program cannot pair to the button
+    /// it is holding.
+    ///
+    /// MUTATION: put `modes.sgr_mouse` back into the `Forward` arm of
+    /// [`route_forwarded_mouse_motion`] and this goes red.
+    #[test]
+    fn a_forwarded_drag_keeps_its_press_encoding_when_the_program_drops_sgr_mid_drag() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+        session.feed(b"\x1b[?1002h\x1b[?1006h").unwrap();
+        let hit = bt_render::GridHit { row: 1, column: 2 };
+        let mut route = None;
+        assert_eq!(
+            route_forwarded_mouse_button(
+                &mut route,
+                ElementState::Pressed,
+                input::MouseProtocolButton::Left,
+                hit,
+                session.terminal_modes(),
+                ModifiersState::empty(),
+                PressedCellTarget::Ordinary,
+            ),
+            Some(b"\x1b[<0;3;2M".to_vec())
+        );
+
+        // The program drops the encoding on its own, without touching tracking:
+        // the retirement's "it all goes at once" is not available here.
+        session.feed(b"\x1b[?1006l").unwrap();
+        let modes = session.terminal_modes();
+        assert!(!modes.sgr_mouse);
+        assert_eq!(
+            modes.mouse_tracking,
+            MouseTracking::Drag,
+            "tracking survives, so the motion path is still live"
+        );
+
+        assert_eq!(
+            route_forwarded_mouse_motion(route.as_ref(), modes, ModifiersState::empty()),
+            Some((true, input::MouseProtocolButton::Left)),
+            "the moves belong to the press, and go out spelled the way it was"
+        );
+        let moved = bt_render::GridHit { row: 2, column: 3 };
+        let (sgr, button) =
+            route_forwarded_mouse_motion(route.as_ref(), modes, ModifiersState::empty()).unwrap();
+        assert_eq!(
+            input::mouse_bytes(
+                sgr,
+                button,
+                input::MouseProtocolEvent::Motion,
+                moved.row,
+                moved.column,
+                ModifiersState::empty(),
+            ),
+            b"\x1b[<32;4;3M",
+            "not the X10 six bytes the current modes would have spelled"
+        );
+    }
+
+    /// The same latch the other way round, which is what makes it a latch: a
+    /// program that turns `1006` **on** while a button is down still gets X10
+    /// moves, because X10 is what its press went out in.
+    #[test]
+    fn a_forwarded_drag_keeps_its_press_encoding_when_the_program_adds_sgr_mid_drag() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+        session.feed(b"\x1b[?1002h").unwrap();
+        let hit = bt_render::GridHit { row: 1, column: 2 };
+        let mut route = None;
+        assert_eq!(
+            route_forwarded_mouse_button(
+                &mut route,
+                ElementState::Pressed,
+                input::MouseProtocolButton::Left,
+                hit,
+                session.terminal_modes(),
+                ModifiersState::empty(),
+                PressedCellTarget::Ordinary,
+            ),
+            Some(vec![0x1b, b'[', b'M', b' ', b'#', b'"'])
+        );
+
+        session.feed(b"\x1b[?1006h").unwrap();
+        let modes = session.terminal_modes();
+        assert!(modes.sgr_mouse);
+        assert_eq!(
+            route_forwarded_mouse_motion(route.as_ref(), modes, ModifiersState::empty()),
+            Some((false, input::MouseProtocolButton::Left))
+        );
+    }
+
+    /// And the boundary the latch does not cross: **a mode change is a fact
+    /// about the next gesture.** With no button down there is no press to be
+    /// owed anything, so a bare tracking move reads the modes as they are — and
+    /// the press that starts the next drag latches whatever they say then.
+    #[test]
+    fn a_hover_with_no_press_in_flight_reads_the_modes_as_they_are() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+        session.feed(b"\x1b[?1003h").unwrap();
+        assert_eq!(
+            route_forwarded_mouse_motion(None, session.terminal_modes(), ModifiersState::empty()),
+            Some((false, input::MouseProtocolButton::None))
+        );
+
+        session.feed(b"\x1b[?1006h").unwrap();
+        assert_eq!(
+            route_forwarded_mouse_motion(None, session.terminal_modes(), ModifiersState::empty()),
+            Some((true, input::MouseProtocolButton::None)),
+            "no latch is held open, so the new encoding takes effect at once"
+        );
+
+        // Shift is the window's, and `Click` tracking hears presses only — the
+        // two refusals the motion path had before it had a latch.
+        assert_eq!(
+            route_forwarded_mouse_motion(None, session.terminal_modes(), ModifiersState::SHIFT),
+            None
+        );
+        let mut click_only =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+        click_only.feed(b"\x1b[?1000h\x1b[?1006h").unwrap();
+        let modes = click_only.terminal_modes();
+        assert_eq!(modes.mouse_tracking, MouseTracking::Click);
+        assert_eq!(
+            route_forwarded_mouse_motion(None, modes, ModifiersState::empty()),
+            None
+        );
+        assert_eq!(
+            route_forwarded_mouse_motion(
+                Some(&MouseRoute::Forward {
+                    button: input::MouseProtocolButton::Left,
+                    sgr: true,
+                }),
+                modes,
+                ModifiersState::empty(),
+            ),
+            None,
+            "a click-tracking program asked for presses, not for the drag between them"
+        );
     }
 
     /// PIN (user ruling, 2026-08-20 — the repeal §7.1.5f wrote its own warrant
