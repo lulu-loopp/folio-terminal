@@ -1,0 +1,72 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>booting</title>
+<style>
+  html { background: #101418; color: #e8eef4; font: 16px/1.5 "Segoe UI", system-ui, sans-serif; }
+  body { margin: 0; padding: 24px 28px 900px; }
+  /* Fixed, so the readout survives the scroll offset the probe sets: the offset
+     is one of the things a rebuild silently loses, so it has to be real, and a
+     readout that scrolled away with it would photograph as an empty page. */
+  main { position: fixed; top: 18px; left: 24px; right: 24px; }
+  h1 { font-size: 15px; letter-spacing: .18em; text-transform: uppercase; color: #7f97ad; margin: 0 0 18px; font-weight: 600; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 0; }
+  dt { color: #7f97ad; }
+  dd { margin: 0; font-variant-numeric: tabular-nums; font-weight: 600; }
+  #boot { color: #ffd479; }
+  #tick { color: #7ee787; }
+  #log { margin-top: 20px; white-space: pre-wrap; color: #9fb3c8; min-height: 4em; }
+  .ring { position: fixed; inset: 0; border: 3px solid #ffd479; pointer-events: none; }
+</style>
+<div class="ring"></div>
+<main>
+<h1>webview2 rehost probe</h1>
+<dl>
+  <dt>boot id</dt><dd id="boot">—</dd>
+  <dt>ticks since boot</dt><dd id="tick">0</dd>
+  <dt>performance.now()</dt><dd id="now">0</dd>
+  <dt>history.length</dt><dd id="hist">0</dd>
+  <dt>scrollY</dt><dd id="scroll">0</dd>
+  <dt>sessionStorage</dt><dd id="store">—</dd>
+  <dt>document.hasFocus()</dt><dd id="focus">false</dd>
+</dl>
+<div id="log"></div>
+</main>
+<script>
+  // Everything below is state that a navigation would destroy and a rehost must
+  // not. The boot id in particular: it is minted once, at parse time, and it
+  // rides out on `document.title`, which the host reads through
+  // `DocumentTitleChanged` — so the whole "did it navigate?" question is
+  // answerable from the host's event log with no picture at all.
+  const boot = Math.random().toString(36).slice(2, 10).toUpperCase();
+  let ticks = 0;
+  const lines = [];
+  sessionStorage.setItem('spike-boot', boot);
+  document.getElementById('boot').textContent = boot;
+  document.getElementById('store').textContent = sessionStorage.getItem('spike-boot');
+  document.getElementById('hist').textContent = history.length;
+
+  function say(what) {
+    lines.push(what);
+    while (lines.length > 6) lines.shift();
+    document.getElementById('log').textContent = lines.join('\n');
+  }
+
+  setInterval(() => {
+    ticks += 1;
+    document.getElementById('tick').textContent = ticks;
+    document.getElementById('now').textContent = Math.round(performance.now());
+    document.getElementById('scroll').textContent = Math.round(window.scrollY);
+    document.getElementById('focus').textContent = document.hasFocus();
+    document.title = `boot=${boot} tick=${ticks}`;
+  }, 250);
+
+  addEventListener('mousedown', (e) => say(`mousedown ${e.button} at ${e.clientX},${e.clientY}`));
+  addEventListener('mouseup', (e) => say(`mouseup ${e.button}`));
+  addEventListener('mousemove', (e) => say(`mousemove ${e.clientX},${e.clientY}`));
+  addEventListener('keydown', (e) => say(`keydown ${e.key}`));
+  addEventListener('focus', () => say('page focus'));
+  addEventListener('blur', () => say('page blur'));
+  // A scroll offset is one of the things a "rebuild at the last URL" fallback
+  // silently loses, so the probe starts somewhere that is not the top.
+  addEventListener('load', () => window.scrollTo(0, 320));
+</script>
