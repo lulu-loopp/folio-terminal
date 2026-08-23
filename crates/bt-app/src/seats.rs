@@ -11598,7 +11598,8 @@ pub struct PreviewHeadTools {
     pub save: bool,
     /// `flippable` (P28) — the buffer is markdown.
     pub flip: bool,
-    /// The buffer is a **page** with a file behind it (user ruling 2026-08-20) —
+    /// The buffer is a **page** with a file behind it (user ruling 2026-08-20;
+    /// the class it means is the one of 2026-08-23, `.html` / `.htm` / `.pdf`) —
     /// `crate::preview_page_hand_off`, the one predicate that also decides which
     /// path the press hands over. A head drawn with an arrow its geometry did not
     /// reserve, or lit over a file it will not open, is the same class of bug the
