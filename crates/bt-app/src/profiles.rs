@@ -6420,15 +6420,21 @@ pub const TERM_MENU_SEPARATOR_AFTER: usize = 3;
 // same verbs are eighteen pixels away in it, and a menu that repeats what is
 // already visible beside it is how two lists come to disagree.
 //
-// **Two of the `⌄` menu's six rows are ruled out, and by the ruling rather than
-// by this file**: `Close pane` closes the whole *tab* on a lone pane, which is a
+// **Two of the `⌄` menu's rows are ruled out, and by the ruling rather than by
+// this file**: `Close pane` closes the whole *tab* on a lone pane, which is a
 // row that quietly means something bigger than it says, and the tab's own `×`
 // and `Ctrl+W` say it out loud; `Move pane to new tab` has nothing to move and
-// nowhere to move it, since a lone pane already *is* the whole tab. Its honest
-// sibling in this layout is `Move pane to new window`, which is multi-window F's
-// to deliver. The mock-up still prints that row and flags it in its own comment
-// as "the row this file would cut" — §7.1.6i cut it, and `loneVerbSegmentHtml`
-// has been brought into line with the ruling.
+// nowhere to move it, since a lone pane already *is* the whole tab. The mock-up
+// still prints that row and flags it in its own comment as "the row this file
+// would cut" — §7.1.6i cut it, and `loneVerbSegmentHtml` has been brought into
+// line with the ruling.
+//
+// **And the sibling §7.1.6i named has arrived** (multiwindow slice F1c): the
+// paragraph above ended "its honest sibling in this layout is `Move pane to new
+// window`, which is multi-window F's to deliver", and F delivered it. It is the
+// one verb in this menu that a lone pane can actually spend — this window is not
+// all there is — so the segment is four rows rather than three, and the debt
+// §7.1.6i wrote down is paid where it was written.
 
 /// The pane verbs a lone pane's right click carries, in the `⌄` menu's own
 /// order.
@@ -6438,10 +6444,11 @@ pub const TERM_MENU_SEPARATOR_AFTER: usize = 3;
 /// rows**, so the day one of them is renamed there is nowhere for the other to
 /// disagree from. The verbs behind them are one implementation too — see
 /// `Runtime::run_pane_verb`.
-pub const TERM_MENU_LONE_PANE_ROWS: [PaneMenuRow; 3] = [
+pub const TERM_MENU_LONE_PANE_ROWS: [PaneMenuRow; 4] = [
     PaneMenuRow::SplitWith,
     PaneMenuRow::NewInFolder,
     PaneMenuRow::Duplicate,
+    PaneMenuRow::MoveToNewWindow,
 ];
 
 /// One entry of the terminal's context menu.
@@ -7401,6 +7408,20 @@ pub enum PaneMenuRow {
     Duplicate,
     /// The pane leaves this tab and becomes a tab of its own.
     MoveToNewTab,
+    /// **The pane leaves this window and becomes a window of its own**
+    /// (multiwindow slice F1c; the plan's own row, `plan.md` F1c).
+    ///
+    /// The row above it and this one are one journey of two lengths — a pane out
+    /// of its tab, and a pane out of its window — and the second is composed of
+    /// the first: the pane is promoted to a tab exactly as the row above
+    /// promotes it, and the tab is then moved by the application's transfer.
+    ///
+    /// **It is also what makes a lone pane's menu worth opening.** §7.1.6i left
+    /// `Move pane to new tab` as a no-op on a pane with no siblings — a tab is
+    /// already all that pane is — and said the debt would be caught by the row
+    /// that came next. This is that row: a lone pane has nowhere to go inside
+    /// this window and a window of its own to go to.
+    MoveToNewWindow,
     /// The same verb the `×` in the head has.
     ClosePane,
 }
@@ -7418,22 +7439,24 @@ impl PaneMenuRow {
     /// command palette will carry it when there is one — which is the
     /// systematic door for a low-frequency verb, rather than a temporary one
     /// hung off whatever surface happened to be near.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Picker,
         Self::SplitWith,
         Self::NewInFolder,
         Self::Duplicate,
         Self::MoveToNewTab,
+        Self::MoveToNewWindow,
         Self::ClosePane,
     ];
 
-    /// The five that are rows of text with a mark, in order — [`Self::ALL`]
+    /// The six that are rows of text with a mark, in order — [`Self::ALL`]
     /// without the picker.
-    pub const TEXT_ROWS: [Self; 5] = [
+    pub const TEXT_ROWS: [Self; 6] = [
         Self::SplitWith,
         Self::NewInFolder,
         Self::Duplicate,
         Self::MoveToNewTab,
+        Self::MoveToNewWindow,
         Self::ClosePane,
     ];
 
@@ -7452,6 +7475,13 @@ impl PaneMenuRow {
             // glyph the files head wears for undocking, which is the same idea
             // aimed at a different container.
             Self::MoveToNewTab => Some(ChromeMark::Float),
+            // **The bare arrow beside the framed one**, which is the pair's own
+            // sentence read one container up: `#i-float`'s doc says the frame is
+            // *this pane leaves the tree* and the bare arrow is *this content
+            // leaves the window*, and these two rows differ by exactly that. Two
+            // framed arrows in adjacent rows would be one drawing asked to mean
+            // both — the argument `ChromeMark::External` was drawn for.
+            Self::MoveToNewWindow => Some(ChromeMark::External),
             Self::ClosePane => Some(ChromeMark::TabClose),
         }
     }
@@ -7464,6 +7494,7 @@ impl PaneMenuRow {
             Self::NewInFolder => new_in_folder_text(),
             Self::Duplicate => duplicate_pane_text(),
             Self::MoveToNewTab => move_to_new_tab_text(),
+            Self::MoveToNewWindow => move_to_new_window_text(),
             Self::ClosePane => close_pane_text(),
         }
     }
@@ -7495,6 +7526,11 @@ pub fn duplicate_pane_text() -> &'static str {
 #[must_use]
 pub fn move_to_new_tab_text() -> &'static str {
     crate::i18n::Text::PaneMenuMoveToNewTab.text()
+}
+/// One word apart from the row above it, and the word is the container.
+#[must_use]
+pub fn move_to_new_window_text() -> &'static str {
+    crate::i18n::Text::PaneMenuMoveToNewWindow.text()
 }
 /// The `×`'s verb, spelled — a menu row has room for the word the button does
 /// not, and `Close pane` is the mock-up's own `title` for that button (4672).
@@ -7706,7 +7742,7 @@ pub struct PaneMenuLayout {
     frame: [f32; 4],
     /// One rectangle per entry of [`PaneMenuRow::ALL`], in that order. The
     /// picker's is its whole block.
-    items: [[f32; 4]; 6],
+    items: [[f32; 4]; PaneMenuRow::ALL.len()],
     /// The pane at the middle of the picker's diagram.
     picker_pane: [f32; 4],
     /// The four slabs as they are **drawn**, in [`SplitZone::ALL`] order.
@@ -7718,7 +7754,7 @@ pub struct PaneMenuLayout {
     zone_hits: [[f32; 4]; 4],
     /// Where the caption sits.
     caption: [f32; 4],
-    /// The rule above `Close pane`, which separates the four verbs that *make* a
+    /// The rule above `Close pane`, which separates the five verbs that *make* a
     /// pane or move one from the one that ends it.
     ///
     /// The menu's only rule again: the second one drew the sentence break under
@@ -7944,7 +7980,7 @@ pub fn pane_menu_layout(
             PaneMenuRow::Picker => picker_height,
             _ => item_height,
         };
-        // The rule falls where the sentence changes: four verbs that make a pane
+        // The rule falls where the sentence changes: five verbs that make a pane
         // or move one, then the one that ends it. `#file-menu` puts its own rule
         // after the first row for the same kind of reason (mock-up 8089).
         if *row == PaneMenuRow::ClosePane {
@@ -8322,7 +8358,7 @@ pub fn pane_menu_build(
                 },
             ));
         }
-        if *row == PaneMenuRow::MoveToNewTab {
+        if *row == PaneMenuRow::MoveToNewWindow {
             quads.push(OverlayQuad {
                 rect: layout.separator,
                 color: palette.menu_border,
@@ -12744,15 +12780,20 @@ mod tests {
         )
     }
 
-    /// PIN (user ruling, 2026-08-16): **the menu is a picker and five verbs,
+    /// PIN (user ruling, 2026-08-16): **the menu is a picker and six verbs,
     /// with a rule above the one that destroys.**
     ///
     /// The order is the ruling's own, and it is an order of *commitment*: point
     /// at a direction, name a profile, name a folder, repeat this pane, move this
-    /// pane, end this pane. The separator's position is the claim about reading —
-    /// five verbs that make or move a pane, then one that ends one, because a
-    /// destructive verb flush against constructive ones is a verb the hand finds
-    /// by overshooting.
+    /// pane out of its tab, move it out of its window, end it. The separator's
+    /// position is the claim about reading — the verbs that make or move a pane,
+    /// then the one that ends one, because a destructive verb flush against
+    /// constructive ones is a verb the hand finds by overshooting.
+    ///
+    /// **The sixth verb is F1c's** (multiwindow slice F1c, `plan.md` F1c). It
+    /// stands directly under the row it is composed of — a pane out of its tab,
+    /// then a pane out of its window — so the two lengths of one journey read as
+    /// one pair rather than as two unrelated exits.
     ///
     /// Red gate: put the rule under the picker and the menu claims the four verbs
     /// below it are a different kind of thing from the diagram above; drop the
@@ -12764,7 +12805,7 @@ mod tests {
     /// back into a menu whose every line acts on the pane under it turns this
     /// red on the first assertion.
     #[test]
-    fn the_pane_menu_is_a_picker_and_five_verbs_with_a_rule_above_the_close() {
+    fn the_pane_menu_is_a_picker_and_six_verbs_with_a_rule_above_the_close() {
         assert_eq!(
             PaneMenuRow::ALL,
             [
@@ -12773,6 +12814,7 @@ mod tests {
                 PaneMenuRow::NewInFolder,
                 PaneMenuRow::Duplicate,
                 PaneMenuRow::MoveToNewTab,
+                PaneMenuRow::MoveToNewWindow,
                 PaneMenuRow::ClosePane,
             ]
         );
@@ -12797,12 +12839,19 @@ mod tests {
                 new_in_folder_text(),
                 duplicate_pane_text(),
                 move_to_new_tab_text(),
+                move_to_new_window_text(),
                 close_pane_text(),
             ],
-            "the caption under the diagram, then five rows, and no heading over them"
+            "the caption under the diagram, then six rows, and no heading over them"
+        );
+        assert_ne!(
+            move_to_new_tab_text(),
+            move_to_new_window_text(),
+            "the two exits differ by the container they name, and by nothing else \
+             — including by not being the same string"
         );
         let close = layout.item(PaneMenuRow::ClosePane);
-        let above = layout.item(PaneMenuRow::MoveToNewTab);
+        let above = layout.item(PaneMenuRow::MoveToNewWindow);
         assert!(
             layout.separator[1] >= above[3] && layout.separator[3] <= close[1],
             "the rule lies between the last constructive verb and `Close pane`"
@@ -14641,11 +14690,12 @@ mod tests {
                 .chain([
                     E::Pane(P::SplitWith),
                     E::Pane(P::NewInFolder),
-                    E::Pane(P::Duplicate)
+                    E::Pane(P::Duplicate),
+                    E::Pane(P::MoveToNewWindow),
                 ])
                 .collect::<Vec<_>>(),
             "the seven terminal verbs, then the pane menu's three making verbs \
-             in the pane menu's own order"
+             and the one exit a lone pane can spend, in the pane menu's own order"
         );
         assert_eq!(
             term_menu_entries(false),
@@ -14659,6 +14709,12 @@ mod tests {
                 "{cut:?} is ruled out of the segment by §7.1.6i"
             );
         }
+        assert!(
+            lone.contains(&E::Pane(P::MoveToNewWindow)),
+            "and the sibling §7.1.6i named in the same breath is in it: a lone \
+             pane has nowhere to go inside this window and a window of its own \
+             to go to (F1c)"
+        );
         // Borrowed whole: the words and the marks are the `⌄` menu's, asked of
         // the `⌄` menu's own row. A segment that spelled its own would be the
         // two-lists failure this test exists to forbid.
@@ -14777,7 +14833,7 @@ mod tests {
         );
         assert_eq!(
             term_menu_step(None, idle, false, true),
-            Some(E::Pane(P::Duplicate)),
+            Some(E::Pane(P::MoveToNewWindow)),
             "and with one it ends at the segment's last row"
         );
         assert_eq!(
@@ -14787,7 +14843,12 @@ mod tests {
         );
         assert_eq!(
             term_menu_step(Some(E::Pane(P::Duplicate)), idle, true, true),
-            Some(E::Pane(P::Duplicate)),
+            Some(E::Pane(P::MoveToNewWindow)),
+            "and the row F1c added is one more step down, not a stop"
+        );
+        assert_eq!(
+            term_menu_step(Some(E::Pane(P::MoveToNewWindow)), idle, true, true),
+            Some(E::Pane(P::MoveToNewWindow)),
             "and clamps at the bottom rather than wrapping"
         );
         assert_eq!(
