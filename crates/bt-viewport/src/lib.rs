@@ -5422,7 +5422,10 @@ mod tests {
     fn verified(paths: &[&str]) -> PrintedPathLinks {
         PrintedPathLinks::new(
             Some(PathBuf::from("D:\\src")),
-            paths.iter().map(|path| (PathBuf::from(path), true)).collect(),
+            paths
+                .iter()
+                .map(|path| (PathBuf::from(path), true))
+                .collect(),
         )
     }
 
@@ -5714,7 +5717,10 @@ mod tests {
     fn a_relative_reference_needs_a_reported_directory() {
         let (frame, probes) = live_frame_of_paths(
             live_rows_of("./a.md docs/b.md", 40, 3),
-            PrintedPathLinks::new(None, BTreeMap::from([(PathBuf::from("D:\\src\\a.md"), true)])),
+            PrintedPathLinks::new(
+                None,
+                BTreeMap::from([(PathBuf::from("D:\\src\\a.md"), true)]),
+            ),
         );
         assert!(
             frame.hyperlink_at(0, 0).is_none(),
