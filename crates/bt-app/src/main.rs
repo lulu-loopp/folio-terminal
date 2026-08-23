@@ -3347,7 +3347,24 @@ struct TermMenuState {
     seat: SeatId,
     /// What the pane could answer for when the menu was raised.
     subject: profiles::TermMenuSubject,
-    hover: Option<profiles::TermMenuRow>,
+    hover: Option<profiles::TermMenuHover>,
+    /// **Whether the pane was the only one in its tab when the menu came up**
+    /// (§7.1.6i's floor) — the one fact the pane-verb segment turns on.
+    ///
+    /// Snapshotted beside `subject` and for its reason, sharpened by what these
+    /// particular verbs do: `Duplicate pane` splits the pane the menu is standing
+    /// over, so the tree can stop being one pane *while the menu is open*, and a
+    /// menu that re-asked every frame would take three rows out from under a
+    /// descending hand.
+    lone: bool,
+    /// Whether the `Split with` child is up.
+    submenu_open: bool,
+    /// **The safety triangle's two facts** (#53), which this menu now owes for
+    /// [`PaneMenuState`]'s reason: it has a child, so what the highlight does
+    /// when the pointer leaves a row is no longer "the new row takes it" but
+    /// "the new row takes it unless the hand is on its way to the child".
+    pointer_was: Option<[f32; 2]>,
+    submenu_hold_until: Option<Instant>,
 }
 
 /// A file row's context menu while it is up (K143).
@@ -43355,11 +43372,20 @@ impl Runtime<'_> {
     /// top of the pane-head menu already hanging over it.
     fn open_term_menu_at(&mut self, seat: SeatId, position: PhysicalPosition<f64>) -> Result<()> {
         self.close_popups_except(Popup::TermMenu);
+        // §7.1.6i's floor: the pane-verb segment is drawn exactly when the head
+        // that would otherwise carry those verbs is not on screen. Asked of the
+        // same predicate the head itself is drawn from, so "the head is here" and
+        // "the menu repeats the head" can never be two answers.
+        let lone = !self.seats.seat_wears_head(bt_layout::SeatKind::Terminal);
         self.window.term_menu = Some(TermMenuState {
             point: [position.x as f32, position.y as f32],
             seat,
             subject: self.term_menu_subject(seat),
             hover: None,
+            lone,
+            submenu_open: false,
+            pointer_was: None,
+            submenu_hold_until: None,
         });
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -43380,6 +43406,8 @@ impl Runtime<'_> {
             profiles::TermMenuLook {
                 subject: menu.subject,
                 hover: menu.hover,
+                lone: menu.lone,
+                submenu_open: menu.submenu_open,
             },
         );
         let scale = self.window.renderer.metrics().scale_factor as f32;
@@ -43397,21 +43425,31 @@ impl Runtime<'_> {
 
     /// The terminal menu's own level of the overlay stack.
     fn term_menu_layer(&mut self) -> Vec<marks::OverlayLayer> {
-        let Some(look) = self
-            .window
-            .term_menu
-            .as_ref()
-            .map(|menu| profiles::TermMenuLook {
-                subject: menu.subject,
-                hover: menu.hover,
-            })
-        else {
+        let Some((look, seat)) = self.window.term_menu.as_ref().map(|menu| {
+            (
+                profiles::TermMenuLook {
+                    subject: menu.subject,
+                    hover: menu.hover,
+                    lone: menu.lone,
+                    submenu_open: menu.submenu_open,
+                },
+                menu.seat,
+            )
+        }) else {
             return Vec::new();
         };
         let Some(layout) = self.term_menu_layout() else {
             return Vec::new();
         };
-        profiles::term_menu_build(&layout, &look)
+        // The profile the pane is *running*, which is what the child marks —
+        // `pane_menu_layer`'s own sentence, read at this menu's door: a pane you
+        // split from a Git Bash is a Git Bash, and a child that ticked PowerShell
+        // on it would be telling you about the window rather than about the pane.
+        let current = self.sessions.get(&seat).map(|leaf| leaf.profile);
+        let programs = &self.app.profile_programs;
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
+        profiles::term_menu_build(&layout, &look, current, programs, &mut measure)
     }
 
     fn close_term_menu(&mut self) -> Result<bool> {
@@ -43424,13 +43462,25 @@ impl Runtime<'_> {
         Ok(true)
     }
 
-    /// Spend a row.
+    /// Spend an entry.
     ///
     /// The menu is **taken** first, so every verb below runs with it already
     /// gone: a row that raises a gate would otherwise leave a menu standing
     /// behind the scrim, and a row that spawns a shell would leave one hanging
     /// over a pane that is being rebuilt underneath it.
-    fn run_term_menu_row(&mut self, row: profiles::TermMenuRow) -> Result<()> {
+    ///
+    /// **The segment's rows go straight to the pane menu's own runner**
+    /// (§7.1.6i, §7.1.6e's rule): one verb, two doors, one implementation. A
+    /// `Duplicate pane` reached by right-clicking a lone pane and one reached
+    /// from a head's `⌄` are the same call with the same seed, and there is
+    /// nowhere for them to drift apart.
+    fn run_term_menu_row(&mut self, hit: profiles::TermMenuHit) -> Result<()> {
+        // The menu's own padding, either rule, a greyed row. A press there is the
+        // menu swallowing it — decided in `chrome_mouse_input` — so there is
+        // nothing to spend and, in particular, no menu to take away.
+        if hit == profiles::TermMenuHit::Surface {
+            return Ok(());
+        }
         let Some(menu) = self.window.term_menu.take() else {
             return Ok(());
         };
@@ -43438,6 +43488,16 @@ impl Runtime<'_> {
             self.present_chrome_change()?;
         }
         let seat = menu.seat;
+        let row = match hit {
+            profiles::TermMenuHit::Row(profiles::TermMenuEntry::Term(row)) => row,
+            profiles::TermMenuHit::Row(profiles::TermMenuEntry::Pane(row)) => {
+                return self.run_pane_verb(seat, profiles::PaneMenuHit::Row(row));
+            }
+            profiles::TermMenuHit::Submenu(profile) => {
+                return self.run_pane_verb(seat, profiles::PaneMenuHit::Submenu(profile));
+            }
+            profiles::TermMenuHit::Surface => return Ok(()),
+        };
         match row {
             // **Copy-on-select's own door**, so that the menu and the drag put
             // the same bytes on the clipboard and both leave the selection
@@ -43470,27 +43530,189 @@ impl Runtime<'_> {
         }
     }
 
+    /// Open or shut this menu's `Split with` child, and report whether anything
+    /// moved. [`Runtime::set_pane_submenu`]'s twin, on the second door.
+    fn set_term_submenu(&mut self, open: bool) -> Result<bool> {
+        let Some(menu) = self.window.term_menu.as_mut() else {
+            return Ok(false);
+        };
+        if menu.submenu_open == open || (open && !menu.lone) {
+            return Ok(false);
+        }
+        menu.submenu_open = open;
+        menu.submenu_hold_until = None;
+        // The highlight follows the surface it is on: opening lands on the first
+        // profile, closing takes it back to the heading it came from, so `←`
+        // leaves the keyboard somewhere rather than nowhere.
+        menu.hover = Some(if open {
+            profiles::TermMenuHover::Submenu(0)
+        } else {
+            profiles::TermMenuHover::Row(profiles::TermMenuEntry::Pane(
+                profiles::PaneMenuRow::SplitWith,
+            ))
+        });
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// **The terminal menu's hover, with the safety triangle in it** — the pane
+    /// menu's own four steps, on the second door.
+    ///
+    /// Its own function rather than the three lines every other popup's hover
+    /// takes, for [`Runtime::drive_pane_menu_hover`]'s reason: since §7.1.6i's
+    /// floor this menu can have a *child*, so what the highlight does when the
+    /// pointer leaves a row is no longer "the new row takes it" but "the new row
+    /// takes it unless the hand is on its way to the child".
+    fn drive_term_menu_hover(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(layout) = self.term_menu_layout() else {
+            return Ok(false);
+        };
+        let hit = profiles::term_menu_hit(&layout, position.x, position.y);
+        let submenu = layout.submenu_frame();
+        let to = [position.x as f32, position.y as f32];
+        let now = Instant::now();
+        let heading = profiles::TermMenuHit::Row(profiles::TermMenuEntry::Pane(
+            profiles::PaneMenuRow::SplitWith,
+        ));
+        let Some(menu) = self.window.term_menu.as_mut() else {
+            return Ok(false);
+        };
+        let hovering_child = layout.on_submenu(to[0], to[1]) || hit == Some(heading);
+        let was_open = menu.submenu_open;
+        let mut held = false;
+        if let Some(submenu) = submenu
+            && !hovering_child
+        {
+            let from = menu.pointer_was.unwrap_or(to);
+            if profiles::safe_triangle_holds(from, to, submenu) {
+                let until = *menu
+                    .submenu_hold_until
+                    .get_or_insert(now + profiles::SUBMENU_SAFE_HOLD);
+                held = now < until;
+            }
+            if !held {
+                menu.submenu_open = false;
+                menu.submenu_hold_until = None;
+            }
+        } else {
+            menu.submenu_hold_until = None;
+        }
+        if !held {
+            menu.pointer_was = Some(to);
+        }
+        let hovered = match hit {
+            Some(profiles::TermMenuHit::Row(entry)) => Some(profiles::TermMenuHover::Row(entry)),
+            Some(profiles::TermMenuHit::Submenu(index)) => {
+                Some(profiles::TermMenuHover::Submenu(index))
+            }
+            // The padding, a greyed row, and everywhere outside: nothing is lit.
+            // A menu whose last-hovered row stayed lit while the pointer sat in
+            // its own margin would be a menu Enter could fire from a place that
+            // looks idle.
+            Some(profiles::TermMenuHit::Surface) | None => None,
+        };
+        let mut changed = menu.submenu_open != was_open;
+        if !held && menu.hover != hovered {
+            menu.hover = hovered;
+            changed = true;
+        }
+        // Resting on the heading opens the child, on the same 250ms every `⌄` in
+        // the house takes. Armed here and matured in `advance_term_menu`.
+        if hit == Some(heading) && !menu.submenu_open {
+            menu.submenu_hold_until
+                .get_or_insert(now + profiles::CHEVRON_HOVER_OPEN);
+        }
+        let inside = hit.is_some();
+        if changed && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(inside)
+    }
+
+    /// The terminal menu's own clocks, matured —
+    /// [`Runtime::advance_pane_menu`]'s twin, and two clocks in one slot for its
+    /// reason: a menu cannot be both waiting to open its child and holding it
+    /// open against the rows.
+    fn advance_term_menu(&mut self, now: Instant) -> Result<()> {
+        let Some(menu) = self.window.term_menu.as_ref() else {
+            return Ok(());
+        };
+        let Some(due) = menu.submenu_hold_until else {
+            return Ok(());
+        };
+        if now < due {
+            return Ok(());
+        }
+        if menu.submenu_open {
+            self.set_term_submenu(false)?;
+            if let Some(position) = self.window.pointer_position {
+                self.drive_term_menu_hover(position)?;
+            }
+            return Ok(());
+        }
+        self.set_term_submenu(true)?;
+        Ok(())
+    }
+
+    /// The terminal menu's next wake-up, for the loop's set.
+    fn term_menu_deadline(&self) -> Option<Instant> {
+        self.window.term_menu.as_ref()?.submenu_hold_until
+    }
+
     /// One key, with the terminal menu holding the keyboard.
     ///
     /// The file menu's four rules verbatim — Esc closes, the arrows walk,
     /// Enter/Space run, everything else is swallowed — because §7.1.3's
     /// 「可键盘化」 is a promise about context menus rather than about file rows,
     /// and a menu that could not be walked would be the one menu in this window
-    /// reachable only by a pointer.
+    /// reachable only by a pointer. Since §7.1.6i's floor it also carries the
+    /// pane menu's two extra rules, for the same reason that menu carries them:
+    /// `→` on a heading opens its child, `←` inside one shuts it, and Esc unwinds
+    /// one layer at a time rather than dismissing the whole menu from inside the
+    /// child.
     fn term_menu_key(&mut self, event: &KeyEvent) -> Result<()> {
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
-                if !event.repeat {
+                if !event.repeat && !self.set_term_submenu(false)? {
                     self.close_term_menu()?;
                 }
+            }
+            Key::Named(NamedKey::ArrowRight)
+                if matches!(
+                    self.window.term_menu.as_ref().and_then(|menu| menu.hover),
+                    Some(profiles::TermMenuHover::Row(entry)) if entry.has_submenu()
+                ) =>
+            {
+                self.set_term_submenu(true)?;
+            }
+            Key::Named(NamedKey::ArrowLeft)
+                if matches!(
+                    self.window.term_menu.as_ref().and_then(|menu| menu.hover),
+                    Some(profiles::TermMenuHover::Submenu(_))
+                ) =>
+            {
+                self.set_term_submenu(false)?;
             }
             // Repeats on the travel keys and nowhere else: holding an arrow down
             // is one continuous "further", and holding Enter is not one
             // continuous "again".
+            //
+            // **The walk stays on the parent while a child is up.** The child is
+            // the profile list, and it is walked by the pane menu's own keyboard
+            // in the head; here it is a pointer surface with an `←` out of it,
+            // which is the same promise this menu's other rows keep.
             Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowUp) => {
                 let forwards = matches!(event.logical_key, Key::Named(NamedKey::ArrowDown));
                 if let Some(menu) = self.window.term_menu.as_mut() {
-                    menu.hover = profiles::term_menu_step(menu.hover, menu.subject, forwards);
+                    let current = match menu.hover {
+                        Some(profiles::TermMenuHover::Row(entry)) => Some(entry),
+                        Some(profiles::TermMenuHover::Submenu(_)) | None => None,
+                    };
+                    menu.hover =
+                        profiles::term_menu_step(current, menu.subject, forwards, menu.lone)
+                            .map(profiles::TermMenuHover::Row);
                 }
                 if self.refresh_overlay() {
                     self.present_chrome_change()?;
@@ -43498,9 +43720,21 @@ impl Runtime<'_> {
             }
             Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
                 if !event.repeat
-                    && let Some(row) = self.window.term_menu.as_ref().and_then(|menu| menu.hover)
+                    && let Some(hover) = self.window.term_menu.as_ref().and_then(|menu| menu.hover)
                 {
-                    self.run_term_menu_row(row)?;
+                    match hover {
+                        // The heading opens its child rather than running, which
+                        // is what `→` does and what a click does.
+                        profiles::TermMenuHover::Row(entry) if entry.has_submenu() => {
+                            self.set_term_submenu(true)?;
+                        }
+                        profiles::TermMenuHover::Row(entry) => {
+                            self.run_term_menu_row(profiles::TermMenuHit::Row(entry))?;
+                        }
+                        profiles::TermMenuHover::Submenu(index) => {
+                            self.run_term_menu_row(profiles::TermMenuHit::Submenu(index))?;
+                        }
+                    }
                 }
             }
             _ => {}
@@ -44960,6 +45194,19 @@ impl Runtime<'_> {
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
+        self.run_pane_verb(seat, hit)
+    }
+
+    /// **One pane verb, wherever it was asked for** (§7.1.6e's rule: one verb,
+    /// two doors, never two implementations).
+    ///
+    /// The pane menu's rows and §7.1.6i's right-click segment both land here, so
+    /// `Duplicate pane` means the same split whichever door raised it and the day
+    /// the split's seed changes there is one place to change it. The seat is the
+    /// caller's, because the two doors carry it differently — one in its own
+    /// menu state, one in the terminal menu's — and both took it from the press
+    /// that raised them rather than from where the pointer has since travelled.
+    fn run_pane_verb(&mut self, seat: SeatId, hit: profiles::PaneMenuHit) -> Result<()> {
         // The pane may have gone while the menu stood open — its shell exited,
         // or another gesture took it. Every verb below needs it to still be
         // there, so it is asked once.
@@ -51465,27 +51712,17 @@ impl Runtime<'_> {
                 return Ok(());
             }
         }
-        // And the terminal's own menu, the same three lines again — with the
-        // same care about a row lit by a key, and one line more: a row that
-        // cannot answer is not hovered, so `term_menu_hit` returning `Some(None)`
-        // over a greyed `Copy` puts the highlight out rather than leaving it on
-        // the row the hand has left.
-        if let Some(layout) = self.term_menu_layout() {
-            let over = profiles::term_menu_hit(&layout, position.x, position.y);
-            if let Some(row) = over
-                && let Some(menu) = self.window.term_menu.as_mut()
-                && menu.hover != row
-            {
-                menu.hover = row;
-                if self.refresh_overlay() {
-                    self.present_chrome_change()?;
-                }
-            }
-            if over.is_some() {
-                self.note_tooltip(None)?;
-                self.update_chrome_hover_target(None)?;
-                return Ok(());
-            }
+        // And the terminal's own menu — its own function since §7.1.6i's floor
+        // gave it a child, for the reason the pane menu's is one: what the
+        // highlight does when the pointer leaves a row stops being "the new row
+        // takes it" the moment there is a second surface to be on the way to.
+        // The one line it keeps from the three it used to be: a row that cannot
+        // answer is not hovered, so a pointer over a greyed `Copy` puts the
+        // highlight out rather than leaving it on the row the hand has left.
+        if self.drive_term_menu_hover(position)? {
+            self.note_tooltip(None)?;
+            self.update_chrome_hover_target(None)?;
+            return Ok(());
         }
         // And the graph's branch filter, the same three lines a third time.
         if let Some(layout) = self.graph_filter_menu_layout() {
@@ -54830,12 +55067,21 @@ impl Runtime<'_> {
             (self.term_menu_layout(), self.window.pointer_position)
         {
             match profiles::term_menu_hit(&layout, position.x, position.y) {
-                Some(row) => {
-                    if state == ElementState::Pressed
-                        && button == MouseButton::Left
-                        && let Some(row) = row
-                    {
-                        self.run_term_menu_row(row)?;
+                Some(hit) => {
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        // The `Split with` heading is the one entry whose press
+                        // is not a verb: it opens the child list, which is the
+                        // `→` key's job through the same door.
+                        if matches!(hit, profiles::TermMenuHit::Row(entry) if entry.has_submenu()) {
+                            let open = self
+                                .window
+                                .term_menu
+                                .as_ref()
+                                .is_some_and(|menu| menu.submenu_open);
+                            self.set_term_submenu(!open)?;
+                        } else {
+                            self.run_term_menu_row(hit)?;
+                        }
                     }
                     return Ok(());
                 }
@@ -59984,6 +60230,11 @@ impl Runtime<'_> {
         // already on screen when the tip asks whether it has anything to explain.
         self.advance_chevrons(now)?;
         self.advance_pane_menu(now)?;
+        // And the terminal menu's, which since §7.1.6i's floor owns the same two
+        // clocks in the same one slot. The two menus are never up together (E61:
+        // the opener closes the others), so this is a second reader of the same
+        // rule rather than a second rule.
+        self.advance_term_menu(now)?;
         // And the drag's own rest, beside them because it is the same shape and
         // the same quarter second (§7.1.6k). Below them rather than above: a
         // spring takes a whole tab off the screen, and the two menus above have
@@ -60163,6 +60414,9 @@ impl Runtime<'_> {
             // And the pane menu's own clock: the heading's rest while the
             // submenu is shut, the safety triangle's cap while it is open.
             self.pane_menu_deadline(),
+            // And the terminal menu's, which is the same clock on the same
+            // heading behind the second door (§7.1.6i).
+            self.term_menu_deadline(),
             // And the spring's 250 (§7.1.6k) — the one clock in this window that
             // fires under a hand that has deliberately stopped moving. Absent for
             // every drag that is not resting a pane on somebody else's tab, which
