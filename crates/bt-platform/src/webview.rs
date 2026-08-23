@@ -55,7 +55,7 @@ use webview2_com::{
     StatusBarTextChangedEventHandler, take_pwstr,
 };
 use windows::Win32::Foundation::{HWND, POINT, RECT};
-use windows::core::{BOOL, HSTRING, Interface as _, PCWSTR, PWSTR};
+use windows::core::{BOOL, HSTRING, IUnknown, Interface as _, PCWSTR, PWSTR};
 
 use super::windows_impl::Compositor;
 
@@ -388,6 +388,201 @@ pub fn webview2_runtime_version() -> Result<String, String> {
     }
 }
 
+// ── Rehosting: one live page, from one window to another ───────────────────
+
+/// One step of the parent-window handoff.
+///
+/// The nine are the contract `plan.md`'s v3 增补 F1a fixes, spelled out so the
+/// order can be held by a test and so a failure can say *where* rather than
+/// only *that* — which is the difference between compensating and guessing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RehostStep {
+    /// `SetIsVisible(false)`. A page that stayed on the glass through the
+    /// handoff would be composed, for at least one frame, into a visual whose
+    /// window it has already left.
+    Hide,
+    /// `SetRootVisualTarget(nullptr)` — the engine lets go of the source
+    /// window's visual **before** it is told about another window.
+    ClearRootVisualTarget,
+    /// The source `IDCompositionDevice::Commit` that publishes the release.
+    CommitSource,
+    /// `put_ParentWindow(new_hwnd)`.
+    ParentWindow,
+    /// `SetRootVisualTarget(target seat's visual)`.
+    SetRootVisualTarget,
+    /// The target `IDCompositionDevice::Commit` that publishes the attachment.
+    CommitTarget,
+    /// `SetBounds` for the seat's size in the window it has arrived in.
+    Bounds,
+    /// `SetIsVisible` for what the target window wants shown.
+    Presence,
+    /// `NotifyParentWindowPositionChanged` — the engine's own popups, tooltips
+    /// and IME candidate window are placed off the parent's screen position,
+    /// and nothing else tells it that position changed.
+    NotifyPosition,
+}
+
+/// The handoff, in order. [`WebHost::rehost`] walks exactly this.
+pub const REHOST_SEQUENCE: [RehostStep; 9] = [
+    RehostStep::Hide,
+    RehostStep::ClearRootVisualTarget,
+    RehostStep::CommitSource,
+    RehostStep::ParentWindow,
+    RehostStep::SetRootVisualTarget,
+    RehostStep::CommitTarget,
+    RehostStep::Bounds,
+    RehostStep::Presence,
+    RehostStep::NotifyPosition,
+];
+
+/// What a half-finished handoff has to put back.
+///
+/// Four booleans and not a list of steps: the undo is not the sequence run
+/// backwards — `CommitSource` and `CommitTarget` publish rather than change, and
+/// putting a visual target back is one call whether it was cleared once or set
+/// twice. What has to be restored is *state*, and there are exactly four pieces
+/// of it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RehostCompensation {
+    /// The controller's parent HWND has moved and must go back.
+    pub parent_window: bool,
+    /// The controller's root visual target is not the source seat's any more.
+    pub root_visual_target: bool,
+    /// The controller's bounds are the target window's and must go back.
+    pub bounds: bool,
+    /// The controller's visibility has been touched.
+    pub presence: bool,
+}
+
+impl RehostCompensation {
+    /// Nothing was changed, so nothing has to be put back — the source window
+    /// still holds a page that never noticed the attempt.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self == Self::default()
+    }
+
+    fn absorb(&mut self, other: Self) {
+        self.parent_window |= other.parent_window;
+        self.root_visual_target |= other.root_visual_target;
+        self.bounds |= other.bounds;
+        self.presence |= other.presence;
+    }
+}
+
+impl RehostStep {
+    /// What running this step changes, and therefore what a **later** step's
+    /// failure owes the source window.
+    fn changes(self) -> RehostCompensation {
+        let mut changed = RehostCompensation::default();
+        match self {
+            Self::Hide | Self::Presence => changed.presence = true,
+            Self::ClearRootVisualTarget | Self::SetRootVisualTarget => {
+                changed.root_visual_target = true;
+            }
+            Self::ParentWindow => changed.parent_window = true,
+            Self::Bounds => changed.bounds = true,
+            // A commit publishes what the calls around it changed; it owns no
+            // state of its own, and the compensation's own commits undo it.
+            Self::CommitSource | Self::CommitTarget | Self::NotifyPosition => {}
+        }
+        changed
+    }
+}
+
+/// What has to be put back when the handoff fails **at** `failed_at`.
+///
+/// Derived by folding [`RehostStep::changes`] over the steps that already ran,
+/// rather than written out as a table: a table is a second copy of the sequence
+/// and would be the thing that goes stale when a step moves.
+#[must_use]
+pub fn rehost_compensation(failed_at: RehostStep) -> RehostCompensation {
+    let mut owed = RehostCompensation::default();
+    for step in REHOST_SEQUENCE {
+        if step == failed_at {
+            break;
+        }
+        owed.absorb(step.changes());
+    }
+    owed
+}
+
+/// How one attempt to move a live page to another window ended.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RehostOutcome {
+    /// The page is on the target window, with everything it was holding.
+    Moved,
+    /// The handoff failed and the source window still has the page: either
+    /// nothing had changed yet, or the compensation put back what had.
+    ///
+    /// The caller's model must **not** move — this is the branch that makes a
+    /// failed tear-out a no-op rather than a lost page.
+    KeptSource {
+        failed_at: RehostStep,
+        error: String,
+        /// What the compensation actually had to undo. Empty means the failure
+        /// came before anything was touched.
+        compensation: RehostCompensation,
+    },
+    /// The handoff failed **and so did the compensation**. The controller has
+    /// been closed, because a controller whose parent, target and bounds are in
+    /// an unknown mixture of two windows is not a page anybody can be shown.
+    ///
+    /// The caller rebuilds from the last good URL — in the **target** window,
+    /// which is where the person put it — and the page's in-document state is
+    /// gone. This is the lossy branch, and it says so rather than claiming the
+    /// source was left as it was.
+    Lost {
+        failed_at: RehostStep,
+        error: String,
+        compensation_error: String,
+    },
+}
+
+/// One end of a rehost: which window, which seat, and the compositor that owns
+/// that window's visual tree.
+pub struct RehostSide<'a> {
+    pub compositor: &'a Compositor,
+    pub seat: u64,
+    pub hwnd: NonZeroIsize,
+}
+
+/// Everything the undo needs, read **before** the handoff touches anything.
+///
+/// Read and not recomputed: the bounds and the visibility being put back are the
+/// ones the page actually had, and asking the controller for them after the walk
+/// has started would be asking a half-moved object about a state it is no longer
+/// in.
+struct Restore<'a> {
+    source: &'a Compositor,
+    target: &'a Compositor,
+    /// The window the page came from.
+    hwnd: HWND,
+    /// The source seat's visual, which is what the page goes back to rendering
+    /// into.
+    visual: IUnknown,
+    bounds: RECT,
+    visible: bool,
+}
+
+/// What the engine says about who owns this page's device scale.
+///
+/// Read rather than assumed, because the answer decides whose job the DPI is:
+/// with `detects_monitor_scale_changes` on, the engine watches the monitor its
+/// parent window is on and sets its own rasterization scale, and a host that
+/// also wrote one would be the second writer of a single value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WebDpiOwnership {
+    /// `ICoreWebView2Controller3::ShouldDetectMonitorScaleChanges`.
+    pub detects_monitor_scale_changes: bool,
+    /// `ICoreWebView2Controller3::RasterizationScale`, as the engine has it now.
+    pub rasterization_scale: f64,
+    /// Whether `BoundsMode` is `USE_RAW_PIXELS` — i.e. whether the bounds this
+    /// host sets are physical pixels, which is what makes the scale a question
+    /// about rastering and not about layout.
+    pub bounds_mode_is_raw_pixels: bool,
+}
+
 // ── The host ───────────────────────────────────────────────────────────────
 
 /// Everything a callback needs to reach: the queue it pushes onto, the chord
@@ -620,6 +815,218 @@ impl WebHost {
             .ok_or_else(|| String::from("this seat has no web visual to render into"))?;
         unsafe { self.composition().SetRootVisualTarget(&visual) }
             .map_err(|error| failure("SetRootVisualTarget", &error))
+    }
+
+    /// **Move this live page to another window** — the whole of F1a.
+    ///
+    /// Nothing navigates, nothing reloads and nothing is rebuilt: the same
+    /// controller, the same browser process and the same document come out the
+    /// other side, which is the difference between a page that was moved and a
+    /// page that was opened again at the same address.
+    ///
+    /// # Prepare, then a compensable platform handoff, then the caller's commit
+    ///
+    /// Everything that can be discovered without touching the controller is
+    /// discovered first — the target seat's visual, the source seat's visual for
+    /// the undo, and the bounds and visibility to put back. Only then does the
+    /// walk over [`REHOST_SEQUENCE`] begin, and every step of it has a written
+    /// compensation ([`rehost_compensation`]). A failure that the compensation
+    /// undoes is [`RehostOutcome::KeptSource`] and the caller's model must not
+    /// move; a failure the compensation cannot undo closes the controller and is
+    /// [`RehostOutcome::Lost`], which says the page has to be rebuilt rather
+    /// than pretending the source window still has it.
+    ///
+    /// # One environment, asserted rather than assumed
+    ///
+    /// A controller can only be reparented inside the environment that made it,
+    /// and this process has exactly one — `ENVIRONMENT` is a process-wide cache
+    /// and `bt_app::webhost` never asks for a second. The check is here because
+    /// "there is only one" is a fact about the whole program that this function
+    /// depends on and cannot see: if it ever stops being true, this refuses
+    /// before it touches anything rather than reparenting across environments.
+    ///
+    /// # The caller checks `has_controller` first
+    ///
+    /// A seat whose controller has not arrived yet has nothing to hand over and
+    /// still has to follow its tab. That is the caller's own address move, not a
+    /// handoff, and asking for one here answers `KeptSource`.
+    pub fn rehost(
+        &mut self,
+        from: &RehostSide<'_>,
+        to: &RehostSide<'_>,
+        size: (u32, u32),
+        visible: bool,
+    ) -> RehostOutcome {
+        let refuse = |error: String| RehostOutcome::KeptSource {
+            failed_at: RehostStep::Hide,
+            error,
+            compensation: RehostCompensation::default(),
+        };
+        let (Some(controller), Some(composition)) =
+            (self.controller.clone(), self.composition.clone())
+        else {
+            return refuse(String::from(
+                "this host has no controller to move; the caller moves its own address instead",
+            ));
+        };
+        if !self.holds_the_process_environment() {
+            return refuse(String::from(
+                "this controller was not made by the process's one environment, and a controller cannot cross environments",
+            ));
+        }
+        let Some(target_visual) = to.compositor.web_visual(to.seat) else {
+            return refuse(format!(
+                "the target window has no web visual for seat {}",
+                to.seat
+            ));
+        };
+        let Some(source_visual) = from.compositor.web_visual(from.seat) else {
+            return refuse(format!(
+                "the source window has no web visual for seat {}, so a failed handoff could not be put back",
+                from.seat
+            ));
+        };
+        let restore = Restore {
+            source: from.compositor,
+            target: to.compositor,
+            hwnd: HWND(from.hwnd.get() as *mut c_void),
+            visual: source_visual,
+            bounds: read::<RECT>(|out| unsafe { controller.Bounds(out) }),
+            visible: read_bool(|out| unsafe { controller.IsVisible(out) }),
+        };
+        let bounds = RECT {
+            left: 0,
+            top: 0,
+            right: size.0 as i32,
+            bottom: size.1 as i32,
+        };
+        let mut failure_at = None;
+        for step in REHOST_SEQUENCE {
+            let done = match step {
+                RehostStep::Hide => unsafe { controller.SetIsVisible(false) }
+                    .map_err(|error| failure("SetIsVisible(false)", &error)),
+                RehostStep::ClearRootVisualTarget => {
+                    unsafe { composition.SetRootVisualTarget(None::<&IUnknown>) }
+                        .map_err(|error| failure("SetRootVisualTarget(nullptr)", &error))
+                }
+                RehostStep::CommitSource => from.compositor.commit(),
+                RehostStep::ParentWindow => {
+                    unsafe { controller.SetParentWindow(HWND(to.hwnd.get() as *mut c_void)) }
+                        .map_err(|error| failure("put_ParentWindow", &error))
+                }
+                RehostStep::SetRootVisualTarget => {
+                    unsafe { composition.SetRootVisualTarget(&target_visual) }
+                        .map_err(|error| failure("SetRootVisualTarget(target)", &error))
+                }
+                RehostStep::CommitTarget => to.compositor.commit(),
+                RehostStep::Bounds => unsafe { controller.SetBounds(bounds) }
+                    .map_err(|error| failure("SetBounds", &error)),
+                RehostStep::Presence => unsafe { controller.SetIsVisible(visible) }
+                    .map_err(|error| failure("SetIsVisible", &error)),
+                RehostStep::NotifyPosition => {
+                    unsafe { controller.NotifyParentWindowPositionChanged() }
+                        .map_err(|error| failure("NotifyParentWindowPositionChanged", &error))
+                }
+            };
+            if let Err(error) = done {
+                failure_at = Some((step, error));
+                break;
+            }
+        }
+        let Some((failed_at, error)) = failure_at else {
+            return RehostOutcome::Moved;
+        };
+        let compensation = rehost_compensation(failed_at);
+        match self.compensate(compensation, &restore) {
+            Ok(()) => RehostOutcome::KeptSource {
+                failed_at,
+                error,
+                compensation,
+            },
+            Err(compensation_error) => {
+                // Half in one window and half in another is not a page: closing
+                // the controller is what makes the caller's rebuild a rebuild
+                // rather than a second thing pointing at the same browser.
+                self.close();
+                RehostOutcome::Lost {
+                    failed_at,
+                    error,
+                    compensation_error,
+                }
+            }
+        }
+    }
+
+    /// Put back exactly what [`rehost_compensation`] says was taken.
+    ///
+    /// Not the sequence run backwards: the target's visual target is dropped and
+    /// published *first*, so that the moment the parent goes back there is
+    /// nothing of this page hanging in the window it is leaving.
+    fn compensate(&self, owed: RehostCompensation, restore: &Restore<'_>) -> Result<(), String> {
+        let controller = self
+            .controller
+            .as_ref()
+            .expect("a controller, taken before the walk began");
+        let composition = self
+            .composition
+            .as_ref()
+            .expect("a composition controller, taken before the walk began");
+        if owed.root_visual_target {
+            unsafe { composition.SetRootVisualTarget(None::<&IUnknown>) }
+                .map_err(|error| failure("compensate SetRootVisualTarget(nullptr)", &error))?;
+            restore.target.commit()?;
+        }
+        if owed.parent_window {
+            unsafe { controller.SetParentWindow(restore.hwnd) }
+                .map_err(|error| failure("compensate put_ParentWindow", &error))?;
+        }
+        if owed.root_visual_target {
+            unsafe { composition.SetRootVisualTarget(&restore.visual) }
+                .map_err(|error| failure("compensate SetRootVisualTarget(source)", &error))?;
+            restore.source.commit()?;
+        }
+        if owed.bounds {
+            unsafe { controller.SetBounds(restore.bounds) }
+                .map_err(|error| failure("compensate SetBounds", &error))?;
+        }
+        if owed.presence {
+            unsafe { controller.SetIsVisible(restore.visible) }
+                .map_err(|error| failure("compensate SetIsVisible", &error))?;
+        }
+        // Best effort, and last: the parent is back where it was, so the engine's
+        // own popups are told so. A refusal here cannot make the page any less
+        // usable than it already is, and turning it into a `Lost` would close a
+        // controller that is whole.
+        let _ = unsafe { controller.NotifyParentWindowPositionChanged() };
+        Ok(())
+    }
+
+    /// Whether this host's environment is the one the process caches.
+    fn holds_the_process_environment(&self) -> bool {
+        let Some(mine) = self.environment.as_ref() else {
+            return false;
+        };
+        ENVIRONMENT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .is_some_and(|process| process.as_raw() == mine.as_raw())
+        })
+    }
+
+    /// Who owns this page's device scale, read off the engine rather than
+    /// assumed. `None` while there is no controller.
+    #[must_use]
+    pub fn dpi_ownership(&self) -> Option<WebDpiOwnership> {
+        let controller3: ICoreWebView2Controller3 = self.controller.as_ref()?.cast().ok()?;
+        Some(WebDpiOwnership {
+            detects_monitor_scale_changes: read_bool(|out| unsafe {
+                controller3.ShouldDetectMonitorScaleChanges(out)
+            }),
+            rasterization_scale: read::<f64>(|out| unsafe { controller3.RasterizationScale(out) }),
+            bounds_mode_is_raw_pixels: read::<COREWEBVIEW2_BOUNDS_MODE>(|out| unsafe {
+                controller3.BoundsMode(out)
+            }) == COREWEBVIEW2_BOUNDS_MODE_USE_RAW_PIXELS,
+        })
     }
 
     fn composition(&self) -> &ICoreWebView2CompositionController {
@@ -1488,4 +1895,127 @@ fn modifiers_down() -> (bool, bool, bool) {
         (unsafe { GetKeyState(i32::from(vk.0)) } as u16 & 0x8000) != 0
     };
     (down(VK_CONTROL), down(VK_SHIFT), down(VK_MENU))
+}
+
+/// **The handoff order and its compensation table, held without a browser.**
+///
+/// The order is the whole safety argument of [`WebHost::rehost`] — a page that
+/// changed parent window before its old root visual target was let go composes
+/// into a visual belonging to a window it is no longer in — and it is exactly
+/// the thing a COM call cannot be asked about afterwards. So it is a value here,
+/// the executor walks it, and these tests hold it.
+#[cfg(test)]
+mod rehost_contract_tests {
+    use super::*;
+
+    /// RED — the handoff order, and the one order that is safe.
+    ///
+    /// `plan.md` v3 增补 F1a: 隐藏 controller → `put_RootVisualTarget(nullptr)` →
+    /// 源 device commit → `put_ParentWindow(new_hwnd)` → 设目标 target → 目标
+    /// device commit → bounds/presence → `NotifyParentWindowPositionChanged`.
+    ///
+    /// MUTATIONS:
+    /// ① move `CommitSource` after `ParentWindow` — the source device would
+    ///    publish a tree whose content belongs to another window;
+    /// ② move `ClearRootVisualTarget` after `ParentWindow` — the engine would be
+    ///    asked to let go of a visual under a parent it no longer has.
+    #[test]
+    fn the_handoff_walks_the_one_order_the_contract_fixes() {
+        assert_eq!(
+            REHOST_SEQUENCE,
+            [
+                RehostStep::Hide,
+                RehostStep::ClearRootVisualTarget,
+                RehostStep::CommitSource,
+                RehostStep::ParentWindow,
+                RehostStep::SetRootVisualTarget,
+                RehostStep::CommitTarget,
+                RehostStep::Bounds,
+                RehostStep::Presence,
+                RehostStep::NotifyPosition,
+            ]
+        );
+    }
+
+    /// RED — a failure at the first step has nothing to put back.
+    #[test]
+    fn a_handoff_that_fails_before_it_changes_anything_compensates_nothing() {
+        assert_eq!(
+            rehost_compensation(RehostStep::Hide),
+            RehostCompensation::default()
+        );
+        assert!(rehost_compensation(RehostStep::Hide).is_empty());
+    }
+
+    /// RED — once the old target is let go, the old target is what comes back.
+    ///
+    /// And **not** the parent window: `ParentWindow` has not run yet, so a
+    /// compensation that set it would be putting back something never taken.
+    #[test]
+    fn a_handoff_that_fails_after_letting_go_of_the_old_target_puts_the_old_target_back() {
+        for step in [RehostStep::CommitSource, RehostStep::ParentWindow] {
+            let put_back = rehost_compensation(step);
+            assert!(put_back.root_visual_target, "{step:?}");
+            assert!(put_back.presence, "{step:?}");
+            assert!(!put_back.parent_window, "{step:?}");
+            assert!(!put_back.bounds, "{step:?}");
+        }
+    }
+
+    /// RED — once the parent moved, the parent comes back too.
+    #[test]
+    fn a_handoff_that_fails_after_the_parent_moved_puts_the_parent_back() {
+        for step in [
+            RehostStep::SetRootVisualTarget,
+            RehostStep::CommitTarget,
+            RehostStep::Bounds,
+        ] {
+            let put_back = rehost_compensation(step);
+            assert!(put_back.parent_window, "{step:?}");
+            assert!(put_back.root_visual_target, "{step:?}");
+            assert!(put_back.presence, "{step:?}");
+            assert!(!put_back.bounds, "{step:?}");
+        }
+    }
+
+    /// RED — and the last two steps put every one of the four back.
+    #[test]
+    fn a_handoff_that_fails_at_the_end_puts_all_four_back() {
+        for step in [RehostStep::Presence, RehostStep::NotifyPosition] {
+            assert_eq!(
+                rehost_compensation(step),
+                RehostCompensation {
+                    parent_window: true,
+                    root_visual_target: true,
+                    bounds: true,
+                    presence: true,
+                },
+                "{step:?}"
+            );
+        }
+    }
+
+    /// RED — **compensation only grows.** A step that changed something can
+    /// never be dropped from a later step's undo list, which is the property
+    /// that makes the table safe to extend: a tenth step added to
+    /// [`REHOST_SEQUENCE`] inherits everything the nine before it changed.
+    #[test]
+    fn every_later_failure_puts_back_at_least_what_an_earlier_one_does() {
+        let mut previous = RehostCompensation::default();
+        for step in REHOST_SEQUENCE {
+            let put_back = rehost_compensation(step);
+            for (was, is) in [
+                (previous.parent_window, put_back.parent_window),
+                (previous.root_visual_target, put_back.root_visual_target),
+                (previous.bounds, put_back.bounds),
+                (previous.presence, put_back.presence),
+            ] {
+                assert!(
+                    !was || is,
+                    "{step:?} drops a compensation an earlier step owed"
+                );
+            }
+            previous = put_back;
+        }
+    }
 }

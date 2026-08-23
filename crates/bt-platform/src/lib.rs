@@ -965,8 +965,9 @@ mod webview;
 
 #[cfg(windows)]
 pub use webview::{
-    WebChord, WebEvent, WebHost, WebKey, WebMouseEvent, WebNavigationVerdict,
-    forget_web_environment, web_mouse_buttons, webview2_runtime_version,
+    REHOST_SEQUENCE, RehostCompensation, RehostOutcome, RehostSide, RehostStep, WebChord,
+    WebDpiOwnership, WebEvent, WebHost, WebKey, WebMouseEvent, WebNavigationVerdict,
+    forget_web_environment, rehost_compensation, web_mouse_buttons, webview2_runtime_version,
 };
 
 #[cfg(windows)]
