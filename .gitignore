@@ -15,6 +15,7 @@
 !docs/spikes/artifacts/webview-rehost/*.png
 !docs/spikes/artifacts/tab-transfer/*.png
 !docs/spikes/artifacts/pane-to-new-window/*.png
+!docs/spikes/artifacts/page-keys/*.png
 !docs/plans/web-preview/w0p-evidence/attachments/*.png
 !docs/plans/web-preview/w2-slice1-evidence/*.png
 !docs/plans/web-preview/w2-slice5-evidence/*.png

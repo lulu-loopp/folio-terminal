@@ -142,6 +142,32 @@ pub fn composition_visual_offset(x: i32, y: i32) -> (f32, f32) {
     (x as f32, y as f32)
 }
 
+/// **The name of one page's visual** inside one window's composition tree.
+///
+/// Two numbers and not one, and the second one is the whole of this type. A
+/// window holds one visual per hosted page ([`Compositor::attach_web_visual`]),
+/// and until F1b′ that visual was filed under the seat number alone. A seat
+/// number is only unique inside its tab — every tab a pane is torn out into
+/// starts its numbering again at one — so two tabs of one window could each
+/// claim seat 1, and the second page then composed into the first page's box
+/// while the first page's teardown pulled the second page's visual out of the
+/// tree. That is the same failure W2 slice ③ measured when a window held a
+/// single slot, arriving one level up.
+///
+/// The application layer is where a tab number comes from, so this type carries
+/// the two halves as plain integers rather than the caller's own id types: what
+/// the compositor requires is only that two pages standing in one window at one
+/// time never hand it the same pair. `bt_app::LeafId` is the one thing that
+/// mints them, and `TabId` is minted once per process and never reused, so the
+/// pair is unique across every window as well.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PageVisual {
+    /// The tab the page's pane stands in.
+    pub tab: u64,
+    /// The seat inside that tab.
+    pub seat: u64,
+}
+
 /// Which end of a DirectComposition child list a new visual is added at.
 ///
 /// # The argument does not read like what it does
@@ -329,45 +355,81 @@ mod visual_layer_tests {
         );
     }
 
-    /// **One visual per seat, and every operation on one names the seat**
-    /// (W2 slice ③).
+    /// **One visual per page, and every operation on one names the page**
+    /// (W2 slice ③; re-keyed by F1b′).
     ///
     /// A source pin for the reason the test above is one: DirectComposition
     /// cannot be asked what is in a tree, so what a machine can hold is the shape
     /// of the calls. The bug it forbids was measured on the real window — a
     /// window that held a single slot pointed the second page's controller at the
-    /// first page's visual, and then the first seat's teardown took that visual
+    /// first page's visual, and then the first page's teardown took that visual
     /// out of the tree about three hundred milliseconds after the second page
     /// arrived, leaving a hole with nothing behind it.
     ///
+    /// The key is a [`super::PageVisual`] and not a bare seat number, because a
+    /// seat number restarts at one in every tab: a window with the same page open
+    /// in two tabs of its own hands the map one name twice, which is the single
+    /// slot again with two extra steps.
+    ///
     /// Red gate: put the slot back to `RefCell<Option<IDCompositionVisual>>` and
-    /// the first assertion fails; drop the `seat` argument from any of the four
-    /// entry points and the crate stops compiling, which is the other half.
+    /// the first assertion fails; key it by `u64` again and it fails too; drop
+    /// the `page` argument from any of the four entry points and the crate stops
+    /// compiling, which is the other half.
     #[test]
-    fn every_web_visual_belongs_to_one_seat_and_is_reached_by_naming_it() {
+    fn every_web_visual_belongs_to_one_page_and_is_reached_by_naming_it() {
         let source: String = include_str!("lib.rs")
             .chars()
             .filter(|character| !character.is_whitespace())
             .collect();
         assert!(
             source.contains(concat!(
-                "web:RefCell<BTreeMap<u64,",
+                "web:RefCell<BTreeMap<PageVisual,",
                 "IDCompositionVisual",
                 ">>"
             )),
-            "the window's web visuals are a map keyed by seat, not one slot"
+            "the window's web visuals are a map keyed by the whole page name, \
+             neither one slot nor a bare seat number"
         );
         for entry in [
-            concat!("fnattach_web", "_visual(&self,seat:u64)"),
-            concat!("fndetach_web", "_visual(&self,seat:u64)"),
-            concat!("fnweb_", "visual(&self,seat:u64)"),
-            concat!("fnplace_web", "_visual(&self,seat:u64,"),
+            concat!("fnattach_web", "_visual(&self,page:PageVisual)"),
+            concat!("fndetach_web", "_visual(&self,page:PageVisual)"),
+            concat!("fnweb_", "visual(&self,page:PageVisual)"),
+            concat!("fnplace_web", "_visual(&self,page:PageVisual,"),
         ] {
             assert!(
                 source.contains(entry),
-                "every door onto a web visual takes the seat it belongs to: {entry}"
+                "every door onto a web visual takes the page it belongs to: {entry}"
             );
         }
+    }
+
+    /// **Two tabs numbering their seats from one are two names** (F1b′).
+    ///
+    /// The value half of the pin above: the map's key type itself has to tell
+    /// the two apart, because everything under it — the controller's root visual
+    /// target, the placement, the teardown — is reached by that key alone.
+    ///
+    /// MUTATION: make [`super::PageVisual`] a one-field struct over `seat` and
+    /// the map holds one entry: the second tab's page composes into the first
+    /// tab's box, and the first tab closing takes the live page's visual with it.
+    #[test]
+    fn one_seat_number_in_two_tabs_is_two_page_visuals() {
+        use super::PageVisual;
+        let first = PageVisual { tab: 1, seat: 1 };
+        let second = PageVisual { tab: 2, seat: 1 };
+        assert_ne!(
+            first, second,
+            "a seat number is only unique inside its tab, so the tab is part of \
+             the name and not decoration on it"
+        );
+        let tree: std::collections::BTreeMap<PageVisual, &str> = [
+            (first, "the first tab's page"),
+            (second, "the second tab's page"),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(tree.len(), 2, "two pages, two visuals");
+        assert_eq!(tree.get(&second), Some(&"the second tab's page"));
     }
 
     /// The third angle, on a real DirectComposition device: the argument pair
@@ -1088,9 +1150,9 @@ mod windows_impl {
     };
 
     use super::{
-        CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, NonZeroIsize, TaskbarProgress,
-        TaskbarProgressState, ThreadPriority, VisualLayer, WheelScrollAmount, WindowRect,
-        composition_visual_offset, custom_frame_hit_test, logical_px_for_dpi,
+        CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, NonZeroIsize, PageVisual,
+        TaskbarProgress, TaskbarProgressState, ThreadPriority, VisualLayer, WheelScrollAmount,
+        WindowRect, composition_visual_offset, custom_frame_hit_test, logical_px_for_dpi,
     };
 
     /// GDI brush currently owned by this process and installed on winit's shared window class.
@@ -1197,23 +1259,29 @@ mod windows_impl {
         /// have.
         root: IDCompositionVisual,
         gpu: IDCompositionVisual,
-        /// **One visual per web seat**, each keyed by the seat that asked for it.
+        /// **One visual per page**, each keyed by the [`PageVisual`] that asked
+        /// for it.
         ///
         /// A single slot until W2 slice ③ made a window able to hold a page per
         /// seat, and the plural is not tidiness: a controller is pointed at one
-        /// visual for its whole life (`SetRootVisualTarget`), so two seats sharing
+        /// visual for its whole life (`SetRootVisualTarget`), so two pages sharing
         /// a slot means the second page composes into the first page's box and the
-        /// first seat's teardown takes the second page's visual out of the tree.
+        /// first page's teardown takes the second page's visual out of the tree.
         /// Measured on the real window — a page reopened from Recent while the
         /// closed one was still waiting for its browser to go appeared as a hole
         /// with nothing behind it, about three hundred milliseconds after it
         /// arrived.
         ///
+        /// Keyed by the seat *and* the tab since F1b′, for the same measurement
+        /// one window over: seat numbers restart at one in every tab, so two tabs
+        /// of one window sharing a bare seat number is the same single slot again
+        /// — see [`PageVisual`].
+        ///
         /// `RefCell` because a web seat opens and closes while the window is
         /// running, and every other operation on this type takes `&self` — the
         /// present funnel holds the compositor by shared reference and always
         /// has.
-        web: RefCell<BTreeMap<u64, IDCompositionVisual>>,
+        web: RefCell<BTreeMap<PageVisual, IDCompositionVisual>>,
     }
 
     impl Compositor {
@@ -1334,8 +1402,8 @@ mod windows_impl {
         /// Folio still has to *stop painting* where the page is — see
         /// `bt_render::WindowRenderer::set_web_holes`. This method decides who
         /// is on top; the hole decides where the top is transparent.
-        pub fn attach_web_visual(&self, seat: u64) -> Result<(), String> {
-            if self.web.borrow().contains_key(&seat) {
+        pub fn attach_web_visual(&self, page: PageVisual) -> Result<(), String> {
+            if self.web.borrow().contains_key(&page) {
                 return Ok(());
             }
             let web = Self::create_visual(&self.device, "web")?;
@@ -1347,7 +1415,7 @@ mod windows_impl {
                 )
             }
             .map_err(|error| compositor_failure("IDCompositionVisual::AddVisual(web)", &error))?;
-            self.web.borrow_mut().insert(seat, web);
+            self.web.borrow_mut().insert(page, web);
             Ok(())
         }
 
@@ -1356,8 +1424,8 @@ mod windows_impl {
         /// Called when the last page in this window goes away. Leaving an empty
         /// visual behind would cost nothing on screen and would still be a lie
         /// in the tree, which is the thing this file is for.
-        pub fn detach_web_visual(&self, seat: u64) -> Result<(), String> {
-            let Some(web) = self.web.borrow_mut().remove(&seat) else {
+        pub fn detach_web_visual(&self, page: PageVisual) -> Result<(), String> {
+            let Some(web) = self.web.borrow_mut().remove(&page) else {
                 return Ok(());
             };
             unsafe { self.root.RemoveVisual(&web) }
@@ -1366,10 +1434,10 @@ mod windows_impl {
 
         /// The `IUnknown` a `ICoreWebView2CompositionController` is handed as its
         /// root visual target.
-        pub(crate) fn web_visual(&self, seat: u64) -> Option<IUnknown> {
+        pub(crate) fn web_visual(&self, page: PageVisual) -> Option<IUnknown> {
             self.web
                 .borrow()
-                .get(&seat)
+                .get(&page)
                 .and_then(|visual| visual.cast::<IUnknown>().ok())
         }
 
@@ -1387,12 +1455,12 @@ mod windows_impl {
         /// with a zero-based rectangle) and the visual carries the placement.
         pub fn place_web_visual(
             &self,
-            seat: u64,
+            page: PageVisual,
             offset: (i32, i32),
             clip: (f32, f32, f32, f32),
         ) -> Result<(), String> {
             let borrowed = self.web.borrow();
-            let Some(web) = borrowed.get(&seat) else {
+            let Some(web) = borrowed.get(&page) else {
                 return Ok(());
             };
             let (x, y) = composition_visual_offset(offset.0, offset.1);

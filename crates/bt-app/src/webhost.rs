@@ -1144,15 +1144,28 @@ enum BrowserWait {
 /// visual inside that window's tree that its page composes into.
 ///
 /// The two travel together because they are one fact. The window's compositor
-/// holds one visual per seat since W2 slice ③, and a controller is pointed at
+/// holds one visual per page since W2 slice ③, and a controller is pointed at
 /// one of them for its whole life (`SetRootVisualTarget`) under one parent HWND
 /// (`put_ParentWindow`). Keeping them as one value rather than two fields is
 /// what makes "this seat's page composes into this seat's box, in this seat's
 /// window" true by construction: the attach, the placement, the detach and the
 /// controller the next rebuild asks for cannot name four different places.
+///
+/// # Why the key is a whole [`bt_platform::PageVisual`] and not a seat number
+///
+/// F1a wrote this field as a bare `seat: u64` because that was what the
+/// compositor's table was keyed by. It is a **platform-layer address**, and its
+/// job is to be the one name under which this page is reachable in the window it
+/// is standing in — so the moment that table stopped being nameable by a seat
+/// number, this had to stop being one too. A seat number is unique only inside
+/// its tab (`seats::Seats::lone_seat` starts every torn-out tab at one), so an
+/// address that carried only the seat could name two different pages of one
+/// window, and the four operations above would then be *guaranteed* to disagree
+/// rather than merely able to. The tab travels with it for that reason and no
+/// other: nothing here reads it, and everything here is filed under it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SeatAddress {
-    pub(crate) seat: u64,
+    pub(crate) page: bt_platform::PageVisual,
     pub(crate) hwnd: std::num::NonZeroIsize,
 }
 
@@ -1298,7 +1311,7 @@ pub(crate) struct WebSeat {
 impl WebSeat {
     /// Open a web seat on this pane and start the engine towards `url`.
     pub(crate) fn open(
-        seat: u64,
+        page: bt_platform::PageVisual,
         hwnd: std::num::NonZeroIsize,
         url: &str,
         minted: Mint,
@@ -1338,7 +1351,7 @@ impl WebSeat {
             wake,
         );
         let mut web = Self {
-            address: SeatAddress { seat, hwnd },
+            address: SeatAddress { page, hwnd },
             folder,
             machine: WebMachine::new(),
             host,
@@ -1700,8 +1713,8 @@ impl WebSeat {
             WebEffect::InstallEvents => {
                 // The visual first: the controller is told where to render
                 // before it is told to do anything at all.
-                compositor.attach_web_visual(self.address.seat)?;
-                self.host.install(compositor, self.address.seat)?;
+                compositor.attach_web_visual(self.address.page)?;
+                self.host.install(compositor, self.address.page)?;
                 // **Before the navigation, never after.** The next line's
                 // acknowledgement produces the first `Navigate`, and a page that
                 // begins loading against the controller's default zero-by-zero
@@ -1794,7 +1807,7 @@ impl WebSeat {
             }
             WebEffect::ReleaseUserDataFolder => {
                 self.waiting = None;
-                let _ = compositor.detach_web_visual(self.address.seat);
+                let _ = compositor.detach_web_visual(self.address.page);
                 outcomes.push(WebOutcome::Gone);
                 Ok(None)
             }
@@ -1893,7 +1906,7 @@ impl WebSeat {
             WebPresence::Hidden => self.host.set_visible(false),
             WebPresence::Shown(bounds) => {
                 compositor.place_web_visual(
-                    self.address.seat,
+                    self.address.page,
                     (bounds.x, bounds.y),
                     (0.0, 0.0, bounds.width as f32, bounds.height as f32),
                 )?;
@@ -1958,7 +1971,7 @@ impl WebSeat {
         }
         // Prepare. The one resource that must exist before the controller is
         // touched, and the one whose failure costs the source window nothing.
-        if let Err(error) = to.attach_web_visual(address.seat) {
+        if let Err(error) = to.attach_web_visual(address.page) {
             return RehostReport::SourceKept(error);
         }
         // A seat whose controller has not arrived — or has already gone — has no
@@ -1975,12 +1988,12 @@ impl WebSeat {
         let outcome = self.host.rehost(
             &bt_platform::RehostSide {
                 compositor: from,
-                seat: self.address.seat,
+                page: self.address.page,
                 hwnd: self.address.hwnd,
             },
             &bt_platform::RehostSide {
                 compositor: to,
-                seat: address.seat,
+                page: address.page,
                 hwnd: address.hwnd,
             },
             size,
@@ -1998,7 +2011,7 @@ impl WebSeat {
                 failed_at, error, ..
             } => {
                 // The target's visual was built for a page that is not coming.
-                let _ = to.detach_web_visual(address.seat);
+                let _ = to.detach_web_visual(address.page);
                 RehostReport::SourceKept(format!("{failed_at:?}: {error}"))
             }
             bt_platform::RehostOutcome::Lost {
@@ -2025,7 +2038,7 @@ impl WebSeat {
     /// a tree costs nothing on screen, and a page that has already arrived
     /// somewhere else must not be reported as not having moved.
     fn adopt(&mut self, from: &bt_platform::Compositor, address: SeatAddress) {
-        let _ = from.detach_web_visual(self.address.seat);
+        let _ = from.detach_web_visual(self.address.page);
         let _ = from.commit();
         self.take_address(address);
     }
@@ -3087,6 +3100,10 @@ mod rehost_address_tests {
         std::num::NonZeroIsize::new(value).expect("a non-zero window handle")
     }
 
+    fn page(tab: u64, seat: u64) -> bt_platform::PageVisual {
+        bt_platform::PageVisual { tab, seat }
+    }
+
     /// A seat with an address, a machine and an engine that has never been
     /// started. **No environment is requested**, which is what keeps these
     /// tests browserless.
@@ -3119,6 +3136,39 @@ mod rehost_address_tests {
         }
     }
 
+    /// PIN (F1b′) — **two panes of one window that both call themselves seat 1
+    /// are two addresses.**
+    ///
+    /// The F1a self-check, made into an assertion. [`SeatAddress`] is a
+    /// platform-layer address and its one job is to name this page's visual in
+    /// the window it stands in; a seat number cannot do that job, because every
+    /// tab a pane is torn out into numbers its seats from one again. Two tabs of
+    /// one window would then hold one address between them, and the four
+    /// operations it exists to keep in agreement — attach, install, place,
+    /// detach — would agree with each other about the wrong page.
+    ///
+    /// MUTATION: drop the tab from [`bt_platform::PageVisual`] and the two
+    /// addresses below are equal, which is `rehost` reporting `AddressOnly` for a
+    /// move that has to happen and a live page composing into another tab's box.
+    #[test]
+    fn one_window_two_tabs_one_seat_number_is_two_addresses() {
+        let same_window = hwnd(0x1111);
+        let first = SeatAddress {
+            page: page(1, 1),
+            hwnd: same_window,
+        };
+        let second = SeatAddress {
+            page: page(2, 1),
+            hwnd: same_window,
+        };
+        assert_ne!(
+            first, second,
+            "the window is the same and the seat number is the same, so the tab \
+             is the only thing that can tell the two pages apart"
+        );
+        assert_eq!(detached(second).address(), second);
+    }
+
     /// RED — **a seat that moved window rebuilds in the window it moved to.**
     ///
     /// The acceptance gate `plan.md` v3 增补 F1a names in one line: 「红测 = 迁移
@@ -3134,11 +3184,11 @@ mod rehost_address_tests {
     #[test]
     fn a_rehosted_seat_rebuilds_in_the_window_it_moved_to() {
         let source = SeatAddress {
-            seat: 3,
+            page: page(1, 3),
             hwnd: hwnd(0x1111),
         };
         let target = SeatAddress {
-            seat: 9,
+            page: page(4, 9),
             hwnd: hwnd(0x2222),
         };
         let mut seat = detached(source);
@@ -3174,11 +3224,11 @@ mod rehost_address_tests {
     #[test]
     fn a_handoff_that_could_not_be_undone_rebuilds_in_the_target_window() {
         let target = SeatAddress {
-            seat: 9,
+            page: page(4, 9),
             hwnd: hwnd(0x2222),
         };
         let mut seat = detached(SeatAddress {
-            seat: 3,
+            page: page(1, 3),
             hwnd: hwnd(0x1111),
         });
         seat.machine.request("https://example.com/");
@@ -3207,7 +3257,7 @@ mod rehost_address_tests {
     #[test]
     fn a_moved_seat_forgets_what_the_old_window_was_told() {
         let mut seat = detached(SeatAddress {
-            seat: 3,
+            page: page(1, 3),
             hwnd: hwnd(0x1111),
         });
         seat.wanted_size = Some((800, 600));
@@ -3220,7 +3270,7 @@ mod rehost_address_tests {
         }));
 
         seat.take_address(SeatAddress {
-            seat: 9,
+            page: page(4, 9),
             hwnd: hwnd(0x2222),
         });
 
@@ -3245,7 +3295,7 @@ mod rehost_address_tests {
     #[test]
     fn the_old_window_is_paid_its_buttons_before_the_parent_changes() {
         let mut seat = detached(SeatAddress {
-            seat: 3,
+            page: page(1, 3),
             hwnd: hwnd(0x1111),
         });
         seat.buttons = bt_platform::web_mouse_buttons::LEFT | bt_platform::web_mouse_buttons::X1;

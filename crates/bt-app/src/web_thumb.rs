@@ -62,7 +62,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bt_layout::SeatId;
+use crate::LeafId;
 
 /// **How often one seat's page may be re-photographed** — once every two
 /// seconds.
@@ -116,9 +116,13 @@ pub struct SeatFacts {
     pub size: Option<(u32, u32)>,
 }
 
-/// One visible card's web seat, and the box its picture would be drawn in.
+/// One visible card's web pane, and the box its picture would be drawn in.
 pub struct PageDemand {
-    pub seat: SeatId,
+    /// **A [`LeafId`] and not a seat number, since F1b′.** This lane's store is
+    /// the window's, and a window's cards are every tab it holds: a seat number
+    /// restarts at one in each of them, so two tabs' pages would share one slot
+    /// and each would keep dropping the other's picture as stale.
+    pub leaf: LeafId,
     /// The seat's identity — the last URL that actually committed. What the
     /// picture would be *of*, and therefore what makes an older one stale.
     pub url: String,
@@ -197,7 +201,7 @@ struct Asked {
 /// window hands to [`PageShrinker`].
 #[derive(Debug)]
 pub struct ShrinkJob {
-    pub seat: SeatId,
+    pub leaf: LeafId,
     pub ticket: u64,
     pub png: Vec<u8>,
     pub target: (u32, u32),
@@ -206,10 +210,10 @@ pub struct ShrinkJob {
 /// A finished one, on its way back.
 #[derive(Debug)]
 pub struct ShrunkPicture {
-    pub seat: SeatId,
+    pub leaf: LeafId,
     pub ticket: u64,
     /// `None` when the bytes would not decode. The slot is released either way;
-    /// the seat keeps whatever picture it already had.
+    /// the pane keeps whatever picture it already had.
     pub rgba: Option<(Vec<u8>, u32, u32)>,
 }
 
@@ -249,14 +253,18 @@ pub struct WebThumbStats {
     pub dropped_stale: u64,
 }
 
-/// Every web seat's last frame, and the clock that refreshes them.
+/// Every web pane's last frame, and the clock that refreshes them.
 ///
 /// One per window, beside `focus_thumb::FocusThumbnails`, and for the same
 /// reason: a window walks only its own tabs, so a second window's pages cost
 /// this one nothing and closing a window takes its pictures with it.
+///
+/// **Keyed by [`LeafId`] since F1b′**, which is the other half of that sentence:
+/// the store spans every tab this window holds, and a seat number is unique only
+/// inside one of them.
 #[derive(Debug, Default)]
 pub struct WebThumbs {
-    seats: BTreeMap<SeatId, Entry>,
+    pages: BTreeMap<LeafId, Entry>,
     tickets: u64,
     stats: WebThumbStats,
 }
@@ -267,23 +275,23 @@ impl WebThumbs {
         self.stats
     }
 
-    /// This seat's last frame, if it has one.
+    /// This pane's last frame, if it has one.
     #[must_use]
-    pub fn picture(&self, seat: SeatId) -> Option<&Picture> {
-        self.seats.get(&seat)?.picture.as_ref()
+    pub fn picture(&self, leaf: LeafId) -> Option<&Picture> {
+        self.pages.get(&leaf)?.picture.as_ref()
     }
 
-    /// **Which of these seats to photograph now.**
+    /// **Which of these pages to photograph now.**
     ///
     /// The whole policy, as a pure function over facts the caller read off the
     /// engine, so that every refusal below is testable without a browser.
-    /// `demands` is the web seats of the cards that are **visible in the
+    /// `demands` is the web panes of the cards that are **visible in the
     /// column** — the caller has already applied `focus_thumb`'s first two
     /// gates, and a window that is not in focus mode never calls this at all.
-    pub fn due(&mut self, demands: &[PageDemand], now: Instant) -> Vec<SeatId> {
+    pub fn due(&mut self, demands: &[PageDemand], now: Instant) -> Vec<LeafId> {
         let mut asking = Vec::new();
         for demand in demands {
-            let entry = self.seats.entry(demand.seat).or_insert_with(|| Entry {
+            let entry = self.pages.entry(demand.leaf).or_insert_with(|| Entry {
                 url: demand.url.clone(),
                 picture: None,
                 serial: 0,
@@ -351,7 +359,7 @@ impl WebThumbs {
             });
             entry.started = Some(now);
             self.stats.captures += 1;
-            asking.push(demand.seat);
+            asking.push(demand.leaf);
         }
         asking
     }
@@ -359,20 +367,20 @@ impl WebThumbs {
     /// **A capture came back.** Hand the bytes on to be shrunk, or throw them
     /// away.
     ///
-    /// `url` is the seat's identity *now*: a page that navigated between the ask
+    /// `url` is the page's identity *now*: a page that navigated between the ask
     /// and the answer has been photographed as something else, and the honest
     /// thing to do with those pixels is nothing.
     pub fn arrived(
         &mut self,
-        seat: SeatId,
+        leaf: LeafId,
         url: &str,
         png: Option<Vec<u8>>,
         source: Option<(u32, u32)>,
     ) -> Option<ShrinkJob> {
-        let entry = self.seats.get_mut(&seat)?;
+        let entry = self.pages.get_mut(&leaf)?;
         let asked = entry.asked.take()?;
         let Some(png) = png else {
-            // The engine refused. The slot is released and the seat keeps
+            // The engine refused. The slot is released and the pane keeps
             // whatever it had; the clock still ran, so the next ask waits its
             // turn rather than hammering an engine that just said no.
             return None;
@@ -392,7 +400,7 @@ impl WebThumbs {
         entry.encoded = Some(png.clone());
         entry.source = source;
         Some(ShrinkJob {
-            seat,
+            leaf,
             ticket: asked.ticket,
             png,
             target: asked.target,
@@ -402,10 +410,10 @@ impl WebThumbs {
     /// **A shrunk picture came back from the worker.** Returns whether anything
     /// changed, so a caller can skip a repaint it does not owe.
     pub fn settle(&mut self, shrunk: ShrunkPicture) -> bool {
-        let Some(entry) = self.seats.get_mut(&shrunk.seat) else {
+        let Some(entry) = self.pages.get_mut(&shrunk.leaf) else {
             return false;
         };
-        // **The ticket is the whole of the staleness check.** A seat that
+        // **The ticket is the whole of the staleness check.** A page that
         // navigated or was invalidated between the ask and this answer has had
         // its ask cleared and its serial moved, and a picture arriving for a
         // ticket nobody is holding is a picture of a page that is not there.
@@ -418,7 +426,14 @@ impl WebThumbs {
         };
         entry.serial += 1;
         entry.picture = Some(Picture {
-            key: format!("web-thumb:{}:{}", shrunk.seat.0, entry.serial),
+            // The tab is in the key as well as the seat since F1b′: two tabs
+            // number their seats from one apiece, and a texture cache handed one
+            // name for two pages draws the first page's pixels on the second
+            // page's card.
+            key: format!(
+                "web-thumb:{}:{}:{}",
+                shrunk.leaf.tab.0, shrunk.leaf.seat.0, entry.serial
+            ),
             rgba: Arc::from(rgba),
             width_px,
             height_px,
@@ -427,13 +442,13 @@ impl WebThumbs {
         true
     }
 
-    /// **This seat is on a different page now** — drop what it was showing.
+    /// **This pane is on a different page now** — drop what it was showing.
     ///
     /// Called on `WebOutcome::Committed`, which is the one event that says the
     /// identity moved. It cancels the ask in flight as well, so the picture that
     /// ask produces cannot land on the new page's slot.
-    pub fn invalidate(&mut self, seat: SeatId) -> bool {
-        let Some(entry) = self.seats.get_mut(&seat) else {
+    pub fn invalidate(&mut self, leaf: LeafId) -> bool {
+        let Some(entry) = self.pages.get_mut(&leaf) else {
             return false;
         };
         let held = entry.picture.take().is_some();
@@ -446,34 +461,37 @@ impl WebThumbs {
         held
     }
 
-    /// Forget every seat that is not in this window's web map any more.
+    /// Forget every pane that is not in this window's web map any more.
     ///
-    /// The picture belongs to the seat, so a seat that has gone takes its
+    /// The picture belongs to the pane, so a pane that has gone takes its
     /// picture with it — which is also the only place the memory is released.
-    pub fn retain(&mut self, live: &BTreeSet<SeatId>) {
-        self.seats.retain(|seat, _| live.contains(seat));
+    pub fn retain(&mut self, live: &BTreeSet<LeafId>) {
+        self.pages.retain(|leaf, _| live.contains(leaf));
     }
 
-    /// **Hand this seat's whole record over** — a tab moving to another window
+    /// **Hand this pane's whole record over** — a tab moving to another window
     /// (Folio F1b), and the only reason a picture ever leaves one of these
     /// without being dropped.
     ///
     /// The *whole* entry and not just the picture: an ask in flight, the serial
-    /// that dates it and the page it was of are all facts about this seat, and
+    /// that dates it and the page it was of are all facts about this pane, and
     /// leaving any of them behind would let the answer to an outstanding ask land
     /// in a window the page has left. The v3 增补's rule for the frame itself is
     /// settled elsewhere and is untouched by this — the entry travels, and
     /// whether the frame it carries is still current is the caller's question.
+    ///
+    /// The key travels unchanged, because a tab keeps its `TabId` across a move
+    /// (F1b) and a seat keeps its number inside that tab.
     #[allow(dead_code, reason = "F1c's drag and F2's menu row press the transfer")]
     #[must_use]
-    pub fn take(&mut self, seat: SeatId) -> Option<Entry> {
-        self.seats.remove(&seat)
+    pub fn take(&mut self, leaf: LeafId) -> Option<Entry> {
+        self.pages.remove(&leaf)
     }
 
-    /// [`Self::take`]'s other half, on the window the seat arrived in.
+    /// [`Self::take`]'s other half, on the window the tab arrived in.
     #[allow(dead_code, reason = "F1c's drag and F2's menu row press the transfer")]
-    pub fn put(&mut self, seat: SeatId, entry: Entry) {
-        self.seats.insert(seat, entry);
+    pub fn put(&mut self, leaf: LeafId, entry: Entry) {
+        self.pages.insert(leaf, entry);
     }
 }
 
@@ -528,7 +546,7 @@ impl PageShrinker {
                     let rgba = shrink(&job.png, job.target);
                     if finished
                         .send(ShrunkPicture {
-                            seat: job.seat,
+                            leaf: job.leaf,
                             ticket: job.ticket,
                             rgba,
                         })
@@ -587,8 +605,17 @@ pub fn shrink(png: &[u8], target: (u32, u32)) -> Option<(Vec<u8>, u32, u32)> {
 mod tests {
     use super::*;
 
-    fn seat(id: u64) -> SeatId {
-        SeatId(id)
+    /// One pane, in a tab of its own — the shape every case below but
+    /// [`one_seat_number_in_two_tabs_is_two_pictures`] is about.
+    fn seat(id: u64) -> LeafId {
+        leaf(1, id)
+    }
+
+    fn leaf(tab: u64, seat: u64) -> LeafId {
+        LeafId {
+            tab: crate::TabId(tab),
+            seat: bt_layout::SeatId(seat),
+        }
     }
 
     fn facts() -> SeatFacts {
@@ -602,8 +629,12 @@ mod tests {
     }
 
     fn demand(id: u64, facts: SeatFacts) -> PageDemand {
+        demand_for(seat(id), facts)
+    }
+
+    fn demand_for(leaf: LeafId, facts: SeatFacts) -> PageDemand {
         PageDemand {
-            seat: seat(id),
+            leaf,
             url: String::from("http://127.0.0.1:8080/"),
             facts,
             target: (263, 320),
@@ -713,7 +744,7 @@ mod tests {
             )
             .expect("the answer to the first ask");
         assert!(thumbs.settle(ShrunkPicture {
-            seat: seat(1),
+            leaf: seat(1),
             ticket: job.ticket,
             rgba: Some((vec![0; 263 * 320 * 4], 263, 320)),
         }));
@@ -750,7 +781,7 @@ mod tests {
             )
             .expect("the answer");
         thumbs.settle(ShrunkPicture {
-            seat: seat(1),
+            leaf: seat(1),
             ticket: job.ticket,
             rgba: Some((vec![0; 263 * 320 * 4], 263, 320)),
         });
@@ -772,7 +803,7 @@ mod tests {
             )
             .expect("the second answer");
         thumbs.settle(ShrunkPicture {
-            seat: seat(1),
+            leaf: seat(1),
             ticket: job.ticket,
             rgba: Some((vec![0; 263 * 320 * 4], 263, 320)),
         });
@@ -800,7 +831,7 @@ mod tests {
             )
             .expect("the answer");
         thumbs.settle(ShrunkPicture {
-            seat: seat(1),
+            leaf: seat(1),
             ticket: job.ticket,
             rgba: Some((vec![0; 263 * 320 * 4], 263, 320)),
         });
@@ -847,7 +878,7 @@ mod tests {
             )
             .expect("the answer");
         thumbs.settle(ShrunkPicture {
-            seat: seat(1),
+            leaf: seat(1),
             ticket: job.ticket,
             rgba: Some((vec![0; 263 * 320 * 4], 263, 320)),
         });
@@ -882,7 +913,7 @@ mod tests {
             )
             .expect("the answer");
         thumbs.settle(ShrunkPicture {
-            seat: seat(1),
+            leaf: seat(1),
             ticket: job.ticket,
             rgba: Some((vec![0; 263 * 320 * 4], 263, 320)),
         });
@@ -901,6 +932,62 @@ mod tests {
             thumbs.picture(seat(1)).map(|picture| picture.key.clone()),
             Some(key),
             "a page that went into the background lost the only picture it can have"
+        );
+    }
+
+    /// PIN (F1b′) — **one seat number in two tabs is two pictures.**
+    ///
+    /// Two panes, both called seat 1, both on the same URL, in the two tabs of
+    /// one window. Keyed by the seat number alone they were one slot, and the
+    /// consequences compounded: the second demand found the first's entry, the
+    /// two took turns being throttled by each other's clock, and whichever card
+    /// drew second drew the other tab's page — with the same texture key, so the
+    /// cache had no way to tell them apart either.
+    ///
+    /// MUTATION: key [`WebThumbs::pages`] by `leaf.seat` and the first
+    /// assertion answers one slot, the second answers `vec![]` because the
+    /// second pane is throttled by the first one's clock, and the last two
+    /// answer the same texture key.
+    #[test]
+    fn one_seat_number_in_two_tabs_is_two_pictures() {
+        let first = leaf(1, 1);
+        let second = leaf(2, 1);
+        let mut thumbs = WebThumbs::default();
+        let start = Instant::now();
+        assert_eq!(
+            thumbs.due(
+                &[demand_for(first, facts()), demand_for(second, facts())],
+                start
+            ),
+            vec![first, second],
+            "both panes are asked, because they are two pages and not one"
+        );
+        for (leaf, pixels) in [(first, 0x11), (second, 0x22)] {
+            let job = thumbs
+                .arrived(leaf, "http://127.0.0.1:8080/", Some(vec![pixels; 8]), None)
+                .expect("a job for each");
+            assert_eq!(job.leaf, leaf);
+            thumbs.settle(ShrunkPicture {
+                leaf,
+                ticket: job.ticket,
+                rgba: Some((vec![pixels; 263 * 320 * 4], 263, 320)),
+            });
+        }
+        let keys = [first, second].map(|leaf| {
+            thumbs
+                .picture(leaf)
+                .expect("each pane kept its own picture")
+                .key
+                .clone()
+        });
+        assert_ne!(
+            keys[0], keys[1],
+            "and the two pictures are two entries in the texture cache, or the \
+             second card draws the first tab's page"
+        );
+        assert!(
+            thumbs.invalidate(second) && thumbs.picture(first).is_some(),
+            "a navigation in one tab does not blank the other tab's card"
         );
     }
 
@@ -938,7 +1025,7 @@ mod tests {
             )
             .expect("the answer");
         thumbs.settle(ShrunkPicture {
-            seat: seat(1),
+            leaf: seat(1),
             ticket: job.ticket,
             rgba: Some((vec![0; 263 * 320 * 4], 263, 320)),
         });
@@ -986,7 +1073,7 @@ mod tests {
             )
             .expect("the first answer is always work");
         thumbs.settle(ShrunkPicture {
-            seat: seat(1),
+            leaf: seat(1),
             ticket: job.ticket,
             rgba: Some((vec![0; 263 * 320 * 4], 263, 320)),
         });
@@ -1051,7 +1138,7 @@ mod tests {
         let start = Instant::now();
         let demands: Vec<PageDemand> = (0..20)
             .map(|id| PageDemand {
-                seat: seat(id),
+                leaf: seat(id),
                 url: format!("http://127.0.0.1:8080/page-{id}"),
                 facts: facts(),
                 target: (263, 320),

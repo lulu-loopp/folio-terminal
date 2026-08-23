@@ -5528,18 +5528,26 @@ struct WindowRuntime {
     /// slice this field becomes a map in". This is that slice and this is that
     /// map.
     ///
-    /// **Keyed by seat and not by tab, because the seat is what owns the
+    /// **Keyed by the pane and not by the tab, because the pane is what owns the
     /// engine**: a controller renders into one visual at one rectangle, and a
     /// window with a page on two tabs has two of both. The singleton rule the
     /// plan states (§0 ②「每 tab 单例」) is one level up and is a rule about where
     /// a *new* page lands — see [`Runtime::web_seat_of_tab`] — not about what
     /// this window can hold.
     ///
-    /// A `BTreeMap` for the reason every other seat-keyed map here is one: seat
+    /// **A [`LeafId`] and not a bare `SeatId`, since F1b′.** A seat number is
+    /// unique only inside its tab (`seats::Seats::lone_seat` starts every
+    /// torn-out tab at one), and this map spans every tab of the window: keyed by
+    /// the number alone it filed two tabs' pages under one name, and the defect
+    /// was visible without moving anything — open one `.html` into a tab of its
+    /// own twice, and the second tab's address bar navigated the first tab's
+    /// engine.
+    ///
+    /// A `BTreeMap` for the reason every other pane-keyed map here is one: leaf
     /// order is stable, so the holes handed to the renderer come out in the same
     /// order every frame and a diff of two frames is a diff of the pixels rather
     /// than of a hash seed.
-    web: BTreeMap<SeatId, webhost::WebSeat>,
+    web: BTreeMap<LeafId, webhost::WebSeat>,
     /// **The files this window's preview seats are showing, watched** (W2 slice
     /// 5, `preview_watch`).
     ///
@@ -7094,9 +7102,6 @@ enum TransferRefusal {
     NoSuchWindow(WindowId),
     /// It is already there.
     AlreadyThere,
-    /// **A page could not be told apart from another tab's** — see
-    /// [`page_key_collision`], the one thing this slice stopped at.
-    AmbiguousPage(SeatId),
     /// The platform refused the handoff and compensated: the page is still on
     /// the source window at the bounds it had, so the tab stays where it is
     /// ([`webhost::RehostReport::SourceKept`]).
@@ -7139,8 +7144,8 @@ struct TabTransfer {
     into: WindowId,
     /// What each page on the tab did, in seat order. `Moved` is the whole page;
     /// `Rebuilding` is an honest loss reported rather than smoothed; `AddressOnly`
-    /// is a seat that had no live page to hand over.
-    pages: Vec<(SeatId, webhost::RehostReport)>,
+    /// is a pane that had no live page to hand over.
+    pages: Vec<(LeafId, webhost::RehostReport)>,
     /// Whether the window the tab left was emptied by the move and asked to
     /// close.
     source_emptied: bool,
@@ -7162,45 +7167,6 @@ struct TabTransfer {
 enum TransferOutcome {
     Moved(TabTransfer),
     Refused(TransferRefusal),
-}
-
-/// Whether a tab's pages can be told apart from every other tab's on both sides
-/// of a move — and if not, which seat number is the one that cannot.
-///
-/// **This is where F1b stopped, and the reason is written here rather than
-/// smoothed over.** A window's two pieces of live per-pane state — `web` (one
-/// engine per seat) and `web_thumbs` (one last frame per seat) — are keyed by a
-/// bare `SeatId`, and a `SeatId` is only unique inside its tab: every tab a pane
-/// is torn out into starts its numbering at `SeatId(1)` again
-/// (`seats::Seats::lone_seat`). So two tabs of one window can each have a
-/// `SeatId(1)`, and if both are pages the map holds one of them.
-///
-/// **That is a live defect today and not something this move introduces**: open
-/// a `.html` file into a tab of its own twice and the second tab's address
-/// navigates the *first* tab's page, because `open_web_page_on` re-checks
-/// `window.web.contains_key(&seat)` with no tab beside it. The repair is to key
-/// both maps — and the compositor's visual table under them — by [`LeafId`], and
-/// it is a change to the web block rather than to this transaction. F1b will not
-/// make it silently worse: rather than clobber, a move that cannot name a page
-/// unambiguously is **refused**, in writing, and the refusal is what says the
-/// prerequisite is owed.
-///
-/// Two ways a seat number fails to be a name:
-///
-/// * it hosts a page in the source window and *another* tab of that window has
-///   the same number — nobody can say whose engine that entry is;
-/// * it hosts a page in the target window already — moving one in would take the
-///   other's place.
-fn page_key_collision(
-    moving: &BTreeSet<SeatId>,
-    others_in_source: &BTreeSet<SeatId>,
-    hosted_in_source: &BTreeSet<SeatId>,
-    hosted_in_target: &BTreeSet<SeatId>,
-) -> Option<SeatId> {
-    moving.iter().copied().find(|seat| {
-        (hosted_in_source.contains(seat) && others_in_source.contains(seat))
-            || hosted_in_target.contains(seat)
-    })
 }
 
 #[cfg(test)]
@@ -7614,53 +7580,65 @@ struct {name} {{
         );
     }
 
-    /// PIN (F1b) — **a page this move could not name unambiguously refuses the
-    /// move; one it can does not.**
+    /// PIN (F1b′) — **every page of a moving tab can be named, on both sides,
+    /// whatever the seat numbers are.**
     ///
-    /// The place this slice stopped, said as a test so that the stop is a
-    /// behaviour and not a paragraph. See [`page_key_collision`] for the defect
-    /// underneath it — a window's `web` map keyed by a `SeatId` that is only
-    /// unique inside a tab — and for why the repair is the web block's and not
-    /// this transaction's.
+    /// F1b stopped here and refused the moves it could not name; this is the
+    /// same place after the prerequisite was paid, and the assertion is turned
+    /// round because the answer is. The shape is the exact one that used to be
+    /// refused: three tabs numbering their seats from one apiece, two of them in
+    /// the source window and one already standing in the target, all three
+    /// hosting a page on their seat 1.
     ///
-    /// Three cases, and the first is the ordinary one: two tabs whose seat
-    /// numbers coincide are perfectly fine to move as long as the number is not
-    /// also a page. It becomes a refusal only when an *engine* hangs off the
-    /// ambiguous number.
+    /// Both windows' maps are exercised as maps rather than argued about, since
+    /// what is being claimed is a property of the key: put the whole world's
+    /// pages in one and nothing displaces anything.
+    ///
+    /// MUTATION: key either map by `leaf.seat` and the source window holds one
+    /// page where it should hold two, the target's page is displaced by the one
+    /// that moved in, and `taken_from_source` comes back holding the wrong tab's
+    /// engine.
     #[test]
-    fn a_page_that_cannot_be_named_refuses_the_move() {
-        let one = SeatId(1);
-        let two = SeatId(2);
-        let moving = BTreeSet::from([one, two]);
-        let empty = BTreeSet::new();
+    fn every_page_of_a_moving_tab_can_be_named() {
+        let moving = TabId(1);
+        let staying = TabId(2);
+        let already_there = TabId(3);
+        let seat = SeatId(1);
+        let page_of = |tab: TabId| LeafId { tab, seat };
+
+        let mut source: BTreeMap<LeafId, &str> = BTreeMap::new();
+        source.insert(page_of(moving), "the moving tab's page");
+        source.insert(page_of(staying), "the tab that stays behind");
         assert_eq!(
-            page_key_collision(&moving, &BTreeSet::from([one]), &empty, &empty),
-            None,
-            "two tabs may share a seat number all day: it is only a name that has \
-             to be unique, and nothing is filed under this one"
+            source.len(),
+            2,
+            "two tabs of one window, both numbering their one seat 1, are two \
+             pages — which is what the bare seat number could not say"
+        );
+
+        let mut target: BTreeMap<LeafId, &str> = BTreeMap::new();
+        target.insert(page_of(already_there), "the target window's own page");
+        let taken_from_source = source
+            .remove(&page_of(moving))
+            .expect("the moving tab's page comes out under its own name");
+        assert_eq!(taken_from_source, "the moving tab's page");
+        assert_eq!(
+            source.get(&page_of(staying)),
+            Some(&"the tab that stays behind"),
+            "and the tab that stayed keeps the page it had"
+        );
+
+        target.insert(page_of(moving), taken_from_source);
+        assert_eq!(
+            target.len(),
+            2,
+            "the page that arrived took nothing's place: a tab keeps its id \
+             across the move, and no other tab has ever had it"
         );
         assert_eq!(
-            page_key_collision(
-                &moving,
-                &BTreeSet::from([one]),
-                &BTreeSet::from([one]),
-                &empty
-            ),
-            Some(one),
-            "but a page filed under a number two of this window's tabs both have \
-             is a page nobody can say the owner of"
-        );
-        assert_eq!(
-            page_key_collision(&moving, &empty, &BTreeSet::from([two]), &empty),
-            None,
-            "the same number carrying a page is fine when no other tab here has \
-             it — that is the whole ordinary case"
-        );
-        assert_eq!(
-            page_key_collision(&moving, &empty, &empty, &BTreeSet::from([two])),
-            Some(two),
-            "and a number that already names a page in the window it is moving \
-             into would take that page's place"
+            target.get(&page_of(already_there)),
+            Some(&"the target window's own page"),
+            "least of all the page that was already standing there"
         );
     }
 
@@ -7685,9 +7663,10 @@ struct {name} {{
                 "the window a tab is in is not a parameter — one authority, asked",
             ),
             (
-                "page_key_collision(",
-                "a page that cannot be named unambiguously refuses the move rather \
-                 than taking another tab's place",
+                "let moving: BTreeSet<LeafId>",
+                "every page the move touches is named by its whole leaf, which is \
+                 what stopped one tab's engine from being handed another tab's \
+                 address (F1b′)",
             ),
             (
                 ".rehost(",
@@ -8315,16 +8294,19 @@ impl TabState {
     /// somewhere else, is how a strip row and the pane under it start describing
     /// two different things.
     ///
-    /// `pages` is every seat this **window** is hosting a page on (§7.7 ②, W2
+    /// `pages` is every pane this **window** is hosting a page on (§7.7 ②, W2
     /// slice ③ ④) — the one fact about a leaf's content that a tab cannot answer
     /// for itself, because the hosts live on the window and a tab knows only its
     /// own tree. A tab whose identity seat is one of them wears the globe,
     /// exactly as the head above it does, through the same `seats::pane_mark`.
-    /// A set and not one seat: slice ③ gave the window a page per seat, and a
+    /// A set and not one seat: slice ③ gave the window a page per pane, and a
     /// window with two pages open in two tabs has to answer for both strip rows.
-    /// Seats are unique across the window, so membership is already the per-tab
-    /// question — no tab can hold another tab's seat.
-    fn tab_mark(&self, pages: &BTreeSet<SeatId>) -> marks::ChromeMark {
+    ///
+    /// **[`LeafId`]s and not seat numbers, since F1b′.** The set spans the whole
+    /// window and a seat number restarts at one in every tab, so asking it about
+    /// a bare number is asking a question two tabs can answer yes to: a preview
+    /// pane numbered the same as another tab's page wore that other tab's globe.
+    fn tab_mark(&self, pages: &BTreeSet<LeafId>) -> marks::ChromeMark {
         let seat = if self.sessions.contains_key(&self.focused_leaf) {
             self.focused_leaf
         } else {
@@ -8344,7 +8326,9 @@ impl TabState {
         // ignored the argument.
         let content = match kind {
             bt_layout::SeatKind::Terminal => Some(profiles::mark(self.leaf_profile(seat))),
-            bt_layout::SeatKind::Preview if pages.contains(&seat) => Some(marks::ChromeMark::Globe),
+            bt_layout::SeatKind::Preview if pages.contains(&LeafId { tab: self.id, seat }) => {
+                Some(marks::ChromeMark::Globe)
+            }
             _ => None,
         };
         let (mark, _, _) = seats::pane_mark(kind, content, bt_render::chrome_palette());
@@ -10977,9 +10961,12 @@ enum RenameSubject {
     /// going somewhere almost always means going somewhere else, and the field
     /// takes the head's remaining room, because a URL is not a label.
     ///
-    /// The seat and not a surface: a page lives on one, and this build has one
-    /// page at a time (slice ③ owns the pool).
-    WebAddress { seat: SeatId },
+    /// The pane and not a surface: a page lives on one, and the pool is slice
+    /// ③'s. A whole [`LeafId`] since F1b′, because this editor lives on the
+    /// *window* while the page it navigates lives on a tab — a bare seat number
+    /// would name a different pane the moment another tab came to the front with
+    /// the field still open.
+    WebAddress { leaf: LeafId },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -11107,10 +11094,10 @@ impl TabRename {
     /// keep.
     ///
     /// [`seed`]: TabRename::seed
-    fn open_address(seat: SeatId, url: &str) -> Self {
+    fn open_address(leaf: LeafId, url: &str) -> Self {
         let text = url.to_owned();
         let whole = text.len();
-        Self::seed(RenameSubject::WebAddress { seat }, text, whole)
+        Self::seed(RenameSubject::WebAddress { leaf }, text, whole)
     }
 
     /// The tab this is renaming, or `None` when it is renaming a file.
@@ -18529,7 +18516,7 @@ fn persisted_preview_pages(tab: &TabV1) -> Vec<bt_persist::RecentPreviewV1> {
 /// needs the first of those whether or not it gets the second (see
 /// `webhost::WebSeat::apply_presence`).
 struct WebPlacement {
-    seat: SeatId,
+    leaf: LeafId,
     presence: webhost::WebPresence,
     size: Option<(u32, u32)>,
 }
@@ -18657,18 +18644,30 @@ fn switcher_rows(
 /// ②「每 tab 单例」).
 ///
 /// The tab's own preview seats are what is walked, and the window's hosted set is
-/// only asked *about* them: a window holds a page per seat and its seats span
+/// only asked *about* them: a window holds a page per pane and its panes span
 /// every tab, so a rule written against that map alone would let a page open on
 /// tab 2 be what tab 1 navigates.
+///
+/// **`tab` is what makes that sentence true rather than nearly true (F1b′).**
+/// The walk was always over one tab's seats, but the set it asked was keyed by
+/// bare seat numbers, and a seat number restarts at one in every tab
+/// (`seats::Seats::lone_seat`). So the guard passed a tab's own numbers into a
+/// window-wide set and got another tab's page back: opening one `.html` into a
+/// tab of its own twice made the second tab's address bar navigate the first
+/// tab's engine, with no move and no second window involved.
 ///
 /// `None` means this tab has no page yet, and the caller lands one the ordinary
 /// way — on `preview_landing_surface`, which is the same address rule a file
 /// opening obeys.
-fn web_seat_among(preview_seats: &[SeatId], hosted: &BTreeSet<SeatId>) -> Option<SeatId> {
+fn web_seat_among(
+    tab: TabId,
+    preview_seats: &[SeatId],
+    hosted: &BTreeSet<LeafId>,
+) -> Option<SeatId> {
     preview_seats
         .iter()
         .copied()
-        .find(|seat| hosted.contains(seat))
+        .find(|seat| hosted.contains(&LeafId { tab, seat: *seat }))
 }
 
 /// **Where a switcher row's target actually goes**, or `None` for one this
@@ -23586,10 +23585,10 @@ impl Runtime<'_> {
             .drag
             .as_ref()
             .and_then(|drag| drag.tab_carry().map(|carry| carry.offset));
-        // The seats this window has pages on, threaded into the strip so that a
+        // The panes this window has pages on, threaded into the strip so that a
         // tab whose identity pane is one of them wears the globe (§7.7 ②) — the
         // same glyph the head under it wears, through the same `pane_mark`.
-        let page_seats: BTreeSet<SeatId> = self.window.web.keys().copied().collect();
+        let page_seats: BTreeSet<LeafId> = self.window.web.keys().copied().collect();
         let grabbed = self.window.drag.as_ref().and_then(|drag| {
             let tab = drag.tab()?;
             self.window
@@ -23784,7 +23783,13 @@ impl Runtime<'_> {
         // meaning is "which content is this leaf holding", which is the one
         // thing `seats::pane_mark` cannot work out from a `SeatKind`.
         let mut leaf_marks = self.leaf_marks();
-        for (seat, web) in &self.window.web {
+        // **Only the tab in front's pages**, because that is whose leaves this
+        // map is about. The window's map spans every tab and seat numbers
+        // restart at one in each of them (F1b′), so a page open on a background
+        // tab used to hand its globe to whichever pane of the tab on the glass
+        // happened to share its number — a terminal wearing a browser's mark.
+        let front = self.id;
+        for (leaf, web) in self.window.web.iter().filter(|(leaf, _)| leaf.tab == front) {
             let page = web.page();
             // **While a navigation is in flight the mark spins in place**
             // (§7.7 ②): no progress hairline, no second row, and no second
@@ -23792,7 +23797,7 @@ impl Runtime<'_> {
             // and the arc it borrows is the one this window already turns on a
             // working tab. `stroke_px` is the mock-up's own 1.4.
             leaf_marks.insert(
-                *seat,
+                leaf.seat,
                 match page.loading_since.filter(|_| page.loading) {
                     Some(since) => marks::ChromeMark::ProgressRing {
                         start_milliturns: indeterminate_start_milliturns(
@@ -25738,29 +25743,41 @@ impl Runtime<'_> {
             .is_some_and(|leaf| !leaf.session.terminal_modes().alternate_screen)
     }
 
-    /// Whether this window's page is on that seat.
-    ///
-    /// The seam slice ③ moves: today a window has at most one page and it names
-    /// its own seat, and when the preview pool learns about pages this becomes a
-    /// question about the buffer on the seat.
+    /// Whether the tab in front holds a page on that seat.
     fn seat_holds_a_page(&self, seat: SeatId) -> bool {
         self.web_on(seat).is_some()
     }
 
-    /// **The page on one seat, and the one door to it** — every reader of a
-    /// hosted page goes through this pair.
+    /// **The window map's name for one seat of the tab in front** (F1b′).
+    ///
+    /// The window's pages span every tab and a seat number is unique only inside
+    /// its tab, so a seat number is half a name and this is the other half. It is
+    /// a function of the *front* tab because that is what every caller of the
+    /// pair below already means: the chrome dresses the tab on the glass, the
+    /// verbs answer the pane holding the keyboard, and both reach this file with
+    /// nothing but a seat in hand. A caller that means some other tab has that
+    /// tab in hand and builds the [`LeafId`] itself — `refresh_preview_file` and
+    /// [`Self::transfer_tab`] are the two, and both are loops over tabs.
+    fn leaf_here(&self, seat: SeatId) -> LeafId {
+        LeafId { tab: self.id, seat }
+    }
+
+    /// **The page on one seat of the tab in front, and the one door to it** —
+    /// every reader of a hosted page goes through this pair.
     ///
     /// It is a pair of one-line functions on purpose: it was written when
     /// `WindowRuntime::web` was one page, because `BT_WEB_DEV` was the only way
     /// to reach one, and every caller already asked "the page on *this* seat".
-    /// Slice ③ made the field a map keyed by seat, and that day the lookup
-    /// changed here and in no other place — which is what the pair was for.
+    /// Slice ③ made the field a map keyed by seat, F1b′ re-keyed it by
+    /// [`LeafId`], and on both days the lookup changed here and in no other
+    /// place — which is what the pair was for.
     fn web_on(&self, seat: SeatId) -> Option<&webhost::WebSeat> {
-        self.window.web.get(&seat)
+        self.window.web.get(&self.leaf_here(seat))
     }
 
     fn web_on_mut(&mut self, seat: SeatId) -> Option<&mut webhost::WebSeat> {
-        self.window.web.get_mut(&seat)
+        let leaf = self.leaf_here(seat);
+        self.window.web.get_mut(&leaf)
     }
 
     /// Which toggles the capsule's current host can honour (§7.7 ②).
@@ -31472,9 +31489,10 @@ impl Runtime<'_> {
         // **The address field is this editor** (§7.7 ②) — same cell, same
         // metrics, same box. Which subject is open decides only what committing
         // writes and what a refusal looks like.
+        let here = self.leaf_here(seat);
         let editing = self.window.rename.as_ref().is_some_and(|editor| {
             matches!(&editor.subject, RenameSubject::PreviewName { surface: at, .. } if *at == surface)
-                || matches!(editor.subject, RenameSubject::WebAddress { seat: at } if at == seat)
+                || matches!(editor.subject, RenameSubject::WebAddress { leaf: at } if at == here)
         });
         if !editing {
             return (tools, None);
@@ -32119,28 +32137,35 @@ impl Runtime<'_> {
     /// Every tab, because a buffer is content and belongs to a tab: two tabs on
     /// one file are two buffers and both are behind the disk.
     fn refresh_preview_file(&mut self, path: &Path) -> Result<()> {
-        let reload: Vec<SeatId> = self
+        // **The pane and not the seat number** (F1b′): this walk is over every
+        // tab, and a seat number means nothing outside the tab it was read from.
+        let reload: Vec<LeafId> = self
             .window
             .tabs
             .iter()
-            .flat_map(|tab| tab.preview_panes.iter())
-            .filter_map(|(surface, pane)| {
+            .flat_map(|tab| {
+                tab.preview_panes
+                    .iter()
+                    .map(move |(surface, pane)| (tab.id, surface, pane))
+            })
+            .filter_map(|(tab, surface, pane)| {
                 let PreviewSurface::Seat(seat) = surface else {
                     return None;
                 };
                 let url = pane.buffer.as_ref()?.web_url()?;
                 let (named, _) = webnav::Mint::path_and_tail_of_file_url(url)?;
-                (named == path && self.window.web.contains_key(&seat)).then_some(seat)
+                let leaf = LeafId { tab, seat };
+                (named == path && self.window.web.contains_key(&leaf)).then_some(leaf)
             })
             .collect();
-        for seat in reload {
+        for leaf in reload {
             let window = &mut *self.window;
             let outcomes = window
                 .web
-                .get_mut(&seat)
+                .get_mut(&leaf)
                 .map(|web| web.reload(&window.compositor))
                 .unwrap_or_default();
-            self.apply_web_outcomes(seat, outcomes)?;
+            self.apply_web_outcomes(leaf, outcomes)?;
         }
         let source = preview::PreviewSource::file(path);
         let stale: Vec<usize> = self
@@ -34289,6 +34314,28 @@ impl Runtime<'_> {
         if self.preview_raster == Some(surface) {
             self.preview_raster = None;
             self.window.renderer.set_preview_image(None);
+        }
+    }
+
+    /// The same, told **which tab** the surface's view lives in — the twin of
+    /// [`Self::leave_preview_buffer_in`], and it exists for that function's own
+    /// reason.
+    ///
+    /// A page opening on a tab that is not in front is the caller
+    /// ([`Self::open_web_page_on`], since F1b′): `preview_pane_mut` resolves a
+    /// seat number against the first tab whose tree holds it, and the raster slot
+    /// is a field of `TabState`, so both of them answer for a tab that is not
+    /// this page's when two tabs number a preview seat the same.
+    fn clear_preview_image_in(&mut self, index: usize, surface: PreviewSurface) {
+        self.window.tabs[index].preview_panes.entry(surface).image = None;
+        if self.window.tabs[index].preview_raster == Some(surface) {
+            self.window.tabs[index].preview_raster = None;
+            // Only the tab on the glass owns what the renderer is holding; a
+            // background tab clearing it would blank the picture the reader is
+            // looking at.
+            if index == self.window.active_tab {
+                self.window.renderer.set_preview_image(None);
+            }
         }
     }
 
@@ -43200,13 +43247,13 @@ impl Runtime<'_> {
     /// wait, which is the only reason the loop is still running at all.
     fn advance_retirement(&mut self, now: Instant) -> Result<Option<Instant>> {
         let window = &mut *self.window;
-        let ticked: Vec<(SeatId, Vec<webhost::WebOutcome>)> = window
+        let ticked: Vec<(LeafId, Vec<webhost::WebOutcome>)> = window
             .web
             .iter_mut()
-            .map(|(seat, web)| (*seat, web.tick(now, &window.compositor)))
+            .map(|(leaf, web)| (*leaf, web.tick(now, &window.compositor)))
             .collect();
-        for (seat, outcomes) in ticked {
-            self.apply_web_outcomes(seat, outcomes)?;
+        for (leaf, outcomes) in ticked {
+            self.apply_web_outcomes(leaf, outcomes)?;
         }
         Ok(self
             .window
@@ -52328,10 +52375,10 @@ impl Runtime<'_> {
         if self.window.web_pointer_inside {
             self.window.web_pointer_inside = false;
             self.window.web_cursor = None;
-            let seats: Vec<SeatId> = self.window.web.keys().copied().collect();
-            for seat in seats {
+            let pages: Vec<LeafId> = self.window.web.keys().copied().collect();
+            for leaf in pages {
                 self.send_to_web_page(
-                    seat,
+                    leaf,
                     bt_platform::WebMouseEvent::Move,
                     PhysicalPosition::new(-1.0, -1.0),
                 );
@@ -55656,14 +55703,14 @@ impl Runtime<'_> {
         // 「回车什么都不做、原来的页面原地不动」 — and the field goes on saying so
         // where it is being typed, which is the search capsule's own answer to a
         // regex that will not parse.
-        if let RenameSubject::WebAddress { seat } = editor.subject {
+        if let RenameSubject::WebAddress { leaf } = editor.subject {
             if commit {
                 let engine = self.app.settings_store.loaded().search_engine;
                 let compositor_outcomes = {
                     let window = &mut *self.window;
                     window
                         .web
-                        .get_mut(&seat)
+                        .get_mut(&leaf)
                         .map(|web| web.go_to(&editor.text, engine, &window.compositor))
                 };
                 if let Some((taken, outcomes)) = compositor_outcomes {
@@ -55672,7 +55719,7 @@ impl Runtime<'_> {
                         self.refresh_chrome();
                         return self.present_chrome_change();
                     }
-                    self.apply_web_outcomes(seat, outcomes)?;
+                    self.apply_web_outcomes(leaf, outcomes)?;
                 }
             }
             self.refresh_chrome();
@@ -55920,7 +55967,9 @@ impl Runtime<'_> {
                 // it is the same target: a press inside it puts a caret, and a
                 // press anywhere else — the page below very much included — is a
                 // blur that commits.
-                RenameSubject::WebAddress { seat } => Some(seats::ChromeTarget::PreviewName(*seat)),
+                RenameSubject::WebAddress { leaf } => {
+                    Some(seats::ChromeTarget::PreviewName(leaf.seat))
+                }
             };
             if editing.is_some() && target == editing {
                 // "编辑器内的按下/双击不触发拖拽或再次进入编辑" (J103): the press
@@ -57558,9 +57607,13 @@ impl Runtime<'_> {
                         // picture it is *owed* goes on a list the caller acts
                         // on past the walk. Neither is a question the
                         // projection may ask.
-                        if let Some(web) = pages.get(&seat.id) {
+                        let leaf = LeafId {
+                            tab: tab.id,
+                            seat: seat.id,
+                        };
+                        if let Some(web) = pages.get(&leaf) {
                             wanted_pictures.push(web_thumb::PageDemand {
-                                seat: seat.id,
+                                leaf,
                                 url: web.identity().unwrap_or_default().to_owned(),
                                 facts: web.capture_facts(),
                                 target: (
@@ -57570,7 +57623,7 @@ impl Runtime<'_> {
                             });
                         }
                         let source =
-                            tab.mini_source(seat.id, seat.kind, page_pictures.picture(seat.id))?;
+                            tab.mini_source(seat.id, seat.kind, page_pictures.picture(leaf))?;
                         // **The seat's own face decides both counts.** A row's
                         // height and a column's width are two readings of the
                         // same face, so they are taken from one table
@@ -57628,8 +57681,8 @@ impl Runtime<'_> {
         if demands.is_empty() {
             return;
         }
-        for seat in self.window.web_thumbs.due(&demands, now) {
-            if let Some(web) = self.window.web.get_mut(&seat)
+        for leaf in self.window.web_thumbs.due(&demands, now) {
+            if let Some(web) = self.window.web.get_mut(&leaf)
                 && let Err(error) = web.capture_page()
             {
                 eprintln!("BT_WEB capture failed: {error}");
@@ -60278,29 +60331,29 @@ impl Runtime<'_> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let motion = self.app.motion;
         let obstructed = self.a_modal_covers_the_window();
-        // Every seat, and its answer read off the tab that holds it — a page on a
+        // Every page, and its answer read off the tab that holds it — a page on a
         // tab nobody is looking at has no placement in *this* tab's layout, and
         // `preview_image_placement` says so by answering `None`, which is the
         // same `Hidden` a page under a modal gets.
-        let seats: Vec<SeatId> = self.window.web.keys().copied().collect();
+        let pages: Vec<LeafId> = self.window.web.keys().copied().collect();
         let active = self.window.active_tab;
-        let mut placements: Vec<WebPlacement> = Vec::with_capacity(seats.len());
-        for seat in seats {
+        let mut placements: Vec<WebPlacement> = Vec::with_capacity(pages.len());
+        for leaf in pages {
+            let seat = leaf.seat;
             let transform = self.window.pane_motion.transform_of(seat, now, motion);
-            // **Each seat measured against its own tab's tree**, not against
+            // **Each page measured against its own tab's tree**, not against
             // whichever tab is in front. A page on a background tab still has a
             // rectangle, and the engine still has to be told its size — see
             // `webhost::WebSeat::apply_presence`. Asking the active tab would
             // answer `None` for every page but one, which is how a restored
             // window's second page came up against zero by zero and never loaded.
-            let Some(index) = self
-                .window
-                .tabs
-                .iter()
-                .position(|tab| tab.seats.preview_seats().contains(&seat))
-            else {
+            //
+            // The page names its own tab since F1b′, so the tab is found by id
+            // rather than by asking every tree which one holds a seat with this
+            // number — a question two of them could answer yes to.
+            let Some(index) = self.window.tabs.iter().position(|tab| tab.id == leaf.tab) else {
                 placements.push(WebPlacement {
-                    seat,
+                    leaf,
                     presence: webhost::WebPresence::Hidden,
                     size: None,
                 });
@@ -60314,11 +60367,11 @@ impl Runtime<'_> {
             if self
                 .window
                 .web
-                .get(&seat)
+                .get(&leaf)
                 .is_some_and(webhost::WebSeat::is_closing)
             {
                 placements.push(WebPlacement {
-                    seat,
+                    leaf,
                     presence: webhost::WebPresence::Hidden,
                     size: None,
                 });
@@ -60347,7 +60400,7 @@ impl Runtime<'_> {
             let carded = self
                 .window
                 .web
-                .get(&seat)
+                .get(&leaf)
                 .and_then(webhost::WebSeat::fault)
                 .is_some_and(|fault| !fault.stands_over_the_page());
             // The size comes off the rectangle whatever is standing over it; the
@@ -60358,7 +60411,7 @@ impl Runtime<'_> {
                 .map(|bounds| (bounds.width, bounds.height));
             let presence = webhost::web_presence(body, obstructed || index != active || carded);
             placements.push(WebPlacement {
-                seat,
+                leaf,
                 presence,
                 size,
             });
@@ -60389,7 +60442,7 @@ impl Runtime<'_> {
         let window = &mut *self.window;
         let mut holes = Vec::new();
         for placement in placements {
-            if let Some(web) = window.web.get_mut(&placement.seat)
+            if let Some(web) = window.web.get_mut(&placement.leaf)
                 && let Err(error) =
                     web.place(&window.compositor, placement.presence, placement.size)
             {
@@ -60422,13 +60475,13 @@ impl Runtime<'_> {
             return Ok(());
         }
         let window = &mut *self.window;
-        let outcomes: Vec<(SeatId, Vec<webhost::WebOutcome>)> = window
+        let outcomes: Vec<(LeafId, Vec<webhost::WebOutcome>)> = window
             .web
             .iter_mut()
-            .map(|(seat, web)| (*seat, web.drive(&window.compositor)))
+            .map(|(leaf, web)| (*leaf, web.drive(&window.compositor)))
             .collect();
-        for (seat, outcomes) in outcomes {
-            self.apply_web_outcomes(seat, outcomes)?;
+        for (leaf, outcomes) in outcomes {
+            self.apply_web_outcomes(leaf, outcomes)?;
         }
         // **And the pictures the worker finished.** Read on the same beat the
         // engine's own words are read on, because the shrinker wakes the loop
@@ -60483,9 +60536,14 @@ impl Runtime<'_> {
         changed
     }
 
+    /// **What one page said, paid** — addressed by the pane it was said from.
+    ///
+    /// A [`LeafId`] and not a seat number since F1b′, because an engine answers
+    /// from whatever tab it lives on: the window's map spans them all, and a
+    /// number read out of one tab names a different pane in the next.
     fn apply_web_outcomes(
         &mut self,
-        seat: SeatId,
+        leaf: LeafId,
         outcomes: Vec<webhost::WebOutcome>,
     ) -> Result<()> {
         for outcome in outcomes {
@@ -60523,13 +60581,13 @@ impl Runtime<'_> {
                     // identity moved, and a card that went on showing the last
                     // page's frame would be the only surface in the column
                     // saying something that is not true of the tab it names.
-                    self.window.web_thumbs.invalidate(seat);
-                    self.commit_web_page(seat)?;
+                    self.window.web_thumbs.invalidate(leaf);
+                    self.commit_web_page(leaf)?;
                 }
                 webhost::WebOutcome::Gone => {
-                    self.window.web.remove(&seat);
+                    self.window.web.remove(&leaf);
                     self.window.web_cursor = None;
-                    let live: BTreeSet<SeatId> = self.window.web.keys().copied().collect();
+                    let live: BTreeSet<LeafId> = self.window.web.keys().copied().collect();
                     self.window.web_thumbs.retain(&live);
                     if self.window.web.is_empty() {
                         self.window.renderer.set_web_holes(Vec::new());
@@ -60543,11 +60601,11 @@ impl Runtime<'_> {
                     let url = self
                         .window
                         .web
-                        .get(&seat)
+                        .get(&leaf)
                         .and_then(webhost::WebSeat::identity)
                         .unwrap_or_default()
                         .to_owned();
-                    if let Some(job) = self.window.web_thumbs.arrived(seat, &url, png, source) {
+                    if let Some(job) = self.window.web_thumbs.arrived(leaf, &url, png, source) {
                         self.page_shrinker().send(job);
                     }
                 }
@@ -60581,37 +60639,45 @@ impl Runtime<'_> {
         // seat has left the tree, or because something else has landed on it.
         // Asked of every tab and not of the active one: a web seat on a tab
         // nobody is looking at is still a web seat.
-        let orphaned: BTreeSet<SeatId> = self
+        // The page names its own tab since F1b′, so "is this pane still a page"
+        // is asked of that one tab rather than of whichever tab happens to hold a
+        // seat with the same number.
+        let orphaned: BTreeSet<LeafId> = self
             .window
             .web
             .keys()
             .copied()
-            .filter(|seat| {
-                let surface = PreviewSurface::Seat(*seat);
-                !self.window.tabs.iter().any(|tab| {
-                    tab.seats.preview_seats().contains(seat)
-                        && !tab.preview_panes.get(surface).is_some_and(|pane| {
-                            a_page_was_replaced(pane.image.is_some(), pane.buffer.as_ref())
-                        })
-                })
+            .filter(|leaf| {
+                let surface = PreviewSurface::Seat(leaf.seat);
+                !self
+                    .window
+                    .tabs
+                    .iter()
+                    .filter(|tab| tab.id == leaf.tab)
+                    .any(|tab| {
+                        tab.seats.preview_seats().contains(&leaf.seat)
+                            && !tab.preview_panes.get(surface).is_some_and(|pane| {
+                                a_page_was_replaced(pane.image.is_some(), pane.buffer.as_ref())
+                            })
+                    })
             })
             .collect();
         let focus = self.shortcut_focus();
         let window = &mut *self.window;
-        let mut outcomes: Vec<(SeatId, Vec<webhost::WebOutcome>)> = Vec::new();
-        for (seat, web) in &mut window.web {
+        let mut outcomes: Vec<(LeafId, Vec<webhost::WebOutcome>)> = Vec::new();
+        for (leaf, web) in &mut window.web {
             let mut theirs = Vec::new();
             // The chords the page may not keep change with the focus, and the
             // focus changes without anything telling the engine so.
             web.set_claims(&self.app.shortcuts, focus);
-            if orphaned.contains(seat) {
+            if orphaned.contains(leaf) {
                 theirs.extend(web.close(&window.compositor));
             }
             theirs.extend(web.tick(now, &window.compositor));
-            outcomes.push((*seat, theirs));
+            outcomes.push((*leaf, theirs));
         }
-        for (seat, theirs) in outcomes {
-            self.apply_web_outcomes(seat, theirs)?;
+        for (leaf, theirs) in outcomes {
+            self.apply_web_outcomes(leaf, theirs)?;
         }
         // **A retirement owes a frame** (W2 slice 5, found on the machine). The
         // hole a page is seen through is punched while a frame is being composed
@@ -60658,6 +60724,7 @@ impl Runtime<'_> {
     /// navigates when you press a switcher row.
     fn web_seat_of_tab(&self) -> Option<SeatId> {
         web_seat_among(
+            self.id,
             &self.seats.preview_seats(),
             &self.window.web.keys().copied().collect(),
         )
@@ -60692,36 +60759,52 @@ impl Runtime<'_> {
                 seat
             }
         };
-        self.open_web_page_on(seat, url, minted)?;
+        self.open_web_page_on(self.leaf_here(seat), url, minted)?;
         self.focus_seat(seat)
     }
 
-    /// **Go to a page on one named seat**, without choosing the seat and without
+    /// **Go to a page on one named pane**, without choosing the pane and without
     /// taking the focus.
     ///
     /// [`Self::open_web_page`]'s other half, split off for the door that has both
-    /// answers already: a restored session names the seat *and* the page (see
+    /// answers already: a restored session names the pane *and* the page (see
     /// [`Self::revive_web_pages`]), and a restore that moved the focus would land
     /// a window on whichever tab happened to hold a page.
     ///
-    /// An engine that is already on this seat is *navigated*; one that is not is
+    /// An engine that is already on this pane is *navigated*; one that is not is
     /// built. Both are the same sentence to the recovery machine — `desired_url`,
     /// last write wins, nothing loaded until the events are installed — which is
     /// why the two arms differ only in whether there is a machine yet.
-    fn open_web_page_on(&mut self, seat: SeatId, url: &str, minted: webnav::Mint) -> Result<()> {
-        if self.window.web.contains_key(&seat) {
+    ///
+    /// **A [`LeafId`] and not a seat number, and this line is the defect F1b′
+    /// repaired.** The re-check below spans the whole window, so with a bare seat
+    /// number the second tab to open a page found the first tab's engine and
+    /// *navigated it*: two tabs on one `.html`, one browser, and an address bar
+    /// steering somebody else's page.
+    fn open_web_page_on(&mut self, leaf: LeafId, url: &str, minted: webnav::Mint) -> Result<()> {
+        let seat = leaf.seat;
+        // **This page's own tab, found once.** Every caller builds the leaf out
+        // of a tab of this window, so the `None` arm is a tab that closed between
+        // the naming and here — nothing to open a page on, and nothing to undo.
+        let Some(index) = self.window.tabs.iter().position(|tab| tab.id == leaf.tab) else {
+            return Ok(());
+        };
+        if self.window.web.contains_key(&leaf) {
             let window = &mut *self.window;
             let outcomes = window
                 .web
-                .get_mut(&seat)
+                .get_mut(&leaf)
                 .map(|web| web.go(url, minted, &window.compositor))
                 .unwrap_or_default();
-            return self.apply_web_outcomes(seat, outcomes);
+            return self.apply_web_outcomes(leaf, outcomes);
         }
         let hwnd = window_hwnd(&self.window.window)?;
         let proxy = self.app.event_proxy.clone();
         match webhost::WebSeat::open(
-            seat.0,
+            bt_platform::PageVisual {
+                tab: leaf.tab.0,
+                seat: seat.0,
+            },
             hwnd,
             url,
             minted,
@@ -60730,7 +60813,7 @@ impl Runtime<'_> {
             }),
         ) {
             Ok(web) => {
-                self.window.web.insert(seat, web);
+                self.window.web.insert(leaf, web);
                 // The pane stops showing whatever document it was on the moment
                 // it becomes a page: one seat shows one thing, and a buffer left
                 // pointed at from underneath a browser is a switcher row claiming
@@ -60741,13 +60824,29 @@ impl Runtime<'_> {
                 // again: clearing it would blank the head and the foot for as long
                 // as the engine takes to come up, which on a cold profile is the
                 // better part of a second.
-                if self
-                    .preview_buffer_on(PreviewSurface::Seat(seat))
-                    .is_none_or(|buffer| buffer.source.web_url().is_none())
-                {
-                    self.leave_preview_buffer(PreviewSurface::Seat(seat));
+                //
+                // **On this page's own tab, and named as one** (F1b′, found on
+                // the machine). `PreviewSurface::Seat` carries a seat number, and
+                // the three doors that take one resolve it against the tab in
+                // front or against the first tab whose tree holds that number —
+                // neither of which is this page's tab when a restore is opening
+                // a page on the tab behind. What that cost, measured: a window
+                // restored with a page in each of two tabs cleared the first
+                // tab's buffer twice and left the second tab's file buffer
+                // standing under its own engine, so `advance_web_page` read that
+                // buffer as "something else landed here" and closed the page it
+                // had just opened. One of the two pages was gone within a frame
+                // of arriving.
+                let surface = PreviewSurface::Seat(seat);
+                let showing_a_page = self.window.tabs[index]
+                    .preview_panes
+                    .get(surface)
+                    .and_then(|pane| pane.buffer.as_ref())
+                    .is_some_and(|source| source.web_url().is_some());
+                if !showing_a_page {
+                    self.leave_preview_buffer_in(index, surface);
                 }
-                self.clear_preview_image(PreviewSurface::Seat(seat));
+                self.clear_preview_image_in(index, surface);
             }
             Err(error) => eprintln!("BT_WEB {error}"),
         }
@@ -60883,7 +60982,7 @@ impl Runtime<'_> {
         if let Ok(hwnd) = window_hwnd(&self.window.window) {
             let _ = bt_platform::take_keyboard_focus(hwnd);
         }
-        self.window.rename = Some(TabRename::open_address(seat, &url));
+        self.window.rename = Some(TabRename::open_address(self.leaf_here(seat), &url));
         self.window.rename_blink.reset(Instant::now());
         self.refresh_chrome();
         self.present_chrome_change()
@@ -60994,7 +61093,8 @@ impl Runtime<'_> {
         let Some(tab) = self.window.tabs.get(index) else {
             return Ok(());
         };
-        let pages: Vec<(SeatId, String, webnav::Mint)> = tab
+        let id = tab.id;
+        let pages: Vec<(LeafId, String, webnav::Mint)> = tab
             .preview_panes
             .iter()
             .filter_map(|(surface, pane)| {
@@ -61002,11 +61102,11 @@ impl Runtime<'_> {
                     return None;
                 };
                 let (url, minted) = revived_page_of(pane.buffer.as_ref()?)?;
-                Some((seat, url, minted))
+                Some((LeafId { tab: id, seat }, url, minted))
             })
             .collect();
-        for (seat, url, minted) in pages {
-            self.open_web_page_on(seat, &url, minted)?;
+        for (leaf, url, minted) in pages {
+            self.open_web_page_on(leaf, &url, minted)?;
         }
         Ok(())
     }
@@ -61025,25 +61125,38 @@ impl Runtime<'_> {
     /// The row is listed under the page's *title* once slice ④ reads one; until
     /// then it is listed under its site, which is what a Recent row and an
     /// unopened pin already print (`webnav::site_label`).
-    fn commit_web_page(&mut self, seat: SeatId) -> Result<()> {
+    fn commit_web_page(&mut self, leaf: LeafId) -> Result<()> {
         let Some(url) = self
             .window
             .web
-            .get(&seat)
+            .get(&leaf)
             .and_then(webhost::WebSeat::identity)
         else {
             return Ok(());
         };
         let key = webnav::switcher_key(url);
         let source = preview::PreviewSource::Web(key.clone());
-        let surface = PreviewSurface::Seat(seat);
-        // **This seat's own tab, which is not always the one in front.** A page
-        // commits on whatever tab it lives on, so the row goes in that tab's pool
-        // — see [`Self::preview_tab_index`], which is where the difference is
-        // written down. `open_preview_source_on` is the *browsing* door and reads
-        // the active tab throughout, which is right for every gesture a hand
-        // makes and wrong for an engine answering from behind another tab.
-        let index = self.preview_tab_index(surface);
+        let surface = PreviewSurface::Seat(leaf.seat);
+        // **This page's own tab, which is not always the one in front.** A page
+        // commits on whatever tab it lives on, so the row goes in that tab's
+        // pool: a navigation that commits while another tab is up would otherwise
+        // put its buffer in that other tab's pool, and the row would appear in a
+        // switcher belonging to a tab that has never been to it. Measured on the
+        // real window — a page opened at launch under the restore prompt,
+        // committing after the prompt had put a restored tab in front of it, left
+        // its row in the restored tab and none in its own.
+        //
+        // Named by the key rather than searched for by seat number since F1b′:
+        // the page carries its own tab, so there is nothing to look up and no
+        // second tab that could answer to the same number.
+        let Some(index) = self
+            .window
+            .tabs
+            .iter()
+            .position(|state| state.id == leaf.tab)
+        else {
+            return Ok(());
+        };
         let tab = &mut self.window.tabs[index];
         let shown = tab.preview_panes.showing();
         // The name it already had where it has been here before, and its site
@@ -61081,7 +61194,7 @@ impl Runtime<'_> {
     /// not at [`Self::point_is_on_the_web_page`]'s, so that the forwarders which
     /// ask *which* page also get it — a click on the capsule that is forwarded
     /// to the page underneath is the same bug read the other way round.
-    fn web_page_at(&self, position: PhysicalPosition<f64>) -> Option<SeatId> {
+    fn web_page_at(&self, position: PhysicalPosition<f64>) -> Option<LeafId> {
         let (x, y) = (position.x as f32, position.y as f32);
         if self
             .window
@@ -61099,13 +61212,13 @@ impl Runtime<'_> {
         {
             return None;
         }
-        self.window.web.iter().find_map(|(seat, web)| {
+        self.window.web.iter().find_map(|(leaf, web)| {
             let bounds = web.shown_at()?;
             (position.x >= f64::from(bounds.x)
                 && position.y >= f64::from(bounds.y)
                 && position.x < f64::from(bounds.x + bounds.width as i32)
                 && position.y < f64::from(bounds.y + bounds.height as i32))
-            .then_some(*seat)
+            .then_some(*leaf)
         })
     }
 
@@ -61117,12 +61230,12 @@ impl Runtime<'_> {
     /// Forward one mouse event to a page, in the window's own coordinates.
     fn send_to_web_page(
         &mut self,
-        seat: SeatId,
+        leaf: LeafId,
         event: bt_platform::WebMouseEvent,
         position: PhysicalPosition<f64>,
     ) {
         let now = Instant::now();
-        let Some(web) = self.window.web.get_mut(&seat) else {
+        let Some(web) = self.window.web.get_mut(&leaf) else {
             return;
         };
         if let Err(error) = web.send_mouse(event, (position.x as i32, position.y as i32), now) {
@@ -61137,8 +61250,8 @@ impl Runtime<'_> {
         event: bt_platform::WebMouseEvent,
         position: PhysicalPosition<f64>,
     ) {
-        if let Some(seat) = self.web_page_at(position) {
-            self.send_to_web_page(seat, event, position);
+        if let Some(leaf) = self.web_page_at(position) {
+            self.send_to_web_page(leaf, event, position);
         }
     }
 
@@ -61161,23 +61274,23 @@ impl Runtime<'_> {
         // window with two pages has a boundary between them, and a page that was
         // never told the hand had gone keeps a hover lit under a page it is no
         // longer under.
-        let leaving: Vec<SeatId> = self
+        let leaving: Vec<LeafId> = self
             .window
             .web
             .keys()
             .copied()
-            .filter(|seat| Some(*seat) != inside)
+            .filter(|leaf| Some(*leaf) != inside)
             .collect();
-        for seat in leaving {
+        for leaf in leaving {
             self.send_to_web_page(
-                seat,
+                leaf,
                 bt_platform::WebMouseEvent::Move,
                 PhysicalPosition::new(-1.0, -1.0),
             );
         }
         self.window.web_pointer_inside = inside.is_some();
-        if let Some(seat) = inside {
-            self.send_to_web_page(seat, bt_platform::WebMouseEvent::Move, position);
+        if let Some(leaf) = inside {
+            self.send_to_web_page(leaf, bt_platform::WebMouseEvent::Move, position);
         } else {
             // The page's cursor stops being the answer the moment the pointer is
             // out of its rectangle, and the answer has to be re-asked to say so.
@@ -61194,7 +61307,7 @@ impl Runtime<'_> {
         position: PhysicalPosition<f64>,
     ) -> Result<()> {
         let down = state == ElementState::Pressed;
-        let Some(seat) = self.web_page_at(position) else {
+        let Some(leaf) = self.web_page_at(position) else {
             return Ok(());
         };
         if down {
@@ -61207,13 +61320,13 @@ impl Runtime<'_> {
             // are claimed from the page a moment later.
             self.mouse_trace(|| {
                 format!(
-                    "press_web_page focus={:?} page_seat={:?} holds={}",
+                    "press_web_page focus={:?} page_leaf={:?} holds={}",
                     self.seats.focus(),
-                    Some(seat),
+                    Some(leaf),
                     self.page_holds_the_keyboard()
                 )
             });
-            if let Some(web) = self.window.web.get(&seat)
+            if let Some(web) = self.window.web.get(&leaf)
                 && let Err(error) = web.focus_page()
             {
                 eprintln!("BT_WEB focus failed: {error}");
@@ -61222,7 +61335,7 @@ impl Runtime<'_> {
         let Some(event) = web_mouse_button(button, down) else {
             return Ok(());
         };
-        self.send_to_web_page(seat, event, position);
+        self.send_to_web_page(leaf, event, position);
         Ok(())
     }
 
@@ -61244,8 +61357,8 @@ impl Runtime<'_> {
         if self.window.modifiers.control_key() && y != 0.0 {
             // The page under the pointer, which is the page the notch was aimed
             // at — the same question every other wheel event on this path asks.
-            if let Some(seat) = self.web_page_at(position)
-                && let Some(web) = self.web_on_mut(seat)
+            if let Some(leaf) = self.web_page_at(position)
+                && let Some(web) = self.window.web.get_mut(&leaf)
                 && let Err(error) = web.zoom_by(y > 0.0)
             {
                 eprintln!("BT_WEB {error}");
@@ -63706,10 +63819,31 @@ impl FolioApp {
     /// # Three phases, and only the middle one can half-happen
     ///
     /// **Prepare** answers every question that can be answered without touching
-    /// anything: is the tab open, is the target open, is it already there, and
-    /// can every page on the tab be named unambiguously on both sides
-    /// ([`page_key_collision`] — the one thing this slice stopped at, and its doc
-    /// says why). A refusal here has changed nothing at all.
+    /// anything: is the tab open, is the target open, is it already there. A
+    /// refusal here has changed nothing at all.
+    ///
+    /// # The fourth question, and why it is no longer asked
+    ///
+    /// F1b asked a fourth — *can every page on this tab be named unambiguously on
+    /// both sides?* — and refused the move when it could not. The reason was a
+    /// defect underneath this transaction rather than in it: a window's two
+    /// pieces of live per-pane state, `web` (one engine per pane) and
+    /// `web_thumbs` (one last frame per pane), were keyed by a bare `SeatId`, and
+    /// a `SeatId` is only unique inside its tab (`seats::Seats::lone_seat` starts
+    /// every torn-out tab's numbering at one). Two tabs of one window could each
+    /// have a `SeatId(1)`, and if both were pages the map held one of them —
+    /// visible without moving anything, by opening one `.html` into a tab of its
+    /// own twice.
+    ///
+    /// F1b′ paid that prerequisite: both maps, and the compositor's visual table
+    /// under them, are keyed by [`LeafId`]. The question is gone rather than left
+    /// standing as a check that cannot fire, and what makes it unaskable is the
+    /// key rather than any test this function could run — a `TabId` is minted
+    /// once per process and never reused ([`TabIds`]); a `LeafId` is equal only
+    /// when both halves are; and a tab stands in exactly one window's strip. So a
+    /// moving tab's leaves are in neither the rest of the source window's nor the
+    /// target's, whatever the seat numbers are.
+    /// `every_page_of_a_moving_tab_can_be_named` is that sentence as a test.
     ///
     /// **The platform handoff** is [`webhost::WebSeat::rehost`] per page, and it
     /// is the only part that can fail after something has moved. A page the
@@ -63772,50 +63906,36 @@ impl FolioApp {
         let Some(index) = source.tabs.iter().position(|open| open.id == tab) else {
             unreachable!("`owner_of` said this window holds this tab");
         };
-        let moving: BTreeSet<SeatId> = source.tabs[index]
+        // **Every page this tab carries, each with a name of its own.**
+        //
+        // F1b stopped here and refused a move it could not name: the two window
+        // maps were keyed by a bare `SeatId`, so two tabs of one window could
+        // both file a page under seat 1 and nobody could say whose entry that
+        // was. F1b′ re-keyed both maps — and the compositor's visual table under
+        // them — by [`LeafId`], and with that there is no collision left to
+        // report: a `TabId` is minted once per process and never handed back
+        // ([`TabIds`]), so a moving tab's leaves differ from every other tab's in
+        // this window and in the one it is moving into, whatever the seat
+        // numbers are. The refusal is gone rather than made unreachable.
+        let moving: BTreeSet<LeafId> = source.tabs[index]
             .seats
             .tree()
             .seats_in_order()
             .into_iter()
-            .map(|seat| seat.id)
+            .map(|seat| LeafId { tab, seat: seat.id })
             .collect();
-        let others_in_source: BTreeSet<SeatId> = source
-            .tabs
-            .iter()
-            .enumerate()
-            .filter(|(slot, _)| *slot != index)
-            .flat_map(|(_, other)| {
-                other
-                    .seats
-                    .tree()
-                    .seats_in_order()
-                    .into_iter()
-                    .map(|seat| seat.id)
-            })
-            .collect();
-        let hosted_in_source: BTreeSet<SeatId> = source.web.keys().copied().collect();
-        let hosted_in_target: BTreeSet<SeatId> = target.web.keys().copied().collect();
-        if let Some(seat) = page_key_collision(
-            &moving,
-            &others_in_source,
-            &hosted_in_source,
-            &hosted_in_target,
-        ) {
-            return Ok(TransferOutcome::Refused(TransferRefusal::AmbiguousPage(
-                seat,
-            )));
-        }
+        let hosted_in_source: BTreeSet<LeafId> = source.web.keys().copied().collect();
 
         // ── The platform handoff ──────────────────────────────────────────────
         // In seat order, so that the compensation below can be read as "the ones
         // before this one", and so that two runs of the same move do the same
         // things in the same order.
-        let carrying: Vec<SeatId> = moving
+        let carrying: Vec<LeafId> = moving
             .iter()
             .copied()
-            .filter(|seat| hosted_in_source.contains(seat))
+            .filter(|leaf| hosted_in_source.contains(leaf))
             .collect();
-        let mut moved: Vec<(SeatId, webhost::RehostReport)> = Vec::new();
+        let mut moved: Vec<(LeafId, webhost::RehostReport)> = Vec::new();
         let mut outcomes = Vec::new();
         let mut refused = None;
         let source_hwnd = window_hwnd(&source.window)?;
@@ -63828,29 +63948,34 @@ impl FolioApp {
             compositor: source_compositor,
             ..
         } = &mut *source;
-        for seat in carrying {
-            let Some(page) = source_web.get_mut(&seat) else {
+        for leaf in carrying {
+            let Some(page) = source_web.get_mut(&leaf) else {
                 continue;
             };
             let report = page.rehost(
                 source_compositor,
                 &target.compositor,
                 webhost::SeatAddress {
-                    seat: seat.0,
+                    // The tab travels whole and keeps its id, so the page's name
+                    // in the target window is the name it already had.
+                    page: bt_platform::PageVisual {
+                        tab: leaf.tab.0,
+                        seat: leaf.seat.0,
+                    },
                     hwnd: target_hwnd,
                 },
                 // **The keyboard goes with the tab**, and only for the pane the
                 // tab is standing on: a page in a background pane of a moved tab
                 // has not been pointed at by anybody.
-                front == seat,
+                front == leaf.seat,
                 &mut outcomes,
             );
             match report {
                 webhost::RehostReport::SourceKept(why) => {
-                    refused = Some(TransferRefusal::PageKept(seat, why));
+                    refused = Some(TransferRefusal::PageKept(leaf.seat, why));
                     break;
                 }
-                report => moved.push((seat, report)),
+                report => moved.push((leaf, report)),
             }
         }
         if let Some(refusal) = refused {
@@ -63862,13 +63987,16 @@ impl FolioApp {
             // and there is nothing further to do about it here: the tab is not
             // moving, and a page that ends up rebuilding rebuilds on the window
             // its tab is still in, which is where this puts its address.
-            for (seat, _) in moved.iter().rev() {
-                if let Some(page) = source_web.get_mut(seat) {
+            for (leaf, _) in moved.iter().rev() {
+                if let Some(page) = source_web.get_mut(leaf) {
                     let _ = page.rehost(
                         &target.compositor,
                         source_compositor,
                         webhost::SeatAddress {
-                            seat: seat.0,
+                            page: bt_platform::PageVisual {
+                                tab: leaf.tab.0,
+                                seat: leaf.seat.0,
+                            },
                             hwnd: source_hwnd,
                         },
                         false,
@@ -63889,12 +64017,12 @@ impl FolioApp {
             // The scaffolding left the window it was scaffolding.
             source.placeholder_tab = None;
         }
-        for (seat, _) in &moved {
-            if let Some(page) = source.web.remove(seat) {
-                target.web.insert(*seat, page);
+        for (leaf, _) in &moved {
+            if let Some(page) = source.web.remove(leaf) {
+                target.web.insert(*leaf, page);
             }
-            if let Some(picture) = source.web_thumbs.take(*seat) {
-                target.web_thumbs.put(*seat, picture);
+            if let Some(picture) = source.web_thumbs.take(*leaf) {
+                target.web_thumbs.put(*leaf, picture);
             }
         }
         for (_, leaf) in carried.leaves_mut() {
@@ -89493,18 +89621,22 @@ mod tests {
     /// **§7.7 ② — the strip row of a tab whose identity seat is hosting a page
     /// wears the globe, and the seat beside it does not** (W2 slice ③ ④).
     ///
-    /// `tab_mark` takes the window's whole set of page seats rather than one
-    /// seat, because slice ③ gave the window a page *per seat* and a window with
-    /// two pages open on two tabs has to answer for both strip rows at once.
-    /// What makes that safe is that seats are unique across the window — so
-    /// membership in the set is already the per-tab question, and the third
-    /// assertion here is the one that says so: a set naming somebody else's seat
-    /// leaves this tab wearing the file mark it had.
+    /// `tab_mark` takes the window's whole set of pages rather than one, because
+    /// slice ③ gave the window a page *per pane* and a window with two pages open
+    /// on two tabs has to answer for both strip rows at once. What makes that
+    /// safe is that the set names [`LeafId`]s (F1b′) — the tab is part of the
+    /// name, so membership is already the per-tab question.
+    ///
+    /// The third assertion is the one that says so, and it is the live defect
+    /// rather than an invented case: it hands the tab a page on **another tab's
+    /// seat 1** while this tab's own identity seat is also 1, which is exactly
+    /// what a window holding the same `.html` in two tabs produces.
     ///
     /// Red gate: ask the set about the *focused* leaf rather than the identity
     /// seat and the first assertion still passes on this one-pane tab while the
     /// strip goes wrong for every split; answer the globe for any non-empty set
-    /// and the third assertion fails.
+    /// and the third assertion fails; drop the tab out of the key and the third
+    /// assertion fails too, with a folder tab wearing a browser's globe.
     #[test]
     fn a_tab_identified_by_a_seat_that_is_hosting_a_page_wears_the_globe() {
         let (mut source, pane) = tab_with_a_preview(
@@ -89522,21 +89654,28 @@ mod tests {
         )
         .expect("a preview may become a tab of its own");
         let seat = torn.seats.preview_seats()[0];
+        let here = LeafId { tab: torn.id, seat };
 
         assert_eq!(
-            torn.tab_mark(&BTreeSet::from([seat])),
+            torn.tab_mark(&BTreeSet::from([here])),
             marks::ChromeMark::Globe,
-            "the seat is hosting a page, so the strip row says page"
+            "the pane is hosting a page, so the strip row says page"
         );
         assert_eq!(
             torn.tab_mark(&BTreeSet::new()),
             marks::ChromeMark::File,
-            "and says file again the moment the page leaves that seat"
+            "and says file again the moment the page leaves that pane"
         );
+        let another_tabs_page = LeafId {
+            tab: TabId(torn.id.0 + 1),
+            seat,
+        };
         assert_eq!(
-            torn.tab_mark(&BTreeSet::from([SeatId(seat.0 + 1000)])),
+            torn.tab_mark(&BTreeSet::from([another_tabs_page])),
             marks::ChromeMark::File,
-            "a page on some other tab's seat is not this tab's page"
+            "a page on another tab's seat is not this tab's page — and the seat \
+             number is deliberately the same one, because that is the state a \
+             window holding one .html in two tabs is actually in"
         );
     }
 
@@ -93898,26 +94037,67 @@ mod tests {
     /// steering a page in another one.
     #[test]
     fn a_tab_has_at_most_one_page_and_it_is_one_of_its_own_seats() {
+        let here = TabId(1);
         let seats = |ids: &[u64]| ids.iter().map(|id| SeatId(*id)).collect::<Vec<_>>();
-        let hosted: BTreeSet<SeatId> = [SeatId(7), SeatId(11)].into_iter().collect();
+        let hosted: BTreeSet<LeafId> = [7, 11]
+            .into_iter()
+            .map(|seat| LeafId {
+                tab: here,
+                seat: SeatId(seat),
+            })
+            .collect();
         assert_eq!(
-            web_seat_among(&seats(&[3, 7, 9]), &hosted),
+            web_seat_among(here, &seats(&[3, 7, 9]), &hosted),
             Some(SeatId(7)),
             "the tab's page is the seat of its own that holds one"
         );
         assert_eq!(
-            web_seat_among(&seats(&[3, 9]), &hosted),
+            web_seat_among(here, &seats(&[3, 9]), &hosted),
             None,
             "a tab with no page of its own has none, whatever the window holds"
         );
         assert_eq!(
-            web_seat_among(&seats(&[7, 11]), &hosted),
+            web_seat_among(here, &seats(&[7, 11]), &hosted),
             Some(SeatId(7)),
             "and a tab that somehow held two is answered by the first in tree \
              order, so the reuse target is stable rather than whichever the map \
              happened to yield"
         );
-        assert_eq!(web_seat_among(&[], &hosted), None);
+        assert_eq!(web_seat_among(here, &[], &hosted), None);
+    }
+
+    /// PIN (F1b′) — **two tabs each numbering their seats from one are two
+    /// tabs, and the second one's address does not steer the first one's
+    /// page.**
+    ///
+    /// The live defect this slice repairs, in the smallest form that holds it.
+    /// Every tab a pane is torn out into starts its seat numbering again at
+    /// `SeatId(1)` (`seats::Seats::lone_seat`), so a window whose pages are
+    /// filed under a bare `SeatId` files two tabs' pages under one name. Open
+    /// the same `.html` into a tab of its own twice and the second tab's
+    /// address bar navigates the *first* tab's engine.
+    ///
+    /// MUTATION: file the window's pages under `leaf.seat` instead of the whole
+    /// [`LeafId`] — which is what they were filed under until this slice — and
+    /// the first assertion answers `Some(SeatId(1))`: a page belonging to a tab
+    /// that is not this one, handed over as this tab's to navigate.
+    #[test]
+    fn a_page_in_another_tab_is_not_this_tabs_page_however_the_seats_are_numbered() {
+        let first = TabId(1);
+        let second = TabId(2);
+        let seat = SeatId(1);
+        let hosted: BTreeSet<LeafId> = [LeafId { tab: first, seat }].into_iter().collect();
+        assert_eq!(
+            web_seat_among(second, &[seat], &hosted),
+            None,
+            "the second tab holds no page of its own, and the first tab's page \
+             is not made its by the two of them having numbered a seat the same"
+        );
+        assert_eq!(
+            web_seat_among(first, &[seat], &hosted),
+            Some(seat),
+            "while the tab that does hold it is answered with it"
+        );
     }
 
     /// **The switcher's identity is the recovery machine's field, and there is no
