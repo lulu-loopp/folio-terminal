@@ -488,17 +488,20 @@ struct LeafId {
     seat: SeatId,
 }
 
-/// One shell, addressed from **outside the window it stands in**.
+/// One shell, and the window it was standing in **when it asked**.
 ///
-/// [`LeafId`] says a seat is only unique inside its tab. This says the next
-/// sentence of the same paragraph: a [`TabId`] is minted by a counter that starts
-/// again in every window, so a `LeafId` names one shell in *each* window at once.
-/// The decoration lanes are the application's (§2.4 rule 1) and each has one
-/// answer channel for the whole process, so what travels on them has to carry the
-/// window as well — otherwise a window matching an answer against its own tab of
-/// that number takes work that was never its own and throws it away, which is the
-/// 2026-08-23 report: in every window but the first, no printed path was ever
-/// verified and no hovered picture ever decoded.
+/// [`LeafId`] says a seat is only unique inside its tab; since F1b a [`TabId`] is
+/// unique in the process ([`TabIds`]), so the leaf alone names one shell
+/// anywhere. The window beside it is therefore no longer a disambiguator, and
+/// carrying it is not a second opinion about where the answer goes: it is there
+/// for the completions on this lane that are the **window's** own — the peek
+/// cache and the hover flyout, whose pending ledgers sit on `WindowRuntime` and
+/// stay put when a tab leaves. [`MathWorkerResult::owner`] is where the two are
+/// told apart, and it is the only reader of this field that decides anything.
+///
+/// It records where the question came from, not where the answer must go. A tab
+/// that moves between the asking and the answering makes those two different
+/// windows, and the one that matters is the second.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct ShellAddress {
     window: WindowId,
@@ -508,6 +511,37 @@ struct ShellAddress {
 struct MathWorkerResult {
     leaf: ShellAddress,
     completion: DecorationWorkerCompletion,
+}
+
+impl MathWorkerResult {
+    /// **Who this answer belongs to**, which on this lane is a question about
+    /// the *completion* and not about the address.
+    ///
+    /// The four that land in a [`bt_term::DualPlaneSession`] — a formula, a
+    /// decoded picture, a resampled raster, a verified path — belong to the pane
+    /// that asked, and a pane travels inside its tab. The two hover completions
+    /// belong to the window: `apply_math_results` already says so in the comment
+    /// above them ("the window's, not a seat's"), and this is that sentence made
+    /// into the routing rather than left as a note beside it.
+    ///
+    /// A preview's resample is a tab's: it is claimed by whichever pane of this
+    /// window's tabs is holding that exact target, so it has to reach the window
+    /// those tabs are in.
+    fn owner(&self) -> AnswerOwner {
+        match self.completion {
+            DecorationWorkerCompletion::PeekImage { .. }
+            | DecorationWorkerCompletion::PeekScaledImage { .. } => {
+                AnswerOwner::Window(self.leaf.window)
+            }
+            DecorationWorkerCompletion::Math { .. }
+            | DecorationWorkerCompletion::InlineImage { .. }
+            | DecorationWorkerCompletion::ScaleInlineImage { .. }
+            | DecorationWorkerCompletion::PreviewScaledImage { .. }
+            | DecorationWorkerCompletion::VerifiedPath { .. } => {
+                AnswerOwner::Tab(self.leaf.leaf.tab)
+            }
+        }
+    }
 }
 
 enum MathWorkerRequest {
@@ -6701,10 +6735,14 @@ struct {name} {{
     ///
     /// The four decoration lanes are the application's (§2.4 rule 1) and each has
     /// one answer channel for the whole process, while every address travelling on
-    /// them is minted by a counter that starts again in every window: `TabId` off
-    /// `WindowRuntime::next_tab_id`, a float's epoch off that window's own
-    /// `FloatHost`, and the [`LeafId`] built out of the first. So `TabId(1)` names
-    /// a tab in *every* window at once.
+    /// them was, on the day this was reported, minted by a counter that started
+    /// again in every window: `TabId` off the window's own `next_tab_id`, a
+    /// float's epoch off that window's own `FloatHost`, and the [`LeafId`] built
+    /// out of the first. So `TabId(1)` named a tab in *every* window at once.
+    /// (F1b took the tab numbering up to the application — see [`TabIds`] — and a
+    /// float's epoch is still the window's, which is why
+    /// [`AnswerOwner`] has two cases. The rule below is unchanged by that: it is
+    /// about who may drain, not about how an address is spelled.)
     ///
     /// While each window called `try_recv` on those receivers in turn, the first
     /// window in the opening order took **every** pending answer, matched the ones
@@ -6740,17 +6778,50 @@ struct {name} {{
             );
         }
     }
+
+    /// PIN (F1b) — **no lane claims an answer by the window it was asked
+    /// from.**
+    ///
+    /// The half the routing line could not pay, because until [`TabIds`] there
+    /// was nothing else to claim by. A `WindowId` written onto a request is a
+    /// record of where the question came from; a tab that moves while the answer
+    /// is out makes that the one window the answer must *not* go to. Every lane
+    /// therefore asks [`Runtime::owns`], which reads the claim off the strip.
+    ///
+    /// MUTATION: put `|response| response.window` back into any one of the four
+    /// and that lane stops following its tab, silently — every window still works
+    /// perfectly on its own, and only a tear-out shows it.
+    #[test]
+    fn no_lane_claims_an_answer_by_the_window_it_was_asked_from() {
+        for lane in [
+            "apply_preview_results",
+            "apply_files_results",
+            "apply_git_results",
+            "apply_math_results",
+        ] {
+            let body = fn_body(lane);
+            assert!(
+                body.contains("self.owns("),
+                "`{lane}` takes its own out of the batch by asking whether this \
+                 window owns the answer, and there is one such question"
+            );
+            assert!(
+                !body.contains(".window)"),
+                "`{lane}` may not read the window off the answer: that field \
+                 records where the question came from, not where the answer goes"
+            );
+        }
+    }
 }
 
 /// **Take one window's answers out of the batch, and leave every other window's
 /// exactly where they were** (user report, 2026-08-23).
 ///
 /// The four decoration lanes are the application's (§2.4 rule 1) and each has one
-/// answer channel for the whole process, while every address travelling on them —
-/// a [`TabId`], a float's epoch, the [`LeafId`] built out of the first — is minted
-/// by a counter that starts again in every window. So the application is what
-/// drains a lane, once, and this is the step each window then performs on what
-/// came out.
+/// answer channel for the whole process. So the application is what drains a
+/// lane, once, and this is the step each window then performs on what came out —
+/// [`AnswerOwner`] is what "its own" means, and since F1b that is a question
+/// about the tab an answer names rather than about the window it was asked from.
 ///
 /// A window that *drained* instead took every pending answer, matched the ones
 /// belonging to another window's `TabId(1)` against its own tab of that number,
@@ -6765,22 +6836,72 @@ struct {name} {{
 /// The order of what is taken is preserved, and so is the order of what is left:
 /// a lane's answers are a sequence and re-ordering them here would be a second
 /// place that decides which of two reads of one directory is the newer.
-fn answers_for<T>(
-    batch: &mut Vec<T>,
-    window: WindowId,
-    address: impl Fn(&T) -> WindowId,
-) -> Vec<T> {
-    let mut mine = Vec::new();
+fn answers_for<T>(batch: &mut Vec<T>, mine: impl Fn(&T) -> bool) -> Vec<T> {
+    let mut taken = Vec::new();
     let mut theirs = Vec::with_capacity(batch.len());
     for answer in batch.drain(..) {
-        if address(&answer) == window {
-            mine.push(answer);
+        if mine(&answer) {
+            taken.push(answer);
         } else {
             theirs.push(answer);
         }
     }
     *batch = theirs;
-    mine
+    taken
+}
+
+/// **Who an answer belongs to** — and therefore which window may take it out of
+/// the one batch the application drained (F1b).
+///
+/// Two owners and not one, because two different things ask these four lanes.
+///
+/// Until F1b the answer was always "the window that asked", stamped on the
+/// request and read back off the response, because a `TabId` came off a counter
+/// that started again in every window and so named nothing on its own. That
+/// stopped being an answer the moment a tab could move: between a question going
+/// out and its answer coming back, the reader can carry the tab into another
+/// window, and the window that asked is then the one window the answer must
+/// *not* go to. [`TabIds`] is what makes the better address available — a
+/// process-unique number that names one tab wherever it is standing.
+///
+/// So the `WindowId` on the wire stops being an authority over anything a tab
+/// owns, and becomes what it always literally was: the name of a window, for the
+/// answers that are a *window's* own. There is one author for each fact — the
+/// strip a tab is standing in says which window has that tab, and nothing else
+/// gets a vote.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AnswerOwner {
+    /// **A tab**, which stands in exactly one window at a time and carries its
+    /// outstanding answers with it when it moves. A number no window's strip
+    /// holds is a tab that has closed — never one that was renumbered, because
+    /// [`TabIds`] does not hand a number back — so an answer nobody claims is the
+    /// cancellation a closed tab already was, arriving as a dropped result.
+    Tab(TabId),
+    /// **A window itself.** Three kinds of answer land here and each has the same
+    /// reason: what they land *in* does not travel with a tab.
+    ///
+    /// A **float**'s epoch is minted by the window that opened it and it floats
+    /// across that window's tabs by ruling (§7.1.2), so there is no tab that can
+    /// be asked whether it is still there — this is `codex-final.md` §2's
+    /// instruction that a host which is not a tab keeps its existing window
+    /// routing rather than being pressed into the `TabId` branch. The **peek
+    /// cache** and the **hover flyout** keep their pending ledgers on
+    /// `WindowRuntime`; an answer that went somewhere else would leave a
+    /// `PeekCacheEntry::Pending` standing for good, and a picture whose question
+    /// is permanently outstanding is a picture that never arrives.
+    Window(WindowId),
+}
+
+/// **May this window take this answer?**
+///
+/// Free and total so the rule can be read without a `Runtime` — the only two
+/// facts it needs are the window's name and the tabs standing in its strip, and
+/// [`Runtime::owns`] is the one caller that supplies them.
+fn claimed_by(owner: AnswerOwner, window: WindowId, tabs: impl IntoIterator<Item = TabId>) -> bool {
+    match owner {
+        AnswerOwner::Tab(tab) => tabs.into_iter().any(|open| open == tab),
+        AnswerOwner::Window(id) => id == window,
+    }
 }
 
 #[cfg(test)]
@@ -6811,7 +6932,7 @@ mod worker_answer_routing_tests {
             answer(1, "first-b"),
             answer(2, "second-b"),
         ];
-        let first = answers_for(&mut batch, WindowId::from(1_u64), |(window, _)| *window);
+        let first = answers_for(&mut batch, |(window, _)| *window == WindowId::from(1_u64));
         assert_eq!(
             first
                 .iter()
@@ -6829,7 +6950,7 @@ mod worker_answer_routing_tests {
             ["second-a", "second-b"],
             "the other window's answers are still there for the window they are for"
         );
-        let second = answers_for(&mut batch, WindowId::from(2_u64), |(window, _)| *window);
+        let second = answers_for(&mut batch, |(window, _)| *window == WindowId::from(2_u64));
         assert_eq!(second.len(), 2);
         assert!(
             batch.is_empty(),
@@ -6844,10 +6965,10 @@ mod worker_answer_routing_tests {
         let mut dealt: Vec<(u64, Vec<String>)> = order
             .iter()
             .map(|window| {
-                let mine = answers_for(&mut batch, WindowId::from(*window), |(window, _)| *window);
+                let taken = answers_for(&mut batch, |(asked, _)| *asked == WindowId::from(*window));
                 (
                     *window,
-                    mine.into_iter().map(|(_, name)| name).collect::<Vec<_>>(),
+                    taken.into_iter().map(|(_, name)| name).collect::<Vec<_>>(),
                 )
             })
             .collect();
@@ -6906,6 +7027,171 @@ mod worker_answer_routing_tests {
             newest_first, oldest_first,
             "and which window is walked first is a fact about the opening order, \
              not about whose answer this is"
+        );
+    }
+
+    fn window_a() -> WindowId {
+        WindowId::from(1_u64)
+    }
+
+    fn window_b() -> WindowId {
+        WindowId::from(2_u64)
+    }
+
+    /// PIN (F1b, `plan.md` v4 增补 ③ contract 2) — **an answer follows the tab
+    /// that asked it, into whichever window that tab is standing in when the
+    /// answer lands.**
+    ///
+    /// The first of the three in-flight contracts, and the one that says why the
+    /// `WindowId` stamped on a request stopped being an authority. The question
+    /// went out from window A. Between the asking and the answering the reader
+    /// carried the tab into window B. There is exactly one right place for the
+    /// answer and it is not the window that asked.
+    ///
+    /// MUTATION: route on the window the answer carries — `owner` returning
+    /// `AnswerOwner::Window(response.window)` for a docked column — and window A
+    /// takes an answer for a tab it no longer has while window B waits for one
+    /// that will never come. Which is exactly the shape of the 2026-08-23 report,
+    /// one window over.
+    #[test]
+    fn an_answer_follows_the_tab_that_asked_it_into_another_window() {
+        let moved = TabId(7);
+        let asked_from_a = files::DirResponse {
+            window: window_a(),
+            host: files::FilesHost::Docked(LeafId {
+                tab: moved,
+                seat: SeatId(1),
+            }),
+            key: String::new(),
+            outcome: files::DirOutcome::Listed(files::DirListing::default()),
+        };
+        let owner = asked_from_a.owner();
+        assert!(
+            !claimed_by(owner, window_a(), [TabId(3)]),
+            "the window that asked no longer has the tab, and an answer is not \
+             owed to whoever posted the question"
+        );
+        assert!(
+            claimed_by(owner, window_b(), [moved, TabId(9)]),
+            "the window the tab is standing in now is the one place the answer \
+             has to go"
+        );
+    }
+
+    /// PIN (F1b, `plan.md` v4 增补 ③ contract 2) — **an answer for a tab that
+    /// has closed is claimed by nobody.**
+    ///
+    /// The safety half. `TabIds` never reuses a number, so a `TabId` that is in
+    /// no window's strip is a tab that is gone rather than a tab that has moved,
+    /// and there is no second reading of it: the answer is dropped, which is the
+    /// cancellation a closed tab already was.
+    #[test]
+    fn an_answer_for_a_tab_that_has_closed_is_claimed_by_nobody() {
+        let dead = AnswerOwner::Tab(TabId(7));
+        assert!(!claimed_by(dead, window_a(), [TabId(3), TabId(4)]));
+        assert!(!claimed_by(dead, window_b(), [TabId(8), TabId(9)]));
+    }
+
+    /// PIN (F1b; `codex-final.md` §2, "浮窗等不以 tab 为 owner 的 host … 保持其
+    /// 既有 epoch/窗口路由") — **each lane says who owns its answer, and the two
+    /// kinds are not confused.**
+    ///
+    /// Two owners and not one, because two things ask these lanes. A tab moves
+    /// between windows and takes its answers with it. A **float** does not: its
+    /// epoch is minted by the window it belongs to, it floats *across* that
+    /// window's tabs by ruling (§7.1.2), and there is no tab that can be asked
+    /// whether it is still there. The same is true of the peek cache and the
+    /// hover flyout, whose pending ledgers sit on `WindowRuntime` and stay put
+    /// when a tab leaves.
+    ///
+    /// MUTATION: give a float's answer `AnswerOwner::Tab(..)` and it lands in
+    /// whichever window holds the tab the float was born beside — which after a
+    /// tear-out is not the window the float is in, so the page it belongs to is
+    /// never told anything.
+    #[test]
+    fn every_lane_names_the_owner_of_its_answer() {
+        let tab = TabId(7);
+        let seat = SeatId(1);
+        let leaf = LeafId { tab, seat };
+        let docked = files::DirResponse {
+            window: window_a(),
+            host: files::FilesHost::Docked(leaf),
+            key: String::new(),
+            outcome: files::DirOutcome::Listed(files::DirListing::default()),
+        };
+        assert_eq!(docked.owner(), AnswerOwner::Tab(tab));
+        let floating = files::DirResponse {
+            host: files::FilesHost::Float(3),
+            ..docked.clone()
+        };
+        assert_eq!(floating.owner(), AnswerOwner::Window(window_a()));
+
+        let column = git::GitResponse {
+            window: window_a(),
+            host: git::GitHost::Column(leaf),
+            answer: git::GitAnswer::Repo {
+                dir: PathBuf::from("/repo"),
+                outcome: Ok(PathBuf::from("/repo")),
+            },
+        };
+        assert_eq!(column.owner(), AnswerOwner::Tab(tab));
+        let graph = git::GitResponse {
+            host: git::GitHost::Graph {
+                tab,
+                root: PathBuf::from("/repo"),
+            },
+            ..column.clone()
+        };
+        assert_eq!(graph.owner(), AnswerOwner::Tab(tab));
+        let popped_out = git::GitResponse {
+            host: git::GitHost::Float { id: 3, tab },
+            ..column.clone()
+        };
+        assert_eq!(popped_out.owner(), AnswerOwner::Window(window_a()));
+
+        let head = preview::PreviewResponse {
+            window: window_a(),
+            tab,
+            source: preview::PreviewSource::File(PathBuf::from("/notes.md")),
+            answer: preview::PreviewAnswer::Size(None),
+        };
+        assert_eq!(head.owner(), AnswerOwner::Tab(tab));
+
+        let address = ShellAddress {
+            window: window_a(),
+            leaf,
+        };
+        let verified = MathWorkerResult {
+            leaf: address,
+            completion: DecorationWorkerCompletion::VerifiedPath {
+                path: PathBuf::from("/notes.md"),
+                exists: true,
+            },
+        };
+        assert_eq!(
+            verified.owner(),
+            AnswerOwner::Tab(tab),
+            "a verdict lands in the pane's own session, and a pane travels inside \
+             its tab"
+        );
+        let peeked = MathWorkerResult {
+            leaf: address,
+            completion: DecorationWorkerCompletion::PeekScaledImage {
+                scaled: bt_term::ScaledInlineImage {
+                    occurrence_id: 0,
+                    content_key: String::new(),
+                    key: String::new(),
+                    rgba: Arc::from(&[][..]),
+                    width_px: 1,
+                    height_px: 1,
+                },
+            },
+        };
+        assert_eq!(
+            peeked.owner(),
+            AnswerOwner::Window(window_a()),
+            "the flyout's pending slot is the window's and does not move when a \
+             tab does"
         );
     }
 }
@@ -37643,6 +37929,21 @@ impl Runtime<'_> {
         self.window.window.id()
     }
 
+    /// **May this window take that answer out of the application's batch?**
+    /// (F1b — see [`AnswerOwner`].)
+    ///
+    /// The one place the two facts meet, and the reason there is only one: the
+    /// strip is the sole author of "which window this tab is in", so a claim is
+    /// read straight off it rather than off a `WindowId` some request wrote down
+    /// earlier and no longer speaks for.
+    fn owns(&self, owner: AnswerOwner) -> bool {
+        claimed_by(
+            owner,
+            self.window_id(),
+            self.window.tabs.iter().map(|tab| tab.id),
+        )
+    }
+
     /// [`Self::focused_leaf_id`] with the window on the front of it.
     fn focused_shell_address(&self) -> ShellAddress {
         ShellAddress {
@@ -37690,7 +37991,7 @@ impl Runtime<'_> {
         // as a head read does — see the tail of [`Self::apply_preview_results`]
         // for what asking `refresh_chrome` alone costs.
         let mut body = false;
-        for response in answers_for(batch, self.window_id(), |response| response.window) {
+        for response in answers_for(batch, |response| self.owns(response.owner())) {
             let host = response.host;
             // **The asker has to still be there.** A column that closed,
             // a graph that was shut and a window that was dismissed are
@@ -38053,7 +38354,7 @@ impl Runtime<'_> {
         lane_gone: bool,
     ) -> Result<()> {
         let mut changed = lane_gone;
-        for response in answers_for(batch, self.window_id(), |response| response.window) {
+        for response in answers_for(batch, |response| self.owns(response.owner())) {
             let Some(index) = self
                 .window
                 .tabs
@@ -39993,7 +40294,7 @@ impl Runtime<'_> {
         lane_gone: bool,
     ) -> Result<()> {
         let mut changed = lane_gone;
-        for response in answers_for(batch, self.window_id(), |response| response.window) {
+        for response in answers_for(batch, |response| self.owns(response.owner())) {
             match response.host {
                 // A tab or a column that closed while its read was in flight
                 // has nowhere to put the answer, and that is not a failure —
@@ -48900,7 +49201,7 @@ impl Runtime<'_> {
         lane_gone: bool,
     ) -> Result<()> {
         let mut changed = lane_gone;
-        for completion in answers_for(batch, self.window_id(), |result| result.leaf.window) {
+        for completion in answers_for(batch, |result| self.owns(result.owner())) {
             let leaf = completion.leaf.leaf;
             let target_index = self.window.tabs.iter().position(|tab| tab.id == leaf.tab);
             let target_active = target_index == Some(self.window.active_tab);

@@ -2601,11 +2601,23 @@ impl PreviewRequest {
 /// What the worker found.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewResponse {
-    /// The window the asking tab is in — see [`PreviewRequest::window`].
+    /// The window the asking tab was in — see [`PreviewRequest::window`].
     pub window: WindowId,
     pub tab: TabId,
     pub source: PreviewSource,
     pub answer: PreviewAnswer,
+}
+
+impl PreviewResponse {
+    /// **Who this answer belongs to** (F1b): the tab whose pool or whose glance
+    /// slot is holding the question, wherever that tab is standing now.
+    ///
+    /// This lane has only the one owner. A head read is claimed by a buffer in a
+    /// tab's pool (§7.1.3), and the hover glance that has no pool entry is still
+    /// checked against a tab of *this* window before it is offered the answer.
+    pub fn owner(&self) -> crate::AnswerOwner {
+        crate::AnswerOwner::Tab(self.tab)
+    }
 }
 
 /// One answer to one [`PreviewWant`].

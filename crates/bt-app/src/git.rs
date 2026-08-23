@@ -931,10 +931,32 @@ impl GitRequest {
 /// What the worker learned, addressed back to the seat that asked.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitResponse {
-    /// The window the asking surface is in — see [`GitRequest::window`].
+    /// The window the asking surface was in — see [`GitRequest::window`].
     pub window: WindowId,
     pub host: GitHost,
     pub answer: GitAnswer,
+}
+
+impl GitResponse {
+    /// **Who this answer belongs to** (F1b).
+    ///
+    /// A column and a graph belong to their tab and travel with it between
+    /// windows. A **float** belongs to the window that minted its epoch, which is
+    /// `codex-final.md` §2's instruction read literally: a host that is not a tab
+    /// keeps the window routing it already had rather than being pressed into the
+    /// `TabId` branch. That is also what the applying end already checks first —
+    /// "is this float still live in me" — and it holds for the float's two
+    /// *document* answers too, even though those land in a tab's pool: a diff
+    /// asked from a float and answered after the tab it recorded has been carried
+    /// into another window is dropped, which is the same cancellation a float
+    /// dismissed mid-read already was.
+    pub fn owner(&self) -> crate::AnswerOwner {
+        match self.host {
+            GitHost::Column(leaf) => crate::AnswerOwner::Tab(leaf.tab),
+            GitHost::Graph { tab, .. } => crate::AnswerOwner::Tab(tab),
+            GitHost::Float { .. } => crate::AnswerOwner::Window(self.window),
+        }
+    }
 }
 
 /// Every answer carries the question's own subject back with it.

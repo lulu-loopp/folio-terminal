@@ -122,11 +122,23 @@ impl DirRequest {
 /// What the worker found.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirResponse {
-    /// The window the asking tree is in — see [`DirRequest::window`].
+    /// The window the asking tree was in — see [`DirRequest::window`].
     pub window: WindowId,
     pub host: FilesHost,
     pub key: String,
     pub outcome: DirOutcome,
+}
+
+impl DirResponse {
+    /// **Who this answer belongs to** (F1b) — a docked column belongs to its
+    /// tab and travels with it between windows; a float belongs to the window
+    /// that minted its epoch and cannot travel at all.
+    pub fn owner(&self) -> crate::AnswerOwner {
+        match self.host {
+            FilesHost::Docked(leaf) => crate::AnswerOwner::Tab(leaf.tab),
+            FilesHost::Float(_) => crate::AnswerOwner::Window(self.window),
+        }
+    }
 }
 
 /// A directory either lists or it does not, and both are answers.
