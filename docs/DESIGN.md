@@ -181,6 +181,10 @@ target  ← CreateTargetForHwnd(hwnd, topmost = true)
 
 本片不改任何用户可见行为：全套测试（含 vendor ref 45/45）绿，clippy `-D warnings` 与 `fmt --check` 干净，release 版逐画面复核与一次滚轮 `BT_PERF_TRACE` 与 main 无差别。
 
+**规则 1 的后半句欠了一句话，第二扇窗替它还的（用户报告 2026-08-23，已修）。** 「地址写在请求上」当时只写到 tab 这一级，而**`TabId` 是每扇窗自己的计数器发的**（`WindowRuntime::next_tab_id`，float 的 epoch 与 `LeafId` 同理），于是 `TabId(1)` 在每一扇窗里都存在。四条 worker 的答案通道是**进程一条**，而当时是**每扇窗各自 `try_recv` 一遍**——开得最早的那扇窗因此把所有待取的答案**全部取走**，把其中属于别人的那些拿去和自己那个同号的 tab 比对，找不到列、找不到缓冲、找不到 session，就地丢掉。没有人会再问第二遍（head read 已经花掉 `claim_head_read`，目录已经 `mark_pending`），所以**除第一扇窗以外的每一扇窗**：files 列永远是空的、打印出来的路径永远不会被验证（`VerifyPath` 走的是同一台 worker）、而一个 markdown 文件开进预览席，画出来的就是**头、脚、和它们之间那两条发丝线**——正是那两次报告里的那张图。实机拍下：同一个进程的两扇窗，同一秒，第一扇的列满了，第二扇的空着。
+
+**改法是把那句话说完：答案带着「问它的那扇窗」一起回来，通道由 `App` 抽一次，每扇窗只取写着自己名字的那些、把别人的留在原地。** 四条 lane 的 request/response 各多一个 `window: WindowId`（math/scale 那两条是 `ShellAddress { window, leaf }`——`LeafId` 说「seat 只在 tab 内唯一」，这是同一段话的下一句），newest-per-target 的合并键也把它算进去（否则两扇窗问同一个文件，一句会顶掉另一句，被顶掉的那扇窗等一个永远不来的答案）。`Runtime::apply_*_results` 不再持有任何 receiver——`layer_shape_tests::no_window_drains_a_shared_worker_answer_queue` 逐个函数读源码钉着这一条。取完还剩下的，是写给一扇已经关掉的窗的，与「tab 关了」是同一种取消，照旧丢弃。
+
 ### 2.5 一个进程，多扇窗：路由与生命周期（多窗块 片 C，2026-08-19，已落地）
 
 **`FolioApp` 持有一个 `App` 和一张 `Windows<WindowId, WindowRuntime>`，事件循环按 winit 事件自带的 `WindowId` 查表。** 片 A1 把渲染器分成 device 层与 window 层（§2.2），片 B 把状态分成 App 层与 Window 层（§2.4）；这一片是那两句话第一次同时为真的地方——`window_event` 不再拿 id 去跟"唯一那扇窗"比对然后丢弃不等的，而是查表，查不到就是那扇窗已经关了，这是平台有权发生的时序而不是缺陷。
@@ -732,6 +736,8 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 - **落点:只有预览臂收行号。** `HyperlinkActivation::Preview` 多带一个 `Option<PrintedPathLocation>`,别的臂连参数都没有——本窗没有办法告诉资源管理器把光标放在哪儿。图片臂也不收:一张图没有行,`sunset.png:12` 开的是那张图。**列只作数不落点**:预览席只有一个 caret,而一条 `file:line:col` 的**印它的人**很少真有列那一级的把握;落到行上是每个编辑器的 `+N` 做的事,也是读者要的那件事。
 - **落在源码面,因为行号是字节里的坐标。** 渲染后的 markdown 没有第 573 行——它的块不带源行号,一个段落本来就是好几行拼起来的。所以带行号的引用把这一面翻成 source(`md_source`,那是**视图**自己的开关,裁决 8⑧ 2026-08-13,所以只动这一个 surface,不动 buffer、不动同一文件的另一个 surface)。
 - **滚动是**「这一行到顶」**而不是最小移动。** 刚开的一扇预览没有阅读位置可打扰,而读者要的是那一行连着它下面的正文。落地上行号是一个**意图**而不是一个数字:正文是从 worker 读回来的,开文件那一帧只知道文件名、不知道它有几行,直接写进 `scroll` 会被按空文档钳成 0。**行号够不着预览席读不到的地方,这是预览席自己的边界不是本片的**:一次预览只读文件的**头**(`PREVIEW_HEAD_BYTES`),所以一条指向大文件深处的引用落在读到的最后一行上(`offset_at` 本来就这么钳)。实机量到过:`docs/DESIGN.md:573` 落在头部末尾,`docs/DESIGN.md:13` 正正落在第 13 行。要让前者也落准,该改的是预览席读多少,不是行号怎么走。 意图停在 pane 上(`goto_line`,与重采样账本同一个理由:它跟着 pane 走进撕出去的窗),`settle_preview_goto` 在有东西可量的那一刻花掉它——池里已有这个文件时就是当帧,没有时就是正文落地的那一帧。
+
+- **写下 `scroll` 的每一处都要把 body 重造一遍,因为 body 是从 `scroll` 造出来的(2026-08-23 补齐)。** `settle_preview_goto` 一直是这么收尾的,`refresh_preview_for_layout` 里排在它后面的 `heal_preview_scroll` 却不是:那一趟的次序是「造 body → 花掉行号 → 钳滚动」,于是**任何真的钳动了一下的帧**,渲染器手上那张图就是按钳之前那个偏移造的——pane 变高了、文档变短了、换了个更短的文件,画面上是一片空白的正文,而**下一个不相干的事件**(最典型的就是一格滚轮)重造之后它就永远好了。这正是那两条报告里「往下滚一段就恢复」的那一半。改法与 goto 同一句:`heal_preview_scroll` 报告自己动没动过,动过的那一帧再造一次 body;没动的帧一分钱不花。
 
 **两处改动都落在 ⑧ 那一处词法上,所以图片那条线一起变了,这是查清楚之后的选择而不是副作用。** 尾部修剪与行号切分都住在候选生成里,`inline_image.rs` 的三个 detect 委托的正是它们:于是`见 D:\shots\a.png。` 从此是一张图(此前那个句号进了名字,扩展名读成 `png。`),而 `a.png:12` 名的是 `a.png`——扩展名这个问题现在问的是**路径**那一半。放在这里而不是只放在非图片那条路上,理由就是 ⑧ 自己:「指针底下这段字到哪儿为止」只能有一个说法,为了让图片那条线保持旧样而给它留一份旧边界,就是再造一个第二读者。钉子:`the_image_lane_reads_the_boundary_rules_the_one_lexicon_holds`,连同「ASCII 结尾的点仍在名字里、于是 `a.png.` 仍过不了扩展名白名单」一起钉住。
 

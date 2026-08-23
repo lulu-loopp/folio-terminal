@@ -64,6 +64,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use winit::event_loop::EventLoopProxy;
+use winit::window::WindowId;
 
 use crate::{AppEvent, LeafId};
 
@@ -144,8 +145,14 @@ pub fn git_not_found() -> &'static str {
 /// panel's whole vocabulary — a page beside a Files page, a branch head, a list
 /// you stage from — is seat-shaped. So there is no `Float` variant to address
 /// here, and the epoch dance [`crate::files::FilesHost`] needs does not arise.
+///
+/// **And the window the host is in** (user report, 2026-08-23). Every spelling of
+/// [`GitHost`] is minted by a counter that starts again in every window — a
+/// `TabId` on its own, one inside a [`crate::LeafId`], a float's epoch — so none
+/// of them names one surface across the process. The pair does.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitRequest {
+    pub window: WindowId,
     pub host: GitHost,
     pub question: GitQuestion,
 }
@@ -913,7 +920,9 @@ impl GitQuestion {
 
 impl GitRequest {
     fn same_target(&self, other: &Self) -> bool {
-        self.host == other.host && self.question.same_target(&other.question)
+        self.window == other.window
+            && self.host == other.host
+            && self.question.same_target(&other.question)
     }
 }
 
@@ -922,6 +931,8 @@ impl GitRequest {
 /// What the worker learned, addressed back to the seat that asked.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitResponse {
+    /// The window the asking surface is in — see [`GitRequest::window`].
+    pub window: WindowId,
     pub host: GitHost,
     pub answer: GitAnswer,
 }
@@ -3791,6 +3802,7 @@ impl GitWorker {
                     };
                     if response_tx
                         .send(GitResponse {
+                            window: request.window,
                             host: request.host,
                             answer,
                         })
@@ -4374,6 +4386,7 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     fn a_staged_diff_and_an_unstaged_diff_are_not_the_same_question() {
         let (tx, rx) = mpsc::channel();
         let diff = |against: crate::preview::GitDiffAgainst| GitRequest {
+            window: winit::window::WindowId::from(1_u64),
             host: GitHost::Column(seat(1)),
             question: GitQuestion::Diff {
                 root: PathBuf::from(r"D:\repo"),
@@ -4405,6 +4418,7 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     fn two_pages_of_history_are_two_questions_and_one_page_asked_twice_is_one() {
         let (tx, rx) = mpsc::channel();
         let page = |skip: usize, count: usize| GitRequest {
+            window: winit::window::WindowId::from(1_u64),
             host: GitHost::Column(seat(1)),
             question: GitQuestion::Log {
                 root: PathBuf::from(r"D:\repo"),
@@ -4429,6 +4443,7 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     fn two_columns_asking_the_same_thing_both_get_answered() {
         let (tx, rx) = mpsc::channel();
         let ask = |host: LeafId| GitRequest {
+            window: winit::window::WindowId::from(1_u64),
             host: GitHost::Column(host),
             question: GitQuestion::Status {
                 root: PathBuf::from(r"D:\repo"),
@@ -4448,6 +4463,7 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     fn a_status_superseded_during_a_slow_read_is_never_run() {
         let (tx, rx) = mpsc::channel();
         let ask = |root: &str| GitRequest {
+            window: winit::window::WindowId::from(1_u64),
             host: GitHost::Column(seat(1)),
             question: GitQuestion::Status {
                 root: PathBuf::from(root),

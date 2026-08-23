@@ -438,29 +438,46 @@ struct LeafId {
     seat: SeatId,
 }
 
-struct MathWorkerResult {
+/// One shell, addressed from **outside the window it stands in**.
+///
+/// [`LeafId`] says a seat is only unique inside its tab. This says the next
+/// sentence of the same paragraph: a [`TabId`] is minted by a counter that starts
+/// again in every window, so a `LeafId` names one shell in *each* window at once.
+/// The decoration lanes are the application's (§2.4 rule 1) and each has one
+/// answer channel for the whole process, so what travels on them has to carry the
+/// window as well — otherwise a window matching an answer against its own tab of
+/// that number takes work that was never its own and throws it away, which is the
+/// 2026-08-23 report: in every window but the first, no printed path was ever
+/// verified and no hovered picture ever decoded.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct ShellAddress {
+    window: WindowId,
     leaf: LeafId,
+}
+
+struct MathWorkerResult {
+    leaf: ShellAddress,
     completion: DecorationWorkerCompletion,
 }
 
 enum MathWorkerRequest {
     Math {
-        leaf: LeafId,
+        leaf: ShellAddress,
         task: Box<SessionMathTask>,
         foreground_rgb: [u8; 3],
     },
     InlineImage {
-        leaf: LeafId,
+        leaf: ShellAddress,
         task: bt_term::InlineImageTask,
     },
     /// Hover-peek decode: read and decode a local image off-thread without touching any
     /// decoration record. The completion routes only to the app-side peek cache, so the band
     /// creation gates (cursor line, semantic input region) are never bypassed.
-    PeekImage { leaf: LeafId, path: PathBuf },
+    PeekImage { leaf: ShellAddress, path: PathBuf },
     /// Ask the disk whether one printed path names anything (§7.1.5j). The cheapest thing this
     /// worker is ever handed, and it is here rather than on the event thread for the reason every
     /// other read is: the answer costs a syscall and the frame is being drawn.
-    VerifyPath { leaf: LeafId, path: PathBuf },
+    VerifyPath { leaf: ShellAddress, path: PathBuf },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -472,15 +489,15 @@ enum ScalePurpose {
 
 enum ScaleWorkerRequest {
     InlineImage {
-        leaf: LeafId,
+        leaf: ShellAddress,
         task: bt_term::InlineImageScaleTask,
     },
     Peek {
-        leaf: LeafId,
+        leaf: ShellAddress,
         task: bt_term::InlineImageScaleTask,
     },
     Preview {
-        leaf: LeafId,
+        leaf: ShellAddress,
         task: bt_term::InlineImageScaleTask,
     },
 }
@@ -502,7 +519,7 @@ impl ScaleWorkerRequest {
         }
     }
 
-    fn leaf(&self) -> LeafId {
+    fn leaf(&self) -> ShellAddress {
         match self {
             Self::InlineImage { leaf, .. }
             | Self::Peek { leaf, .. }
@@ -519,7 +536,7 @@ impl ScaleWorkerRequest {
             && self.task().content_key == other.task().content_key
     }
 
-    fn completion(self) -> (LeafId, DecorationWorkerCompletion) {
+    fn completion(self) -> (ShellAddress, DecorationWorkerCompletion) {
         match self {
             Self::InlineImage { leaf, task } => (
                 leaf,
@@ -3936,7 +3953,7 @@ fn take_math_worker_notice(notice_pending: &mut bool) -> Option<&'static str> {
 }
 
 fn dispatch_decoration_task(
-    leaf: LeafId,
+    leaf: ShellAddress,
     task: SessionDecorationTask,
     tasks: &mpsc::Sender<MathWorkerRequest>,
     scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
@@ -3964,7 +3981,7 @@ fn dispatch_decoration_task(
 /// Drain the real session queue into the renderer channel. A dead optional-decoration worker is
 /// a one-way feature downgrade, never a terminal/runtime error.
 fn dispatch_pending_math_tasks(
-    leaf: LeafId,
+    leaf: ShellAddress,
     session: &mut DualPlaneSession,
     tasks: &mpsc::Sender<MathWorkerRequest>,
     scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
@@ -4004,6 +4021,7 @@ fn leaf_session_mut(
 /// peek), which is why the affordance appeared to be a thing hovering granted rather than a thing
 /// every pane is owed.
 fn dispatch_tab_decoration_tasks(
+    window: WindowId,
     tab: &mut TabState,
     tasks: &mpsc::Sender<MathWorkerRequest>,
     scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
@@ -4014,9 +4032,12 @@ fn dispatch_tab_decoration_tasks(
     let mut disabled = false;
     for (seat, leaf) in tab.leaves_mut() {
         disabled |= dispatch_pending_math_tasks(
-            LeafId {
-                tab: tab_id,
-                seat: *seat,
+            ShellAddress {
+                window,
+                leaf: LeafId {
+                    tab: tab_id,
+                    seat: *seat,
+                },
             },
             &mut leaf.session,
             tasks,
@@ -6601,6 +6622,147 @@ struct {name} {{
             !rereads.contains(concat!("invalid", "ate(")),
             "a re-read does not know yet whether the history moved, so it may not \
              blank the lanes on the chance that it did: {rereads}"
+        );
+    }
+
+    /// PIN (user report, 2026-08-23) — **no window may drain a worker's answer
+    /// queue.**
+    ///
+    /// The four decoration lanes are the application's (§2.4 rule 1) and each has
+    /// one answer channel for the whole process, while every address travelling on
+    /// them is minted by a counter that starts again in every window: `TabId` off
+    /// `WindowRuntime::next_tab_id`, a float's epoch off that window's own
+    /// `FloatHost`, and the [`LeafId`] built out of the first. So `TabId(1)` names
+    /// a tab in *every* window at once.
+    ///
+    /// While each window called `try_recv` on those receivers in turn, the first
+    /// window in the opening order took **every** pending answer, matched the ones
+    /// addressed to another window's `TabId(1)` against its own tab of that number,
+    /// found no column, no buffer and no session to put them in, and dropped them.
+    /// Nothing was ever asked again — a head read had already spent
+    /// `claim_head_read`, a directory was already `mark_pending` — so in every
+    /// window but the first: the files column stood empty for ever, no printed path
+    /// was ever verified, and a markdown file opened into the preview pane drew its
+    /// head, its foot and the two hairlines between them and not one word.
+    /// Photographed on the machine, two windows of one process, the same second.
+    ///
+    /// The rule that replaces it: the receivers are drained **once, by the
+    /// application**, and each window takes only the answers addressed to it and
+    /// leaves the rest standing for the window that they are for.
+    ///
+    /// MUTATION: put `self.app.preview_worker.responses.try_recv()` back inside
+    /// `apply_preview_results` and this test says so before a window is opened.
+    #[test]
+    fn no_window_drains_a_shared_worker_answer_queue() {
+        for lane in [
+            "apply_preview_results",
+            "apply_files_results",
+            "apply_git_results",
+            "apply_math_results",
+        ] {
+            let body = fn_body(lane);
+            assert!(
+                !body.contains("try_recv"),
+                "`{lane}` is one window's, and a receiver it drains is every \
+                 window's: it must be handed the batch the application drained \
+                 and take only what is addressed to it"
+            );
+        }
+    }
+}
+
+/// **Take one window's answers out of the batch, and leave every other window's
+/// exactly where they were** (user report, 2026-08-23).
+///
+/// The four decoration lanes are the application's (§2.4 rule 1) and each has one
+/// answer channel for the whole process, while every address travelling on them —
+/// a [`TabId`], a float's epoch, the [`LeafId`] built out of the first — is minted
+/// by a counter that starts again in every window. So the application is what
+/// drains a lane, once, and this is the step each window then performs on what
+/// came out.
+///
+/// A window that *drained* instead took every pending answer, matched the ones
+/// belonging to another window's `TabId(1)` against its own tab of that number,
+/// and dropped them where they stood. Nothing asks twice — a head read has spent
+/// [`preview::PreviewBuffer::claim_head_read`], a directory is already
+/// `mark_pending` — so in every window but the first, the files column stayed
+/// empty for ever, no printed path was ever verified, and a markdown file opened
+/// into the preview pane drew its head, its foot and the two hairlines between
+/// them and nothing else. Photographed on the machine, two windows of one
+/// process, in the same second.
+///
+/// The order of what is taken is preserved, and so is the order of what is left:
+/// a lane's answers are a sequence and re-ordering them here would be a second
+/// place that decides which of two reads of one directory is the newer.
+fn answers_for<T>(
+    batch: &mut Vec<T>,
+    window: WindowId,
+    address: impl Fn(&T) -> WindowId,
+) -> Vec<T> {
+    let mut mine = Vec::new();
+    let mut theirs = Vec::with_capacity(batch.len());
+    for answer in batch.drain(..) {
+        if address(&answer) == window {
+            mine.push(answer);
+        } else {
+            theirs.push(answer);
+        }
+    }
+    *batch = theirs;
+    mine
+}
+
+#[cfg(test)]
+mod worker_answer_routing_tests {
+    use super::*;
+
+    fn answer(window: u64, name: &str) -> (WindowId, String) {
+        (WindowId::from(window), name.to_owned())
+    }
+
+    /// **A window takes its own and leaves the rest standing** (user report,
+    /// 2026-08-23).
+    ///
+    /// The whole of the incident in four values: the first window in the opening
+    /// order is offered a batch holding two of its own answers and two of
+    /// another window's, and what it must not do is come away with all four.
+    ///
+    /// MUTATION: have `answers_for` return `batch.drain(..).collect()` — the
+    /// draining every window used to do — and the second window is handed an
+    /// empty batch, which on the glass was a files column that never filled, a
+    /// printed path that was never underlined, and a markdown preview showing its
+    /// head, its foot and the two hairlines between them.
+    #[test]
+    fn a_window_takes_only_the_answers_addressed_to_it() {
+        let mut batch = vec![
+            answer(1, "first-a"),
+            answer(2, "second-a"),
+            answer(1, "first-b"),
+            answer(2, "second-b"),
+        ];
+        let first = answers_for(&mut batch, WindowId::from(1_u64), |(window, _)| *window);
+        assert_eq!(
+            first
+                .iter()
+                .map(|(_, name)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["first-a", "first-b"],
+            "in the order the lane answered in, which is the order two reads of \
+             one directory have to keep"
+        );
+        assert_eq!(
+            batch
+                .iter()
+                .map(|(_, name)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["second-a", "second-b"],
+            "the other window's answers are still there for the window they are for"
+        );
+        let second = answers_for(&mut batch, WindowId::from(2_u64), |(window, _)| *window);
+        assert_eq!(second.len(), 2);
+        assert!(
+            batch.is_empty(),
+            "and what nobody claimed is what a closed window left behind"
         );
     }
 }
@@ -21486,6 +21648,7 @@ impl Runtime<'_> {
                 continue;
             }
             if !self.app.preview_worker.request(preview::PreviewRequest {
+                window: self.window_id(),
                 tab: id,
                 source,
                 want,
@@ -32269,6 +32432,7 @@ impl Runtime<'_> {
         // same lane a document's head goes down.
         let tab = self.id;
         if !self.app.preview_worker.request(preview::PreviewRequest {
+            window: self.window_id(),
             tab,
             source: preview::PreviewSource::file(path.clone()),
             want: preview::PreviewWant::Size,
@@ -32526,6 +32690,7 @@ impl Runtime<'_> {
         pane.scroll = view.scroll;
         if wants_read
             && !self.app.preview_worker.request(preview::PreviewRequest {
+                window: self.window_id(),
                 tab,
                 source,
                 want: preview::PreviewWant::Head,
@@ -35242,8 +35407,17 @@ impl Runtime<'_> {
     /// because one solve moves every rectangle at once: healing only the pane the
     /// gesture touched would leave the others believing a geometry that stopped
     /// existing in the same frame.
-    fn heal_preview_scroll(&mut self) {
+    ///
+    /// **Reports whether it moved anything**, which is [`Self::settle_preview_goto`]'s
+    /// closing sentence said about the other writer of the same number: the body
+    /// is built *from* the offset, so an offset written after it was built is a
+    /// number nothing has drawn. Left unsaid, a pane grown taller or a document
+    /// grown shorter kept the frame that had been built past its own end — a body
+    /// with nothing in it — until some unrelated event rebuilt it, which on the
+    /// glass is a blank pane that one notch of the wheel fixes for good.
+    fn heal_preview_scroll(&mut self) -> bool {
         let scale = self.window.renderer.metrics().scale_factor as f32;
+        let mut moved = false;
         for surface in self.preview_surfaces() {
             let Some(body) = self.preview_surface_body_rect(surface, scale) else {
                 continue;
@@ -35254,8 +35428,10 @@ impl Runtime<'_> {
             let healed = self.clamped_preview_scroll(surface, body, scale, scroll);
             if healed != scroll {
                 self.preview_pane_mut(surface).scroll = healed;
+                moved = true;
             }
         }
+        moved
     }
 
     /// Re-derive the parsed body if what it was parsed from has changed.
@@ -35789,13 +35965,32 @@ impl Runtime<'_> {
         // rectangle the solver has not answered for yet is a body whose every
         // paragraph is a box no clip can keep, and by the time the picture is on
         // screen the numbers that made it are gone.
+        //
+        // **`bytes` and `owed` are the two the 2026-08-23 report needed and did
+        // not have.** `built … paragraphs=0` was saying two completely different
+        // things with one number — "this document really is empty" and "the head
+        // read never came home" — and it was the second, because the answer had
+        // been taken off the shared channel by another window and dropped. The
+        // buffer's own two facts separate them at the station that already runs:
+        // how much text it is holding, and whether it is still owed a read.
         preview_trace::emit(preview_trace::global(), || {
             let scroll = self
                 .preview_pane(surface)
                 .map_or([0.0, 0.0], |pane| pane.scroll);
+            let buffer = self.preview_buffer_on(surface);
+            let bytes = buffer.map_or(0, |buffer| {
+                buffer.content.as_ref().map_or(0, std::string::String::len)
+            });
+            let owed = buffer.is_some_and(preview::PreviewBuffer::awaiting_head_read);
             format!(
-                "build {surface:?} scale={scale} body=[{},{},{},{}] scroll=[{},{}]",
-                body[0], body[1], body[2], body[3], scroll[0], scroll[1]
+                "build {surface:?} scale={scale} body=[{},{},{},{}] scroll=[{},{}] bytes={bytes} owed={}",
+                body[0],
+                body[1],
+                body[2],
+                body[3],
+                scroll[0],
+                scroll[1],
+                u8::from(owed)
             )
         });
         self.rebuild_preview_document(surface, body, scale);
@@ -36263,7 +36458,16 @@ impl Runtime<'_> {
         for surface in self.preview_surfaces() {
             self.settle_preview_goto(surface);
         }
-        self.heal_preview_scroll();
+        // **And the heal's own rebuild, for `settle_preview_goto`'s reason.** The
+        // body a moment ago was built from the offset the heal has just replaced,
+        // so on a frame that clamped anything the picture in the renderer's hands
+        // is one nothing on this pane agrees with any more — a document scrolled
+        // past its own end draws no rows at all. Only on the frames that moved
+        // something, which are the frames a pane grew taller or a document grew
+        // shorter and no others.
+        if self.heal_preview_scroll() {
+            self.refresh_preview_body();
+        }
         let hosts = self.preview_picture_hosts();
         // The one `set_preview_image` slot, emptied when no seat is holding it —
         // the lane is a seat's, and a frame in which no seat has a picture is a
@@ -36379,7 +36583,7 @@ impl Runtime<'_> {
                 .math_worker
                 .tasks
                 .send(MathWorkerRequest::PeekImage {
-                    leaf: self.focused_leaf_id(),
+                    leaf: self.focused_shell_address(),
                     path,
                 })
                 .is_ok()
@@ -36523,7 +36727,7 @@ impl Runtime<'_> {
             .math_worker
             .scale_tasks
             .send(ScaleWorkerRequest::Preview {
-                leaf: self.focused_leaf_id(),
+                leaf: self.focused_shell_address(),
                 task,
             })
             .is_ok()
@@ -36752,7 +36956,9 @@ impl Runtime<'_> {
         let active = self.window.active_tab;
         let tasks = self.app.math_worker.tasks.clone();
         let scale_tasks = self.app.math_worker.scale_tasks.clone();
+        let window = self.window_id();
         dispatch_tab_decoration_tasks(
+            window,
             &mut self.window.tabs[active],
             &tasks,
             &scale_tasks,
@@ -36808,6 +37014,7 @@ impl Runtime<'_> {
             || asked_about_paths
         {
             dispatch_tab_decoration_tasks(
+                window,
                 &mut self.window.tabs[active],
                 &tasks,
                 &scale_tasks,
@@ -36952,11 +37159,22 @@ impl Runtime<'_> {
         }
     }
 
-    fn disable_math_worker(&mut self) -> bool {
-        disable_math_worker_state(
-            &mut self.app.math_worker_running,
-            &mut self.app.math_worker_notice_pending,
-        )
+    /// **This window, as a worker addresses it.**
+    ///
+    /// The outer half of every address on the four decoration lanes. See
+    /// [`ShellAddress`] for why a `TabId` is not enough on its own: the counters
+    /// that mint the inner halves start again in every window, and the channels
+    /// the answers come home on are the application's.
+    fn window_id(&self) -> WindowId {
+        self.window.window.id()
+    }
+
+    /// [`Self::focused_leaf_id`] with the window on the front of it.
+    fn focused_shell_address(&self) -> ShellAddress {
+        ShellAddress {
+            window: self.window_id(),
+            leaf: self.focused_leaf_id(),
+        }
     }
 
     fn disable_files_worker(&mut self) -> bool {
@@ -36987,282 +37205,274 @@ impl Runtime<'_> {
     /// and a column that has since been re-rooted refuses it — both are the
     /// cancellation, arriving as a dropped result. Only an answer that actually
     /// changed something the active tab is drawing asks for a new frame.
-    fn apply_git_results(&mut self) -> Result<()> {
-        let mut changed = false;
+    fn apply_git_results(
+        &mut self,
+        batch: &mut Vec<git::GitResponse>,
+        lane_gone: bool,
+    ) -> Result<()> {
+        let mut changed = lane_gone;
         // A document landing is not a chrome change (G-3): what it turns from
         // "Loading …" into lines is the renderer's own preview surface, exactly
         // as a head read does — see the tail of [`Self::apply_preview_results`]
         // for what asking `refresh_chrome` alone costs.
         let mut body = false;
-        loop {
-            match self.app.git_worker.responses.try_recv() {
-                Ok(response) => {
-                    let host = response.host;
-                    // **The asker has to still be there.** A column that closed,
-                    // a graph that was shut and a window that was dismissed are
-                    // one cancellation arriving as a dropped answer — and each
-                    // says so in its own register, because each is addressed in
-                    // its own way.
-                    //
-                    // **The float is asked first, and without a tab.** That is
-                    // the whole of why its host carries an epoch (user ruling,
-                    // 2026-08-19): a pinned window floats *across* tabs by
-                    // ruling, so "is that tab still open" is not the question
-                    // here, and dropping a page's answer because the tab the
-                    // window was born in has since closed would strand it
-                    // mid-read with no second asking owed.
-                    let floating = match &host {
-                        git::GitHost::Float { id, .. } => {
-                            if self
-                                .window
-                                .float
-                                .live(*id)
-                                .and_then(float::FloatWin::files)
-                                .is_none()
-                            {
-                                continue;
-                            }
-                            Some(*id)
-                        }
-                        git::GitHost::Column(_) | git::GitHost::Graph { .. } => None,
-                    };
-                    let tab_index = self.window.tabs.iter().position(|tab| tab.id == host.tab());
-                    if floating.is_none() {
-                        let Some(index) = tab_index else {
-                            continue;
-                        };
-                        let tab = &self.window.tabs[index];
-                        match &host {
-                            git::GitHost::Column(leaf) if !tab.files.contains_key(&leaf.seat) => {
-                                continue;
-                            }
-                            git::GitHost::Graph { root, .. }
-                                if !tab.git_graphs.contains_key(root) =>
-                            {
-                                continue;
-                            }
-                            _ => {}
-                        }
+        for response in answers_for(batch, self.window_id(), |response| response.window) {
+            let host = response.host;
+            // **The asker has to still be there.** A column that closed,
+            // a graph that was shut and a window that was dismissed are
+            // one cancellation arriving as a dropped answer — and each
+            // says so in its own register, because each is addressed in
+            // its own way.
+            //
+            // **The float is asked first, and without a tab.** That is
+            // the whole of why its host carries an epoch (user ruling,
+            // 2026-08-19): a pinned window floats *across* tabs by
+            // ruling, so "is that tab still open" is not the question
+            // here, and dropping a page's answer because the tab the
+            // window was born in has since closed would strand it
+            // mid-read with no second asking owed.
+            let floating = match &host {
+                git::GitHost::Float { id, .. } => {
+                    if self
+                        .window
+                        .float
+                        .live(*id)
+                        .and_then(float::FloatWin::files)
+                        .is_none()
+                    {
+                        continue;
                     }
-                    // **The two answers that are documents go to the pool**
-                    // (G-3), which is a tab's and not a column's: a diff opened
-                    // from one column is the same buffer whichever pane shows
-                    // it, and a column re-rooted since does not make the
-                    // document it opened wrong. A float's diff lands in the pool
-                    // of the tab that was in front when the row was pressed,
-                    // which is the tab its host recorded for exactly this.
-                    let answer = match git_document_answer(response.answer) {
-                        Ok((source, outcome)) => {
-                            let Some(index) = tab_index else {
-                                continue;
-                            };
-                            let tab = &mut self.window.tabs[index];
-                            // Evicted, or never opened — the cancellation,
-                            // arriving as a dropped result.
-                            let Some(buffer) = tab.preview_pool.get_mut(&source) else {
-                                // **The glance's own slot**, exactly as a head
-                                // read's answer finds it (`apply_preview_results`):
-                                // a hover over a commit's file asks git and never
-                                // enters the pool, so its answer lands here or
-                                // nowhere. Matched by source, so a pointer that
-                                // has moved on is the cancellation arriving as a
-                                // dropped result.
-                                if let Some(peek) = self
-                                    .window
-                                    .peek_buffer
-                                    .as_mut()
-                                    .filter(|peek| peek.source == source)
-                                {
-                                    match outcome {
-                                        Ok(text) => peek.accept(preview::HeadOutcome::Read {
-                                            text,
-                                            truncated: false,
-                                            mtime: None,
-                                        }),
-                                        Err(fault) => {
-                                            peek.decline(git_panel::fault_sentence(&fault));
-                                        }
-                                    }
-                                    body |= index == self.window.active_tab;
-                                }
-                                continue;
-                            };
+                    Some(*id)
+                }
+                git::GitHost::Column(_) | git::GitHost::Graph { .. } => None,
+            };
+            let tab_index = self.window.tabs.iter().position(|tab| tab.id == host.tab());
+            if floating.is_none() {
+                let Some(index) = tab_index else {
+                    continue;
+                };
+                let tab = &self.window.tabs[index];
+                match &host {
+                    git::GitHost::Column(leaf) if !tab.files.contains_key(&leaf.seat) => {
+                        continue;
+                    }
+                    git::GitHost::Graph { root, .. } if !tab.git_graphs.contains_key(root) => {
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            // **The two answers that are documents go to the pool**
+            // (G-3), which is a tab's and not a column's: a diff opened
+            // from one column is the same buffer whichever pane shows
+            // it, and a column re-rooted since does not make the
+            // document it opened wrong. A float's diff lands in the pool
+            // of the tab that was in front when the row was pressed,
+            // which is the tab its host recorded for exactly this.
+            let answer = match git_document_answer(response.answer) {
+                Ok((source, outcome)) => {
+                    let Some(index) = tab_index else {
+                        continue;
+                    };
+                    let tab = &mut self.window.tabs[index];
+                    // Evicted, or never opened — the cancellation,
+                    // arriving as a dropped result.
+                    let Some(buffer) = tab.preview_pool.get_mut(&source) else {
+                        // **The glance's own slot**, exactly as a head
+                        // read's answer finds it (`apply_preview_results`):
+                        // a hover over a commit's file asks git and never
+                        // enters the pool, so its answer lands here or
+                        // nowhere. Matched by source, so a pointer that
+                        // has moved on is the cancellation arriving as a
+                        // dropped result.
+                        if let Some(peek) = self
+                            .window
+                            .peek_buffer
+                            .as_mut()
+                            .filter(|peek| peek.source == source)
+                        {
                             match outcome {
-                                Ok(text) => buffer.accept(preview::HeadOutcome::Read {
+                                Ok(text) => peek.accept(preview::HeadOutcome::Read {
                                     text,
-                                    // Nothing truncated it and no disk wrote it:
-                                    // both of those are facts about a file, and
-                                    // this document is not one.
                                     truncated: false,
                                     mtime: None,
                                 }),
-                                Err(fault) => buffer.decline(git_panel::fault_sentence(&fault)),
+                                Err(fault) => {
+                                    peek.decline(git_panel::fault_sentence(&fault));
+                                }
                             }
                             body |= index == self.window.active_tab;
-                            continue;
                         }
-                        Err(answer) => answer,
+                        continue;
                     };
-                    // **A checkout that went through is about the whole
-                    // repository, not about the surface that asked for it.**
-                    // After it, every branch head, every status and every
-                    // history of that repository is about somewhere else — and
-                    // a panel still drawing the old branch beside a graph
-                    // drawing the new one is exactly the disagreement this
-                    // subsystem was built to prevent. Noted before the answer is
-                    // filed, because filing moves it.
-                    let moved = match &answer {
-                        git::GitAnswer::Checkout {
-                            root,
-                            outcome: Ok(()),
-                            ..
-                        } => Some(root.clone()),
-                        // **A ref write is the same claim** (v2 ④): a branch
-                        // created, renamed or deleted changes the pills on every
-                        // row of every history of this repository, and a tracking
-                        // checkout moves `HEAD` as well. A panel still drawing
-                        // the old list beside a graph drawing the new one is the
-                        // one disagreement this subsystem exists to prevent.
-                        git::GitAnswer::Write {
-                            root,
-                            verb,
-                            outcome: Ok(()),
-                            ..
-                        } if verb.moves_refs() => Some(root.clone()),
-                        _ => None,
-                    };
-                    // **A verb git refused is a notice** (user ruling,
-                    // 2026-08-16), raised here and nowhere else: this is the one
-                    // instant the refusal *happens*, so it is raised once per
-                    // answer rather than re-derived on every frame from a
-                    // remembered sentence — which is what the red banner was, and
-                    // why it outstayed the thing it was about.
-                    //
-                    // The two verbs and only those two: a repository, a status, a
-                    // branch list or a history that would not read is a persistent
-                    // fault, and those keep the page's own quiet sentence (see
-                    // `git_panel::build`). Nothing about a machine with no git is
-                    // going to change in six seconds.
-                    // **A checkout that went through says so, and offers the
-                    // way back** (user ruling, 2026-08-19). Moving where you are
-                    // standing is reversible and named, so it is not asked about
-                    // on a clean tree — but a page that changed under a reader
-                    // with nothing to attribute the change to is the same silence
-                    // in a different place, and the honest answer to a reversible
-                    // move is a notice that says where you landed and one press
-                    // that undoes it.
-                    //
-                    // **Both spellings, because both moved you.** A tracking
-                    // checkout comes back as a `Write` — one command that made
-                    // the branch and stood on it — and a reader who pressed
-                    // `Checkout tracking` is owed the same sentence and the same
-                    // one press back as a reader who pressed `Checkout`. It says
-                    // the *local* name, which is where they are now standing.
-                    let landed = match &answer {
-                        git::GitAnswer::Checkout {
-                            target,
-                            outcome: Ok(()),
-                            ..
-                        } => Some(target.clone()),
-                        git::GitAnswer::Write {
-                            verb: git::GitWriteVerb::CheckoutTracking { name },
-                            outcome: Ok(()),
-                            ..
-                        } => Some(git::tracking_local_name(name).to_owned()),
-                        _ => None,
-                    };
-                    if let Some(landed) = landed {
-                        self.announce_checkout(&host, &landed)?;
+                    match outcome {
+                        Ok(text) => buffer.accept(preview::HeadOutcome::Read {
+                            text,
+                            // Nothing truncated it and no disk wrote it:
+                            // both of those are facts about a file, and
+                            // this document is not one.
+                            truncated: false,
+                            mtime: None,
+                        }),
+                        Err(fault) => buffer.decline(git_panel::fault_sentence(&fault)),
                     }
-                    if let Some(words) = git_answer_notice(&answer) {
-                        let anchor = self.git_toast_anchor(&host);
-                        self.toast(
-                            toast::ToastKind::Error,
-                            anchor,
-                            Some(git_panel::git_toast_title().to_owned()),
-                            words,
-                        )?;
-                        // `self` was borrowed mutably above; the tab has to be
-                        // taken again for the filing below.
-                    }
-                    let filed = if let Some(id) = floating {
-                        // The window's own cache, found by the epoch that minted
-                        // its view: with several floats on screen that is also
-                        // what *addresses* the answer, so two windows on one
-                        // repository never fill in with each other's readings.
-                        self.window
-                            .float
-                            .live_mut(id)
-                            .and_then(float::FloatWin::files_mut)
-                            .is_some_and(|files| files.git.accept(answer))
-                    } else {
-                        let Some(index) = tab_index else {
-                            continue;
-                        };
-                        let tab = &mut self.window.tabs[index];
-                        match &host {
-                            git::GitHost::Column(leaf) => tab
-                                .git_trees
-                                .get_mut(&leaf.seat)
-                                .is_some_and(|cache| cache.accept(answer)),
-                            git::GitHost::Graph { root, .. } => {
-                                match tab.git_graphs.get_mut(root) {
-                                    Some(state) => {
-                                        let filed = state.cache.accept(answer);
-                                        // The lanes are a reading of the log, so they
-                                        // are brought level with it the moment it
-                                        // moves — a page appended, or a checkout that
-                                        // replaced the history altogether.
-                                        if filed {
-                                            state.sync();
-                                        }
-                                        filed
-                                    }
-                                    None => false,
-                                }
-                            }
-                            // Answered above, by the branch that needed no tab.
-                            git::GitHost::Float { .. } => false,
-                        }
-                    };
-                    if let Some(root) = moved.filter(|_| filed) {
-                        if let Some(index) = tab_index {
-                            let tab = &mut self.window.tabs[index];
-                            for cache in tab.git_trees.values_mut() {
-                                if cache.root() == Some(root.as_path()) {
-                                    cache.refresh();
-                                }
-                            }
-                            if let Some(state) = tab.git_graphs.get_mut(&root) {
-                                state.cache.refresh();
-                                // The lanes are a reading of the history that was.
-                                state.invalidate();
-                            }
-                        }
-                        // **And every floating page on that repository** (user
-                        // ruling, 2026-08-19). A window standing on the branch
-                        // that was just left is the same disagreement a column
-                        // would be, and it is not in any tab to have been swept
-                        // with one.
-                        for win in self.window.float.live_windows_mut() {
-                            if let Some(files) = win.files_mut()
-                                && files.git.root() == Some(root.as_path())
-                            {
-                                files.git.refresh();
-                            }
-                        }
-                    }
-                    // A float is window-level chrome and is on screen whichever
-                    // tab is in front, so its answer is always owed a frame.
-                    changed |=
-                        filed && (floating.is_some() || tab_index == Some(self.window.active_tab));
+                    body |= index == self.window.active_tab;
+                    continue;
                 }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    changed |= self.disable_git_worker();
-                    break;
+                Err(answer) => answer,
+            };
+            // **A checkout that went through is about the whole
+            // repository, not about the surface that asked for it.**
+            // After it, every branch head, every status and every
+            // history of that repository is about somewhere else — and
+            // a panel still drawing the old branch beside a graph
+            // drawing the new one is exactly the disagreement this
+            // subsystem was built to prevent. Noted before the answer is
+            // filed, because filing moves it.
+            let moved = match &answer {
+                git::GitAnswer::Checkout {
+                    root,
+                    outcome: Ok(()),
+                    ..
+                } => Some(root.clone()),
+                // **A ref write is the same claim** (v2 ④): a branch
+                // created, renamed or deleted changes the pills on every
+                // row of every history of this repository, and a tracking
+                // checkout moves `HEAD` as well. A panel still drawing
+                // the old list beside a graph drawing the new one is the
+                // one disagreement this subsystem exists to prevent.
+                git::GitAnswer::Write {
+                    root,
+                    verb,
+                    outcome: Ok(()),
+                    ..
+                } if verb.moves_refs() => Some(root.clone()),
+                _ => None,
+            };
+            // **A verb git refused is a notice** (user ruling,
+            // 2026-08-16), raised here and nowhere else: this is the one
+            // instant the refusal *happens*, so it is raised once per
+            // answer rather than re-derived on every frame from a
+            // remembered sentence — which is what the red banner was, and
+            // why it outstayed the thing it was about.
+            //
+            // The two verbs and only those two: a repository, a status, a
+            // branch list or a history that would not read is a persistent
+            // fault, and those keep the page's own quiet sentence (see
+            // `git_panel::build`). Nothing about a machine with no git is
+            // going to change in six seconds.
+            // **A checkout that went through says so, and offers the
+            // way back** (user ruling, 2026-08-19). Moving where you are
+            // standing is reversible and named, so it is not asked about
+            // on a clean tree — but a page that changed under a reader
+            // with nothing to attribute the change to is the same silence
+            // in a different place, and the honest answer to a reversible
+            // move is a notice that says where you landed and one press
+            // that undoes it.
+            //
+            // **Both spellings, because both moved you.** A tracking
+            // checkout comes back as a `Write` — one command that made
+            // the branch and stood on it — and a reader who pressed
+            // `Checkout tracking` is owed the same sentence and the same
+            // one press back as a reader who pressed `Checkout`. It says
+            // the *local* name, which is where they are now standing.
+            let landed = match &answer {
+                git::GitAnswer::Checkout {
+                    target,
+                    outcome: Ok(()),
+                    ..
+                } => Some(target.clone()),
+                git::GitAnswer::Write {
+                    verb: git::GitWriteVerb::CheckoutTracking { name },
+                    outcome: Ok(()),
+                    ..
+                } => Some(git::tracking_local_name(name).to_owned()),
+                _ => None,
+            };
+            if let Some(landed) = landed {
+                self.announce_checkout(&host, &landed)?;
+            }
+            if let Some(words) = git_answer_notice(&answer) {
+                let anchor = self.git_toast_anchor(&host);
+                self.toast(
+                    toast::ToastKind::Error,
+                    anchor,
+                    Some(git_panel::git_toast_title().to_owned()),
+                    words,
+                )?;
+                // `self` was borrowed mutably above; the tab has to be
+                // taken again for the filing below.
+            }
+            let filed = if let Some(id) = floating {
+                // The window's own cache, found by the epoch that minted
+                // its view: with several floats on screen that is also
+                // what *addresses* the answer, so two windows on one
+                // repository never fill in with each other's readings.
+                self.window
+                    .float
+                    .live_mut(id)
+                    .and_then(float::FloatWin::files_mut)
+                    .is_some_and(|files| files.git.accept(answer))
+            } else {
+                let Some(index) = tab_index else {
+                    continue;
+                };
+                let tab = &mut self.window.tabs[index];
+                match &host {
+                    git::GitHost::Column(leaf) => tab
+                        .git_trees
+                        .get_mut(&leaf.seat)
+                        .is_some_and(|cache| cache.accept(answer)),
+                    git::GitHost::Graph { root, .. } => {
+                        match tab.git_graphs.get_mut(root) {
+                            Some(state) => {
+                                let filed = state.cache.accept(answer);
+                                // The lanes are a reading of the log, so they
+                                // are brought level with it the moment it
+                                // moves — a page appended, or a checkout that
+                                // replaced the history altogether.
+                                if filed {
+                                    state.sync();
+                                }
+                                filed
+                            }
+                            None => false,
+                        }
+                    }
+                    // Answered above, by the branch that needed no tab.
+                    git::GitHost::Float { .. } => false,
+                }
+            };
+            if let Some(root) = moved.filter(|_| filed) {
+                if let Some(index) = tab_index {
+                    let tab = &mut self.window.tabs[index];
+                    for cache in tab.git_trees.values_mut() {
+                        if cache.root() == Some(root.as_path()) {
+                            cache.refresh();
+                        }
+                    }
+                    if let Some(state) = tab.git_graphs.get_mut(&root) {
+                        state.cache.refresh();
+                        // The lanes are a reading of the history that was.
+                        state.invalidate();
+                    }
+                }
+                // **And every floating page on that repository** (user
+                // ruling, 2026-08-19). A window standing on the branch
+                // that was just left is the same disagreement a column
+                // would be, and it is not in any tab to have been swept
+                // with one.
+                for win in self.window.float.live_windows_mut() {
+                    if let Some(files) = win.files_mut()
+                        && files.git.root() == Some(root.as_path())
+                    {
+                        files.git.refresh();
+                    }
                 }
             }
+            // A float is window-level chrome and is on screen whichever
+            // tab is in front, so its answer is always owed a frame.
+            changed |= filed && (floating.is_some() || tab_index == Some(self.window.active_tab));
         }
         if body {
             self.refresh_preview_for_layout();
@@ -37337,6 +37547,7 @@ impl Runtime<'_> {
         }
         for question in questions {
             if !self.app.git_worker.request(git::GitRequest {
+                window: self.window_id(),
                 host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
                 question,
             }) {
@@ -37352,109 +37563,113 @@ impl Runtime<'_> {
     /// silence: a tab that closed, or a buffer the pool has since evicted, has
     /// nowhere to put the answer, and that is not a failure — it is the
     /// cancellation §7.1.3 asks for, arriving as a dropped result.
-    fn apply_preview_results(&mut self) -> Result<()> {
-        let mut changed = false;
-        loop {
-            match self.app.preview_worker.responses.try_recv() {
-                Ok(response) => {
-                    let Some(index) = self
-                        .window
-                        .tabs
-                        .iter()
-                        .position(|tab| tab.id == response.tab)
-                    else {
+    ///
+    /// **The batch is the application's and this takes only its own out of it**
+    /// (user report, 2026-08-23). It used to drain the receiver, which is one
+    /// receiver for the whole process: the first window in the opening order took
+    /// every pending answer, matched the ones addressed to another window's
+    /// `TabId(1)` against its own tab of that number, found no buffer to put them
+    /// in and dropped them — for ever, because `claim_head_read` had already been
+    /// spent and nothing asks twice. In every window but the first, a markdown
+    /// file opened into the preview pane drew its head, its foot and the two
+    /// hairlines between them and not one word of itself.
+    fn apply_preview_results(
+        &mut self,
+        batch: &mut Vec<preview::PreviewResponse>,
+        lane_gone: bool,
+    ) -> Result<()> {
+        let mut changed = lane_gone;
+        for response in answers_for(batch, self.window_id(), |response| response.window) {
+            let Some(index) = self
+                .window
+                .tabs
+                .iter()
+                .position(|tab| tab.id == response.tab)
+            else {
+                continue;
+            };
+            // **A card is a surface too** (user ruling 2026-08-21). A
+            // head read landing in a background tab used to owe nobody a
+            // frame, because nothing of that tab was on screen; in focus
+            // mode its card is, and the projection that would turn the
+            // face into the document's first lines only runs on a frame
+            // somebody asks for. `seats` answering is gates 1 and 2 of
+            // `focus_thumb` — the mode is on and this card is inside the
+            // column's clip box — read from the pass that just ran
+            // rather than re-derived here.
+            let carded = self.window.focus_thumbs.seats(response.tab).is_some();
+            let tab = &mut self.window.tabs[index];
+            match response.answer {
+                preview::PreviewAnswer::Head(outcome) => {
+                    let Some(buffer) = tab.preview_pool.get_mut(&response.source) else {
+                        // **The glance's own slot** (P145): a hover
+                        // read is not an open file and never enters the
+                        // pool, so its answer lands here or nowhere.
+                        // Matched by source, exactly as the pool's is —
+                        // the pointer may have moved on to another row
+                        // during the read, and that is the cancellation
+                        // §7.1.3 asks for, arriving as a dropped result.
+                        if let Some(peek) = self
+                            .window
+                            .peek_buffer
+                            .as_mut()
+                            .filter(|peek| peek.source == response.source)
+                        {
+                            peek.accept(outcome);
+                            changed |= index == self.window.active_tab;
+                        }
                         continue;
                     };
-                    // **A card is a surface too** (user ruling 2026-08-21). A
-                    // head read landing in a background tab used to owe nobody a
-                    // frame, because nothing of that tab was on screen; in focus
-                    // mode its card is, and the projection that would turn the
-                    // face into the document's first lines only runs on a frame
-                    // somebody asks for. `seats` answering is gates 1 and 2 of
-                    // `focus_thumb` — the mode is on and this card is inside the
-                    // column's clip box — read from the pass that just ran
-                    // rather than re-derived here.
-                    let carded = self.window.focus_thumbs.seats(response.tab).is_some();
+                    buffer.accept(outcome);
+                    // A body has just arrived under a caret that was
+                    // restored from the view store, and the file may not
+                    // be the one it was remembered against — a buffer
+                    // evicted and re-read is a fresh read of a file that
+                    // has had time to change. Healed here rather than
+                    // trusted, which is the same discipline the scroll
+                    // offset is held to two lines from a body landing.
+                    let content = buffer.content.clone();
                     let tab = &mut self.window.tabs[index];
-                    match response.answer {
-                        preview::PreviewAnswer::Head(outcome) => {
-                            let Some(buffer) = tab.preview_pool.get_mut(&response.source) else {
-                                // **The glance's own slot** (P145): a hover
-                                // read is not an open file and never enters the
-                                // pool, so its answer lands here or nowhere.
-                                // Matched by source, exactly as the pool's is —
-                                // the pointer may have moved on to another row
-                                // during the read, and that is the cancellation
-                                // §7.1.3 asks for, arriving as a dropped result.
-                                if let Some(peek) = self
-                                    .window
-                                    .peek_buffer
-                                    .as_mut()
-                                    .filter(|peek| peek.source == response.source)
-                                {
-                                    peek.accept(outcome);
-                                    changed |= index == self.window.active_tab;
-                                }
-                                continue;
-                            };
-                            buffer.accept(outcome);
-                            // A body has just arrived under a caret that was
-                            // restored from the view store, and the file may not
-                            // be the one it was remembered against — a buffer
-                            // evicted and re-read is a fresh read of a file that
-                            // has had time to change. Healed here rather than
-                            // trusted, which is the same discipline the scroll
-                            // offset is held to two lines from a body landing.
-                            let content = buffer.content.clone();
-                            let tab = &mut self.window.tabs[index];
-                            // **Every surface on this buffer**, and there may be
-                            // several: one file open in two panes is one buffer
-                            // (§7.1.3) with two carets, and a body arriving under
-                            // one of them arrives under both.
-                            let showing: Vec<PreviewSurface> = tab
-                                .preview_panes
-                                .iter()
-                                .filter(|(_, pane)| pane.buffer.as_ref() == Some(&response.source))
-                                .map(|(surface, _)| surface)
-                                .collect();
-                            if let Some(content) = content {
-                                for surface in &showing {
-                                    tab.preview_panes.entry(*surface).caret.heal(&content);
-                                }
-                            }
-                            changed |=
-                                !showing.is_empty() && (index == self.window.active_tab || carded);
-                        }
-                        // A picture's byte count, for the meta line under it.
-                        // Filed against the image state rather than the pool,
-                        // because a picture's buffer is not what is on screen —
-                        // the decode lane is. Told to **every** surface showing
-                        // that file: the byte count is a fact about the file, and
-                        // a second copy of the picture owes the same sentence
-                        // even though only one of them holds the texture.
-                        preview::PreviewAnswer::Size(bytes) => {
-                            // A size is only ever asked of a picture, and a
-                            // picture is a file.
-                            let Some(answered) = response.source.file_path() else {
-                                continue;
-                            };
-                            let mut told = false;
-                            for (_, pane) in tab.preview_panes.iter_mut() {
-                                if let Some(image) =
-                                    pane.image.as_mut().filter(|image| image.path == answered)
-                                {
-                                    image.bytes = bytes;
-                                    told = true;
-                                }
-                            }
-                            changed |= told && index == self.window.active_tab;
+                    // **Every surface on this buffer**, and there may be
+                    // several: one file open in two panes is one buffer
+                    // (§7.1.3) with two carets, and a body arriving under
+                    // one of them arrives under both.
+                    let showing: Vec<PreviewSurface> = tab
+                        .preview_panes
+                        .iter()
+                        .filter(|(_, pane)| pane.buffer.as_ref() == Some(&response.source))
+                        .map(|(surface, _)| surface)
+                        .collect();
+                    if let Some(content) = content {
+                        for surface in &showing {
+                            tab.preview_panes.entry(*surface).caret.heal(&content);
                         }
                     }
+                    changed |= !showing.is_empty() && (index == self.window.active_tab || carded);
                 }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    changed |= self.disable_preview_worker();
-                    break;
+                // A picture's byte count, for the meta line under it.
+                // Filed against the image state rather than the pool,
+                // because a picture's buffer is not what is on screen —
+                // the decode lane is. Told to **every** surface showing
+                // that file: the byte count is a fact about the file, and
+                // a second copy of the picture owes the same sentence
+                // even though only one of them holds the texture.
+                preview::PreviewAnswer::Size(bytes) => {
+                    // A size is only ever asked of a picture, and a
+                    // picture is a file.
+                    let Some(answered) = response.source.file_path() else {
+                        continue;
+                    };
+                    let mut told = false;
+                    for (_, pane) in tab.preview_panes.iter_mut() {
+                        if let Some(image) =
+                            pane.image.as_mut().filter(|image| image.path == answered)
+                        {
+                            image.bytes = bytes;
+                            told = true;
+                        }
+                    }
+                    changed |= told && index == self.window.active_tab;
                 }
             }
         }
@@ -37519,6 +37734,7 @@ impl Runtime<'_> {
             })
             .collect();
         let mut views = BTreeMap::new();
+        let window = self.window_id();
         let mut asks = Vec::new();
         for (seat, (mut content, wanted)) in walked {
             content.focus_ring = Some(seat) == ringed;
@@ -37535,6 +37751,7 @@ impl Runtime<'_> {
                 // already asked rather than asking it a second time.
                 cache.mark_pending(&key);
                 asks.push(files::DirRequest {
+                    window,
                     host: files::FilesHost::Docked(LeafId { tab: tab_id, seat }),
                     path: files::full_path(&root, &key),
                     key,
@@ -37758,6 +37975,7 @@ impl Runtime<'_> {
         let active = self.window.active_tab;
         let tab_id = self.window.tabs[active].id;
         if !self.app.git_worker.request(git::GitRequest {
+            window: self.window_id(),
             host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
             question,
         }) {
@@ -37785,6 +38003,7 @@ impl Runtime<'_> {
             && let Some(cache) = self.window.tabs[active].git_trees.get_mut(&seat)
             && let Some(question) = cache.begin_commit_files(&hash)
             && !self.app.git_worker.request(git::GitRequest {
+                window: self.window_id(),
                 host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
                 question,
             })
@@ -38046,6 +38265,7 @@ impl Runtime<'_> {
             return Ok(());
         };
         if !self.app.git_worker.request(git::GitRequest {
+            window: self.window_id(),
             host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
             question,
         }) {
@@ -38115,6 +38335,7 @@ impl Runtime<'_> {
                 }
                 for question in questions {
                     if !self.app.git_worker.request(git::GitRequest {
+                        window: self.window_id(),
                         host: git::GitHost::Graph {
                             tab: tab_id,
                             root: root.clone(),
@@ -38148,6 +38369,7 @@ impl Runtime<'_> {
         // page longer the moment the first answer lands, and `wants_more` then
         // asks about a further page rather than the same one.
         if !self.app.git_worker.request(git::GitRequest {
+            window: self.window_id(),
             host: git::GitHost::Graph {
                 tab: tab_id,
                 root: root.to_owned(),
@@ -38172,6 +38394,7 @@ impl Runtime<'_> {
             return;
         };
         if !self.app.git_worker.request(git::GitRequest {
+            window: self.window_id(),
             host: git::GitHost::Graph {
                 tab: tab_id,
                 root: root.to_owned(),
@@ -38743,6 +38966,7 @@ impl Runtime<'_> {
             && let Some(state) = self.window.tabs[tab].git_graphs.get_mut(root)
             && let Some(question) = state.cache.begin_commit_files(&hash)
             && !self.app.git_worker.request(git::GitRequest {
+                window: self.window_id(),
                 host: git::GitHost::Graph {
                     tab: tab_id,
                     root: root.to_owned(),
@@ -38925,6 +39149,7 @@ impl Runtime<'_> {
         };
         let tab_id = self.window.tabs[self.preview_tab_index(from)].id;
         if !self.app.git_worker.request(git::GitRequest {
+            window: self.window_id(),
             host: git::GitHost::Graph {
                 tab: tab_id,
                 root: root.to_owned(),
@@ -38947,6 +39172,7 @@ impl Runtime<'_> {
             return Ok(());
         };
         if !self.app.git_worker.request(git::GitRequest {
+            window: self.window_id(),
             host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
             question,
         }) {
@@ -38981,6 +39207,7 @@ impl Runtime<'_> {
             return Ok(());
         };
         if !self.app.git_worker.request(git::GitRequest {
+            window: self.window_id(),
             host: git::GitHost::Float { id, tab },
             question,
         }) {
@@ -39013,6 +39240,7 @@ impl Runtime<'_> {
             return Ok(());
         };
         if !self.app.git_worker.request(git::GitRequest {
+            window: self.window_id(),
             host: git::GitHost::Graph {
                 tab: tab_id,
                 root: root.to_owned(),
@@ -39274,6 +39502,7 @@ impl Runtime<'_> {
             return;
         };
         let request = files::DirRequest {
+            window: self.window_id(),
             host: files::FilesHost::Docked(LeafId { tab: tab.id, seat }),
             key: key.to_owned(),
             path: files::full_path(&state.root, key),
@@ -39284,63 +39513,59 @@ impl Runtime<'_> {
     }
 
     /// Take every directory the worker has finished.
-    fn apply_files_results(&mut self) -> Result<()> {
-        let mut changed = false;
-        loop {
-            match self.app.files_worker.responses.try_recv() {
-                Ok(response) => match response.host {
-                    // A tab or a column that closed while its read was in flight
-                    // has nowhere to put the answer, and that is not a failure —
-                    // it is the cancellation, arriving as a dropped result.
-                    files::FilesHost::Docked(leaf) => {
-                        let Some(index) =
-                            self.window.tabs.iter().position(|tab| tab.id == leaf.tab)
-                        else {
-                            continue;
-                        };
-                        // The card's claim on a frame, for `apply_preview_results`'
-                        // reason exactly: a listing landing in a background tab
-                        // is what turns that tab's card from `Loading…` into its
-                        // tree, and only a frame somebody asks for will project
-                        // it.
-                        let carded = self.window.focus_thumbs.seats(leaf.tab).is_some();
-                        let tab = &mut self.window.tabs[index];
-                        if !tab.files.contains_key(&leaf.seat) {
-                            continue;
-                        }
-                        tab.file_trees
-                            .entry(leaf.seat)
-                            .or_default()
-                            .accept(&response.key, response.outcome);
-                        changed |= index == self.window.active_tab || carded;
+    fn apply_files_results(
+        &mut self,
+        batch: &mut Vec<files::DirResponse>,
+        lane_gone: bool,
+    ) -> Result<()> {
+        let mut changed = lane_gone;
+        for response in answers_for(batch, self.window_id(), |response| response.window) {
+            match response.host {
+                // A tab or a column that closed while its read was in flight
+                // has nowhere to put the answer, and that is not a failure —
+                // it is the cancellation, arriving as a dropped result.
+                files::FilesHost::Docked(leaf) => {
+                    let Some(index) = self.window.tabs.iter().position(|tab| tab.id == leaf.tab)
+                    else {
+                        continue;
+                    };
+                    // The card's claim on a frame, for `apply_preview_results`'
+                    // reason exactly: a listing landing in a background tab
+                    // is what turns that tab's card from `Loading…` into its
+                    // tree, and only a frame somebody asks for will project
+                    // it.
+                    let carded = self.window.focus_thumbs.seats(leaf.tab).is_some();
+                    let tab = &mut self.window.tabs[index];
+                    if !tab.files.contains_key(&leaf.seat) {
+                        continue;
                     }
-                    // The float's version of the same cancellation: the window is
-                    // gone, or it is showing a *different* view than the one that
-                    // asked. The epoch is what tells those apart — without it a
-                    // peek replaced by another trigger's would be handed the old
-                    // root's directories under keys that now mean somewhere else.
-                    //
-                    // With several floats on screen (2026-08-12) it is also what
-                    // *addresses* the answer: `live_mut` searches every window for
-                    // the one that asked, so two trees never fill in with each
-                    // other's contents.
-                    files::FilesHost::Float(epoch) => {
-                        let Some(files) = self
-                            .window
-                            .float
-                            .live_mut(epoch)
-                            .and_then(float::FloatWin::files_mut)
-                        else {
-                            continue;
-                        };
-                        files.cache.accept(&response.key, response.outcome);
-                        changed = true;
-                    }
-                },
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    changed |= self.disable_files_worker();
-                    break;
+                    tab.file_trees
+                        .entry(leaf.seat)
+                        .or_default()
+                        .accept(&response.key, response.outcome);
+                    changed |= index == self.window.active_tab || carded;
+                }
+                // The float's version of the same cancellation: the window is
+                // gone, or it is showing a *different* view than the one that
+                // asked. The epoch is what tells those apart — without it a
+                // peek replaced by another trigger's would be handed the old
+                // root's directories under keys that now mean somewhere else.
+                //
+                // With several floats on screen (2026-08-12) it is also what
+                // *addresses* the answer: `live_mut` searches every window for
+                // the one that asked, so two trees never fill in with each
+                // other's contents.
+                files::FilesHost::Float(epoch) => {
+                    let Some(files) = self
+                        .window
+                        .float
+                        .live_mut(epoch)
+                        .and_then(float::FloatWin::files_mut)
+                    else {
+                        continue;
+                    };
+                    files.cache.accept(&response.key, response.outcome);
+                    changed = true;
                 }
             }
         }
@@ -40067,6 +40292,7 @@ impl Runtime<'_> {
             if wants_read {
                 let tab = self.id;
                 if !self.app.preview_worker.request(preview::PreviewRequest {
+                    window: self.window_id(),
                     tab,
                     source,
                     want: preview::PreviewWant::Head,
@@ -40090,6 +40316,7 @@ impl Runtime<'_> {
         {
             let tab = self.id;
             if !self.app.git_worker.request(git::GitRequest {
+                window: self.window_id(),
                 host: git::GitHost::Column(LeafId { tab, seat }),
                 question,
             }) {
@@ -40100,6 +40327,7 @@ impl Runtime<'_> {
         if wants_read {
             let tab = self.id;
             if !self.app.preview_worker.request(preview::PreviewRequest {
+                window: self.window_id(),
                 tab,
                 source,
                 want: preview::PreviewWant::Head,
@@ -40223,7 +40451,7 @@ impl Runtime<'_> {
                             .math_worker
                             .tasks
                             .send(MathWorkerRequest::PeekImage {
-                                leaf: self.focused_leaf_id(),
+                                leaf: self.focused_shell_address(),
                                 path: path.to_owned(),
                             })
                             .is_ok()
@@ -40263,7 +40491,7 @@ impl Runtime<'_> {
             .math_worker
             .scale_tasks
             .send(ScaleWorkerRequest::Peek {
-                leaf: self.focused_leaf_id(),
+                leaf: self.focused_shell_address(),
                 task: peek_scale_task(&target, rgba, native_width, native_height),
             })
             .is_ok()
@@ -42296,11 +42524,12 @@ impl Runtime<'_> {
         let Some(question) = question else {
             return Ok(());
         };
-        if !self
-            .app
-            .git_worker
-            .request(git::GitRequest { host, question })
-        {
+        let window = self.window_id();
+        if !self.app.git_worker.request(git::GitRequest {
+            window,
+            host,
+            question,
+        }) {
             self.disable_git_worker();
             return Ok(());
         }
@@ -43854,6 +44083,7 @@ impl Runtime<'_> {
             return Ok(());
         };
         if !self.app.git_worker.request(git::GitRequest {
+            window: self.window_id(),
             host: git::GitHost::Graph { tab: tab_id, root },
             question,
         }) {
@@ -44110,6 +44340,7 @@ impl Runtime<'_> {
         }
         for question in questions {
             if !self.app.git_worker.request(git::GitRequest {
+                window: self.window_id(),
                 host: host.clone(),
                 question,
             }) {
@@ -44854,6 +45085,7 @@ impl Runtime<'_> {
         // host is walked, because it is a fact about the window and not about
         // any one float.
         let tab = self.window.tabs[self.window.active_tab].id;
+        let window = self.window_id();
         let mut asks = Vec::new();
         for win in self.window.float.live_windows_mut() {
             let id = win.epoch;
@@ -44875,6 +45107,7 @@ impl Runtime<'_> {
                 files.git.mark_pending(question);
             }
             asks.extend(questions.into_iter().map(|question| git::GitRequest {
+                window,
                 host: git::GitHost::Float { id, tab },
                 question,
             }));
@@ -44895,6 +45128,7 @@ impl Runtime<'_> {
     /// rides along, so a late answer is matched to the view that asked rather
     /// than to whichever float is in front when it lands.
     fn ask_float_directories(&mut self) {
+        let window = self.window_id();
         let mut asks = Vec::new();
         for win in self.window.float.live_windows_mut() {
             let epoch = win.epoch;
@@ -44905,6 +45139,7 @@ impl Runtime<'_> {
             for key in files::tree_view(&files.files, &files.cache).wanted {
                 files.cache.mark_pending(&key);
                 asks.push(files::DirRequest {
+                    window,
                     host: files::FilesHost::Float(epoch),
                     path: files::full_path(&root, &key),
                     key,
@@ -45183,6 +45418,7 @@ impl Runtime<'_> {
         };
         let tab = self.window.tabs[self.window.active_tab].id;
         if !self.app.git_worker.request(git::GitRequest {
+            window: self.window_id(),
             host: git::GitHost::Float { id, tab },
             question,
         }) {
@@ -45212,6 +45448,7 @@ impl Runtime<'_> {
         }
         if let Some(question) = question
             && !self.app.git_worker.request(git::GitRequest {
+                window: self.window_id(),
                 host: git::GitHost::Float { id, tab },
                 question,
             })
@@ -45320,6 +45557,7 @@ impl Runtime<'_> {
             return Ok(());
         };
         if !self.app.git_worker.request(git::GitRequest {
+            window: self.window_id(),
             host: git::GitHost::Float { id, tab },
             question,
         }) {
@@ -45396,6 +45634,7 @@ impl Runtime<'_> {
             // Unfolding is this product's refresh gesture (there is no watcher
             // yet), so an opened directory is re-asked exactly as a column's is.
             let request = files::DirRequest {
+                window: self.window_id(),
                 host: files::FilesHost::Float(epoch),
                 path: files::full_path(&root, &key),
                 key: key.clone(),
@@ -47911,131 +48150,121 @@ impl Runtime<'_> {
         }
     }
 
-    fn apply_math_results(&mut self) -> Result<()> {
-        let mut changed = false;
-        loop {
-            match self.app.math_worker.results.try_recv() {
-                Ok(completion) => {
-                    let leaf = completion.leaf;
-                    let target_index = self.window.tabs.iter().position(|tab| tab.id == leaf.tab);
-                    let target_active = target_index == Some(self.window.active_tab);
-                    // The answer goes back to the shell that asked for it. Since U12 that is a
-                    // seat and not merely a tab: routing through the tab's `Deref` handed every
-                    // pane's work to whichever pane happened to hold the keyboard when it landed.
-                    // A pane closed while its work was in flight simply has no session to take it.
-                    changed |= match completion.completion {
-                        DecorationWorkerCompletion::Math { task, result } => match *task {
-                            // **A table's picture is made here and not on the worker thread.** The
-                            // worker did the half that is genuinely off-thread — proving the block
-                            // — and stopped, because the other half needs the shaper that lives on
-                            // this one. What comes back for a table is therefore an empty raster
-                            // and the real extent is measured now, before the session is told
-                            // anything, so the record it stores is the size the block will draw at.
-                            SessionMathTask::Frozen(task) => {
-                                let result = if task.span.kind == bt_detect::BlockKind::Table {
-                                    self.table_raster(&task.span.render_source)
-                                } else {
-                                    result
-                                };
-                                target_index.is_some_and(|index| {
-                                    let applied =
-                                        leaf_session_mut(&mut self.window.tabs, index, leaf.seat)
-                                            .is_some_and(|session| {
-                                                session.complete_worker_result(task, result)
-                                            });
-                                    target_active && applied
-                                })
-                            }
-                            SessionMathTask::Live(task) => {
-                                let result = if task.span.kind == bt_detect::BlockKind::Table {
-                                    self.table_raster(&task.span.render_source)
-                                } else {
-                                    result
-                                };
-                                target_index.is_some_and(|index| {
-                                    let applied =
-                                        leaf_session_mut(&mut self.window.tabs, index, leaf.seat)
-                                            .is_some_and(|session| {
-                                                session.complete_live_worker_result(task, result)
-                                            });
-                                    target_active && applied
-                                })
-                            }
-                        },
-                        DecorationWorkerCompletion::InlineImage { task, result } => {
-                            if target_active {
-                                self.remember_decode_for_peek(&task, result.as_ref().ok());
-                            }
-                            target_index.is_some_and(|index| {
-                                let applied =
-                                    leaf_session_mut(&mut self.window.tabs, index, leaf.seat)
-                                        .is_some_and(|session| {
-                                            session.complete_inline_image_result(task, result)
-                                        });
-                                target_active && applied
-                            })
-                        }
-                        DecorationWorkerCompletion::ScaleInlineImage { scaled } => target_index
-                            .is_some_and(|index| {
-                                let applied =
-                                    leaf_session_mut(&mut self.window.tabs, index, leaf.seat)
-                                        .is_some_and(|session| {
-                                            session.complete_inline_image_scale(scaled)
-                                        });
-                                target_active && applied
-                            }),
-                        // **Not gated on the asking tab still being the one on
-                        // screen.** The two completions below are the window's,
-                        // not a seat's: the decode lands in `peek_cache`, which
-                        // is one map per window and keyed by path, and the
-                        // resample is claimed by whichever picture is holding
-                        // that exact target. Dropping either because the tab
-                        // changed left the ledger entry it answers — a
-                        // `PeekCacheEntry::Pending`, a `PreviewImageState`'s
-                        // `pending` — set for good, and a picture whose question
-                        // is permanently outstanding is a picture that never
-                        // arrives.
-                        DecorationWorkerCompletion::PeekImage { path, result } => {
-                            self.complete_peek_image(path, result)?;
-                            // Peek state never enters frames, so no republish is needed.
-                            false
-                        }
-                        DecorationWorkerCompletion::PeekScaledImage { scaled } => {
-                            if target_active {
-                                self.complete_peek_scale(scaled)?;
-                            }
-                            false
-                        }
-                        DecorationWorkerCompletion::PreviewScaledImage { scaled } => {
-                            self.complete_preview_scale(scaled)?;
-                            false
-                        }
-                        // A verdict belongs to the seat that asked: the ledger is per pane, because
-                        // the directory relative text is measured from is per pane. Unlike the two
-                        // above it *is* gated on the tab still being on screen — a pane nobody can
-                        // see has no frame to redraw, and the answer is kept either way.
-                        DecorationWorkerCompletion::VerifiedPath { path, exists } => target_index
-                            .is_some_and(|index| {
-                                let drew =
-                                    leaf_session_mut(&mut self.window.tabs, index, leaf.seat)
-                                        .is_some_and(|session| {
-                                            session.complete_path_verification(path, exists)
-                                        });
-                                target_active && drew
-                            }),
-                    };
+    fn apply_math_results(
+        &mut self,
+        batch: &mut Vec<MathWorkerResult>,
+        lane_gone: bool,
+    ) -> Result<()> {
+        let mut changed = lane_gone;
+        for completion in answers_for(batch, self.window_id(), |result| result.leaf.window) {
+            let leaf = completion.leaf.leaf;
+            let target_index = self.window.tabs.iter().position(|tab| tab.id == leaf.tab);
+            let target_active = target_index == Some(self.window.active_tab);
+            // The answer goes back to the shell that asked for it. Since U12 that is a
+            // seat and not merely a tab: routing through the tab's `Deref` handed every
+            // pane's work to whichever pane happened to hold the keyboard when it landed.
+            // A pane closed while its work was in flight simply has no session to take it.
+            changed |= match completion.completion {
+                DecorationWorkerCompletion::Math { task, result } => match *task {
+                    // **A table's picture is made here and not on the worker thread.** The
+                    // worker did the half that is genuinely off-thread — proving the block
+                    // — and stopped, because the other half needs the shaper that lives on
+                    // this one. What comes back for a table is therefore an empty raster
+                    // and the real extent is measured now, before the session is told
+                    // anything, so the record it stores is the size the block will draw at.
+                    SessionMathTask::Frozen(task) => {
+                        let result = if task.span.kind == bt_detect::BlockKind::Table {
+                            self.table_raster(&task.span.render_source)
+                        } else {
+                            result
+                        };
+                        target_index.is_some_and(|index| {
+                            let applied = leaf_session_mut(&mut self.window.tabs, index, leaf.seat)
+                                .is_some_and(|session| {
+                                    session.complete_worker_result(task, result)
+                                });
+                            target_active && applied
+                        })
+                    }
+                    SessionMathTask::Live(task) => {
+                        let result = if task.span.kind == bt_detect::BlockKind::Table {
+                            self.table_raster(&task.span.render_source)
+                        } else {
+                            result
+                        };
+                        target_index.is_some_and(|index| {
+                            let applied = leaf_session_mut(&mut self.window.tabs, index, leaf.seat)
+                                .is_some_and(|session| {
+                                    session.complete_live_worker_result(task, result)
+                                });
+                            target_active && applied
+                        })
+                    }
+                },
+                DecorationWorkerCompletion::InlineImage { task, result } => {
+                    if target_active {
+                        self.remember_decode_for_peek(&task, result.as_ref().ok());
+                    }
+                    target_index.is_some_and(|index| {
+                        let applied = leaf_session_mut(&mut self.window.tabs, index, leaf.seat)
+                            .is_some_and(|session| {
+                                session.complete_inline_image_result(task, result)
+                            });
+                        target_active && applied
+                    })
                 }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    changed |= self.disable_math_worker();
-                    break;
+                DecorationWorkerCompletion::ScaleInlineImage { scaled } => target_index
+                    .is_some_and(|index| {
+                        let applied = leaf_session_mut(&mut self.window.tabs, index, leaf.seat)
+                            .is_some_and(|session| session.complete_inline_image_scale(scaled));
+                        target_active && applied
+                    }),
+                // **Not gated on the asking tab still being the one on
+                // screen.** The two completions below are the window's,
+                // not a seat's: the decode lands in `peek_cache`, which
+                // is one map per window and keyed by path, and the
+                // resample is claimed by whichever picture is holding
+                // that exact target. Dropping either because the tab
+                // changed left the ledger entry it answers — a
+                // `PeekCacheEntry::Pending`, a `PreviewImageState`'s
+                // `pending` — set for good, and a picture whose question
+                // is permanently outstanding is a picture that never
+                // arrives.
+                DecorationWorkerCompletion::PeekImage { path, result } => {
+                    self.complete_peek_image(path, result)?;
+                    // Peek state never enters frames, so no republish is needed.
+                    false
                 }
-            }
+                DecorationWorkerCompletion::PeekScaledImage { scaled } => {
+                    if target_active {
+                        self.complete_peek_scale(scaled)?;
+                    }
+                    false
+                }
+                DecorationWorkerCompletion::PreviewScaledImage { scaled } => {
+                    self.complete_preview_scale(scaled)?;
+                    false
+                }
+                // A verdict belongs to the seat that asked: the ledger is per pane, because
+                // the directory relative text is measured from is per pane. Unlike the two
+                // above it *is* gated on the tab still being on screen — a pane nobody can
+                // see has no frame to redraw, and the answer is kept either way.
+                DecorationWorkerCompletion::VerifiedPath { path, exists } => target_index
+                    .is_some_and(|index| {
+                        let drew = leaf_session_mut(&mut self.window.tabs, index, leaf.seat)
+                            .is_some_and(|session| {
+                                session.complete_path_verification(path, exists)
+                            });
+                        target_active && drew
+                    }),
+            };
         }
         let active = self.window.active_tab;
         let tasks = self.app.math_worker.tasks.clone();
         let scale_tasks = self.app.math_worker.scale_tasks.clone();
+        let window = self.window_id();
         dispatch_tab_decoration_tasks(
+            window,
             &mut self.window.tabs[active],
             &tasks,
             &scale_tasks,
@@ -48063,7 +48292,9 @@ impl Runtime<'_> {
             let active = self.window.active_tab;
             let tasks = self.app.math_worker.tasks.clone();
             let scale_tasks = self.app.math_worker.scale_tasks.clone();
+            let window = self.window_id();
             let disabled = dispatch_tab_decoration_tasks(
+                window,
                 &mut self.window.tabs[active],
                 &tasks,
                 &scale_tasks,
@@ -49598,7 +49829,7 @@ impl Runtime<'_> {
                         .math_worker
                         .tasks
                         .send(MathWorkerRequest::PeekImage {
-                            leaf: self.focused_leaf_id(),
+                            leaf: self.focused_shell_address(),
                             path,
                         })
                         .is_ok()
@@ -49640,9 +49871,12 @@ impl Runtime<'_> {
             .math_worker
             .scale_tasks
             .send(ScaleWorkerRequest::Peek {
-                leaf: LeafId {
-                    tab: self.id,
-                    seat: candidate.seat,
+                leaf: ShellAddress {
+                    window: self.window.window.id(),
+                    leaf: LeafId {
+                        tab: self.id,
+                        seat: candidate.seat,
+                    },
                 },
                 task: peek_scale_task(&target, native_rgba, native_width_px, native_height_px),
             })
@@ -55060,6 +55294,7 @@ impl Runtime<'_> {
                 continue;
             }
             if !self.app.preview_worker.request(preview::PreviewRequest {
+                window: self.window_id(),
                 tab: id,
                 source,
                 want: preview::PreviewWant::Head,
@@ -55083,6 +55318,7 @@ impl Runtime<'_> {
                 .or_default()
                 .mark_pending(&ask.key);
             let request = files::DirRequest {
+                window: self.window_id(),
                 host: files::FilesHost::Docked(LeafId {
                     tab: id,
                     seat: ask.seat,
@@ -60635,6 +60871,115 @@ impl FolioApp {
         Ok(())
     }
 
+    /// **The preview lane, drained once for the whole process** (user report,
+    /// 2026-08-23).
+    ///
+    /// A worker is the application's and so is its answer channel, so this is the
+    /// layer that may call `try_recv` on one: the batch is then offered to every
+    /// window in turn and each takes only what is addressed to it
+    /// ([`answers_for`]). While the *windows* drained, the first one in the
+    /// opening order took every pending answer and dropped whatever it could not
+    /// place — see [`answers_for`] for what that looked like on the glass.
+    ///
+    /// The `bool` is the lane going away under us, carried out rather than acted
+    /// on here: turning a worker off is one sentence for the process, but the
+    /// notice it earns is a frame, and a frame belongs to a window.
+    ///
+    /// Whatever is still in the batch when every window has taken its own is
+    /// addressed to a window that has since closed — the same cancellation a
+    /// closed tab already was, arriving as a dropped result.
+    fn drain_preview_answers(&mut self) -> (Vec<preview::PreviewResponse>, bool) {
+        let mut batch = Vec::new();
+        let Some(app) = self.app.as_mut() else {
+            return (batch, false);
+        };
+        let mut gone = false;
+        loop {
+            match app.preview_worker.responses.try_recv() {
+                Ok(response) => batch.push(response),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    gone = preview::disable_preview_worker_state(
+                        &mut app.preview_worker_running,
+                        &mut app.preview_worker_notice_pending,
+                    );
+                    break;
+                }
+            }
+        }
+        (batch, gone)
+    }
+
+    /// [`Self::drain_preview_answers`] for the directory lane.
+    fn drain_files_answers(&mut self) -> (Vec<files::DirResponse>, bool) {
+        let mut batch = Vec::new();
+        let Some(app) = self.app.as_mut() else {
+            return (batch, false);
+        };
+        let mut gone = false;
+        loop {
+            match app.files_worker.responses.try_recv() {
+                Ok(response) => batch.push(response),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    gone = files::disable_files_worker_state(
+                        &mut app.files_worker_running,
+                        &mut app.files_worker_notice_pending,
+                    );
+                    break;
+                }
+            }
+        }
+        (batch, gone)
+    }
+
+    /// [`Self::drain_preview_answers`] for the repository lane.
+    fn drain_git_answers(&mut self) -> (Vec<git::GitResponse>, bool) {
+        let mut batch = Vec::new();
+        let Some(app) = self.app.as_mut() else {
+            return (batch, false);
+        };
+        let mut gone = false;
+        loop {
+            match app.git_worker.responses.try_recv() {
+                Ok(response) => batch.push(response),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    gone = git::disable_git_worker_state(
+                        &mut app.git_worker_running,
+                        &mut app.git_worker_notice_pending,
+                    );
+                    break;
+                }
+            }
+        }
+        (batch, gone)
+    }
+
+    /// [`Self::drain_preview_answers`] for the decoration lane — the formulas,
+    /// the decoded pictures, the resampled rasters and the verified paths.
+    fn drain_math_answers(&mut self) -> (Vec<MathWorkerResult>, bool) {
+        let mut batch = Vec::new();
+        let Some(app) = self.app.as_mut() else {
+            return (batch, false);
+        };
+        let mut gone = false;
+        loop {
+            match app.math_worker.results.try_recv() {
+                Ok(result) => batch.push(result),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    gone = disable_math_worker_state(
+                        &mut app.math_worker_running,
+                        &mut app.math_worker_notice_pending,
+                    );
+                    break;
+                }
+            }
+        }
+        (batch, gone)
+    }
+
     /// Answer every toast clicked since the last turn.
     ///
     /// **Here and not in a `Runtime`**, because this is the one lane whose answer names its own
@@ -60913,12 +61258,22 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // frames discarded with this arm draining, against 1 of 765 without
             // it.
             AppEvent::PtyOutput => Ok(()),
-            AppEvent::MathReady => self.for_each_window(|runtime| runtime.apply_math_results()),
-            AppEvent::FilesReady => self.for_each_window(|runtime| runtime.apply_files_results()),
-            AppEvent::PreviewReady => {
-                self.for_each_window(|runtime| runtime.apply_preview_results())
+            AppEvent::MathReady => {
+                let (mut batch, gone) = self.drain_math_answers();
+                self.for_each_window(|runtime| runtime.apply_math_results(&mut batch, gone))
             }
-            AppEvent::GitReady => self.for_each_window(|runtime| runtime.apply_git_results()),
+            AppEvent::FilesReady => {
+                let (mut batch, gone) = self.drain_files_answers();
+                self.for_each_window(|runtime| runtime.apply_files_results(&mut batch, gone))
+            }
+            AppEvent::PreviewReady => {
+                let (mut batch, gone) = self.drain_preview_answers();
+                self.for_each_window(|runtime| runtime.apply_preview_results(&mut batch, gone))
+            }
+            AppEvent::GitReady => {
+                let (mut batch, gone) = self.drain_git_answers();
+                self.for_each_window(|runtime| runtime.apply_git_results(&mut batch, gone))
+            }
             // Nothing is done here. The news has already been stamped into the
             // watcher's own mailbox by the thread that heard it; this only
             // brings the loop round to `about_to_wait`, where every clock in
@@ -75545,10 +75900,13 @@ mod tests {
     }
 
     /// One shell's address, for the dispatch probes that only care that work is routed somewhere.
-    fn probe_leaf() -> LeafId {
-        LeafId {
-            tab: TabId(1),
-            seat: SeatId(1),
+    fn probe_leaf() -> ShellAddress {
+        ShellAddress {
+            window: WindowId::from(1_u64),
+            leaf: LeafId {
+                tab: TabId(1),
+                seat: SeatId(1),
+            },
         }
     }
 
@@ -85852,6 +86210,7 @@ mod tests {
         let mut notice_pending = false;
         assert!(
             !dispatch_tab_decoration_tasks(
+                WindowId::from(1_u64),
                 &mut tab,
                 &tasks,
                 &scale_tasks,
@@ -85874,13 +86233,16 @@ mod tests {
             addressed,
             seats
                 .iter()
-                .map(|seat| LeafId {
-                    tab: tab.id,
-                    seat: *seat
+                .map(|seat| ShellAddress {
+                    window: WindowId::from(1_u64),
+                    leaf: LeafId {
+                        tab: tab.id,
+                        seat: *seat
+                    },
                 })
                 .collect::<std::collections::BTreeSet<_>>(),
-            "every pane's file reference reaches the worker under its own seat, so every pane can \
-             earn the resting underline the focused one earns"
+            "every pane's file reference reaches the worker under its own seat — and under its own \
+             window, because the answer comes home on a channel every window can see"
         );
     }
 

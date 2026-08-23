@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use winit::event_loop::EventLoopProxy;
+use winit::window::WindowId;
 
 use crate::seats::FilesLeafState;
 use crate::{AppEvent, LeafId};
@@ -87,9 +88,17 @@ pub enum FilesHost {
     Float(u64),
 }
 
-/// "Read this directory for this tree."
+/// "Read this directory for this tree of this window."
+///
+/// **The window is part of the address** (user report, 2026-08-23). Both spellings
+/// of [`FilesHost`] are minted by counters that start again in every window — a
+/// `TabId` inside [`crate::LeafId`], and a float's epoch — so neither names one
+/// tree on its own. The pair does, and until it did, the first window in the
+/// opening order took every answer off the one shared channel and dropped the ones
+/// that were not its own: the second window's column stood empty for ever.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirRequest {
+    pub window: WindowId,
     pub host: FilesHost,
     /// The stable id of the directory being read — `""` for the column's root.
     pub key: String,
@@ -106,13 +115,15 @@ impl DirRequest {
     /// newer request is the one that should win — which is exactly what
     /// coalescing on the pair already does.
     fn same_target(&self, other: &Self) -> bool {
-        self.host == other.host && self.key == other.key
+        self.window == other.window && self.host == other.host && self.key == other.key
     }
 }
 
 /// What the worker found.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirResponse {
+    /// The window the asking tree is in — see [`DirRequest::window`].
+    pub window: WindowId,
     pub host: FilesHost,
     pub key: String,
     pub outcome: DirOutcome,
@@ -994,6 +1005,7 @@ impl FilesWorker {
                     let outcome = read_directory(&request.path);
                     if response_tx
                         .send(DirResponse {
+                            window: request.window,
                             host: request.host,
                             key: request.key,
                             outcome,
@@ -1320,6 +1332,7 @@ mod tests {
             seat: crate::SeatId(1),
         });
         let ask = |key: &str, path: &str| DirRequest {
+            window: winit::window::WindowId::from(1_u64),
             host,
             key: key.to_owned(),
             path: PathBuf::from(path),
@@ -1352,6 +1365,7 @@ mod tests {
             seat: crate::SeatId(1),
         });
         let ask = |key: &str, path: &str| DirRequest {
+            window: winit::window::WindowId::from(1_u64),
             host,
             key: key.to_owned(),
             path: PathBuf::from(path),

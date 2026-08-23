@@ -33,6 +33,7 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use winit::event_loop::EventLoopProxy;
+use winit::window::WindowId;
 
 use crate::{AppEvent, TabId};
 
@@ -1994,6 +1995,18 @@ impl PreviewBuffer {
             )
     }
 
+    /// Whether a read of this buffer's head is **out with the worker right now**.
+    ///
+    /// [`Self::wants_head_read`]'s other side, and the one `BT_PREVIEW_TRACE`'s
+    /// build station prints: a buffer holding no text because its answer is still
+    /// on the disk and a buffer holding no text because its answer was taken by
+    /// somebody else and dropped look identical from the glass, and this is the
+    /// bit that tells them apart (user report, 2026-08-23).
+    #[must_use]
+    pub fn awaiting_head_read(&self) -> bool {
+        self.head_asked
+    }
+
     /// **Take this buffer's head read** — [`Self::wants_head_read`] and the
     /// filing of the question, in one breath.
     ///
@@ -2515,11 +2528,18 @@ pub enum PreviewWant {
     Size,
 }
 
-/// "Answer this about this file for this tab."
+/// "Answer this about this file for this tab of this window."
 ///
 /// Addressed by [`TabId`] rather than by a seat, because the pool is the tab's:
 /// the answer belongs to the buffer, and which pane happens to be showing it
 /// when the disk answers is none of the worker's business.
+///
+/// **And by the window the tab is in** (user report, 2026-08-23). A `TabId` is
+/// minted by a counter that starts again in every window, so `TabId(1)` names a
+/// tab in each of them at once; an answer carrying only the tab is an answer any
+/// window can mistake for its own. The pair is what is unique, and it is the
+/// same sentence [`crate::LeafId`] says one level down about a seat inside a
+/// tab.
 ///
 /// **Addressed by [`PreviewSource`] rather than by a path** for the reason the
 /// buffer is: the answer has to find its way back to one entry of a pool keyed
@@ -2529,6 +2549,7 @@ pub enum PreviewWant {
 /// because [`PreviewBuffer::wants_head_read`] is the only thing that sends.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewRequest {
+    pub window: WindowId,
     pub tab: TabId,
     pub source: PreviewSource,
     pub want: PreviewWant,
@@ -2541,14 +2562,23 @@ impl PreviewRequest {
     /// **`want` is part of the target.** Without it a size question would
     /// supersede the head read of the same picture and the body would never
     /// arrive, which is coalescing turned into cancellation.
+    ///
+    /// **And the window is part of it**: two windows asking the same thing about
+    /// the same file of their own `TabId(1)` are two questions, and one answer
+    /// standing in for both leaves one of them waiting for ever.
     fn same_target(&self, other: &Self) -> bool {
-        self.tab == other.tab && self.source == other.source && self.want == other.want
+        self.window == other.window
+            && self.tab == other.tab
+            && self.source == other.source
+            && self.want == other.want
     }
 }
 
 /// What the worker found.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewResponse {
+    /// The window the asking tab is in — see [`PreviewRequest::window`].
+    pub window: WindowId,
     pub tab: TabId,
     pub source: PreviewSource,
     pub answer: PreviewAnswer,
@@ -2862,6 +2892,7 @@ impl PreviewWorker {
                     };
                     if response_tx
                         .send(PreviewResponse {
+                            window: request.window,
                             tab: request.tab,
                             source: request.source,
                             answer,
@@ -4807,6 +4838,7 @@ mod tests {
 
         let (sender, receiver) = std::sync::mpsc::channel();
         let ask = |want| PreviewRequest {
+            window: winit::window::WindowId::from(1_u64),
             tab: crate::TabId(1),
             source: PreviewSource::file("a.png"),
             want,
@@ -4822,6 +4854,40 @@ mod tests {
             "neither supersedes the other"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Two windows asking one thing are two questions** (user report,
+    /// 2026-08-23).
+    ///
+    /// The coalescing half of the window's half of the address. The lane keeps
+    /// only the newest request per target, and `TabId(1)` is a tab in *every*
+    /// window — so a target that could not tell two windows apart would let one
+    /// window's question supersede the other's, and the window whose question was
+    /// dropped would wait for an answer that was never coming.
+    ///
+    /// Mutation: leave `window` out of `same_target` and only one read is made.
+    #[test]
+    fn one_question_asked_by_two_windows_is_not_coalesced_into_one() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let ask = |window: u64| PreviewRequest {
+            window: winit::window::WindowId::from(window),
+            tab: crate::TabId(1),
+            source: PreviewSource::file("plan.md"),
+            want: PreviewWant::Head,
+        };
+        sender.send(ask(1)).unwrap();
+        sender.send(ask(2)).unwrap();
+        drop(sender);
+        let mut asked = Vec::new();
+        run_preview_worker(receiver, |request| asked.push(request.window));
+        assert_eq!(
+            asked,
+            vec![
+                winit::window::WindowId::from(1_u64),
+                winit::window::WindowId::from(2_u64)
+            ],
+            "neither window's read supersedes the other's"
+        );
     }
 
     // ── slice 3: quick edit ─────────────────────────────────────────────────
@@ -5026,6 +5092,7 @@ mod tests {
     fn a_question_superseded_while_reading_is_dropped_rather_than_asked() {
         let (sender, receiver) = std::sync::mpsc::channel();
         let ask = |path: &str| PreviewRequest {
+            window: winit::window::WindowId::from(1_u64),
             tab: crate::TabId(1),
             source: PreviewSource::file(path),
             want: PreviewWant::Head,
