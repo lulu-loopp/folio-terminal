@@ -181,6 +181,10 @@ target  ← CreateTargetForHwnd(hwnd, topmost = true)
 
 本片不改任何用户可见行为：全套测试（含 vendor ref 45/45）绿，clippy `-D warnings` 与 `fmt --check` 干净，release 版逐画面复核与一次滚轮 `BT_PERF_TRACE` 与 main 无差别。
 
+**规则 1 的后半句欠了一句话，第二扇窗替它还的（用户报告 2026-08-23，已修）。** 「地址写在请求上」当时只写到 tab 这一级，而**`TabId` 是每扇窗自己的计数器发的**（`WindowRuntime::next_tab_id`，float 的 epoch 与 `LeafId` 同理），于是 `TabId(1)` 在每一扇窗里都存在。四条 worker 的答案通道是**进程一条**，而当时是**每扇窗各自 `try_recv` 一遍**——开得最早的那扇窗因此把所有待取的答案**全部取走**，把其中属于别人的那些拿去和自己那个同号的 tab 比对，找不到列、找不到缓冲、找不到 session，就地丢掉。没有人会再问第二遍（head read 已经花掉 `claim_head_read`，目录已经 `mark_pending`），所以**除第一扇窗以外的每一扇窗**：files 列永远是空的、打印出来的路径永远不会被验证（`VerifyPath` 走的是同一台 worker）、而一个 markdown 文件开进预览席，画出来的就是**头、脚、和它们之间那两条发丝线**——正是那两次报告里的那张图。实机拍下：同一个进程的两扇窗，同一秒，第一扇的列满了，第二扇的空着。
+
+**改法是把那句话说完：答案带着**问它的那扇窗**回来，通道由 `App` 抽一次，每扇窗只取写着自己名字的那些、把别人的留在原地。** 四条 lane 的 request/response 各多一个 `window: WindowId`（math/scale 那两条是 `ShellAddress { window, leaf }`——`LeafId` 说「seat 只在 tab 内唯一」，这是同一段话的下一句），newest-per-target 的合并键也把它算进去（否则两扇窗问同一个文件，一句会顶掉另一句，被顶掉的那扇窗等一个永远不来的答案）。`Runtime::apply_*_results` 不再持有任何 receiver——`layer_shape_tests::no_window_drains_a_shared_worker_answer_queue` 逐个函数读源码钉着这一条。取完还剩下的，是写给一扇已经关掉的窗的，与「tab 关了」是同一种取消，照旧丢弃。
+
 ### 2.5 一个进程，多扇窗：路由与生命周期（多窗块 片 C，2026-08-19，已落地）
 
 **`FolioApp` 持有一个 `App` 和一张 `Windows<WindowId, WindowRuntime>`，事件循环按 winit 事件自带的 `WindowId` 查表。** 片 A1 把渲染器分成 device 层与 window 层（§2.2），片 B 把状态分成 App 层与 Window 层（§2.4）；这一片是那两句话第一次同时为真的地方——`window_event` 不再拿 id 去跟"唯一那扇窗"比对然后丢弃不等的，而是查表，查不到就是那扇窗已经关了，这是平台有权发生的时序而不是缺陷。

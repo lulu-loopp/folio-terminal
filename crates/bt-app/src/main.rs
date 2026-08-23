@@ -35319,8 +35319,17 @@ impl Runtime<'_> {
     /// because one solve moves every rectangle at once: healing only the pane the
     /// gesture touched would leave the others believing a geometry that stopped
     /// existing in the same frame.
-    fn heal_preview_scroll(&mut self) {
+    ///
+    /// **Reports whether it moved anything**, which is [`Self::settle_preview_goto`]'s
+    /// closing sentence said about the other writer of the same number: the body
+    /// is built *from* the offset, so an offset written after it was built is a
+    /// number nothing has drawn. Left unsaid, a pane grown taller or a document
+    /// grown shorter kept the frame that had been built past its own end — a body
+    /// with nothing in it — until some unrelated event rebuilt it, which on the
+    /// glass is a blank pane that one notch of the wheel fixes for good.
+    fn heal_preview_scroll(&mut self) -> bool {
         let scale = self.window.renderer.metrics().scale_factor as f32;
+        let mut moved = false;
         for surface in self.preview_surfaces() {
             let Some(body) = self.preview_surface_body_rect(surface, scale) else {
                 continue;
@@ -35331,8 +35340,10 @@ impl Runtime<'_> {
             let healed = self.clamped_preview_scroll(surface, body, scale, scroll);
             if healed != scroll {
                 self.preview_pane_mut(surface).scroll = healed;
+                moved = true;
             }
         }
+        moved
     }
 
     /// Re-derive the parsed body if what it was parsed from has changed.
@@ -36340,7 +36351,16 @@ impl Runtime<'_> {
         for surface in self.preview_surfaces() {
             self.settle_preview_goto(surface);
         }
-        self.heal_preview_scroll();
+        // **And the heal's own rebuild, for `settle_preview_goto`'s reason.** The
+        // body a moment ago was built from the offset the heal has just replaced,
+        // so on a frame that clamped anything the picture in the renderer's hands
+        // is one nothing on this pane agrees with any more — a document scrolled
+        // past its own end draws no rows at all. Only on the frames that moved
+        // something, which are the frames a pane grew taller or a document grew
+        // shorter and no others.
+        if self.heal_preview_scroll() {
+            self.refresh_preview_body();
+        }
         let hosts = self.preview_picture_hosts();
         // The one `set_preview_image` slot, emptied when no seat is holding it —
         // the lane is a seat's, and a frame in which no seat has a picture is a
