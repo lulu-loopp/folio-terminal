@@ -1922,13 +1922,11 @@ impl DualPlaneSession {
     }
 
     fn rebuild_printed_path_links(&mut self) {
+        // The whole ledger travels, both answers in it: a "no" is what stops the projection from
+        // asking about the same dead name on every frame it draws (§7.1.5j).
         self.printed_path_links = bt_transcript::paths::PrintedPathLinks::new(
             self.reference_directory().map(Path::to_path_buf),
-            self.path_verdicts
-                .iter()
-                .filter(|(_, exists)| **exists)
-                .map(|(path, _)| path.clone())
-                .collect(),
+            self.path_verdicts.clone(),
         );
     }
 
@@ -19438,6 +19436,81 @@ mod tests {
         );
 
         std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// PIN (§7.1.5j, user report 2026-08-23) — **a name nobody can reach is never asked about, so
+    /// a real file on a crowded screen never becomes a link.**
+    ///
+    /// The report was one file printed three times on one Claude Code screen, of which one spelling
+    /// wore the mark and two did not — and, a frame later, the same spelling that had been dark lit
+    /// up. All three resolve to the same path, so no lexical difference can account for it: what
+    /// separates them is only **where on the screen they stand**.
+    ///
+    /// One projection pass may report at most `MAX_PRINTED_PATH_PROBES` unanswered names, filled in
+    /// row order. A name already answered "no" is still not in `verified`, so the projection reports
+    /// it as unanswered on every frame for the rest of the session, and on a screen that prints more
+    /// than that many path-shaped words the budget is spent entirely on dead names before the scan
+    /// ever reaches the bottom of the screen. The question is never raised, so the disk never
+    /// answers, so the mark never appears — for as many frames as the program cares to repaint.
+    ///
+    /// The dead names here sort *after* the real one, so lexical order alone would have favoured the
+    /// file that matters; only row order can starve it.
+    ///
+    /// MUTATIONS: raise the budget and this still fails with one more row of noise; report answered
+    /// "no" names as unanswered again and it fails as it did when it was written.
+    #[test]
+    fn a_real_file_low_on_a_crowded_screen_is_still_asked_about() {
+        let (directory, _) = temporary_ordinary_file();
+        let nested = directory.join("sub");
+        std::fs::create_dir(&nested).unwrap();
+        let real = nested.join("notes.md");
+        std::fs::write(&real, b"# notes\n").unwrap();
+
+        let mut session = DualPlaneSession::new(nz(200), nz(60));
+        enable_path_detection(&mut session);
+        let cwd = format!(
+            "\x1b]7;file:///{}\x07",
+            directory.to_string_lossy().replace('\\', "/")
+        );
+        session.feed(cwd.as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+
+        // Fifty-eight rows of path-shaped words that name nothing, then the one file that is real.
+        // Twenty per row is what a tool-calling agent's screen actually looks like, and the total is
+        // several times the per-frame budget.
+        let noise = (0..58u32)
+            .map(|row| {
+                (0..20u32)
+                    .map(|slot| format!("zdead{row:02}{slot:02}/a.md"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join("\r\n");
+
+        for _ in 0..40u32 {
+            session
+                .feed(format!("\x1b[?1049h\x1b[2J\x1b[H{noise}\r\nsub/notes.md\r\n").as_bytes())
+                .unwrap();
+            session.viewport_frame(&mut projection).unwrap();
+            session.absorb_printed_path_probes(&mut projection);
+            while let Some(task) = session.take_decoration_worker_task() {
+                if let SessionDecorationTask::VerifyPath(path) = task {
+                    let exists = path_exists(&path);
+                    session.complete_path_verification(path, exists);
+                }
+            }
+        }
+
+        assert!(
+            session.path_is_verified(&real),
+            "forty repaints and the one real file on the screen was never even asked about"
+        );
+
+        std::fs::remove_file(&real).unwrap();
+        std::fs::remove_dir(&nested).unwrap();
+        std::fs::remove_file(directory.join("notes.md")).unwrap();
         std::fs::remove_dir(&directory).unwrap();
     }
 
