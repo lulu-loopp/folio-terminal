@@ -6701,14 +6701,22 @@
     if (["png", "jpg", "jpeg", "svg", "gif", "webp"].includes(ext)) return "image";
     if (ext === "md") return "markdown";
     if (ext === "csv") return "table";
-    /* `htm` sits beside `html` (W2 slice 5): the shortened spelling is the same
-       object - Windows registers both against the same handler, and the head's
-       hand-off arrow has read both since it was drawn. This list holding only
-       one of them is what made a `.htm` file draw the "no preview for this file
-       type" card and that arrow at the same time.
-       Native: `preview::TEXT_EXTENSIONS`. */
-    if (["rs", "py", "js", "ts", "json", "toml", "html", "htm", "txt", "gitignore", "lock", "yml", "yaml", "diff", "patch"].includes(ext)
+    /* Native: `preview::TEXT_EXTENSIONS`. `html` and `htm` LEFT this list on
+       2026-08-23 - see the page arm below. */
+    if (["rs", "py", "js", "ts", "json", "toml", "txt", "gitignore", "lock", "yml", "yaml", "diff", "patch"].includes(ext)
         || name.startsWith(".")) return "text";
+    /* THE PAGE ARM (user ruling 2026-08-23,「一个名字只该有一个含义」;
+       DESIGN §7.10 ⑥). Native: `preview::PAGE_EXTENSIONS`. `htm` sits beside
+       `html` because the shortened spelling is the same object - Windows
+       registers both against the same handler - and `pdf` sits beside them
+       because the browser the seat already hosts has a reader for it and this
+       window has none.
+       It is AFTER the text arm on purpose: a file whose whole name is `.html`
+       is a dotfile, and `Path::extension` - which is what decides the routing
+       one lane over - reads it as having no extension at all. Ask the page
+       question first and two tables would disagree about one name, which is
+       the thing this ruling exists to end. */
+    if (["html", "htm", "pdf"].includes(ext)) return "web";
     return "unknown";
   };
   /* believable file bodies, keyed by extension — the mock is the CONTENT, the
@@ -6754,6 +6762,11 @@
   const PV_BUFFER_CAP = 8;
   const mkPreviewState = (path, name) => {
     const ftype = previewFtype(name);
+    /* THE ONE FORK, HERE AND NOT AT EACH DOOR (user ruling 2026-08-23) — the
+       native's `Runtime::open_preview_source_on` does the same thing in the same
+       place, so a seeded pool, a restored `cur` and a double-click cannot come to
+       disagree about what a `.html` is. */
+    if (ftype === "web") return mkFilePageState(path, name);
     /* `virtual` is what a buffer READ OFF THE DISK is not: a git diff produced by
        a review, and anything else this pane learns to show that has no file
        behind its name. Every buffer this prototype makes comes from the files
@@ -6805,8 +6818,22 @@
      dropped, port kept (a dev server IS its port) */
   function webHost(url) {
     const m = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(url);
-    return m ? m[1] : url;
+    /* An empty authority is a `file:` URL, and a local page has no site to be
+       labelled by: the whole address is the label, which is native
+       `webnav::site_label`'s own answer for it. */
+    return m && m[1] ? m[1] : url;
   }
+  /* ── A LOCAL FILE THAT NAMES A PAGE IS A PAGE (user ruling 2026-08-23;
+     DESIGN §7.10 ⑥) ──
+     `previewFtype` answers `web` for `.html`, `.htm` and `.pdf`, so a row of one
+     of those opened from the files tree becomes the same kind of buffer an
+     address does. Its IDENTITY is the `file:` URL, not the row's path, for the
+     reason a remote page's is its URL: one file is one page however it was
+     reached, and the switcher lists it under the same `url` category. Native:
+     `Runtime::open_preview_web_file` mints exactly this URL from the
+     canonicalised path and `PreviewSource::Web` carries it. */
+  const fileUrlOf = (path) => "file:///" + path.replace(/\\/g, "/").replace(/^\/+/, "");
+  const mkFilePageState = (path, name) => mkWebState(fileUrlOf(path), name);
   const isWebBuf = (pv) => !!(pv && pv.ftype === "web");
   const isWebUrl = (s) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s) || /^[^\s/?#:]+\.[^\s/?#:]+/.test(s);
   /* §3 地址输入 allowlist, drawn rather than merely described: http/https and a
@@ -9388,7 +9415,14 @@
        reading of it. Not on a web seat: a page that is already a page is handed
        over by its foot (「外链一律外交」), and the arrow would be that band's
        second spelling. */
-    const page = !isWebBuf(pv) && /\.html?$/i.test(pv.name);
+    /* AND IT REACHES A PAGE THAT IS BEING RENDERED (user ruling 2026-08-23).
+       The paragraph above was written while `.html` was in the text list, so the
+       arrow's whole job was "show me the page" beside a source view. The seat
+       draws the page now, and a seat with no way to the machine's own browser
+       would be that complaint upside down. A page with no local file behind it
+       still has none: its foot hands the address over (「外链一律外交」). */
+    const page = /\.html?$/i.test(isWebBuf(pv) ? decodeURI(pv.web.url) : pv.name)
+      && (!isWebBuf(pv) || /^file:\/\/\//i.test(pv.web.url));
     /* THE CHEVRON FOLLOWS THE LIST, NOT THE POOL (found on the machine,
        2026-08-19). It is the only door into this list, and it used to open on
        `pool.length > 1` — so on the first frame after a restart, with one buffer
@@ -9476,7 +9510,12 @@
      wherever it was: browsing must feel continuous. */
   function openPreview(path, name) {
     const w = activeTab();
-    const buf = poolBuffer(w, path, name);
+    /* A page is found and kept under its `file:` URL — `make` is the hook
+       `poolBuffer` grew for exactly this, so there is still one pool and one
+       eviction law for both kinds of content. */
+    const buf = previewFtype(name) === "web"
+      ? poolBuffer(w, fileUrlOf(path), name, () => mkFilePageState(path, name))
+      : poolBuffer(w, path, name);
     const host = leavesOf(w.tree).find(l => isPreviewLeaf(l) && !l.pvPinned);
     if (host) {
       host.preview = buf;
@@ -11153,6 +11192,13 @@
         <path d="M20 102 L95 52 L150 88 L198 60 L260 102 Z" fill="#2a3a55"/></svg></div>`;
     } else if (ftype === "unknown") {
       body = `<div class="fpeek-none">No preview — binary or unrecognized type.</div>`;
+    } else if (ftype === "web") {
+      /* THE GLANCE OVER A PAGE (user ruling 2026-08-23). The card has no engine,
+         so it cannot show the page; what it owes its reader is the one fact that
+         places the row. Until this it said "No preview" over a `.pdf` while a
+         double-click opened a rendered page - one row, two answers, and the card
+         was the half that was lying. Native: `i18n::Text::PeekOpensAsPage`. */
+      body = `<div class="fpeek-none">Opens as a page.</div>`;
     } else {
       const text = (buf && buf.content != null) ? buf.content : mockFileContent(name, ftype);
       const lines = text.split("\n");

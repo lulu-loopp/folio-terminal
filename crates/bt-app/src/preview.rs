@@ -79,12 +79,20 @@ pub enum PreviewFtype {
     /// **A page** (Web 预览块 W2 片③) — the mock-up's `previewFtype === "web"`
     /// (`docs/DESIGN.md` §7.7 ①).
     ///
-    /// The one class that is **not** asked of the name, and the exception is the
-    /// point rather than a hole in the rule: a page's name is its *title*, which
-    /// is a sentence somebody wrote, and asking [`preview_ftype`] about a page
-    /// called `release-notes.md` would draw a markdown document over a live
-    /// browser. What decides this class is [`PreviewSource::Web`] — see
-    /// [`PreviewBuffer::new`], which is the one place the two questions meet.
+    /// **Two questions answer this class, and they answer it the same way**
+    /// (user ruling 2026-08-23, "一个名字只该有一个含义"; §7.10 ⑥):
+    ///
+    /// * a *source* that is [`PreviewSource::Web`] is a page whatever it is
+    ///   called — a page's name is its **title**, which is a sentence somebody
+    ///   wrote, and asking [`preview_ftype`] about a page called
+    ///   `release-notes.md` would draw a markdown document over a live browser;
+    /// * a *name* in [`PAGE_EXTENSIONS`] is a page too, because it is opened as
+    ///   one from every door in this window ([`crate::preview_open_lane`]).
+    ///
+    /// The second half is what the ruling added. Until it, `.html` was `Text`
+    /// and `.pdf` was [`Self::Unknown`], so one file had two answers: the hover
+    /// card said "no preview" while a double-click opened the page. A class is
+    /// what a name *means*, and a name cannot mean two things at once.
     Web,
     /// No reader in this window. The "no preview" card, by name alone.
     Unknown,
@@ -113,24 +121,35 @@ impl PreviewFtype {
 /// Extensions that name a picture — the mock-up's list (3090).
 const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "svg", "gif", "webp"];
 
+/// Extensions that name a **page** — [`PreviewFtype::Web`] asked of a name
+/// (user ruling 2026-08-23; `docs/DESIGN.md` §7.10 ⑥).
+///
+/// The three spellings this window opens on the engine's lane, and the same
+/// three [`crate::path_opens_as_a_page`] routes there: `htm` sits beside `html`
+/// because the shortened spelling is the same object — Windows registers both
+/// against the same handler — and `pdf` sits beside them because the browser
+/// this seat already hosts has a reader for it and this window has none.
+///
+/// **They left [`TEXT_EXTENSIONS`] to get here**, and that is the whole of the
+/// cost the ruling accepted: `.html` used to be shown as source by default. What
+/// replaced the default is not nothing — the head's `</>` opens the page's own
+/// developer tools and its `↗` hands the file to a browser — but it is no longer
+/// what a double-click does, because a double-click on a name that says "page"
+/// now means the page.
+const PAGE_EXTENSIONS: [&str; 3] = ["html", "htm", "pdf"];
+
 /// Extensions that name something this window can show as text (3093).
 ///
-/// **`htm` sits beside `html`** (W2 slice 5, paying the account
-/// `docs/HANDOFF-2026-08-21.md` section 5 item 18 opened): the shortened
-/// spelling is the same object - Windows registers both against the same
-/// handler, and `names_an_html_page` has read both since the day it was
-/// written. This table listing only one of them is what made a `.htm` file draw
-/// the "no preview for this file type" card and the head's hand-off arrow at
-/// the same time.
-const TEXT_EXTENSIONS: [&str; 15] = [
+/// **`html` and `htm` are not here** (user ruling 2026-08-23): they moved to
+/// [`PAGE_EXTENSIONS`]. They were in this table for as long as a page's source
+/// was the only thing this window could do with one, and W2 ended that.
+const TEXT_EXTENSIONS: [&str; 13] = [
     "rs",
     "py",
     "js",
     "ts",
     "json",
     "toml",
-    "html",
-    "htm",
     "txt",
     "gitignore",
     "lock",
@@ -165,6 +184,15 @@ pub fn preview_ftype(name: &str) -> PreviewFtype {
     // exactly why the name and not the extension is asked here.
     if TEXT_EXTENSIONS.contains(&ext.as_str()) || name.starts_with('.') {
         return PreviewFtype::Text;
+    }
+    // **After the dotfile clause, and that order is the ruling reaching one more
+    // table.** A file whose whole name is `.html` has no extension as far as
+    // `Path::extension` is concerned, so [`crate::names_an_html_page`] answers
+    // `false` for it (§7.1.5j ⑦(e)) and this window opens it as a document. Ask
+    // the page question first and the two would disagree about one name, which
+    // is the thing this ruling exists to end.
+    if PAGE_EXTENSIONS.contains(&ext.as_str()) {
+        return PreviewFtype::Web;
     }
     PreviewFtype::Unknown
 }
@@ -1454,7 +1482,12 @@ pub enum PreviewFault {
 }
 
 impl PreviewFault {
-    fn from_io(error: &std::io::Error) -> Self {
+    /// Public because the disk is asked in two places now: [`read_head`], on the
+    /// worker, and `Runtime::open_preview_web_file`, whose `canonicalize` is the
+    /// step that decides whether a name that says page has a page behind it.
+    /// Both report the same three faults, and a second mapping of
+    /// `io::ErrorKind` would be a second vocabulary for one answer.
+    pub fn from_io(error: &std::io::Error) -> Self {
         match error.kind() {
             std::io::ErrorKind::PermissionDenied => Self::PermissionDenied,
             std::io::ErrorKind::NotFound => Self::NotFound,
@@ -1881,13 +1914,26 @@ impl PreviewBuffer {
                         // already exists, so its buffer is complete the moment
                         // it is made.
                         PreviewFtype::Image => PreviewLoad::Ready,
-                        // A name cannot be a page: `preview_ftype` is asked of
-                        // the name and `Web` is the one class it never answers
-                        // (see [`PreviewFtype::Web`]), so a *file* reaching this
-                        // arm is a file with no reader, exactly as before.
-                        PreviewFtype::Web | PreviewFtype::Unknown => {
-                            PreviewLoad::Refused(PreviewRefusal::Type)
-                        }
+                        // **A page-named file in the document pool is a page the
+                        // page lane could not open**, and its card must say
+                        // which disk answer that was — not `Refused(Type)`,
+                        // which is a sentence about the file's *kind* when the
+                        // kind was never the problem (user ruling 2026-08-23;
+                        // §7.10 ⑥ is the account this pays).
+                        //
+                        // Every door that lands a source goes through
+                        // `Runtime::open_preview_source_on`, which turns a name
+                        // that says page back onto the engine's lane, so the
+                        // only way here is `Runtime::open_preview_web_file`
+                        // having asked the disk and been refused — and that door
+                        // files the real refusal on this buffer in the same
+                        // breath it lands it. `Pending` is what it lands in
+                        // until then, and no read is ever asked for it: see
+                        // [`Self::wants_head_read`], which has never listed
+                        // `Web` and must not start — this window does not read a
+                        // page as text under any name.
+                        PreviewFtype::Web => PreviewLoad::Pending,
+                        PreviewFtype::Unknown => PreviewLoad::Refused(PreviewRefusal::Type),
                     }
                 }
             }
@@ -3775,6 +3821,12 @@ mod tests {
         }
         assert_eq!(preview_ftype("README.md"), PreviewFtype::Markdown);
         assert_eq!(preview_ftype("cases.csv"), PreviewFtype::Table);
+        // **The page class** (user ruling 2026-08-23). `a.html` stood in the
+        // list below until then; it is here now, and the rest of that list has
+        // not moved — see `a_name_that_says_page_is_a_page_in_this_table_too`.
+        for name in ["a.html", "a.htm", "a.pdf"] {
+            assert_eq!(preview_ftype(name), PreviewFtype::Web, "{name}");
+        }
         for name in [
             "a.rs",
             "a.py",
@@ -3782,7 +3834,6 @@ mod tests {
             "a.ts",
             "a.json",
             "a.toml",
-            "a.html",
             "a.txt",
             "a.gitignore",
             "Cargo.lock",
@@ -3907,15 +3958,118 @@ mod tests {
     /// file type" card *and* the head's hand-off arrow at the same time: one
     /// pane, two buttons, one door.
     ///
-    /// MUTATION: take `"htm"` back out of [`TEXT_EXTENSIONS`].
+    /// **The class the two agree on is now `Web`** (user ruling 2026-08-23) —
+    /// this test says what it always said, that the two spellings are one
+    /// object, and it says it about the class they are both in today.
+    ///
+    /// MUTATION: take `"htm"` back out of [`PAGE_EXTENSIONS`].
     #[test]
     fn the_two_spellings_of_a_page_are_one_file_type() {
-        assert_eq!(preview_ftype("timeline.htm"), PreviewFtype::Text);
-        assert_eq!(preview_ftype("timeline.html"), PreviewFtype::Text);
-        assert_eq!(preview_ftype("TIMELINE.HTM"), PreviewFtype::Text);
+        assert_eq!(preview_ftype("timeline.htm"), PreviewFtype::Web);
+        assert_eq!(preview_ftype("timeline.html"), PreviewFtype::Web);
+        assert_eq!(preview_ftype("TIMELINE.HTM"), PreviewFtype::Web);
         // And the neighbour that must not be swept up with them: an extension is
         // the real one and never a substring.
         assert_eq!(preview_ftype("index.htmlx"), PreviewFtype::Unknown);
+    }
+
+    /// PIN — **a name that says page is a page here too** (user ruling
+    /// 2026-08-23, "一个名字只该有一个含义"; `docs/DESIGN.md` §7.10 ⑥).
+    ///
+    /// The account slice ⑤ opened knowingly: `path_opens_as_a_page` routed
+    /// `.html`, `.htm` and `.pdf` onto the engine's lane while this table called
+    /// the first two `Text` and the third `Unknown`. So one `.pdf` row had two
+    /// answers at once — the hover card said "no preview" and a double-click
+    /// opened the page — and the card was the one that was lying.
+    ///
+    /// The near-misses are the same three the routing table refuses, and they
+    /// are here rather than only there because a second reading of "which names
+    /// are pages" is exactly the thing the two tables just stopped having.
+    ///
+    /// RED GATE: drop the `pdf` entry from [`PAGE_EXTENSIONS`] and the first
+    /// group fails on `report.pdf` alone — which is how much of this feature PDF
+    /// is; drop the whole table and every line of the first group fails.
+    #[test]
+    fn a_name_that_says_page_is_a_page_in_this_table_too() {
+        for name in [
+            "index.html",
+            "index.htm",
+            "INDEX.HTM",
+            "report.pdf",
+            "REPORT.PDF",
+            "中文页.html",
+        ] {
+            assert_eq!(preview_ftype(name), PreviewFtype::Web, "{name}");
+        }
+        // The neighbours a substring reading would sweep up, and the one a
+        // careless ordering would: `.html` as a *whole name* is a dotfile, which
+        // `Path::extension` — and therefore `crate::names_an_html_page` — reads
+        // as having no extension at all (§7.1.5j ⑦(e)). Two tables, one answer.
+        assert_eq!(preview_ftype("index.htmlx"), PreviewFtype::Unknown);
+        assert_eq!(preview_ftype("notes.pdfx"), PreviewFtype::Unknown);
+        assert_eq!(preview_ftype("report.html.txt"), PreviewFtype::Text);
+        assert_eq!(preview_ftype(".html"), PreviewFtype::Text);
+        assert_eq!(preview_ftype(".pdf"), PreviewFtype::Text);
+        // And a page is not an editable surface: what is on the glass belongs to
+        // the engine.
+        assert!(!is_editable("index.html", PreviewFtype::Web, false));
+        assert!(!is_editable("report.pdf", PreviewFtype::Web, true));
+    }
+
+    /// PIN — **a page-named file is never refused for its type** (user ruling
+    /// 2026-08-23; `docs/DESIGN.md` §7.10 ⑥).
+    ///
+    /// This is the trap the ruling had to walk past. Teaching [`preview_ftype`]
+    /// to answer `Web` by name puts every `PreviewSource::File` whose name is a
+    /// page into an arm that used to say `Refused(PreviewRefusal::Type)` — so a
+    /// `.html` arriving from a drop, from the switcher or from a session file
+    /// would have stopped showing its source and started showing a card saying
+    /// this window has no reader for it. That is a worse answer than the one it
+    /// replaced, and it is not what the ruling asked for.
+    ///
+    /// The answer is that no such buffer is ever *shown*: every door goes
+    /// through `Runtime::open_preview_source_on`, which turns a page-named
+    /// source back onto the engine's lane. What is pinned here is the other
+    /// half — that if one is built anyway, its load is not a verdict about the
+    /// file's kind, and nothing reads a page off a disk as text.
+    ///
+    /// RED GATE: give [`PreviewFtype::Web`] `Refused(PreviewRefusal::Type)` back
+    /// in [`PreviewBuffer::new`]'s file arm.
+    #[test]
+    fn a_page_named_file_is_never_refused_for_its_type() {
+        for (path, name) in [
+            (r"D:\site\index.html", "index.html"),
+            (r"D:\site\index.htm", "index.htm"),
+            (r"D:\reports\report.pdf", "report.pdf"),
+        ] {
+            let buffer = PreviewBuffer::new(PreviewSource::file(path), name.to_owned());
+            assert_eq!(buffer.ftype, PreviewFtype::Web, "{name}");
+            assert_ne!(
+                buffer.load,
+                PreviewLoad::Refused(PreviewRefusal::Type),
+                "a page whose page lane refused it earns the disk's own answer, \
+                 never a sentence about its kind: {name}"
+            );
+            assert!(
+                !buffer.wants_head_read(),
+                "and this window never reads a page off a disk as text: {name}"
+            );
+        }
+        // A share is still the network card, and it is answered before the type
+        // is even looked at — so the one refusal a page name can carry is the
+        // one that is about the path rather than about the kind.
+        let share = PreviewBuffer::new(
+            PreviewSource::file(r"\\server\share\index.html"),
+            "index.html".to_owned(),
+        );
+        assert_eq!(
+            share.load,
+            PreviewLoad::Refused(PreviewRefusal::NetworkPath)
+        );
+        // And the regression half: a name with no reader at all is refused for
+        // its type exactly as it always was.
+        let unknown = PreviewBuffer::new(PreviewSource::file(r"C:\w\a.exe"), "a.exe".to_owned());
+        assert_eq!(unknown.load, PreviewLoad::Refused(PreviewRefusal::Type));
     }
 
     /// ④ `editable` names the surface that actually edits.

@@ -1464,6 +1464,10 @@ pub enum Text {
     /// Its sentence. Says the one thing the three names cannot: **when** this
     /// row is consulted at all.
     DescSearchEngine,
+    /// **The glance card over a name that opens as a page** (user ruling
+    /// 2026-08-23; `docs/DESIGN.md` §7.10 ⑥). The card cannot draw a page, so it
+    /// says what the row does instead of what the card cannot do.
+    PeekOpensAsPage,
 }
 
 impl Text {
@@ -2446,6 +2450,9 @@ impl Text {
                 "No preview — binary or unrecognized type.",
                 "无法预览 —— 二进制或无法识别的类型。",
             ),
+            // A statement of what the row does. The card has no engine, so it
+            // cannot show the page; what it can do is stop saying the opposite.
+            Self::PeekOpensAsPage => pick(lang, "Opens as a page.", "打开为页面。"),
             Self::GitDocumentEmpty => pick(lang, "No changes to show", "没有可显示的改动"),
 
             // ── a drag's landing caption ───────────────────────────────────
@@ -2664,7 +2671,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 445] = [
+    pub const ALL: [Self; 446] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3110,6 +3117,7 @@ impl Text {
         Self::WebFailDownloadVerb,
         Self::RowSearchEngine,
         Self::DescSearchEngine,
+        Self::PeekOpensAsPage,
     ];
 
     /// The entries whose two columns are allowed to be the same string.

@@ -206,6 +206,17 @@ pub fn peek_unknown_text() -> &'static str {
     crate::i18n::Text::PeekUnknown.text()
 }
 
+/// **What the card says over a name that opens as a page** (user ruling
+/// 2026-08-23; `docs/DESIGN.md` §7.10 ⑥).
+///
+/// A statement of what this row does, and nothing else: the card cannot show a
+/// page, so what it owes its reader is the one fact that places the row — that
+/// opening it will render rather than refuse. See [`PeekBody::Page`].
+#[must_use]
+pub fn peek_page_text() -> &'static str {
+    crate::i18n::Text::PeekOpensAsPage.text()
+}
+
 /// Whether `at` lies inside `rect`, half-open on the far edges the way every
 /// other hit test in this window is.
 #[must_use]
@@ -411,6 +422,19 @@ pub enum PeekBody {
     Image { width: f32, height: f32 },
     /// A file this window will not read.
     Refused,
+    /// **A name that opens as a page** (user ruling 2026-08-23,
+    /// `docs/DESIGN.md` §7.10 ⑥).
+    ///
+    /// One line, laid out exactly as [`Self::Refused`]'s is, and a separate
+    /// variant rather than a second sentence squeezed through that one because
+    /// they are opposites: the refusal says nothing will happen, and this says
+    /// what will. It is the card's half of the ruling — until it, a `.pdf` row
+    /// drew "no preview" under a pointer and opened a rendered page under a
+    /// double click, and the card was the half that was lying.
+    ///
+    /// No body is asked for and none arrives: a page is drawn by the engine, on
+    /// a seat, and there is no engine on a hover card.
+    Page,
 }
 
 impl PeekBody {
@@ -432,7 +456,11 @@ impl PeekBody {
                     + px(PEEK_IMAGE_H_LOGICAL_PX)
                     + px(PEEK_BODY_PADDING_BOTTOM_LOGICAL_PX)
             }
-            Self::Refused => {
+            // One line each, and the same one: two sentences of the same size in
+            // the same box, so a column of rows does not change shape as the
+            // pointer walks from a file with no reader to a file that opens as a
+            // page.
+            Self::Refused | Self::Page => {
                 let line = (px(PEEK_NONE_FONT_LOGICAL_PX) * 1.4).round();
                 px(PEEK_NONE_PADDING_TOP_LOGICAL_PX)
                     + line
@@ -806,12 +834,17 @@ pub fn build(
                 });
             }
         }
-        PeekBody::Refused => {
+        PeekBody::Refused | PeekBody::Page => {
             let left = layout.body[0] + px(PEEK_NONE_PADDING_X_LOGICAL_PX);
             let right = layout.body[2] - px(PEEK_NONE_PADDING_X_LOGICAL_PX);
             let top = layout.body[1] + px(PEEK_NONE_PADDING_TOP_LOGICAL_PX);
+            let words = if matches!(content.body, PeekBody::Page) {
+                peek_page_text()
+            } else {
+                peek_unknown_text()
+            };
             labels.push(label(
-                peek_unknown_text(),
+                words,
                 [left, top, right, layout.body[3]],
                 px(PEEK_NONE_FONT_LOGICAL_PX),
                 palette.body_hint_text,
