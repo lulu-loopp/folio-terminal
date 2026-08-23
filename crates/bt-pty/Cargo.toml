@@ -11,5 +11,11 @@ bt-transcript = { path = "../bt-transcript" }
 portable-pty.workspace = true
 thiserror.workspace = true
 
+# `tests/` links against this crate and its dev-dependencies only, so the terminal
+# an integration test has to put in front of a real ConPTY has to be named again
+# here even though the library already depends on it.
+[dev-dependencies]
+bt-term = { path = "../bt-term" }
+
 [lints]
 workspace = true
