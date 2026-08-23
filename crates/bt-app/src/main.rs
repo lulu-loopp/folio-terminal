@@ -3595,6 +3595,30 @@ enum PreviewOpenLane {
     Document,
 }
 
+/// **Whether the content on a web seat has been replaced by something else**
+/// (W2 slice 5).
+///
+/// The other half of "one seat shows one thing". `Runtime::open_web_page_on`
+/// already owns the half that runs when a page lands - the document under it
+/// stops being pointed at - and until slice ⑤ nothing could travel the other
+/// way, because the only door into a page was `BT_WEB_DEV`. A files column that
+/// opens pages makes it an everyday gesture: double-click `report.html`, then
+/// double-click `notes.md`, and without this the head, the foot and the tab name
+/// all say `notes.md` while a browser is still on the glass in front of the
+/// document.
+///
+/// **`None` is not "something else".** There is a window between a page being
+/// asked for and its first commit in which the pane points at nothing at all -
+/// `open_web_page_on` clears the outgoing buffer on purpose - and reading that
+/// as a replacement would close every page a frame after it opened.
+///
+/// A predicate rather than a condition written into the retirement loop,
+/// because it is a claim about content that is worth being able to ask on its
+/// own, and because the loop that consumes it is walking two maps at once.
+fn a_page_was_replaced(showing_picture: bool, buffer: Option<&preview::PreviewSource>) -> bool {
+    showing_picture || buffer.is_some_and(|source| source.web_url().is_none())
+}
+
 /// [`PreviewOpenLane`] for one path.
 ///
 /// **A network path is never a page**, and that is not a special case bolted on
@@ -56311,6 +56335,24 @@ impl Runtime<'_> {
                 });
                 continue;
             };
+            // **A seat that has been asked to go is already gone**, whatever
+            // rectangle its pane still has: its visual left the composition tree
+            // with `host.close()`, and a hole cut for it would be the desktop
+            // showing through the document that replaced it - for as long as ten
+            // seconds, which is what the browser-exit wait can be.
+            if self
+                .window
+                .web
+                .get(&seat)
+                .is_some_and(webhost::WebSeat::is_closing)
+            {
+                placements.push(WebPlacement {
+                    seat,
+                    presence: webhost::WebPresence::Hidden,
+                    size: None,
+                });
+                continue;
+            }
             let tab = &self.window.tabs[index];
             let body =
                 preview_image_placement(&tab.seats, &tab.seat_layout, seat, scale, transform).map(
@@ -56440,20 +56482,23 @@ impl Runtime<'_> {
         if self.window.web.is_empty() {
             return Ok(());
         }
-        // A page whose pane has left the tree goes with it. Asked of every tab
-        // and not of the active one: a web seat on a tab nobody is looking at is
-        // still a web seat.
+        // **A page goes when the seat stops being a page** - either because the
+        // seat has left the tree, or because something else has landed on it.
+        // Asked of every tab and not of the active one: a web seat on a tab
+        // nobody is looking at is still a web seat.
         let orphaned: BTreeSet<SeatId> = self
             .window
             .web
             .keys()
             .copied()
             .filter(|seat| {
-                !self
-                    .window
-                    .tabs
-                    .iter()
-                    .any(|tab| tab.seats.preview_seats().contains(seat))
+                let surface = PreviewSurface::Seat(*seat);
+                !self.window.tabs.iter().any(|tab| {
+                    tab.seats.preview_seats().contains(seat)
+                        && !tab.preview_panes.get(surface).is_some_and(|pane| {
+                            a_page_was_replaced(pane.image.is_some(), pane.buffer.as_ref())
+                        })
+                })
             })
             .collect();
         let focus = self.shortcut_focus();
@@ -56472,6 +56517,21 @@ impl Runtime<'_> {
         }
         for (seat, theirs) in outcomes {
             self.apply_web_outcomes(seat, theirs)?;
+        }
+        // **A retirement owes a frame** (W2 slice 5, found on the machine). The
+        // hole a page is seen through is punched while a frame is being composed
+        // (`sync_web_page`), and this loop runs at the tail of a turn — *after*
+        // the redraw. So the frame that drew the document which replaced a page
+        // still carried the page's hole, and with the window then idle there was
+        // no next frame to take it out: the desktop showed through the pane
+        // until something else happened to ask for one.
+        //
+        // `present_chrome_change` and not a bare `request_redraw`, for the
+        // reason written on that function: with no frame queued a redraw finds
+        // nothing to draw and skips, and this is precisely a change that belongs
+        // to the chrome rather than to a shell's output.
+        if !orphaned.is_empty() {
+            self.present_chrome_change()?;
         }
         Ok(())
     }
@@ -86816,6 +86876,44 @@ mod tests {
                 "{document}"
             );
         }
+    }
+
+    /// PIN (W2 slice 5) - **one seat shows one thing, in both directions.**
+    ///
+    /// Found on the machine and not by reading: double-click `page.html` in the
+    /// files column, then double-click `notes.md`, and the head, the foot and
+    /// the tab name all said `notes.md` while the browser was still on the glass
+    /// in front of the document (`shots/column-5-md.png`, before this). The
+    /// half that had always been there is `open_web_page_on`'s - a page landing
+    /// stops the document under it being pointed at - and until this slice
+    /// nothing could travel the other way, because the only door into a page was
+    /// `BT_WEB_DEV`.
+    ///
+    /// The third case is the one that makes this a predicate rather than an
+    /// `is_some()`: between a page being asked for and its first commit the pane
+    /// points at nothing at all, on purpose, and reading that as a replacement
+    /// would close every page a frame after it opened.
+    #[test]
+    fn a_page_leaves_the_seat_that_stopped_showing_it() {
+        assert!(
+            !a_page_was_replaced(false, None),
+            "a page that has been asked for and has not committed yet is not a \
+             page somebody replaced"
+        );
+        assert!(!a_page_was_replaced(
+            false,
+            Some(&preview::PreviewSource::Web(
+                "http://localhost:5173/app".into()
+            ))
+        ));
+        assert!(
+            a_page_was_replaced(false, Some(&preview::PreviewSource::file(r"D:\notes\a.md"))),
+            "a document landed on the seat"
+        );
+        assert!(
+            a_page_was_replaced(true, None),
+            "and so did a picture, which has no buffer to be found by"
+        );
     }
 
     /// PIN (W2 slice 5) - **a stored row naming a local page is taken back to

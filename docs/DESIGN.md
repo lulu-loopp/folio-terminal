@@ -1551,6 +1551,45 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 
 **⑧ 池里有,不代表窗口里有。** 一张 tab 的池是它的历史,恢复回来的是**行**;`create_tab_state` 把行放回池、把 pane 指回去(所以头、脚、tab 名、切换器在第一帧就是对的),`revive_web_pages` 才把它变回一个真的页面。两件事故意分开:缓冲是内容、归 tab;引擎是一个挂在窗口 `HWND` 上的 controller,而只有恢复的这一侧手里有窗口。也因此它挂在 `show_new_window` **之后**——一个建在还没显示过的窗口上的 WebView2 无处可合成,这是 §7.8 已经付过一次的学费。
 
+### 7.10 一份本地文件也可以是一张网页（Web 预览块 W2 片⑤，2026-08-22，已落地；`crates/bt-platform/src/{lib,webview}.rs`、`crates/bt-app/src/{main,preview,preview_watch,webnav,webhost}.rs`、`design/ui-mockup.html`）
+
+**这一片把两件事接上：files 列的一行可以落在网页座位上，而预览座位第一次会自己发现它正看着的那份文件被存盘了。** 两件事都不是网页专有的——受控 file 入口是一条政策的第一个真用户，watcher 是给整个预览座位写的，markdown 与文本同样受益。方案 §0 把它们并在一片里，是因为「静态 HTML 存盘自刷」这句话必须先有一张能打开的本地网页才有意义。
+
+**① 受控 file 入口是四步，而次序就是全部规则。** `plan.md` §3 的那一段落成 `Runtime::open_preview_web_file` 的四行：
+
+1. **磁盘说这条路径是什么**——`canonicalize` 解掉 junction、`..`、8.3 短名与大小写，之后所有人看见的只有这一种拼法。不在磁盘上的路径不是网页，它走文档道，那里本来就有「问过磁盘，磁盘说没有」的卡。
+2. **宿主铸币**——`webnav::Mint::file` 把那个 `PathBuf` 变成这个座位唯一可以加载的 `file:` URL，四个会重开解析的字符百分号编码，UNC 当场拒。**任何字符串都不被信任**：URL 是从规范化后的路径造出来的，不是从地址、行或会话文件里读出来的。
+3. **宿主问自己那道门**——`webnav::Origin::HostMinted`，而且在选座位之前就问。片② 写这条臂是为了让「本产品发起的每一次导航都过过门」这句话没有例外；这是它的第一个真调用者。
+4. **铸币跟着请求走到引擎**——`WebSeat::open`/`go` 收下它并在 `Navigate` **之前**装上，因为 `NavigationStarting` 可以在 `Navigate` 返回之前就打回来。
+
+**铸币是被携带的，不是从 URL 推出来的。** 在 `WebEffect::Navigate` 那一步只有三个答案：座位自铸的 `about:blank`、调用方交来且与本次 URL 相符的那一条 `file:`、其余一律 `Mint::Nothing`。看见 `file:` 前缀就断定「那一定是宿主要的」会把这笔账重新变成字符串的属性——而片② 的② 说得很清楚，能分开「座位自己的空白页」与「一个页面要来的空白页」的只能是宿主自己记的一笔账。携带还有一个恢复模型上的理由：浏览器崩了会被重建并重新导航到 `desired_url`，那第二次导航和第一次一样是宿主自己的。
+
+**四条安全开关，逐条落在哪。** ①`--allow-file-access-from-files` **不加**——environment 建在 `None::<&ICoreWebView2EnvironmentOptions>` 上，根本没有地方放命令行，这比「那一个 flag 不在」更强；②**web message 关**（`SetIsWebMessageEnabled(false)`，片① 已有）；③**host object bridge 关**（`SetAreHostObjectsAllowed(false)`，本片补上——它是这四条里唯一真的缺着的一条）；④`PermissionRequested` **默认拒**（handler 自己就是那句 `SetState(DENY)`）。四条都**无条件**，不看页面从哪来：一个只为 `file:` 页面拨的开关，是一个总有人会忘记拨的开关。四条各有源码钉（`bt_platform::web_security_tests`），因为其中三条是只在浏览器跑起来之后才存在的 COM 调用，第四条是一个本产品刻意永远不传的参数——没有任何 API 能报告「没有传额外浏览器参数」。
+
+**② PDF 就是那一行。** `path_opens_as_a_page` 里 `names_an_html_page(path) || 扩展名是 pdf`。除此之外 PDF 没有一行自己的代码：同一次 canonicalize、同一枚铸币、同一道 HostMinted 门、同一个引擎、同样四条开关、同一个 watcher。方案原话「类型路由一行；其余走完整 WebView 生命周期、安全与输入合同」——一个 PDF 专用的表面会是对一个引擎已经回答过的问题的第二个答案。两种网页拼法取自 `names_an_html_page` 而不是第二张表，所以 `.htm` 与 `.html` 在这里不可能分家。
+
+**③ 存下来的一行是一个名字，不是一张许可证。** `page_destination` 是切换器行、`session.json` 与 `pins.json` 共同的那扇门，而它的 `file:` 臂做的正是 files 列做的三步：解码成路径、对磁盘 canonicalize、从**那个**结果铸币。`webnav::address_bar` 仍然对 `file:` 一律拒绝，而且永远会——字符串正是那个可能被改过的东西。所以授权来自此刻新铸的那一枚币，行只贡献一个名字。`Mint::path_and_tail_of_file_url` 是编码器的精确反函数，**不是** `file:` URL 解析器：它只解自己写的那四个转义，任何别的东西答 `None`，把调用者原样送回磁盘。`?query#fragment` 单独交回，因为一份本地报告的目录就是 `report.html#ch3`，丢掉它等于回到文章开头。后果照直说：文件被移走或删掉的网页回不来，那一行按下去什么也不发生——与政策收紧之后的一枚钉是同一格（§7.9 ⑤）。**本片没有放宽任何一处**：`switcher_pin_is_allowed` 一字未动，所以一张本地网页今天仍然钉不住（欠账）。
+
+**④ 通用 preview-file watcher：住在窗口里，盯着座位手上的那一份文件。** `crates/bt-app/src/preview_watch.rs`，形状抄 `git_watch`，时钟就是 `watch_clock::WatchClock` 本人——**不是第二份去抖**，因为两份去抖就是两个表面迟早对「它不动了」给出两个答案。三条纪律：
+
+* **订阅跟着座位走。** `sync` 收下「此刻这扇窗里每个预览 pane 打开的那份文件」这个集合，出集合的当场丢句柄。**跨 tab 而不只看在屏的那张**——`git_watch` 的门是「在屏」，这里不是，理由是主体不同：一个 buffer 是内容、归 tab，回到那张 tab 时它不会被重读，所以按可见性设门只会让「切回去」成为这扇窗唯一明知在展示过期内容的地方。
+* **一个文件夹，不是一棵树。** Windows 没法订阅一个文件，所以句柄开在它所在的目录上——新的 `bt_platform::DirWatch::start_shallow`，`ReadDirectoryChangesW` 的 `bWatchSubtree=false`。**这是给既有原语加一个参数，不是另造一套**：预览一个仓库根目录里的 README 不该让一次 `cargo build` 写进 `target\debug` 的每个 .obj 都叫醒这个线程。
+* **通知不是答案。** 浅订阅照样为同目录的**兄弟**说话，而一个文件夹里放着好几份文档是常态。所以时钟到期时问那份文件自己的**修改时间与长度**，只有和上次读到的不同才是消息。这是**因为内核说了话**才做的一次 `metadata`——`watch_clock` 的头里写着的那条与轮询的分别。文件没了同样是消息：戳记从 `Some` 变 `None`，两边不等，rename/delete/recreate 因此不必是特例。
+
+**去抖判据与数字**：`WATCH_QUIET` **300ms**（编辑器一次保存是写临时文件、改名盖上去、动属性，三条通知落在几毫秒内；一次保存必须是一次刷新，不是三次）与 `WATCH_FLOOR` **2s**（一个被持续写的文件不会每 300ms 刷一次）。两个数字都不是本片新起的，是这扇窗里另外两个 watcher 已经在用的那一对。
+
+**跟着座位走的两处**：`sync` 的出入集合（换文件、关座位、关 tab 都是同一件事），以及 `due` 折账时对文件夹的 `retain`——一个不再被看的文件夹留下的旧消息不该在下次有人打开它时被兑现，那件事发生在这次打开之前，而打开本身已经读过一遍了。
+
+**刷新是两条道，方案两条都点了名**：网页座位一次普通 `Reload`（`WebMachine::reload`，**不是重新导航**——重新导航会截断页面自己的导航栈，而变的是引擎已经站着的那个地址背后的字节）；文档座位重读那一份头，走同一个 worker、同一本「一次一问」的账、同一扇 `request_revived_previews`。`PreviewBuffer::mark_stale` 是那扇门，它有两条自己的规矩：**不把 `load` 打回 `Pending`**（`Pending` 会让 pane 印「Loading …」，一次保存不该让正文闪掉再回来——旧段落留在玻璃上直到新段落落地），以及**有未保存改动的 buffer 不重读**（人的文字是两者中更新的那一份；分歧由裁决 8⑨ 的 `disk_mtime` 在保存那一刻报告，那才是有人能回答它的时刻）。
+
+**为什么不是轮询**：这里没有一行代码在没有 `ReadDirectoryChangesW` 完成的情况下开始计时。一扇开着看一份没人写的文件的窗，不起时钟、不醒、不读盘——`a_file_nobody_touches_owes_no_wake_up_and_reads_no_disk` 把「不读盘」写成一个会 panic 的闭包，所以它是一句断言而不是一个愿望。
+
+**⑤ 一个座位展示一件事，两个方向都是。** 实机撞出来的：files 列双击 `page.html`，再双击 `notes.md`——头、脚、tab 名全都说 `notes.md`，而浏览器还在文档前面的玻璃上（证据 `w2-slice5-evidence/09`）。一直存在的那一半是 `open_web_page_on` 的（页面落地时下面的文档不再被指着）；反方向在片⑤ 之前走不通，因为进网页的唯一一扇门是 `BT_WEB_DEV`。现在的判据是 `a_page_was_replaced`，接在 `advance_web_page` 已有的「pane 离开树就带走页面」那道门上：**`None` 不算「别的东西」**——页面被要求到第一次提交之间 pane 故意指着空，把那读成替换会让每张网页在开出来的下一帧被关掉。
+
+这条修复自己又拖出两条，都记在这里因为它们是同一个机制的两半：**① 正在关闭的座位不该再挖洞**（`WebSeat::is_closing`）——`host.close()` 已经把它的 visual 摘出合成树，而等浏览器进程退出可以长达十秒（`w0p-evidence.md` §4.2），这段时间里那个洞就是从一块 pane 里看见的桌面；**② 一次退役欠一帧**——洞是在造帧的时候打的（`sync_web_page`），而这道退役门跑在一趟的尾巴上、在重绘**之后**，所以画出「替换上来的文档」的那一帧仍然带着页面的洞，而窗口随后就静止了，没有下一帧去把洞收掉。用 `present_chrome_change` 而不是裸 `request_redraw`，理由写在那个函数上：没有排队的帧时重绘会找不到东西画而跳过。
+
+**⑥ 顺带清掉的一笔账（`docs/HANDOFF-2026-08-21.md` §5 第 18 条）。** `preview_ftype` 的文本扩展名表有 `html` 没有 `htm`，于是一份 `.htm` 同时画出「无法预览」卡与头上那枚交给浏览器的 ↗——一块 pane 两枚钮通同一扇门。`htm` 补进 `preview::TEXT_EXTENSIONS` 与小样的 `previewFtype`。**这只是分类那一半**：行激活现在把 `.htm` 与 `.html` 一起送上网页道，两种拼法在两张表里都是同一个对象。留下来的小差别是 `.pdf`——它按名字仍然是 `Unknown`，所以一行 `.pdf` 的悬停卡说的是「无法预览」而双击它会开在网页座位上。**这是本片明知留下的一条缝**，因为把 `preview_ftype` 改成按名字回答 `Web` 会让每一个 `PreviewSource::File` 的 `.html` buffer（拖放进来的、切换器里的）变成 `Refused(Type)`，那是另一条裁决，不是这一片的。
+
 ## 8. 依赖策略
 
 同 v3 表格，关键修订：**alacritty_terminal 稳态配置 scrollback=0**。vendor seam 包含既有上滚事件钩子，以及窄事务操作：打开 primary native history、查询行数、在 coalesced final viewport 上用 vendor row/WRAPLINE/cursor 重新评估高度、一次性 `take_history(oldest→newest)`、清空并恢复 limit=0，以及只针对唯一未闭合 staging candidate 的 `restore_history(oldest→newest)`；没有可独立呈现的 transcript snapshot/backing 镜像，也不复制 reflow 算法。事务期 vendor grid 是 mutable tail 唯一权威；收割后转录层拥有 staging ID/配额/定稿权，vendor 只保留该候选的原生 row escrow 供下一事务无损交还。升级必须 diff `grid/resize.rs`/history 语义，跑 vendor 181 项与完整生命周期矩阵。

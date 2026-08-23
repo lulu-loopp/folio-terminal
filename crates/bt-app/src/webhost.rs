@@ -1365,6 +1365,19 @@ impl WebSeat {
         self.host.focus_page()
     }
 
+    /// **Whether this seat has been asked to go** (W2 slice 5).
+    ///
+    /// A controller that is closing has nothing on the glass - `host.close()`
+    /// took its visual out of the tree - but the wait for its browser process to
+    /// end runs for as long as ten seconds (`w0p-evidence.md` 4.2). The window
+    /// asks this so that it stops cutting a hole in its own surface for a page
+    /// that is not there: without it, replacing a page with a document leaves a
+    /// transparent rectangle over the document until the browser exits, which is
+    /// the desktop showing through a pane (found on the machine, W2 slice 5).
+    pub(crate) fn is_closing(&self) -> bool {
+        self.machine.state() == WebState::Closing
+    }
+
     /// The seat is going away: close the controller and start the wait.
     pub(crate) fn close(&mut self, compositor: &bt_platform::Compositor) -> Vec<WebOutcome> {
         if self.machine.state() == WebState::Closing {
