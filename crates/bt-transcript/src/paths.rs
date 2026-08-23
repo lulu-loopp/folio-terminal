@@ -12,7 +12,7 @@
 //! off the event thread.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -810,24 +810,36 @@ pub fn local_path_to_file_uri(path: &Path) -> String {
 }
 
 /// What this window has been told about the printed paths it can see: where relative text is
-/// measured from, and which files a worker has found on the disk.
+/// measured from, and what a worker found on the disk for each name it was asked about.
 ///
 /// **Verification is the whole of what makes a path a link.** A shape is not a promise — the window
 /// underlines what it has opened, not what it can parse — so this carries the worker's answers and
 /// nothing else, and a path it has not been told about produces no link at all. The unknowns are
 /// handed back through [`Self::links_in`]'s sink, which is how the layer that draws a frame tells
 /// the layer that owns a worker what the frame would have liked to know.
+///
+/// # Why both answers are carried, and not just the yes
+///
+/// A "no" is an answer, and a frame that cannot see it has no way to tell a name nobody has looked
+/// at yet from one the disk has already denied. Carrying only the yes made every dead name on the
+/// screen look permanently new: the projection reported it as a question on every frame for the rest
+/// of the session, and since one pass may only report a bounded number of questions, a screen
+/// printing more path-shaped words than that budget spent all of it on names that were already
+/// answered — so a real file lower down was never asked about at all, and never became a link
+/// however long the program repainted (§7.1.5j, user report 2026-08-23).
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PrintedPathLinks {
     working_directory: Option<PathBuf>,
-    verified: BTreeSet<PathBuf>,
+    /// Every name this window has been given an answer for, and what the answer was. Absence means
+    /// "nobody has looked", which is the one state that is worth a question.
+    verdicts: BTreeMap<PathBuf, bool>,
 }
 
 impl PrintedPathLinks {
-    pub fn new(working_directory: Option<PathBuf>, verified: BTreeSet<PathBuf>) -> Self {
+    pub fn new(working_directory: Option<PathBuf>, verdicts: BTreeMap<PathBuf, bool>) -> Self {
         Self {
             working_directory,
-            verified,
+            verdicts,
         }
     }
 
@@ -865,21 +877,27 @@ impl PrintedPathLinks {
             // **The line is never part of what is asked about.** A reference to line 9999 of a real
             // file is a reference to a real file, and a probe carrying `:9999` would be a question
             // about a name no filesystem holds — permanently unanswerable, permanently unlinked.
-            if self.verified.contains(&path) {
-                let mut uri = local_path_to_file_uri(&path);
-                if let Some(location) = candidate.location {
-                    uri.push('#');
-                    uri.push_str(&location.uri_fragment());
+            match self.verdicts.get(&path) {
+                Some(true) => {
+                    let mut uri = local_path_to_file_uri(&path);
+                    if let Some(location) = candidate.location {
+                        uri.push('#');
+                        uri.push_str(&location.uri_fragment());
+                    }
+                    links.push((
+                        HyperlinkRange {
+                            byte_start: candidate.byte_start,
+                            byte_end: candidate.byte_end,
+                        },
+                        uri,
+                    ));
                 }
-                links.push((
-                    HyperlinkRange {
-                        byte_start: candidate.byte_start,
-                        byte_end: candidate.byte_end,
-                    },
-                    uri,
-                ));
-            } else {
-                unknown.insert(path);
+                // Answered "no": nothing to draw and, above all, nothing to ask again. This is the
+                // arm that keeps a repainting screen's question budget for the names that need it.
+                Some(false) => {}
+                None => {
+                    unknown.insert(path);
+                }
             }
         }
         links
@@ -997,6 +1015,28 @@ mod tests {
         assert!(spans("Cargo.toml").is_empty());
     }
 
+    /// The three spellings of one file that shared a screen on 2026-08-23, read at the lexer.
+    ///
+    /// A full-width `（` opens a relative reference for the same reason `路径：D:\x\a.md` opens an
+    /// absolute one: CJK punctuation is prose, not a path character. Leading indentation opens one
+    /// because whitespace always did. If any of these three stops here, the fault is lexical; if
+    /// all three arrive, the fault is downstream and this test is the proof of that.
+    #[test]
+    fn the_three_printed_spellings_of_one_file_all_open() {
+        assert_eq!(
+            spans("Write(docs\\plans\\multiwindow-ef\\plan.md)"),
+            ["docs\\plans\\multiwindow-ef\\plan.md"]
+        );
+        assert_eq!(
+            spans("方案写完（docs/plans/multiwindow-ef/plan.md）。"),
+            ["docs/plans/multiwindow-ef/plan.md"]
+        );
+        assert_eq!(
+            spans("  docs/plans/multiwindow-ef/plan.md 的要点:"),
+            ["docs/plans/multiwindow-ef/plan.md"]
+        );
+    }
+
     /// Boundary table row 10: `./` and `../` are marks, not prose, so they open a candidate wherever
     /// they stand.
     #[test]
@@ -1078,7 +1118,7 @@ mod tests {
     /// neither a link nor even a question, because there is nothing to ask about.
     #[test]
     fn a_relative_reference_without_a_working_directory_is_neither_link_nor_question() {
-        let links = PrintedPathLinks::new(None, BTreeSet::new());
+        let links = PrintedPathLinks::new(None, BTreeMap::new());
         let mut unknown = BTreeSet::new();
         assert!(
             links
@@ -1095,7 +1135,7 @@ mod tests {
         let real = PathBuf::from("D:\\src\\real.md");
         let links = PrintedPathLinks::new(
             Some(PathBuf::from("D:\\src")),
-            BTreeSet::from([real.clone()]),
+            BTreeMap::from([(real.clone(), true)]),
         );
         let mut unknown = BTreeSet::new();
         let found = links.links_in("real.md ./real.md ./gone.md D:\\src\\real.md", &mut unknown);
@@ -1109,6 +1149,36 @@ mod tests {
              the anchored and drive-rooted spellings both name the one file that is"
         );
         assert_eq!(unknown, BTreeSet::from([PathBuf::from("D:\\src\\gone.md")]));
+    }
+
+    /// A name the disk has already denied is neither a link nor a question ever again.
+    ///
+    /// The second half is the load-bearing one and the reason both answers are carried (§7.1.5j,
+    /// user report 2026-08-23): the caller's question budget is bounded and refilled every frame, so
+    /// a dead name that keeps asking is a dead name that keeps a live one from ever being asked.
+    #[test]
+    fn a_path_the_disk_has_denied_is_never_asked_about_again() {
+        let links = PrintedPathLinks::new(
+            Some(PathBuf::from("D:\\src")),
+            BTreeMap::from([
+                (PathBuf::from("D:\\src\\real.md"), true),
+                (PathBuf::from("D:\\src\\gone.md"), false),
+            ]),
+        );
+        let mut unknown = BTreeSet::new();
+        let found = links.links_in("./real.md ./gone.md ./fresh.md", &mut unknown);
+        assert_eq!(
+            found
+                .iter()
+                .map(|(_, uri)| uri.as_str())
+                .collect::<Vec<_>>(),
+            ["file:///D:/src/real.md"]
+        );
+        assert_eq!(
+            unknown,
+            BTreeSet::from([PathBuf::from("D:\\src\\fresh.md")]),
+            "only the name nobody has looked at yet is worth a question"
+        );
     }
 
     /// §7.1.5j's alternate-screen budget, **measured rather than argued**.
@@ -1136,7 +1206,7 @@ mod tests {
         let links = PrintedPathLinks::new(
             Some(PathBuf::from("D:\\src")),
             (0..64u32)
-                .map(|index| PathBuf::from(format!("D:\\src\\notes-{index}.md")))
+                .map(|index| (PathBuf::from(format!("D:\\src\\notes-{index}.md")), true))
                 .collect(),
         );
 
@@ -1302,7 +1372,7 @@ mod tests {
     fn a_located_reference_is_verified_by_its_file_and_carries_its_line_in_the_target() {
         let links = PrintedPathLinks::new(
             Some(PathBuf::from("D:\\src")),
-            BTreeSet::from([PathBuf::from("D:\\src\\real.md")]),
+            BTreeMap::from([(PathBuf::from("D:\\src\\real.md"), true)]),
         );
         let mut unknown = BTreeSet::new();
         let line = "real/../real.md:13:5 and D:\\src\\real.md:9999";
@@ -1358,7 +1428,7 @@ mod tests {
         let path = PathBuf::from("D:\\src\\a.md");
         let links = PrintedPathLinks::new(
             Some(PathBuf::from("D:\\src")),
-            BTreeSet::from([path.clone()]),
+            BTreeMap::from([(path.clone(), true)]),
         );
         let line = "D:\\src\\a.md and file:///D:/src/a.md";
         let mut unknown = BTreeSet::new();

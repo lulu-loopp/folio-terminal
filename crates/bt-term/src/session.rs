@@ -908,6 +908,10 @@ pub struct DualPlaneSession {
     /// What this pane last told its projection, kept so the telling is free on the frames where
     /// nothing has changed — which is nearly all of them.
     printed_path_links: bt_transcript::paths::PrintedPathLinks,
+    /// Whether the last frame filled its printed-path question budget, and so has names it never
+    /// got to report. It makes the next verdict — a "no" included — worth a frame, which is the
+    /// only way the projection runs again to collect them.
+    printed_path_budget_full: bool,
     /// Where this session's shell was put down (§7.1.4's second rung), pushed in by the app at
     /// spawn because it is an answer only the spawn knew.
     spawn_directory: Option<PathBuf>,
@@ -1249,6 +1253,7 @@ impl DualPlaneSession {
             path_verify_tasks: VecDeque::new(),
             path_verify_in_flight: BTreeSet::new(),
             printed_path_links: bt_transcript::paths::PrintedPathLinks::default(),
+            printed_path_budget_full: false,
             spawn_directory: None,
             local_image_path_tasks: VecDeque::new(),
             inline_image_scale_tasks: VecDeque::new(),
@@ -1863,6 +1868,9 @@ impl DualPlaneSession {
     /// Returns how many questions this actually raised, so the caller can hand the worker its work
     /// on the same pass instead of waiting for whatever moves next.
     pub fn absorb_printed_path_probes(&mut self, projection: &mut ViewportProjection) -> usize {
+        // Read before the drain empties the set: it is the question of whether the frame had more to
+        // say than it had room for, and it is what makes the next answer worth a frame.
+        self.printed_path_budget_full = projection.printed_path_probes_filled_budget();
         let before = self.path_verify_tasks.len();
         for path in projection.take_printed_path_probes() {
             self.ask_about_path(path);
@@ -1890,16 +1898,22 @@ impl DualPlaneSession {
         self.path_verify_tasks.push_back(path);
     }
 
-    /// Record what the disk said about one printed path, and report whether this pane now draws
-    /// something it did not draw before.
+    /// Record what the disk said about one printed path, and report whether this pane **owes a
+    /// frame** because of the answer.
     ///
     /// `true` is what makes a link appear without the pointer moving: the app republishes on it,
     /// exactly as it does for a formula or a decode landing.
+    ///
+    /// Two things owe a frame, and the second is why this is not simply `exists`. A "yes" changes
+    /// the picture. And a frame that **filled its question budget** has names it never got to report,
+    /// which only another projection can collect — without that arm a screen whose first budget's
+    /// worth of names all come back "no" would end the conversation there and leave a real file
+    /// further down permanently unasked about (§7.1.5j, user report 2026-08-23).
     pub fn complete_path_verification(&mut self, path: PathBuf, exists: bool) -> bool {
         self.path_verify_in_flight.remove(&path);
         self.path_verify_tasks.retain(|queued| *queued != path);
         if self.path_verdicts.get(&path) == Some(&exists) {
-            return false;
+            return self.printed_path_budget_full;
         }
         if self.path_verdicts.insert(path.clone(), exists).is_none() {
             self.path_verdict_order.push_back(path);
@@ -1910,9 +1924,11 @@ impl DualPlaneSession {
             }
         }
         // A "no" changes the ledger but not the picture: nothing was drawn for that name before
-        // the answer and nothing is drawn after it. Only a "yes" is worth a frame.
+        // the answer and nothing is drawn after it. It is still worth a frame when the frame that
+        // asked had more names than it could report — that frame is the only thing that can collect
+        // them, and on a crowded screen it is the whole of how the scan reaches the bottom.
         self.rebuild_printed_path_links();
-        exists
+        exists || self.printed_path_budget_full
     }
 
     /// Whether the disk has told this pane that a printed path is real — the `verified` bit of
@@ -1922,13 +1938,11 @@ impl DualPlaneSession {
     }
 
     fn rebuild_printed_path_links(&mut self) {
+        // The whole ledger travels, both answers in it: a "no" is what stops the projection from
+        // asking about the same dead name on every frame it draws (§7.1.5j).
         self.printed_path_links = bt_transcript::paths::PrintedPathLinks::new(
             self.reference_directory().map(Path::to_path_buf),
-            self.path_verdicts
-                .iter()
-                .filter(|(_, exists)| **exists)
-                .map(|(path, _)| path.clone())
-                .collect(),
+            self.path_verdicts.clone(),
         );
     }
 
@@ -19438,6 +19452,152 @@ mod tests {
         );
 
         std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// PIN (§7.1.5j, user report 2026-08-23) — **a name nobody can reach is never asked about, so
+    /// a real file on a crowded screen never becomes a link.**
+    ///
+    /// The report was one file printed three times on one Claude Code screen, of which one spelling
+    /// wore the mark and two did not — and, a frame later, the same spelling that had been dark lit
+    /// up. All three resolve to the same path, so no lexical difference can account for it: what
+    /// separates them is only **where on the screen they stand**.
+    ///
+    /// One projection pass may report at most `MAX_PRINTED_PATH_PROBES` unanswered names, filled in
+    /// row order. A name already answered "no" is still not in `verified`, so the projection reports
+    /// it as unanswered on every frame for the rest of the session, and on a screen that prints more
+    /// than that many path-shaped words the budget is spent entirely on dead names before the scan
+    /// ever reaches the bottom of the screen. The question is never raised, so the disk never
+    /// answers, so the mark never appears — for as many frames as the program cares to repaint.
+    ///
+    /// The dead names here sort *after* the real one, so lexical order alone would have favoured the
+    /// file that matters; only row order can starve it.
+    ///
+    /// MUTATIONS: raise the budget and this still fails with one more row of noise; report answered
+    /// "no" names as unanswered again and it fails as it did when it was written.
+    #[test]
+    fn a_real_file_low_on_a_crowded_screen_is_still_asked_about() {
+        let (directory, _) = temporary_ordinary_file();
+        let nested = directory.join("sub");
+        std::fs::create_dir(&nested).unwrap();
+        let real = nested.join("notes.md");
+        std::fs::write(&real, b"# notes\n").unwrap();
+
+        let mut session = DualPlaneSession::new(nz(200), nz(60));
+        enable_path_detection(&mut session);
+        let cwd = format!(
+            "\x1b]7;file:///{}\x07",
+            directory.to_string_lossy().replace('\\', "/")
+        );
+        session.feed(cwd.as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+
+        // Fifty-eight rows of path-shaped words that name nothing, then the one file that is real.
+        // Twenty per row is what a tool-calling agent's screen actually looks like, and the total is
+        // several times the per-frame budget.
+        let noise = (0..58u32)
+            .map(|row| {
+                (0..20u32)
+                    .map(|slot| format!("zdead{row:02}{slot:02}/a.md"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join("\r\n");
+
+        for _ in 0..40u32 {
+            session
+                .feed(format!("\x1b[?1049h\x1b[2J\x1b[H{noise}\r\nsub/notes.md\r\n").as_bytes())
+                .unwrap();
+            session.viewport_frame(&mut projection).unwrap();
+            session.absorb_printed_path_probes(&mut projection);
+            while let Some(task) = session.take_decoration_worker_task() {
+                if let SessionDecorationTask::VerifyPath(path) = task {
+                    let exists = path_exists(&path);
+                    session.complete_path_verification(path, exists);
+                }
+            }
+        }
+
+        assert!(
+            session.path_is_verified(&real),
+            "forty repaints and the one real file on the screen was never even asked about"
+        );
+
+        std::fs::remove_file(&real).unwrap();
+        std::fs::remove_dir(&nested).unwrap();
+        std::fs::remove_file(directory.join("notes.md")).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// PIN (§7.1.5j, user report 2026-08-23) — **a screen that has stopped printing still finishes
+    /// asking.**
+    ///
+    /// The sibling of the test above, and the half a repainting program hides. One projection may
+    /// only report a budget's worth of names, so a crowded screen needs several passes to ask about
+    /// all of them — and a pass only happens because something asked for a frame. The app asks for
+    /// one when an answer *changes the picture*, so a whole budget of names that all come back "no"
+    /// would end the conversation with the rest of the screen still unasked. Nothing further is
+    /// printed here and no repaint is fed: the only thing that can carry the scan to the bottom of
+    /// the screen is the frame a filled budget owes.
+    ///
+    /// MUTATIONS: return `exists` alone from `complete_path_verification` and this hangs one budget
+    /// short of the file, while the repainting sibling above still passes.
+    #[test]
+    fn a_screen_that_has_stopped_printing_still_finishes_asking() {
+        let (directory, _) = temporary_ordinary_file();
+        let nested = directory.join("sub");
+        std::fs::create_dir(&nested).unwrap();
+        let real = nested.join("notes.md");
+        std::fs::write(&real, b"# notes\n").unwrap();
+
+        let mut session = DualPlaneSession::new(nz(200), nz(60));
+        enable_path_detection(&mut session);
+        let cwd = format!(
+            "\x1b]7;file:///{}\x07",
+            directory.to_string_lossy().replace('\\', "/")
+        );
+        session.feed(cwd.as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+
+        let noise = (0..58u32)
+            .map(|row| {
+                (0..20u32)
+                    .map(|slot| format!("zdead{row:02}{slot:02}/a.md"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        // Printed **once**. Every frame after this one happens only because the pane asked for it.
+        session
+            .feed(format!("\x1b[?1049h\x1b[2J\x1b[H{noise}\r\nsub/notes.md\r\n").as_bytes())
+            .unwrap();
+
+        let mut owed = true;
+        let mut frames = 0u32;
+        while owed && frames < 40 {
+            frames += 1;
+            session.viewport_frame(&mut projection).unwrap();
+            session.absorb_printed_path_probes(&mut projection);
+            owed = false;
+            while let Some(task) = session.take_decoration_worker_task() {
+                if let SessionDecorationTask::VerifyPath(path) = task {
+                    let exists = path_exists(&path);
+                    owed |= session.complete_path_verification(path, exists);
+                }
+            }
+        }
+
+        assert!(
+            session.path_is_verified(&real),
+            "the screen stopped printing with the bottom of it still unasked about, after \
+             {frames} frames"
+        );
+
+        std::fs::remove_file(&real).unwrap();
+        std::fs::remove_dir(&nested).unwrap();
+        std::fs::remove_file(directory.join("notes.md")).unwrap();
         std::fs::remove_dir(&directory).unwrap();
     }
 

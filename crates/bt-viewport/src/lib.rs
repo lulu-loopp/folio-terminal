@@ -1560,6 +1560,24 @@ impl ViewportProjection {
         }
     }
 
+    /// Whether the last projection filled its question budget, so this frame may have seen names it
+    /// had no room to report.
+    ///
+    /// **A frame that could not ask everything it wanted is owed another frame.** The conversation
+    /// between this pane and its worker is otherwise driven only by *affirmative* answers — a "yes"
+    /// changes the picture and the app republishes on it — so on a screen where a whole budget's
+    /// worth of names all come back "no", nothing would redraw, the projection would never run
+    /// again, and the names that did not fit would stay unasked for as long as the screen stood
+    /// still (§7.1.5j, user report 2026-08-23).
+    ///
+    /// Read **before** draining, and conservative by construction: a frame with exactly a budget's
+    /// worth of unknowns and no more costs one extra projection. It cannot spin, because every round
+    /// answers what it asked and an answered name is never reported again.
+    #[must_use]
+    pub fn printed_path_probes_filled_budget(&self) -> bool {
+        self.printed_path_probes.len() >= MAX_PRINTED_PATH_PROBES
+    }
+
     /// Take the printed paths this pane drew and could not answer for. Draining is how the question
     /// reaches a worker, and it empties the set so the next frame asks only about what it itself
     /// could not answer.
@@ -4473,7 +4491,7 @@ mod tests {
     use super::*;
     use bt_doc::{Bias, GridGeneration, GridPoint, ScreenId};
     use bt_transcript::{CapturedRow, GraphemeOffset, StagingId, TranscriptStore};
-    use std::{num::NonZeroU32, num::NonZeroUsize, path::Path};
+    use std::{collections::BTreeMap, num::NonZeroU32, num::NonZeroUsize, path::Path};
 
     fn nz32(value: u32) -> NonZeroU32 {
         NonZeroU32::new(value).unwrap()
@@ -5404,7 +5422,10 @@ mod tests {
     fn verified(paths: &[&str]) -> PrintedPathLinks {
         PrintedPathLinks::new(
             Some(PathBuf::from("D:\\src")),
-            paths.iter().map(PathBuf::from).collect(),
+            paths
+                .iter()
+                .map(|path| (PathBuf::from(path), true))
+                .collect(),
         )
     }
 
@@ -5696,7 +5717,10 @@ mod tests {
     fn a_relative_reference_needs_a_reported_directory() {
         let (frame, probes) = live_frame_of_paths(
             live_rows_of("./a.md docs/b.md", 40, 3),
-            PrintedPathLinks::new(None, BTreeSet::from([PathBuf::from("D:\\src\\a.md")])),
+            PrintedPathLinks::new(
+                None,
+                BTreeMap::from([(PathBuf::from("D:\\src\\a.md"), true)]),
+            ),
         );
         assert!(
             frame.hyperlink_at(0, 0).is_none(),
