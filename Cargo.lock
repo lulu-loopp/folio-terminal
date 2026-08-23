@@ -265,6 +265,7 @@ dependencies = [
  "bt-transcript",
  "bt-unicode",
  "bt-viewport",
+ "image",
  "pollster",
  "serde_json",
  "syntect",

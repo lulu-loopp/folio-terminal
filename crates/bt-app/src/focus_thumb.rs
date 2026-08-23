@@ -206,6 +206,23 @@ enum Damage {
     /// A face: the two words on it. There is nothing behind them to have a
     /// generation, so they *are* the generation.
     Face { name: String, kind: String },
+    /// **A page's last frame** — how many frames this seat has had, and the box
+    /// it is drawn in (W2 slice ⑥, §7.11).
+    ///
+    /// The serial and *not* the pixels: `web_thumb` bumps it once per picture
+    /// stored, so a card re-projects when the frame is replaced and on no other
+    /// occasion. Comparing the bytes would be a megabyte-wide memcmp on every
+    /// frame of every visible card to answer a question a counter already
+    /// answers, and comparing the `Arc` would make "the same picture, moved" and
+    /// "a new picture" the same event.
+    ///
+    /// **No rectangle**, unlike every other variant here, and the exception is
+    /// exact rather than an oversight: a projected *row* has to be re-cut when
+    /// its box changes, and a texture does not — the painter is handed the box
+    /// the card gives it this frame and the picture is sampled into it. A card
+    /// that grew therefore draws a bigger picture without rebuilding anything,
+    /// which is the whole difference between pixels and rows.
+    Page { key: String },
 }
 
 /// **A directory one card's files seat had nothing in memory to draw** (user
@@ -310,6 +327,22 @@ pub enum SeatSource<'a> {
     /// screen at once, which is what makes it cheap enough to be the honest
     /// shape.
     Face { name: String, kind: String },
+    /// **A web seat with a frame in hand** (W2 slice ⑥, §7.11).
+    ///
+    /// The one variant whose content this module did not compute and cannot: a
+    /// page's pixels come from `ICoreWebView2::CapturePreview`, arrive tens of
+    /// milliseconds after they are asked for, and exist **only while the page is
+    /// on the glass** — a hidden WebView never answers at all. So `web_thumb`
+    /// owns the asking and the keeping, and what reaches the projection is the
+    /// frame it already has.
+    ///
+    /// A web seat with **no** frame does not reach this variant. It is a
+    /// [`Self::Face`], exactly as it was before this slice, and that is the
+    /// honest picture rather than a fallback: there is nothing to draw, because
+    /// nothing has ever been on that glass while anybody was looking.
+    Page {
+        picture: &'a crate::web_thumb::Picture,
+    },
 }
 
 /// One seat of one visible card, and how wide its own rectangle is in characters.
@@ -539,6 +572,9 @@ impl SeatDemand<'_> {
                 name: name.clone(),
                 kind: kind.clone(),
             },
+            SeatSource::Page { picture } => Damage::Page {
+                key: picture.key.clone(),
+            },
         }
     }
 
@@ -582,6 +618,18 @@ impl SeatDemand<'_> {
                 MiniSeatContent::Face {
                     name: name.clone(),
                     kind: kind.clone(),
+                },
+                Vec::new(),
+            ),
+            // The cheapest projection in the module: two `Arc` clones and a
+            // string. The expensive half of a page's card happened on another
+            // thread two seconds ago.
+            SeatSource::Page { picture } => (
+                MiniSeatContent::Page {
+                    key: picture.key.clone(),
+                    rgba: std::sync::Arc::clone(&picture.rgba),
+                    width_px: picture.width_px,
+                    height_px: picture.height_px,
                 },
                 Vec::new(),
             ),
@@ -636,9 +684,15 @@ impl SeatSource<'_> {
     pub fn metrics(&self) -> MiniMetrics {
         match self {
             Self::Terminal { .. } | Self::Document { mono: true, .. } => MiniMetrics::TERM,
-            Self::Files { .. } | Self::Document { mono: false, .. } | Self::Face { .. } => {
-                MiniMetrics::FACE
-            }
+            // A picture has no rows and no columns, and the answer it gives here
+            // is only ever spent on the two counts it does not use. The window's
+            // face, because that is what every seat this module cannot quote
+            // answers — and because a page whose picture is dropped becomes a
+            // `Face`, which must not change its own measurements on the way.
+            Self::Files { .. }
+            | Self::Document { mono: false, .. }
+            | Self::Face { .. }
+            | Self::Page { .. } => MiniMetrics::FACE,
         }
     }
 }
@@ -1998,6 +2052,130 @@ mod tests {
                 name: "notes.md".to_owned(),
                 kind: "MD".to_owned(),
             })
+        );
+    }
+
+    /// One page's last frame, as the store would hand it over.
+    fn a_frame(key: &str) -> crate::web_thumb::Picture {
+        crate::web_thumb::Picture {
+            key: key.to_owned(),
+            rgba: std::sync::Arc::from(vec![0x40; 8 * 8 * 4]),
+            width_px: 8,
+            height_px: 8,
+        }
+    }
+
+    /// **Red gate (W2 slice ⑥): a web seat with a frame draws the frame, and a
+    /// web seat without one is the face it always was.**
+    ///
+    /// The second half is the one that matters: `mini_source` hands `None` for a
+    /// page nobody has photographed, and every arm below it then runs exactly as
+    /// it did before this slice — `PreviewView::Web` has no lines to quote, so
+    /// the seat is a face. That is the honest picture, not a fallback.
+    #[test]
+    fn a_page_with_a_frame_draws_it_and_a_page_without_one_stays_a_face() {
+        let picture = a_frame("web-thumb:1:1");
+        let mut thumbs = FocusThumbnails::default();
+        thumbs.project(
+            tab(1),
+            &[SeatDemand {
+                id: seat(1),
+                columns: 40,
+                rows: 12,
+                source: SeatSource::Page { picture: &picture },
+            }],
+            Instant::now(),
+        );
+        assert_eq!(
+            shown(&thumbs),
+            Some(&MiniSeatContent::Page {
+                key: "web-thumb:1:1".to_owned(),
+                rgba: std::sync::Arc::from(vec![0x40; 8 * 8 * 4]),
+                width_px: 8,
+                height_px: 8,
+            })
+        );
+
+        let mut unphotographed = FocusThumbnails::default();
+        unphotographed.project(
+            tab(1),
+            &[SeatDemand {
+                id: seat(1),
+                columns: 40,
+                rows: 12,
+                source: SeatSource::Face {
+                    name: "127.0.0.1:8080".to_owned(),
+                    kind: "Page".to_owned(),
+                },
+            }],
+            Instant::now(),
+        );
+        assert_eq!(
+            shown(&unphotographed),
+            Some(&MiniSeatContent::Face {
+                name: "127.0.0.1:8080".to_owned(),
+                kind: "Page".to_owned(),
+            })
+        );
+    }
+
+    /// **Red gate: gate 3 answers a page on its picture's identity and on
+    /// nothing else.**
+    ///
+    /// The picture is a megabyte and the card is asked about it sixty times a
+    /// second, so the damage key has to be a string comparison rather than the
+    /// pixels. A frame that has not been replaced re-projects nothing; a
+    /// replacement re-projects once.
+    #[test]
+    fn a_page_re_projects_when_its_frame_is_replaced_and_never_otherwise() {
+        let picture = a_frame("web-thumb:1:1");
+        let mut thumbs = FocusThumbnails::default();
+        let start = Instant::now();
+        thumbs.project(
+            tab(1),
+            &[SeatDemand {
+                id: seat(1),
+                columns: 40,
+                rows: 12,
+                source: SeatSource::Page { picture: &picture },
+            }],
+            start,
+        );
+        assert_eq!(thumbs.stats().projections, 1);
+        for frame in 1..30 {
+            thumbs.project(
+                tab(1),
+                &[SeatDemand {
+                    id: seat(1),
+                    columns: 40,
+                    rows: 12,
+                    source: SeatSource::Page { picture: &picture },
+                }],
+                start + MIN_INTERVAL * frame,
+            );
+        }
+        assert_eq!(
+            thumbs.stats().projections,
+            1,
+            "a still page re-projected its card"
+        );
+        assert_eq!(thumbs.stats().skipped_unchanged, 29);
+
+        let replaced = a_frame("web-thumb:1:2");
+        thumbs.project(
+            tab(1),
+            &[SeatDemand {
+                id: seat(1),
+                columns: 40,
+                rows: 12,
+                source: SeatSource::Page { picture: &replaced },
+            }],
+            start + MIN_INTERVAL * 30,
+        );
+        assert_eq!(
+            thumbs.stats().projections,
+            2,
+            "a fresh frame did not reach the card"
         );
     }
 

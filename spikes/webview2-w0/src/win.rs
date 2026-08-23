@@ -23,7 +23,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW,
     GetClientRect, GetForegroundWindow, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage,
-    RegisterClassW, SW_SHOW, SetForegroundWindow, ShowWindow, TranslateMessage, WM_CHAR,
+    RegisterClassW, SW_SHOW, SW_SHOWNOACTIVATE, SetForegroundWindow, ShowWindow, TranslateMessage,
+    WM_CHAR,
     WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
     WNDCLASSW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
@@ -51,6 +52,18 @@ thread_local! {
     /// the pump sees: only what was dispatched to this class.
     static WNDPROC_KEYS: RefCell<Vec<KeyMessage>> = const { RefCell::new(Vec::new()) };
     static DPI_CHANGES: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Whether this run is allowed to take the foreground.
+///
+/// Every input gate needs it and says so by leaving this alone. The one that
+/// does not is the slice 6 measurement, which injects no key and no click and
+/// therefore has no business pulling a window out from under whoever is using
+/// the machine.
+static TAKE_FOREGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn leave_the_foreground_alone() {
+    TAKE_FOREGROUND.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn clear_wndproc_keys() {
@@ -134,9 +147,13 @@ impl HostWindow {
                 None,
             )
             .context("CreateWindowExW")?;
-            let _ = ShowWindow(hwnd, SW_SHOW);
-            let _ = SetForegroundWindow(hwnd);
-            let _ = SetFocus(Some(hwnd));
+            if TAKE_FOREGROUND.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = ShowWindow(hwnd, SW_SHOW);
+                let _ = SetForegroundWindow(hwnd);
+                let _ = SetFocus(Some(hwnd));
+            } else {
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
             Ok(Self { hwnd })
         }
     }

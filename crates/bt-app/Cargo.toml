@@ -29,6 +29,12 @@ bt-term = { path = "../bt-term" }
 bt-transcript = { path = "../bt-transcript" }
 bt-unicode = { path = "../bt-unicode" }
 bt-viewport = { path = "../bt-viewport" }
+# The one decoder this crate needs of its own: `ICoreWebView2::CapturePreview`
+# hands a page's picture over as an encoded PNG and offers no other shape, so a
+# focus card that draws a page has to decode one (W2 slice 6, `web_thumb`). The
+# terminal's inline-image lane decodes on `bt-term`'s own worker and is keyed by
+# file path; a page has no file.
+image.workspace = true
 pollster.workspace = true
 syntect.workspace = true
 two-face.workspace = true

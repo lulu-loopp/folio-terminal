@@ -43,7 +43,7 @@ use webview2_com::Microsoft::Web::WebView2::Win32::*;
 // this file mean something else.
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, BrowserProcessExitedEventHandler,
-    CreateCoreWebView2CompositionControllerCompletedHandler,
+    CapturePreviewCompletedHandler, CreateCoreWebView2CompositionControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, CursorChangedEventHandler,
     DocumentTitleChangedEventHandler, DownloadStartingEventHandler,
     FindActiveMatchIndexChangedEventHandler, FindMatchCountChangedEventHandler,
@@ -225,6 +225,19 @@ pub enum WebEvent {
     FindMatches {
         count: i32,
         active: i32,
+    },
+    /// **A `CapturePreview` finished** — the encoded PNG of the page's viewport,
+    /// or `None` if the engine refused or the stream could not be read
+    /// (W2 slice ⑥).
+    ///
+    /// It arrives as an event rather than as a return value for the reason every
+    /// other line of this file does: the answer comes back tens of milliseconds
+    /// later on the engine's own clock, and the window has a frame to finish.
+    /// The `Option` is the whole of the failure vocabulary, because a picture
+    /// that did not arrive has exactly one consequence for the caller — the seat
+    /// still shows the last one it had.
+    Captured {
+        png: Option<Vec<u8>>,
     },
 }
 
@@ -1354,6 +1367,62 @@ impl WebHost {
         .map_err(|error| failure(&format!("SendMouseInput({})", event.name()), &error))
     }
 
+    /// **Ask the engine for a picture of what is on its glass** (W2 slice ⑥).
+    ///
+    /// `CapturePreview` is the only pixel channel the SDK offers a hosted page
+    /// (`plan.md` §1's second row), and it has three properties this signature is
+    /// shaped around:
+    ///
+    /// * **It is asynchronous, and the wait is not the caller's to make.** The
+    ///   measured latency is 33–85 ms depending on the viewport
+    ///   (`w0p-evidence` gate 11), and a window that pumped its own messages
+    ///   until the answer came would run the whole application re-entrantly —
+    ///   the same reason nothing else in this file blocks. So this returns the
+    ///   moment the ask is made, and the picture arrives later as
+    ///   [`WebEvent::Captured`]. The synchronous half measured **0.115 ms**,
+    ///   which is what the caller's frame actually pays.
+    /// * **It has no size parameter.** What comes back is the viewport, at the
+    ///   size the controller was last given. Anything smaller is the caller's
+    ///   resample.
+    /// * **A hidden WebView never answers at all.** Measured three times across
+    ///   two re-verification runs: the completion handler is not called and the
+    ///   ask simply hangs. So the caller must not ask unless the page is on the
+    ///   glass, and this cannot check that for it — `SetIsVisible` is state the
+    ///   caller owns.
+    ///
+    /// PNG rather than JPEG: the two encode at the same speed (63.9 ms against
+    /// 64.0 at pane size) and one of them is lossless.
+    pub fn capture_preview(&self) -> Result<(), String> {
+        use windows::Win32::Foundation::HGLOBAL;
+        use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
+        let Some(webview) = self.webview.as_ref() else {
+            return Ok(());
+        };
+        let stream = unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), true) }
+            .map_err(|error| failure("CreateStreamOnHGlobal", &error))?;
+        let shared = Rc::clone(&self.shared);
+        // The stream is moved into the handler rather than kept here: the only
+        // moment its bytes are wanted is the moment the engine says it has
+        // finished writing them, and a stream held on `self` would be a second
+        // owner of a buffer whose life is exactly one call long.
+        let sink = stream.clone();
+        let handler = CapturePreviewCompletedHandler::create(Box::new(
+            move |result: windows::core::Result<()>| {
+                let png = result.ok().and_then(|()| read_stream(&sink));
+                shared.push(WebEvent::Captured { png });
+                Ok(())
+            },
+        ));
+        unsafe {
+            webview.CapturePreview(
+                COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+                &stream,
+                &handler,
+            )
+        }
+        .map_err(|error| failure("CapturePreview", &error))
+    }
+
     /// Close a controller that arrived for a generation nobody wants any more.
     ///
     /// **Closed and not simply dropped.** The controller is real and running:
@@ -1381,6 +1450,31 @@ impl WebHost {
         self.composition = None;
         self.webview = None;
     }
+}
+
+/// Everything an `IStream` holds, from its start.
+///
+/// `None` rather than an error string: the one caller is a completion handler,
+/// which has nowhere to report to and one thing to say — there is a picture, or
+/// there is not.
+fn read_stream(stream: &windows::Win32::System::Com::IStream) -> Option<Vec<u8>> {
+    use windows::Win32::System::Com::{STREAM_SEEK_END, STREAM_SEEK_SET};
+    let mut length = 0u64;
+    unsafe { stream.Seek(0, STREAM_SEEK_END, Some(&mut length)) }.ok()?;
+    unsafe { stream.Seek(0, STREAM_SEEK_SET, None) }.ok()?;
+    let mut bytes = vec![0u8; usize::try_from(length).ok()?];
+    let mut read = 0u32;
+    unsafe {
+        stream.Read(
+            bytes.as_mut_ptr().cast(),
+            u32::try_from(bytes.len()).ok()?,
+            Some(&mut read),
+        )
+    }
+    .ok()
+    .ok()?;
+    bytes.truncate(read as usize);
+    Some(bytes)
 }
 
 /// Which modifiers are physically down right now.

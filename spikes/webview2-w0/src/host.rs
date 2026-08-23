@@ -828,9 +828,160 @@ impl Host {
         Ok(elapsed)
     }
 
+    /// `CapturePreview` into **memory**, with the two clocks kept apart.
+    ///
+    /// [`Self::capture_preview`] answers one number — how long the engine takes
+    /// to hand a picture back — and that number is a *latency*. A caller with a
+    /// frame budget needs the other one: how much of its own thread the ask
+    /// costs. So this method times the synchronous call on its own, times the
+    /// wait separately, and reads the bytes out of an `HGLOBAL` stream rather
+    /// than a file, because a thumbnail that went through the disk would be
+    /// measuring the disk.
+    pub fn capture_preview_to_memory(
+        &self,
+        format: COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT,
+        timeout: Duration,
+    ) -> Result<CaptureTiming> {
+        use windows::Win32::Foundation::HGLOBAL;
+        use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
+        use windows::Win32::System::Com::{STREAM_SEEK_END, STREAM_SEEK_SET};
+        let stream = unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), true) }
+            .context("CreateStreamOnHGlobal")?;
+        let done: Rc<RefCell<Option<Duration>>> = Rc::new(RefCell::new(None));
+        let sink = Rc::clone(&done);
+        let started = Instant::now();
+        let handler = CapturePreviewCompletedHandler::create(Box::new(move |result| {
+            result?;
+            *sink.borrow_mut() = Some(started.elapsed());
+            Ok(())
+        }));
+        let issued = Instant::now();
+        unsafe {
+            self.webview
+                .CapturePreview(format, &stream, &handler)
+                .context("CapturePreview")?;
+        }
+        let issue = issued.elapsed();
+        crate::win::pump_until(timeout, || done.borrow().is_some());
+        let complete = done
+            .borrow_mut()
+            .take()
+            .context("CapturePreview did not complete inside the timeout")?;
+        let read_started = Instant::now();
+        let mut length = 0u64;
+        unsafe { stream.Seek(0, STREAM_SEEK_END, Some(&mut length)) }.context("Seek(end)")?;
+        unsafe { stream.Seek(0, STREAM_SEEK_SET, None) }.context("Seek(set)")?;
+        let mut bytes = vec![0u8; length as usize];
+        let mut read = 0u32;
+        unsafe {
+            stream.Read(
+                bytes.as_mut_ptr().cast(),
+                bytes.len() as u32,
+                Some(&mut read),
+            )
+        }
+        .ok()
+        .context("Read")?;
+        bytes.truncate(read as usize);
+        let read_back = read_started.elapsed();
+        drop(stream);
+        Ok(CaptureTiming {
+            issue,
+            complete,
+            read_back,
+            bytes,
+        })
+    }
+
+    /// Start a `CapturePreview` and **do not wait for it**.
+    ///
+    /// The shape a window can actually use: the ask is made on one frame, the
+    /// frame ends, and the answer lands on whatever later pump the completion
+    /// happens to fall in. [`Self::capture_preview_to_memory`] blocks, which is
+    /// the arrangement no frame loop can have, and measuring only that one would
+    /// price a design nobody would build.
+    pub fn begin_capture_preview(
+        &self,
+        format: COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT,
+    ) -> Result<CaptureInFlight> {
+        use windows::Win32::Foundation::HGLOBAL;
+        use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
+        let stream = unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), true) }
+            .context("CreateStreamOnHGlobal")?;
+        let done: Rc<RefCell<Option<Duration>>> = Rc::new(RefCell::new(None));
+        let sink = Rc::clone(&done);
+        let started = Instant::now();
+        let handler = CapturePreviewCompletedHandler::create(Box::new(move |result| {
+            result?;
+            *sink.borrow_mut() = Some(started.elapsed());
+            Ok(())
+        }));
+        let issued = Instant::now();
+        unsafe {
+            self.webview
+                .CapturePreview(format, &stream, &handler)
+                .context("CapturePreview")?;
+        }
+        Ok(CaptureInFlight {
+            issue: issued.elapsed(),
+            done,
+            stream,
+        })
+    }
+
     pub fn close(&self) {
         let _ = unsafe { self.controller.Close() };
     }
+}
+
+/// A capture that has been asked for and not yet answered.
+pub struct CaptureInFlight {
+    /// What the ask cost the asking thread.
+    pub issue: Duration,
+    done: Rc<RefCell<Option<Duration>>>,
+    stream: windows::Win32::System::Com::IStream,
+}
+
+impl CaptureInFlight {
+    /// The latency, once the completion handler has run — `None` while it has
+    /// not. Asked on the frame clock, which is the only clock a window has.
+    pub fn settled(&self) -> Option<Duration> {
+        *self.done.borrow()
+    }
+
+    /// The encoded bytes, read out of the stream. Only meaningful once
+    /// [`Self::settled`] has answered.
+    pub fn bytes(&self) -> Result<Vec<u8>> {
+        use windows::Win32::System::Com::{STREAM_SEEK_END, STREAM_SEEK_SET};
+        let mut length = 0u64;
+        unsafe { self.stream.Seek(0, STREAM_SEEK_END, Some(&mut length)) }.context("Seek(end)")?;
+        unsafe { self.stream.Seek(0, STREAM_SEEK_SET, None) }.context("Seek(set)")?;
+        let mut bytes = vec![0u8; length as usize];
+        let mut read = 0u32;
+        unsafe {
+            self.stream.Read(
+                bytes.as_mut_ptr().cast(),
+                bytes.len() as u32,
+                Some(&mut read),
+            )
+        }
+        .ok()
+        .context("Read")?;
+        bytes.truncate(read as usize);
+        Ok(bytes)
+    }
+}
+
+/// One `CapturePreview`, in the three clocks a frame budget cares about.
+pub struct CaptureTiming {
+    /// The synchronous call: what the asking thread actually pays to ask.
+    pub issue: Duration,
+    /// Ask to completion handler — the engine's latency, and the number the
+    /// pixel matrix already recorded.
+    pub complete: Duration,
+    /// Getting the encoded bytes back out of the stream afterwards.
+    pub read_back: Duration,
+    pub bytes: Vec<u8>,
 }
 
 // ── Mouse and pointer forwarding ───────────────────────────────────────────
