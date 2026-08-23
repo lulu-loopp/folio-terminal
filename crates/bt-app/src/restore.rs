@@ -1901,6 +1901,284 @@ pub fn gate_build(
     }]
 }
 
+// ── the quit summary card (multiwindow slice E2, §2.9) ──────────────────────
+//
+// The fourth dialog on this surface and the fourth of one craft: the same
+// `push_float_window` face, the same `.btn` row, the same padding, the same
+// wrap. It is here rather than in `quit.rs` for the reason the gate is here
+// rather than in `preview_edit.rs` — the geometry constants above are this
+// module's and `push_button` / `push_float_window` are private to it. `quit.rs`
+// owns everything this card is *about*: the order of the phases, the verdicts,
+// and the bound on the wait.
+//
+// **Two things differ from the gate, and both are why this is not a fifth
+// `GateRequest`.** It has three answers rather than two, because a reader who
+// does not want to lose the work has somewhere else to go than "not now"; and
+// it is the *application's* question rather than one window's, so the list it
+// names is collected once across every window (see [`crate::quit::Quit`]) rather
+// than re-derived from a pool every frame.
+
+/// Everything the summary card draws that had to be measured with a real font.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QuitContent {
+    /// [`crate::i18n::quit_unsaved_message`], already broken to lines that fit
+    /// [`content_width`].
+    pub message_lines: Vec<String>,
+    pub save_text_width: f32,
+    pub cancel_text_width: f32,
+    pub discard_text_width: f32,
+}
+
+/// Every rectangle the summary card draws and hit-tests.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuitLayout {
+    scale: f32,
+    frame: [f32; 4],
+    title: [f32; 4],
+    message: Vec<(String, [f32; 4])>,
+    save: [f32; 4],
+    cancel: [f32; 4],
+    discard: [f32; 4],
+}
+
+#[must_use]
+pub fn quit_title_text() -> &'static str {
+    crate::i18n::Text::QuitTitle.text()
+}
+
+/// The word on the button that writes everything back.
+#[must_use]
+pub fn quit_save_text() -> &'static str {
+    crate::i18n::Text::QuitSave.text()
+}
+
+/// Where every part of the card lands in a window this size.
+///
+/// [`gate_layout`]'s arithmetic with one more button in the row. The two the
+/// gate already had keep their places — `Discard` hard right and `Cancel` beside
+/// it — and `Save` goes to the *left* of the pair rather than displacing either:
+/// a reader who has met this window's gate knows where "change nothing" is, and
+/// moving it to make room for a third answer would be the price of the third
+/// answer being paid by the second.
+#[must_use]
+pub fn quit_layout(
+    content: &QuitContent,
+    surface_width: f32,
+    surface_height: f32,
+    scale: f32,
+) -> QuitLayout {
+    let px = |value: f32| value * scale;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let width = dialog_width(surface_width, scale);
+    let button_height =
+        2.0 * border + px(2.0 * BUTTON_PADDING_Y_LOGICAL_PX + BUTTON_LINE_LOGICAL_PX);
+    let height = (2.0 * border
+        + px(DIALOG_PADDING_TOP_LOGICAL_PX)
+        + px(TITLE_LINE_LOGICAL_PX + TITLE_MARGIN_BOTTOM_LOGICAL_PX)
+        + content.message_lines.len() as f32 * px(SUB_LINE_LOGICAL_PX)
+        + px(SUB_MARGIN_BOTTOM_LOGICAL_PX)
+        + button_height
+        + px(DIALOG_PADDING_BOTTOM_LOGICAL_PX))
+    .round();
+
+    let left = ((surface_width - width) / 2.0).round();
+    let top = ((surface_height - height) / 2.0).round();
+    let frame = [left, top, left + width, top + height];
+
+    let content_left = frame[0] + border + px(DIALOG_PADDING_X_LOGICAL_PX);
+    let content_right = frame[2] - border - px(DIALOG_PADDING_X_LOGICAL_PX);
+    let mut cursor = frame[1] + border + px(DIALOG_PADDING_TOP_LOGICAL_PX);
+    let title = [
+        content_left,
+        cursor,
+        content_right,
+        cursor + px(TITLE_LINE_LOGICAL_PX),
+    ];
+    cursor = title[3] + px(TITLE_MARGIN_BOTTOM_LOGICAL_PX);
+    let message = content
+        .message_lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let line_top = cursor + index as f32 * px(SUB_LINE_LOGICAL_PX);
+            (
+                line.clone(),
+                [
+                    content_left,
+                    line_top,
+                    content_right,
+                    line_top + px(SUB_LINE_LOGICAL_PX),
+                ],
+            )
+        })
+        .collect();
+    cursor += content.message_lines.len() as f32 * px(SUB_LINE_LOGICAL_PX)
+        + px(SUB_MARGIN_BOTTOM_LOGICAL_PX);
+
+    let button_width =
+        |text_width: f32| 2.0 * border + 2.0 * px(BUTTON_PADDING_X_LOGICAL_PX) + text_width;
+    let discard = [
+        content_right - button_width(content.discard_text_width),
+        cursor,
+        content_right,
+        cursor + button_height,
+    ];
+    let cancel = [
+        discard[0] - px(ACTIONS_GAP_LOGICAL_PX) - button_width(content.cancel_text_width),
+        cursor,
+        discard[0] - px(ACTIONS_GAP_LOGICAL_PX),
+        cursor + button_height,
+    ];
+    let save = [
+        cancel[0] - px(ACTIONS_GAP_LOGICAL_PX) - button_width(content.save_text_width),
+        cursor,
+        cancel[0] - px(ACTIONS_GAP_LOGICAL_PX),
+        cursor + button_height,
+    ];
+    QuitLayout {
+        scale,
+        frame,
+        title,
+        message,
+        save,
+        cancel,
+        discard,
+    }
+}
+
+/// The three buttons' rectangles, left to right, for the test that pins their
+/// order.
+///
+/// Test-only: the window draws them out of the layout it was handed and hit-tests
+/// them through [`quit_hit`], so nothing the product does needs to read them
+/// separately.
+#[cfg(test)]
+#[must_use]
+pub fn quit_button_rects(layout: &QuitLayout) -> ([f32; 4], [f32; 4], [f32; 4]) {
+    (layout.save, layout.cancel, layout.discard)
+}
+
+/// What a point is over. **Always an answer**, on [`gate_hit`]'s own rule: this
+/// card is modal, so a press outside it is still the card's and is swallowed.
+#[must_use]
+pub fn quit_hit(layout: &QuitLayout, x: f64, y: f64) -> crate::quit::QuitTarget {
+    use crate::quit::QuitTarget;
+    let (x, y) = (x as f32, y as f32);
+    if contains(layout.save, x, y) {
+        return QuitTarget::Save;
+    }
+    if contains(layout.cancel, x, y) {
+        return QuitTarget::Cancel;
+    }
+    if contains(layout.discard, x, y) {
+        return QuitTarget::Discard;
+    }
+    QuitTarget::Panel
+}
+
+/// The answer a press on `target` gives, if it gives one at all.
+#[must_use]
+pub fn quit_answer(target: crate::quit::QuitTarget) -> Option<crate::quit::QuitAnswer> {
+    use crate::quit::{QuitAnswer, QuitTarget};
+    match target {
+        QuitTarget::Save => Some(QuitAnswer::Save),
+        QuitTarget::Discard => Some(QuitAnswer::Discard),
+        QuitTarget::Cancel => Some(QuitAnswer::Cancel),
+        QuitTarget::Panel => None,
+    }
+}
+
+/// The card as one overlay layer, **scrim and all**.
+///
+/// **No button is painted in the accent**, `Save` included, which is the gate's
+/// discipline read for a third answer: an accent is this window recommending
+/// one, and the one it would be recommending is the one that writes to the disk
+/// on the way out of a session the reader may have meant to abandon. Enter
+/// presses `Cancel` here exactly as it does on the gate.
+#[must_use]
+pub fn quit_build(
+    layout: &QuitLayout,
+    surface: (f32, f32),
+    hover: Option<crate::quit::QuitTarget>,
+) -> Vec<OverlayLayer> {
+    use crate::quit::QuitTarget;
+    let palette = chrome_palette();
+    let scale = layout.scale;
+    let px = |value: f32| value * scale;
+    let alpha = |value: u8| f32::from(value) / 255.0;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let mut quads = vec![OverlayQuad {
+        rect: [0.0, 0.0, surface.0, surface.1],
+        color: palette.modal_scrim,
+        alpha: alpha(palette.modal_scrim_alpha),
+    }];
+    let mut labels = Vec::new();
+
+    push_float_window(
+        &mut quads,
+        layout.frame,
+        px(FLOAT_WINDOW_RADIUS_LOGICAL_PX),
+        border,
+        px(FLOAT_WINDOW_SHADOW_LOGICAL_PX),
+        palette.dialog_surface,
+        palette.menu_shadow,
+        alpha(palette.menu_shadow_inner_alpha),
+        alpha(palette.menu_shadow_outer_alpha),
+        palette.menu_border,
+        alpha(palette.menu_border_alpha),
+    );
+    labels.push(ChromeLabel {
+        mono: false,
+        text: quit_title_text().to_owned(),
+        rect: layout.title,
+        font_size_px: px(TITLE_FONT_LOGICAL_PX),
+        color: palette.dialog_title_text,
+        align_right: false,
+        align_center: false,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::SemiBold,
+        tabular_numerals: false,
+        clip: None,
+    });
+    for (text, rect) in &layout.message {
+        labels.push(ChromeLabel {
+            mono: false,
+            text: text.clone(),
+            rect: *rect,
+            font_size_px: px(SUB_FONT_LOGICAL_PX),
+            color: palette.dialog_secondary_text,
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        });
+    }
+    for (rect, text, target) in [
+        (layout.save, quit_save_text(), QuitTarget::Save),
+        (layout.cancel, gate_cancel_text(), QuitTarget::Cancel),
+        (layout.discard, gate_discard_text(), QuitTarget::Discard),
+    ] {
+        push_button(
+            &mut quads,
+            &mut labels,
+            rect,
+            text,
+            false,
+            hover == Some(target),
+            scale,
+            border,
+            palette,
+        );
+    }
+    vec![OverlayLayer {
+        quads,
+        labels,
+        ..Default::default()
+    }]
+}
+
 // ── the PSReadLine invitation (§7.1.6c-3b) ──────────────────────────────────
 //
 // The third dialog on this surface and the third of one craft: the same

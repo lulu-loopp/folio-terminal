@@ -1468,6 +1468,28 @@ pub enum Text {
     /// 2026-08-23; `docs/DESIGN.md` §7.10 ⑥). The card cannot draw a page, so it
     /// says what the row does instead of what the card cannot do.
     PeekOpensAsPage,
+    /// **`Quit` — the shortcut row's own name** (multiwindow slice E2).
+    ///
+    /// Not `Close window`: that row already exists three lines up in this table
+    /// and means the other thing. This one takes the whole application with it.
+    ShortcutQuit,
+    /// The summary card's question (§2.9).
+    ///
+    /// It names the moment — *before quitting* — because that is the whole of
+    /// what separates this card from the shut gate a reader has met before: the
+    /// gate stands in front of one window and this one stands in front of the
+    /// process.
+    QuitTitle,
+    /// The word on the button that writes everything back before leaving.
+    QuitSave,
+    /// **The card a quit that could not write `session.json` raises** (slice E2
+    /// phase ③).
+    ///
+    /// Two facts and no advice: the file did not go down, and nothing was closed.
+    /// The second half is the one a reader cannot see — the windows are still
+    /// there, so the only way to know the quit did not silently half-happen is to
+    /// be told.
+    QuitSessionNotWritten,
 }
 
 impl Text {
@@ -2453,6 +2475,20 @@ impl Text {
             // A statement of what the row does. The card has no engine, so it
             // cannot show the page; what it can do is stop saying the opposite.
             Self::PeekOpensAsPage => pick(lang, "Opens as a page.", "打开为页面。"),
+
+            // ── quitting (multiwindow slice E2) ────────────────────────────
+            Self::ShortcutQuit => pick(lang, "Quit", "退出"),
+            Self::QuitTitle => pick(
+                lang,
+                "Save changes before quitting?",
+                "退出前保存这些改动？",
+            ),
+            Self::QuitSave => pick(lang, "Save", "保存"),
+            Self::QuitSessionNotWritten => pick(
+                lang,
+                "session.json could not be written. Nothing was closed.",
+                "session.json 写入失败。没有关闭任何窗口。",
+            ),
             Self::GitDocumentEmpty => pick(lang, "No changes to show", "没有可显示的改动"),
 
             // ── a drag's landing caption ───────────────────────────────────
@@ -2671,7 +2707,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 446] = [
+    pub const ALL: [Self; 450] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3118,6 +3154,10 @@ impl Text {
         Self::RowSearchEngine,
         Self::DescSearchEngine,
         Self::PeekOpensAsPage,
+        Self::ShortcutQuit,
+        Self::QuitTitle,
+        Self::QuitSave,
+        Self::QuitSessionNotWritten,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
@@ -3641,6 +3681,44 @@ pub fn not_saved(reason: &str) -> String {
     match current() {
         Lang::English => format!("Not saved — {reason}"),
         Lang::Chinese => format!("未保存 —— {reason}"),
+    }
+}
+
+/// **The summary card's list, on the way out of the process** (multiwindow slice
+/// E2, §2.9).
+///
+/// By name, always — §7.1.3's rule read for a question that spans every window.
+/// A card that said "some windows have unsaved changes" would be asking a reader
+/// to go and look, which is the one thing a summary is for.
+///
+/// It states rather than asks, because the question is on the line above it.
+#[must_use]
+pub fn quit_unsaved_message(names: &str) -> String {
+    quit_unsaved_message_in(current(), names)
+}
+
+fn quit_unsaved_message_in(lang: Lang, names: &str) -> String {
+    match lang {
+        Lang::English => format!("Unsaved: {names}"),
+        Lang::Chinese => format!("未保存：{names}"),
+    }
+}
+
+/// **What the save branch could not save** (slice E2 phase ①, v3 复审 ④-a).
+///
+/// The names and nothing else. A quit that stopped here has left every window
+/// exactly where it was, so the card's whole job is to say which of the things
+/// it was asked to write are still only in memory — the reader can see the rest
+/// of the state for themselves, because it is still on the screen.
+#[must_use]
+pub fn quit_not_saved(names: &str) -> String {
+    quit_not_saved_in(current(), names)
+}
+
+fn quit_not_saved_in(lang: Lang, names: &str) -> String {
+    match lang {
+        Lang::English => format!("Not saved: {names}"),
+        Lang::Chinese => format!("未能保存：{names}"),
     }
 }
 
@@ -5218,6 +5296,11 @@ mod tests {
                     "gate_unsaved_message",
                     gate_unsaved_message_in(lang, "a.txt, b.md"),
                 ),
+                (
+                    "quit_unsaved_message",
+                    quit_unsaved_message_in(lang, "a.txt, b.md"),
+                ),
+                ("quit_not_saved", quit_not_saved_in(lang, "b.md")),
                 (
                     "gate_git_discard_message",
                     gate_git_discard_message_in(lang, "a.txt"),

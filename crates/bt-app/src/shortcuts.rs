@@ -47,6 +47,20 @@ pub(crate) enum Action {
     /// Its own row and not a mode of [`Self::NewTab`], because the two differ in
     /// the one thing a shortcut row is about: what appears when you press it.
     NewWindow,
+    /// **The whole application leaving** (multiwindow slice E2, user ruling
+    /// 2026-08-20).
+    ///
+    /// Its own row and not "close every window", because the two differ in the
+    /// one thing this table is about: what is true afterwards. Closing windows
+    /// one at a time files each of them in Recent and leaves the file describing
+    /// the last one; this writes every window into `session.json` as one document
+    /// and puts **nothing** in the vault, so the next launch opens what you left.
+    /// See [`crate::quit`].
+    ///
+    /// Scoped to the window like every other row here, and that is not a
+    /// contradiction: the *chord* is answered by whichever window has the
+    /// keyboard, and what it starts belongs to the process.
+    Quit,
     ClosePane,
     NextTab,
     PrevTab,
@@ -598,6 +612,19 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutNewWindow,
         Action::NewWindow,
         Chord::new(CTRL_SHIFT, character("m")),
+    ),
+    // **`Ctrl+Shift+Q`, ruled by the user 2026-08-20** — and the key was free,
+    // which is the whole of why this row needed no argument: `Q` is claimed by
+    // nothing in this table, and `^Q` — what a bare `Ctrl+Q` would take — is
+    // XON/XOFF's resume and stays with the terminal, exactly as `^M` stays with
+    // it one row above. It wears the modifier pair every window verb here wears
+    // (discipline (1): bare `Ctrl+letter` belongs to the shell) and it is the
+    // chord Windows Terminal, iTerm2 and VS Code all quit on.
+    Binding::window(
+        "quit",
+        Text::ShortcutQuit,
+        Action::Quit,
+        Chord::new(CTRL_SHIFT, character("q")),
     ),
     Binding::window(
         "close-pane",
@@ -2602,7 +2629,9 @@ mod tests {
         // **Three more on 2026-08-22** (§7.7, W2 slice ④): `Ctrl+L` and `F12`,
         // ruled in by the user, and bare `Escape` — see [`Action::CloseSearch`]
         // for why a page turns a rung of the ladder into a row of the table.
-        assert_eq!(BINDINGS.len(), 37);
+        // **One more on 2026-08-23** (multiwindow slice E2): `quit` on
+        // `Ctrl+Shift+Q`, which makes it 22 single actions.
+        assert_eq!(BINDINGS.len(), 38);
         assert_eq!(
             BINDINGS
                 .iter()

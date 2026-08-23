@@ -291,6 +291,32 @@ target  ← CreateTargetForHwnd(hwnd, topmost = true)
 **片 A1 的小账复核（spike Q5 第 2 条）。** 标题栏几何的两份副本**已经收成一处**，A1 落地时就做掉了（`2ea208f`）：`bt-platform` 不再自己藏 `TITLE_BAR_LOGICAL_PX` / `CAPTION_BUTTON_LOGICAL_PX`，`CustomWindowFrame::install` 收一个 `CustomFrameGeometry`，两个数由 `bt-render` 的 `WINDOW_TITLE_BAR_LOGICAL_PX` / `WINDOW_CAPTION_BUTTON_LOGICAL_PX` 一路传进去——命中测试用的和绘制用的现在字面上是同一个数。开第一扇窗与开第二扇窗两处都传同一对常量，所以多窗没有让它复活。**本片无事可做，核对结果记在这里。**
 
 **验收。** 全套测试绿（bt-app 2117），clippy `-D warnings` 与 `fmt --check` 干净。红测先红后绿：`every_verb_that_moves_a_process_static_hands_it_to_the_other_windows`（`apply_cursor_style` 动了进程 static 却不进通道 → 红）、`the_sweep_spends_every_flag_the_record_can_carry`（flag 名单从 `ApplicationChange` 的声明上读，`adopt_application_change` 不读 `change.caret` → 红）；另两条钉住本来就对的那一半：`a_theme_switch_is_owed_to_the_window_that_did_not_flip_it`、`no_window_is_left_holding_yesterday_when_the_loop_goes_to_sleep`（settle 排在算唤醒时刻之前）。实机（自建 debug、隔离 `APPDATA`、`BT_PTY_DUMP`）：`Ctrl+Shift+M` 开第二扇窗并排放置，在 A 窗的 Appearance 里把光标形状从 Bar 改成 Block，**B 窗同一轮换成空心方块**（B 窗失焦，而「失焦窗口保留空心 cursor」是 M1.8-r4 的既有规则，见本文开头的修订记录）；再把主题从 Dark 切到 Light，两窗同变；stderr 无异常。
+### 2.9 退出这个程序：`Ctrl+Shift+Q` 与四阶段事务（多窗块 片 E2，2026-08-23，已落地；`crates/bt-app/src/{quit,main,restore,preview,persist,shortcuts,i18n,webhost}.rs`）
+
+**§2.7 挂的那条账在这里清掉。** 片 D 记下的冲突是真的：本产品此前没有"退出"这个动词，关掉最后一扇窗就是退出，于是两扇窗只能一扇一扇地关，先关的那扇按裁决 ② 已经进了 Recent——"开两窗→退出→重启两窗回来"在当时的产品里不能同时为真。用户 2026-08-20 裁下这个动词，语义写死成一句：**退出 = 所有窗口作为整体写进会话文件再退出，下次启动按既定恢复策略全部回来**；与逐扇关的分野也是一句：**一颗种子都不进 Recent**。这正是 Firefox / Chrome 的模型——关一扇窗进「最近关闭的窗口」，退出应用则整套恢复。
+
+**键是 `Ctrl+Shift+Q`，而且它不欠任何理由。** 片 C 的 `Ctrl+Shift+M` 是一个明写理由的占位（它想要的 `Ctrl+Shift+N` 早判给了新建 tab），这一行不是：`Q` 在这张表里没有任何行认领，Windows Terminal / iTerm2 / VS Code 退出用的都是它，而裸 `Ctrl+Q` 会拿走的 `^Q` 是 XON/XOFF 的 resume，照 A 案纪律留给终端。行作用域是窗口级——**键由拿着键盘的那扇窗回答，它启动的事情属于进程**，这两句不冲突。表因此是 38 行。
+
+**为什么不复用 `exiting`。** `exiting` 是 winit 在循环**已经停下之后**的兜底回调，它的函数体是 `for_each_window(|runtime| runtime.close_window(true))`，三处都不适用，而且每一处都是缺陷不是口味：① `for_each_window` 自己的 doc 写着"oldest first, **stopping at the first failure**"，一扇窗的子进程不肯死就会让它后面的窗根本没被拍照；② `close_window` 把**照片与 teardown 交错**——每扇窗依次是"记一次会话、关 controller、关 shell"，于是第三扇窗是在第一扇窗的浏览器已经被通知走人之后才拍的照；③ 循环已经停了，什么都不再被 pump，`WebSeat::tick` 不再转、`WebOutcome::Gone` 永远不来，片① 那道 UDF 超时门在 `exit()` 之后是空话。所以 Quit 另立一套应用级事务，`exiting` 一个字不动——它是"循环被**不是关窗也不是退出**的东西停掉"时的兜底，对那件事它的形状是对的。
+
+**四个阶段，顺序由类型保证而不是由注释保证。** 事务是 `crate::quit::Quit` 这个值，循环推进它：`Quit::step()` 说现在欠什么，驱动方做完一件事就回报一次，**从不自己决定下一步**。于是"所有窗先拍完照，才开始任何 teardown"是这一个文件的性质，可以在没有 GPU 的地方被测试，而不是七万行里需要有人一直记得的一条顺序。
+
+1. **应用级脏门，一次。** 扫每扇窗每个 tab 的脏预览缓冲，加上每扇窗那个"改了但没提交"的编辑器；有内容就升起**一张**汇总卡（保存 / 丢弃 / 取消），没有就直接跳过——「对可逆动作不加确认仪式」这半论证只在这里成立，一个干净的应用被问「确定退出?」是在问一个两个答案都不丢东西的问题。名单是**升起那一刻收一次**，不像脏门那样每帧从 pool 重新求：卡跨所有窗，而这程序里没有任何一个借用同时握着所有窗和一个渲染器；这也是诚实的读法——问的就是问的那一刻脏的东西。
+2. **只读拍照。** 每扇窗 `window_snapshot` → `App::session_document` 组装成一份 `SessionV1`。**这里不做任何 teardown**，这是它与 `close_window` 唯一的区别，也是验收门第 2 条。
+3. **原子写，失败可判。** `SessionStore::flush_judged` 是 `flush` 的可判版本，只为这一个调用方存在：一扇窗被藏起来、而它的文件从来没落地，就是会话没了。写不下去 = **不退出、窗口原样、每扇窗一张告警卡**，`session.lock` 留在原地——那不是伪装，那是这次运行如实报告自己没有走到干净退出。
+4. **`Quitting` 阶段再退出。** 窗口隐藏但事件循环**继续 pump**：`about_to_wait` 在这个阶段只转一件事——浏览器退出的那个等待（`advance_retirement`），因为一扇 shell 已经关掉、已经离开屏幕的窗，`turn` 里那三十个钟没有任何东西可读。等到每扇窗的 `window.web` 都空，或者总超时 6 秒到点（`quit::PAGE_TEARDOWN_DEADLINE`，比单座位的 `BROWSER_EXIT_DEADLINE` 长，因为多个座位并行退、最后一个才开始自己的钟），才 `event_loop.exit()`。超时走人的那一次在 stderr 上说出来：照片早已安全，而"浏览器活过了这个界"是关于这台机器的事实。
+
+**「保存」逐项，而且全成才走。** 每个脏缓冲走 `PreviewPool::save_dirty` → `PreviewBuffer::save`，也就是 `Ctrl+S` 用的那一次冲突检测（比 mtime）与那一次原子写，一个字都不是第二种写法。**每一个都试**，包括失败之后的那些：停在第一个拒绝上会交给用户一份没法处理的名单——一半存了、一半根本没试过，而且分不出是哪一半。任一项失败/冲突 → **不退出、不藏窗、失败项列名**（每扇窗在自己身上升起自己那张卡，通知出现在注意力已经在的地方）；**已保存的诚实变干净**，不为了让句子好听而回滚——「整次零变化」这句话只属于「取消」。冲突在这里算失败，尽管它在 pane 上不算：区别在于接下来会发生什么——在 pane 上缓冲还在、人还能去看，在退出这里进程本来就要走了，走掉就把它带走。
+
+**非文件缓冲逐类写死。** 「保存」= commit 该编辑（与 Enter 同义），「丢弃」= 放弃草稿（与 Escape 同义），「取消」= 编辑器原样开着。上卡的两类是**提交之后会活过这次退出**的那两类：tab 的手动名（写进 `session.json`，下次启动还在）、预览头上的文件名（磁盘上真的搬家；文件系统拒绝时它自己升卡，不拖住退出）。**页面地址栏那一类故意不上卡**——它 commit 的动作是**导航**，而要导航的那张页正是这次退出要关掉的，所以它没有什么可失去的，列上去等于给一个不可能发生的损失命名；它仍然跟着答案一起结清，因为被「丢弃」放弃掉的草稿不该在门口又被提交一次。草稿与已提交值相同的编辑器**不算编辑**：打开它、改了主意、点到别处去是这个编辑器最常见的出路，为一次没人敲过的键升起一张卡是在问一个不存在的问题。没有升卡的那一次，编辑器照 §7.1.4 的 blur 语义在拍照前提交，与 `close_window` 一模一样。
+
+**卡的形制照脏门那张，差两处，两处都是它为什么不是第五个 `GateRequest` 的原因。** 三个按钮而不是两个（脏门的肯定答案**就是**丢弃，这里还有第三件读者可以诚实想要的事：保住工作，仍然离开），以及它是**应用的**问题而不是某一扇窗的（所以名单跨窗收一次）。三个按钮里**没有一个画成 accent**，`Save` 也没有：accent 是这扇窗在推荐一个，而它会推荐的那个是"在一次读者也许本来就想放弃的会话末尾往磁盘写东西"。Enter 按 `Cancel`、Esc 按 `Cancel`，与脏门一致。位置上 `Discard` 仍在最右、`Cancel` 仍在它左边（脏门教给读者的位置一个像素没动），`Save` 加在两者左侧——为第三个答案付的代价不该由第二个答案来付。卡**每扇窗都画**：一个问题、一份名单、一个答案，而画在每扇窗上是"没有哪扇窗还在收键"的说法（`a_modal_covers_the_window` 与 `keyboard_owner` 都把它排在脏门之上）。
+
+**逐扇关那条路一个字没改。** `close_window` 现在分成"决定这扇窗的**记录**去哪"与"把这扇窗握着的东西**放掉**"两半（`let_go_of_this_window`），退出只花后半——照片已经拍完、文件已经落地，在这里再拍一次就是在前面几扇窗的 teardown 已经开始之后重新记账，正是本节要禁的交错，还会在这次退出已经判过的那次写之后再交一份文档给 store。放掉那一半顺手修了一处：**每个子进程都被通知，不管前一个答了什么**，第一个拒绝作为返回值——一个在没人看得见的窗后面还跑着的 shell，比一个错误更坏（`fail` 自己的注释对窗口说的就是这句）。退出进行中，`FolioApp::close` 整个不应答：非最后一扇窗的关闭会把 tab 记进 Recent，而那正是退出必须不做的事。
+
+**验收。** 全套测试绿（bt-app 2129，workspace 全绿），clippy `-D warnings` 与 `fmt --check` 干净。红测先红后绿逐条验过（红证记在片单里）：`answer(Discard)` 直接进 `Retiring` → 拍照步骤从走查里消失；`written` 忽略参数 → 写不下去也照样藏窗；`deadline` 返回 `None` → 浏览器不报到就永远等下去；`save_dirty` 停在第一个失败 → 名单短一项；`session_windows` 丢掉未答复的那一半 → 没人拒绝过的窗不见了；`retire_window` 里加一句 `vault_this_window` → 金库的门从一个变成两个；`flush_judged` 恒返回 `Ok` → 退出无从得知文档没落地；三个按钮的矩形互换 → 位置断言变红。
+
+**实机（debug 版，`APPDATA` + `LOCALAPPDATA` 隔离，`BT_PTY_DUMP`，本地静态服务不出外网）。** 三窗（`Ctrl+Shift+M` 开出两扇），一窗挂 `BT_WEB_DEV` 的本地页面 —— `Ctrl+Shift+Q` → 进程退、`session.json` 里 `windows` = **3**、`recent` = **0**、`session.lock` 被摘掉；重启后恢复卡列出另外两扇窗的 tab，按 Restore 三窗按各自的矩形（98/246/294）全部回来，第三扇顶着它被 blur 提交的手动名。带一份脏预览再来一次：卡画在**每一扇**窗上，写着 `Save changes before quitting?` / `Unsaved: notes.txt`，三个按钮 `Save｜Cancel｜Discard`；Esc **取消** → 卡消失、三窗一扇没动、脏点还在、磁盘原样、恢复卡回到原位继续问；再 `Ctrl+Shift+Q` 按 **Discard** → 进程退、磁盘上的 `notes.txt` 一个字节没变、`windows` = **5**（三扇开着的 + 两扇没人答复的，「未答复不算否」照钉活着）、`recent` 仍是 **0**；同一路按 **Save** → 进程退、`notes.txt` 在磁盘上真的带上了刚才敲进去的字。收尾：属于本次运行的 `msedgewebview2` **0 个**。**探针教训一条**：`tasklist` 与 `Win32_Process` 会把已经退出、但句柄还被别人握着的进程照常列出来（连内存数字一起），`Process.GetProcessById` 才是权威 —— 差点据此误报一次「退出挂死」。
 
 ## 3. 内容模型
 

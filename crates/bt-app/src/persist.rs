@@ -83,6 +83,27 @@ impl SessionStore {
         }
     }
 
+    /// A store over two named paths, for the tests that have to watch a write
+    /// **fail**.
+    ///
+    /// Test-only, like `Text::ALL`: the product has one door onto this type and
+    /// it is [`Self::open`], which resolves `%APPDATA%` and arms a sentinel.
+    /// Neither of those is a thing a test may do to the machine it runs on, and
+    /// the property multiwindow slice E2 has to pin — a quit that could not write
+    /// does not leave — needs a store whose path is *guaranteed* unwritable,
+    /// which is exactly what a caller-named path buys.
+    #[cfg(test)]
+    pub fn at(session_path: PathBuf, sentinel_path: PathBuf) -> Self {
+        Self {
+            session_path,
+            sentinel_path,
+            session: SessionV1::default(),
+            debouncer: Debouncer::new(),
+            failures: WriteFailureTracker::new(),
+            armed: false,
+        }
+    }
+
     /// The session document as it was read. The caller owns what the fields
     /// mean; this type owns only when they reach the disk.
     pub fn loaded(&self) -> &SessionV1 {
@@ -117,8 +138,26 @@ impl SessionStore {
     /// a pending change must not be lost because the window closed 300ms after
     /// it happened.
     pub fn flush(&mut self) {
+        // The ordinary paths have nowhere to put a failure: a window is already
+        // going, and the alert below has been said. See [`Self::flush_judged`]
+        // for the one caller that can act on the answer.
+        let _ = self.flush_judged();
+    }
+
+    /// **The same write, judged** (multiwindow slice E2 phase ③).
+    ///
+    /// A quit hands the store every window at once and then hides all of them,
+    /// so it is the one caller for which "could not write" is not a line on
+    /// `stderr` after the fact but a decision to make *before* the next step: a
+    /// window hidden over a document that never reached the disk is the session
+    /// gone, and `session.lock` left standing would then be this run truthfully
+    /// reporting that it did not reach a clean exit.
+    ///
+    /// `Ok(())` with nothing written is the honest answer when the debounce is
+    /// clean: what is on the disk already says this.
+    pub fn flush_judged(&mut self) -> Result<(), String> {
         if !self.debouncer.is_dirty() {
-            return;
+            return Ok(());
         }
         let result = write_session_atomic(&self.session_path, &self.session);
         if self.failures.record(result.is_ok()) == WriteAlertAction::AlertOnce
@@ -128,8 +167,12 @@ impl SessionStore {
             // disk must not turn into a message every 1.5 seconds.
             eprintln!("BT_PERSIST could not write session.json: {error}");
         }
-        if result.is_ok() {
-            self.debouncer.mark_flushed();
+        match result {
+            Ok(()) => {
+                self.debouncer.mark_flushed();
+                Ok(())
+            }
+            Err(error) => Err(error.to_string()),
         }
     }
 
@@ -543,6 +586,55 @@ fn relocate(previous: &Path, current: &Path) -> Relocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (multiwindow slice E2 phase ③, acceptance gate 1) — **a write that
+    /// could not happen says so, and a write that happened says that.**
+    ///
+    /// The store's final flush is what a quit's decision to leave rests on, so it
+    /// has to be *judgeable*. The failure is injected the only way a filesystem
+    /// can be made to refuse honestly: a path whose parent directory does not
+    /// exist, which is what a store on a volume that went away looks like from
+    /// here — no mocked writer, no flag, the real `atomic_write` refusing for a
+    /// real reason.
+    ///
+    /// Red gate: give `flush_judged` the old `flush`'s body — which reports
+    /// nothing — and the first assertion cannot even be written; make it return
+    /// `Ok(())` unconditionally and the process would go on to hide every window
+    /// over a session file it never wrote.
+    #[test]
+    fn a_session_write_that_could_not_happen_is_reported_as_one() {
+        let root = std::env::temp_dir().join(format!(
+            "bt-app-quit-flush-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // Nothing has created `root`, so `root/session.json` has nowhere to be
+        // written and the atomic write's own temporary has nowhere to live.
+        let mut refused = SessionStore::at(root.join("session.json"), root.join("session.lock"));
+        let mut document = SessionV1::default();
+        document
+            .windows
+            .push(bt_persist::SessionWindowV1::default());
+        refused.record(document.clone(), Instant::now());
+        let verdict = refused.flush_judged();
+        assert!(
+            verdict.is_err(),
+            "a quit must be able to find out that its document did not land"
+        );
+
+        // And the same document, with somewhere to go.
+        std::fs::create_dir_all(&root).expect("a private directory for this test");
+        let mut landed = SessionStore::at(root.join("session.json"), root.join("session.lock"));
+        landed.record(document, Instant::now());
+        assert_eq!(landed.flush_judged(), Ok(()));
+        assert!(root.join("session.json").is_file(), "and it is on the disk");
+        // A second flush with nothing pending is honestly `Ok` and writes nothing.
+        assert_eq!(landed.flush_judged(), Ok(()));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// A private `%APPDATA%` for one test, with nothing of the real one in it.
     ///
