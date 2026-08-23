@@ -19,7 +19,12 @@
 #   .\ui-probe.ps1 capture -Pid <pid> -Out shot.png [-Margin 400]  → DPI-aware capture; Margin grows the
 #                                                                    region beyond the window (IME popups
 #                                                                    are separate windows and live outside)
-#   .\ui-probe.ps1 wheel -Pid <pid> -X 900 -Y 400 -Delta -6 [-Mods s]
+#   .\ui-probe.ps1 wheel -Pid <pid> -X 900 -Y 400 -Delta -6 [-Mods s] [-Step 20]
+#                                                              → -Step is the WHEEL_DELTA per report:
+#                                                                120 = one mouse detent (the default),
+#                                                                20/40 = the run of small reports a
+#                                                                high-resolution wheel or a precision
+#                                                                touchpad sends per detent
 #                                                              → a notch where the pointer is put;
 #                                                                -Mods holds ctrl/shift/alt down
 #                                                                around the run, which is the only
@@ -115,6 +120,10 @@ param(
   [int]$Margin = 0,
   [int]$WaitSeconds = 15,
   [int]$Delta = 3,
+  # wheel: the WHEEL_DELTA each report carries. 120 is one detent of a mouse;
+  # 20 or 40 is what a high-resolution wheel or a precision touchpad sends, six
+  # or three reports to the detent.
+  [int]$Step = 120,
   [int]$W = 0,
   [int]$H = 0,
   # click/hover: physical pixels from the window's own top-left. Negative values
@@ -348,7 +357,10 @@ public class Probe {
      safety law as typing: foreground-verified before anything is sent. */
   [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, int data, UIntPtr extra);
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
-  public static void Wheel(int notches) { WheelWithMods(notches, false, false, false); }
+  public static void Wheel(int notches) { WheelWithMods(notches, false, false, false, 120); }
+  public static void WheelWithMods(int notches, bool ctrl, bool shift, bool alt) {
+    WheelWithMods(notches, ctrl, shift, alt, 120);
+  }
   /* The wheel with modifiers held down around it.
 
      Shift+wheel is how every horizontal scroller on this desktop is reached
@@ -357,7 +369,12 @@ public class Probe {
      whole run rather than around each notch, because that is what a hand does
      and because an app that reads the modifier state at the event would see it
      flicker otherwise. */
-  public static void WheelWithMods(int notches, bool ctrl, bool shift, bool alt) {
+  /* `step` is the WHEEL_DELTA each report carries. A detent is 120, and that is
+     what a mouse sends; a high-resolution wheel or a precision touchpad sends a
+     detent as a run of much smaller reports (20 and 40 are the common ones), and
+     an app that rounds each report on its own throws all of them away. Driving
+     that shape is the only way to test it from outside. */
+  public static void WheelWithMods(int notches, bool ctrl, bool shift, bool alt, int step) {
     var hold = new System.Collections.Generic.List<INPUT>();
     var drop = new System.Collections.Generic.List<INPUT>();
     if (ctrl)  { var d = new INPUT { type = 1 }; d.u.ki = new KEYBDINPUT { wVk = 0x11, wScan = 0x1D, dwFlags = 0 }; hold.Add(d);
@@ -370,7 +387,7 @@ public class Probe {
       SendInput((uint)hold.Count, hold.ToArray(), Marshal.SizeOf(typeof(INPUT)));
       System.Threading.Thread.Sleep(40);
     }
-    int dir = notches < 0 ? -120 : 120;
+    int dir = notches < 0 ? -step : step;
     for (int i = 0; i < System.Math.Abs(notches); i++) {
       mouse_event(0x0800, 0, 0, dir, UIntPtr.Zero);
       System.Threading.Thread.Sleep(60);
@@ -644,8 +661,8 @@ switch ($Cmd) {
     # positive = scroll up (into history), negative = down. -Mods holds
     # ctrl/shift/alt down around the run, which is how a horizontal scroller is
     # reached from a mouse that has no tilt wheel.
-    [Probe]::WheelWithMods($Delta, ($Mods -match "c"), ($Mods -match "s"), ($Mods -match "a"))
-    "wheeled $Delta notches mods=$Mods at ($px, $py) on pid=$ProcId (foreground verified)"
+    [Probe]::WheelWithMods($Delta, ($Mods -match "c"), ($Mods -match "s"), ($Mods -match "a"), $Step)
+    "wheeled $Delta reports of $Step mods=$Mods at ($px, $py) on pid=$ProcId (foreground verified)"
   }
   "click" {
     # **Ownership of the pixel, which is the law this file already argues for a
