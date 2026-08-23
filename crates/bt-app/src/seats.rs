@@ -5568,32 +5568,61 @@ pub struct TabRun {
     /// over the caption buttons is the strip's own `overflow-x`, and what stops
     /// a row being carried out past the rail's foot is the list's `overflow-y`.
     pub band: [f32; 4],
-    /// **Whether this list will receive a pane dragged out of the layout at
-    /// all**, which is a different offer from [`Self::slots`] and has to be
-    /// sayable separately.
+    /// **What this list will receive from a pane dragged out of the layout**,
+    /// which is a different offer from [`Self::slots`] and has to be sayable
+    /// separately.
     ///
     /// `slots` answers "where may something already in this list come to rest";
-    /// this answers "may something that is not in the list yet join it". The
-    /// strip and the rail are a whole window's tab list and say yes to both. The
-    /// focus column says yes to the first and no to the second, because
-    /// §7.1.6b′ ② rules that focus mode does not take a pane source at all:
-    /// *"pane 拖到卡列不得撕成新 tab"*.
-    ///
-    /// **One bit for the two offers a pane has here, and that is the ruling's
-    /// own shape rather than a shortcut.** A pane over a tab list can mint a
-    /// *new* tab out of itself (K124, the tear-out) or be handed to one of the
-    /// entries already in the list (§7.1.6k, the spring-loaded drop of
-    /// 2026-08-20). Both are "a pane that is not in this list joining it", both
-    /// are refused by the card column and offered by the other two, and the
-    /// ruling behind the refusal is one sentence about the source rather than
-    /// two about the verbs. The field was called `hosts_tear_out` while the
-    /// tear-out was the only offer a pane had here.
-    ///
-    /// It lives on the run so that the refusal stays R3's kind of fact — a
+    /// this answers "may something that is not in the list yet join it, and
+    /// how". It lives on the run so that the answer stays R3's kind of fact — a
     /// property of the surface, read off the same object the mids and the band
     /// come off — rather than a second place where the drag engine learns which
     /// mode the window is in.
-    pub hosts_pane_drop: bool,
+    pub pane_offers: PaneOffers,
+}
+
+/// **The two offers a tab list makes a pane, said separately** (§7.1.6b′ ② as
+/// re-judged by the user on 2026-08-23).
+///
+/// A pane over a tab list can do one of two different things: mint a **new** tab
+/// out of itself (K124, the tear-out) or be handed to one of the entries the
+/// list already holds (§7.1.6k, the spring-loaded drop). Both are "a pane that
+/// is not in this list joining it", and until 2026-08-23 they travelled on one
+/// bit — `hosts_pane_drop`, itself a rename of `hosts_tear_out` — because ②
+/// read as a refusal of the *source* and a refusal of the source refuses every
+/// verb it could ask for.
+///
+/// **The user split that sentence in half.** Focus mode hides the tab strip, so
+/// while it is on the one bit made a pane's route to another tab disappear
+/// entirely — which collides with the ruling focus mode is built on, *"不禁任何
+/// 动词零新规"* (§7.1.6b′ ①). What ② was actually protecting is the *other* half:
+/// a card column is a list of rooms, and letting a pane fall into the gap
+/// between two of them and become a third is the tab-making gesture ② turned
+/// away. So the tear-out stays refused and the hand-over is granted, and the
+/// only way to say that is two bits.
+///
+/// One struct rather than two loose booleans on [`TabRun`] so that a surface
+/// answers this question in one place and a third offer, if one is ever
+/// invented, has somewhere to be added that every surface must fill in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaneOffers {
+    /// §7.1.6k — the pane may be handed to the tab under the pointer.
+    pub adopt: bool,
+    /// K124/N157 — the pane may become a tab of its own in the gaps.
+    pub extract: bool,
+}
+
+impl PaneOffers {
+    /// A whole window's tab list: both offers stand (the strip and the rail).
+    pub const BOTH: Self = Self {
+        adopt: true,
+        extract: true,
+    };
+    /// The focus column: a card takes a pane, the gaps between cards do not.
+    pub const ADOPT_ONLY: Self = Self {
+        adopt: true,
+        extract: false,
+    };
 }
 
 impl TabRun {
@@ -5699,7 +5728,7 @@ pub fn strip_run(geometry: &TabStripGeometry, scale: f32) -> TabRun {
         slots: geometry.tabs.iter().map(|tab| tab.body).collect(),
         band: strip_band(geometry, scale),
         viewport: geometry.viewport,
-        hosts_pane_drop: true,
+        pane_offers: PaneOffers::BOTH,
     }
 }
 
@@ -5716,7 +5745,7 @@ pub fn rail_run(geometry: &RailGeometry) -> TabRun {
         slots: geometry.tabs.iter().map(|tab| tab.body).collect(),
         band: geometry.body,
         viewport: geometry.viewport,
-        hosts_pane_drop: true,
+        pane_offers: PaneOffers::BOTH,
     }
 }
 
@@ -5737,15 +5766,18 @@ pub fn rail_run(geometry: &RailGeometry) -> TabRun {
 /// entire. Nothing here is a second gesture; it is the strip's gesture on the
 /// column's rectangles.
 ///
-/// The other two refusals stand, and they are said in two different places
-/// because they are two different offers:
+/// The other two answers are said in two different places because they are two
+/// different offers:
 ///
-/// * **②, a pane source:** [`TabRun::hosts_pane_drop`], `false` here. A pane
-///   dragged out of the stage may not become a new tab by landing on the card
-///   list — and since §7.1.6k (2026-08-20) it may not be handed to a card's tab
-///   either, nor spring the column over to it. ② is a refusal of the *source*,
-///   so it refuses both of the offers a pane has on the other two surfaces, and
-///   it refuses them through one bit rather than at each verb.
+/// * **②, a pane source: half of it was withdrawn on 2026-08-23**
+///   ([`PaneOffers`]). The column now answers [`PaneOffers::ADOPT_ONLY`]: a pane
+///   rested on a *card* is handed to that card's tab, exactly as it is on the
+///   other two surfaces, and a pane let go in the column's **blank** is still
+///   refused — it does not become a tab of its own there, which is the half of
+///   ② the user kept. The reason the other half went is ①'s: focus mode hides
+///   the strip, so a bit that refused the source outright left a pane in focus
+///   mode with no door to another tab at all, and *"不禁任何动词零新规"* is the
+///   ruling focus mode is built on.
 /// * **③, file drops:** `DragSource::Row(_) => None` in
 ///   `Runtime::survey_strip`, which is global to every tab surface, so a card
 ///   has nothing to opt into. The refusal is the strip's own: no insertion caret
@@ -5764,7 +5796,7 @@ pub fn focus_rail_run(geometry: &FocusRailGeometry) -> TabRun {
         slots: geometry.cards.iter().map(|card| card.body).collect(),
         band: geometry.body,
         viewport: geometry.viewport,
-        hosts_pane_drop: false,
+        pane_offers: PaneOffers::ADOPT_ONLY,
     }
 }
 
@@ -10076,6 +10108,9 @@ fn rail_chrome(
 /// reason: paint order. No `preview`, and that is ②'s shape rather than an
 /// omission — K124's stand-in is the slot a *torn-out pane* would take, and
 /// [`focus_rail_run`] hosts no tear-out, so no slot is ever held open for one.
+/// The hand-over the column *did* gain on 2026-08-23 ([`PaneOffers::ADOPT_ONLY`])
+/// does not want one either: it takes no slot, it lights the card it is aimed
+/// at, and the ghost stays under the pointer saying what is in the hand.
 /// No `shown` either: the folder flyout is summoned from a tab row's own
 /// trigger, and a card carries no trigger to summon it with.
 struct FocusRail<'a> {
@@ -10262,6 +10297,42 @@ fn focus_rail_chrome(
                 palette.focus_card_edge
             },
         ));
+        // ── the aiming mark: `@keyframes tab-land`'s `from`, on a card ──
+        //
+        // **§7.1.6b′ ② as re-judged 2026-08-23.** A card that a carried pane is
+        // resting on wears the very pair the strip's aimed tab and the rail's
+        // aimed row wear — a 9% accent wash under a 45% accent inset ring — and
+        // it wears it off the same [`TabContent::landing`], which the window
+        // holds at `1.0` for whichever tab the survey answered `StripAdopt`
+        // about. Three surfaces, one drawing, one field: a fourth mark invented
+        // here would be a second vocabulary for "this is where it goes", which
+        // is the argument §7.1.6k made when the strip grew this and the reason
+        // the column may not answer it differently.
+        //
+        // Over the card's own fill and its edge, and under everything the card
+        // holds — where a `background` and an inset `box-shadow` sit in CSS, and
+        // the same place both other surfaces put it.
+        if content.landing > 0.0 {
+            let mut wash = ChromeSprite::new(
+                ChromeMark::ControlPill {
+                    radius_px: card_radius,
+                },
+                body,
+                palette.accent,
+            );
+            wash.opacity = TAB_LAND_WASH_ALPHA * content.landing;
+            sprites.push(wash);
+            let mut ring = ChromeSprite::new(
+                ChromeMark::ControlPillRing {
+                    radius_px: card_radius,
+                    stroke_px: (TAB_LAND_RING_LOGICAL_PX * scale).round().max(1.0) as u32,
+                },
+                body,
+                palette.accent,
+            );
+            ring.opacity = TAB_LAND_RING_ALPHA * content.landing;
+            sprites.push(ring);
+        }
         // ── the breath: `@keyframes fcard-wait` (§7.1.5b, §7.1.6b′ F3) ──
         //
         // A second ring, `0 0 0 3px` *outside* the border and at `24%` of the
@@ -29997,11 +30068,14 @@ mod tests {",
     ///
     /// The other two refusals are untouched, and this is where they are held:
     ///
-    /// * **② a card list refuses a pane source outright.** A pane dragged out of
-    ///   the stage may not become a new tab by being dropped on the column, and
-    ///   since §7.1.6k (2026-08-20) may not be handed to a card's tab or spring
-    ///   the column over to it either — so this run takes no pane drop at all,
-    ///   while both surfaces that *are* a whole window's tab list do.
+    /// * **② a card list refuses a pane the *gaps*, and since 2026-08-23 only
+    ///   the gaps.** A pane dragged out of the stage may still not become a new
+    ///   tab by being dropped on the column — that is the half of ② the user
+    ///   kept — while a pane rested on a *card* is handed to that card's tab
+    ///   like it is on the other two surfaces, because focus mode hides the
+    ///   strip and ① forbids focus mode from having fewer verbs than the window
+    ///   under it. So this run answers [`PaneOffers::ADOPT_ONLY`] where a whole
+    ///   window's tab list answers [`PaneOffers::BOTH`].
     /// * **③ it refuses file drops** — *"一份 tab 清单没有一个非任意的 tab 可以
     ///   接住一个文件"*. That one is `DragSource::Row(_) => None` in
     ///   `Runtime::survey_strip`, global to every tab surface, so there is
@@ -30039,22 +30113,48 @@ mod tests {",
             Axis::Col,
             "a column is reordered down its own axis"
         );
-        assert!(
-            !run.hosts_pane_drop,
-            "②: a pane taken out of the stage has no new tab to become here, \
-             and no card's tab to be handed to either (§7.1.6k)"
+        assert_eq!(
+            run.pane_offers,
+            PaneOffers::ADOPT_ONLY,
+            "②, as re-judged 2026-08-23: a pane taken out of the stage has no \
+             new tab to become here, and a card's tab to be handed to"
         );
         assert_eq!(run.band, column.body, "and it claims its own rectangle");
-        for card in &column.cards {
+        for (index, card) in column.cards.iter().enumerate() {
+            let (x, y) = (
+                f64::from((card.body[0] + card.body[2]) / 2.0),
+                f64::from((card.body[1] + card.body[3]) / 2.0),
+            );
             assert!(
-                run.contains(
-                    f64::from((card.body[0] + card.body[2]) / 2.0),
-                    f64::from((card.body[1] + card.body[3]) / 2.0),
-                ),
+                run.contains(x, y),
                 "so a drop over a card is answered by the column rather than \
                  falling through to the pane behind it"
             );
+            // **The third surface `slot_at` is asked of** (§7.1.6b′ ② as
+            // re-judged 2026-08-23). It costs no new geometry here and that is
+            // the finding rather than a saving: the column filled `slots` with
+            // its solved card boxes the day reordering was unblocked, so "whose
+            // tab is under my hand" was already answerable — only the offer was
+            // missing.
+            assert_eq!(
+                run.slot_at(x, y),
+                Some(index),
+                "and the card under the pointer is the room a carried pane is \
+                 asking to be put in"
+            );
         }
+        // The blank the column leaves between the panel's edge and a card is the
+        // run's own padding, and nobody's room — which is exactly why the half of
+        // ② that survives (no tear-out here) has somewhere to bite.
+        let first = column.cards[0].body;
+        assert_eq!(
+            run.slot_at(
+                f64::from(first[0] - 1.0),
+                f64::from((first[1] + first[3]) / 2.0)
+            ),
+            None,
+            "a pointer beside the cards is on the column and on no card"
+        );
     }
 
     /// The focus column exactly as [`rail_paint_of`] draws it — [`painted_rail`]'s
