@@ -4208,7 +4208,6 @@ struct LeafSession {
     /// reader thread, so a pane driven by `BT_PROBE_INPUT` — which has no ConPTY
     /// behind it — has nothing to re-point and says so, rather than holding a
     /// cell no thread reads.
-    #[allow(dead_code, reason = "F1c's drag and F2's menu row press the transfer")]
     wake: Option<Arc<LeafWake>>,
     /// Which of [`profiles::PROFILES`] this pane's shell was started from.
     ///
@@ -4807,7 +4806,6 @@ impl LeafWake {
     }
 
     /// **This shell now nudges that window.**
-    #[allow(dead_code, reason = "F1c's drag and F2's menu row press the transfer")]
     fn rebind(&self, signal: &PtyWakeSignal) {
         *self
             .signal
@@ -4817,7 +4815,6 @@ impl LeafWake {
 
     /// Which bit this shell is raising — the identity, so a transfer can assert
     /// it has actually moved the wake-up and not merely intended to.
-    #[allow(dead_code, reason = "F1c's drag and F2's menu row press the transfer")]
     fn bit(&self) -> Arc<AtomicBool> {
         Arc::clone(
             &self
@@ -4864,9 +4861,6 @@ struct App {
     /// one: nothing, because a tab was never a fact about a window — only about
     /// which window it is standing in this second.
     tab_ids: TabIds,
-    /// F1b's acceptance harness, when `BT_TRANSFER_DEV` asked for one — see
-    /// [`TransferProbe`]. `None` in every run nobody asked, which is every run.
-    transfer_probe: Option<TransferProbe>,
     event_proxy: EventLoopProxy<AppEvent>,
     math_worker: MathWorker,
     math_worker_running: bool,
@@ -5191,6 +5185,38 @@ struct NewWindowPlan {
     /// was accepted, or a Recent row that was pressed) or a question still to be
     /// asked. Only a launch queues the latter.
     ask_about_unpinned: bool,
+    /// **The tab this window is being opened to receive** (multiwindow slice
+    /// F1c), or `None` for a window that is opening for its own sake.
+    ///
+    /// `Move pane to new window` cannot hand a live tab to a window that does
+    /// not exist yet, and a window cannot be created outside the loop's own
+    /// door — so the verb records the errand here and the door spends it the
+    /// instant the window is standing, in the same turn and before any frame.
+    /// See [`TearOut`] for what the errand carries and why the seed tab this
+    /// window opens holding is scaffolding.
+    receives: Option<TearOut>,
+}
+
+/// **A pane on its way out of its window** (multiwindow slice F1c).
+///
+/// The three facts the second half of the verb needs and the window it is
+/// opening cannot supply: which tab is moving, which window it is moving out of
+/// — the one that has to say so if the move is refused — and whether a pane was
+/// promoted to make it, which is the half of the refusal a reader cannot see.
+///
+/// The tab is named rather than the pane, because by the time this is queued the
+/// pane *is* a tab: `Move pane to new window` is the tear-out the row above it
+/// runs and then [`FolioApp::transfer_tab`], and the plan's own sentence for it
+/// is 「先按 `StripExtract` 升格成 tab 再成窗,一条路」.
+#[derive(Clone, Copy, Debug)]
+struct TearOut {
+    tab: TabId,
+    from: WindowId,
+    /// Whether the tab is one this verb has just made out of a pane. A refusal
+    /// then has two facts to report rather than one — the move did not happen,
+    /// *and* the pane is a tab of this window now — because the first half of
+    /// the journey cannot be taken back by any door this window has.
+    promoted: bool,
 }
 
 impl NewWindowPlan {
@@ -5200,6 +5226,26 @@ impl NewWindowPlan {
             like: Some(like),
             saved: None,
             ask_about_unpinned: false,
+            receives: None,
+        }
+    }
+
+    /// **`Move pane to new window`: a window like the one that asked, opened to
+    /// be moved into** (multiwindow slice F1c).
+    ///
+    /// It opens holding the same default tab every other new window opens
+    /// holding, and that tab is **scaffolding**: the moment the transfer lands,
+    /// it is taken away and its shell is shut, which is exactly what the launch
+    /// does to the stand-in it opens when nothing was pinned
+    /// ([`WindowRuntime::placeholder_tab`] — "a stand-in for an answer we do not
+    /// have yet"). A window cannot be built holding nothing — every solve in
+    /// [`Runtime::open_window`] reaches through `tabs[active_tab]` — so the
+    /// honest arrangement is a stand-in that is retired, rather than a window
+    /// that is briefly not one.
+    fn receiving(like: WindowId, errand: TearOut) -> Self {
+        Self {
+            receives: Some(errand),
+            ..Self::fresh(like)
         }
     }
 
@@ -5210,6 +5256,7 @@ impl NewWindowPlan {
             like: None,
             saved: Some(Box::new(window)),
             ask_about_unpinned: false,
+            receives: None,
         }
     }
 
@@ -5232,6 +5279,7 @@ impl NewWindowPlan {
                 ..SessionWindowV1::default()
             })),
             ask_about_unpinned: false,
+            receives: None,
         }
     }
 }
@@ -7033,7 +7081,10 @@ fn claimed_by(owner: AnswerOwner, window: WindowId, tabs: impl IntoIterator<Item
 /// Every one of these is decided in the transaction's *prepare*, before anything
 /// has been asked of a compositor or a controller — except the last, which is the
 /// platform saying no and putting the page back where it was.
-#[allow(dead_code, reason = "F1c's drag and F2's menu row are the callers")]
+///
+/// **Each of them says one sentence out loud** (F1c, M147 —「拒绝必须看得见」):
+/// see [`Self::notice`], and [`Runtime::report_move_refusal`] for the card it
+/// goes on. A refusal nobody is told about is a menu row that did nothing.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum TransferRefusal {
     /// No open window holds that tab. It closed while the gesture was in the
@@ -7052,8 +7103,35 @@ enum TransferRefusal {
     PageKept(SeatId, String),
 }
 
+impl TransferRefusal {
+    /// **The one sentence this refusal is owed** (F1c; M147).
+    ///
+    /// **No seat number reaches the card.** A `SeatId` is this program's word
+    /// for a place in a layout tree; the reader has never been shown one and
+    /// would have nothing to do with it. What they can see is the two tabs the
+    /// sentence is about, which is what it names instead.
+    ///
+    /// `NoSuchTab` and `NoSuchWindow` share a sentence, and that is the honest
+    /// grouping rather than a saving: both mean "the thing this was about closed
+    /// between the press and the move", the reader watched whichever it was
+    /// close, and a card that told them which one would be answering a question
+    /// they are not asking.
+    fn notice(&self) -> String {
+        match self {
+            Self::NoSuchTab(_) | Self::NoSuchWindow(_) => {
+                i18n::Text::MoveRefusedGone.text().to_owned()
+            }
+            Self::AlreadyThere => i18n::Text::MoveRefusedAlreadyThere.text().to_owned(),
+            Self::AmbiguousPage(_) => i18n::Text::MoveRefusedAmbiguousPage.text().to_owned(),
+            // The engine's own words, passed through: they are the only text
+            // that separates a controller that had already gone from a parent
+            // window Windows would not set.
+            Self::PageKept(_, why) => i18n::move_refused_page_kept(why),
+        }
+    }
+}
+
 /// **What one tab's move between windows came to** (F1b).
-#[allow(dead_code, reason = "F1c's drag and F2's menu row are the callers")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TabTransfer {
     tab: TabId,
@@ -7068,73 +7146,6 @@ struct TabTransfer {
     source_emptied: bool,
 }
 
-/// **`BT_TRANSFER_DEV=<seconds>` — F1b's acceptance harness, and nothing a
-/// person can press.**
-///
-/// The transaction has no gesture: the drag across a window boundary is F1c's
-/// and the menu row is F2's, and this slice was told not to invent either. But a
-/// transaction whose only evidence is a unit test is a transaction that has
-/// never handed a live browser and a live ConPTY between two real windows, and
-/// three of the four things it has to get right — the page keeps its document,
-/// the shell keeps talking, the source window goes — are only true on a machine.
-///
-/// So this is the door the acceptance uses, on `BT_WEB_DEV`'s own terms: an
-/// environment variable read once at startup, reachable by nothing else, that
-/// scripts one move and prints what it found. It opens a second window, waits
-/// the number of seconds it was given for the page and the shell to have
-/// something to say, moves the first window's tab into the second, and reports.
-///
-/// Two numbers separated by a comma when the second is wanted:
-/// `BT_TRANSFER_DEV=6,4` moves after six seconds and prints the moved shell's
-/// scrollback again four seconds later — which is the whole of the wake-up
-/// acceptance, because by then the window that shell was started in has gone and
-/// the loop has nothing else to wake it for.
-#[derive(Clone, Copy, Debug)]
-enum TransferProbe {
-    /// Waiting to ask for the second window.
-    Arming {
-        at: Instant,
-        settle: Duration,
-    },
-    /// The second window is on order; move once it is open and settled.
-    Opening {
-        at: Instant,
-    },
-    /// Moved; print the shell's tail once more at this moment, then stop.
-    Listening {
-        at: Instant,
-        tab: TabId,
-    },
-    Done,
-}
-
-impl TransferProbe {
-    /// `None` unless the variable is set — the whole of the gate.
-    fn from_environment(now: Instant) -> Option<Self> {
-        let value = std::env::var("BT_TRANSFER_DEV").ok()?;
-        let mut parts = value.split(',');
-        let before = parts
-            .next()
-            .and_then(|text| text.trim().parse::<u64>().ok())
-            .unwrap_or(6);
-        let after = parts
-            .next()
-            .and_then(|text| text.trim().parse::<u64>().ok())
-            .unwrap_or(4);
-        Some(Self::Arming {
-            at: now + Duration::from_secs(before),
-            settle: Duration::from_secs(after),
-        })
-    }
-
-    fn deadline(self) -> Option<Instant> {
-        match self {
-            Self::Arming { at, .. } | Self::Opening { at } | Self::Listening { at, .. } => Some(at),
-            Self::Done => None,
-        }
-    }
-}
-
 /// The two answers [`FolioApp::transfer_tab`] can give.
 ///
 /// A refusal is not an error: every one of them is an ordinary state of the
@@ -7142,14 +7153,11 @@ impl TransferProbe {
 /// let go of — and a `Result` would put them beside "the OS could not tell us
 /// this window's handle", which is not the same kind of thing at all.
 ///
-/// **No gesture calls this yet, on purpose.** F1b is the transaction and its
-/// identity; the drag across a window boundary is F1c's and the menu row is
-/// F2's. The convention is `git.rs`'s, and `webhost.rs` used it one slice ago to
-/// hold `WebSeat::rehost` for exactly this caller: an item a named later slice
-/// will press carries the allow rather than being held out of the build, because
-/// what the slice has to get right is the contract and the contract is what a
-/// test can hold today.
-#[allow(dead_code, reason = "F1c's drag and F2's menu row are the callers")]
+/// **A person presses this now** (F1c). F1b built the transaction and left the
+/// answer type standing under an `allow(dead_code)` naming the slice that would
+/// press it; `Move pane to new window` is that slice's row, and every refusal
+/// below reaches a card through [`TransferRefusal::notice`] rather than being
+/// dropped on the floor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum TransferOutcome {
     Moved(TabTransfer),
@@ -7183,7 +7191,6 @@ enum TransferOutcome {
 ///   the same number — nobody can say whose engine that entry is;
 /// * it hosts a page in the target window already — moving one in would take the
 ///   other's place.
-#[allow(dead_code, reason = "F1c's drag and F2's menu row press the transfer")]
 fn page_key_collision(
     moving: &BTreeSet<SeatId>,
     others_in_source: &BTreeSet<SeatId>,
@@ -7761,6 +7768,234 @@ struct {name} {{
                 body.contains("tab_ids.mint()"),
                 "`{door}` opens a tab, so the number it opens with is the \
                  application's to give: {body}"
+            );
+        }
+    }
+
+    // ── F1c: the verb face on the transaction ──────────────────────────────
+
+    /// PIN (F1c) — **`Move pane to new window` is composed of the two verbs
+    /// that already exist, and implements neither of them again.**
+    ///
+    /// The slice's own rule is 「一个动词两扇门永不两套实现」, and the failure it
+    /// guards against is not a wrong result today: it is a second strip surgery
+    /// that agrees with `transfer_tab` in the build that wrote it and drifts in
+    /// the one after — a move that quietly becomes a respawn, or a tab that
+    /// arrives in the new window without its wake-up re-pointed.
+    ///
+    /// The row is therefore asserted to *reach* the two existing functions: the
+    /// tear-out the row above it and the drag onto the strip both spend, and
+    /// the application's transfer, which is the only thing in this program that
+    /// moves a tab between windows.
+    ///
+    /// MUTATION: have the row push and pop `tabs` itself, or call anything but
+    /// `transfer_tab` to move it, and one of these names is missing.
+    #[test]
+    fn the_menu_row_spends_the_two_verbs_that_already_exist() {
+        let row = fn_body("move_pane_to_new_window");
+        assert!(
+            row.contains("self.extract_pane_into_new_tab(leaf, slot)"),
+            "the pane is promoted by the same tear-out the row above it spends: \
+             {row}"
+        );
+        assert!(
+            row.contains("promoted.unwrap_or(standing)"),
+            "and a lone pane, which the tear-out will not take out of its own \
+             tree, moves the tab it already is: {row}"
+        );
+        assert!(
+            row.contains("NewWindowPlan::receiving"),
+            "the window has to exist before a tab can move into it, so the row \
+             records the errand and the loop's door spends it: {row}"
+        );
+        for absent in ["tabs.remove", "tabs.push", "tabs.insert"] {
+            assert!(
+                !row.contains(absent),
+                "no strip surgery here — that is the transaction's, and a second \
+                 copy of it is the whole failure this pin is about"
+            );
+        }
+        let door = fn_body("settle_tear_out");
+        assert!(
+            door.contains("self.transfer_tab(errand.tab, into)"),
+            "one transaction, pressed by the menu row exactly as F2's drag will \
+             press it: {door}"
+        );
+        assert!(
+            door.contains("retire_the_stand_in"),
+            "the tab the window opened holding is scaffolding and goes: {door}"
+        );
+        assert!(
+            door.contains("report_move_refusal"),
+            "and a refusal is said out loud in the window the tab is still in \
+             (M147): {door}"
+        );
+    }
+
+    /// PIN (F1c) — **only a window opened to receive a tab carries an errand.**
+    ///
+    /// Four other doors open windows — a chord, the session file, the launch,
+    /// the vault — and none of them is a tear-out. A plan that carried an errand
+    /// by default would move a tab into the next window the reader opened for
+    /// any reason at all.
+    ///
+    /// MUTATION: give `receives` a value in any other constructor and the loop
+    /// below names it.
+    #[test]
+    fn only_the_window_a_pane_was_torn_into_carries_an_errand() {
+        let asker = WindowId::from(1_u64);
+        let errand = TearOut {
+            tab: TabId(7),
+            from: asker,
+            promoted: true,
+        };
+        let carrying = NewWindowPlan::receiving(asker, errand);
+        let carried = carrying.receives.expect("this window is opened to receive");
+        assert_eq!(carried.tab, TabId(7));
+        assert_eq!(
+            carried.from, asker,
+            "the window that has to say so if the \
+             move is refused"
+        );
+        assert!(
+            carried.promoted,
+            "and whether a pane was promoted to make it"
+        );
+        assert_eq!(
+            carrying.like,
+            Some(asker),
+            "it wears the rail of the window it was torn out of, exactly as \
+             `Ctrl+Shift+M`'s window does"
+        );
+        assert!(
+            NewWindowPlan::fresh(asker).receives.is_none(),
+            "`Ctrl+Shift+M` opens a window for its own sake"
+        );
+        assert!(
+            NewWindowPlan::saved(SessionWindowV1::default())
+                .receives
+                .is_none(),
+            "and so does a window the session file described"
+        );
+        assert!(
+            NewWindowPlan::launched(SessionWindowV1::default())
+                .receives
+                .is_none(),
+            "and so does the launch's"
+        );
+        assert!(
+            NewWindowPlan::revived(asker, Vec::new()).receives.is_none(),
+            "and so does one drawn back out of the vault"
+        );
+    }
+
+    /// PIN (F1c; M147 —「拒绝必须看得见」) — **every refusal has one sentence,
+    /// and the two that mean different things do not share it.**
+    ///
+    /// A tab that stayed where it was looks exactly like a menu row nobody
+    /// pressed, so silence here is indistinguishable from a defect. The
+    /// grouping is asserted as well as the presence: `NoSuchTab` and
+    /// `NoSuchWindow` deliberately say one thing — "it closed before the move" —
+    /// and everything else says its own.
+    ///
+    /// MUTATION: return an empty string for any arm, or give `AmbiguousPage` the
+    /// same words as `AlreadyThere`, and this fails.
+    #[test]
+    fn every_refusal_of_a_move_says_one_sentence() {
+        let said = |refusal: TransferRefusal| refusal.notice();
+        let gone = said(TransferRefusal::NoSuchTab(TabId(1)));
+        assert_eq!(
+            gone,
+            said(TransferRefusal::NoSuchWindow(WindowId::from(1_u64))),
+            "a tab that closed and a window that closed are the same fact to the \
+             reader who watched one of them close"
+        );
+        let ambiguous = said(TransferRefusal::AmbiguousPage(SeatId(1)));
+        let already = said(TransferRefusal::AlreadyThere);
+        let kept = said(TransferRefusal::PageKept(
+            SeatId(1),
+            "put_ParentWindow failed".to_owned(),
+        ));
+        for sentence in [&gone, &ambiguous, &already, &kept] {
+            assert!(
+                !sentence.trim().is_empty(),
+                "a refusal nobody is told about is a row that did nothing"
+            );
+        }
+        assert!(
+            [&gone, &ambiguous, &already]
+                .iter()
+                .all(|other| **other != kept),
+            "the platform's own words are what separate this one from the rest"
+        );
+        assert!(
+            kept.contains("put_ParentWindow failed"),
+            "and they are passed through rather than summarised: {kept}"
+        );
+        assert_ne!(ambiguous, already);
+        assert_ne!(ambiguous, gone);
+        assert!(
+            !ambiguous.contains("SeatId") && !ambiguous.contains("Seat"),
+            "no seat number reaches a card: it is this program's word for a place \
+             in a layout tree, and the reader has never been shown one — {ambiguous}"
+        );
+    }
+
+    /// PIN (F1c) — **a refusal that arrives after the pane was promoted says
+    /// both halves.**
+    ///
+    /// `Move pane to new window` is two steps and only the second can be
+    /// refused, so the first has already happened by the time there is anything
+    /// to report. A card that said only "the tab did not move" would leave the
+    /// reader looking for a pane that is now a tab in their strip.
+    ///
+    /// MUTATION: drop the second half and the promoted card reads the same as
+    /// the unpromoted one.
+    #[test]
+    fn a_refusal_after_a_promotion_reports_the_promotion_too() {
+        let said = TransferRefusal::AmbiguousPage(SeatId(1)).notice();
+        assert_eq!(
+            i18n::move_refusal_notice(&said, false),
+            said,
+            "a lone pane's tab never became anything, so there is nothing to add"
+        );
+        let promoted = i18n::move_refusal_notice(&said, true);
+        assert!(promoted.starts_with(&said), "the refusal first: {promoted}");
+        assert!(
+            promoted.len() > said.len(),
+            "and then the fact the reader would otherwise have to discover"
+        );
+        assert!(
+            promoted.contains(i18n::Text::MoveRefusedPaneIsNowATab.text()),
+            "said in the table's own words: {promoted}"
+        );
+    }
+
+    /// PIN (F1c) — **the scaffolding the F1b acceptance ran on is gone.**
+    ///
+    /// F1b's environment-variable harness existed because the transaction had no
+    /// door a person could press, and its own doc said so: "the drag is F1c's
+    /// and the menu row is F2's, and this slice was told not to invent either".
+    /// The row exists now, so the variable would be a second, invisible way to
+    /// reach one verb — the kind this house retires rather than keeps (§7.1.5e's
+    /// own list of struck dev chords).
+    ///
+    /// **The three names are spelled in halves on purpose**: this file is its own
+    /// witness, so a pin that wrote them out would be the very text it is looking
+    /// for.
+    ///
+    /// MUTATION: leave any part of the probe standing and this names it.
+    #[test]
+    fn the_transfer_has_a_door_a_person_can_press_and_no_environment_variable() {
+        for retired in [
+            concat!("BT_TRANSFER", "_DEV"),
+            concat!("Transfer", "Probe"),
+            concat!("transfer", "_probe"),
+        ] {
+            assert!(
+                !SOURCE.contains(retired),
+                "`{retired}` is F1b's scaffolding, and F1c's row is what it was \
+                 waiting for"
             );
         }
     }
@@ -21884,7 +22119,6 @@ impl Runtime<'_> {
         let mut app = App {
             gpu,
             tab_ids,
-            transfer_probe: TransferProbe::from_environment(Instant::now()),
             event_proxy: proxy.clone(),
             git_watch: git_watch::GitWatch::default(),
             math_worker,
@@ -46477,6 +46711,12 @@ impl Runtime<'_> {
                     SplitSeed::Inherit,
                 ),
                 profiles::PaneMenuRow::MoveToNewTab => self.move_pane_to_new_tab(seat),
+                // The row above it and this one are one journey of two lengths,
+                // and this one is *made of* that one — see
+                // `Runtime::move_pane_to_new_window`, which promotes the pane
+                // through the very function the row above spends and then hands
+                // the tab to the application's transfer.
+                profiles::PaneMenuRow::MoveToNewWindow => self.move_pane_to_new_window(seat),
                 // The `×`'s own verb, reached through the `×`'s own door — so the
                 // gate a destruction has to pass is passed once and not twice.
                 profiles::PaneMenuRow::ClosePane => self.close_pane(seat),
@@ -46623,8 +46863,81 @@ impl Runtime<'_> {
             tab: self.window.tabs[self.window.active_tab].id,
             seat,
         };
-        self.extract_pane_into_new_tab(leaf, slot)?;
+        // The id the tear-out hands back belongs to the row below this one,
+        // which has a second half to give it to. This row's whole story is that
+        // the pane is a tab now, and a lone pane's `None` is §7.1.6i's recorded
+        // no-op rather than a failure.
+        let _ = self.extract_pane_into_new_tab(leaf, slot)?;
         Ok(())
+    }
+
+    /// **`Move pane to new window` — the pane leaves this window** (multiwindow
+    /// slice F1c; `plan.md` F1c, `DESIGN.md` §2.10).
+    ///
+    /// **Two doors, one journey, and the journey is composed rather than
+    /// copied.** The plan's own sentence is 「pane 拖出窗界 = 先按 `StripExtract`
+    /// 升格成 tab 再成窗,一条路」, and this is that sentence in two lines: the
+    /// pane becomes a tab through [`Self::extract_pane_into_new_tab`] — the same
+    /// function the row above and the drag onto the strip both spend — and the
+    /// tab then moves through [`FolioApp::transfer_tab`], which is the whole of
+    /// F1b's transaction and the only thing in this program that moves a tab
+    /// between windows. Nothing here re-implements either half, which is why a
+    /// tear-out can never quietly become a respawn.
+    ///
+    /// **A lone pane skips the first half rather than failing it.** `close_seat`
+    /// will not empty a tree, so the tear-out answers `None` for a pane with no
+    /// siblings — and that pane is already the whole tab, so the tab that moves
+    /// is the one it is standing in. This is the row §7.1.6i said would catch
+    /// the debt `Move pane to new tab` leaves on a lone pane.
+    ///
+    /// **The window has to exist before the tab can move into it**, and only the
+    /// loop's own door may create one, so the errand is written down here and
+    /// spent in [`FolioApp::open_pending_window`] — in the same turn, before any
+    /// frame is drawn. [`App::pending_new_windows`]'s standing shape and its
+    /// standing reason.
+    fn move_pane_to_new_window(&mut self, seat: SeatId) -> Result<()> {
+        let standing = self.window.tabs[self.window.active_tab].id;
+        let slot = self.window.tabs.len();
+        let leaf = LeafId {
+            tab: standing,
+            seat,
+        };
+        let promoted = self.extract_pane_into_new_tab(leaf, slot)?;
+        let errand = TearOut {
+            tab: promoted.unwrap_or(standing),
+            from: self.window_id(),
+            promoted: promoted.is_some(),
+        };
+        let like = self.window_id();
+        self.app
+            .pending_new_windows
+            .push(NewWindowPlan::receiving(like, errand));
+        Ok(())
+    }
+
+    /// **What a move between windows that did not happen says** (multiwindow
+    /// slice F1c; M147 — 「拒绝必须看得见」).
+    ///
+    /// Every one of [`TransferRefusal`]'s answers is an ordinary state of the
+    /// world rather than a fault, and none of them is visible: a tab that stayed
+    /// where it was looks exactly like a menu row nobody pressed. So each one
+    /// gets a card, in this window, saying what is true — and no card says what
+    /// the reader should do about it, because for the one refusal they can
+    /// actually meet there is nothing they can do about it and inventing an
+    /// instruction would be worse than the silence it replaced.
+    ///
+    /// **The corner and not a pane** ([`toast::ToastAnchor`]'s own fallback,
+    /// spent deliberately). The subject of this card is a *tab*, and half the
+    /// time it is a tab that is not on screen — a promoted pane lands in the
+    /// strip without being activated (N157) — so there is no surface the card
+    /// could stand on that would be the thing it is about.
+    fn report_move_refusal(&mut self, refusal: &TransferRefusal, promoted: bool) -> Result<()> {
+        self.toast(
+            toast::ToastKind::Error,
+            toast::ToastAnchor::Window,
+            None,
+            i18n::move_refusal_notice(&refusal.notice(), promoted),
+        )
     }
 
     /// Do what one row of the file menu says, and put the menu away.
@@ -54963,7 +55276,9 @@ impl Runtime<'_> {
         let DragSource::Pane(leaf) = drag.source else {
             return Ok(false);
         };
-        self.extract_pane_into_new_tab(leaf, slot)
+        // Whether anything moved is the whole of what a drop reports; the id the
+        // tear-out now hands back is F1c's caller's, not this one's.
+        Ok(self.extract_pane_into_new_tab(leaf, slot)?.is_some())
     }
 
     /// **§7.1.6k — let go of a pane over one of the strip's own tabs.**
@@ -55119,7 +55434,15 @@ impl Runtime<'_> {
     /// and it matters more here than usual: the whole point of the row is that
     /// the pane *moves*, sessions and scrollback intact, and a second
     /// implementation is exactly how a move quietly becomes a respawn.
-    fn extract_pane_into_new_tab(&mut self, leaf: LeafId, slot: usize) -> Result<bool> {
+    ///
+    /// **The id comes back** (multiwindow slice F1c), because `Move pane to new
+    /// window` is this verb and then the application's transfer, and the tab the
+    /// second half moves is the one the first half made. `None` is the layout
+    /// refusing to let the pane out — a lone pane, whose tree `close_seat` will
+    /// not empty — and it is a fact the caller needs rather than a failure: a
+    /// lone pane is already a whole tab, so the journey to a window of its own
+    /// simply starts one step further along.
+    fn extract_pane_into_new_tab(&mut self, leaf: LeafId, slot: usize) -> Result<Option<TabId>> {
         let metrics = self.seat_metrics();
         // Spent whether or not the layout lets the pane out — [`Runtime::absorb_tab`]'s
         // reason, and the same allocator.
@@ -55131,7 +55454,7 @@ impl Runtime<'_> {
         // can have moved the view since the hand closed, and a tear-out reaches
         // into the tree the pane is actually standing in.
         let Some(source) = self.tab_slot_of(leaf.tab) else {
-            return Ok(false);
+            return Ok(None);
         };
         let seat = leaf.seat;
         let motion = self.app.motion;
@@ -55151,7 +55474,7 @@ impl Runtime<'_> {
             },
         );
         let Some(torn) = torn else {
-            return Ok(false);
+            return Ok(None);
         };
         // The survey already clamped this against the same strip (N158); the
         // `min` is the ordinary bound on an insertion index, not a second opinion
@@ -55166,7 +55489,7 @@ impl Runtime<'_> {
             "item 6: a tear-out leaves the tab it left matching its own tree"
         );
         self.settle_seat_set_change()?;
-        Ok(true)
+        Ok(Some(id))
     }
 
     /// J119 — "never mind".
@@ -61714,6 +62037,78 @@ impl Runtime<'_> {
         self.let_go_of_this_window()
     }
 
+    /// **Take away the tab a window opened holding, now that the tab it was
+    /// opened for has arrived** (multiwindow slice F1c).
+    ///
+    /// A window cannot be built holding nothing, so `Move pane to new window`
+    /// opens one holding the default profile's single tab and moves the reader's
+    /// tab in beside it. That first tab is scaffolding in the launch
+    /// placeholder's exact sense — "a stand-in for an answer we do not have yet"
+    /// — and this is the launch's own retirement of it, down to shutting the
+    /// shell it started: a tab removed with its child left running is a shell
+    /// nobody can see, which `let_go_of_this_window` calls the one outcome worse
+    /// than an error.
+    ///
+    /// **Never the last tab.** The guard is not defensive — it is the invariant
+    /// every window in this program stands on, and a stand-in that was somehow
+    /// the only tab left is a stand-in the reader is now using.
+    fn retire_the_stand_in(&mut self, stand_in: TabId) -> Result<()> {
+        if self.window.tabs.len() <= 1 {
+            return Ok(());
+        }
+        let Some(index) = self.window.tabs.iter().position(|tab| tab.id == stand_in) else {
+            return Ok(());
+        };
+        let mut removed = self.window.tabs.remove(index);
+        // Before anything else asks this window what it is showing: the index
+        // the transfer left `active_tab` on has just moved under it, and a
+        // window pointing past its own strip has no active tab at all.
+        self.window.active_tab = self
+            .window
+            .active_tab
+            .min(self.window.tabs.len().saturating_sub(1));
+        removed.shutdown_all_shells()?;
+        if self.window.placeholder_tab == Some(stand_in) {
+            self.window.placeholder_tab = None;
+        }
+        self.apply_window_min_inner_size()?;
+        // The tab that arrived is the one this window is for, and it is the only
+        // one left; `force` because the assignment above already named it.
+        self.activate_tab(0, true)?;
+        self.mark_session_dirty(Instant::now());
+        Ok(())
+    }
+
+    /// **Empty a window that was opened to receive a tab which never arrived**
+    /// (multiwindow slice F1c).
+    ///
+    /// The move was refused, so this window holds nothing but the stand-in it
+    /// opened with — a window the reader never asked for. Emptying it before the
+    /// shut is what keeps it out of Recent: [`Self::vault_this_window`] records
+    /// nothing for a window with no tabs, which is the same rule the emptied
+    /// *source* of a move leaves by, rather than a second one written for this
+    /// door.
+    ///
+    /// **Every shell is told, whatever the one before it answered**, and the
+    /// first refusal is what comes back — [`Self::let_go_of_this_window`]'s own
+    /// discipline, for its own reason.
+    fn abandon_a_window_nothing_arrived_in(&mut self) -> Result<()> {
+        let mut refused = None;
+        for mut tab in std::mem::take(&mut self.window.tabs) {
+            if let Err(error) = tab.shutdown_all_shells()
+                && refused.is_none()
+            {
+                refused = Some(error);
+            }
+        }
+        self.window.active_tab = 0;
+        self.window.placeholder_tab = None;
+        match refused {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     /// **Everything this window is holding on to, let go** — the shut's second
     /// half, said once.
     ///
@@ -61937,7 +62332,6 @@ impl<K: Copy + Eq + std::hash::Hash, W> Windows<K, W> {
     /// second is the caller having asked a question with no answer rather than a
     /// case to degrade into, because a tab moving into the window it is already
     /// in is refused three layers up ([`FolioApp::transfer_tab`]).
-    #[allow(dead_code, reason = "F1c's drag and F2's menu row press the transfer")]
     fn two_mut(&mut self, a: K, b: K) -> Option<(&mut W, &mut W)> {
         if a == b {
             return None;
@@ -63289,7 +63683,6 @@ impl FolioApp {
     /// runs when a worker answers. If that ever stops being cheap the answer is
     /// an index derived from the strips and rebuilt when they change — not a
     /// second place to write it down.
-    #[allow(dead_code, reason = "F1c's drag and F2's menu row press the transfer")]
     fn owner_of(&mut self, tab: TabId) -> Option<WindowId> {
         (0..self.windows.len()).find_map(|index| {
             let id = self.windows.key_at(index)?;
@@ -63302,11 +63695,13 @@ impl FolioApp {
     /// transaction (F1b; `plan.md` F1b「移交 = App 级事务」).
     ///
     /// This is the door, and it is deliberately a plain function taking two ids.
-    /// The gestures are not this slice's — a drag across a window boundary is
-    /// F1c's, a menu row is F2's — and both of them, and every test, come through
-    /// here. Nothing above it decides anything: which window the tab is *in* is
-    /// not a parameter, because [`Self::owner_of`] is the only authority on that
-    /// and asking the caller would be inviting a second one.
+    /// The gestures are not this function's — the menu row is F1c's
+    /// ([`Runtime::move_pane_to_new_window`], through
+    /// [`Self::settle_tear_out`]), a drag across a window boundary is F2's — and
+    /// every one of them, and every test, comes through here. Nothing above it
+    /// decides anything: which window the tab is *in* is not a parameter,
+    /// because [`Self::owner_of`] is the only authority on that and asking the
+    /// caller would be inviting a second one.
     ///
     /// # Three phases, and only the middle one can half-happen
     ///
@@ -63349,181 +63744,6 @@ impl FolioApp {
     /// pane still asking is issued a new ticket by the target's own counter on
     /// its next turn — which is the sentence "you have not answered this yet"
     /// said in the new window's own words.
-    /// Turn F1b's acceptance harness one step — see [`TransferProbe`], which is
-    /// where the whole of "why this exists" is written. A no-op in every run that
-    /// did not ask for it.
-    fn advance_transfer_probe(&mut self, now: Instant) -> Result<()> {
-        let Some(probe) = self.app.as_ref().and_then(|app| app.transfer_probe) else {
-            return Ok(());
-        };
-        let next = match probe {
-            TransferProbe::Arming { at, settle } if now >= at => {
-                let Some(first) = self.windows.key_at(0) else {
-                    return Ok(());
-                };
-                eprintln!("BT_TRANSFER opening a second window");
-                if let Some(app) = self.app.as_mut() {
-                    app.pending_new_windows.push(NewWindowPlan::fresh(first));
-                }
-                TransferProbe::Opening {
-                    at: now + settle.max(Duration::from_secs(1)),
-                }
-            }
-            TransferProbe::Opening { at } if now >= at => {
-                let (Some(from), Some(into)) = (self.windows.key_at(0), self.windows.key_at(1))
-                else {
-                    eprintln!("BT_TRANSFER the second window never arrived");
-                    TransferProbe::Done.deadline();
-                    return self.set_transfer_probe(TransferProbe::Done);
-                };
-                let Some(tab) = self.windows.get_mut(from).and_then(|window| {
-                    window
-                        .tabs
-                        .get(window.active_tab)
-                        .map(|tab| (tab.id, tab.sessions.len()))
-                }) else {
-                    return self.set_transfer_probe(TransferProbe::Done);
-                };
-                let (tab, shells) = tab;
-                eprintln!(
-                    "BT_TRANSFER before: moving {tab:?} ({shells} shell(s)) out of {from:?} into \
-                     {into:?}"
-                );
-                self.report_transfer_shape("before");
-                self.report_transfer_tail(tab, "before");
-                let outcome = self.transfer_tab(tab, into)?;
-                eprintln!("BT_TRANSFER report: {outcome:?}");
-                self.report_transfer_shape("after");
-                self.report_transfer_tail(tab, "after");
-                match outcome {
-                    TransferOutcome::Moved(moved) => {
-                        // **Give the moved shell something to say, later.** An
-                        // idle prompt says nothing, and "the output arrived" is
-                        // half the acceptance; the sleep is what makes it arrive
-                        // after the source window has already gone.
-                        self.speak_into_transfer_probe_tab(
-                            moved.tab,
-                            b"Start-Sleep -Seconds 2; Write-Output BT-TRANSFER-ALIVE\r",
-                        );
-                        TransferProbe::Listening {
-                            at: now + Duration::from_secs(6),
-                            tab: moved.tab,
-                        }
-                    }
-                    TransferOutcome::Refused(_) => TransferProbe::Done,
-                }
-            }
-            TransferProbe::Listening { at, tab } if now >= at => {
-                // **The wake-up acceptance, and the only assertion it needs.**
-                // The window this shell was started in has gone; the loop has
-                // been idle; if the tail below has grown, the shell woke a window
-                // it was not born in.
-                self.report_transfer_tail(tab, "settled");
-                TransferProbe::Done
-            }
-            standing => standing,
-        };
-        self.set_transfer_probe(next)
-    }
-
-    /// Print which window holds which tab, and where each page is composing.
-    fn report_transfer_shape(&mut self, when: &str) {
-        for index in 0..self.windows.len() {
-            let Some(id) = self.windows.key_at(index) else {
-                continue;
-            };
-            let Some(window) = self.windows.get_mut(id) else {
-                continue;
-            };
-            let tabs: Vec<u64> = window.tabs.iter().map(|tab| tab.id.0).collect();
-            // **The title and not the address**, because a page reloaded to the
-            // same address looks exactly like a page that never moved: F1a's
-            // whole method, read out of the same place. The probe page writes
-            // `boot=<id> tick=<n>` into `document.title` every 250ms, so an
-            // unchanged id across the move is "no navigation happened" and a
-            // climbing tick is "the same JS heap kept running".
-            let pages: Vec<String> = window
-                .web
-                .iter()
-                .map(|(seat, page)| {
-                    format!(
-                        "seat {} -> {} [{}]",
-                        seat.0,
-                        page.page().url,
-                        page.page().title
-                    )
-                })
-                .collect();
-            eprintln!("BT_TRANSFER {when}: {id:?} tabs={tabs:?} pages={pages:?}");
-        }
-    }
-
-    /// Type one line into every shell of one tab, wherever that tab now is.
-    fn speak_into_transfer_probe_tab(&mut self, tab: TabId, line: &[u8]) {
-        let Some(id) = self.owner_of(tab) else {
-            return;
-        };
-        let Some(window) = self.windows.get_mut(id) else {
-            return;
-        };
-        let Some(state) = window.tabs.iter_mut().find(|open| open.id == tab) else {
-            return;
-        };
-        for (_, leaf) in state.leaves_mut() {
-            if let Some(pty) = leaf.pty.as_mut() {
-                let _ = pty.write(line);
-            }
-        }
-    }
-
-    /// How much every shell of one tab has said, wherever that tab now is.
-    fn report_transfer_tail(&mut self, tab: TabId, when: &str) {
-        let Some(id) = self.owner_of(tab) else {
-            eprintln!("BT_TRANSFER tail {when}: {tab:?} is in no window");
-            return;
-        };
-        let Some(window) = self.windows.get_mut(id) else {
-            return;
-        };
-        let bit = Arc::clone(&window.pty_wake.raised);
-        let Some(state) = window.tabs.iter_mut().find(|open| open.id == tab) else {
-            return;
-        };
-        for (seat, leaf) in state.leaves_mut() {
-            // **The measurement the wake-up acceptance is actually about**: does
-            // this shell's reader thread nudge the window the tab is standing in
-            // now, or the one it was started in — which by this line has closed.
-            let nudges_this_window = leaf
-                .wake
-                .as_ref()
-                .is_some_and(|wake| Arc::ptr_eq(&wake.bit(), &bit));
-            eprintln!(
-                "BT_TRANSFER wake {when}: {tab:?} seat {} nudges the window it is in = \
-                 {nudges_this_window}",
-                seat.0
-            );
-            // Two counts and not one picture: `output_revision` is how many times
-            // the loop has *drained* this shell, so it only climbs if something
-            // woke the window to drain it, and the frozen line count is what
-            // arrived. Together they are the whole of the wake-up acceptance.
-            let drains = leaf.output_revision;
-            let lines = leaf.session.transcript().frozen().len();
-            eprintln!(
-                "BT_TRANSFER tail {when}: {tab:?} seat {} in {id:?} drains={drains} \
-                 frozen_lines={lines}",
-                seat.0
-            );
-        }
-    }
-
-    fn set_transfer_probe(&mut self, next: TransferProbe) -> Result<()> {
-        if let Some(app) = self.app.as_mut() {
-            app.transfer_probe = Some(next);
-        }
-        Ok(())
-    }
-
-    #[allow(dead_code, reason = "F1c's drag and F2's menu row are the gestures")]
     fn transfer_tab(&mut self, tab: TabId, into: WindowId) -> Result<TransferOutcome> {
         // ── Prepare ───────────────────────────────────────────────────────────
         let Some(from) = self.owner_of(tab) else {
@@ -63992,12 +64212,74 @@ impl FolioApp {
             };
             let (id, window) = Runtime::open_window(event_loop, app, &plan, like)?;
             self.windows.insert(id, window);
+            // **The tear-out's second half, in the turn its first half ran in**
+            // (F1c). The window is standing and has not drawn a frame, so the
+            // stand-in tab it opened holding is never seen; what the reader sees
+            // is a window that opened with their pane in it.
+            if let Some(errand) = plan.receives {
+                self.settle_tear_out(errand, id)?;
+                continue;
+            }
             // **Into the document the moment it exists**, measured rather than
             // predicted: nothing else is guaranteed to change in this window
             // before the process ends, and a window missing from the file is a
             // window the next launch does not open.
             if let Some(mut runtime) = self.runtime(id) {
                 runtime.mark_session_dirty(Instant::now());
+            }
+        }
+        Ok(())
+    }
+
+    /// **Move the torn-out tab into the window that was opened to hold it, and
+    /// then make that window look like one** (multiwindow slice F1c).
+    ///
+    /// The move itself is [`Self::transfer_tab`] and nothing else — the menu row
+    /// and F2's drag are two doors onto one transaction, which is the whole rule
+    /// this slice was written under. What is left here is the two facts that
+    /// belong to *opening a window for this purpose*:
+    ///
+    /// * **the stand-in goes.** The window opened holding the default profile's
+    ///   one tab because a window cannot be built holding nothing; the tab that
+    ///   was asked for is here now, so the stand-in is taken away and its shell
+    ///   is shut. That is the launch placeholder's own retirement, spelled where
+    ///   the second door needs it.
+    /// * **a refused move leaves no window behind.** A window opened to receive
+    ///   a tab that did not arrive was never a window the reader asked for, so it
+    ///   is emptied and shut through the same door an emptied source goes
+    ///   through — and, by [`Runtime::vault_this_window`]'s own rule, a window
+    ///   with no tabs files no seed into Recent, so nothing is remembered that
+    ///   nobody ever had.
+    fn settle_tear_out(&mut self, errand: TearOut, into: WindowId) -> Result<()> {
+        let stand_in = self
+            .windows
+            .get_mut(into)
+            .and_then(|window| window.tabs.first())
+            .map(|tab| tab.id);
+        let outcome = self.transfer_tab(errand.tab, into)?;
+        match outcome {
+            TransferOutcome::Moved(_) => {
+                if let Some(stand_in) = stand_in
+                    && let Some(mut runtime) = self.runtime(into)
+                {
+                    runtime.retire_the_stand_in(stand_in)?;
+                }
+            }
+            TransferOutcome::Refused(refusal) => {
+                if let Some(mut runtime) = self.runtime(into) {
+                    runtime.abandon_a_window_nothing_arrived_in()?;
+                }
+                // Shut through the door every window closure goes through, and
+                // `ending = false` because this is a window going and not the
+                // process: the window the tab is still in is open by
+                // construction.
+                if let Some(mut runtime) = self.runtime(into) {
+                    runtime.close_window(false)?;
+                }
+                self.windows.remove(into);
+                if let Some(mut runtime) = self.runtime(errand.from) {
+                    runtime.report_move_refusal(&refusal, errand.promoted)?;
+                }
             }
         }
         Ok(())
@@ -64667,23 +64949,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 }
             }
         }
-        // **F1b's acceptance harness, and only when it was asked for.** Its
-        // deadline joins the loop's own on purpose: the last step of the script
-        // runs on an otherwise idle loop, which is exactly the condition the
-        // wake-up acceptance is about.
-        if let Err(error) = self.advance_transfer_probe(now) {
-            self.fail(event_loop, error);
-            return;
-        }
-        let probe_deadline = self
-            .app
-            .as_ref()
-            .and_then(|app| app.transfer_probe)
-            .and_then(TransferProbe::deadline);
-        event_loop.set_control_flow(
-            earliest_deadline([wake_deadline, probe_deadline])
-                .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
-        );
+        event_loop
+            .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {

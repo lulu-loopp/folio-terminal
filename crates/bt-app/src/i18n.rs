@@ -1514,6 +1514,36 @@ pub enum Text {
     PreviewLock,
     /// The tip while the pane is locked — the state, and the way out of it.
     PreviewUnlock,
+    // ── multiwindow slice F1c ─────────────────────────────────────────────
+    //
+    // One contiguous block at the end, per this table's standing rule.
+    /// **The pane menu's sixth verb**: this pane leaves for a window of its own.
+    ///
+    /// Its neighbour one row up says `new tab`, and the only word that differs
+    /// is the container — which is the whole of the difference between the two
+    /// verbs, so it is the only word that may differ.
+    PaneMenuMoveToNewWindow,
+    /// **The card a move refused because a page could not be named** (§2.10's
+    /// `AmbiguousPage`).
+    ///
+    /// It says what is true of the two tabs rather than what the reader should
+    /// do about it: nothing they can do about it is true today, and a card that
+    /// suggested one would be inventing it.
+    MoveRefusedAmbiguousPage,
+    /// The card when the tab or the window stopped being open between the press
+    /// and the move. A timing the platform is entitled to, said plainly.
+    MoveRefusedGone,
+    /// The card when the tab is already standing in the window it was asked
+    /// into.
+    MoveRefusedAlreadyThere,
+    /// **The second half of a refusal that came after a pane was promoted**
+    /// (§2.10, F1c).
+    ///
+    /// `Move pane to new window` is two steps — the pane becomes a tab, and the
+    /// tab moves — and only the second can be refused. When it is, the first has
+    /// already happened, and a card reporting only the refusal would leave the
+    /// reader to discover the tab for themselves.
+    MoveRefusedPaneIsNowATab,
 }
 
 impl Text {
@@ -2525,6 +2555,32 @@ impl Text {
                 "Unlock — this pane becomes the reusable preview again",
                 "解锁 —— 此窗格重新成为可复用的预览",
             ),
+            // ── moving a pane out of this window (multiwindow slice F1c) ───
+            Self::PaneMenuMoveToNewWindow => {
+                pick(lang, "Move pane to new window", "把窗格移到新窗口")
+            }
+            Self::MoveRefusedAmbiguousPage => pick(
+                lang,
+                "This tab's page shares a seat number with another tab's, so it cannot be \
+                 told apart. The tab did not move.",
+                "这个 tab 的页与另一个 tab 的页共用座位号，分不出是哪一台，所以 tab 没有移动。",
+            ),
+            Self::MoveRefusedGone => pick(
+                lang,
+                "That tab or that window closed before the move. Nothing moved.",
+                "那个 tab 或那扇窗在移动之前已经关了。什么都没有移动。",
+            ),
+            Self::MoveRefusedAlreadyThere => pick(
+                lang,
+                "The tab is already in that window.",
+                "这个 tab 已经在那扇窗里了。",
+            ),
+            Self::MoveRefusedPaneIsNowATab => pick(
+                lang,
+                "The pane is a tab of this window.",
+                "这个窗格现在是本窗的一个 tab。",
+            ),
+
             Self::GitDocumentEmpty => pick(lang, "No changes to show", "没有可显示的改动"),
 
             // ── a drag's landing caption ───────────────────────────────────
@@ -2743,7 +2799,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 452] = [
+    pub const ALL: [Self; 457] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3196,6 +3252,11 @@ impl Text {
         Self::QuitSessionNotWritten,
         Self::PreviewLock,
         Self::PreviewUnlock,
+        Self::PaneMenuMoveToNewWindow,
+        Self::MoveRefusedAmbiguousPage,
+        Self::MoveRefusedGone,
+        Self::MoveRefusedAlreadyThere,
+        Self::MoveRefusedPaneIsNowATab,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
@@ -4697,6 +4758,47 @@ fn pins_file_kept_in(lang: Lang, file: &str) -> String {
     match lang {
         Lang::English => format!("{file} could not be read; the pins already in force were kept"),
         Lang::Chinese => format!("{file} 无法读取；保留了正在生效的钉住条目"),
+    }
+}
+
+/// **The engine would not hand its page over** (multiwindow slice F1c, §2.10's
+/// `PageKept`).
+///
+/// The platform's own sentence is passed through rather than summarised, on
+/// [`psreadline_install_failed`]'s reason: it is the only text that tells a
+/// controller that had already gone from a parent window Windows would not set,
+/// and neither of those is a thing this window can word better than the report
+/// it was given.
+#[must_use]
+pub fn move_refused_page_kept(why: &str) -> String {
+    move_refused_page_kept_in(current(), why)
+}
+
+fn move_refused_page_kept_in(lang: Lang, why: &str) -> String {
+    match lang {
+        Lang::English => format!("The page stayed in this window: {why}. The tab did not move."),
+        Lang::Chinese => format!("这张页留在了本窗：{why}。tab 没有移动。"),
+    }
+}
+
+/// **Two facts on one card**, when a refusal arrived after the pane had already
+/// become a tab (multiwindow slice F1c).
+///
+/// The join is the language's own and not a space in both: written English
+/// separates sentences with one, and written Chinese does not.
+#[must_use]
+pub fn move_refusal_notice(said: &str, pane_is_now_a_tab: bool) -> String {
+    move_refusal_notice_in(current(), said, pane_is_now_a_tab)
+}
+
+fn move_refusal_notice_in(lang: Lang, said: &str, pane_is_now_a_tab: bool) -> String {
+    if !pane_is_now_a_tab {
+        return said.to_owned();
+    }
+    let also = Text::MoveRefusedPaneIsNowATab.in_lang(lang);
+    match lang {
+        Lang::English => format!("{said} {also}"),
+        Lang::Chinese => format!("{said}{also}"),
     }
 }
 
