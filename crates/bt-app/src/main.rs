@@ -14419,7 +14419,7 @@ fn dump_focus_thumb_frame(
     let line = format!(
         "focus-thumb visible={visible} projections={} unchanged={} throttled={} dropped={} \
          captures={} pictures={} page-hidden={} page-closing={} page-blank={} page-inflight={} \
-         page-throttled={} page-stale={}\n",
+         page-throttled={} page-unchanged={} page-stale={}\n",
         stats.projections,
         stats.skipped_unchanged,
         stats.skipped_throttled,
@@ -14431,6 +14431,7 @@ fn dump_focus_thumb_frame(
         pages.skipped_blank,
         pages.skipped_in_flight,
         pages.skipped_throttled,
+        pages.skipped_unchanged,
         pages.dropped_stale,
     );
     if let Ok(mut file) = std::fs::OpenOptions::new()

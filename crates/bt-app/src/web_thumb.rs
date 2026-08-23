@@ -162,6 +162,23 @@ struct Entry {
     /// The viewport the last picture was taken at, so that a pane which has
     /// changed shape is owed a fresh one at once.
     source: Option<(u32, u32)>,
+    /// **The bytes the engine last handed over**, kept so that the next answer
+    /// can be compared with them.
+    ///
+    /// This is gate 3 — `focus_thumb`'s damage gate — reaching the one kind of
+    /// card that could not have it. A terminal seat is asked "has your screen
+    /// moved" and answers with an integer; a page cannot be asked anything at
+    /// all until it has been photographed, so the cheapest place the question
+    /// can be put is *after* the photograph and *before* the 18 ms decode and
+    /// the megabyte upload behind it. A still page therefore costs one capture
+    /// every two seconds and nothing else — no decode, no resample, no texture,
+    /// and no re-projection of its card.
+    ///
+    /// The encoded PNG and not the decoded pixels, because the encoded form is
+    /// what arrives and comparing it is a 40 KB memcmp against 18 ms of work.
+    /// It is only ever an optimisation: an encoder that answered differently for
+    /// identical pixels would simply leave this never firing.
+    encoded: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -218,6 +235,10 @@ pub struct WebThumbStats {
     /// Seats not asked because the last one was less than [`CAPTURE_INTERVAL`]
     /// ago.
     pub skipped_throttled: u64,
+    /// Answers that were byte-for-byte the last one — a page that has not
+    /// changed. The decode, the resample and the upload behind it are all
+    /// refused.
+    pub skipped_unchanged: u64,
     /// Answers thrown away because the seat had moved on — it navigated, or it
     /// was invalidated, between the ask and the answer.
     pub dropped_stale: u64,
@@ -264,6 +285,7 @@ impl WebThumbs {
                 asked: None,
                 started: None,
                 source: None,
+                encoded: None,
             });
             // **A seat that navigated is a seat whose picture is of another
             // page.** Asked here as well as on `Committed`, because the two say
@@ -277,6 +299,7 @@ impl WebThumbs {
                 }
                 entry.asked = None;
                 entry.source = None;
+                entry.encoded = None;
             }
             if demand.facts.closing {
                 self.stats.skipped_closing += 1;
@@ -353,6 +376,15 @@ impl WebThumbs {
             self.stats.dropped_stale += 1;
             return None;
         }
+        // **Gate 3, for the one card that had to be photographed to be asked.**
+        // A page that has not changed hands back the same encoding, and the 18 ms
+        // decode plus the megabyte upload behind it are refused here.
+        if entry.encoded.as_deref() == Some(png.as_slice()) && entry.picture.is_some() {
+            self.stats.skipped_unchanged += 1;
+            entry.source = source;
+            return None;
+        }
+        entry.encoded = Some(png.clone());
         entry.source = source;
         Some(ShrinkJob {
             seat,
@@ -402,6 +434,7 @@ impl WebThumbs {
         let held = entry.picture.take().is_some();
         entry.asked = None;
         entry.source = None;
+        entry.encoded = None;
         if held {
             entry.serial += 1;
         }
@@ -901,6 +934,70 @@ mod tests {
         assert_eq!((width, height), (263, 320));
         assert_eq!(rgba.len(), 263 * 320 * 4);
         assert!(shrink(b"not a png at all", (263, 320)).is_none());
+    }
+
+    /// Red gate: **a page that has not changed is photographed and then let go**
+    /// — no decode, no resample, no texture, and no re-projection of its card.
+    ///
+    /// This is `focus_thumb`'s gate 3 reaching the one kind of card that cannot
+    /// be asked anything until it has been photographed. Without it a still page
+    /// beside a scrolling shell would pay 18 ms of decode and a megabyte of
+    /// upload every two seconds for a picture identical to the one already on
+    /// screen.
+    #[test]
+    fn a_page_that_has_not_changed_costs_nothing_after_its_first_frame() {
+        let mut thumbs = WebThumbs::default();
+        let start = Instant::now();
+        let still = a_real_png(40, 30);
+        thumbs.due(&[demand(1, facts())], start);
+        let job = thumbs
+            .arrived(
+                seat(1),
+                "http://127.0.0.1:8080/",
+                Some(still.clone()),
+                Some((1200, 800)),
+            )
+            .expect("the first answer is always work");
+        thumbs.settle(ShrunkPicture {
+            seat: seat(1),
+            ticket: job.ticket,
+            rgba: Some((vec![0; 263 * 320 * 4], 263, 320)),
+        });
+        let key = thumbs.picture(seat(1)).expect("a picture").key.clone();
+
+        thumbs.due(&[demand(1, facts())], start + CAPTURE_INTERVAL);
+        assert!(
+            thumbs
+                .arrived(
+                    seat(1),
+                    "http://127.0.0.1:8080/",
+                    Some(still),
+                    Some((1200, 800)),
+                )
+                .is_none(),
+            "an unchanged page was sent to the decoder anyway"
+        );
+        assert_eq!(thumbs.stats().skipped_unchanged, 1);
+        assert_eq!(
+            thumbs.picture(seat(1)).expect("a picture").key,
+            key,
+            "and its card was asked to re-project for a picture it already had"
+        );
+
+        // A page that *did* change is still work, which is what stops this from
+        // being a card frozen on its first frame.
+        thumbs.due(&[demand(1, facts())], start + CAPTURE_INTERVAL * 2);
+        assert!(
+            thumbs
+                .arrived(
+                    seat(1),
+                    "http://127.0.0.1:8080/",
+                    Some(a_real_png(41, 30)),
+                    Some((1200, 800)),
+                )
+                .is_some(),
+            "a page that moved was refused as if it had not"
+        );
     }
 
     /// **The page lane's own budget** (W2 slice ⑥ against §7.1.6b′ F2's

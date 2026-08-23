@@ -1686,6 +1686,36 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 
 **⑥ 顺带清掉的一笔账（`docs/HANDOFF-2026-08-21.md` §5 第 18 条）。** `preview_ftype` 的文本扩展名表有 `html` 没有 `htm`，于是一份 `.htm` 同时画出「无法预览」卡与头上那枚交给浏览器的 ↗——一块 pane 两枚钮通同一扇门。`htm` 补进 `preview::TEXT_EXTENSIONS` 与小样的 `previewFtype`。**这只是分类那一半**：行激活现在把 `.htm` 与 `.html` 一起送上网页道，两种拼法在两张表里都是同一个对象。留下来的小差别是 `.pdf`——它按名字仍然是 `Unknown`，所以一行 `.pdf` 的悬停卡说的是「无法预览」而双击它会开在网页座位上。**这是本片明知留下的一条缝**，因为把 `preview_ftype` 改成按名字回答 `Web` 会让每一个 `PreviewSource::File` 的 `.html` buffer（拖放进来的、切换器里的）变成 `Refused(Type)`，那是另一条裁决，不是这一片的。
 
+### 7.11 卡片上的网页是它最后一次在玻璃上的样子（Web 预览块 W2 片⑥，2026-08-23，已落地；`crates/bt-app/src/{web_thumb(新),focus_thumb,seats,webhost,main}.rs`、`crates/bt-platform/src/webview.rs`、`spikes/webview2-w0/src/{gates_w2s6(新),host,win,main}.rs`）
+
+**这一片只回答一个问题:聚焦卡片上的网页座位画什么。** 片③ 之后网页是预览缓冲,而卡片的投影层「只从内存里的缓冲取文本」——网页缓冲里没有文本,于是那一格一直是一张面(名字 + 类型词)。本片让它变成一张真的图。头/脚/三钮是片④,live 缩略图与远程投影按 `plan.md` §5 另立性能片,本片一行不做。
+
+**① 两个数字的矛盾,以及它其实不是矛盾。** F2 写下的预算是「满负荷 3.0ms/帧、10Hz」(`focus_thumb::FULL_BLAST_BUDGET_MS`),而 `plan.md` §1 给网页的唯一像素通道 `CapturePreview` 被门 2 量到 **52.7ms**——差两个数量级。**但 52.7 是延迟,不是成本**:它从调用量到完成回调,而那段时间几乎全花在浏览器进程里。本片在主仓探针上新开一扇门(`spikes/webview2-w0/` 门 11,`--gates 11 --no-activate`)把它拆成三段,本机 release、页面 1146×777:**同步那一半 0.115ms**(调用返回)、**等待 84ms**(引擎自己的钟)、**把编码好的字节从流里读回来 0.014ms**。也就是说照一张相,发起方的线程一共付 **0.13ms**。另外 PNG 解码 3.8ms + 缩放到卡片 14.3ms = **18ms**,那是必须离开渲染线程的一段。
+
+**这个结论是在一个跑着的渲染循环上验的,不是算出来的。** 同一扇门跑三组各 180 帧:**基线** 帧间隔中位 8.299ms、超过 20ms 的帧 **0**;**在帧里发起并等回答**(最朴素的写法)帧间隔中位 **84.307ms**、超 20ms 的帧 **180/180**;**发起后不等、答案落在后面某次 pump 上**——帧间隔中位 **8.297ms**、超 20ms 的帧 **0**,同期完成 14 张照片。三组数并排的意思很直白:**这条路能不能进预算,取决于写法,而不取决于 52.7 这个数**。落地取的是第三种,也是窗口唯一能有的一种(`bt_platform::WebHost::capture_preview` 发起即返回,答案走 `WebEvent::Captured`)。
+
+**② 决定形状的那条实测事实:隐藏的 WebView 根本不回答。** 2026-08-20 记过一次,08-22 复验两次,本片在卡片尺寸下又量一次——完成回调不来,`CapturePreview` 就那么挂着。而聚焦列里**除当前 tab 那一张之外全是后台 tab**,它们的页面按 §7.8 ⑧ 是 `SetIsVisible(false)`。所以「每张卡都有一张活的网页缩图」这件事在公开 API 上不存在;`plan.md` §1 早就把话说死了(「F2 活缩略图与低延迟远程逐帧,公开 API 无受支持路径」)。**能做的是方案接着点名的那一件:把它最后一次在玻璃上的那一帧留下来。** 于是本片的一句话是:**一张网页卡画的是那个页面最后一次站在玻璃上的样子;从没站过的,画它一直画的那张面。**
+
+**尺寸也量了,因为它决定不了什么值得写下来。** `CapturePreview` 没有目标尺寸参数,交回的永远是视口。四档实测中位:整块 pane(1146×777)**85.3ms**、半块(640×400)65.8ms、卡片高档(263×320)**35.2ms**、卡片矮档(263×160)33.1ms。**下限在 30ms 上下**,与画面大小基本无关——也就是说「把座位缩小去换一张便宜的相片」这条路不存在,而且卡片从来也不是页面的真实尺寸。JPEG 与 PNG 编码同速(63.9 对 64.0ms),所以取无损的那个。
+
+**③ 被否掉的形状,连同否掉的理由。** ⓐ **在帧里发起并等回答**:上面那组 84.307ms/180 帧全爆的数就是它的判词。ⓑ **在渲染线程上解码**:18ms 是整个投影预算的六倍,一帧里出现一次就是一次肉眼可见的顿挫;解码与缩放因此住在 `web_thumb::PageShrinker` 的独立线程上(窗口第一次真的照相时才起,大多数窗口一辈子不起)。ⓒ **把 `CapturePreview` 折进 `focus_thumb` 的四道门里当第五道**:门是投影的门,而照相既不是投影也不由投影触发的那套 damage 决定,塞进去会让「一次投影是什么」这句话同时指两件事。ⓓ **给网页卡画一张更好的面(favicon + 标题)而把真图整个留给 F2-live**:这是原单允许的退路,**没有走**——因为量下来这条路进得了预算,退路的前提不成立;favicon 本身仍是欠账(见末段)。ⓔ **降低 `FULL_BLAST_BUDGET_MS`** 或把它调松:那道门是 F2 写下来的裁决,一个字未动,前后数见 ⑥。
+
+**④ 四道门管「问」,图本身归座位——这是本片唯一一条新规矩,而且是被介质逼出来的。** `focus_thumb` 的门 1(模式关着不跑)与门 2(卡不在裁剪框里不跑)照旧管着**要不要去照相**。它们不管**那张图**,理由是:一根终端座位的投影滚出视野就丢、滚回来当场重投,因为它画的那个网格一直在内存里、随时可以再问一次;**一张网页的像素只在页面站在玻璃上时存在**。照门 2 的字面把网页图也丢掉,等于「聚焦列滚一下,所有网页卡永久变白」——没有任何东西能再把它们填回来。所以**图挂在座位上,不挂在卡上**:座位没了才没,页面换了才换。红测 `a_page_that_left_the_glass_keeps_its_last_frame` 钉这一半。
+
+**⑤ 抓帧的生命周期,四件事。** **触发**:每帧那一趟投影 pass 里,对**在裁剪框里的卡**上的每个网页座位问一次 `web_thumb::WebThumbs::due`——一个只吃事实的纯函数,事实由 `WebSeat::capture_facts` 一次读齐(在不在玻璃上、是不是正在关、有没有提交过文档、有没有一张照片还没回来、引擎最后拿到的尺寸)。**频率**:`CAPTURE_INTERVAL` **2 秒**一张,每座位同时只有一张在飞;十倍慢于投影的 10Hz,因为唯一照得到的那张卡就是舞台上那一张的缩图,它没有任何只能从缩图上读到的东西。**缓存**:`WindowRuntime::web_thumbs`,一座位一张,已经缩到卡片格子大小的 RGBA + 一个身份串(`web-thumb:<seat>:<serial>`),走 `ChromeGroup::images` 这条不经光栅器的通道(与 glance 卡缩图同一个槽)。**作废**四个时机:ⓐ 导航提交了另一条 URL(`WebOutcome::Committed` 与下一趟 demand 的 URL 各说一次,红测两条);ⓑ 答案回来时座位已经不在那条 URL 上(丢弃,记 `page-stale`);ⓒ 座位关掉/网页座位消失(`retain`,像素在这里释放);ⓓ **pane 换了形状**——这一条**不作废,而是当场欠一张新的**:老像素是一个已经不在的排版的真实照片,而丢掉它对一个已经下台的页面就是永久变白,两害相权取轻,红测 `a_reshaped_pane_is_photographed_without_waiting_for_the_clock`。
+
+**⑥ 门 3 也够到了网页,只是够到的方式不同。** 终端座位被问「你的屏幕动了没有」,答一个整数;**网页在被照下来之前根本无法被问**。所以这道门下移到照片回来之后、18ms 解码与一兆纹理上传之前:**编码字节与上一张逐字节相同就整张丢掉**(记 `page-unchanged`)。于是一个不动的页面除了每两秒一次 `CapturePreview` 之外什么也不花——不解码、不缩放、不上传、卡片也不重投。40KB 的 memcmp 换 18ms,而且它只可能是优化:编码若不确定性,它就永不命中。红测 `a_page_that_has_not_changed_costs_nothing_after_its_first_frame`。
+
+**⑦ 预算前后。** 同一台机器、同一天、同一条命令,`the_budget_holds_under_ten_tabs_of_full_blast_output` **本片未改一字**:落地前 **0.0247ms/帧**,落地后 **0.0250ms/帧**(闲时 0.0053 → 0.0051),差在噪声里。新加的那一趟(十 tab 二十座**全是网页**,比产品能被要求的重得多)**0.0010ms/帧**,由 `web_thumb::tests::the_page_lane_stays_far_inside_the_projection_budget` 钉着,引用的是同一个 3.0。照相本身每次 0.115ms、每座位最多两秒一次,摊到 10Hz 的一趟上是 **0.0058ms**。`FULL_BLAST_BUDGET_MS = 3.0` 与 `MIN_INTERVAL = 100ms` 一个字未改。
+
+**⑧ 计数进的是同一行,不是第二个开关。** `BT_FOCUS_THUMB_DUMP` 那行尾部接上八个新数:`captures`(真发出去的)、`pictures`(真存下来的)、`page-hidden` / `page-closing` / `page-blank` / `page-inflight` / `page-throttled` / `page-unchanged`(六种拒绝各自的)、`page-stale`(答案回来晚了)。同一行而不是第二份文件,是因为读的人要的正是两组数**并排**:`captures` 不动而 `page-hidden` 一路爬,就是「这一列全是后台 tab」的全部故事。实机十三帧留档见本节末。
+
+**⑨ 一个刻意不做的东西:这条通道没有自己的钟。** 照相跑在窗口本来就在转的帧上(`refresh_chrome` → `refresh_focus_thumbnails`),没有为它排 wake。后果如实记下:**一扇没人碰、什么也没在动的窗,它的网页卡不会自己刷新**——哪怕页面自己变了。给它一个钟会让闲窗每两秒醒一次专门去照相,那正是门 1 承诺要还回来的那笔钱;而 F2 的投影本来就只在转着的帧上发生,网页在这一点上跟它的邻居完全一样,不是特例。
+
+**⑩ 实机(2026-08-23,debug,隔离 `APPDATA`/`LOCALAPPDATA`,本地静态服务器 127.0.0.1:8642,不访问外网)。** 一扇 2400×1500 的窗、`settings.focus_mode = true` + `focus_card_height = 320` 开机即在聚焦态,一张 tab 两块 pane(PowerShell + 网页)。卡上左格是终端的尾巴、右格是**那张网页的真图**——渐变底、标题、正文、四个编号方块,连页面自己的滚动条都在。`focus-thumb` 那一行:`visible=1 projections=5 unchanged=46 throttled=1 dropped=0 captures=1 pictures=1 page-hidden=0 page-closing=0 page-blank=16 page-inflight=1 page-throttled=4 page-stale=0`——`page-blank=16` 是页面提交之前那十六帧,`captures=1 pictures=1` 是提交之后立刻照的那一张,`page-throttled` 一路爬是两秒钟的钟在挡。stderr 上没有 `BT_WEB` 故障,收尾后本进程 0 个残留 folio、0 个残留 msedgewebview2。
+
+**⑪ 欠账。** ⓐ **favicon 仍然没有**:§7.7 的头写的是「favicon/地球标」,今天两处画的都是地球标;没有图的网页卡因此说的是标题 + 类型词而不是标题 + favicon,这跟本片是两件事(引擎侧要接 `FaviconChanged`),归片④ 的后续。ⓑ **第一次进聚焦模式时,除当前 tab 外的网页卡都是面**——它们的页面从没在「有人看着」的时候站上过玻璃。这是门 1 的价钱,不是缺陷;真要抹掉它,得让模式关着的时候也照相,那是另一条裁决。ⓒ **卡片改高之后,已下台页面的那张图会被拉伸**(纹理是旧尺寸、框是这一帧的格子),直到它再一次上台;拒绝画反而会让它永久变白,见 ④。
+
 ## 8. 依赖策略
 
 同 v3 表格，关键修订：**alacritty_terminal 稳态配置 scrollback=0**。vendor seam 包含既有上滚事件钩子，以及窄事务操作：打开 primary native history、查询行数、在 coalesced final viewport 上用 vendor row/WRAPLINE/cursor 重新评估高度、一次性 `take_history(oldest→newest)`、清空并恢复 limit=0，以及只针对唯一未闭合 staging candidate 的 `restore_history(oldest→newest)`；没有可独立呈现的 transcript snapshot/backing 镜像，也不复制 reflow 算法。事务期 vendor grid 是 mutable tail 唯一权威；收割后转录层拥有 staging ID/配额/定稿权，vendor 只保留该候选的原生 row escrow 供下一事务无损交还。升级必须 diff `grid/resize.rs`/history 语义，跑 vendor 181 项与完整生命周期矩阵。
