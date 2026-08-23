@@ -508,18 +508,38 @@ impl Seats {
     /// close button — take it away and the pane loses the two verbs every other
     /// pane has.
     ///
-    /// Preview follows the terminal's rule rather than the files pane's: it is
-    /// only ever opened beside something, so `pane_count > 1` is already true
-    /// wherever it exists, and giving it the unconditional rule would be writing
-    /// a branch no state can reach.
-    /// A placeholder joins the files pane on the unconditional side, for the
-    /// same reason and a sharper one: T227 asks the degradation to be visible,
+    /// **Preview stands with the files pane** (§7.1.6i's floor, 2026-08-23).
+    ///
+    /// It used to follow the terminal's rule, on an argument that was about
+    /// reachability and not about design: "it is only ever opened beside
+    /// something, so `pane_count > 1` is already true wherever it exists, and
+    /// giving it the unconditional rule would be writing a branch no state can
+    /// reach". **§7.1.6h reached it** — a file is a tab now, its pane is that
+    /// tab's only seat, and the branch that was unwritable is the shape of every
+    /// preview-root tab. What was left was a document with no name on it, no
+    /// save, no pin, no pop-out and no close: the files pane's own sentence
+    /// above, word for word, about a different kind of leaf.
+    ///
+    /// The mock-up has drawn it this way the whole time and is the evidence
+    /// rather than the argument: `previewPaneHtml` emits `.preview-head` with no
+    /// `multi` in front of it, exactly as `filesPaneHtml` does, and the one
+    /// place `multi ? … : loneVerbHtml(node)` stands is the terminal arm of
+    /// `renderNode`. **The user's veto of an unconditional head is untouched**:
+    /// it was about the terminal — 「常驻的 30px 灰带在每天看九成时间的那张画面
+    /// 里不挣像素」 — and that pane is still the one pane in this window that
+    /// earns its head by having a sibling.
+    ///
+    /// A placeholder joins them on the unconditional side, for the same reason
+    /// and a sharper one: T227 asks the degradation to be visible,
     /// and a lone unrecognised leaf with no head and no body notice is a blank
     /// window — indistinguishable from the silent destruction the rule exists to
     /// forbid. The pane that cannot say what it is, is exactly the pane that has
     /// to say it.
     pub fn seat_wears_head(&self, kind: SeatKind) -> bool {
-        matches!(kind, SeatKind::Files | SeatKind::Placeholder) || self.has_pane_headers()
+        matches!(
+            kind,
+            SeatKind::Files | SeatKind::Preview | SeatKind::Placeholder
+        ) || self.has_pane_headers()
     }
 
     /// Whether this one seat wears the **corner ghost** — the lone pane's `⌄`
@@ -527,11 +547,12 @@ impl Seats {
     ///
     /// The exact complement of [`Self::seat_wears_head`] on terminals and on
     /// nothing else: a pane that has its head has its chevron in it, and a files
-    /// column or a placeholder never loses its head to begin with. A preview
-    /// follows the terminal's head rule but has no shell to duplicate and no
-    /// profile to split with, so it does not grow the ghost either — the menu
-    /// this opens is `Runtime::open_pane_menu`'s, and that one is terminals
-    /// only.
+    /// column, a preview or a placeholder never loses its head to begin with.
+    /// The `kind` test is therefore belt and braces rather than a second rule —
+    /// and it is kept, because it is the one that says *why*: the menu this
+    /// opens is `Runtime::open_pane_menu`'s, whose every verb needs a shell to
+    /// duplicate or a profile to split with, and a ghost over a document would
+    /// be a button that opens nothing.
     ///
     /// **An open search capsule stands it down** (`capsule`), which is the
     /// mock-up's `.pane-inner:has(> .srchbar) > .pane-ghost { display: none }`:
@@ -23831,6 +23852,38 @@ mod tests {",
         let split = term_beside_files();
         assert!(split.seat_wears_head(SeatKind::Terminal));
         assert!(split.seat_wears_head(SeatKind::Files));
+    }
+
+    /// **A lone preview keeps its head** (§7.1.6h's tab shape, §7.1.6i's floor).
+    ///
+    /// The mock-up has said so since preview panes existed: `previewPaneHtml`
+    /// emits `.preview-head` with no `multi` in front of it, exactly as
+    /// `filesPaneHtml` does and unlike the terminal arm of `renderNode`, which
+    /// is the one place `multi ? … : loneVerbHtml(node)` stands. This build read
+    /// the terminal's rule onto preview on the argument that a lone preview was
+    /// "a branch no state can reach" — and §7.1.6h reached it, so the argument
+    /// is spent and the mock-up's own drawing is what is left.
+    ///
+    /// The second half is the part that keeps one button one button: the corner
+    /// ghost opens `Runtime::open_pane_menu`, which is terminals only, so a
+    /// preview that has its head must **not** also grow a ghost. The two
+    /// predicates stay exact complements on terminals and silent everywhere
+    /// else.
+    ///
+    /// Red gate: the first assertion is the shipped state — a lone preview pane
+    /// draws no head, so it has no name, no save, no pin, no pop-out and no
+    /// close, and §7.1.6h made that pane a whole tab.
+    #[test]
+    fn a_lone_preview_wears_its_head_and_grows_no_corner_ghost() {
+        let lone = Seats::lone_seat(&Seat::new(SeatId(1), SeatKind::Preview)).0;
+        assert!(
+            lone.seat_wears_head(SeatKind::Preview),
+            "a preview pane's head does not depend on the company it keeps"
+        );
+        assert!(
+            !lone.seat_wears_ghost(SeatKind::Preview, SeatId(1), None),
+            "the ghost opens a menu of shell verbs; a preview has no shell"
+        );
     }
 
     /// C30/C27: the `×`'s box, read off the mock-up's own declaration.
