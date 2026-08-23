@@ -29874,6 +29874,20 @@ impl Runtime<'_> {
         }
         self.follow_renamed_preview(source, &new, name);
         self.refresh_files_dirs_at(&directory);
+        // **A suffix that changes the view can change the lane** (user ruling
+        // 2026-08-23). `follow_renamed_preview` already re-asks `preview_ftype`
+        // — "renaming `notes.md` to `notes.txt` really does turn a rendered
+        // document into a text editor, which is the filesystem's answer and not
+        // ours to soften" — and since the day a name can say *page*, the
+        // filesystem's answer to `notes.md` → `notes.html` is a page. Left
+        // here, the buffer would keep its text and be drawn as a document this
+        // window has no reader for, which is exactly the contradiction this
+        // ruling exists to end. The reverse cannot happen: a page has no file
+        // path, so this door refuses it above.
+        if let Some(path) = source_opens_as_a_page(&preview::PreviewSource::file(&new)) {
+            self.mark_session_dirty(Instant::now());
+            return self.open_preview_web_file(path);
+        }
         // **The session holds the path, so the session has moved too.** A window
         // killed after a rename and restored from a file still naming the old
         // path opens on `No preview — file not found`, which is this window
@@ -88769,6 +88783,23 @@ mod tests {
                 && door.contains("self.open_preview_web_file(path)"),
             "the pool's own door does not turn a page-named source back onto the \
              engine's lane, so a `.html` can still land as a document:\n{door}"
+        );
+        // **And the one door that changes a name without landing a source.** A
+        // rename re-asks `preview_ftype` on purpose — `notes.md` → `notes.txt`
+        // really does turn a rendered document into a text editor — so since a
+        // name can say *page*, `notes.md` → `notes.html` has to reach the engine
+        // rather than leave a buffer full of text drawn as a kind this window
+        // cannot read.
+        const RENAME: &str = "    fn rename_preview_file(";
+        let start = SOURCE
+            .find(RENAME)
+            .expect("the rename door is declared in this file");
+        let rest = &SOURCE[start + RENAME.len()..];
+        let rename = &rest[..rest.find("\n    fn ").unwrap_or(rest.len())];
+        assert!(
+            rename.contains("source_opens_as_a_page(&preview::PreviewSource::file(&new))")
+                && rename.contains("self.open_preview_web_file(path)"),
+            "a rename into a page's name leaves the file on the document lane:\n{rename}"
         );
     }
 
