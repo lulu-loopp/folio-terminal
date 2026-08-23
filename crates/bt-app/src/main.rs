@@ -6801,6 +6801,7 @@ impl TabState {
     /// as [`Self::display_title`]'s: giving a folder tab a second glyph, chosen
     /// somewhere else, is how a strip row and the pane under it start describing
     /// two different things.
+    ///
     /// `pages` is every seat this **window** is hosting a page on (§7.7 ②, W2
     /// slice ③ ④) — the one fact about a leaf's content that a tab cannot answer
     /// for itself, because the hosts live on the window and a tab knows only its
@@ -84361,6 +84362,56 @@ mod tests {
         assert!(
             !source.sessions.is_empty(),
             "the tab it left keeps the shell that stayed"
+        );
+    }
+
+    /// **§7.7 ② — the strip row of a tab whose identity seat is hosting a page
+    /// wears the globe, and the seat beside it does not** (W2 slice ③ ④).
+    ///
+    /// `tab_mark` takes the window's whole set of page seats rather than one
+    /// seat, because slice ③ gave the window a page *per seat* and a window with
+    /// two pages open on two tabs has to answer for both strip rows at once.
+    /// What makes that safe is that seats are unique across the window — so
+    /// membership in the set is already the per-tab question, and the third
+    /// assertion here is the one that says so: a set naming somebody else's seat
+    /// leaves this tab wearing the file mark it had.
+    ///
+    /// Red gate: ask the set about the *focused* leaf rather than the identity
+    /// seat and the first assertion still passes on this one-pane tab while the
+    /// strip goes wrong for every split; answer the globe for any non-empty set
+    /// and the third assertion fails.
+    #[test]
+    fn a_tab_identified_by_a_seat_that_is_hosting_a_page_wears_the_globe() {
+        let (mut source, pane) = tab_with_a_preview(
+            1,
+            vec![buffer_saying("D:\\work\\notes.md", "notes.md", "hello")],
+        );
+        let torn = tear_pane_into_tab(
+            &mut source,
+            &cross_metrics(),
+            pane,
+            TabId(9),
+            Instant::now(),
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("a preview may become a tab of its own");
+        let seat = torn.seats.preview_seats()[0];
+
+        assert_eq!(
+            torn.tab_mark(&BTreeSet::from([seat])),
+            marks::ChromeMark::Globe,
+            "the seat is hosting a page, so the strip row says page"
+        );
+        assert_eq!(
+            torn.tab_mark(&BTreeSet::new()),
+            marks::ChromeMark::File,
+            "and says file again the moment the page leaves that seat"
+        );
+        assert_eq!(
+            torn.tab_mark(&BTreeSet::from([SeatId(seat.0 + 1000)])),
+            marks::ChromeMark::File,
+            "a page on some other tab's seat is not this tab's page"
         );
     }
 
