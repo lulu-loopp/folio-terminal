@@ -2594,6 +2594,264 @@ mod tests {
         assert_eq!(located("D:\\x\\a.md:0"), [("D:\\x\\a.md:0", None)]);
     }
 
+    /// §7.1.5k combination row 34: a **relative** reference carries a `:line[:col]` exactly as a
+    /// drive-rooted one does, in every spelling of "relative" there is.
+    ///
+    /// It has done so since §7.1.5j ⑨, and the reason is worth reading off the code rather than
+    /// off a memory of it: `is_relative_reference`'s "no colon" refusal is asked of the **path**,
+    /// which [`split_printed_location`] has already cut the location off of. So `docs/a.md:12:3`
+    /// reaches that refusal as `docs/a.md` and passes, while `docs/a.md:abc` reaches it whole and
+    /// is refused exactly as the row above says. What is pinned here is that every anchoring gets
+    /// there — bare, `./`, `..\`, backslashed — and that each of them survives the prose that
+    /// opens a candidate around it.
+    #[test]
+    fn a_located_relative_reference_is_read_like_a_drive_rooted_one() {
+        let links = ledger("D:\\case", &[("D:\\case\\docs\\a.md", true)]);
+        for (line, span, uri) in [
+            (
+                "docs/a.md:12:3",
+                "docs/a.md:12:3",
+                "file:///D:/case/docs/a.md#L12C3",
+            ),
+            (
+                "docs\\a.md:12",
+                "docs\\a.md:12",
+                "file:///D:/case/docs/a.md#L12",
+            ),
+            (
+                "./docs/a.md:12:3",
+                "./docs/a.md:12:3",
+                "file:///D:/case/docs/a.md#L12C3",
+            ),
+            (
+                "..\\case\\docs\\a.md:12",
+                "..\\case\\docs\\a.md:12",
+                "file:///D:/case/docs/a.md#L12",
+            ),
+            (
+                "见 docs/a.md:12:3。",
+                "docs/a.md:12:3",
+                "file:///D:/case/docs/a.md#L12C3",
+            ),
+            (
+                "(docs/a.md:12:3)",
+                "docs/a.md:12:3",
+                "file:///D:/case/docs/a.md#L12C3",
+            ),
+            (
+                "\"docs/a.md:12:3\"",
+                "docs/a.md:12:3",
+                "file:///D:/case/docs/a.md#L12C3",
+            ),
+        ] {
+            assert_eq!(
+                linked(&links, line, None),
+                [(span, uri.to_owned())],
+                "{line}"
+            );
+        }
+        // The disk is asked about the file and never about the printed string — the same
+        // discipline the drive-rooted spelling lives under, asserted on the spelling that has to
+        // be joined to a directory first.
+        let fresh = ledger("D:\\case", &[]);
+        let mut unknown = BTreeSet::new();
+        assert!(
+            fresh
+                .links_in("docs/a.md:12:3", None, &mut unknown)
+                .is_empty()
+        );
+        assert_eq!(
+            unknown,
+            BTreeSet::from([PathBuf::from("D:\\case\\docs\\a.md")])
+        );
+    }
+
+    /// §7.1.5k ① over a located relative reference (combination row 35): the gate reads the
+    /// **whole** reference, so a cut line number is as suspect as a cut name.
+    ///
+    /// `docs/a.md:12:3` ending the row may be all of `…:12:34`, and the file's own name is
+    /// complete either way — so the disk would answer yes, which is precisely the licence the gate
+    /// refuses. One cell of prose behind it is enough to make it an ordinary link again.
+    #[test]
+    fn the_truncation_gate_reads_a_located_relative_reference_to_the_end_of_its_line() {
+        let links = ledger("D:\\case", &[("D:\\case\\docs\\a.md", true)]);
+        let line = "docs/a.md:12:3";
+        let mut unknown = BTreeSet::new();
+        assert!(
+            links
+                .links_in(line, last_cell_of(line), &mut unknown)
+                .is_empty()
+        );
+        assert!(
+            unknown.is_empty(),
+            "a span the gate has pressed down is not worth a probe: {unknown:?}"
+        );
+        let inside = "docs/a.md:12:3 x";
+        assert_eq!(
+            linked(&links, inside, last_cell_of(inside)),
+            [(
+                "docs/a.md:12:3",
+                "file:///D:/case/docs/a.md#L12C3".to_owned()
+            )]
+        );
+    }
+
+    /// §7.1.5k ② over a relative reference (combination rows 36 and 37).
+    ///
+    /// Row 36 is the ordinary rejoin with the location riding along, and its receipt has to name
+    /// the directory the halves were measured from: a relative rejoin is only true of the working
+    /// directory it was joined to, and the next pass rebuilds it against whatever that is then.
+    ///
+    /// Row 37 is the shape only a located reference can have — **the cut fell inside the line
+    /// number**. Gate ⑤ answers it: the upper half is already a verified reference of its own
+    /// (`docs/a.md` at line 1), so no third target is invented; gate ① then keeps that upper half
+    /// from being drawn as the line-1 reference it is not. A blank is the honest end of it, the
+    /// same end §7.1.5k ② gives `D:\WINDOWS\system`.
+    #[test]
+    fn two_physical_lines_rejoin_a_relative_reference_and_its_line_rides_along() {
+        let links = ledger(
+            "D:\\case",
+            &[
+                ("D:\\case\\docs\\a.md", true),
+                ("D:\\case\\very\\long\\path\\file.rs", true),
+            ],
+        );
+        let upper = "very/long/pa";
+        assert_eq!(
+            rejoin(&links, upper, "th/file.rs:12:3"),
+            Some((
+                upper,
+                "th/file.rs:12:3",
+                "file:///D:/case/very/long/path/file.rs#L12C3".to_owned()
+            ))
+        );
+        let mut unknown = BTreeSet::new();
+        let joined = links
+            .rejoin_across_newline(
+                upper,
+                last_cell_of(upper).unwrap(),
+                "th/file.rs:12:3",
+                &mut unknown,
+            )
+            .expect("the five gates pass on the relative spelling too");
+        assert_eq!(
+            joined.target,
+            PathBuf::from("D:\\case\\very\\long\\path\\file.rs")
+        );
+        assert_eq!(joined.resolution_base, Some(PathBuf::from("D:\\case")));
+
+        let cut_number = "docs/a.md:1";
+        assert_eq!(
+            rejoin(&links, cut_number, "2:3"),
+            None,
+            "row 37: the upper half is a verified reference of its own, so gate ⑤ refuses it"
+        );
+        assert_eq!(
+            linked(&links, cut_number, last_cell_of(cut_number)),
+            [],
+            "and the half that refused the rejoin is not drawn as the line-1 reference it is not"
+        );
+    }
+
+    /// §7.1.5k ③ over a located relative segment (combination row 38): a declared search path owns
+    /// its whole value, and a `:12` behind a relative segment does not buy that segment the base
+    /// it never had.
+    #[test]
+    fn a_declared_search_path_owns_a_located_relative_segment_too() {
+        assert_eq!(
+            linked_on_a_full_disk(Some("D:\\case"), "PATH=docs/a.md:12;D:\\bin"),
+            [("D:\\bin", "file:///D:/bin".to_owned())]
+        );
+    }
+
+    /// §7.1.5k ④ over a located relative reference (combination row 39): those refusals are about
+    /// **who owns the text**, so a line number behind the name changes none of them.
+    ///
+    /// Every row runs on the disk that says yes to everything it is asked, so no refusal here is
+    /// luck — each one is the rule doing the refusing.
+    #[test]
+    fn the_ownership_refusals_hold_over_a_located_relative_reference() {
+        for line in [
+            "$HOME/docs/a.md:12",
+            "--- a/docs/a.md:12",
+            "+++ b/docs/a.md:12",
+            "docs//a.md:12",
+            "docs/NUL:12",
+            "http://localhost:3000/?file=docs/a.md:12",
+        ] {
+            assert_eq!(linked_on_a_full_disk(Some("D:\\case"), line), [], "{line}");
+        }
+    }
+
+    /// The direction this whole table leans, asked of the shape a line number makes possible:
+    /// **a number behind a colon is not a reference**. `12:30` is a time and `3:2` is a score, and
+    /// neither carries the one mark a bare relative reference must carry — a separator. Nothing
+    /// about locations loosened that, because the separator rule is asked of the path.
+    ///
+    /// The neighbouring shape that *does* carry a separator is written down beside it rather than
+    /// left to be discovered: `2026/08/23:14` is a candidate, and it always was one without the
+    /// `:14`. **The witness is what refuses it**, and a name the disk has denied stays denied
+    /// whether or not a line number was printed behind it.
+    #[test]
+    fn a_number_behind_a_colon_in_prose_is_not_a_reference() {
+        for line in ["时间 12:30", "比分 3:2", "Elapsed 1:23:45", "-j12:30"] {
+            assert!(spans(line).is_empty(), "{line}");
+        }
+        assert_eq!(
+            located("2026/08/23:14"),
+            [(
+                "2026/08/23",
+                Some(PrintedPathLocation {
+                    line: 14,
+                    column: None
+                })
+            )]
+        );
+        let denied = ledger("D:\\case", &[("D:\\case\\2026\\08\\23", false)]);
+        assert_eq!(linked(&denied, "2026/08/23:14", None), []);
+    }
+
+    /// Boundary table row 20 read from the relative side, in both directions — the ambiguity a
+    /// located reference is owed an explicit judge for.
+    ///
+    /// A drive letter is a colon with a **separator behind it** (`is_drive_prefix_at` demands one
+    /// at the third byte); a line number is a colon with a **decimal positive integer behind it**
+    /// and nothing else. No colon can be both, so nothing has to choose between them — and no two
+    /// scans can claim one reference.
+    #[test]
+    fn a_drive_letter_and_a_line_number_cannot_be_the_same_colon() {
+        // A drive-rooted path buried inside a token belongs to nobody: the relative reading
+        // refuses it for the colon it still carries, and the absolute one cannot open behind a `/`.
+        assert!(spans("docs/C:\\a.md").is_empty());
+        // One reference, claimed once — by the spelling whose colon has a separator behind it.
+        assert_eq!(
+            candidates("see D:\\case\\docs\\a.md:12"),
+            [("D:\\case\\docs\\a.md:12", PrintedPathSpelling::Absolute)]
+        );
+        assert_eq!(
+            located("see D:\\case\\docs\\a.md:12"),
+            [(
+                "D:\\case\\docs\\a.md",
+                Some(PrintedPathLocation {
+                    line: 12,
+                    column: None
+                })
+            )]
+        );
+        // And the mirror: a single letter that is *not* a drive, because nothing separates it from
+        // the number, names a file called `D` at line 12.
+        assert_eq!(
+            located("sub\\D:12"),
+            [(
+                "sub\\D",
+                Some(PrintedPathLocation {
+                    line: 12,
+                    column: None
+                })
+            )]
+        );
+    }
+
     /// Boundary table row 17, the debt this slice pays: a trailing full-width stop is prose behind
     /// the reference, not the tail of a filename.
     #[test]
