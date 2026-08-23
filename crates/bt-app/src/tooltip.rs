@@ -392,14 +392,35 @@ pub enum TooltipAnchorId {
     /// A preview head's `↗` — the hand-off arrow a page's seat wears (user
     /// ruling 2026-08-20).
     ///
-    /// **The one preview tool that registers**, and for [`Self::PaneChevron`]'s
-    /// own reason rather than in spite of it: a `×`, a folder, a pin and a
-    /// floppy disk are idioms this product has taught elsewhere, and so is a
-    /// framed arrow leaving a box — which is exactly the trouble. The framed one
-    /// is drawn immediately to this button's right and means "this pane leaves
-    /// the tree"; a *bare* arrow beside it has to say which of the two leavings
-    /// it is, and nothing in the picture can.
+    /// **It registers** for [`Self::PaneChevron`]'s own reason rather than in
+    /// spite of it: a `×`, a folder and a floppy disk are idioms this product
+    /// has taught elsewhere, and so is a framed arrow leaving a box — which is
+    /// exactly the trouble. The framed one is drawn immediately to this button's
+    /// right and means "this pane leaves the tree"; a *bare* arrow beside it has
+    /// to say which of the two leavings it is, and nothing in the picture can.
+    ///
+    /// (This doc said "a `×`, a folder, **a pin** and a floppy disk" until
+    /// 2026-08-23, and the pin in that list was the whole of what §7.7 ⑧ went on
+    /// to overturn: the sentence was true of the tab's pin and the switcher
+    /// row's, and the preview head's control was resting on their tuition while
+    /// meaning something else. It is a padlock now and it registers too — see
+    /// [`Self::PreviewLock`].)
     PreviewBrowser(bt_layout::SeatId),
+    /// A preview head's padlock — "do not reuse this pane" (§7.7 ⑧, Claude 定
+    /// 2026-08-23).
+    ///
+    /// **The second preview tool that registers, and the ruling is why.** The
+    /// exemption above — a mark this product has taught elsewhere needs no tip —
+    /// covered this control only while it was drawn as a pin, and it covered it
+    /// wrongly: what the pin taught is a tab's and a row's "this one stays in
+    /// the list", which is not what this button does. Given its own glyph it is
+    /// the one mark in that head with nothing behind it, so it is exactly the
+    /// case a tip is for.
+    ///
+    /// The tip changes with the state, on [`Self::PreviewWebNav`]'s reload/stop
+    /// precedent: the button changes, so a single word for both would be the
+    /// head describing what it was a press ago.
+    PreviewLock(bt_layout::SeatId),
     /// **A page's three navigation buttons and its developer tools** (§7.7 ②,
     /// W2 slice ④), and every one of them registers where the hand-off arrow
     /// above says why one has to: a `<` and a `>` in a 22px box are the

@@ -645,9 +645,11 @@
      (编辑不改变 pane 生命周期)」. A dirty buffer cannot be clobbered by the next
      Enter because the buffer belongs to the tab's pool and survives the switch —
      which is what makes the promotion unnecessary rather than merely unwanted.
-     The pin in the header is the one and only way a tab grows a second preview
-     pane; see the note above `mkPreviewLeaf` for the same correction on the JS
-     side, and 7858-7873 for the implementation that was already right. */
+     The LOCK in the header is the one and only way a tab grows a second preview
+     pane (it was a pin until §7.7 ⑧, 2026-08-23 — and the quoted ruling's
+     「显式图钉」 is that same control under its old name); see the note above
+     `mkPreviewLeaf` for the same correction on the JS side, and 7858-7873 for
+     the implementation that was already right. */
   .preview-pane .pane-inner { background: var(--termbg); display: flex; flex-direction: column; }
   /* same 30px header as every other pane — the .panehead height rules it; only
      the horizontal padding is ours (user report 2026-07-17: it ran taller) */
@@ -742,7 +744,7 @@
     border-radius: 8px; padding: 0 5px; line-height: 14px; flex: none;
   }
   .preview-head .pv-count.dirty { color: var(--accent); }
-  .preview-head .pv-tool.pv-pin.on { color: var(--accent); }
+  .preview-head .pv-tool.pv-lock.on { color: var(--accent); }
   #pv-menu .tm-item.cur { color: var(--ink); background: var(--hover); }
   /* a switcher row's favicon takes the box the row's `<svg>` mark takes, so a
      list of pages and files keeps one left edge (the menu sets that box; only
@@ -761,12 +763,12 @@
   .preview-head .pv-tool:hover { background: var(--hover); color: var(--ink); }
   .preview-head .pv-tool svg { width: 13px; height: 13px; }
   /* pane convention (user report 2026-07-17): tools hidden until the pane is
-     hovered, reveal together at .7, full strength under the pointer. The ON pin
-     is STATE, not chrome — it stays visible unhovered (last rule wins). */
+     hovered, reveal together at .7, full strength under the pointer. The SHUT
+     lock is STATE, not chrome — it stays visible unhovered (last rule wins). */
   .preview-head .pv-tool { opacity: 0; transition: opacity .12s ease; }
   .pane:hover .preview-head .pv-tool { opacity: .7; }
   .pane:hover .preview-head .pv-tool:hover { opacity: 1; }
-  .preview-head .pv-tool.pv-pin.on { opacity: 1; }
+  .preview-head .pv-tool.pv-lock.on { opacity: 1; }
   @media (prefers-reduced-motion: reduce) { .preview-head .pv-tool { transition: none; } }
   .preview-body { flex: 1; overflow: auto; min-height: 0; }
   /* text/code editing: the pane IS the editor surface — same metrics as the terminal */
@@ -1387,6 +1389,51 @@
   }
   .term-menu .tm-item.subopen { background: var(--hover); color: var(--ink); }
   .term-menu .tm-item.subopen svg { color: var(--accent); }
+  /* ── THE PANE MENU'S DIRECTION PICKER (§7.1.6e, ruled 2026-08-16; native
+     `profiles::pane_menu_build`, this page 2026-08-23) ──
+     A DRAWING AND NOT FOUR ROWS OF TEXT, in Snap Layouts' own grammar: the pane
+     you are standing in, and the four places the arriving one can go. It is the
+     first entry of the menu and the only one carrying four answers of its own.
+     THE SLAB IS A WASH AND NOT A FILL, and the distinction is the whole picture:
+     a slab has to keep reading as an outline with something behind it, because
+     what it says is "the new pane LANDS here". A solid block would say "there is
+     already a pane here", which is the neighbouring picture and the wrong one.
+     15% is native's `PICKER_ZONE_WASH_ALPHA`.
+     THE NUMBERS ARE THE RULING'S: a 48×34 pane, four 10px slabs, 3px of air
+     between each slab and the pane — 74×60 of diagram — under 6px of air and
+     over a 5px-gapped caption, which is where native's "one row, ~92px tall"
+     comes from as a SUM rather than as a declared height.
+     LEFT AND TOP ARE THE SAME TWO AXES with the arriving pane inserted FIRST
+     (`Edit::SplitSeat`'s own `leading` flag, which is `splitLeafIn`'s `first`
+     here), which is why there are four zones and not two. The zones are named in
+     this file's own drop-zone vocabulary — `left` / `right` / `top` / `bottom` —
+     because they are handed straight to `splitLeafIn`, and a second spelling of
+     a direction is a translation table waiting to be got wrong.
+     THE CAPTION IS `.glabel`'s grammar and is written upper-case at the source:
+     there is no `text-transform` in the native chrome pipeline, so a lower-case
+     constant nothing upper-cased would be a lie about what appears on screen. */
+  .term-menu .tm-picker { padding: 6px 10px 5px; cursor: default; }
+  .term-menu .tm-picker .tmp-grid { position: relative; width: 74px; height: 60px; margin: 0 auto; }
+  .term-menu .tm-picker .tmp-pane {
+    position: absolute; left: 13px; top: 13px; width: 48px; height: 34px;
+    border: 1px solid var(--border); border-radius: 3px; background: var(--panel);
+  }
+  .term-menu .tm-picker .tmp-zone {
+    position: absolute; border: 1px solid var(--border); border-radius: 3px;
+    background: transparent; cursor: pointer;
+  }
+  .term-menu .tm-picker .tmp-zone[data-zone="left"] { left: 0; top: 13px; width: 10px; height: 34px; }
+  .term-menu .tm-picker .tmp-zone[data-zone="right"] { right: 0; top: 13px; width: 10px; height: 34px; }
+  .term-menu .tm-picker .tmp-zone[data-zone="top"] { top: 0; left: 13px; width: 48px; height: 10px; }
+  .term-menu .tm-picker .tmp-zone[data-zone="bottom"] { bottom: 0; left: 13px; width: 48px; height: 10px; }
+  .term-menu .tm-picker .tmp-zone:hover {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+  }
+  .term-menu .tm-picker .tmp-cap {
+    margin-top: 5px; text-align: center; font-size: 9.5px; letter-spacing: .09em;
+    color: var(--ink3); font-weight: 600;
+  }
   .files-tree { flex: 1; min-height: 0; overflow-y: auto; padding: 2px 4px 8px; outline: none; font-size: 13px; }
 
   /* One row = one node. Indent is inline padding scaled by depth, so the whole
@@ -4162,6 +4209,41 @@
     </g>
   </symbol>
 
+  <!-- THE PADLOCK, AND WHY IT IS NOT A THIRD PIN (§7.7 ⑧, Claude 定 2026-08-23,
+       用户可否决).
+
+       A PIN IN THIS WINDOW MEANS ONE THING, SAID TWICE. A tab's pin keeps that
+       tab across a launch and refuses to close before it is taken off; a menu
+       row's pin keeps that file, folder or page at the top of a list. Both are
+       MEMBERSHIP: this one stays in the list. The preview head's control is not
+       about membership at all — it says "do not reuse this pane" — and it was
+       drawing the pin above and answering to its word two hundred pixels from
+       one of them, in the same head that raises the list the other one lives in.
+       That is the collision the W1 report filed and left for a naming ticket
+       (`docs/plans/web-preview/plan.md` §5), and this is the ticket.
+
+       THE STATE RIDES ON TWO AXES, deliberately unlike the pin. Windows fixed
+       the pin's angle, so the pin has only the fill left to carry action vs
+       state. A padlock has a second axis for free — the shackle — and it is
+       spent: regular and OPEN is the action ("you could lock this"), filled and
+       SHUT is the state ("it is locked"). Fluent 2's fill reading is unchanged;
+       the shackle says it a second time, which is what fourteen pixels want.
+
+       ONE BODY IN BOTH, so the two drawings differ only where the meaning does.
+       Stroke 1.25, the pin's own weight: the two are read in one window at one
+       size, and a lighter lock would read as a pin in a different mood. -->
+  <symbol id="i-lock" viewBox="0 0 16 16">
+    <path d="M10.4 7.2V5a2.4 2.4 0 014.8 0v1"
+          fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+    <rect x="3.1" y="7.2" width="9.8" height="6.6" rx="1.6"
+          fill="none" stroke="currentColor" stroke-width="1.25"/>
+  </symbol>
+  <symbol id="i-locked" viewBox="0 0 16 16">
+    <path d="M5.6 7.2V5a2.4 2.4 0 014.8 0v2.2"
+          fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+    <rect x="3.1" y="7.2" width="9.8" height="6.6" rx="1.6" fill="currentColor"/>
+  </symbol>
+
   <!-- App mark. 【未决】placeholder, and the tension is worth stating rather
        than burying: the chevron-and-line is THE terminal idiom, instantly read,
        and every terminal on the taskbar wears some version of it — but §1.0
@@ -4273,15 +4355,23 @@
        and a division reaches the walls. IT NO LONGER STANDS ON THE PANE HEAD —
        §7.1.6e put the house's `⌄` in that slot on 2026-08-16 and this page
        followed on 2026-08-21 — so its one remaining reader is the `Split with ▸`
-       row of the terminal menu, which is exactly the axis-free reading it was
-       drawn for.
+       row, which is exactly the axis-free reading it was drawn for. One row, two
+       menus: the pane menu owns it and a lone pane's right click borrows it, and
+       both take it from the same table, so that is one reader and not two.
 
-       `#i-split-right` and `#i-split-down` are the head menu's two rows, where
-       the axis IS committed to — so they draw the result rather than the cut:
-       the two panes the split leaves, side by side or stacked. Same rects, same
-       1.2-unit gutter, same stroke; only the axis differs, because that is the
-       only thing the reader is being asked to tell apart at a menu row's
-       fourteen pixels. -->
+       `#i-split-right` and `#i-split-down` are for the places where the axis IS
+       committed to — so they draw the result rather than the cut: the two panes
+       the split leaves, side by side or stacked. Same rects, same 1.2-unit
+       gutter, same stroke; only the axis differs, because that is the only thing
+       the reader is being asked to tell apart at fourteen pixels.
+       THEY NO LONGER STAND IN THE PANE MENU. They were its two flat `Split
+       right` / `Split down` rows until §7.1.6e replaced both with the direction
+       picker on 2026-08-16, whose four zones ARE the axis and need no glyph;
+       this page followed on 2026-08-23. Where the same ruling still puts them is
+       the `Split direction` setting's three options (`⊞` / right / down) —
+       "and where the new pane goes is a SHAPE" — and this page has not drawn
+       marks in a combo item's list yet, so the two symbols are standing by for
+       the reader that ruling gives them rather than for one they have lost. -->
   <symbol id="i-split" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M8 2.5v11M1.5 8h13" fill="none" stroke="currentColor" stroke-width="1.1"/></symbol>
   <symbol id="i-split-right" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="5.9" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/><rect x="8.6" y="2.5" width="5.9" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/></symbol>
   <symbol id="i-split-down" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="4.9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/><rect x="1.5" y="8.6" width="13" height="4.9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/></symbol>
@@ -4995,11 +5085,22 @@
              rows, which is the one thing a picker of pixels cannot say. Past 320
              a card stops being a card: four of them would not fit a tall column,
              and a list whose rows are a third of the window is a list nobody can
-             scan. Native: `settings.json` v18 `focus_card_height`. -->
+             scan. Native: `settings.json` v18 `focus_card_height`.
+             THE THIRD CLAUSE IS THE `Alt`+WHEEL AIM'S ONLY PLACE TO BE FOUND
+             (§7.1.6b′, same day). A gesture reachable only by holding a key
+             nobody told you about does not exist, and every surface that could
+             have said so is ruled out elsewhere: the card column refuses tips
+             ("a card writes its name out in full"), a card is not the subject of
+             a `⌄` menu, and a visible entry on the column is the very thing
+             2026-08-20 took off it. This is the one line in the product already
+             talking about that picture, and "how tall is it" and "which rows does
+             it show" are the same reader's question one clause apart. No new
+             surface was invented for it, and native added no string - the
+             sentence below is `DescFocusCardHeight` itself. -->
         <div class="row">
           <div class="text">
             <div class="title">Focus card height</div>
-            <div class="desc" id="fcardheight-desc">How tall each card&rsquo;s picture of its tab stands. At the default face a lone pane&rsquo;s seat holds 12 rows at 160, 20 at 240 and 27 at 320</div>
+            <div class="desc" id="fcardheight-desc">How tall each card&rsquo;s picture of its tab stands. At the default face a lone pane&rsquo;s seat holds 12 rows at 160, 20 at 240 and 27 at 320. Alt+wheel over a seat lifts its picture off the bottom of that pane, a row per notch</div>
           </div>
           <div class="combo" data-combo="fcardheight">
             <button aria-haspopup="listbox"><span class="value">160 px</span><span class="chev">▼</span></button>
@@ -6083,6 +6184,12 @@
   const folderSvg = `<svg><use href="#i-folder"/></svg>`;
   const pinSvg = `<svg class="pinsvg"><use href="#i-pin"/></svg>`;
   const pinnedSvg = `<svg class="pinsvg"><use href="#i-pinned"/></svg>`;
+  /* The preview pane's own control, and NOT a third spelling of the two above
+     (§7.7 ⑧). A pin here means membership — a tab that stays, a row that stays;
+     this one means "do not reuse this pane", which is not membership in
+     anything, so it has its own drawing and its own word. */
+  const lockSvg = `<svg><use href="#i-lock"/></svg>`;
+  const lockedSvg = `<svg><use href="#i-locked"/></svg>`;
   const media = window.matchMedia("(prefers-color-scheme: dark)");
   /* A pane must stay usable; splits that would go below this are not offered.
      This — not an arbitrary pane count — is what limits how far you can split. */
@@ -6681,19 +6788,25 @@
   const mkFilesLeaf = (root) => ({ type: "leaf", id: leafSeq++, kind: "files",
                                    files: { root: root || HOME, open: new Set(["/crates", "/docs", "/src"]), sel: null, width: FILES_W } });
   /* ── preview leaf (third leaf kind; DESIGN §7.1.3) ──
-     Quick-look + quick-edit. THE SINGLETON FLAG IS `pvPinned`, AND IT READS THE
+     Quick-look + quick-edit. THE SINGLETON FLAG IS `pvLocked`, AND IT READS THE
      OTHER WAY (裁决 1, 2026-08-12 — 落地 2026-08-13). This note used to describe
      a `transient` field: "the one transient preview per tab gets REUSED by the
      next Enter; the first edit clears it (the pane is 'promoted', VS Code-style)
      and marks dirty". Two things were wrong with it. There is no `transient`
-     field and there never was — the leaf carries `pvPinned` (below), whose
-     polarity is inverted: an UN-pinned preview is the reuse target, and pinning
+     field and there never was — the leaf carries `pvLocked` (below), whose
+     polarity is inverted: an UNLOCKED preview is the reuse target, and locking
      is what takes a pane out of the rotation. And editing does not promote:
      DESIGN §7.1.3 overturned that on 2026-07-17 in the same ruling that moved
-     the buffer pool from the pane to the tab, so `pane 增殖只经显式图钉`. The
+     the buffer pool from the pane to the tab, so `pane 增殖只经显式动词`. The
      input handler at 7858-7873 has always said so ("dirty marks the BUFFER,
      nothing else changes hands"); this comment was the last place the old
-     reading survived. */
+     reading survived.
+     THE FIELD WAS `pvPinned` UNTIL §7.7 ⑧ (2026-08-23) and the SERIALIZED key
+     still is — see `snapshot`/`revive` below, where the two spellings meet on
+     purpose. `session.json` writes `pinned` for the same leaf natively, and a
+     disk key is versioned vocabulary nobody reads: renaming it would buy a
+     schema version and a migration to change nothing on screen. Everything the
+     reader touches is named for the padlock they see. */
   const isPreviewLeaf = (l) => !!(l && l.kind === "preview");
   const previewFtype = (name) => {
     const dot = name.lastIndexOf(".");
@@ -6872,7 +6985,7 @@
   }
   const poolDirtyNames = (w) => poolOf(w).filter(b => b.dirty).map(b => b.name);
   const mkPreviewLeaf = (buf) => ({ type: "leaf", id: leafSeq++, kind: "preview",
-                                    preview: buf, pvPinned: false });
+                                    preview: buf, pvLocked: false });
 
   function mkWs(session) {
     const leaf = mkLeaf(session.uid);
@@ -6886,7 +6999,7 @@
       ? { type: "leaf", id: leafSeq++, kind: "files", files: leaf.files }
       : isPreviewLeaf(leaf)
         ? { type: "leaf", id: leafSeq++, kind: "preview", preview: leaf.preview,
-            pvPinned: leaf.pvPinned }
+            pvLocked: leaf.pvLocked }
         : mkLeaf(leaf.uid);
     return { id: wsSeq++, tree: nl, focus: nl.id, pinned: false };
   }
@@ -7507,7 +7620,7 @@
          a leaf that says kind:"preview" with no preview object is the files-pane
          crash of 2026-07-16 wearing a new kind */
       const payload = (l) => ({ kind: l.kind, uid: l.uid, files: l.files,
-                                preview: l.preview, pvPinned: l.pvPinned });
+                                preview: l.preview, pvLocked: l.pvLocked });
       const pa = payload(a), pb = payload(b);
       Object.assign(a, pb); Object.assign(b, pa);
       w.focus = targetLeafId;
@@ -7630,7 +7743,7 @@
     /* land like openPreview: reuse the unpinned preview pane, else THE fixed
        seat — the far-right root column (user ruling 2026-07-18: a singleton
        deserves one address; aimed drags still land where aimed) */
-    const host = leavesOf(w.tree).find(l => isPreviewLeaf(l) && !l.pvPinned);
+    const host = leavesOf(w.tree).find(l => isPreviewLeaf(l) && !l.pvLocked);
     if (host) { host.preview = buf; w.focus = host.id; render(); return; }
     const leaf = mkPreviewLeaf(buf);
     const before = snapshotPanes();
@@ -7997,7 +8110,7 @@
          do NOT survive — same "no output history" honesty: a restored pane
          must not pretend nothing happened. */
       if (isPreviewLeaf(n)) return { type: "leaf", kind: "preview",
-        cur: n.preview.path, pvPinned: !!n.pvPinned };
+        cur: n.preview.path, pvPinned: !!n.pvLocked };
       return { type: "leaf", seed: seedOf(session(n.uid)) };
     };
     /* active + focus travel with the plan: coming back to "the tab I was on,
@@ -8036,7 +8149,7 @@
         let buf = pool.find(b => b.path === n.cur);
         if (!buf) { buf = mkPreviewState(n.cur, fileRowName(n.cur.replace(/\\/g, "/"))); pool.push(buf); }
         const l = mkPreviewLeaf(buf);
-        l.pvPinned = !!n.pvPinned;
+        l.pvLocked = !!n.pvPinned;
         return l;
       }
       return mkLeaf(reviveSeed(n.seed).uid);
@@ -9506,7 +9619,7 @@
               ${page ? `<span class="pv-tool pv-browser" title="Open in browser"><svg><use href="#i-external"/></svg></span>` : ""}
               ${webTools}
               <span class="pv-tool pv-popout" data-popout-leaf="${leaf.id}" title="Pop out to a floating window"><svg><use href="#i-float"/></svg></span>
-              <span class="pv-tool pv-pin ${leaf.pvPinned ? "on" : ""}" title="${leaf.pvPinned ? "Unpin — make this the reusable preview again" : web ? "Pin — keep this pane; the next page opens a new preview" : "Pin — keep this pane; the next file opens a new preview"}">${leaf.pvPinned ? pinnedSvg : pinSvg}</span>
+              <span class="pv-tool pv-lock ${leaf.pvLocked ? "on" : ""}" title="${leaf.pvLocked ? "Unlock — this pane becomes the reusable preview again" : "Lock this pane — what opens next opens in a new preview"}">${leaf.pvLocked ? lockedSvg : lockSvg}</span>
               <span class="pane-close" title="Close pane">${closeSvg}</span>
             </div>
             <div class="preview-body" data-leaf="${leaf.id}">${previewBodyHtml(pv)}</div>
@@ -9527,7 +9640,7 @@
     const buf = previewFtype(name) === "web"
       ? poolBuffer(w, fileUrlOf(path), name, () => mkFilePageState(path, name))
       : poolBuffer(w, path, name);
-    const host = leavesOf(w.tree).find(l => isPreviewLeaf(l) && !l.pvPinned);
+    const host = leavesOf(w.tree).find(l => isPreviewLeaf(l) && !l.pvLocked);
     if (host) {
       host.preview = buf;
       render();
@@ -9648,7 +9761,7 @@
        head member or corner ghost, since 2026-08-21 they are one class; every
        path that puts the menu away has to put the light out, or the chevron is
        left stranded on — the root menu's lesson, obeyed on day one this time */
-    clearPaneChevClocks();
+    clearChevronClocks();
     document.querySelectorAll(".pane-chev.open").forEach(g => g.classList.remove("open"));
     closePvMenu();
     document.querySelectorAll(".combo.open").forEach(c => c.classList.remove("open"));
@@ -10562,7 +10675,13 @@
     /* A control that opens something must also put it away. It used to only ever
        open: the click stopped propagation (so the document handler could not
        close it) and then re-opened the same menu — so the chevron was a one-way
-       door, and the only way out was to click somewhere else. */
+       door, and the only way out was to click somewhere else.
+       AND THE PRESS IS THE SECOND DOOR, NOT THE ONLY ONE (§7.1.6e). This button
+       is a `⌄`, so it is one of the two entries in `CHEVRON_GATES`: a 250ms rest
+       opens the profile list too, and 150ms after the hand has left both this
+       button and that list puts it away. It was the last chevron in the house
+       still opening on the press alone — the ruling names it by position ("the
+       one beside the tab strip's `+`") and never made an exception of it. */
     document.querySelectorAll(".nt-chev").forEach(el => {
       if (el.__wired) return;
       el.__wired = true;
@@ -10583,7 +10702,7 @@
            button puts it away — a control that opens something must also close
            it (the tab strip's chevron learned this the hard way), and that is
            the ruling's own "再点即收".
-           A press is the SECOND door, not the only one: `paneChevGate` below
+           A press is the SECOND door, not the only one: `CHEVRON_GATES` below
            opens the same menu on a 250ms rest and closes it 150ms after the hand
            has left both the button and the list. */
         const pg = e.target.closest(".pane-chev");
@@ -12150,7 +12269,7 @@
     renderWithPaneFlip(before);
   }
   function fileToTab(d, index) {
-    const leaf = { type: "leaf", id: leafSeq++, kind: "preview", preview: null, pvPinned: false };
+    const leaf = { type: "leaf", id: leafSeq++, kind: "preview", preview: null, pvLocked: false };
     const w = { id: wsSeq++, tree: leaf, focus: leaf.id, pinned: false };
     leaf.preview = poolBuffer(w, d.path, d.name);
     const minIdx = state.tabs.filter(t => t.pinned).length;
@@ -12994,13 +13113,15 @@
       if (leaf) openPvMenu(leaf, live);
       return;
     }
-    /* pin: this pane keeps its buffers and stops being the reuse target —
-       the NEXT file opens a fresh preview beside it (explicit side-by-side) */
-    const pin = e.target.closest(".pv-pin");
-    if (pin) {
+    /* lock: this pane keeps its buffers and stops being the reuse target —
+       whatever opens NEXT opens in a fresh preview beside it (explicit
+       side-by-side). It was drawn and named as a pin until §7.7 ⑧; a pin in
+       this window means "this one stays in the list", which this is not. */
+    const lock = e.target.closest(".pv-lock");
+    if (lock) {
       e.stopPropagation();
-      const leaf = findLeafIn(activeTab(), +pin.closest(".preview-head").dataset.leaf);
-      if (leaf) { leaf.pvPinned = !leaf.pvPinned; render(); }
+      const leaf = findLeafIn(activeTab(), +lock.closest(".preview-head").dataset.leaf);
+      if (leaf) { leaf.pvLocked = !leaf.pvLocked; render(); }
       return;
     }
     /* explicit save — Ctrl+S only reaches the app while the editor has focus;
@@ -13503,16 +13624,68 @@
      flag and agreed. Its honest sibling in this layout is `Move pane to new
      window`, and that one is multi-window F's (tear-out) to deliver and to place.
      Flagged, then cut — not silently substituted. */
+  /* ══════ THE PANE'S VERBS, WRITTEN ONCE (§7.1.6e/§7.1.6i) ══════
+     The segment's three rows ARE the pane menu's own rows — native says it in
+     types (`TermMenuEntry::Pane(PaneMenuRow)`, `TERM_MENU_LONE_PANE_ROWS =
+     [SplitWith, NewInFolder, Duplicate]`), and here they are one table read
+     twice. Words, glyph and "does a list hang off it" are asked of the row
+     itself, so renaming one has exactly one place to be done and the two doors
+     cannot come to disagree about what a verb is called.
+     `#i-copy` FOR `Duplicate pane` and not `#i-split-right`, which is native's
+     `ChromeMark::Copy` and the correction this page owed: the axis of the split
+     is the `Split direction` setting's business, and a row drawing one axis
+     while obeying another is a picture of the wrong verb. `#i-float` for `Move
+     pane to new tab` is the same glyph the files head wears for undocking —
+     "opens outside this frame", the same idea aimed at a different container. */
+  const PANE_VERB_ROWS = {
+    splitwith: { icon: "i-split", text: "Split with", sub: true },
+    newfolder: { icon: "i-folder", text: "New terminal in folder…" },
+    dupe: { icon: "i-copy", text: "Duplicate pane" },
+    movetab: { icon: "i-float", text: "Move pane to new tab" },
+    close: { icon: "i-close", text: "Close pane" },
+  };
+  const paneVerbRowHtml = (act) => {
+    const r = PANE_VERB_ROWS[act];
+    return `<div class="tm-item" data-act="${act}"><svg><use href="#${r.icon}"/></svg><span>${r.text}</span>`
+      + (r.sub ? `<svg class="sub-chev"><use href="#i-chev"/></svg>` : "") + `</div>`;
+  };
+  /* ONE VERB, ONE IMPLEMENTATION, TWO DOORS (native `Runtime::run_pane_verb`).
+     `Duplicate pane` pressed in the head's list and `Duplicate pane` pressed in
+     the terminal's right-click segment are the SAME call on the same seed, not
+     two copies that happen to agree today. `splitwith` is not here because it is
+     not a verb — it is a heading with a list behind it. */
+  function runPaneVerb(act, leafId) {
+    if (act === "newfolder") {
+      /* prototype: a real folder picker goes here — the same stand-in the root
+         menu's `Browse…` uses, so the flow is testable end to end */
+      const src = leafSession(findLeafIn(activeTab(), leafId));
+      const picked = window.prompt("New terminal in folder:", (src && src.cwd) || HOME);
+      if (picked && picked.trim()) splitPaneSeeded(leafId, null, picked.trim());
+      return;
+    }
+    if (act === "dupe") { splitPaneSeeded(leafId, null, null); return; }
+    /* MOVING A LEAF, NOT RE-CREATING ONE (§7.1.6e): this is the same
+       `extractPaneToTab` a pane dragged onto the tab strip runs, so scrollback,
+       the child process and whatever is running in it all travel. Two gestures
+       that look alike but lose the reader's work are not the same gesture.
+       On a LONE pane it returns having done nothing — `detachLeaf` refuses to
+       empty a tree — which is why §7.1.6i cut the row from the right-click
+       segment rather than printing a door onto a no-op. */
+    if (act === "movetab") { extractPaneToTab(leafId, null, activeTab().id); return; }
+    if (act === "close") closePane(leafId);
+  }
+  const TERM_MENU_LONE_PANE_ROWS = ["splitwith", "newfolder", "dupe"];
   function loneVerbSegmentHtml(w) {
     if (paneCount(w) !== 1) return "";
-    return `<div class="tm-sep"></div>
-       <div class="tm-item" data-act="splitwith"><svg><use href="#i-split"/></svg><span>Split with</span><svg class="sub-chev"><use href="#i-chev"/></svg></div>
-       <div class="tm-item" data-act="newfolder"><svg><use href="#i-folder"/></svg><span>New terminal in folder…</span></div>
-       <div class="tm-item" data-act="dupe"><svg><use href="#i-split-right"/></svg><span>Duplicate pane</span></div>`;
+    return `<div class="tm-sep"></div>` + TERM_MENU_LONE_PANE_ROWS.map(paneVerbRowHtml).join("");
   }
+  /* `.term-menu` and not `#term-menu`: the row hangs off TWO menus now — the
+     pane head's `⌄` list owns it, the lone pane's right-click segment borrows it
+     — and a closer that only knew one of them would leave the other's heading
+     lit with no list behind it. */
   function closeSplitWithMenu() {
     $("split-with-menu").classList.remove("show");
-    document.querySelectorAll("#term-menu .tm-item.subopen").forEach(el => el.classList.remove("subopen"));
+    document.querySelectorAll(".term-menu .tm-item.subopen").forEach(el => el.classList.remove("subopen"));
   }
   /* One seat-a-shell path for every door in the segment: `splitPane` inherits the
      source pane's profile AND place, and these two are the same call with one of
@@ -13542,8 +13715,9 @@
     menu.querySelectorAll(".tm-item").forEach(el => el.addEventListener("click", (e) => {
       e.stopPropagation();
       const p = PROFILES[+el.dataset.p];
-      closeSplitWithMenu();
-      $("term-menu").classList.remove("show");
+      /* whichever of the two menus this list is hanging off goes away with it,
+         and so does the chevron's light if it was the head's `⌄` that raised it */
+      closeAllPopups();
       splitPaneSeeded(leafId, p, null);
     }));
     menu.classList.add("show");
@@ -13557,6 +13731,39 @@
     menu.style.left = Math.max(6, left) + "px";
     menu.style.top = Math.max(6, Math.min(r.top - 5, window.innerHeight - menu.offsetHeight - 8)) + "px";
   }
+  /* THE `Split with ▸` DWELL, WIRED ONCE FOR BOTH MENUS THAT CARRY THE ROW.
+     The child list opens on the same hover-rest the rest of the window's `⌄`s
+     open on and closes on the same grace; pointing at any OTHER row puts it
+     away, which is the cheap half of what a safety triangle buys. Both callers
+     get the same clock because there is one function, not because two copies
+     were kept in step.
+     `onpointerleave` IS AN ASSIGNMENT, not `addEventListener`: both menus are
+     permanent elements that every open re-fills, so a subscription here would
+     stack one more copy per open and the tenth close would run ten timers. The
+     rows may subscribe freely — `innerHTML` just replaced them. */
+  function wireSplitWithDwell(menu, leafId) {
+    let subT = 0;
+    /* `.tm-picker` is in this list because it is a row of this menu even though
+       it is a drawing: a hand that goes UP from `Split with ▸` into the picker
+       has left the heading like any other, and a child list that survived that
+       move would be standing over the one entry it is not about. */
+    menu.querySelectorAll(".tm-item, .tm-picker").forEach(el => {
+      el.addEventListener("pointerenter", () => {
+        clearTimeout(subT);
+        if (el.dataset.act === "splitwith") subT = setTimeout(() => openSplitWithMenu(el, leafId), CHEV_REST_MS);
+        else subT = setTimeout(closeSplitWithMenu, CHEV_GRACE_MS);
+      });
+    });
+    menu.onpointerleave = () => {
+      clearTimeout(subT);
+      subT = setTimeout(() => { if (!$("split-with-menu").matches(":hover")) closeSplitWithMenu(); }, CHEV_GRACE_MS);
+    };
+    return { pressed(row, leaf) {
+      clearTimeout(subT);
+      if (row.classList.contains("subopen")) closeSplitWithMenu();
+      else openSplitWithMenu(row, leaf);
+    } };
+  }
   function openTermMenu(leafId, x, y) {
     closeAllPopups();   /* contextmenu is not a click; nobody else's closer will run */
     const menu = $("term-menu");
@@ -13569,47 +13776,16 @@
        <div class="tm-item" data-act="clearsb"><svg><use href="#i-clear"/></svg><span>Clear scrollback…</span></div>
        <div class="tm-item" data-act="restart"><svg><use href="#i-refresh"/></svg><span>Restart shell…</span></div>`
       + loneVerbSegmentHtml(activeTab());
-    /* the child list opens on the same hover-rest the rest of the window's `⌄`s
-       open on, and closes on the same grace; pointing at any OTHER row puts it
-       away, which is the cheap half of what a safety triangle buys */
-    let subT = 0;
-    menu.querySelectorAll(".tm-item").forEach(el => {
-      el.addEventListener("pointerenter", () => {
-        clearTimeout(subT);
-        if (el.dataset.act === "splitwith") subT = setTimeout(() => openSplitWithMenu(el, leafId), CHEV_REST_MS);
-        else subT = setTimeout(closeSplitWithMenu, CHEV_GRACE_MS);
-      });
-    });
-    /* ASSIGNMENT, not addEventListener: `#term-menu` is a permanent element that
-       every open re-fills, so a subscription here would stack one more copy per
-       right click and the tenth close would run ten timers. The rows below can
-       subscribe freely — innerHTML just replaced them. */
-    menu.onpointerleave = () => {
-      clearTimeout(subT);
-      subT = setTimeout(() => { if (!$("split-with-menu").matches(":hover")) closeSplitWithMenu(); }, CHEV_GRACE_MS);
-    };
+    const subT = wireSplitWithDwell(menu, leafId);
     menu.querySelectorAll(".tm-item").forEach(el => el.addEventListener("click", (e) => {
       e.stopPropagation();
       /* the parent stays lit while its child stands: pressing the row is the
          click half of the same door the dwell opens */
-      if (el.dataset.act === "splitwith") {
-        clearTimeout(subT);
-        if (el.classList.contains("subopen")) closeSplitWithMenu();
-        else openSplitWithMenu(el, leafId);
-        return;
-      }
+      if (el.dataset.act === "splitwith") { subT.pressed(el, leafId); return; }
       menu.classList.remove("show");
       closeSplitWithMenu();
       const act = el.dataset.act;
-      if (act === "newfolder") {
-        /* prototype: a real folder picker goes here — the same stand-in the root
-           menu's `Browse…` uses, so the flow is testable end to end */
-        const src = leafSession(findLeafIn(activeTab(), leafId));
-        const picked = window.prompt("New terminal in folder:", (src && src.cwd) || HOME);
-        if (picked && picked.trim()) splitPaneSeeded(leafId, null, picked.trim());
-        return;
-      }
-      if (act === "dupe") { splitPaneSeeded(leafId, null, null); return; }
+      if (act === "newfolder" || act === "dupe") { runPaneVerb(act, leafId); return; }
       /* `movetab` was here and left with its row (§7.1.6i, 2026-08-23): the only
          menu that ever printed it is the one this segment is drawn in, and that
          menu is only ever drawn on a lone pane — where the verb has nothing to
@@ -13787,25 +13963,65 @@
        came out of the table with it; the menu is back to its original shape, so
        the keyboard walk starts at the first split row again. Focus mode's doors
        are the Appearance row, `Ctrl+Shift+Z`, the column's own exit button and
-       Esc — none of them hangs off a pane. */
+       Esc — none of them hangs off a pane.
+       SIX ENTRIES, AND THE FIRST ONE IS A DRAWING (§7.1.6e, 2026-08-16; this
+       page 2026-08-23, which had been drawing the two flat `Split right` /
+       `Split down` rows the ruling replaced). Native's `PaneMenuRow::ALL` is
+       this list in this order: the picker, `Split with ▸`, `New terminal in
+       folder…`, `Duplicate pane`, `Move pane to new tab`, a rule, `Close pane`.
+       Auto-split did not disappear when the `⊞` did — the picker's four zones
+       ARE directions, said in a shape instead of guessed from a rectangle.
+       THE RULE SITS ABOVE `Close pane` and not under the first row as
+       `#file-menu`'s does. Same principle, different sentence boundary: the
+       verbs that MAKE a pane, then the one that ends one. A destructive verb
+       flush against constructive ones is a verb the hand finds by overshooting.
+       `Move pane to new tab` STAYS IN THIS LIST even though it is a no-op on a
+       lone pane, and that is not an oversight: this menu is raised from a head
+       or a corner ghost that belongs to one pane among possibly many, and the
+       row is real for every split one. §7.1.6i cut it from the lone pane's
+       RIGHT-CLICK segment, which is the surface that is only ever drawn when the
+       verb has nothing to do. */
     menu.innerHTML =
-      `<div class="tm-item" data-act="right"><svg><use href="#i-split-right"/></svg><span>Split right</span></div>
-       <div class="tm-item" data-act="down"><svg><use href="#i-split-down"/></svg><span>Split down</span></div>
-       <div class="tm-sep"></div>
-       <div class="tm-item" data-act="close"><svg><use href="#i-close"/></svg><span>Close pane</span></div>`;
+      `<div class="tm-picker">
+         <div class="tmp-grid">
+           <div class="tmp-zone" data-zone="left"></div>
+           <div class="tmp-zone" data-zone="top"></div>
+           <div class="tmp-pane"></div>
+           <div class="tmp-zone" data-zone="right"></div>
+           <div class="tmp-zone" data-zone="bottom"></div>
+         </div>
+         <div class="tmp-cap">SPLIT</div>
+       </div>`
+      + ["splitwith", "newfolder", "dupe", "movetab"].map(paneVerbRowHtml).join("")
+      + `<div class="tm-sep"></div>`
+      + paneVerbRowHtml("close");
+    /* The picker's four zones and the rows' verbs go through the same two calls
+       every other door goes through — `splitLeafIn` by way of `splitPane` for a
+       named axis, `runPaneVerb` for the rest. */
+    menu.querySelectorAll(".tmp-zone").forEach(el => el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closePaneChevMenu();
+      splitPane(leafId, el.dataset.zone);
+    }));
+    const subT = wireSplitWithDwell(menu, leafId);
     menu.querySelectorAll(".tm-item").forEach(el => el.addEventListener("click", (e) => {
       e.stopPropagation();
-      menu.classList.remove("show");
-      const act = el.dataset.act;
-      if (act === "close") closePane(leafId);
-      else splitPane(leafId, act === "right" ? "right" : "bottom");
+      if (el.dataset.act === "splitwith") { subT.pressed(el, leafId); return; }
+      /* the chevron's light goes out with the list it belongs to — every path
+         that puts this menu away has to, or the button is left stranded on */
+      closePaneChevMenu();
+      runPaneVerb(el.dataset.act, leafId);
     }));
     menu.classList.add("show");
     menu.style.left = Math.max(6, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + "px";
     menu.style.top = Math.max(6, Math.min(y, window.innerHeight - menu.offsetHeight - 8)) + "px";
   }
 
-  /* ══════ THE PANE `⌄`'S TWO CLOCKS (§7.1.6e; this page 2026-08-21) ══════
+  /* ══════ EVERY `⌄` IN THIS WINDOW RUNS THESE TWO CLOCKS ══════
+     (§7.1.6e, ruled 2026-08-16; this page's pane chevron 2026-08-21, the tab
+     strip's new-tab chevron 2026-08-23 — it was the last button in the house
+     still opening on the press alone.)
+
      `⌄` IS THE ONE VERB SURFACE IN THIS WINDOW A HOVER MAY OPEN. Everything
      else keeps the old law — hover = look (tip/peek), click = do, right-click =
      options — and the chevron is the named exception: 250ms of rest opens it,
@@ -13817,15 +14033,26 @@
      already gone. They live in `CHEV_REST_MS` / `CHEV_GRACE_MS` beside the split
      submenu that already reads them, because a second pair is how two dwells in
      one window come to disagree about how long a dwell is.
-     BUTTON AND LIST ARE ONE REGION FOR THE LEAVE. The menu hangs 4px under the
+     BUTTON AND LIST ARE ONE REGION FOR THE LEAVE. The menu hangs 4px off the
      button, so a hand travelling into it crosses ground that is neither — the
      grace is what carries it across, and re-entering either one cancels the
      grace rather than arming a second clock.
-     ONE HANDLER PAIR, DELEGATED, because both spellings of the button are
-     rebuilt by `render` whenever their pane redraws: per-element listeners would
-     evaporate under the first line of output. */
+
+     ONE GATE, A TABLE OF WHO WEARS IT — which is native's own shape: both
+     buttons go through the SAME `ChevronGates::observe`, so "the two `⌄` agree"
+     is a property of there being one clock rather than of two spellings
+     happening to match today. A gate is four sentences about one button: which
+     element it is, which surface is its list, how it opens, how it closes. The
+     pane's `⌄` (head member and corner ghost alike — one class since
+     2026-08-21) and the tab strip's `+`-side `˅` (which is also the vertical
+     rail's and the focus column's, one `railNewHtml`) are the two entries, and
+     nothing else in this file is allowed a third pair of numbers.
+     ONE HANDLER PAIR, DELEGATED, because both spellings of the pane button are
+     rebuilt by `render` whenever their pane redraws and the strip's is rebuilt
+     with the strip: per-element listeners would evaporate under the first line
+     of output. */
   let chevRestT = 0, chevRestBtn = null, chevGraceT = 0;
-  function clearPaneChevClocks() {
+  function clearChevronClocks() {
     clearTimeout(chevRestT); chevRestT = 0; chevRestBtn = null;
     clearTimeout(chevGraceT); chevGraceT = 0;
   }
@@ -13837,31 +14064,57 @@
     btn.classList.add("open");
   }
   function closePaneChevMenu() {
-    clearPaneChevClocks();
+    clearChevronClocks();
+    closeSplitWithMenu();   /* a child list may not outlive the row it hangs off */
     $("pane-menu").classList.remove("show");
     document.querySelectorAll(".pane-chev.open").forEach(g => g.classList.remove("open"));
   }
+  /* Declared after the two openers it names so the table reads top to bottom;
+     `openProfileMenu` / `closeProfileMenu` are function declarations further
+     down the same scope. Both openers already light their own button (the pane
+     chevron by class, the strip's through `menuAnchor`), so `.open` is the one
+     question the gate asks about state and it can ask it of either. */
+  const CHEVRON_GATES = [
+    /* `#split-with-menu` is part of this gate's region and not a place the hand
+       has gone away to: the child list hangs off a row of the pane menu, so a
+       reader travelling into it is still reading this menu. Leaving it out is
+       how the grace would fire while somebody was choosing a profile. */
+    { btn: ".pane-chev", list: "#pane-menu, #split-with-menu",
+      open: openPaneChevMenu, close: closePaneChevMenu,
+      showing: () => $("pane-menu").classList.contains("show") },
+    { btn: ".nt-chev", list: "#profile-menu",
+      open: openProfileMenu, close: closeProfileMenu,
+      showing: () => $("profile-menu").classList.contains("show") },
+  ];
+  /* Which gate a point is inside, button or list — `null` for the whole rest of
+     the window, which is what the leave clock means by "away". */
+  const chevronGateAt = (el) => (el instanceof Element)
+    ? (CHEVRON_GATES.find(g => el.closest(`${g.btn}, ${g.list}`)) || null) : null;
   document.addEventListener("pointerover", (e) => {
-    const btn = e.target.closest(".pane-chev");
-    if (!btn && !e.target.closest("#pane-menu")) return;
+    const gate = chevronGateAt(e.target);
+    if (!gate) return;
     clearTimeout(chevGraceT); chevGraceT = 0;          /* the hand came back */
+    const btn = e.target.closest(gate.btn);
     if (!btn || btn.classList.contains("open") || chevRestBtn === btn) return;
     clearTimeout(chevRestT);
     chevRestBtn = btn;
     chevRestT = setTimeout(() => {
       chevRestT = 0;
-      if (chevRestBtn === btn && btn.isConnected) openPaneChevMenu(btn);
+      if (chevRestBtn === btn && btn.isConnected) gate.open(btn);
     }, CHEV_REST_MS);
   });
   document.addEventListener("pointerout", (e) => {
-    if (!e.target.closest(".pane-chev, #pane-menu")) return;
-    const to = e.relatedTarget;
-    if (to instanceof Element && to.closest(".pane-chev, #pane-menu")) return;
+    const gate = chevronGateAt(e.target);
+    if (!gate) return;
+    /* Crossing between a gate's button and its own list is not a leave; crossing
+       from one gate into the OTHER one is, and the arriving gate's `pointerover`
+       runs right after this to say so. */
+    if (chevronGateAt(e.relatedTarget) === gate) return;
     clearTimeout(chevRestT); chevRestT = 0; chevRestBtn = null;
     clearTimeout(chevGraceT);
     chevGraceT = setTimeout(() => {
       chevGraceT = 0;
-      if ($("pane-menu").classList.contains("show")) closePaneChevMenu();
+      if (gate.showing()) gate.close();
     }, CHEV_GRACE_MS);
   });
   function fileMenuFromRow(e, row) {
@@ -14396,22 +14649,50 @@
     startDrag(e, { kind: "tab", wsId, el: card, homeWs: state.active,
                    pressActivated: false, activateT });
   });
-  /* A NOTCH OVER A CARD'S TERMINAL SEAT AIMS THAT SEAT (user ruling
-     2026-08-21). Asked before the column scrolls, which is the sentence this
-     product answers everywhere else: the innermost scroller under the pointer
-     takes the notch.
-     ONE NOTCH IS ONE ROW AND THERE IS NO MODIFIER. `Shift`+wheel already means
-     "the other axis" here (`scrollPreviewBody`), and a mini seat has no other
-     axis to be turned onto; giving it a magnitude would make one key mean two
-     things on two surfaces. Up lifts the window, down lowers it, and zero is a
-     floor rather than a wrap.
+  /* ══════ THE LIST TAKES THE BARE NOTCH; `Alt` AIMS A SEAT ══════
+     (§7.1.6b′ "平滚轮归列、瞄准归 `Alt`", user ruling 2026-08-21 from a
+     screenshot, native the same day. This page owed the correction and here it
+     is: it used to run the aim off a bare `wheel`, which is the bug the ruling
+     was written about.)
+
+     THE BARE NOTCH IS THE COLUMN'S, UNCONDITIONALLY. The line the first version
+     quoted — "the innermost scroller under the pointer takes the notch" — was
+     hung on the wrong pair of things: aiming is not a scroller (it never reaches
+     an end and has no way to say so), and the thing on this surface with content
+     out of view IS the column. The mini cells cover almost the whole of it (8px
+     between cards), so every bare notch was eaten by the aim and the fourth card
+     of four could not be brought into view by any means. So the bare notch falls
+     through to `.rail`'s own `overflow-y`, exactly as it does on every other list
+     in this window, and WHEN THE COLUMN HAS NOTHING TO SCROLL IT DOES NOTHING —
+     it is not quietly re-read as an aim. A gesture whose meaning depends on how
+     many tabs are open is one the reader has to count furniture to predict, and
+     a hand turning the wheel on a short column is saying "scroll this column".
+
+     AIMING IS `Alt`+WHEEL, BECAUSE `Alt` IS THE ONE MODIFIER THIS WINDOW HAS NOT
+     SPENT ON A WHEEL. `Shift`+wheel is spent twice already — the preview body's
+     other axis (`scrollPreviewBody`) and `wheelRoute`'s "this one is the
+     window's, not the program's" — and a third meaning would be one key saying
+     three things on three surfaces. `Ctrl`+wheel is unclaimed here (image zoom is
+     the BARE wheel) and every desk on earth keeps it for zoom, so leaving it
+     unspent is what keeps that door. `Alt`+wheel is claimed by nobody in the
+     chrome; the only place `Alt` reaches a shell is the modifier bit of an SGR
+     mouse report, and that is a PANE's business while the card column is chrome.
+     `Ctrl+Alt` is NOT carved out of it: the shortcut table bars `Ctrl+Alt`
+     because Windows reports AltGr as that pair and a binding there steals a
+     character from every layout that composes with it — a notch composes no
+     character, so there is nothing to steal, and an exception would only make the
+     gesture intermittent for a reader resting a hand on AltGr.
+
+     ONE NOTCH IS ONE ROW under `Alt`. Up lifts the window off the tail, down
+     lowers it, and zero is a floor rather than a wrap.
      ONLY A TERMINAL SEAT ANSWERS: a files column, a preview and a face have no
-     tail to be lifted off - they are read from the top already - so a notch over
-     one of them falls through to the column, which is what the reader will read
-     it as.
+     tail to be lifted off — they are read from the top already — so an `Alt`
+     notch over one of them is simply not an aim.
      THE CLICK TABLE DID NOT CHANGE: a mini seat is still not a click target, and
      "clicking a card is clicking that tab" is about presses, not notches. */
+  const columnNotchAims = (e) => e.altKey;
   $("rail").addEventListener("wheel", (e) => {
+    if (!columnNotchAims(e)) return;   /* the list's; `.rail` scrolls itself */
     const body = e.target.closest(".fc-tab-mini [data-leaf]");
     if (!body) return;
     const card = body.closest(".fcard");

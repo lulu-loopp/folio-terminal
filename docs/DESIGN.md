@@ -1649,6 +1649,22 @@ HKCU\Software\Classes\AppUserModelId\Folio.Terminal
 
 **⑦ 小样怎么读。** 网页座位在演示窗最后一张 tab（`[files | web]`，无 shell）；`?web=ok|runtime|load|crash|blocked|download` 把它切到六态之一，`?web=blocked&scheme=javascript` 换被拒的 scheme。这道读取器与 `?lonehead=` / `?icons=` 同类，但**不是临时的、不挑胜者**——六态全都要发。
 
+**⑧ 两个「钉」的命名单结案:预览 pane 那枚不是钉,是锁(Claude 定 2026-08-23,用户可否决;`crates/bt-app/src/{marks,seats,main,i18n,tooltip}.rs`、小样同日回写)。** **由头是 W1 自己挂的那一条**,原文在 `docs/plans/web-preview/plan.md` §5:「**`.pv-pin` 与 `row-pin` 两个「钉」同框**。头上的 `pin` 是「钉住这个 pane(下一个文件另开)」,切换器行上的 `pin` 是「收藏这个文件/网页」——两枚同一个图形、同一个词、相距 200px。**这不是本片引入的**(files 小单起就并存),但网页行让它更常同时出现。**建议单独起一个命名小单**,本片未动。」用户 2026-08-22 全按推荐拍板时,这一条的裁决就是「另开小单,不挡 Web」。本段是那张小单。
+
+**语义确实不同,而且不同的那一枚是哪一枚有答案。** 这扇窗里其实有**三**枚钉,不是两枚:tab 的钉(`Text::Pin`/`Unpin`/`TabTipPinned`——这张 tab 下次启动会回来,而且要先取消固定才关得掉)、菜单行的钉(`pins.json`,`Text::PinnedSection`——这个文件/文件夹/网页留在列表顶上,§7.5「收藏＝钉」)、预览头的钉(`ChromeTarget::PreviewPin`——这块 pane 别被复用,下一份内容另开一块)。**前两枚是同一句话说了两遍:这一个留在列表里**;而且它们同图形是**裁过的**——§7.5 那条「控件就是 tab 已经在用的那枚钉」是有意复用,不是巧合。第三枚说的不是「留在列表里」,它根本不在任何列表里,它说的是「别拿这块 pane 当垃圾桶」。**落单的是第三枚,所以改的是第三枚。**
+
+**改成 `Lock`,连词带图一起改。** 只改词不改图,等于让两个一模一样的图形在同一张头上下相距 200px 讲两件事——图还在说谎;只改图不改词,读者读到的仍是同一个动词。**词**:`Lock this pane — what opens next opens in a new preview` / `Unlock — this pane becomes the reusable preview again`(中文:「锁定此窗格 —— 接下来打开的内容会开在新的预览里」/「解锁 —— 此窗格重新成为可复用的预览」)。两句都只陈述按下去发生什么以及随之而来的事实,没有第一人称、没有劝告(2026-08-17 的文案裁决);**两句都不提「文件」也不提「网页」**,因为一个预览席位两种都装,点名一种就会在另一半席位上说错话。**图**:`ChromeMark::Lock { engaged }`,`#i-lock` / `#i-locked`——一枚挂锁,**同一个锁体、只有锁梁与填充在动**。它比钉多花一根轴而且是故意的:Windows 11 把钉的角度钉死了(`Pin` 与 `Pinned` 逐像素相同),钉只剩填充轴可用;锁白得一根锁梁,就花掉——**开着且描边 = 动作,合上且实心 = 状态**,Fluent 2 那条填充轴的读法一个字没改,锁梁只是把同一句话在十三像素上再说一遍。
+
+**为什么是 `Lock` 而不是 `Keep` 或别的。** 「保持原样、别被换掉」在每一张桌面上都是一枚挂锁,`Keep` 没有图形;而 `Lock` 在本产品里**是空的**(`Text::RefNameLock` 是 git 的 `.lock` 后缀提示,不是动词),不必从谁手里抢。
+
+**它因此长出一条 tooltip,而这正好推翻了一句写在 `tooltip.rs` 里的话。** 那句原话是「`×`、文件夹、**一枚钉**、一张软盘都是本产品在别处教过的成语」,所以预览头的工具除了 ↗ 之外一律不挂提示。**这句话是对的,错的是它把第三枚钉算进了那份教材**——它教出来的是 tab 与菜单行那两枚的意思。换成挂锁之后,它成了那张头里唯一一个本产品没在别处教过的记号,于是它挂提示,而且**提示随状态换字**(走 reload/stop 那条既有先例:钮变了,提示就得变,否则头是在描述一按之前的自己)。
+
+**改名到哪儿为止,以及为什么就到那儿。** 读者摸得到的一律改:`ChromeTarget::PreviewLock`、`PreviewHeadGeometry::lock`、`PreviewHeadContent::locked`、`Seats::{preview_is_locked, toggle_preview_lock}`、`Runtime::toggle_preview_lock`、小样的 `.pv-lock` 与 `pvLocked`。**`bt_layout::Seat::pinned` 与 `session.json` 里那个 `pinned` 键留着旧词**:那是树的耐久位与磁盘的键,**磁盘的键是带版本的词汇、没有读者**,改它要付一个 session schema 版本加一次迁移,买回来的是屏幕上零变化。两套词汇**在一个函数上碰头**(`Seats::preview_is_locked` / `toggle_preview_lock`),那叫翻译;要是它们在不知道哪儿碰头,那才叫走样。
+
+**红测三条,都是钉字面与图形的形。** `marks::the_lock_says_its_state_on_the_shackle_as_well_as_the_fill`——① 锁与钉的 `id` 不同(共用 id 会让第二枚锁拿到钉的缓存像素),② 锁体上方那条带子里,开锁在中线左边一个像素都没有、合锁有(把两根锁梁画成一样,填充轴还绿着它就红了,而那正是十三像素上读者要猜的那种坏法),③ 填充轴按 `ink_mass` 读,外加锁体不许在两态之间挪窝(实心必须落在描边之内、两者共心)。`seats::…` 那条在头的两个态里都断言**一枚钉都不许出现在预览头里**。`i18n::the_preview_panes_control_says_lock_and_leaves_pin_to_the_two_it_belongs_to` 两个方向都钉:锁的两句里不许有 `pin`/`钉`、也不许有「文件/网页」,并且 `Pin`/`Unpin`/`PINNED` 三句**原样还在**——一次把词从它本来对的那两个动词身上一起扫掉的改名,会让这扇窗再也没有词说「留在列表里」。字符串表 **450 → 452**。
+
+**Claude 定,用户可否决。** 本段是一张命名单的裁决而不是一次实现选择,所以按本文件的惯例标明:`Lock` 这个词、挂锁这个形、以及「改名到磁盘键为止」这条边界,三样都可以被推翻;推翻其中任何一样,上面那三条红测就是它要改的清单。
+
 #### W2 片② 落地:导航策略是一个纯模块(2026-08-22;`crates/bt-app/src/webnav.rs`,**只有模块与它的合同测试,一根接线也没有**)
 
 **这一片交付的是一条规则,不是一个能用的网页座位。** 方案 §3 的每一句话在这里成了类型与判定函数——无 I/O、无 COM、无宿主依赖,不查 DNS、不读 `hosts`、不问磁盘——产品里除了新文件本身,只多了 `main.rs` 的一行 `mod webnav;`。接线归后面几片:片① 在 `NavigationStarting` 上装这扇门,片③ 拿 `switcher_key` 当预览池的去重键,片④ 拥有地址栏 UI 与搜索引擎的选择,片⑤ 的 files 列入口调 `Mint::file`。本节记的是规则本身,以及每一条是从哪一条既有裁决或哪一次实测推出来的。
