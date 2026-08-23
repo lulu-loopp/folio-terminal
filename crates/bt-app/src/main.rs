@@ -15053,10 +15053,21 @@ impl DropLanding {
     /// Every other zone answers with nothing, and that is a rule rather than an
     /// omission: a word on a box whose shape already said it is a second voice
     /// saying the same thing, and the first one to be believed when they drift.
-    fn caption(self, source: &DragSource) -> &'static str {
+    /// `arrives_whole` is whether the hand is carrying a **subtree** rather than
+    /// a seat of the tree being aimed at — [`PlanInputs::cargo`], asked here for
+    /// the reason it is asked in [`Runtime::plan_for`]: which of the centre's
+    /// two sentences this is, is a fact about what arrives and not about which
+    /// gesture started it. It read `DragSource::Tab(_)` while a tab was the only
+    /// subtree a hand could hold, and §7.1.6k′ made a foreign pane the second —
+    /// its centre evicts the target exactly as a tab's does, so it must say so.
+    fn caption(self, source: &DragSource, arrives_whole: bool) -> &'static str {
         match (self, source) {
-            (Self::SeatCentre { .. }, DragSource::Pane(_)) => i18n::Text::DragSwapPanes.text(),
-            (Self::SeatCentre { .. }, DragSource::Tab(_)) => i18n::Text::DragReplacePane.text(),
+            (Self::SeatCentre { .. }, DragSource::Pane(_)) if !arrives_whole => {
+                i18n::Text::DragSwapPanes.text()
+            }
+            (Self::SeatCentre { .. }, DragSource::Pane(_) | DragSource::Tab(_)) => {
+                i18n::Text::DragReplacePane.text()
+            }
             // L141/L142 — a row's centre verbs say their names for exactly the
             // reason a pane's and a tab's do: the box is the same rectangle and
             // the outcome is not. "Open in this preview" changes what a page is
@@ -15559,10 +15570,11 @@ fn landing_for_aim(
 /// *ruling*, and a ruling that needs a `Renderer` to state is a ruling no test
 /// ever reads back.
 ///
-/// * `hosts` — [`seats::TabRun::hosts_pane_drop`], §7.1.6b′ ②. A card column
-///   refuses a pane source outright, so it refuses **both** offers here and the
-///   spring never arms: the refusal is asked first because it is about the
-///   surface rather than about the pointer.
+/// * `offers` — [`seats::PaneOffers`], §7.1.6b′ ② as re-judged 2026-08-23. Two
+///   bits and not one since the user split ② in half: the card column now says
+///   yes to the hand-over and goes on saying no to the tear-out. It is asked
+///   per verb rather than once at the top because that is what the ruling now
+///   is — a statement about the two verbs and not about the source.
 /// * `over` — the tab whose own rectangle the pointer is standing on
 ///   ([`seats::TabRun::slot_at`]), and `None` for the run's padding.
 /// * `holding` — the tab the pane in the hand lives in.
@@ -15581,24 +15593,33 @@ fn landing_for_aim(
 /// says no. The pointer is aimed at a room; if the room will not take it, there
 /// is nothing there.
 fn pane_strip_landing(
-    hosts: bool,
+    offers: seats::PaneOffers,
     over: Option<TabId>,
     holding: TabId,
     adopt_fits: bool,
     extract_slot: Option<usize>,
 ) -> Option<DropLanding> {
-    if !hosts {
-        return None;
-    }
     // The pane's own tab falls through deliberately: appending a pane to the end
     // of the tree it is already in is K135's sentence one surface up, so that
-    // pointer goes on getting the tear-out it always got.
+    // pointer goes on getting the tear-out it always got — where there is one.
+    //
+    // **A card column's own card therefore answers nothing at all**, and that is
+    // both halves of the re-judged ② meeting: the hand-over is refused because
+    // it would do nothing, and the tear-out is refused because the column does
+    // not make tabs. Two reasons, one honest silence.
     if let Some(tab) = over
         && tab != holding
     {
-        return adopt_fits.then_some(DropLanding::StripAdopt { tab });
+        return (offers.adopt && adopt_fits).then_some(DropLanding::StripAdopt { tab });
     }
-    extract_slot.map(|slot| DropLanding::StripExtract { slot })
+    // Still no fall-through from a refused adopt, and now not from a refused
+    // *offer* either: the paragraph above is about a pointer that named a room,
+    // and a room that will not take it leaves nothing there.
+    offers
+        .extract
+        .then_some(extract_slot)
+        .flatten()
+        .map(|slot| DropLanding::StripExtract { slot })
 }
 
 /// **Which end of a tree an arriving pane joins** — §7.1.6k's "追加为树末尾分屏".
@@ -18933,19 +18954,36 @@ fn move_seat_content(
     }
 }
 
-/// **§7.1.6k (user ruling, 2026-08-20) — move one pane into another tab,
-/// appended at the end of that tab's tree.**
+/// **§7.1.6k (user ruling, 2026-08-20) — move one pane into another tab, at the
+/// place the gesture aimed at.**
 ///
 /// A free function over two [`TabState`]s for the reason [`tear_pane_into_tab`]
 /// and [`absorb_tab_into_layout`] are: everything this gesture *decides* is a
 /// fact about two tabs, and the only thing the window contributes is the solved
 /// rectangles and the strip surgery. Those are arguments here.
 ///
+/// **One body for two doors, since §7.1.6k′ (user ruling 2026-08-23).** The tab
+/// list's door aims at the end of the target's tree; the stage's door aims at
+/// whatever zone the pointer was in when the hand opened. Those differ in the
+/// [`seats::LayoutAim`] and in **nothing else** — the same pluck, the same
+/// renumbering, the same seven tables of content, the same emptied-tab rule —
+/// so the aim is a parameter and not a second copy of this function. It arrives
+/// on [`PaneArrival`] with the two facts a plan is judged against.
+///
 /// **The end of the tree is a rim drop and not a split of some pane**, which is
 /// [`seats::Seats::add_files_pane`]'s own argument read for a different kind of
 /// leaf: however many panes the target already holds, "append" means beside all
 /// of them, and only the root has an edge that means that (G82/G83). Which side
-/// is the end is [`trailing_edge`]'s, off the window's `Split direction`.
+/// is the end is [`trailing_edge`]'s, off the window's `Split direction`. That
+/// is the tab list's door; the stage's says which pane and which side outright.
+///
+/// **A centre evicts, and the eviction is this function's** (N161). An arriving
+/// *subtree* takes the target pane's slot, so the target pane leaves for the
+/// strip as a tab of its own — [`pane_into_new_tab`], the very call
+/// [`absorb_tab_into_layout`] makes for a merging tab, with the host's pin
+/// (N160②). It is done here rather than by the window because it is a fact about
+/// the two trees; what the window does with the tab that comes back is the
+/// window's.
 ///
 /// **The tree the pane is leaving.** Two shapes, and the second is not a refusal:
 ///
@@ -18964,10 +19002,12 @@ fn move_seat_content(
 /// `watched` is whether the target is the tab on screen — see
 /// [`move_seat_content`].
 ///
-/// `None` when the seat is not in `from`'s tree, or when the target's tree
-/// cannot take another pane (H93). Nothing is mutated on either path: the plan
-/// is built and judged before the first edit, so a refusal leaves both tabs
-/// exactly as they were and the gesture goes home (J120).
+/// `None` when the seat is not in `from`'s tree, when the target's tree cannot
+/// take the pane at this aim (H93), or when a centre would evict a pane the
+/// strip cannot hold ([`pane_can_become_a_tab`], the third place M147 can act on
+/// that one answer). Nothing is mutated on any of those paths: the plan is built
+/// and judged before the first edit, so a refusal leaves both tabs exactly as
+/// they were and the gesture goes home (J120).
 fn pane_into_tab(
     from: &mut TabState,
     into: &mut TabState,
@@ -18981,10 +19021,29 @@ fn pane_into_tab(
     // it to be asked about and everything durable about the pane — its kind, its
     // fixed extent — lives on the `Seat` (§5).
     let travelling = LayoutNode::seat(from.seats.tree().find_seat(seat)?.clone());
+    // **N161 — read before the adoption installs a tree that no longer has it.**
+    // A centre seats the arriving subtree where the target pane stood, so the
+    // target pane is the one leaving, and everything durable about it lives on
+    // its `Seat` (§5). Every other aim displaces nobody, which is why this is a
+    // match on the aim rather than a search of the plan.
+    let displaced = match arrival.aim {
+        seats::LayoutAim::SeatCentre(target) => Some(into.seats.tree().find_seat(target)?.clone()),
+        seats::LayoutAim::SeatEdge(..) | seats::LayoutAim::Rim(_) => None,
+    };
+    // M147's one answer, asked where the refusal still costs nothing. The
+    // preview asked it too ([`Runtime::plan_for`]) and got the same answer from
+    // the same function, which is what keeps the dashed box and the release
+    // saying one thing.
+    if displaced
+        .as_ref()
+        .is_some_and(|seat| !pane_can_become_a_tab(seat.kind))
+    {
+        return None;
+    }
     let plan = into.seats.plan_drop(
         metrics,
         arrival.viewport,
-        seats::LayoutAim::Rim(arrival.edge),
+        arrival.aim,
         seats::DropCargo::Layout(&travelling),
     )?;
     // Judged **before** anything moves. `adopt_drop` asks the same question and
@@ -19012,6 +19071,21 @@ fn pane_into_tab(
     }
     into.seats.adopt_drop(plan)?;
     move_seat_content(from, into, seat, landed, watched);
+    // **N161's eviction, after the arrival and before the focus** — the order
+    // [`absorb_tab_into_layout`] already uses, and it matters twice. The
+    // arriving pane's content has to be filed under `landed` before the target's
+    // is taken out from under `displaced.id`, so that no table is ever holding
+    // two entries for one surface; and `pane_into_new_tab` decides whether the
+    // preview pool follows by asking what preview seats are *left*, which is
+    // only the right question once the arrival is in the tree.
+    //
+    // N160② — the ejected pane inherits the **host's** pin, because it was
+    // displaced rather than aimed. `absorb_tab_into_layout` says the same
+    // sentence for a merging tab, and this is the same event with one leaf in
+    // the hand instead of a whole layout.
+    let host_pinned = into.pinned;
+    let ejected = displaced
+        .and_then(|seat| pane_into_new_tab(into, &seat, arrival.ejected_id, host_pinned, &solve));
     if strands_the_pool {
         // The rest of the history goes with it when nothing is left to reach it
         // from — the same `take` [`pane_into_new_tab`] performs, and for the same
@@ -19066,27 +19140,40 @@ fn pane_into_tab(
     Some(PaneMove {
         landed,
         source_emptied,
+        ejected,
     })
 }
 
-/// **Where an arriving pane lands, and against what** — the window's three facts
-/// that [`pane_into_tab`] needs and cannot ask for itself.
+/// **Where an arriving pane lands, and against what** — the window's facts that
+/// [`pane_into_tab`] needs and cannot ask for itself.
 ///
-/// One argument rather than three because they travel together and always will:
+/// One argument rather than four because they travel together and always will:
 /// the metrics and the viewport are the pair every edit in this program is
-/// judged against (§2.1 — one device scale at a time), and the edge is the one
+/// judged against (§2.1 — one device scale at a time), and the aim is the one
 /// choice the gesture makes about them.
 struct PaneArrival<'a> {
     metrics: &'a SeatMetrics,
     /// The box every tab in this window is solved into — [`TabState::seat_layout`]'s
     /// own, so the plan is measured against the rectangle the drop will land in.
     viewport: LogicalRect,
-    /// Which end of the root the pane joins — [`trailing_edge`]'s answer.
-    edge: seats::DropEdge,
+    /// **Where in the target's tree the pane goes** — the tab list's door says
+    /// `Rim(`[`trailing_edge`]`)` and means "beside all of it"; the stage's door
+    /// says whichever zone the pointer was in (§7.1.6k′).
+    aim: seats::LayoutAim,
+    /// The name a pane evicted by a centre would take (N161).
+    ///
+    /// Handed in rather than minted here because a `TabId` is the *window's*
+    /// counter and a free function has no business spending one. It is spent
+    /// only when [`PaneMove::ejected`] comes back `Some`, exactly as
+    /// [`Runtime::absorb_tab`] spends its own.
+    ejected_id: TabId,
 }
 
 /// What [`pane_into_tab`] did, for the window to finish.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// Not `Copy` and not `Debug` since §7.1.6k′, because [`Self::ejected`] is a
+/// whole `TabState` — a tab in transit, on its way from one tree into the run —
+/// and a tab is neither.
 struct PaneMove {
     /// The id the pane answers to in the tab it arrived in.
     landed: SeatId,
@@ -19094,6 +19181,12 @@ struct PaneMove {
     /// no content: its strip entry has to go. See [`pane_into_tab`] for why this
     /// is not `close_tab`.
     source_emptied: bool,
+    /// **N161 — the pane a centre turned out of the target tree, already a tab**
+    /// and waiting for a slot in the run.
+    ///
+    /// `None` for every other aim, and for a centre it is the whole of what the
+    /// window still owes: a slot, and the tab id counter moving on.
+    ejected: Option<TabState>,
 }
 
 /// **N159/K124 — a tab merged into a pane's layout hands its fleet over.**
@@ -26446,21 +26539,38 @@ impl Runtime<'_> {
         // preview in the strip is the ghost now"), so there is no dock box for
         // them and never was one to fade.
         landing.layout_aim()?;
+        let showing = self.window.tabs[self.window.active_tab].id;
+        // **The one place a source is turned into the *shape* it arrives in**
+        // (M156, and §7.1.6k′'s addition to it). `Some` means "a whole subtree
+        // arrives and is renumbered on the way in"; `None` means "a seat of the
+        // tree being planned changes places and keeps its own name".
+        //
+        // Written here rather than in [`Runtime::plan_for`] because this is the
+        // cache key: the shape is part of what the plan is a function of, and a
+        // spring that moves the view mid-gesture changes the shape without
+        // changing the landing.
         let cargo = match &drag.source {
-            // A pane and a row both arrive as one leaf, and the leaf is built
-            // where the plan is (see [`Runtime::plan_for`]) — a row has no tree
-            // of its own to carry, which is the whole difference between it and
-            // a tab.
-            DragSource::Pane(_) | DragSource::Row(_) => None,
-            DragSource::Tab(id) => Some(
-                self.window
-                    .tabs
-                    .iter()
-                    .find(|candidate| candidate.id == *id)?
+            // A row arrives as one leaf, and that leaf is built where the plan
+            // is (see [`Runtime::plan_for`]) — a row has no tree of its own to
+            // carry, which is the whole difference between it and a tab.
+            DragSource::Row(_) => None,
+            // **§7.1.6k′ — a pane is one shape at home and the other away.** In
+            // the tab on screen it is a seat this tree owns, so it arrives *as
+            // itself*: the same `Seat`, the same id, its fixed extent along
+            // with it, and a centre that trades payloads rather than evicting
+            // anybody (L138). Once the spring has left the hand in one tab and
+            // the view in another, that seat is not in the tree being planned
+            // at all — it is a subtree from another room, exactly like a tab's,
+            // and it arrives the way one does.
+            DragSource::Pane(leaf) if leaf.tab == showing => None,
+            DragSource::Pane(leaf) => Some(bt_layout::LayoutNode::seat(
+                self.tab_state(leaf.tab)?
                     .seats
                     .tree()
+                    .find_seat(leaf.seat)?
                     .clone(),
-            ),
+            )),
+            DragSource::Tab(id) => Some(self.tab_state(*id)?.seats.tree().clone()),
         };
         Some(PlanInputs {
             landing,
@@ -26508,14 +26618,14 @@ impl Runtime<'_> {
             .row()
             .map(|payload| bt_layout::LayoutNode::seat(row_arrival_seat(payload.kind)));
         let cargo = match (&inputs.cargo, &arriving, &inputs.source) {
-            // M156① — a tab arrives as its whole layout.
+            // M156① — a tab arrives as its whole layout, and since §7.1.6k′ so
+            // does a pane the spring left behind in another tab. Which of the
+            // two this is was decided once, in [`Runtime::plan_inputs_for`].
             (Some(tree), _, _) => seats::DropCargo::Layout(tree),
             (_, Some(leaf), _) => seats::DropCargo::Layout(leaf),
-            // M156② — a pane arrives as the seat it already is, fixed column and
-            // all. It is a seat of *this* tree by construction: `survey_drop`
-            // offers no layout landing at all to a pane whose tab is not the one
-            // on screen (§7.1.6k), so `layout_aim` above has already refused
-            // every pointer that could ask this with a foreign seat.
+            // M156② — a pane of *this* tree arrives as the seat it already is,
+            // fixed column and all. `inputs.cargo` being `None` for a pane is
+            // exactly the statement that the seat is one this tree owns.
             (None, None, DragSource::Pane(leaf)) => seats::DropCargo::Pane(leaf.seat),
             (None, None, DragSource::Tab(_) | DragSource::Row(_)) => return None,
         };
@@ -26527,14 +26637,23 @@ impl Runtime<'_> {
         // release and the box stays blue right up until the hand opens on
         // nothing, which is the picture "this app is broken" makes too.
         //
-        // The limit is I106's and it is narrow. N161/K125 — a *tab* let go on a
-        // pane's centre — is the one landing that ejects the target pane into the
-        // strip, and [`pane_can_become_a_tab`] is what that pane has to answer.
-        // A tab dropped on a files column's middle would push a files column out
-        // as a tab with nothing running in it. Every other landing here moves
-        // panes only inside one tree and asks nothing of the strip.
-        if let (DropLanding::SeatCentre { target }, DragSource::Tab(_)) =
-            (inputs.landing, &inputs.source)
+        // The limit is I106's and it is narrow. N161/K125 — a centre that ejects
+        // the target pane into the strip — and [`pane_can_become_a_tab`] is what
+        // that pane has to answer. A drop on a files column's middle would push a
+        // files column out as a tab with nothing running in it. Every other
+        // landing here moves panes only inside one tree and asks nothing of the
+        // strip.
+        //
+        // **Asked of the cargo and not of the source** (§7.1.6k′). It read
+        // `DragSource::Tab(_)` while a tab was the only thing that could arrive
+        // as a subtree, and that was the right rule written down by its only
+        // instance: what evicts the target is `Edit::ReplaceSeat`, and what asks
+        // for a replace is a centre with **a whole layout** in the hand — a
+        // foreign pane included, since 2026-08-23. A pane of this tree is the
+        // one centre that evicts nobody (`Edit::CenterSwap`, L138), and it is
+        // `inputs.cargo == None` that says so.
+        if let DropLanding::SeatCentre { target } = inputs.landing
+            && inputs.cargo.is_some()
             && !self
                 .seats
                 .tree()
@@ -26586,7 +26705,10 @@ impl Runtime<'_> {
             // dashed and empty, and "Swap panes" printed inside an outline that
             // means "this will not happen" is the box arguing with itself.
             if shown.plan.fits() {
-                shown.inputs.landing.caption(&shown.inputs.source)
+                shown
+                    .inputs
+                    .landing
+                    .caption(&shown.inputs.source, shown.inputs.cargo.is_some())
             } else {
                 ""
             },
@@ -51689,8 +51811,8 @@ impl Runtime<'_> {
         // column is the ordinary tree, its panes are the ordinary panes, and a
         // drag among them is the ordinary gesture. What the mode does refuse is
         // the tear-out, and that refusal lives where the surface being dropped
-        // on is described (`seats::TabRun::hosts_tear_out`, ②) rather than at
-        // the moment a pane leaves the ground.
+        // on is described (`seats::PaneOffers::extract`, ②) rather than at the
+        // moment a pane leaves the ground.
         // K135 covers a pane already, and by identity rather than by geometry:
         // a pane held over its own rectangle has no landing however that
         // rectangle has moved since the press. A home rectangle here would be
@@ -51834,25 +51956,27 @@ impl Runtime<'_> {
         if *source == DragSource::Tab(showing) {
             return None;
         }
-        // **§7.1.6k — a pane away from home has no landing in this layout, and
-        // that is a policy record rather than a structural wall** (§7.0 rule 8).
+        // **§7.1.6k′ (user ruling 2026-08-23) — the policy record that stood
+        // here has been cashed in, so there is nothing left to refuse.**
         //
-        // The spring puts another tab's layout under a pointer that is still
-        // holding a pane of the tab it set out from. The ruling this slice
-        // implements grants exactly one cross-tab door and names where it is:
-        // *"直接松在 tab 上 = 移入该 tab(追加为树末尾分屏)"* — the tab, not the
-        // layout under it. So the zones below are not offered, no box is drawn,
-        // and letting go over them is J120's clean nothing.
+        // What used to be here was a `return None` for a pane whose tab is not
+        // the one on screen, with §7.1.6k's own words beside it: *"离家的 pane
+        // 在这张舞台上没有落点,这是政策位不是墙(§7.0 法则③)… 要把那扇门开出来是
+        // 它自己的一片(从一棵树里摘下、落进另一棵),现在是未做而不是做不了"*. The
+        // user met that state on the machine — spring across to the target tab,
+        // aim at the stage to choose a side, and the stage answered nothing at
+        // all — and ruled the door open. So a pane the spring left behind in
+        // another tab is offered **exactly** the zones a pane of this tab is,
+        // and the box is drawn the same way.
         //
-        // It is refused here rather than deep inside the plan because the plan
-        // could not state it: `DropCargo::Pane` names a seat **of the tree being
-        // planned**, so a pane from another tab is not a cargo this type can
-        // carry, and every arm downstream would have to learn that. Granting the
-        // door later is a slice of its own — pluck from one tree, arrive in
-        // another — and it is unblocked, not blocked.
-        if source.pane().is_some_and(|leaf| leaf.tab != showing) {
-            return None;
-        }
+        // The type's objection was real and it is answered rather than ignored:
+        // `DropCargo::Pane` names a seat **of the tree being planned**, so a
+        // foreign pane is not a cargo it can carry. It arrives as
+        // `DropCargo::Layout` instead — a one-leaf subtree, renumbered on the
+        // way in like any arriving tab's, which is the very route the rim
+        // append has taken since §7.1.6k. [`Runtime::plan_inputs_for`] chooses
+        // between the two shapes in one place, so "what may a foreign pane land
+        // on" has exactly one author and is not re-decided here.
         let aim = seats::aim_at_layout(
             &self.seat_layout,
             self.layout_host_rect(),
@@ -51926,30 +52050,35 @@ impl Runtime<'_> {
             // N158 clamps the slot here rather than at the commit, so the caret
             // the user watches and the slot the release inserts at are one
             // number — see [`strip_insert_slot`].
-            // **`hosts_pane_drop` is §7.1.6b′ ② and it is asked of the run**, so
-            // this arm goes on not knowing which surface it is judging. A card
-            // column is the tab list of *one window* drawn beside the tab it is
-            // showing, and the ruling is that focus mode takes no pane source at
-            // all: *"pane 拖到卡列不得撕成新 tab"*. The refusal has to be a fact
-            // about the surface rather than a second reading of
+            // **[`seats::PaneOffers`] is §7.1.6b′ ② and it is asked of the
+            // run**, so this arm goes on not knowing which surface it is
+            // judging. A card column is the tab list of *one window* drawn
+            // beside the tab it is showing, and what it withholds has to be a
+            // fact about the surface rather than a second reading of
             // `window.focus_mode` here — R3's whole shape is that
             // `Runtime::tab_run` is the one place the surface is chosen and
             // everything under it takes a [`seats::TabRun`] — and it has to be
             // its own field rather than "has no slots", because since 2026-08-20
             // the column has slots.
             //
-            // **Two offers now, and which one this pointer is asking for is
+            // Since the user's 2026-08-23 ruling that field says the two offers
+            // separately: the column takes the hand-over and still refuses the
+            // tear-out. This arm did not have to learn that, which is the point
+            // of it living on the run.
+            //
+            // **Two offers, and which one this pointer is asking for is
             // [`pane_strip_landing`]'s** (§7.1.6k). The run answers both questions
             // off the slots it already carries: `slot_at` for "whose tab is under
-            // my hand", `insert_index_at` for "between which two would a new one
-            // land".
+            // my hand" — the third surface to be asked it, and it answers the
+            // column's cards off the same boxes it reorders them by —
+            // `insert_index_at` for "between which two would a new one land".
             DragSource::Pane(leaf) => {
                 let over = run
                     .slot_at(position.x, position.y)
                     .and_then(|index| self.window.tabs.get(index))
                     .map(|tab| tab.id);
                 pane_strip_landing(
-                    run.hosts_pane_drop,
+                    run.pane_offers,
                     over,
                     leaf.tab,
                     // Asked of every pointer move rather than at the release, and
@@ -52534,6 +52663,33 @@ impl Runtime<'_> {
                 RowVerb::Split => {}
             }
         }
+        // **§7.1.6k′ — a pane the spring left in another tab is a *cross-tab*
+        // move, however much the aim looks like a local one.**
+        //
+        // Everything above this line edits one tree: `adopt_drop` installs the
+        // plan into the tab on screen and the source, if there was one, is a tab
+        // giving up its whole self. A foreign pane has to be plucked out of a
+        // tree nobody is drawing and filed into this one, its seven tables of
+        // content moving with it and its own tab possibly emptying — which is
+        // [`Runtime::move_pane_across_tabs`] to the letter, and the very door the
+        // tab list's drop already goes through.
+        //
+        // `plan` is dropped here rather than handed over, and that costs one tree
+        // walk and buys the discipline `commit_layout_drop` is built on: the
+        // criterion is `plan_for`'s, and `plan_drop` is pure (T223/D2), so the
+        // plan the commit rebuilds from the same inputs is the same tree to the
+        // bit. What must not be re-decided is the *judgement*, and it is not —
+        // a refusal reaches the commit through `plan.fits()` here and through the
+        // same [`pane_can_become_a_tab`] there.
+        let showing = self.window.tabs[self.window.active_tab].id;
+        if let Some(leaf) = drag.source.pane().filter(|leaf| leaf.tab != showing) {
+            // M147 — the dashed box already said so while the hand was open, and
+            // the release says the same thing by doing nothing at all.
+            let Some(aim) = inputs.landing.layout_aim().filter(|_| plan.fits()) else {
+                return Ok(false);
+            };
+            return self.move_pane_across_tabs(leaf, showing, aim);
+        }
         let arrived = plan.arrived.clone();
         // **The seat the plan minted for a row**, read before `adopt_drop`
         // consumes the plan. `arrived` is the renumbering's own record and a row
@@ -52545,6 +52701,11 @@ impl Runtime<'_> {
             .source
             .row()
             .and_then(|_| arrived.first().map(|(_, landed)| *landed));
+        // N161 — a centre with a whole *layout* in the hand evicts the target
+        // pane. Only a tab can reach this line holding one: the foreign pane's
+        // arm above has already returned, and every other source either arrives
+        // as a seat of this tree (a swap, which evicts nobody) or as a leaf the
+        // plan minted (a row, which never reaches a centre as a space verb).
         let displaced = match (inputs.landing, &drag.source) {
             (DropLanding::SeatCentre { target }, DragSource::Tab(_)) => {
                 self.seats.tree().find_seat(target).cloned()
@@ -52699,6 +52860,34 @@ impl Runtime<'_> {
         let DragSource::Pane(leaf) = drag.source else {
             return Ok(false);
         };
+        // **The tab list aims at the end of the tree and always has**, whichever
+        // surface asked: *"追加为树末尾分屏"*. It is stated here rather than
+        // inside [`Runtime::move_pane_across_tabs`] because it is what this
+        // *door* means; the stage's door names a zone instead, and the thing
+        // they share is everything after the aim.
+        self.move_pane_across_tabs(leaf, target, seats::LayoutAim::Rim(self.append_edge()))
+    }
+
+    /// **A pane leaves one tab's tree and lands in another's, at a named aim** —
+    /// the window's half of [`pane_into_tab`], and the one door both cross-tab
+    /// gestures go through.
+    ///
+    /// The two gestures are §7.1.6k's *"松在 tab 上"* (the tab list, aiming at the
+    /// end of the tree) and §7.1.6k′'s *"落在布局上"* (the stage, aiming at a
+    /// zone). They differ in the [`seats::LayoutAim`] their callers hand in and
+    /// in nothing else — which is the whole reason this is one function: the
+    /// strip surgery below is fiddly, order-dependent and easy to get subtly
+    /// wrong, and two copies of it would be two chances to.
+    ///
+    /// What is left here is what only a window can do: find the two entries, mint
+    /// the id an eviction would spend, hand over the solver, and put back into
+    /// the run whatever the move took out of it or pushed out of a tree.
+    fn move_pane_across_tabs(
+        &mut self,
+        leaf: LeafId,
+        target: TabId,
+        aim: seats::LayoutAim,
+    ) -> Result<bool> {
         let (Some(from), Some(into)) = (self.tab_slot_of(leaf.tab), self.tab_slot_of(target))
         else {
             return Ok(false);
@@ -52710,7 +52899,8 @@ impl Runtime<'_> {
         let arrival = PaneArrival {
             metrics: &metrics,
             viewport: self.window.seat_viewport,
-            edge: self.append_edge(),
+            aim,
+            ejected_id: TabId(self.window.next_tab_id),
         };
         let watching = self.window.tabs[self.window.active_tab].id;
         let render_physical =
@@ -52738,11 +52928,19 @@ impl Runtime<'_> {
             self.window.tabs[into].seats.tree().contains(moved.landed),
             "§7.1.6k: the pane landed under an id its new tree does not have"
         );
+        if moved.ejected.is_some() {
+            self.window.next_tab_id += 1;
+        }
         if moved.source_emptied {
             // The tab did not close — it was emptied by a move, and `close_tab`
             // would file a still-running shell into Recent and shut it down. This
             // is [`Runtime::absorb_tab`]'s door, for [`absorb_tab_into_strip`]'s
             // stated reason.
+            //
+            // **L139's slot, when there is something to put in it.** A centre
+            // pushed a pane of the target out, and the tab it became takes the
+            // slot the emptied source is vacating — exactly the trade
+            // [`Runtime::absorb_tab`] makes, and the same call makes it.
             let follow = if watching == leaf.tab {
                 target
             } else {
@@ -52752,7 +52950,7 @@ impl Runtime<'_> {
                 &mut self.window.tabs,
                 &mut self.window.active_tab,
                 from,
-                None,
+                moved.ejected,
             );
             if let Some(index) = self.tab_slot_of(follow) {
                 // Forced: the removal may already have left `active_tab` naming
@@ -52760,6 +52958,27 @@ impl Runtime<'_> {
                 // grid for the shells, a title — rather than the index alone.
                 self.activate_tab(index, true)?;
             }
+        } else if let Some(ejected) = moved.ejected {
+            // **Nobody vacated a slot, so the evicted pane takes the one next to
+            // the room it was pushed out of.** L139's own sentence is "the
+            // displaced pane takes the slot the source tab is vacating", and it
+            // is a sentence about a *trade*: one tab left the run and one arrives
+            // in its place. Here no tab left, so the nearest true reading of it
+            // is the neighbouring slot — the pane is still where it was, one step
+            // over. Through [`strip_insert_slot`] like every other insertion,
+            // because the run it is joining has a pinned partition to respect.
+            let pinned = self
+                .window
+                .tabs
+                .iter()
+                .map(|tab| tab.pinned)
+                .collect::<Vec<_>>();
+            let slot = strip_insert_slot(into + 1, &pinned);
+            self.window.tabs.insert(slot, ejected);
+            if slot <= self.window.active_tab {
+                self.window.active_tab += 1;
+            }
+            settle_pin_partition(&mut self.window.tabs, &mut self.window.active_tab);
         }
         self.settle_seat_set_change()?;
         Ok(true)
@@ -79430,52 +79649,137 @@ mod tests {
     ///
     /// Red gate: answer `StripExtract` for a pointer over a foreign tab (which is
     /// what this file did until §7.1.6k) and the first row fails; let the pane's
-    /// **own** tab answer `StripAdopt` and the second does; drop the
-    /// `hosts` guard and the card column's row does; fall back to the tear-out
-    /// when the target will not fit and the last one does.
+    /// **own** tab answer `StripAdopt` and the second does; ask one `hosts` bit
+    /// of both verbs — which is what this file did until 2026-08-23 — and the
+    /// card column's *first* row does; fall back to the tear-out when the target
+    /// will not fit and the last one does.
     #[test]
     fn the_strip_hands_a_pane_to_the_tab_under_it_and_makes_a_new_one_in_the_gaps() {
         let mine = TabId(1);
         let other = TabId(2);
+        let both = seats::PaneOffers::BOTH;
+        let cards = seats::PaneOffers::ADOPT_ONLY;
         assert_eq!(
-            pane_strip_landing(true, Some(other), mine, true, Some(3)),
+            pane_strip_landing(both, Some(other), mine, true, Some(3)),
             Some(DropLanding::StripAdopt { tab: other }),
             "resting on somebody else's tab is asking to be put in it"
         );
         assert_eq!(
-            pane_strip_landing(true, Some(mine), mine, true, Some(3)),
+            pane_strip_landing(both, Some(mine), mine, true, Some(3)),
             Some(DropLanding::StripExtract { slot: 3 }),
             "resting on your own tab is not a move, so the strip's ordinary \
              offer stands"
         );
         assert_eq!(
-            pane_strip_landing(true, None, mine, true, Some(3)),
+            pane_strip_landing(both, None, mine, true, Some(3)),
             Some(DropLanding::StripExtract { slot: 3 }),
             "and the run's padding is the gap between tabs, which is where a \
              new tab has always been made"
         );
         assert_eq!(
-            pane_strip_landing(false, Some(other), mine, true, Some(3)),
-            None,
-            "§7.1.6b′ ②: a card column takes no pane source at all, so neither \
-             offer is made and the spring never arms"
+            pane_strip_landing(cards, Some(other), mine, true, Some(3)),
+            Some(DropLanding::StripAdopt { tab: other }),
+            "§7.1.6b′ ② as re-judged 2026-08-23: a card takes the pane, because \
+             focus mode hides the strip and ① forbids it having fewer verbs"
         );
         assert_eq!(
-            pane_strip_landing(false, None, mine, true, Some(3)),
+            pane_strip_landing(cards, None, mine, true, Some(3)),
             None,
-            "not even in its padding"
+            "and the blank between cards still makes no tab — the half of ② the \
+             user kept"
         );
         assert_eq!(
-            pane_strip_landing(true, Some(other), mine, false, Some(3)),
+            pane_strip_landing(cards, Some(mine), mine, true, Some(3)),
+            None,
+            "so a pane over its own card is answered by nobody: the hand-over \
+             would do nothing and the column does not make tabs"
+        );
+        assert_eq!(
+            pane_strip_landing(both, Some(other), mine, false, Some(3)),
             None,
             "M147: a tab whose tree will not take the pane says so by not \
              lighting up — and emphatically does not fall through to a tear-out"
         );
         assert_eq!(
-            pane_strip_landing(true, None, mine, true, None),
+            pane_strip_landing(both, None, mine, true, None),
             None,
             "and a pane that cannot become a tab of its own is still turned \
              away in the gaps (K124/G84)"
+        );
+    }
+
+    /// **§7.1.6b′ ② as re-judged 2026-08-23 — the card column's whole chain, end
+    /// to end, and the one nail the half that survives hangs on.**
+    ///
+    /// The ruling: *"卡片接收 pane"* — rest a carried pane on a card for the
+    /// chevron's own quarter second and the stage goes to that tab with the pane
+    /// still in the air; let go on the card and the pane moves into that tab,
+    /// appended at the end of its tree, which is *"与 tab 条目同义"*. And the half
+    /// that stays: *"pane 在卡列空白处松手仍不撕新 tab"*.
+    ///
+    /// Every link is asserted against the machinery the strip already had rather
+    /// than against a card-shaped copy of it, because that is the claim: the
+    /// column answers `StripAdopt` like any run, the spring reads the survey's
+    /// answer rather than the pointer's coordinates so it arms without being
+    /// told about cards, and the release verdict is the same `Adopt`.
+    ///
+    /// Red gate: give the column one bit for both verbs — which is what this file
+    /// did until 2026-08-23 — and the first assertion answers `None`, the spring
+    /// never arms, and focus mode has no door to another tab at all; give it
+    /// `PaneOffers::BOTH` instead and the blank starts making tabs, which is the
+    /// half of ② the user kept.
+    #[test]
+    fn a_card_takes_a_pane_and_springs_while_the_blank_beside_it_still_makes_no_tab() {
+        let mine = TabId(1);
+        let other = TabId(2);
+        let cards = seats::PaneOffers::ADOPT_ONLY;
+
+        let on_a_card = pane_strip_landing(cards, Some(other), mine, true, Some(3));
+        assert_eq!(
+            on_a_card,
+            Some(DropLanding::StripAdopt { tab: other }),
+            "a card is a room, and pointing at it asks to be put in it"
+        );
+        assert_eq!(
+            pane_strip_landing(cards, None, mine, true, Some(3)),
+            None,
+            "and the blank between cards is not a room — ② keeps its tear-out \
+             refusal, so letting go there is J120's clean nothing"
+        );
+
+        // The spring is told what the survey answered, never where the pointer
+        // is, which is why the column had nothing to add to it.
+        let start = Instant::now();
+        let mut spring = SpringGate::default();
+        spring.observe(
+            match on_a_card {
+                Some(DropLanding::StripAdopt { tab }) => Some(tab),
+                _ => None,
+            },
+            start,
+        );
+        assert_eq!(
+            spring.deadline(),
+            Some(start + profiles::CHEVRON_HOVER_OPEN),
+            "the same quarter second the `⌄` menus rest for — one constant, and \
+             the state lives on the drag rather than being shared with them"
+        );
+        assert_eq!(
+            spring.due(start + profiles::CHEVRON_HOVER_OPEN),
+            Some(other),
+            "so the stage goes to that tab with the pane still in the air"
+        );
+
+        assert_eq!(
+            release_verdict(on_a_card),
+            DragRelease::Adopt { tab: other },
+            "and letting go on the card is the tab entry's own verdict: move it \
+             in, appended at the end of that tree"
+        );
+        assert_eq!(
+            release_verdict(pane_strip_landing(cards, None, mine, true, Some(3))),
+            DragRelease::Home,
+            "while letting go in the blank goes home"
         );
     }
 
@@ -79597,7 +79901,7 @@ mod tests {
         );
         assert_eq!(DropLanding::StripAdopt { tab: TabId(4) }.aimed_at(), None);
         assert_eq!(
-            DropLanding::StripAdopt { tab: TabId(4) }.caption(&held_pane(1)),
+            DropLanding::StripAdopt { tab: TabId(4) }.caption(&held_pane(1), true),
             "",
             "and the tab it lights up has already said where"
         );
@@ -85894,11 +86198,11 @@ mod tests {
 
     /// The window's contribution to [`pane_into_tab`], supplied by hand — the
     /// same shape [`cross_solve`] has, and the same viewport.
-    fn cross_move(
+    fn cross_move_at(
         from: &mut TabState,
         into: &mut TabState,
         seat: SeatId,
-        edge: seats::DropEdge,
+        aim: seats::LayoutAim,
         watched: bool,
     ) -> Option<PaneMove> {
         let metrics = cross_metrics();
@@ -85909,11 +86213,28 @@ mod tests {
             &PaneArrival {
                 metrics: &metrics,
                 viewport: cross_view(),
-                edge,
+                aim,
+                // The name the window would have spent on an eviction. Only a
+                // centre ever takes it, and a test that gets one back can say so
+                // by this number.
+                ejected_id: TabId(900),
             },
             watched,
             cross_solve,
         )
+    }
+
+    /// The tab list's door: *"追加为树末尾分屏"*, which is the rim and nothing
+    /// else. Stated once here so that the older §7.1.6k tests go on saying what
+    /// they always said while §7.1.6k′'s say something wider.
+    fn cross_move(
+        from: &mut TabState,
+        into: &mut TabState,
+        seat: SeatId,
+        edge: seats::DropEdge,
+        watched: bool,
+    ) -> Option<PaneMove> {
+        cross_move_at(from, into, seat, seats::LayoutAim::Rim(edge), watched)
     }
 
     /// **§7.1.6k — the pane moves into the tab you let go on, appended at the end
@@ -86060,15 +86381,15 @@ mod tests {
         let before_into = into.seats.tree().clone();
         let travelling = from.seats.terminals()[1];
 
-        assert_eq!(
+        assert!(
             cross_move(
                 &mut from,
                 &mut into,
                 travelling,
                 seats::DropEdge::Right,
                 false
-            ),
-            None,
+            )
+            .is_none(),
             "H93: the plan does not fit, so there is no move"
         );
         assert_eq!(*from.seats.tree(), before_from, "and nothing was taken");
@@ -86079,6 +86400,206 @@ mod tests {
         );
         assert!(from.sessions_match_terminals());
         assert!(into.sessions_match_terminals());
+    }
+
+    // ── §7.1.6k′: the same move, aimed at the stage instead of at the tab list ─
+
+    /// **§7.1.6k′ (user ruling 2026-08-23) — a pane from another tab splits the
+    /// pane it was let go beside, on the side it was let go on.**
+    ///
+    /// The policy §7.1.6k recorded was *"离家的 pane 在这张舞台上没有落点 … 现在是
+    /// 未做而不是做不了"*, and the user met it on the machine: spring across, aim
+    /// at the stage to choose a side, and nothing at all happens. The ruling
+    /// opens it, and the promise is that a foreign pane gets **the same** zones a
+    /// local one does — so what is asserted here is a `SeatEdge` doing exactly
+    /// what a `SeatEdge` does, with a shell that is the same object on both sides
+    /// of the move.
+    ///
+    /// Red gate: keep `pane_into_tab` aiming at `Rim(edge)` however it was
+    /// called — which is what this file did until 2026-08-23 — and `BETA` comes
+    /// out beside *everything* instead of beside `GAMMA`, so the order is
+    /// `GAMMA, DELTA, BETA` and the first assertion fails.
+    #[test]
+    fn a_pane_from_another_tab_splits_the_one_it_was_dropped_beside() {
+        let mut from = cross_tab(1, &["ALPHA", "BETA"]);
+        let mut into = cross_tab(2, &["GAMMA", "DELTA"]);
+        let travelling = from.seats.terminals()[1];
+        let beside = into.seats.terminals()[0];
+
+        let moved = cross_move_at(
+            &mut from,
+            &mut into,
+            travelling,
+            seats::LayoutAim::SeatEdge(beside, seats::DropEdge::Left),
+            true,
+        )
+        .expect("a two-pane tab may give one away and a two-pane tab may split");
+
+        assert_eq!(
+            tab_texts(&into),
+            vec!["BETA".to_string(), "GAMMA".to_string(), "DELTA".to_string()],
+            "the side that was aimed at is the side it landed on — leading, \
+             because `Left` is a leading edge — and it is beside GAMMA rather \
+             than beside the whole tree"
+        );
+        assert_eq!(
+            tab_texts(&from),
+            vec!["ALPHA".to_string()],
+            "and it is not in two tabs at once"
+        );
+        assert!(
+            moved.ejected.is_none(),
+            "an edge cuts a new slot, so it turns nobody out"
+        );
+        assert!(!moved.source_emptied);
+        assert!(from.sessions_match_terminals());
+        assert!(into.sessions_match_terminals());
+        assert_eq!(
+            into.seats.focus(),
+            moved.landed,
+            "D43: the focus goes where the promise was drawn"
+        );
+        assert_eq!(
+            into.focused_leaf, moved.landed,
+            "and the keyboard follows it, because this is the tab on screen and \
+             a shell came with it"
+        );
+    }
+
+    /// **§7.1.6k′ — a foreign pane let go on a *centre* takes the target's place
+    /// and the target leaves for the strip** (L139/N161).
+    ///
+    /// The ruling's word for the centre is *"既有语义"*, and the centre's existing
+    /// semantics are decided by **what arrives** rather than by which gesture
+    /// started it: a seat of this tree trades payloads (`Edit::CenterSwap`, L138),
+    /// a whole subtree replaces (`Edit::ReplaceSeat`, L139). A pane from another
+    /// tab is a one-leaf subtree — that is the whole of how it got in — so it
+    /// replaces, and the pane it replaced becomes a tab of its own carrying its
+    /// own shell, exactly as it does when a tab is what arrived.
+    ///
+    /// Red gate: keep the eviction out of `pane_into_tab` and `GAMMA`'s shell is
+    /// dropped on the floor — `ejected` is `None` and the word is gone from the
+    /// window.
+    #[test]
+    fn a_foreign_pane_on_a_centre_replaces_and_the_pane_it_replaced_becomes_a_tab() {
+        let mut from = cross_tab(1, &["ALPHA", "BETA"]);
+        let mut into = cross_tab(2, &["GAMMA", "DELTA"]);
+        let travelling = from.seats.terminals()[1];
+        let target = into.seats.terminals()[0];
+
+        let moved = cross_move_at(
+            &mut from,
+            &mut into,
+            travelling,
+            seats::LayoutAim::SeatCentre(target),
+            true,
+        )
+        .expect("a centre displaces rather than dividing, so it always fits");
+
+        assert_eq!(
+            tab_texts(&into),
+            vec!["BETA".to_string(), "DELTA".to_string()],
+            "the arriving pane took the slot GAMMA stood in"
+        );
+        let ejected = moved.ejected.expect("N161: GAMMA was turned out");
+        assert_eq!(
+            ejected.id,
+            TabId(900),
+            "and it took the name the window had ready for it, rather than \
+             minting one inside a free function"
+        );
+        assert_eq!(
+            tab_texts(&ejected),
+            vec!["GAMMA".to_string()],
+            "carrying the very shell it was running: a replace moves a pane out, \
+             it does not close one"
+        );
+        assert_eq!(
+            tab_texts(&from),
+            vec!["ALPHA".to_string()],
+            "and the tab the arrival came from is one pane lighter"
+        );
+        assert!(from.sessions_match_terminals());
+        assert!(into.sessions_match_terminals());
+        assert!(ejected.sessions_match_terminals());
+    }
+
+    /// **§7.1.6k′ — the emptied source tab is still emptied, whichever zone the
+    /// hand opened over.**
+    ///
+    /// §7.1.6k settled this for the tab list's door: *"关最后一个座位 = 关 tab"*,
+    /// and the tab **leaves** rather than closing, because `close_tab` would file
+    /// a still-running shell into Recent and shut it down. The stage's door is the
+    /// same move with a different aim, so it inherits the rule rather than
+    /// restating it — this is that claim, asserted at an edge.
+    ///
+    /// Red gate: give the stage's door its own commit and this either refuses the
+    /// last pane (G84, `close_seat` will not empty a tree) or leaves an empty tab
+    /// standing in the strip, which §2.1 says is not a state that exists.
+    #[test]
+    fn a_lone_pane_dropped_on_the_stage_empties_its_tab_the_same_way() {
+        let mut from = cross_tab(1, &["ALPHA"]);
+        let mut into = cross_tab(2, &["GAMMA"]);
+        let travelling = from.seats.terminals()[0];
+        let beside = into.seats.terminals()[0];
+
+        let moved = cross_move_at(
+            &mut from,
+            &mut into,
+            travelling,
+            seats::LayoutAim::SeatEdge(beside, seats::DropEdge::Bottom),
+            true,
+        )
+        .expect("the last pane of a tab may still be moved");
+
+        assert!(moved.source_emptied, "so its tab has to leave the run");
+        assert!(
+            from.sessions.is_empty(),
+            "T226: it is leaving with no shell filed under it — the shell moved"
+        );
+        assert_eq!(
+            tab_texts(&into),
+            vec!["GAMMA".to_string(), "ALPHA".to_string()],
+            "and it is running below the pane it was dropped under"
+        );
+    }
+
+    /// **§7.1.6k′ — M147 at every aim: a stage that cannot take the pane refuses
+    /// it, and refuses it before anything moves.**
+    ///
+    /// H93 is a fact about the layout the drop *would* make, so it is asked of
+    /// each aim separately — an edge and a rim both cut a new slot into a tree
+    /// that has no room for one. What must never happen is the refusal arriving
+    /// after the pluck, which would leave the pane in neither tab.
+    ///
+    /// The centre is deliberately **not** in this list: a replace divides
+    /// nothing, so it fits where a split does not, and asserting that it refuses
+    /// would be pinning a bug.
+    ///
+    /// Red gate: judge `fits()` after `close_seat` and the source tab comes back
+    /// one pane lighter with nothing to show for it.
+    #[test]
+    fn a_stage_that_will_not_take_the_pane_refuses_it_at_every_dividing_aim() {
+        let crowded = ["A", "B", "C", "D", "E", "F", "G", "H"];
+        for aim in [
+            seats::LayoutAim::Rim(seats::DropEdge::Right),
+            seats::LayoutAim::SeatEdge(SeatId(1), seats::DropEdge::Right),
+        ] {
+            let mut from = cross_tab(1, &["ALPHA", "BETA"]);
+            let mut into = cross_tab(2, &crowded);
+            let before_from = from.seats.tree().clone();
+            let before_into = into.seats.tree().clone();
+            let travelling = from.seats.terminals()[1];
+
+            assert!(
+                cross_move_at(&mut from, &mut into, travelling, aim, false).is_none(),
+                "H93 at {aim:?}: the plan does not fit, so there is no move"
+            );
+            assert_eq!(*from.seats.tree(), before_from, "and nothing was taken");
+            assert_eq!(*into.seats.tree(), before_into, "and nothing arrived");
+            assert!(from.sessions_match_terminals());
+            assert!(into.sessions_match_terminals());
+        }
     }
 
     /// **PIN — 「Move pane to new tab」两步路保留** (§7.1.6k's own sentence).
@@ -87357,14 +87878,23 @@ mod tests {
         );
     }
 
-    /// **L137 — the centre says its name, and nothing else does.**
+    /// **L137 — the centre says its name, and the name is a fact about what
+    /// arrives.**
     ///
-    /// The centre's box is the same rectangle an edge's is; a pane swaps payloads
-    /// with the target and a tab takes its place outright, and the geometry cannot
+    /// The centre's box is the same rectangle an edge's is; a payload swaps with
+    /// the target and a subtree takes its place outright, and the geometry cannot
     /// tell you which. Every other zone answers with nothing, because its shape
     /// has already spoken.
+    ///
+    /// **§7.1.6k′ added the third row.** A pane the spring left behind in another
+    /// tab arrives as a subtree — it is not a seat of the tree being aimed at —
+    /// so its centre *replaces* and has to say so. Reading the source kind alone
+    /// would print "Swap panes" over a box that is about to evict somebody.
+    ///
+    /// Red gate: key the first arm on `DragSource::Pane` alone, which is what
+    /// this file did until 2026-08-23, and the third row prints "Swap panes".
     #[test]
-    fn only_the_centre_says_a_word_and_it_depends_on_the_hand() {
+    fn only_the_centre_says_a_word_and_it_depends_on_what_arrives() {
         let target = bt_layout::SeatId(2);
         let pane = DragSource::Pane(LeafId {
             tab: TabId(1),
@@ -87372,11 +87902,18 @@ mod tests {
         });
         let tab = DragSource::Tab(TabId(1));
         assert_eq!(
-            DropLanding::SeatCentre { target }.caption(&pane),
-            "Swap panes"
+            DropLanding::SeatCentre { target }.caption(&pane, false),
+            "Swap panes",
+            "a seat of this tree trades places with the target (L138)"
         );
         assert_eq!(
-            DropLanding::SeatCentre { target }.caption(&tab),
+            DropLanding::SeatCentre { target }.caption(&pane, true),
+            "Replace pane",
+            "§7.1.6k′: a pane from another tab arrives as a subtree, and a \
+             subtree at a centre evicts (L139/N161)"
+        );
+        assert_eq!(
+            DropLanding::SeatCentre { target }.caption(&tab, true),
             "Replace pane"
         );
         for landing in [
@@ -87390,12 +87927,14 @@ mod tests {
             DropLanding::StripExtract { slot: 0 },
             DropLanding::StripReorder { slot: 0 },
         ] {
-            assert_eq!(
-                landing.caption(&pane),
-                "",
-                "{landing:?} draws its own meaning"
-            );
-            assert_eq!(landing.caption(&tab), "");
+            for whole in [false, true] {
+                assert_eq!(
+                    landing.caption(&pane, whole),
+                    "",
+                    "{landing:?} draws its own meaning"
+                );
+                assert_eq!(landing.caption(&tab, whole), "");
+            }
         }
     }
 
@@ -87795,8 +88334,11 @@ mod tests {
     fn a_rows_centre_says_which_of_its_two_verbs_it_means() {
         let file = DragSource::Row(file_row("notes.md"));
         let folder = DragSource::Row(folder_row("src"));
-        assert_eq!(centre().caption(&file), "Open in this preview");
-        assert_eq!(centre().caption(&folder), "Root this tree here");
+        // A row's cargo is neither shape the flag is about — it has no tree of
+        // its own and it is not a seat of this one — so its two verbs are read
+        // off the payload and the flag says nothing here either way.
+        assert_eq!(centre().caption(&file, false), "Open in this preview");
+        assert_eq!(centre().caption(&folder, false), "Root this tree here");
         for landing in [
             DropLanding::SeatEdge {
                 target: TARGET,
@@ -87808,7 +88350,7 @@ mod tests {
             DropLanding::StripExtract { slot: 0 },
         ] {
             assert_eq!(
-                landing.caption(&file),
+                landing.caption(&file, false),
                 "",
                 "{landing:?} draws its own meaning"
             );
