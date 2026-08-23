@@ -1829,6 +1829,15 @@ mod tests {
             linked(&links, "\"D:\\case\\real;D:\\case\\missing\"", None),
             []
         );
+        // Scenario 52: a field that is not a search path, holding an address whose own syntax uses
+        // a semicolon. Neither the list mode nor the relative scan may reach inside it.
+        assert_eq!(
+            linked_on_a_full_disk(
+                Some("D:\\case"),
+                "ARG=\"https://host.invalid/a;b?next=docs/a.md\""
+            ),
+            []
+        );
         // Scenario 73: the same, for a single file whose name really carries a semicolon.
         assert_eq!(linked(&links, "\"D:\\a;b\\c.md\"", None), []);
     }
@@ -2350,6 +2359,10 @@ mod tests {
             [],
             "an address cut at the row's end is a working link to the wrong place"
         );
+        // The rest of scenario 61: the lower half is judged on its own terms, and on its own terms
+        // it is not an address at all. Nothing rejoins the two — an address has no witness on this
+        // machine's disk, so there is no fourth gate for it to pass.
+        assert_eq!(inferred_url_ranges("ers?id=7", None), []);
     }
 
     /// Verification is the whole of what makes a path a link: what the worker has answered becomes

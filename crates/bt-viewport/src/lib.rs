@@ -5602,6 +5602,11 @@ mod tests {
     /// a complete reference and the front half of a cut one are the same picture. Rows 70 and 71 —
     /// a closing bracket and a full-width stop sitting on the last cell — are the other half of
     /// the rule: the *candidate* never reached the end, so nothing is suspect.
+    ///
+    /// It is scenario 63 as well, read at the frozen plane: the two widths below are asked of
+    /// **one** ledger that already answers yes, and they answer differently. A stale `yes` cannot
+    /// light a span, because the span and its suspicion are re-derived from the current geometry on
+    /// every pass rather than remembered from the width the probe was sent at.
     #[test]
     fn a_printed_reference_that_fills_its_row_is_pressed_down_on_both_planes() {
         const PATH: &str = "D:\\src\\a.md";
