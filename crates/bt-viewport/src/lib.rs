@@ -17,8 +17,8 @@ use bt_doc::{
 };
 use bt_transcript::{
     CapturedCell, CapturedRow, CellFlags, CellHyperlink, FrozenLine, GraphemeOffset,
-    HyperlinkRange, SourceGeneration, StagedRow, StagingId, TranscriptId, detect_http_urls,
-    paths::PrintedPathLinks,
+    HyperlinkRange, SourceGeneration, StagedRow, StagingId, TranscriptId,
+    paths::{LineEndCell, PrintedPathLinks, RejoinedReference, inferred_url_ranges},
 };
 use bt_unicode::{cluster_width, graphemes};
 
@@ -1486,16 +1486,37 @@ struct PrintedPathPass<'a> {
 
 impl PrintedPathPass<'_> {
     /// The `file:` links one logical line offers, with its unknowns recorded on the way past.
-    fn links_in(&mut self, text: &str) -> Vec<(HyperlinkRange, String)> {
+    fn links_in(&mut self, text: &str, edge: Option<LineEndCell>) -> Vec<(HyperlinkRange, String)> {
         let mut unknown = BTreeSet::new();
-        let links = self.links.links_in(text, &mut unknown);
+        let links = self.links.links_in(text, edge, &mut unknown);
+        self.record(unknown);
+        links
+    }
+
+    /// The one reference two neighbouring **physical** lines spell between them, if the five gates
+    /// of §7.1.5k ② all pass — with the file it names recorded as a question when nobody has been
+    /// to the disk for it yet.
+    fn rejoin(
+        &mut self,
+        upper: &str,
+        upper_edge: LineEndCell,
+        lower: &str,
+    ) -> Option<RejoinedReference> {
+        let mut unknown = BTreeSet::new();
+        let joined = self
+            .links
+            .rejoin_across_newline(upper, upper_edge, lower, &mut unknown);
+        self.record(unknown);
+        joined
+    }
+
+    fn record(&mut self, unknown: BTreeSet<PathBuf>) {
         for path in unknown {
             if self.probes.len() >= MAX_PRINTED_PATH_PROBES {
                 break;
             }
             self.probes.insert(path);
         }
-        links
     }
 }
 
@@ -3884,16 +3905,130 @@ fn implicit_hyperlinks(
     mut paths: Option<&mut PrintedPathPass<'_>>,
 ) -> Vec<Vec<ImplicitCellLink>> {
     let mut claims: Vec<Vec<ImplicitCellLink>> = rows.iter().map(|_| Vec::new()).collect();
+    let mut lines = Vec::new();
     let mut start = 0usize;
     while start < rows.len() {
         let mut end = start;
         while end + 1 < rows.len() && rows[end].continues {
             end += 1;
         }
-        implicit_hyperlinks_in_line(&rows[start..=end], start, paths.as_deref_mut(), &mut claims);
+        lines.push(logical_line_of(&rows[start..=end], start));
         start = end + 1;
     }
+    for line in &lines {
+        for inferred in inferred_links_in(&line.text, line.edge, paths.as_deref_mut()) {
+            claim_cells(
+                rows,
+                line,
+                inferred.range,
+                &CellHyperlink::implicit(inferred.uri),
+                inferred.resting_dotted,
+                &mut claims,
+            );
+        }
+    }
+    // §7.1.5k ②. A pair of neighbouring logical lines is a pair of **physical** lines by
+    // construction — the run above ends only where `continues` says the terminal did not wrap — so
+    // the seam between any two of them is an application newline, the one break no record covers.
+    if let Some(paths) = paths {
+        for index in 1..lines.len() {
+            let (upper, lower) = (&lines[index - 1], &lines[index]);
+            let Some(edge) = upper.edge else { continue };
+            let Some(joined) = paths.rejoin(&upper.text, edge, &lower.text) else {
+                continue;
+            };
+            let link = CellHyperlink::implicit(joined.uri);
+            claim_cells(rows, upper, joined.upper, &link, true, &mut claims);
+            claim_cells(rows, lower, joined.lower, &link, true, &mut claims);
+        }
+    }
     claims
+}
+
+/// One logical line flattened for recognition: its text, where every cell of it sits, and the last
+/// visual cell of its final physical row.
+struct LogicalLine {
+    text: String,
+    /// `(row, column, byte range)` for every cell of the line, in reading order.
+    spots: Vec<(usize, usize, std::ops::Range<usize>)>,
+    edge: Option<LineEndCell>,
+}
+
+/// Flatten one logical line's rows. `base` is the index `line[0]` has in the full row sequence.
+fn logical_line_of(line: &[&CapturedRow], base: usize) -> LogicalLine {
+    let mut text = String::new();
+    let mut spots = Vec::new();
+    for (offset, row) in line.iter().enumerate() {
+        for (column, cell) in row.cells.iter().enumerate() {
+            let start = text.len();
+            if !cell.wide_spacer {
+                text.push_str(&cell.text);
+            }
+            spots.push((base + offset, column, start..text.len()));
+        }
+    }
+    // The last visual cell of the last physical row — what §7.1.5k ①'s truncation gate is asked
+    // about. A wide glyph's spacer carries no text of its own, so the cell that ends the row is the
+    // last one that put bytes into `text`; a row's trailing blanks *do* carry bytes (a space), which
+    // is exactly right — a candidate that stops before them never reached the row's end.
+    let edge = spots
+        .iter()
+        .rev()
+        .find(|(_, _, bytes)| bytes.start < bytes.end)
+        .map(|(_, _, bytes)| LineEndCell {
+            byte_start: bytes.start,
+            byte_end: bytes.end,
+        });
+    LogicalLine { text, spots, edge }
+}
+
+/// Lay one inferred reference's claim over the cells its printed text occupies.
+///
+/// A cell an application already declared a link on is never taken, and one cell of the span being
+/// spoken for is enough to drop the whole claim: a reference half drawn is a reference whose span
+/// no longer says what its target is.
+fn claim_cells(
+    rows: &[&CapturedRow],
+    line: &LogicalLine,
+    range: HyperlinkRange,
+    link: &CellHyperlink,
+    resting_dotted: bool,
+    claims: &mut [Vec<ImplicitCellLink>],
+) {
+    let affected = line
+        .spots
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, _, bytes))| bytes.start < range.byte_end && range.byte_start < bytes.end)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if affected.is_empty()
+        || affected.iter().any(|index| {
+            let (row, column, _) = line.spots[*index];
+            rows[row].cells[column].hyperlink.is_some()
+        })
+    {
+        return;
+    }
+    for index in affected {
+        let (row, column, _) = line.spots[index];
+        claims[row].push(ImplicitCellLink {
+            column,
+            link: link.clone(),
+            resting_dotted,
+        });
+        // A wide glyph's spacer column belongs to the same on-screen cell as the glyph and must
+        // carry its link. It is only ever the column after its own lead, never the first column of
+        // the next row.
+        let spacer = column + 1;
+        if spacer < rows[row].cells.len() && rows[row].cells[spacer].wide_spacer {
+            claims[row].push(ImplicitCellLink {
+                column: spacer,
+                link: link.clone(),
+                resting_dotted,
+            });
+        }
+    }
 }
 
 /// Every inferred reference one logical line's text offers, in reading order and never overlapping.
@@ -3903,8 +4038,12 @@ fn implicit_hyperlinks(
 /// a worker found. A path range that touches a URL's is dropped rather than allowed to fight over
 /// the cells — the URL was recognized without asking anyone anything, so it is the older claim, and
 /// two links on one cell is not a state this frame can draw.
-fn inferred_links_in(text: &str, paths: Option<&mut PrintedPathPass<'_>>) -> Vec<InferredLink> {
-    let mut links = detect_http_urls(text)
+fn inferred_links_in(
+    text: &str,
+    edge: Option<LineEndCell>,
+    paths: Option<&mut PrintedPathPass<'_>>,
+) -> Vec<InferredLink> {
+    let mut links = inferred_url_ranges(text, edge)
         .into_iter()
         .map(|range| InferredLink {
             uri: text[range.byte_start..range.byte_end].to_owned(),
@@ -3915,7 +4054,7 @@ fn inferred_links_in(text: &str, paths: Option<&mut PrintedPathPass<'_>>) -> Vec
     let Some(paths) = paths else {
         return links;
     };
-    for (range, uri) in paths.links_in(text) {
+    for (range, uri) in paths.links_in(text, edge) {
         if links.iter().any(|link| {
             link.range.byte_start < range.byte_end && range.byte_start < link.range.byte_end
         }) {
@@ -3929,69 +4068,6 @@ fn inferred_links_in(text: &str, paths: Option<&mut PrintedPathPass<'_>>) -> Vec
     }
     links.sort_by_key(|link| link.range.byte_start);
     links
-}
-
-/// One logical line's worth of [`implicit_hyperlinks`]. `base` is the index `line[0]` has in the
-/// full sequence the claims are indexed by.
-fn implicit_hyperlinks_in_line(
-    line: &[&CapturedRow],
-    base: usize,
-    paths: Option<&mut PrintedPathPass<'_>>,
-    claims: &mut [Vec<ImplicitCellLink>],
-) {
-    let mut text = String::new();
-    // (row, column, byte range) for every cell of the line, in reading order.
-    let mut spots = Vec::new();
-    for (offset, row) in line.iter().enumerate() {
-        for (column, cell) in row.cells.iter().enumerate() {
-            let start = text.len();
-            if !cell.wide_spacer {
-                text.push_str(&cell.text);
-            }
-            spots.push((base + offset, column, start..text.len()));
-        }
-    }
-    let cell_at = |row: usize, column: usize| &line[row - base].cells[column];
-    for inferred in inferred_links_in(&text, paths) {
-        let range = inferred.range;
-        let affected = spots
-            .iter()
-            .enumerate()
-            .filter(|(_, (_, _, bytes))| {
-                bytes.start < range.byte_end && range.byte_start < bytes.end
-            })
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
-        if affected.is_empty()
-            || affected.iter().any(|index| {
-                cell_at(spots[*index].0, spots[*index].1)
-                    .hyperlink
-                    .is_some()
-            })
-        {
-            continue;
-        }
-        let link = CellHyperlink::implicit(inferred.uri);
-        for index in affected {
-            let (row, column, _) = spots[index];
-            claims[row].push(ImplicitCellLink {
-                column,
-                link: link.clone(),
-                resting_dotted: inferred.resting_dotted,
-            });
-            // A wide glyph's spacer column belongs to the same on-screen cell as the glyph and
-            // must carry its link. It is only ever the column after its own lead, never the first
-            // column of the next row.
-            let spacer = column + 1;
-            if spacer < line[row - base].cells.len() && line[row - base].cells[spacer].wide_spacer {
-                claims[row].push(ImplicitCellLink {
-                    column: spacer,
-                    link: link.clone(),
-                    resting_dotted: inferred.resting_dotted,
-                });
-            }
-        }
-    }
 }
 
 /// Lay one row's share of [`implicit_hyperlinks`] onto its cells.
@@ -4215,6 +4291,39 @@ fn word_class(cell: &CapturedCell) -> WordClass {
     }
 }
 
+/// The last visual cell of a frozen line's **final** row, when that row is exactly full.
+///
+/// A frozen logical line ends where the application ended it, so its final row is the one physical
+/// row §7.1.5k ①'s truncation gate is about; every row above it is a soft wrap this plane already
+/// rejoined and which the gate must never see. The wrap is replayed by exactly the rule
+/// [`layout_frozen_line`] lays cells by — one cluster at a time, a new row when the next cluster
+/// would not fit — because a second opinion about where a row breaks is a second opinion about
+/// which references are suspect.
+fn frozen_line_end_cell(line: &FrozenLine, columns: usize) -> Option<LineEndCell> {
+    let mut used = 0usize;
+    let mut last: Option<LineEndCell> = None;
+    for (index, cluster) in graphemes(&line.text).enumerate() {
+        let byte_start = line.grapheme_boundaries[index] as usize;
+        let width = cluster_width(cluster).min(columns);
+        if width == 0 {
+            // A zero-width cluster joins the cell in front of it and widens nothing.
+            if let Some(cell) = last.as_mut() {
+                cell.byte_end = byte_start + cluster.len();
+            }
+            continue;
+        }
+        if used != 0 && used + width > columns {
+            used = 0;
+        }
+        used += width;
+        last = Some(LineEndCell {
+            byte_start,
+            byte_end: byte_start + cluster.len(),
+        });
+    }
+    (used == columns).then_some(last).flatten()
+}
+
 fn layout_frozen_line(
     line: &FrozenLine,
     columns: usize,
@@ -4223,7 +4332,7 @@ fn layout_frozen_line(
     // `None` is a caller that only wants to know how many rows this line takes, and an inferred
     // link never changes that. Asking the ledger there would run the path lexer once per line of a
     // hundred-thousand-line transcript to produce an answer nobody reads.
-    let implicit_links = inferred_links_in(&line.text, paths)
+    let implicit_links = inferred_links_in(&line.text, frozen_line_end_cell(line, columns), paths)
         .into_iter()
         .filter(|inferred| {
             !line.styles.iter().any(|span| {
@@ -5439,6 +5548,241 @@ mod tests {
         grid
     }
 
+    /// One frozen logical line of `text`, with no styles and no OSC 8 of its own.
+    fn frozen_line_of(text: &str) -> FrozenLine {
+        FrozenLine {
+            id: TranscriptId(7),
+            source_generation: SourceGeneration(3),
+            grapheme_boundaries: graphemes(text)
+                .scan(0u32, |offset, cluster| {
+                    let start = *offset;
+                    *offset += cluster.len() as u32;
+                    Some(start)
+                })
+                .chain(std::iter::once(text.len() as u32))
+                .collect(),
+            text: text.to_owned(),
+            styles: Vec::new(),
+            fragments: Vec::new(),
+            shell_marks: Vec::new(),
+            wrap_split: false,
+        }
+    }
+
+    /// The distinct link targets one frozen line's cells carry, in reading order.
+    fn frozen_link_targets(
+        line: &FrozenLine,
+        columns: usize,
+        links: &PrintedPathLinks,
+    ) -> Vec<String> {
+        let mut probes = BTreeSet::new();
+        let rows = layout_frozen_line(
+            line,
+            columns,
+            Some(&mut PrintedPathPass {
+                links,
+                probes: &mut probes,
+            }),
+        );
+        let mut targets: Vec<String> = Vec::new();
+        for cell in rows.iter().flat_map(|row| row.cells.iter()) {
+            if let Some(link) = &cell.hyperlink
+                && targets.last() != Some(&link.uri)
+            {
+                targets.push(link.uri.clone());
+            }
+        }
+        targets
+    }
+
+    /// §7.1.5k ① at the cells, on **both planes** (scenarios 53, 54, 55, 68, 70, 71).
+    ///
+    /// The placement axis the boundary table grew: one and the same lexical result is a link inside
+    /// a row and is pressed down when it reaches the row's last visual cell, because at that cell
+    /// a complete reference and the front half of a cut one are the same picture. Rows 70 and 71 —
+    /// a closing bracket and a full-width stop sitting on the last cell — are the other half of
+    /// the rule: the *candidate* never reached the end, so nothing is suspect.
+    #[test]
+    fn a_printed_reference_that_fills_its_row_is_pressed_down_on_both_planes() {
+        const PATH: &str = "D:\\src\\a.md";
+        let ledger = verified(&["D:\\src\\a.md"]);
+        let uri = "file:///D:/src/a.md".to_owned();
+        // Live plane: the row is exactly as wide as the reference.
+        let (frame, probes) = live_frame_of_paths(
+            vec![CapturedRow::plain(PATH, false)],
+            verified(&["D:\\src\\a.md"]),
+        );
+        assert!(
+            frame.hyperlink_at(0, 0).is_none(),
+            "scenario 53: a reference on the row's last cell is edge-suspect"
+        );
+        assert!(
+            probes.is_empty(),
+            "and the gate stands in front of the question, not behind it: {probes:?}"
+        );
+        // One blank column past it and the same text is an ordinary link (scenario 54).
+        let (frame, _) = live_frame_of_paths(
+            vec![CapturedRow::plain(&format!("{PATH} "), false)],
+            verified(&["D:\\src\\a.md"]),
+        );
+        assert_eq!(frame.hyperlink_at(0, 0).expect("a link").uri, uri);
+        // Scenarios 55 and 70: the last cell is prose, so the candidate stopped short of it.
+        let (frame, _) = live_frame_of_paths(
+            vec![CapturedRow::plain(&format!("({PATH})"), false)],
+            verified(&["D:\\src\\a.md"]),
+        );
+        assert_eq!(frame.hyperlink_at(0, 1).expect("a link").uri, uri);
+        // Scenario 71: a full-width stop is prose too, and it is two columns wide.
+        let (frame, _) = live_frame_of_paths(
+            vec![CapturedRow::plain(&format!("{PATH}。"), false)],
+            verified(&["D:\\src\\a.md"]),
+        );
+        assert_eq!(frame.hyperlink_at(0, 0).expect("a link").uri, uri);
+
+        // Frozen plane, the same three placements — the wrap is replayed by the layout's own rule.
+        let line = frozen_line_of(PATH);
+        assert_eq!(
+            frozen_link_targets(&line, PATH.len(), &ledger),
+            Vec::<String>::new(),
+            "scenario 68: the final frozen row is exactly full"
+        );
+        assert_eq!(
+            frozen_link_targets(&line, PATH.len() + 1, &ledger),
+            std::slice::from_ref(&uri)
+        );
+        assert_eq!(
+            frozen_link_targets(
+                &frozen_line_of(&format!("({PATH})")),
+                PATH.len() + 2,
+                &ledger
+            ),
+            std::slice::from_ref(&uri)
+        );
+    }
+
+    /// §7.1.5k ①, the cell dimension: **the row's end is measured in terminal cells**, so a wide
+    /// glyph that occupies the last two columns ends the row exactly as a narrow one does.
+    ///
+    /// The off-by-one this pins is the one that would let a truncated prefix through: counting
+    /// UTF-8 bytes, scalars or graphemes all disagree with the grid here, and only the grid decides
+    /// what the application could see when it chose to break the line.
+    #[test]
+    fn a_wide_glyph_on_the_last_two_columns_is_still_the_rows_end() {
+        let ledger = verified(&["D:\\src\\文"]);
+        let uri = "file:///D:/src/%E6%96%87".to_owned();
+        // `文` is the reference's own last cell and it fills the last **two** columns of the row:
+        // the glyph and the spacer the grid puts beside it, which carries no text of its own.
+        let wide_tail = || {
+            let mut row = CapturedRow::plain("D:\\src\\文", false);
+            row.cells.push(CapturedCell {
+                wide_spacer: true,
+                ..CapturedCell::default()
+            });
+            row
+        };
+        let (frame, probes) = live_frame_of_paths(vec![wide_tail()], ledger.clone());
+        assert!(
+            frame.hyperlink_at(0, 0).is_none(),
+            "the spacer is the glyph's own second column, not a cell past the reference"
+        );
+        assert!(probes.is_empty());
+        // One blank column past the spacer and the same reference is an ordinary link.
+        let mut roomy = wide_tail();
+        roomy.cells.push(CapturedCell::plain(" "));
+        let (frame, _) = live_frame_of_paths(vec![roomy], ledger.clone());
+        assert_eq!(frame.hyperlink_at(0, 0).expect("a link").uri, uri);
+        // The frozen plane measures the same wrap: `D:\src\` is seven columns and `文` is two.
+        let line = frozen_line_of("D:\\src\\文");
+        assert_eq!(
+            frozen_link_targets(&line, 9, &ledger),
+            Vec::<String>::new(),
+            "nine columns is exactly full"
+        );
+        assert_eq!(frozen_link_targets(&line, 10, &ledger), [uri]);
+    }
+
+    /// §7.1.5k ② at the cells (scenarios 56 and 57): two **physical** lines the application cut a
+    /// reference across become one span on two rows, and the case that started the slice becomes a
+    /// blank.
+    ///
+    /// The seam here is a real newline — `continues` is false on the upper row — which is the one
+    /// break the terminal keeps no record of and therefore the only one these five gates are for.
+    #[test]
+    fn two_physical_rows_carry_one_rejoined_reference_and_case_a_stays_blank() {
+        let (frame, _) = live_frame_of_paths(
+            vec![
+                CapturedRow::plain("D:\\src\\very\\long\\pa", false),
+                CapturedRow::plain("th\\file.rs:12:3    ", false),
+            ],
+            verified(&["D:\\src\\very\\long\\path\\file.rs"]),
+        );
+        let upper = frame.hyperlink_at(0, 0).expect("the upper half is a link");
+        assert_eq!(upper.uri, "file:///D:/src/very/long/path/file.rs#L12C3");
+        assert_eq!(
+            frame.hyperlink_at(1, 0).map(|hit| hit.uri),
+            Some(upper.uri.clone()),
+            "one reference, one target, on both of the rows it lies on"
+        );
+        assert!(
+            frame.hyperlink_at(1, 15).is_none(),
+            "the blank columns past the lower half are not part of it"
+        );
+
+        // Scenario 56: both halves are on the disk and the answer is still a blank.
+        let (frame, probes) = live_frame_of_paths(
+            vec![
+                CapturedRow::plain("D:\\WINDOWS\\system", false),
+                CapturedRow::plain("32\\Modules       ", false),
+            ],
+            verified(&["D:\\WINDOWS\\system", "D:\\WINDOWS\\system32\\Modules"]),
+        );
+        assert!(
+            frame.hyperlink_at(0, 0).is_none(),
+            "the cut prefix is not a link"
+        );
+        assert!(
+            frame.hyperlink_at(1, 0).is_none(),
+            "and the halves are not joined"
+        );
+        assert!(
+            !probes.contains(&PathBuf::from("D:\\WINDOWS\\system32\\Modules")),
+            "gate ⑤ answers before the disk is asked anything: {probes:?}"
+        );
+    }
+
+    /// §7.1.5k ①, the provenance dimension (scenario 62): **a DEC soft wrap is not an application
+    /// newline**, so a reference that crosses one has not been cut by anybody and the gate must
+    /// never see it.
+    ///
+    /// This is the line the whole hardening rests on. Soft wrap is already rejoined — by
+    /// `continues` on the live plane and by construction on the frozen one — and if the gate were
+    /// applied per *visual* row instead, every reference wider than the pane would go dark.
+    #[test]
+    fn a_soft_wrapped_reference_is_judged_whole_and_is_never_edge_suspect() {
+        let ledger = verified(&["D:\\src\\deep\\file.rs"]);
+        let uri = "file:///D:/src/deep/file.rs".to_owned();
+        let (frame, _) = live_frame_of_paths(
+            vec![
+                CapturedRow::plain("D:\\src\\de", true),
+                CapturedRow::plain("ep\\file.r", true),
+                CapturedRow::plain("s        ", false),
+            ],
+            ledger.clone(),
+        );
+        assert_eq!(
+            frame
+                .hyperlink_at(0, 0)
+                .expect("one link across the wrap")
+                .uri,
+            uri
+        );
+        // And the frozen plane, where every row but the last is a wrap by construction.
+        assert_eq!(
+            frozen_link_targets(&frozen_line_of("D:\\src\\deep\\file.rs "), 10, &ledger),
+            [uri]
+        );
+    }
+
     /// PIN (§7.1.5j, user report 2026-08-20) — **a printed path this window has been to the disk
     /// for is a `file:` link, and nothing downstream can tell it from one an application declared
     /// over OSC 8.**
@@ -5856,6 +6200,10 @@ mod tests {
     /// the vendor has stamped both with the one id it reuses for this URL. Geometry says join.
     /// What says no is the label — each row already spells the whole address, so the two of them
     /// spell it twice, and twice is not once.
+    ///
+    /// The rows carry one blank column past the address (§7.1.5k ①): a bare URL that reaches its
+    /// row's **last** visual cell is `edge-suspect` and is no longer offered at all, which is a
+    /// different ruling than this one and would hide the seam this test is about.
     #[test]
     fn two_mentions_of_one_address_on_neighbouring_lines_stay_two_links() {
         const URI: &str = "https://example.test/a-fairly-long-path";
@@ -5865,7 +6213,7 @@ mod tests {
         };
         for explicit in [true, false] {
             let row = || {
-                let mut row = CapturedRow::plain(URI, false);
+                let mut row = CapturedRow::plain(&format!("{URI} "), false);
                 if explicit {
                     for cell in &mut row.cells {
                         cell.hyperlink = Some(osc_8.clone());

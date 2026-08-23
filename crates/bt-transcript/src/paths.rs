@@ -88,6 +88,53 @@ fn positive_integer(text: &str) -> Option<u32> {
         .filter(|value| *value >= 1)
 }
 
+/// The last visual cell of the **physical** line a logical line's text was printed on, when that
+/// line is ended by an application newline rather than by a DEC soft wrap.
+///
+/// It is the whole of what the truncation gate (§7.1.5k ①) reads. A reference whose printed text
+/// reaches this cell may be a complete reference that happened to fill the row, or the front half of
+/// one the application cut in two; on the strength of one line nothing tells those apart, and the
+/// front half of a cut path is exactly the kind of name that exists on the disk. So the gate does
+/// not try to tell them apart — it declines to promise either.
+///
+/// The range is in the same byte space as the text handed to [`PrintedPathLinks::links_in`], which
+/// is the logical line's text with its soft-wrapped rows already rejoined. `None` at a call site
+/// means the caller has no cell geometry to offer and the gate cannot run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LineEndCell {
+    pub byte_start: usize,
+    pub byte_end: usize,
+}
+
+/// Whether a printed range reaches the physical line's last visual cell — the one test the
+/// truncation gate is.
+///
+/// Overlap, not equality: a wide glyph occupies the last two columns and a candidate that owns its
+/// lead cell owns the row's end just as much as a narrow one that lands on the final column.
+#[must_use]
+pub fn touches_line_end(byte_start: usize, byte_end: usize, edge: Option<LineEndCell>) -> bool {
+    edge.is_some_and(|cell| byte_start < cell.byte_end && cell.byte_start < byte_end)
+}
+
+/// The bare web addresses one logical line offers, with the truncation gate already applied.
+///
+/// It sits here rather than at the projection because the gate is **one ruling about two shapes**:
+/// §7.1.5k ① presses down an inferred path and an inferred URL for exactly the same reason, and a
+/// URL is the shape where being wrong is worst — a cut address is a perfectly working link to
+/// somebody else's host, while a cut path at least usually fails to exist. Two copies of the gate
+/// would be two opinions about where a reference stops, which is the thing this module exists to
+/// prevent.
+///
+/// OSC 8 is not routed through here and is deliberately untouched: an application that declared a
+/// target declared it whole, and no cell geometry can contradict it.
+#[must_use]
+pub fn inferred_url_ranges(text: &str, edge: Option<LineEndCell>) -> Vec<HyperlinkRange> {
+    crate::detect_http_urls(text)
+        .into_iter()
+        .filter(|range| !touches_line_end(range.byte_start, range.byte_end, edge))
+        .collect()
+}
+
 /// One printed path candidate: the half-open byte range it occupies in the line, its spelling, and
 /// the place inside the file it may name.
 ///
@@ -835,6 +882,30 @@ pub struct PrintedPathLinks {
     verdicts: BTreeMap<PathBuf, bool>,
 }
 
+/// A reference an application cut across a real newline, put back together — and the receipt that
+/// says exactly what it was put back together **from**.
+///
+/// Everything in it is part of the promise, not decoration. The two spans are the text the two
+/// halves occupy on their own physical lines; the target is the file the lexer split out of the
+/// joined text; the base is the directory a relative half was measured from. A projection rebuilds
+/// this from the current geometry on every pass, so a resize, a reflow, a scroll that changes which
+/// rows are neighbours, or a working directory that moved does not leave a stale receipt behind —
+/// the next pass produces a different one, or none at all.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RejoinedReference {
+    /// Byte range inside the upper physical line.
+    pub upper: HyperlinkRange,
+    /// Byte range inside the lower physical line, always opening at 0.
+    pub lower: HyperlinkRange,
+    /// The disk target, with any `:line[:col]` already taken off.
+    pub target: PathBuf,
+    /// The directory a relative half was measured from, and `None` for a drive-rooted one.
+    pub resolution_base: Option<PathBuf>,
+    /// The `file:` target, location carried in the fragment exactly as a single-line reference
+    /// carries it.
+    pub uri: String,
+}
+
 impl PrintedPathLinks {
     pub fn new(working_directory: Option<PathBuf>, verdicts: BTreeMap<PathBuf, bool>) -> Self {
         Self {
@@ -853,6 +924,7 @@ impl PrintedPathLinks {
     pub fn links_in(
         &self,
         text: &str,
+        edge: Option<LineEndCell>,
         unknown: &mut BTreeSet<PathBuf>,
     ) -> Vec<(HyperlinkRange, String)> {
         // Every shape this reads needs a separator: a drive-rooted path by its `X:\`, a relative
@@ -863,14 +935,19 @@ impl PrintedPathLinks {
         if !text.contains(['/', '\\']) {
             return Vec::new();
         }
-        let mut candidates = detect_absolute_path_candidates(text);
-        if self.working_directory.is_some() {
-            candidates.extend(detect_relative_path_candidates(text, &|_| true));
-        }
-        candidates.extend(detect_file_uri_candidates(text));
-        candidates.sort_by_key(|candidate| candidate.byte_start);
+        let candidates = self.candidates_in(text);
         let mut links = Vec::new();
         for candidate in candidates {
+            // §7.1.5k ①, **in front of the ledger and in front of the probe queue**. A candidate
+            // that reaches the physical line's last visual cell may be the front half of a
+            // reference the application cut in two, and the front half of a cut path is exactly the
+            // kind of name that exists on the disk — so neither an answer already in the ledger nor
+            // one this frame could go and fetch is allowed to decide it. Pressing it down here is
+            // what keeps an old `yes` for `D:\WINDOWS\system` from lighting up a span that means
+            // `D:\WINDOWS\system32\…` (scenario 67).
+            if touches_line_end(candidate.byte_start, candidate.byte_end, edge) {
+                continue;
+            }
             let Some(path) = self.resolve(candidate.path_text(text), candidate.spelling) else {
                 continue;
             };
@@ -901,6 +978,127 @@ impl PrintedPathLinks {
             }
         }
         links
+    }
+
+    /// Put back together a reference the application itself cut across a real newline — §7.1.5k ②,
+    /// and the debt §7.1.5j left as #16.
+    ///
+    /// **Five gates, and the first version keeps every one of them shut as far as it goes.** A
+    /// soft wrap is rejoined by the terminal's own `continues` record and never reaches here; an
+    /// application newline leaves no record at all, so nothing here is read from provenance and
+    /// everything is read from evidence:
+    ///
+    /// 1. the upper half reaches its physical line's last visual cell — otherwise the application
+    ///    had room and chose to stop, which is not a cut;
+    /// 2. the lower half opens at visual column 0. *Not* "at the same indent as the line above":
+    ///    two stack frames, two diagnostics and two directory entries all share an indent, and a
+    ///    shared indent is what peer lines look like rather than what a wrap looks like;
+    /// 3. the joined text, handed back to **this same lexer**, is exactly one candidate covering
+    ///    all of it. Not "contains a candidate" — a query string, a tail of prose or a second
+    ///    reference would then be silently dropped and the promise would cover text it did not
+    ///    read;
+    /// 4. the disk holds the target the lexer split out — the file's own name, never the printed
+    ///    string with `:line:col` welded to it;
+    /// 5. neither half is a verified reference on its own. This is the gate that keeps two real
+    ///    neighbouring log lines from being spliced into a third real path, and it is deliberately
+    ///    **not** relaxed for the case that started this slice: `D:\WINDOWS\system` +
+    ///    `32\…\Modules` ends as a blank, and a blank is the honest answer.
+    ///
+    /// A bare **web address** is never rejoined here, and cannot be: gate 4 is a witness on this
+    /// machine's disk, and no such witness exists for a host. Its cut upper half is pressed down by
+    /// [`inferred_url_ranges`] instead, and its lower half is judged on its own terms.
+    pub fn rejoin_across_newline(
+        &self,
+        upper: &str,
+        upper_edge: LineEndCell,
+        lower: &str,
+        unknown: &mut BTreeSet<PathBuf>,
+    ) -> Option<RejoinedReference> {
+        // Gate 1. Exactly one candidate may reach the row's end: two would mean the lexer cannot
+        // say which of them the application cut.
+        let mut reaching = self
+            .candidates_in(upper)
+            .into_iter()
+            .filter(|candidate| {
+                touches_line_end(candidate.byte_start, candidate.byte_end, Some(upper_edge))
+            })
+            .collect::<Vec<_>>();
+        let head = reaching.pop().filter(|_| reaching.is_empty())?;
+        let upper_tail = upper.get(head.byte_start..upper_edge.byte_end)?;
+
+        // Gate 2. The lower line's first cell is the continuation, so its first token opens at 0.
+        let lower_end = token_end(lower, 0);
+        let lower_head = lower.get(..lower_end).filter(|head| !head.is_empty())?;
+
+        // Gate 3. One candidate, covering all of it.
+        let joined = format!("{upper_tail}{lower_head}");
+        let mut spelled = self.candidates_in(&joined);
+        let whole = spelled.pop().filter(|candidate| {
+            spelled.is_empty() && candidate.byte_start == 0 && candidate.byte_end == joined.len()
+        })?;
+
+        // Gate 5, asked before the disk so a refusal costs nothing: a half that already names a
+        // file of its own is that file's reference and not the front of somebody else's.
+        if self.is_verified(&head, upper) {
+            return None;
+        }
+        if self
+            .candidates_in(lower)
+            .into_iter()
+            .any(|candidate| candidate.byte_start == 0 && self.is_verified(&candidate, lower))
+        {
+            return None;
+        }
+
+        // Gate 4. The witness, asked about the file's own name.
+        let target = self.resolve(whole.path_text(&joined), whole.spelling)?;
+        match self.verdicts.get(&target) {
+            Some(true) => {}
+            Some(false) => return None,
+            None => {
+                unknown.insert(target);
+                return None;
+            }
+        }
+        let mut uri = local_path_to_file_uri(&target);
+        if let Some(location) = whole.location {
+            uri.push('#');
+            uri.push_str(&location.uri_fragment());
+        }
+        Some(RejoinedReference {
+            upper: HyperlinkRange {
+                byte_start: head.byte_start,
+                byte_end: upper_edge.byte_end,
+            },
+            lower: HyperlinkRange {
+                byte_start: 0,
+                byte_end: lower_end,
+            },
+            target,
+            resolution_base: match whole.spelling {
+                PrintedPathSpelling::Relative => self.working_directory.clone(),
+                _ => None,
+            },
+            uri,
+        })
+    }
+
+    /// Every candidate one text offers, in reading order — the one scan both the single-line pass
+    /// and the rejoin read, so the two can never disagree about where a reference stops.
+    fn candidates_in(&self, text: &str) -> Vec<PrintedPathCandidate> {
+        let mut candidates = detect_absolute_path_candidates(text);
+        if self.working_directory.is_some() {
+            candidates.extend(detect_relative_path_candidates(text, &|_| true));
+        }
+        candidates.extend(detect_file_uri_candidates(text));
+        candidates.sort_by_key(|candidate| candidate.byte_start);
+        candidates
+    }
+
+    /// Whether one candidate already names a file the disk has been read for and answered yes to.
+    fn is_verified(&self, candidate: &PrintedPathCandidate, text: &str) -> bool {
+        self.resolve(candidate.path_text(text), candidate.spelling)
+            .is_some_and(|path| self.verdicts.get(&path) == Some(&true))
     }
 
     /// The file one candidate names, or `None` when this window cannot say.
@@ -1122,10 +1320,276 @@ mod tests {
         let mut unknown = BTreeSet::new();
         assert!(
             links
-                .links_in("./test.md docs/a.md", &mut unknown)
+                .links_in("./test.md docs/a.md", None, &mut unknown)
                 .is_empty()
         );
         assert!(unknown.is_empty());
+    }
+
+    /// The last visual cell of `text`, as the gate reads it when the whole line is one row of
+    /// exactly `columns` narrow cells and the reference ends the row.
+    fn last_cell_of(text: &str) -> Option<LineEndCell> {
+        let last = text.char_indices().next_back()?;
+        Some(LineEndCell {
+            byte_start: last.0,
+            byte_end: text.len(),
+        })
+    }
+
+    /// Every link one line offers as `(printed span, target)` — the oracle the matrix asserts on,
+    /// which is span *and* target and never merely "underlined or not".
+    fn linked<'line>(
+        links: &PrintedPathLinks,
+        line: &'line str,
+        edge: Option<LineEndCell>,
+    ) -> Vec<(&'line str, String)> {
+        let mut unknown = BTreeSet::new();
+        links
+            .links_in(line, edge, &mut unknown)
+            .into_iter()
+            .map(|(range, uri)| (&line[range.byte_start..range.byte_end], uri))
+            .collect()
+    }
+
+    fn ledger(working_directory: &str, verdicts: &[(&str, bool)]) -> PrintedPathLinks {
+        PrintedPathLinks::new(
+            Some(PathBuf::from(working_directory)),
+            verdicts
+                .iter()
+                .map(|(path, answer)| (PathBuf::from(path), *answer))
+                .collect(),
+        )
+    }
+
+    /// §7.1.5k ① / scenario 53, 54, 55: a reference that reaches the physical line's last visual
+    /// cell is `edge-suspect` and is not drawn, and one that stops short of it is untouched.
+    ///
+    /// The middle of the three is the whole ruling: `D:\case\src\main.rs` **exists**, and existence
+    /// is refused as a licence precisely because the front half of a path an application cut in two
+    /// is the kind of name that exists. Row 55 is the other half of the boundary — the last cell
+    /// belongs to a closing bracket, so the candidate never reached it and nothing is suspect.
+    #[test]
+    fn a_reference_that_reaches_the_last_visual_cell_is_not_drawn() {
+        let links = ledger("D:\\case", &[("D:\\case\\src\\main.rs", true)]);
+        let full = "D:\\case\\src\\main.rs";
+        assert_eq!(
+            linked(&links, full, None),
+            [(full, String::from("file:///D:/case/src/main.rs"))],
+            "scenario 54: a candidate away from the row's end is an ordinary link"
+        );
+        assert_eq!(
+            linked(&links, full, last_cell_of(full)),
+            [],
+            "scenario 53: exactly filling the row is indistinguishable from being cut, and \
+             existence is not a licence"
+        );
+        let bracketed = "(D:\\case\\src\\main.rs)";
+        assert_eq!(
+            linked(&links, bracketed, last_cell_of(bracketed)),
+            [(full, String::from("file:///D:/case/src/main.rs"))],
+            "scenario 55: the last cell is a prose delimiter, so the candidate never reached it"
+        );
+    }
+
+    /// §7.1.5k ①: the gate stands **in front of** the ledger, so a suspect span is not even a
+    /// question — and an old `yes` for the truncated prefix cannot light it up (scenario 67).
+    #[test]
+    fn an_edge_suspect_reference_is_neither_asked_about_nor_lit_by_an_old_yes() {
+        let links = ledger(
+            "D:\\case",
+            &[("D:\\WINDOWS\\system", true), ("D:\\case\\src", true)],
+        );
+        let line = "D:\\WINDOWS\\system";
+        assert_eq!(linked(&links, line, last_cell_of(line)), []);
+
+        let fresh = ledger("D:\\case", &[]);
+        let mut unknown = BTreeSet::new();
+        let unseen = "D:\\case\\deep\\name.rs";
+        assert!(
+            fresh
+                .links_in(unseen, last_cell_of(unseen), &mut unknown)
+                .is_empty()
+        );
+        assert!(
+            unknown.is_empty(),
+            "a span the gate has pressed down is not worth a probe: {unknown:?}"
+        );
+    }
+
+    /// The rejoin of two physical lines, as the five gates answer it.
+    fn rejoin<'a>(
+        links: &PrintedPathLinks,
+        upper: &'a str,
+        lower: &'a str,
+    ) -> Option<(&'a str, &'a str, String)> {
+        let mut unknown = BTreeSet::new();
+        links
+            .rejoin_across_newline(upper, last_cell_of(upper)?, lower, &mut unknown)
+            .map(|joined| {
+                (
+                    &upper[joined.upper.byte_start..joined.upper.byte_end],
+                    &lower[joined.lower.byte_start..joined.lower.byte_end],
+                    joined.uri,
+                )
+            })
+    }
+
+    /// §7.1.5k ②, the one shape the five gates let through (scenario 57): the upper half reaches
+    /// its row's last cell, the lower half starts at column 0, the two spell **exactly one**
+    /// reference, the disk holds it, and neither half is a verified path on its own.
+    #[test]
+    fn two_physical_lines_rejoin_only_when_all_five_gates_pass() {
+        let links = ledger("D:\\case", &[("D:\\case\\very\\long\\path\\file.rs", true)]);
+        assert_eq!(
+            rejoin(&links, "D:\\case\\very\\long\\pa", "th\\file.rs:12:3"),
+            Some((
+                "D:\\case\\very\\long\\pa",
+                "th\\file.rs:12:3",
+                "file:///D:/case/very/long/path/file.rs#L12C3".to_owned()
+            ))
+        );
+    }
+
+    /// §7.1.5k ② gate ⑤ and its whole reason for existing (scenarios 56 and 59): **a verified
+    /// upper half stops the rejoin**, and the truncation gate then stops the upper half from being
+    /// drawn on its own. The end of case A is an honest blank, not a link.
+    #[test]
+    fn a_verified_upper_half_refuses_the_rejoin_and_is_not_drawn_either() {
+        let links = ledger(
+            "D:\\case",
+            &[
+                ("D:\\WINDOWS\\system", true),
+                (
+                    "D:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\Modules",
+                    true,
+                ),
+                ("D:\\case\\src", true),
+                ("D:\\case\\src\\main.rs", true),
+            ],
+        );
+        let upper = "D:\\WINDOWS\\system";
+        assert_eq!(
+            rejoin(&links, upper, "32\\WindowsPowerShell\\v1.0\\Modules"),
+            None,
+            "scenario 56: the disk holding both halves is not evidence of what was meant"
+        );
+        assert_eq!(linked(&links, upper, last_cell_of(upper)), []);
+        assert_eq!(
+            rejoin(&links, "D:\\case\\src", "\\main.rs"),
+            None,
+            "scenario 59: two peer lines that happen to spell a real file are still two lines"
+        );
+    }
+
+    /// §7.1.5k ② gates ② and ⑤ from the other side (scenarios 58 and 60): a lower half that does
+    /// not start at column 0 is not a continuation, and a lower half that is already a verified
+    /// reference of its own is left to be that reference.
+    #[test]
+    fn an_indented_or_already_verified_lower_half_refuses_the_rejoin() {
+        let links = ledger(
+            "D:\\case",
+            &[
+                ("D:\\case\\very\\long\\path\\file.rs", true),
+                // Scenario 60's fixture, sharpened so gate ⑤ is the gate that answers: the joined
+                // target exists **too**, so only "the lower half is already a reference" can refuse.
+                ("D:\\case\\prefix\\main.rs", true),
+                ("D:\\case\\fix\\main.rs", true),
+            ],
+        );
+        assert_eq!(
+            rejoin(&links, "    D:\\case\\very\\long\\pa", "    th\\file.rs"),
+            None,
+            "scenario 58: a shared indent is what peer lines look like, not what a wrap looks like"
+        );
+        assert_eq!(
+            rejoin(&links, "D:\\case\\pre", "fix/main.rs"),
+            None,
+            "scenario 60: the lower half already names a file, so no third target is invented"
+        );
+        // And that lower half keeps its own ordinary link.
+        assert_eq!(
+            linked(&links, "fix/main.rs", None),
+            [("fix/main.rs", "file:///D:/case/fix/main.rs".to_owned())]
+        );
+    }
+
+    /// §7.1.5k ② gate ③, written as the precise assertion the ruling asks for: the two halves must
+    /// spell **exactly one** candidate covering all of the joined text. Anything the lexer would
+    /// quietly drop — a second reference, a tail of prose — is a refusal.
+    #[test]
+    fn a_rejoin_that_does_not_spell_exactly_one_reference_is_refused() {
+        let links = ledger(
+            "D:\\case",
+            &[
+                ("D:\\case\\very\\long\\path\\file.rs", true),
+                ("D:\\case\\a", true),
+            ],
+        );
+        assert_eq!(
+            rejoin(
+                &links,
+                "D:\\case\\very\\long\\pa",
+                "th\\file.rs，然后见 D:\\case\\a"
+            ),
+            None,
+            "the joined token carries prose the lexer would release, so it is not one reference"
+        );
+        assert_eq!(
+            rejoin(&links, "see D:\\case\\very\\long\\pa", "th\\file.rs"),
+            Some((
+                "D:\\case\\very\\long\\pa",
+                "th\\file.rs",
+                "file:///D:/case/very/long/path/file.rs".to_owned()
+            )),
+            "prose in front of the upper candidate is not part of the join"
+        );
+    }
+
+    /// §7.1.5k ② gate ④: the rejoin is verified by the **disk target the lexer split out**, and an
+    /// unanswered one is a question rather than a link — the same discipline a single-line
+    /// reference lives under.
+    #[test]
+    fn a_rejoined_reference_asks_about_the_file_and_not_the_printed_string() {
+        let links = ledger("D:\\case", &[]);
+        let mut unknown = BTreeSet::new();
+        let upper = "D:\\case\\very\\long\\pa";
+        assert_eq!(
+            links.rejoin_across_newline(
+                upper,
+                last_cell_of(upper).unwrap(),
+                "th\\file.rs:12:3",
+                &mut unknown
+            ),
+            None
+        );
+        assert_eq!(
+            unknown,
+            BTreeSet::from([PathBuf::from("D:\\case\\very\\long\\path\\file.rs")]),
+            "the line number is never part of what is asked about"
+        );
+    }
+
+    /// §7.1.5k ①, the widest half of the ruling: the gate covers an inferred **URL** as well, or
+    /// the most dangerous shape of all — a cut address that resolves to somebody else's host —
+    /// survives the hardening untouched (scenario 61, boundary table row 12 under `placement`).
+    #[test]
+    fn an_inferred_url_that_reaches_the_last_visual_cell_is_not_drawn() {
+        // Scenario 61 verbatim. Its single-label host was never an address this window offers, so
+        // the row below carries the same shape at a host that is.
+        assert_eq!(inferred_url_ranges("https://host:8080/api/us", None), []);
+        let line = "https://host.invalid:8080/api/us";
+        assert_eq!(
+            inferred_url_ranges(line, None)
+                .into_iter()
+                .map(|range| &line[range.byte_start..range.byte_end])
+                .collect::<Vec<_>>(),
+            [line]
+        );
+        assert_eq!(
+            inferred_url_ranges(line, last_cell_of(line)),
+            [],
+            "an address cut at the row's end is a working link to the wrong place"
+        );
     }
 
     /// Verification is the whole of what makes a path a link: what the worker has answered becomes
@@ -1138,7 +1602,11 @@ mod tests {
             BTreeMap::from([(real.clone(), true)]),
         );
         let mut unknown = BTreeSet::new();
-        let found = links.links_in("real.md ./real.md ./gone.md D:\\src\\real.md", &mut unknown);
+        let found = links.links_in(
+            "real.md ./real.md ./gone.md D:\\src\\real.md",
+            None,
+            &mut unknown,
+        );
         assert_eq!(
             found
                 .iter()
@@ -1166,7 +1634,7 @@ mod tests {
             ]),
         );
         let mut unknown = BTreeSet::new();
-        let found = links.links_in("./real.md ./gone.md ./fresh.md", &mut unknown);
+        let found = links.links_in("./real.md ./gone.md ./fresh.md", None, &mut unknown);
         assert_eq!(
             found
                 .iter()
@@ -1227,7 +1695,7 @@ mod tests {
             while started.elapsed() < std::time::Duration::from_millis(200) {
                 let mut unknown = BTreeSet::new();
                 for line in corpus {
-                    found += links.links_in(line, &mut unknown).len();
+                    found += links.links_in(line, None, &mut unknown).len();
                 }
                 frames += 1;
             }
@@ -1376,7 +1844,7 @@ mod tests {
         );
         let mut unknown = BTreeSet::new();
         let line = "real/../real.md:13:5 and D:\\src\\real.md:9999";
-        let found = links.links_in(line, &mut unknown);
+        let found = links.links_in(line, None, &mut unknown);
         assert_eq!(
             found
                 .iter()
@@ -1432,7 +1900,7 @@ mod tests {
         );
         let line = "D:\\src\\a.md and file:///D:/src/a.md";
         let mut unknown = BTreeSet::new();
-        let found = links.links_in(line, &mut unknown);
+        let found = links.links_in(line, None, &mut unknown);
         assert_eq!(
             found
                 .iter()
