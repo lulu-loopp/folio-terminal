@@ -2246,6 +2246,21 @@ pub enum ChromeTarget {
     /// of §7.1.5g's table deliberately does not offer for a page. So it is a
     /// button rather than a modifier.
     PreviewBrowser(SeatId),
+    /// `.pv-nav.pv-back` — a page's own back (§7.7 ②, W2 slice ④).
+    PreviewBack(SeatId),
+    /// `.pv-nav.pv-fwd`.
+    PreviewForward(SeatId),
+    /// `.pv-nav.pv-reload` — reload, and stop while a navigation is in flight.
+    PreviewReload(SeatId),
+    /// `.pv-tool.pv-devtools`.
+    PreviewDevTools(SeatId),
+    /// The one verb on the failure card a page's seat is showing (§7.7 ④).
+    ///
+    /// One target for five cards, because each of them has exactly one button
+    /// and which verb it runs is a property of the fault the seat is holding —
+    /// a target per card would be five ways of asking the same seat the same
+    /// question.
+    PreviewFaultVerb(SeatId),
     /// `.pv-tool.pv-popout` — "pop out to a floating window" (P29/P60).
     ///
     /// **It moves the presentation, not the buffer.** The buffer stays in its
@@ -7300,6 +7315,7 @@ pub fn build_chrome_for_tabs(
                             revealed: tree.foot_revealed,
                             notice: "",
                             notice_width: 0.0,
+                            web: false,
                         }),
                     };
                     let target = match placement.kind {
@@ -7328,12 +7344,17 @@ pub fn build_chrome_for_tabs(
                         [head_box[0], head_bottom, head_box[2], head_box[3]],
                         |geometry| geometry.body,
                     );
-                    let geometry = preview_card_geometry(body, card.button_text_px, scale);
+                    let geometry = preview_card_geometry(
+                        body,
+                        card.button_text_px,
+                        !card.detail.is_empty(),
+                        scale,
+                    );
                     // `.pv-unknown svg { opacity: .5 }` — the element's own
                     // opacity and not a paler ink, which is the distinction
                     // `with_opacity` exists to keep.
                     pane_sprites.push(
-                        ChromeSprite::new(ChromeMark::File, geometry.icon, palette.files_row_muted)
+                        ChromeSprite::new(card.mark, geometry.icon, palette.files_row_muted)
                             .with_opacity(0.5),
                     );
                     pane_labels.push(ChromeLabel {
@@ -7349,6 +7370,25 @@ pub fn build_chrome_for_tabs(
                         tabular_numerals: false,
                         clip: None,
                     });
+                    // **The fact, in the face facts are written in everywhere
+                    // else in this window** (§7.7 ④). One line, monospace, and
+                    // never a second sentence of prose: what goes here is the
+                    // thing a reader can copy into a bug report.
+                    if !card.detail.is_empty() {
+                        pane_labels.push(ChromeLabel {
+                            mono: true,
+                            text: card.detail.to_owned(),
+                            rect: geometry.detail,
+                            font_size_px: geometry.detail_font,
+                            color: palette.files_row_muted,
+                            align_right: false,
+                            align_center: true,
+                            letter_spacing_em: 0.0,
+                            weight: ChromeLabelWeight::Regular,
+                            tabular_numerals: false,
+                            clip: None,
+                        });
+                    }
                     if card.button_hovered {
                         pane_sprites.push(ChromeSprite::new(
                             ChromeMark::ControlPill {
@@ -11297,6 +11337,37 @@ pub const PREVIEW_TOOL_GLYPH_LOGICAL_PX: f32 = 13.0;
 /// ladder `.pane-files` climbs (P21), and the reason it is a separate constant
 /// from [`PANE_HEAD_TRIGGER_REVEAL`] is only that the mock-up writes it twice.
 pub const PREVIEW_TOOL_REVEAL: f32 = PANE_HEAD_TRIGGER_REVEAL;
+/// `.pv-nav svg { width: 11px; height: 11px }` — the three navigation buttons
+/// carry a smaller glyph than the tools beside them, in the same 22px box.
+pub const PREVIEW_NAV_GLYPH_LOGICAL_PX: f32 = 11.0;
+/// `.preview-head .pv-tool.pv-nav { opacity: .7 }` — **the resting opacity of a
+/// resident control** (§7.7 ②).
+///
+/// The same number [`PREVIEW_TOOL_REVEAL`] carries and a separate constant on
+/// its own terms: that one is the rung a *hover tool* climbs to when the pane is
+/// pointed at, and this one is where a control that never fades away stands. The
+/// two would only be one number by coincidence, and the coincidence is the
+/// mock-up's.
+pub const PREVIEW_NAV_REST: f32 = 0.7;
+/// `.preview-head .pv-tool.pv-nav.off { opacity: .22 }` — a button with nowhere
+/// to go.
+///
+/// **Dimmed and inert, never hidden**: 「a button that vanishes when the history
+/// runs out moves the two beside it under the pointer」.
+pub const PREVIEW_NAV_SPENT: f32 = 0.22;
+/// `.preview-head .pv-sep { width: 1px; height: 14px; margin: 0 1px }`.
+pub const PREVIEW_SEPARATOR_WIDTH_LOGICAL_PX: f32 = 1.0;
+/// Its height.
+pub const PREVIEW_SEPARATOR_HEIGHT_LOGICAL_PX: f32 = 14.0;
+/// Its margin, on each side.
+pub const PREVIEW_SEPARATOR_MARGIN_LOGICAL_PX: f32 = 1.0;
+/// `.pane:hover .preview-head .pv-sep { opacity: .7 }` — **and nothing at
+/// rest**.
+///
+/// The rule belongs to the group *after* it: written any other way it hangs at
+/// the head's right edge introducing nothing for as long as the pointer is
+/// elsewhere. The switcher's own `PINNED` section is built on the same sentence.
+pub const PREVIEW_SEPARATOR_REVEAL: f32 = 0.7;
 /// `.pv-name.switch { padding: 2px 5px; margin: -2px -5px }` — the pill is the
 /// name's box grown five each way, and the negative margin is what keeps it from
 /// pushing the row wider (P18, the `.files-root` trick).
@@ -11353,6 +11424,14 @@ pub struct PreviewHeadContent<'a> {
     pub pinned: bool,
     /// Whether this pane's switcher is open, which turns the chevron over.
     pub menu_open: bool,
+    /// **The page on this seat, when there is one** (§7.7 ②, W2 slice ④).
+    ///
+    /// Whether the three buttons *exist* is [`PreviewHeadTools::web`], which the
+    /// geometry needs; what they say is here, which only the paint needs. Split
+    /// for this struct's own stated reason — a head with a control its geometry
+    /// did not reserve is the bug D4 exists to make impossible — and because a
+    /// page whose history moves is a repaint and not a re-layout.
+    pub web: Option<WebHeadState>,
     /// **The open name editor, when this head is the one holding it** (user
     /// ruling 2026-08-19).
     ///
@@ -11373,6 +11452,22 @@ pub struct PreviewHeadContent<'a> {
     pub edit: Option<PreviewNameEdit<'a>>,
 }
 
+/// What a page's three navigation buttons say this frame.
+///
+/// **Every field arrives on an engine event** — `HistoryChanged` for the two
+/// flags, `NavigationStarting` and `NavigationCompleted` for the third. The W1
+/// report is explicit that this is where the mock-up must not be copied: its
+/// `webNav` fakes the whole of it with one `setTimeout(…, 420)`, and a head
+/// drawn off a clock rather than off the stack is a head that is right by
+/// coincidence.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WebHeadState {
+    pub can_go_back: bool,
+    pub can_go_forward: bool,
+    /// A navigation is in flight, so the reload button is a stop.
+    pub loading: bool,
+}
+
 /// **The open name editor, as the head has to draw it** (user ruling
 /// 2026-08-19).
 ///
@@ -11391,6 +11486,18 @@ pub struct PreviewNameEdit<'a> {
     pub selection_px: f32,
     /// Whether the caret is in the lit half of its blink.
     pub caret_lit: bool,
+    /// **The draft will not be navigated to** (§7.7 ④, W2 slice ④).
+    ///
+    /// `.preview-head .pv-addr.bad { color: var(--err) }` — said *where it is
+    /// typed*, which is the search capsule's own answer to a regex that does not
+    /// parse and for the same reason: the reader is looking straight at the
+    /// thing that is wrong, so a card would be telling them what they can
+    /// already see.
+    ///
+    /// Always `false` for a file's name: renaming refuses in silence and leaves
+    /// the name as it was, which is a different ruling made one content class
+    /// over.
+    pub refused: bool,
 }
 
 /// What the preview head has to lay out this frame.
@@ -11411,6 +11518,13 @@ pub struct PreviewHeadTools {
     /// reserve, or lit over a file it will not open, is the same class of bug the
     /// note on this struct exists to make impossible.
     pub browser: bool,
+    /// **A page is on this seat** (§7.7 ②, W2 slice ④), so the head carries the
+    /// three navigation buttons and the developer-tools verb.
+    ///
+    /// A field of the tools rather than a [`SeatKind`], for this struct's own
+    /// stated reason: a head with three more controls is a different *layout*,
+    /// and it is a property of the buffer on the seat and not of the seat.
+    pub web: bool,
     /// The pool holds more than one buffer, so the name is a control (P18/P23).
     pub switcher: bool,
     /// `.pv-name`'s drawn width, measured by the caller that holds a font.
@@ -11435,6 +11549,19 @@ pub struct PreviewHeadGeometry {
     pub flip: Option<[f32; 4]>,
     /// `.pv-tool.pv-browser` — the hand-off arrow, last of the per-type verbs.
     pub browser: Option<[f32; 4]>,
+    /// `.pv-nav.pv-back` — the first of a page's three, and the first control in
+    /// this head that is drawn whether or not the pane is pointed at.
+    pub back: Option<[f32; 4]>,
+    /// `.pv-nav.pv-fwd`.
+    pub forward: Option<[f32; 4]>,
+    /// `.pv-nav.pv-reload` — reload, or stop while a navigation is in flight.
+    pub reload: Option<[f32; 4]>,
+    /// `.pv-sep` — the hairline that introduces the hover tools after it, and
+    /// fades in with them.
+    pub separator: Option<[f32; 4]>,
+    /// `.pv-tool.pv-devtools` — a hover tool, because a verb pressed twice a
+    /// week does not get permanent pixels beside three pressed every minute.
+    pub devtools: Option<[f32; 4]>,
     /// `.pv-tool.pv-popout` (P29) — the slice-5 arrival the note below reserved.
     pub popout: Option<[f32; 4]>,
     pub pin: Option<[f32; 4]>,
@@ -11465,44 +11592,71 @@ pub fn preview_head_geometry(
     let gap = SEAT_TITLE_GAP_LOGICAL_PX * scale;
     let box_ = (PREVIEW_TOOL_BOX_LOGICAL_PX * scale).round().max(1.0);
     let middle = (head.title[1] + head.content_bottom) / 2.0;
-    let top = (middle - box_ / 2.0).round();
     let floor = head.title[0];
 
     // Right to left from the `×`. A control that would reach the name's own left
     // edge has nowhere to stand, and half a control is worse than none — the rule
     // `pane_head_geometry` already holds the `×` and the files trigger to.
     let mut right = head.close.map_or(head.title[2], |close| close[0]);
-    let mut take = |wanted: bool| -> Option<[f32; 4]> {
+    let mut take_wide = |wanted: bool, width: f32, height: f32| -> Option<[f32; 4]> {
         if !wanted {
             return None;
         }
         let edge = right - gap;
-        let left = edge - box_;
+        let left = edge - width;
         (left > floor).then(|| {
             right = left;
-            pixel_snapped([left, top, edge, top + box_])
+            let top = (middle - height / 2.0).round();
+            pixel_snapped([left, top, edge, top + height])
         })
     };
+
     // The pin is always offered: it is the one control that is a *state* as well
     // as an action, and P95 makes it the only route to a second preview pane.
-    let pin = take(true);
+    let pin = take_wide(true, box_, box_);
     // Offered as unconditionally as the pin, and for the mirror of its reason:
     // the pin is how a buffer stops being replaceable *in* the tree, and this is
     // how it leaves the tree altogether. Neither is a property of the content, so
     // neither can be earned or lost by it.
-    let popout = take(true);
+    let popout = take_wide(true, box_, box_);
     // Last of the per-type verbs, so it is the first of them off the right — see
     // the note above for why a page's verb sits with `Save` and the flip rather
     // than with the pop-out it would otherwise be read as a second spelling of.
-    let browser = take(tools.browser);
-    let flip = take(tools.flip);
-    let save = take(tools.save);
+    // **A page's four, in the mock-up's own DOM order** — `[back][forward]
+    // [reload] │ [devtools]` — taken off the right, so they come off the left of
+    // the run first exactly as every other control here does. The developer
+    // tools are outermost of the four because they are the one that fades: a
+    // hover tool that sat *between* the three resident buttons and the pin would
+    // pull them sideways every time the pointer arrived.
+    let devtools = take_wide(tools.web, box_, box_);
+    // The rule is not a 22px box. `.pv-sep` is one physical pixel wide with a
+    // pixel of margin on each side and fourteen of height, which is why it needs
+    // the wider door and not the tool-sized one.
+    let separator_width = (PREVIEW_SEPARATOR_WIDTH_LOGICAL_PX * scale)
+        .round()
+        .max(1.0)
+        + (PREVIEW_SEPARATOR_MARGIN_LOGICAL_PX * scale)
+            .round()
+            .max(1.0)
+            * 2.0;
+    let separator_height = (PREVIEW_SEPARATOR_HEIGHT_LOGICAL_PX * scale)
+        .round()
+        .max(1.0);
+    let separator = take_wide(tools.web, separator_width, separator_height);
+    let reload = take_wide(tools.web, box_, box_);
+    let forward = take_wide(tools.web, box_, box_);
+    let back = take_wide(tools.web, box_, box_);
+    let browser = take_wide(tools.browser, box_, box_);
+    let flip = take_wide(tools.flip, box_, box_);
+    let save = take_wide(tools.save, box_, box_);
 
-    let run_left = [save, flip, browser, popout, pin]
-        .into_iter()
-        .flatten()
-        .map(|box_| box_[0])
-        .fold(head.title[2], f32::min);
+    let run_left = [
+        save, flip, browser, back, forward, reload, separator, devtools, popout, pin,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|box_| box_[0])
+    .fold(head.title[2], f32::min);
     let dirty_slot = (PREVIEW_DIRTY_SLOT_LOGICAL_PX * scale).round().max(1.0);
     // What is left for the flexible half of the row: the name bits and the dot,
     // with the spacer taking whatever neither of them wants.
@@ -11578,6 +11732,11 @@ pub fn preview_head_geometry(
         save,
         flip,
         browser,
+        back,
+        forward,
+        reload,
+        separator,
+        devtools,
         popout,
         pin,
     }
@@ -12494,6 +12653,22 @@ pub fn hit_preview_head(
         if hit(geometry.browser) {
             return Some(ChromeTarget::PreviewBrowser(placement.id));
         }
+        // A page's four, in the order they are laid out. The separator between
+        // them answers nothing: it is a rule and not a control, and a hairline
+        // that swallowed a press would be three pixels of dead head between two
+        // buttons.
+        if hit(geometry.back) {
+            return Some(ChromeTarget::PreviewBack(placement.id));
+        }
+        if hit(geometry.forward) {
+            return Some(ChromeTarget::PreviewForward(placement.id));
+        }
+        if hit(geometry.reload) {
+            return Some(ChromeTarget::PreviewReload(placement.id));
+        }
+        if hit(geometry.devtools) {
+            return Some(ChromeTarget::PreviewDevTools(placement.id));
+        }
         if hit(geometry.popout) {
             return Some(ChromeTarget::PreviewPopOut(placement.id));
         }
@@ -12970,7 +13145,9 @@ fn push_preview_head(
         // expresses and which a preview head inherits like every other. An open
         // editor is always in the focused pane — the first click of the pair put
         // it there — so it changes the ink by not changing it.
-        color: if focused || content.edit.is_some() {
+        color: if content.edit.is_some_and(|edit| edit.refused) {
+            palette.status_err
+        } else if focused || content.edit.is_some() {
             palette.pane_title_focus
         } else {
             palette.files_row_text
@@ -13050,7 +13227,23 @@ fn push_preview_head(
         });
     }
     // ── the tools ───────────────────────────────────────────────────────────
-    let mut tool = |box_: Option<[f32; 4]>, target: ChromeTarget, mark: ChromeMark, on: bool| {
+    // A free function and not a closure, for the reason the `nav` painter below
+    // is one too: two closures that each need the sprite list are two unique
+    // borrows of it, and the resident buttons genuinely cannot share a painter
+    // with the hover tools — the first line of this one is exactly the sentence
+    // they do not make.
+    #[allow(clippy::too_many_arguments)]
+    fn tool(
+        sprites: &mut Vec<ChromeSprite>,
+        pointer: ChromePointer,
+        pane_hovered: bool,
+        scale: f32,
+        palette: &bt_render::ChromePalette,
+        box_: Option<[f32; 4]>,
+        target: ChromeTarget,
+        mark: ChromeMark,
+        on: bool,
+    ) {
         let Some(box_) = box_ else {
             return;
         };
@@ -13089,14 +13282,24 @@ fn push_preview_head(
         );
         sprite.opacity = if lit || on { 1.0 } else { PREVIEW_TOOL_REVEAL };
         sprites.push(sprite);
-    };
+    }
     tool(
+        sprites,
+        pointer,
+        pane_hovered,
+        scale,
+        palette,
         geometry.save,
         ChromeTarget::PreviewSave(seat),
         ChromeMark::Save,
         false,
     );
     tool(
+        sprites,
+        pointer,
+        pane_hovered,
+        scale,
+        palette,
         geometry.flip,
         ChromeTarget::PreviewFlip(seat),
         // The glyph names where the press takes you, not where you are.
@@ -13108,6 +13311,11 @@ fn push_preview_head(
         false,
     );
     tool(
+        sprites,
+        pointer,
+        pane_hovered,
+        scale,
+        palette,
         geometry.browser,
         ChromeTarget::PreviewBrowser(seat),
         // `#i-external` — the bare arrow, and the reason it is bare is that the
@@ -13115,7 +13323,143 @@ fn push_preview_head(
         ChromeMark::External,
         false,
     );
+    // ── a page's four (§7.7 ②, W2 slice ④) ─────────────────────────────────
+    //
+    // **The three navigation buttons are resident and every other tool in this
+    // head is not.** Each of the others is an *offer*; these three are the only
+    // way to move inside a page, and a browser whose back button appears when
+    // you approach it is a browser you cannot aim at. So they have a painter of
+    // their own rather than an argument to the one above: `tool` begins by
+    // returning when the pane is not hovered, which is exactly the sentence
+    // these three do not make.
+    fn nav(
+        sprites: &mut Vec<ChromeSprite>,
+        pointer: ChromePointer,
+        scale: f32,
+        palette: &bt_render::ChromePalette,
+        box_: Option<[f32; 4]>,
+        target: ChromeTarget,
+        mark: ChromeMark,
+        live: bool,
+    ) {
+        let Some(box_) = box_ else {
+            return;
+        };
+        // `.pv-nav.off { pointer-events: none }` — a spent button is not
+        // hovered, so the pill under the pointer does not appear over it either.
+        let lit = live && pointer.hover == Some(target);
+        if lit {
+            sprites.push(ChromeSprite::new(
+                ChromeMark::ControlPill {
+                    radius_px: (PREVIEW_TOOL_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32,
+                },
+                box_,
+                palette.pane_close_pill,
+            ));
+        }
+        let glyph = (PREVIEW_NAV_GLYPH_LOGICAL_PX * scale).round().max(1.0);
+        let left = ((box_[0] + box_[2] - glyph) / 2.0).round();
+        let top = ((box_[1] + box_[3] - glyph) / 2.0).round();
+        let mut sprite = ChromeSprite::new(
+            mark,
+            [left, top, left + glyph, top + glyph],
+            if lit {
+                palette.pane_close_glyph_on_pill
+            } else {
+                palette.pane_close_glyph
+            },
+        );
+        sprite.opacity = if !live {
+            PREVIEW_NAV_SPENT
+        } else if lit {
+            1.0
+        } else {
+            PREVIEW_NAV_REST
+        };
+        sprites.push(sprite);
+    }
+    let web = content.web.unwrap_or_default();
+    nav(
+        sprites,
+        pointer,
+        scale,
+        palette,
+        geometry.back,
+        ChromeTarget::PreviewBack(seat),
+        // `#i-chev` turned a quarter, which is the same sentence the submenu's
+        // `▸` is drawn with: this window has one directional glyph, and a second
+        // arrow family for two buttons would make it two.
+        ChromeMark::Chevron { turned_degrees: 90 },
+        web.can_go_back,
+    );
+    nav(
+        sprites,
+        pointer,
+        scale,
+        palette,
+        geometry.forward,
+        ChromeTarget::PreviewForward(seat),
+        ChromeMark::Chevron {
+            turned_degrees: 270,
+        },
+        web.can_go_forward,
+    );
+    nav(
+        sprites,
+        pointer,
+        scale,
+        palette,
+        geometry.reload,
+        ChromeTarget::PreviewReload(seat),
+        // **One button, two glyphs**: while a navigation is in flight the reload
+        // is a stop, and the seat grows no chrome for a state that lasts a
+        // second.
+        if web.loading {
+            ChromeMark::PaneClose
+        } else {
+            ChromeMark::Refresh
+        },
+        true,
+    );
+    // **The rule belongs to what is after it.** Drawn only while the pane is
+    // hovered, because what it introduces — the developer tools — is only there
+    // then: a divider with an empty side is a line telling the reader something
+    // follows when nothing does.
+    if let Some(separator) = geometry.separator
+        && pane_hovered
+    {
+        let width = (PREVIEW_SEPARATOR_WIDTH_LOGICAL_PX * scale)
+            .round()
+            .max(1.0);
+        let left = ((separator[0] + separator[2] - width) / 2.0).round();
+        let mut rule = ChromeSprite::new(
+            ChromeMark::Fill,
+            [left, separator[1], left + width, separator[3]],
+            palette.menu_border,
+        );
+        rule.opacity = PREVIEW_SEPARATOR_REVEAL;
+        sprites.push(rule);
+    }
     tool(
+        sprites,
+        pointer,
+        pane_hovered,
+        scale,
+        palette,
+        geometry.devtools,
+        ChromeTarget::PreviewDevTools(seat),
+        // `#i-code` — the same glyph markdown's `Edit source` wears, and the
+        // same sentence: what is behind this is the thing itself rather than a
+        // rendering of it.
+        ChromeMark::Code,
+        false,
+    );
+    tool(
+        sprites,
+        pointer,
+        pane_hovered,
+        scale,
+        palette,
         geometry.popout,
         ChromeTarget::PreviewPopOut(seat),
         // `#i-float` — a frame with an arrow leaving through its corner, the
@@ -13125,6 +13469,11 @@ fn push_preview_head(
         false,
     );
     tool(
+        sprites,
+        pointer,
+        pane_hovered,
+        scale,
+        palette,
         geometry.pin,
         ChromeTarget::PreviewPin(seat),
         ChromeMark::Pin {
@@ -13157,6 +13506,15 @@ pub struct FootStrip<'a> {
     /// for [`files_root_box`]'s reason: nothing in this module holds a font, and
     /// a box sized by a guess is a box whose letters end somewhere else.
     pub notice_width: f32,
+    /// **This strip is naming a page rather than a place** (§7.7 ③, W2 slice ④).
+    ///
+    /// It changes the mark and nothing else about the drawing: the band already
+    /// says "this is where the content lives, and pressing hands it to the
+    /// system", and for a page that is a URL and the default browser rather than
+    /// a path and Explorer. Which end the text is cut from is decided one level
+    /// up, in [`FootDress::cut_left`], because that is a property of the string
+    /// and not of the strip.
+    pub web: bool,
 }
 
 /// **The gap between the path and the phrase hung beside it.**
@@ -13324,6 +13682,10 @@ fn push_files_foot(
     sprites.push(ChromeSprite::new(
         if revealed {
             ChromeMark::Check
+        } else if strip.is_some_and(|strip| strip.web) {
+            // `#i-globe` — the same mark this seat wears on its head, because
+            // the band is naming the same thing the head is naming.
+            ChromeMark::Globe
         } else {
             ChromeMark::FolderOpen
         },
@@ -13772,6 +14134,10 @@ const PREVIEW_CARD_ICON_LOGICAL_PX: f32 = 30.0;
 const PREVIEW_CARD_GAP_LOGICAL_PX: f32 = 10.0;
 /// `.pv-unknown { font-size: 12.5px }`.
 const PREVIEW_CARD_FONT_LOGICAL_PX: f32 = 12.5;
+/// `.pv-blank .pvb-detail { font: 11.5px/1.5 Consolas, … }` — the fact line
+/// (§7.7 ④), a shade smaller than the sentence and set in the monospace face
+/// this window writes every other quotable fact in.
+const PREVIEW_CARD_DETAIL_FONT_LOGICAL_PX: f32 = 11.5;
 /// `.pv-unknown button { font-size: 12px }`.
 pub const PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX: f32 = 12.0;
 /// `.pv-unknown button { padding: 5px 12px }`, and the 1px border around it.
@@ -13791,8 +14157,13 @@ const PREVIEW_CARD_BUTTON_RADIUS_LOGICAL_PX: f32 = 6.0;
 pub struct PreviewCardGeometry {
     pub icon: [f32; 4],
     pub notice: [f32; 4],
+    /// **The one line of fact under the sentence** (§7.7 ④, W2 slice ④) — an
+    /// error code, a host, a file name. Zero height when there is none, which is
+    /// the state every card that is not a page's failure is in.
+    pub detail: [f32; 4],
     pub button: [f32; 4],
     pub notice_font: f32,
+    pub detail_font: f32,
     pub button_font: f32,
     pub button_radius: f32,
 }
@@ -13803,6 +14174,17 @@ pub struct PreviewCardContent<'a> {
     /// The sentence — the mock-up's single "No preview for this file type", or
     /// the more specific one a binary, a network path or a failed read earns.
     pub notice: &'a str,
+    /// **The fact, and never a second sentence of prose** (§7.7 ④). A host name,
+    /// an error string, a version — the thing worth copying into a bug report.
+    /// Empty for every card that has none.
+    pub detail: &'a str,
+    /// The mark above the sentence: this content class's own. A file for a
+    /// refused read, the globe for a page.
+    pub mark: ChromeMark,
+    /// **Whose button this is.** A refused *file* offers the system; a failed
+    /// *page* offers whatever its own fault names — see `webhost::WebFault`. One
+    /// card, two owners, and the press has to reach the right one.
+    pub fault: bool,
     /// The button's caption: "Open in default app", or the acknowledgement that
     /// replaces it for 1300ms after a press.
     pub button: &'a str,
@@ -13820,6 +14202,7 @@ pub struct PreviewCardContent<'a> {
 pub fn preview_card_geometry(
     body: [f32; 4],
     button_text_px: f32,
+    has_detail: bool,
     scale: f32,
 ) -> PreviewCardGeometry {
     let icon = (PREVIEW_CARD_ICON_LOGICAL_PX * scale).round().max(1.0);
@@ -13839,11 +14222,19 @@ pub fn preview_card_geometry(
             * scale)
         .round()
         .max(1.0);
-    let total = icon + gap + notice_height + gap + button_height;
+    let detail_font = PREVIEW_CARD_DETAIL_FONT_LOGICAL_PX * scale;
+    let detail_height = if has_detail {
+        (detail_font * CHROME_LINE_HEIGHT).round().max(1.0)
+    } else {
+        0.0
+    };
+    let detail_run = if has_detail { gap + detail_height } else { 0.0 };
+    let total = icon + gap + notice_height + detail_run + gap + button_height;
     let centre_x = (body[0] + body[2]) / 2.0;
     let top = (body[1] + (body[3] - body[1] - total) / 2.0).max(body[1]);
     let notice_top = top + icon + gap;
-    let button_top = notice_top + notice_height + gap;
+    let detail_top = notice_top + notice_height + gap;
+    let button_top = notice_top + notice_height + detail_run + gap;
     PreviewCardGeometry {
         icon: [
             centre_x - icon / 2.0,
@@ -13854,6 +14245,7 @@ pub fn preview_card_geometry(
         // The sentence is centred by the label itself, so its box is the body's
         // width and its height is the one line it gets.
         notice: [body[0], notice_top, body[2], notice_top + notice_height],
+        detail: [body[0], detail_top, body[2], detail_top + detail_height],
         button: [
             centre_x - button_width / 2.0,
             button_top,
@@ -13861,6 +14253,7 @@ pub fn preview_card_geometry(
             button_top + button_height,
         ],
         notice_font,
+        detail_font,
         button_font,
         button_radius: (PREVIEW_CARD_BUTTON_RADIUS_LOGICAL_PX * scale).round(),
     }
@@ -13907,15 +14300,37 @@ pub fn preview_seat_body_rect(
 pub fn hit_preview_card_button(
     seats: &Seats,
     layout: &SeatLayout,
-    button_text_px: f32,
+    button: PreviewCardButton,
     scale: f32,
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
     let seat = seats.preview()?;
     let body = preview_body_rect(seats, layout, scale)?;
-    let button = preview_card_geometry(body, button_text_px, scale).button;
-    contains(button, x as f32, y as f32).then_some(ChromeTarget::PreviewOpenButton(seat))
+    let box_ = preview_card_geometry(body, button.text_px, button.has_detail, scale).button;
+    if !contains(box_, x as f32, y as f32) {
+        return None;
+    }
+    Some(if button.fault {
+        ChromeTarget::PreviewFaultVerb(seat)
+    } else {
+        ChromeTarget::PreviewOpenButton(seat)
+    })
+}
+
+/// **The card's one button, as the hit test has to see it** (§7.7 ④).
+///
+/// Three facts that travel together and cannot be allowed to disagree: how wide
+/// the caption is drawn, whether the card carries a fact line — which moves the
+/// button — and whose press it is. One value rather than three parameters,
+/// because the first two decide the rectangle and the third decides what
+/// pressing it means, and a call site that got any of them from a different
+/// frame would be answering for a button nobody can see.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PreviewCardButton {
+    pub text_px: f32,
+    pub has_detail: bool,
+    pub fault: bool,
 }
 
 /// The tail line of the L4 strip: how many seats it had no row for.
@@ -14494,14 +14909,22 @@ pub(crate) fn seat_title(kind: SeatKind) -> &'static str {
 /// than picking a shell's artwork at random. The one honest caller of it is
 /// [`pane_head_geometry`], which wants the mark's *size* — the same 15px slot for
 /// all four profiles — and throws the mark itself away.
+///
+/// **A preview seat answers it too since the web block** (§7.7 ②, W2 slice ④),
+/// and for the same sentence one kind over: every preview is the same kind and
+/// they are not the same content. A page hands in `ChromeMark::Globe`; a
+/// document hands in nothing and gets `#i-file` exactly as it always did. This
+/// is the one place the choice is made, which is what keeps the head, the strip
+/// row above it, the switcher's line and Recent's row from drawing four glyphs
+/// for one seat — the mock-up's `pvMarkId`, said once in Rust.
 pub(crate) fn pane_mark(
     kind: SeatKind,
-    terminal: Option<ChromeMark>,
+    content: Option<ChromeMark>,
     palette: bt_render::ChromePalette,
 ) -> (ChromeMark, f32, [u8; 3]) {
     match kind {
         SeatKind::Terminal => (
-            terminal.unwrap_or(ChromeMark::Panel),
+            content.unwrap_or(ChromeMark::Panel),
             PANE_HEAD_PROFILE_MARK_LOGICAL_PX,
             palette.accent,
         ),
@@ -14511,7 +14934,7 @@ pub(crate) fn pane_mark(
             palette.accent,
         ),
         SeatKind::Preview => (
-            ChromeMark::File,
+            content.unwrap_or(ChromeMark::File),
             PANE_HEAD_FILE_MARK_LOGICAL_PX,
             palette.accent,
         ),
@@ -16047,6 +16470,9 @@ mod tests {
         // standing — the card replaces a body, and only its own.
         let card = PreviewCardContent {
             notice: "No preview for this file type",
+            detail: "",
+            mark: ChromeMark::File,
+            fault: false,
             button: "Open in default app",
             button_text_px: 120.0,
             button_hovered: false,
@@ -16418,6 +16844,7 @@ mod tests {
                 revealed: false,
                 notice,
                 notice_width,
+                web: false,
             }),
             true,
             1.0,
@@ -16540,6 +16967,7 @@ mod tests {
             save: true,
             flip: true,
             browser: false,
+            web: false,
             switcher: true,
             name_width: 60.0,
             count_width: 8.0,
@@ -17073,6 +17501,7 @@ mod tests {",
                         save: true,
                         flip: true,
                         browser: false,
+                        web: false,
                         switcher: true,
                         name_width: 120.0,
                         count_width: 8.0,
@@ -17084,6 +17513,7 @@ mod tests {",
                     flip_to_source: true,
                     pinned: false,
                     menu_open: false,
+                    web: None,
                     edit,
                 },
                 ChromePointer::default(),
@@ -17099,6 +17529,7 @@ mod tests {",
             caret_px: 4_000.0,
             selection_px: 80.0,
             caret_lit: true,
+            refused: false,
         }));
         assert_eq!(
             editing_head.len(),
@@ -19286,7 +19717,7 @@ mod tests {",
     #[test]
     fn the_cards_button_answers_for_exactly_the_box_it_is_drawn_in() {
         let body = [40.0, 60.0, 440.0, 460.0];
-        let geometry = preview_card_geometry(body, 120.0, 1.0);
+        let geometry = preview_card_geometry(body, 120.0, false, 1.0);
         assert!(
             geometry.icon[3] < geometry.notice[1] && geometry.notice[3] < geometry.button[1],
             "icon over sentence over button, in that order"
@@ -32369,6 +32800,378 @@ mod tests {",
             Some(LogicalPx::px(300)),
             "§5: a column torn into its own tab is still the width it was"
         );
+    }
+
+    // ── a page's head (§7.7 ②, W2 slice ④) ──────────────────────────────────
+    //
+    // The four controls a web seat adds, where they stand, and which of them
+    // fade. In this module rather than in one of its own because the fixtures
+    // every preview-head test is built on — `preview_chrome`, `solved`,
+    // `seat_metrics` — live here, and a second copy of them is a second window
+    // to disagree with.
+
+    fn page_tools() -> PreviewHeadTools {
+        PreviewHeadTools {
+            web: true,
+            name_width: 60.0,
+            ..PreviewHeadTools::default()
+        }
+    }
+
+    fn head_geometry(tools: PreviewHeadTools) -> (SeatId, SeatLayout, PreviewHeadGeometry) {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.add_preview(&metrics).expect("the preview seat lands");
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let seat = seats.preview().expect("the preview seat");
+        let rect = full_pane_rect(&layout, seat).expect("a full pane");
+        let head = pane_head_geometry(rect, SeatKind::Preview, 1.0);
+        let geometry = preview_head_geometry(&head, 1.0, tools);
+        (seat, layout, geometry)
+    }
+
+    /// PIN (§7.7 ②, user ruling 2026-08-22) — **the three buttons sit in the
+    /// slot `Save` and `Edit source` sit in, and the developer tools sit at its
+    /// far end.**
+    ///
+    /// The ruling is 「三钮(后退/前进/刷新)维持 pane 头右侧工具格」 and the
+    /// argument is 「同族优先于浏览器惯例」: every content class that has verbs
+    /// of its own puts them first in the tool run, before the three every pane
+    /// has. So a document's `Save` and a page's outermost per-type verb are the
+    /// **same box** — one slot, two contents — which is what this asserts
+    /// rather than an inequality that any ordering would satisfy.
+    ///
+    /// MUTATIONS:
+    /// ① take the four after the pop-out — the equality goes red and a page's
+    ///    verbs land where the pane's own three live;
+    /// ② take the developer tools innermost of the four — it lands between the
+    ///    resident buttons and the pin, and every arrival of the pointer shoves
+    ///    the three sideways.
+    #[test]
+    fn the_three_buttons_sit_where_save_and_edit_source_sit() {
+        let (_, _, page) = head_geometry(page_tools());
+        let (_, _, document) = head_geometry(PreviewHeadTools {
+            save: true,
+            name_width: 60.0,
+            ..PreviewHeadTools::default()
+        });
+        let devtools = page.devtools.expect("a page's head seats its tools");
+        assert_eq!(
+            devtools,
+            document.save.expect("a text file's head seats Save"),
+            "one per-type verb slot, two contents"
+        );
+        // In the mock-up's own DOM order, left to right:
+        // `[back][forward][reload] │ [devtools]`, and then the three every pane
+        // has.
+        let back = page.back.expect("a back box");
+        let forward = page.forward.expect("a forward box");
+        let reload = page.reload.expect("a reload box");
+        let rule = page.separator.expect("a separator box");
+        let popout = page.popout.expect("a pop-out box");
+        let pin = page.pin.expect("a pin box");
+        assert!(back[2] <= forward[0], "back is left of forward");
+        assert!(forward[2] <= reload[0], "forward is left of reload");
+        assert!(reload[2] <= rule[0], "the rule stands after the three");
+        assert!(rule[2] <= devtools[0], "and introduces the tools after it");
+        assert!(devtools[2] <= popout[0] && popout[2] <= pin[0]);
+        assert!(
+            page.name[2] <= back[0],
+            "and the name is cut short of them, not drawn under them"
+        );
+        // One family, one box — the rule excepted, which is a hairline and not a
+        // control.
+        for box_ in [back, forward, reload] {
+            assert_eq!(
+                [box_[2] - box_[0], box_[3] - box_[1]],
+                [popout[2] - popout[0], popout[3] - popout[1]],
+                "one family, one box"
+            );
+        }
+        assert!(
+            rule[2] - rule[0] < popout[2] - popout[0],
+            "the rule is a hairline in its margins, not a tool-sized box"
+        );
+        // Nothing that is not a page has any of them.
+        let (_, _, plain) = head_geometry(PreviewHeadTools {
+            name_width: 60.0,
+            ..PreviewHeadTools::default()
+        });
+        assert_eq!(
+            (
+                plain.back,
+                plain.forward,
+                plain.reload,
+                plain.separator,
+                plain.devtools
+            ),
+            (None, None, None, None, None),
+            "no page, no navigation"
+        );
+    }
+
+    /// PIN (§7.7 ②) — **each of the four answers for its own rectangle.**
+    ///
+    /// And the rule answers for none: it is a hairline, and three pixels of dead
+    /// head between two buttons is what a rule that swallowed a press would be.
+    #[test]
+    fn each_of_a_pages_four_answers_for_its_own_box() {
+        let tools = page_tools();
+        let (seat, layout, geometry) = head_geometry(tools);
+        let centre = |box_: [f32; 4]| {
+            (
+                f64::from((box_[0] + box_[2]) / 2.0),
+                f64::from((box_[1] + box_[3]) / 2.0),
+            )
+        };
+        for (box_, expected) in [
+            (geometry.back, ChromeTarget::PreviewBack(seat)),
+            (geometry.forward, ChromeTarget::PreviewForward(seat)),
+            (geometry.reload, ChromeTarget::PreviewReload(seat)),
+            (geometry.devtools, ChromeTarget::PreviewDevTools(seat)),
+        ] {
+            let (x, y) = centre(box_.expect("a head this wide seats every control"));
+            assert_eq!(
+                hit_preview_head(&layout, 1.0, &[(seat, tools)], x, y),
+                Some(expected),
+                "{expected:?} answers for its own rectangle"
+            );
+        }
+        let (x, y) = centre(geometry.separator.expect("a rule"));
+        assert_eq!(
+            hit_preview_head(&layout, 1.0, &[(seat, tools)], x, y),
+            None,
+            "a rule is not a control"
+        );
+    }
+
+    fn page_head(
+        web: WebHeadState,
+        pointer: ChromePointer,
+    ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
+        preview_chrome(
+            PreviewHeadContent {
+                tools: page_tools(),
+                name: "Folio dev server",
+                dirty: false,
+                count: "",
+                others_dirty: false,
+                flip_to_source: false,
+                pinned: false,
+                menu_open: false,
+                web: Some(web),
+                edit: None,
+            },
+            pointer,
+        )
+    }
+
+    fn glyphs(sprites: &[ChromeSprite], mark: ChromeMark) -> Vec<ChromeSprite> {
+        sprites
+            .iter()
+            .filter(|sprite| sprite.mark == mark)
+            .copied()
+            .collect()
+    }
+
+    /// PIN (§7.7 ②) — **the three navigation buttons are resident and every
+    /// other tool in this head is not.**
+    ///
+    /// Each of the others is an *offer* and fades in with the pane's hover; the
+    /// three are the only way to move inside a page, and 「一个走近才出现的后退
+    /// 钮是瞄不准的」. The developer tools stay a hover tool by the same
+    /// sentence read the other way: 「一个一周按两次的动词不该占常驻像素」.
+    ///
+    /// MUTATION: paint the three through the hover-tool painter and the first
+    /// assertion goes red — which is a browser whose back button appears when
+    /// you approach it.
+    #[test]
+    fn the_three_buttons_do_not_fade_with_the_pane_and_the_tools_do() {
+        let resting = ChromePointer::default();
+        let (_, _, sprites) = page_head(
+            WebHeadState {
+                can_go_back: true,
+                can_go_forward: true,
+                loading: false,
+            },
+            resting,
+        );
+        assert_eq!(
+            glyphs(&sprites, ChromeMark::Chevron { turned_degrees: 90 }).len(),
+            1,
+            "back is drawn on a head nobody is pointing at"
+        );
+        assert_eq!(
+            glyphs(
+                &sprites,
+                ChromeMark::Chevron {
+                    turned_degrees: 270
+                }
+            )
+            .len(),
+            1,
+            "and so is forward"
+        );
+        assert_eq!(
+            glyphs(&sprites, ChromeMark::Refresh).len(),
+            1,
+            "and so is reload"
+        );
+        assert!(
+            glyphs(&sprites, ChromeMark::Code).is_empty(),
+            "the developer tools are an offer and wait to be approached"
+        );
+        // At rest they stand at the reveal ladder's resting rung rather than at
+        // full strength: resident is not the same as loud.
+        for sprite in glyphs(&sprites, ChromeMark::Refresh) {
+            assert!((sprite.opacity - PREVIEW_NAV_REST).abs() < 1e-6);
+        }
+    }
+
+    /// PIN (§7.7 ②) — **a history that has run out dims its button and keeps its
+    /// place.**
+    ///
+    /// 「nowhere to go: dimmed and inert, never hidden — a button that vanishes
+    /// when the history runs out moves the two beside it under the pointer」.
+    ///
+    /// MUTATION: return early instead of dimming and the boxes assertion goes
+    /// red, which is the pointer landing on `Reload` where `Back` was.
+    #[test]
+    fn a_spent_button_keeps_its_place_and_is_drawn_dim() {
+        let spent = WebHeadState {
+            can_go_back: false,
+            can_go_forward: false,
+            loading: false,
+        };
+        let (_, _, sprites) = page_head(spent, ChromePointer::default());
+        let back = glyphs(&sprites, ChromeMark::Chevron { turned_degrees: 90 });
+        assert_eq!(back.len(), 1, "a spent button is dimmed, never hidden");
+        assert!((back[0].opacity - PREVIEW_NAV_SPENT).abs() < 1e-6);
+        // And the boxes do not move: the geometry is a function of the tools,
+        // which is what the history cannot touch.
+        let (_, _, live) = head_geometry(page_tools());
+        let (_, _, also) = head_geometry(page_tools());
+        assert_eq!(live.back, also.back);
+    }
+
+    /// PIN (§7.7 ②) — **one button, two glyphs**: while a navigation is in
+    /// flight the reload is a stop. 「同一秒里刷新钮变停止钮,三个钮还是三个钮」.
+    #[test]
+    fn a_loading_page_turns_its_reload_into_a_stop() {
+        let flying = WebHeadState {
+            can_go_back: true,
+            can_go_forward: false,
+            loading: true,
+        };
+        let (_, _, sprites) = page_head(flying, ChromePointer::default());
+        assert!(
+            glyphs(&sprites, ChromeMark::Refresh).is_empty(),
+            "nothing to reload while something is arriving"
+        );
+        // The stop has taken the reload's box, glyph and all — same control,
+        // same rectangle, one second apart.
+        let (_, _, geometry) = head_geometry(page_tools());
+        let reload = geometry.reload.expect("a reload box");
+        let stop = glyphs(&sprites, ChromeMark::PaneClose)
+            .into_iter()
+            .find(|sprite| {
+                sprite.rect[0] >= reload[0]
+                    && sprite.rect[2] <= reload[2]
+                    && sprite.rect[1] >= reload[1]
+                    && sprite.rect[3] <= reload[3]
+            })
+            .expect("a stop standing in the reload's own box");
+        assert!((stop.opacity - PREVIEW_NAV_REST).abs() < 1e-6);
+    }
+
+    /// PIN (§7.7 ②) — **the rule belongs to what is after it.**
+    ///
+    /// Written any other way it hangs at the head's right edge introducing
+    /// nothing for as long as the pointer is elsewhere, and the hover tools are
+    /// invisible at rest: a divider with an empty side is a line telling the
+    /// reader something follows when nothing does. The switcher's own `PINNED`
+    /// section is built on the same sentence.
+    ///
+    /// MUTATION: draw the rule unconditionally and the first assertion goes red.
+    #[test]
+    fn the_rule_fades_in_with_the_group_it_introduces() {
+        let state = WebHeadState {
+            can_go_back: true,
+            can_go_forward: true,
+            loading: false,
+        };
+        let (_, _, resting) = page_head(state, ChromePointer::default());
+        let fills = |sprites: &[ChromeSprite]| glyphs(sprites, ChromeMark::Fill).len();
+        let at_rest = fills(&resting);
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.add_preview(&metrics).expect("the preview seat lands");
+        let seat = seats.preview().expect("the preview seat");
+        let (_, _, hovered) = page_head(
+            state,
+            ChromePointer {
+                pane_hover: Some(seat),
+                ..ChromePointer::default()
+            },
+        );
+        assert!(
+            fills(&hovered) > at_rest,
+            "the rule and its group arrive together"
+        );
+        assert!(
+            glyphs(&hovered, ChromeMark::Code).len() == 1,
+            "and what it introduces is the developer tools"
+        );
+    }
+
+    /// PIN (§7.7 ②, ⑥) — **a page's seat wears the globe and a document's wears
+    /// the file, and both come out of one function.**
+    ///
+    /// `seats::pane_mark` is where the choice is made, which is what keeps the
+    /// head, the strip row above it, the switcher's line and Recent's row from
+    /// drawing four glyphs for one seat — the mock-up's `pvMarkId`, said once.
+    #[test]
+    fn a_page_wears_the_globe_and_a_document_the_file() {
+        let palette = chrome_palette();
+        assert_eq!(
+            pane_mark(SeatKind::Preview, Some(ChromeMark::Globe), palette).0,
+            ChromeMark::Globe
+        );
+        assert_eq!(
+            pane_mark(SeatKind::Preview, None, palette).0,
+            ChromeMark::File,
+            "a document is what it always was"
+        );
+        // Same box either way, so a column of heads does not shuffle when one
+        // seat's content has an icon and the next one's has not.
+        assert_eq!(
+            pane_mark(SeatKind::Preview, Some(ChromeMark::Globe), palette).1,
+            pane_mark(SeatKind::Preview, None, palette).1
+        );
+    }
+
+    /// PIN (§7.7 ④) — **the fact stands between the sentence and the verb, and a
+    /// card without one is the card that was there before.**
+    #[test]
+    fn the_card_stacks_a_fact_between_the_sentence_and_the_verb() {
+        let body = [40.0, 60.0, 440.0, 460.0];
+        let plain = preview_card_geometry(body, 120.0, false, 1.0);
+        let detailed = preview_card_geometry(body, 120.0, true, 1.0);
+        assert_eq!(
+            plain.detail[3] - plain.detail[1],
+            0.0,
+            "no fact, no line — and no gap held open for one"
+        );
+        assert!(detailed.detail[3] > detailed.detail[1]);
+        assert!(
+            detailed.notice[3] <= detailed.detail[1] && detailed.detail[3] <= detailed.button[1],
+            "icon, sentence, fact, verb — in that order"
+        );
+        // The column stays centred on the body: a taller card grows equally at
+        // both ends rather than pushing its verb off the bottom.
+        let plain_middle = (plain.icon[1] + plain.button[3]) / 2.0;
+        let detailed_middle = (detailed.icon[1] + detailed.button[3]) / 2.0;
+        assert!((plain_middle - detailed_middle).abs() < 1.5);
     }
 }
 

@@ -324,6 +324,15 @@ impl TipFace {
 /// click target, and the `×` is a click target the mock-up gives no tip at all.
 /// Folding them together would have meant teaching the press, drag and cursor
 /// machinery about a target that exists only to be hovered.
+/// Which of a page's head verbs an anchor is for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WebNavTool {
+    Back,
+    Forward,
+    Reload,
+    DevTools,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TooltipAnchorId {
     /// The tab body — index into the strip, matching `ChromeTarget::Tab`.
@@ -391,6 +400,14 @@ pub enum TooltipAnchorId {
     /// the tree"; a *bare* arrow beside it has to say which of the two leavings
     /// it is, and nothing in the picture can.
     PreviewBrowser(bt_layout::SeatId),
+    /// **A page's three navigation buttons and its developer tools** (§7.7 ②,
+    /// W2 slice ④), and every one of them registers where the hand-off arrow
+    /// above says why one has to: a `<` and a `>` in a 22px box are the
+    /// submenu's own arrow turned, a circular arrow is this window's refresh,
+    /// and `</>` is what markdown's `Edit source` wears — four glyphs a reader
+    /// has met here meaning something else. The reload's tip changes with the
+    /// button, because the button changes into a stop.
+    PreviewWebNav(bt_layout::SeatId, WebNavTool),
     /// One tick of a pane's command marks rail — *"hover **glances** the command"*
     /// (mock 4604).
     ///

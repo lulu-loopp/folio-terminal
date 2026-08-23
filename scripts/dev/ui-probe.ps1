@@ -507,7 +507,11 @@ $NAMED_KEYS = @{
   Space = 0x20; Delete = 0x2E; Insert = 0x2D
   Left = 0x25; Up = 0x26; Right = 0x27; Down = 0x28
   Home = 0x24; End = 0x23; PageUp = 0x21; PageDown = 0x22
-  F9 = 0x78; F10 = 0x79
+  F9 = 0x78; F10 = 0x79; F11 = 0x7A; F12 = 0x7B
+  # `F3` is a shipped chord (`next-match`, `Shift+F3` for its opposite) and
+  # `F12` is one since 2026-08-22 (`web-devtools`), so both are keys an
+  # acceptance run has to be able to press.
+  F1 = 0x70; F2 = 0x71; F3 = 0x72; F4 = 0x73
   # VK_APPS — the Menu key, which is how a keyboard raises a context menu on
   # every Windows application. Named `Menu` here rather than `Apps` because that
   # is what is printed on the keycap.

@@ -45,11 +45,14 @@ use webview2_com::{
     AcceleratorKeyPressedEventHandler, BrowserProcessExitedEventHandler,
     CreateCoreWebView2CompositionControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, CursorChangedEventHandler,
-    DownloadStartingEventHandler, FocusChangedEventHandler, LaunchingExternalUriSchemeEventHandler,
-    MoveFocusRequestedEventHandler, NavigationCompletedEventHandler,
-    NavigationStartingEventHandler, NewBrowserVersionAvailableEventHandler,
-    NewWindowRequestedEventHandler, PermissionRequestedEventHandler, ProcessFailedEventHandler,
-    take_pwstr,
+    DocumentTitleChangedEventHandler, DownloadStartingEventHandler,
+    FindActiveMatchIndexChangedEventHandler, FindMatchCountChangedEventHandler,
+    FindStartCompletedHandler, FocusChangedEventHandler, HistoryChangedEventHandler,
+    LaunchingExternalUriSchemeEventHandler, MoveFocusRequestedEventHandler,
+    NavigationCompletedEventHandler, NavigationStartingEventHandler,
+    NewBrowserVersionAvailableEventHandler, NewWindowRequestedEventHandler,
+    PermissionRequestedEventHandler, ProcessFailedEventHandler, SourceChangedEventHandler,
+    StatusBarTextChangedEventHandler, take_pwstr,
 };
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::core::{BOOL, HSTRING, Interface as _, PCWSTR, PWSTR};
@@ -167,6 +170,61 @@ pub enum WebEvent {
     /// `IDC_*` — 32512 arrow, 32513 I-beam, 32649 hand.
     CursorChanged {
         system_cursor_id: u32,
+    },
+    /// The navigation stack moved: a page was pushed onto it, popped off it, or
+    /// replaced through the history API.
+    ///
+    /// **The two booleans ride on the event and are never polled** (slice ④; the
+    /// W1 report names this: "`CanGoBack`/`CanGoForward` 要以引擎为准,不要照抄
+    /// 小样的 420ms 假节拍"). They are read inside `HistoryChanged`, which is the
+    /// only moment the engine promises they are settled — a getter called on the
+    /// window's own clock would be sampling a value that changes on somebody
+    /// else's.
+    HistoryChanged {
+        can_go_back: bool,
+        can_go_forward: bool,
+    },
+    /// The document said what it is called. This is what the head's name cell
+    /// shows, and it arrives separately from the URL because a page can rename
+    /// itself without navigating.
+    DocumentTitleChanged {
+        title: String,
+    },
+    /// The committed URL changed — a navigation, a redirect, or a `pushState`.
+    ///
+    /// Distinct from [`Self::NavigationCompleted`] on purpose: the history API
+    /// changes the address without completing a navigation, and an address field
+    /// that only followed completions would sit on a stale URL for the whole of
+    /// a single-page application.
+    SourceChanged {
+        uri: String,
+    },
+    /// What a browser would put in its status bubble — the target of whatever
+    /// the pointer is over, or empty when it is over nothing.
+    ///
+    /// The engine's own bar is switched off (`SetIsStatusBarEnabled(false)`);
+    /// this is the text it would have drawn, handed over so the preview's foot
+    /// can be the one band that says both things (§7.7 ③).
+    StatusBarTextChanged {
+        text: String,
+    },
+    /// A download started and was cancelled. `uri` is where it was coming from
+    /// and `file_name` is what it would have been called.
+    ///
+    /// Cancelled in the callback and not by the caller, because
+    /// `ICoreWebView2DownloadStartingEventArgs::SetCancel` cannot be decided
+    /// later — the same shape as `AcceleratorKeyPressed`'s `SetHandled`. What
+    /// the caller decides is what happens *instead*, which is a hand-off or a
+    /// card (§7.7 ④).
+    DownloadStarting {
+        uri: String,
+        file_name: String,
+    },
+    /// The find session's tally: how many matches the page holds, and which one
+    /// is current (1-based; `0` while there is no current one).
+    FindMatches {
+        count: i32,
+        active: i32,
     },
 }
 
@@ -370,6 +428,14 @@ pub struct WebHost {
     /// it here, and the state machine decides — from the generation the event
     /// carried — whether it is wanted.
     pending_controller: Option<Rc<RefCell<Option<ICoreWebView2CompositionController>>>>,
+    /// Whether the find session's two counter events have been attached.
+    ///
+    /// `ICoreWebView2::Find` hands back the same session object every time, so
+    /// subscribing on each call would stack a fresh handler per keystroke and
+    /// report one count several times over. A `Cell` and not a plain `bool`
+    /// because the attaching happens behind `&self`, as every other verb here
+    /// does.
+    find_attached: std::cell::Cell<bool>,
 }
 
 impl WebHost {
@@ -393,6 +459,7 @@ impl WebHost {
             webview: None,
             environment: None,
             pending_controller: None,
+            find_attached: std::cell::Cell::new(false),
         }
     }
 
@@ -580,8 +647,15 @@ impl WebHost {
             settings
                 .SetIsStatusBarEnabled(false)
                 .map_err(|error| failure("SetIsStatusBarEnabled", &error))?;
+            // **On since slice ④**, which is what a verb for it means: the head
+            // carries a `Developer tools` tool and `F12` is a row of the
+            // shortcut table, and neither can do anything against a controller
+            // that has the tools switched off. The window keeps the key —
+            // `webhost::claimable_chords` claims `F12` while a page has the
+            // focus — so the engine's own accelerator never reaches the page and
+            // there is still one door.
             settings
-                .SetAreDevToolsEnabled(false)
+                .SetAreDevToolsEnabled(true)
                 .map_err(|error| failure("SetAreDevToolsEnabled", &error))?;
             settings
                 .SetAreDefaultContextMenusEnabled(false)
@@ -680,6 +754,84 @@ impl WebHost {
                 )
                 .map_err(|error| failure("add_NavigationCompleted", &error))?;
 
+            // ── what the head shows (slice ④) ─────────────────────────────
+            //
+            // Three facts, three events, and not one of them polled. The head is
+            // rebuilt every frame from what the seat last heard, so a getter
+            // called on the window's clock would be asking the engine a question
+            // it has already answered — and, for the two history flags, asking
+            // it at a moment when the answer is explicitly not settled.
+            let shared = Rc::clone(&self.shared);
+            webview
+                .add_HistoryChanged(
+                    &HistoryChangedEventHandler::create(Box::new(move |view, _| {
+                        if let Some(view) = view.as_ref() {
+                            shared.push(WebEvent::HistoryChanged {
+                                can_go_back: read_bool(|out| view.CanGoBack(out)),
+                                can_go_forward: read_bool(|out| view.CanGoForward(out)),
+                            });
+                        }
+                        Ok(())
+                    })),
+                    &mut token,
+                )
+                .map_err(|error| failure("add_HistoryChanged", &error))?;
+
+            let shared = Rc::clone(&self.shared);
+            webview
+                .add_DocumentTitleChanged(
+                    &DocumentTitleChangedEventHandler::create(Box::new(move |view, _| {
+                        if let Some(view) = view.as_ref() {
+                            shared.push(WebEvent::DocumentTitleChanged {
+                                title: read_string(|out| view.DocumentTitle(out)),
+                            });
+                        }
+                        Ok(())
+                    })),
+                    &mut token,
+                )
+                .map_err(|error| failure("add_DocumentTitleChanged", &error))?;
+
+            let shared = Rc::clone(&self.shared);
+            webview
+                .add_SourceChanged(
+                    &SourceChangedEventHandler::create(Box::new(move |view, _| {
+                        if let Some(view) = view.as_ref() {
+                            shared.push(WebEvent::SourceChanged {
+                                uri: read_string(|out| view.Source(out)),
+                            });
+                        }
+                        Ok(())
+                    })),
+                    &mut token,
+                )
+                .map_err(|error| failure("add_SourceChanged", &error))?;
+
+            // The status bubble's text, with the engine's own bubble switched
+            // off above: the preview's foot is already a band that says where
+            // this seat's content lives, and §7.7 ③ makes it the same band that
+            // says where a link goes.
+            let shared = Rc::clone(&self.shared);
+            let status: ICoreWebView2_12 = webview
+                .cast()
+                .map_err(|error| failure("ICoreWebView2_12", &error))?;
+            status
+                .add_StatusBarTextChanged(
+                    &StatusBarTextChangedEventHandler::create(Box::new(move |view, _| {
+                        let text = match view.as_ref().and_then(|view| view.cast().ok()) {
+                            Some(view12) => {
+                                let view12: ICoreWebView2_12 = view12;
+                                read_string(|out| view12.StatusBarText(out))
+                            }
+                            None => String::new(),
+                        };
+                        shared.push(WebEvent::StatusBarTextChanged { text });
+                        Ok(())
+                    })),
+                    &mut token,
+                )
+                .map_err(|error| failure("add_StatusBarTextChanged", &error))?;
+
             // ── the doors slice ② will widen, shut for now ────────────────
             //
             // A window opened by a page, a download, a permission and an
@@ -698,6 +850,12 @@ impl WebHost {
                 )
                 .map_err(|error| failure("add_NewWindowRequested", &error))?;
 
+            // **The download is still cancelled here, and now it is also
+            // reported** (方案 §0: 「取消并外开可重放的 GET URL,不可重放者提示无法
+            // 下载」). `SetCancel` cannot be decided later, so the refusal is
+            // unconditional and the *answer* — hand the address to the machine's
+            // browser, or raise the sheet — is the caller's, on its own turn.
+            let shared = Rc::clone(&self.shared);
             let downloads: ICoreWebView2_4 = webview
                 .cast()
                 .map_err(|error| failure("ICoreWebView2_4", &error))?;
@@ -706,6 +864,14 @@ impl WebHost {
                     &DownloadStartingEventHandler::create(Box::new(move |_, args| {
                         let Some(args) = args else { return Ok(()) };
                         args.SetCancel(true)?;
+                        let (uri, file_name) = match args.DownloadOperation() {
+                            Ok(operation) => (
+                                read_string(|out| operation.Uri(out)),
+                                read_string(|out| operation.ResultFilePath(out)),
+                            ),
+                            Err(_) => (String::new(), String::new()),
+                        };
+                        shared.push(WebEvent::DownloadStarting { uri, file_name });
                         Ok(())
                     })),
                     &mut token,
@@ -949,6 +1115,201 @@ impl WebHost {
             return Ok(());
         };
         unsafe { webview.Reload() }.map_err(|error| failure("ICoreWebView2::Reload", &error))
+    }
+
+    /// Stop whatever is loading. What the reload button turns into while a
+    /// navigation is in flight (§7.7 ②).
+    pub fn stop(&self) -> Result<(), String> {
+        let Some(webview) = self.webview.as_ref() else {
+            return Ok(());
+        };
+        unsafe { webview.Stop() }.map_err(|error| failure("ICoreWebView2::Stop", &error))
+    }
+
+    /// Walk the page's own navigation stack backwards.
+    ///
+    /// **Not guarded on `CanGoBack` here.** The caller draws the button from
+    /// [`WebEvent::HistoryChanged`] and does not offer a press it cannot honour;
+    /// a second guard on this side would be a second opinion about the same
+    /// stack, read a frame later than the one the reader is looking at.
+    pub fn go_back(&self) -> Result<(), String> {
+        let Some(webview) = self.webview.as_ref() else {
+            return Ok(());
+        };
+        unsafe { webview.GoBack() }.map_err(|error| failure("ICoreWebView2::GoBack", &error))
+    }
+
+    /// The same, forwards.
+    pub fn go_forward(&self) -> Result<(), String> {
+        let Some(webview) = self.webview.as_ref() else {
+            return Ok(());
+        };
+        unsafe { webview.GoForward() }.map_err(|error| failure("ICoreWebView2::GoForward", &error))
+    }
+
+    /// Open the developer tools on this page, in the window the engine keeps for
+    /// them.
+    ///
+    /// A window of the browser's own and not a surface of this one, which is the
+    /// whole of what「C-精简」costs here: the tools are the engine's, they are
+    /// worth a verb, and they are not worth this window growing a docked panel
+    /// it would then have to lay out beside a page.
+    pub fn open_dev_tools(&self) -> Result<(), String> {
+        let Some(webview) = self.webview.as_ref() else {
+            return Ok(());
+        };
+        unsafe { webview.OpenDevToolsWindow() }
+            .map_err(|error| failure("ICoreWebView2::OpenDevToolsWindow", &error))
+    }
+
+    /// The page's zoom, as the engine holds it. `1.0` is unzoomed.
+    pub fn zoom(&self) -> f64 {
+        let Some(controller) = self.controller.as_ref() else {
+            return 1.0;
+        };
+        let factor = read::<f64>(|out| unsafe { controller.ZoomFactor(out) });
+        if factor > 0.0 { factor } else { 1.0 }
+    }
+
+    /// Set the page's zoom.
+    ///
+    /// The controller's zoom and not a transform on the visual: a scaled visual
+    /// would resample the page's own raster, and what a reader asks for when
+    /// they zoom a document is more text laid out larger, not the same text
+    /// magnified.
+    pub fn set_zoom(&self, factor: f64) -> Result<(), String> {
+        let Some(controller) = self.controller.as_ref() else {
+            return Ok(());
+        };
+        unsafe { controller.SetZoomFactor(factor) }
+            .map_err(|error| failure("ICoreWebView2Controller::SetZoomFactor", &error))
+    }
+
+    /// Start — or restart — a find session over the page.
+    ///
+    /// The engine's own find dialog is suppressed, because the box a reader is
+    /// typing into is this window's search capsule (§7.7 ②: 「第二个 host,不是第
+    /// 二份实现」). Every count that comes back arrives as
+    /// [`WebEvent::FindMatches`]; nothing here is polled, for
+    /// [`WebEvent::HistoryChanged`]'s reason.
+    pub fn find(&self, term: &str, case_sensitive: bool) -> Result<(), String> {
+        let Some(find) = self.find_session()? else {
+            return Ok(());
+        };
+        let environment: ICoreWebView2Environment15 = self
+            .environment
+            .as_ref()
+            .ok_or_else(|| String::from("no environment to make find options from"))?
+            .cast()
+            .map_err(|error| failure("ICoreWebView2Environment15", &error))?;
+        unsafe {
+            let options = environment
+                .CreateFindOptions()
+                .map_err(|error| failure("CreateFindOptions", &error))?;
+            options
+                .SetFindTerm(&HSTRING::from(term))
+                .map_err(|error| failure("SetFindTerm", &error))?;
+            options
+                .SetIsCaseSensitive(case_sensitive)
+                .map_err(|error| failure("SetIsCaseSensitive", &error))?;
+            options
+                .SetShouldHighlightAllMatches(true)
+                .map_err(|error| failure("SetShouldHighlightAllMatches", &error))?;
+            options
+                .SetSuppressDefaultFindDialog(true)
+                .map_err(|error| failure("SetSuppressDefaultFindDialog", &error))?;
+            let shared = Rc::clone(&self.shared);
+            let session = find.clone();
+            find.Start(
+                &options,
+                &FindStartCompletedHandler::create(Box::new(move |_| {
+                    shared.push(WebEvent::FindMatches {
+                        count: read::<i32>(|out| session.MatchCount(out)),
+                        active: read::<i32>(|out| session.ActiveMatchIndex(out)),
+                    });
+                    Ok(())
+                })),
+            )
+            .map_err(|error| failure("ICoreWebView2Find::Start", &error))
+        }
+    }
+
+    /// Walk to the next match, or the previous one. Both wrap, which is what the
+    /// capsule's own walk does.
+    pub fn find_step(&self, forwards: bool) -> Result<(), String> {
+        let Some(find) = self.find_session()? else {
+            return Ok(());
+        };
+        unsafe {
+            if forwards {
+                find.FindNext()
+            } else {
+                find.FindPrevious()
+            }
+        }
+        .map_err(|error| failure("ICoreWebView2Find::FindNext", &error))
+    }
+
+    /// End the find session and take the page's highlights off.
+    pub fn find_stop(&self) -> Result<(), String> {
+        let Some(find) = self.find_session()? else {
+            return Ok(());
+        };
+        unsafe { find.Stop() }.map_err(|error| failure("ICoreWebView2Find::Stop", &error))
+    }
+
+    /// The page's find session, with its two counters' events attached once.
+    ///
+    /// `Ok(None)` means there is no controller yet — the seat is still coming
+    /// up, and a find asked for before the page exists is a find with nothing to
+    /// search. A runtime too old to carry `ICoreWebView2_28` is an `Err`, said
+    /// out loud rather than silently answering zero: "no matches" and "this
+    /// build cannot count" are two different things and only one of them is
+    /// about the page.
+    fn find_session(&self) -> Result<Option<ICoreWebView2Find>, String> {
+        let Some(webview) = self.webview.as_ref() else {
+            return Ok(None);
+        };
+        let view28: ICoreWebView2_28 = webview
+            .cast()
+            .map_err(|error| failure("ICoreWebView2_28", &error))?;
+        let find =
+            unsafe { view28.Find() }.map_err(|error| failure("ICoreWebView2::Find", &error))?;
+        if self.find_attached.replace(true) {
+            return Ok(Some(find));
+        }
+        let mut token = 0i64;
+        unsafe {
+            let shared = Rc::clone(&self.shared);
+            find.add_MatchCountChanged(
+                &FindMatchCountChangedEventHandler::create(Box::new(move |session, _| {
+                    if let Some(session) = session.as_ref() {
+                        shared.push(WebEvent::FindMatches {
+                            count: read::<i32>(|out| session.MatchCount(out)),
+                            active: read::<i32>(|out| session.ActiveMatchIndex(out)),
+                        });
+                    }
+                    Ok(())
+                })),
+                &mut token,
+            )
+            .map_err(|error| failure("add_MatchCountChanged", &error))?;
+            let shared = Rc::clone(&self.shared);
+            find.add_ActiveMatchIndexChanged(
+                &FindActiveMatchIndexChangedEventHandler::create(Box::new(move |session, _| {
+                    if let Some(session) = session.as_ref() {
+                        shared.push(WebEvent::FindMatches {
+                            count: read::<i32>(|out| session.MatchCount(out)),
+                            active: read::<i32>(|out| session.ActiveMatchIndex(out)),
+                        });
+                    }
+                    Ok(())
+                })),
+                &mut token,
+            )
+            .map_err(|error| failure("add_ActiveMatchIndexChanged", &error))?;
+        }
+        Ok(Some(find))
     }
 
     /// Put the keyboard inside the page.

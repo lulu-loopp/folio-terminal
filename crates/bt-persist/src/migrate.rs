@@ -54,6 +54,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (16, migrate_settings_v16_to_v17),
     (17, migrate_settings_v17_to_v18),
     (18, migrate_settings_v18_to_v19),
+    (19, migrate_settings_v19_to_v20),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -411,6 +412,22 @@ fn migrate_settings_v18_to_v19(mut value: Value) -> Value {
             "focus_card_height".to_owned(),
             Value::from(crate::settings::DEFAULT_FOCUS_CARD_HEIGHT),
         );
+    }
+    value
+}
+
+/// v19 -> v20: which engine a web preview's address field hands a non-address to
+/// (`docs/DESIGN.md` §7.7 ②, W2 slice ④).
+///
+/// One key a tenth time, and it lands the way v17 and v18 did rather than the way v13–v16 did:
+/// there was no behaviour here to carry forward. Before this key there was no address field and
+/// no way at all to type a word into a web preview, so the migration is not choosing between a
+/// habit and a product default — it is writing the default the feature ships with, which is the
+/// one `SearchEngineV1` argues for.
+fn migrate_settings_v19_to_v20(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(20));
+        object.insert("search_engine".to_owned(), Value::from("DuckDuckGo"));
     }
     value
 }

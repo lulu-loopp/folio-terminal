@@ -402,6 +402,20 @@ pub fn scheme_of(input: &str) -> Option<String> {
     split_scheme(input.trim()).map(|(scheme, _)| scheme)
 }
 
+/// The host of an address, for the card that has to say **which name did not
+/// answer** (§7.7 ④'s 「加载失败」 row). `None` when the text carries no
+/// authority at all.
+///
+/// Here and not beside the card, for the reason `scheme_of` is here: this file
+/// already splits an address four ways and a second splitter would be a second
+/// answer about the same string. The port is dropped — a connection failure is
+/// about the name, and the port is on the head in full.
+pub fn host_of(input: &str) -> Option<String> {
+    let (_, rest) = split_scheme(input.trim())?;
+    let (host, _) = split_host_port(authority(rest));
+    (!host.is_empty()).then_some(host)
+}
+
 /// The schemes this door has an opinion about **by name**, and what that
 /// opinion is. `None` means "never heard of it", which is two things at once:
 /// the catch-all refusal below, and the reason [`split_scheme`] is allowed to

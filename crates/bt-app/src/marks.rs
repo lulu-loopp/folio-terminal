@@ -664,6 +664,21 @@ pub enum ChromeMark {
     /// corner to corner it would lose half its width to the edge of its own
     /// raster at both ends, which reads as an edge that goes thin exactly where
     /// it meets the line it is joining.
+    /// `#i-globe` — **the web content class's own mark** (§7.7 ②, W2 slice ④).
+    ///
+    /// A page's head, the strip row above it, the preview switcher's line and
+    /// Recent's row all draw the seat's mark, and they all draw it through
+    /// `seats::pane_mark`, so there is one glyph and one place it is chosen.
+    ///
+    /// **The site's own favicon is not this mark and is not drawn yet.** §7.7 ②
+    /// asks for the favicon where a site has one and this globe where it has
+    /// not, and the two halves are not the same kind of work: every variant of
+    /// this enum is a vector symbol struck from a path list and cached by name,
+    /// and a favicon is a raster the engine fetches at runtime — a second
+    /// pipeline into the chrome atlas that no mark has. Recorded as an open item
+    /// rather than faked: a coloured square with a letter in it would be this
+    /// window inventing an icon for somebody else's site.
+    Globe,
     GraphCurve {
         stroke_px: u32,
         /// The dot is at the box's right rather than its left — the edge runs
@@ -744,6 +759,7 @@ impl ChromeMark {
             Self::GitMergeCurve => "git-merge-curve",
             // One id for four mirrorings and every span, exactly as the chevron
             // has one id for every angle: `mark_key` adds the rest.
+            Self::Globe => "i-globe",
             Self::GraphCurve { .. } => "graph-curve",
         }
     }
@@ -1585,6 +1601,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::ProfileCmd => 14,
         ChromeMark::Float => 17,
         ChromeMark::External => 40,
+        ChromeMark::Globe => 41,
         ChromeMark::DockLeft => 18,
         ChromeMark::DockRight => 26,
         ChromeMark::ResizeGrip => 19,

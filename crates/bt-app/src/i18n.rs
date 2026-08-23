@@ -1400,6 +1400,70 @@ pub enum Text {
     // be this window guessing.
     /// `.pv-tool.pv-browser`'s tip.
     PreviewOpenInBrowser,
+
+    // ── the web seat's own chrome (§7.7, W2 slice ④, 2026-08-22) ────────────
+    //
+    // One contiguous block at the end, per this table's standing rule. Fifteen
+    // entries and no more: the three navigation buttons and the stop they turn
+    // into, the four rows this slice puts in the shortcut table, and the five
+    // failure cards' sentences and verbs. Everything else the seat says is
+    // either a value (a host name, a scheme, an error string — see
+    // `web_fail_did_not_respond` below) or a word this table already owns
+    // (`HyperlinkBlockedSuffix` is the foot's `· blocked`, and it is the same
+    // ruling's same word).
+    /// The `Address` row of the shortcut table, and the name of the verb
+    /// `Ctrl+L` runs. Not `Address bar`: there is no bar — the page's title *is*
+    /// the field, and the row names what the caret lands in.
+    ShortcutWebAddress,
+    /// The `Developer tools` row, and the tip on the head's `</>`. One entry for
+    /// both on `RowFocusMode`'s precedent: the chord and the button turn the
+    /// same verb, so they are one name.
+    ShortcutWebDevTools,
+    /// The `Close search` row — bare `Escape`, in force only while the capsule
+    /// is up. See `shortcuts::BINDINGS` for why a page makes this a row of the
+    /// table rather than a rung the ladder can keep to itself.
+    ShortcutCloseSearch,
+    /// The tag the shortcut editor prints under a row that is only in force
+    /// while a page holds the keyboard.
+    ShortcutScopeWebPage,
+    /// The tag for a row in force on either of the search capsule's two hosts.
+    ShortcutScopeSearchHost,
+    /// `.pv-nav.pv-back`'s tip.
+    PreviewWebBack,
+    /// `.pv-nav.pv-fwd`'s tip.
+    PreviewWebForward,
+    /// `.pv-nav.pv-reload`'s tip while nothing is in flight — and the single
+    /// verb on the two failure cards that offer one (§7.7 ④). One entry, because
+    /// the button and the card's button are the same word for the same call.
+    PreviewWebReload,
+    /// The same button's tip while a navigation is in flight, when it is a stop.
+    PreviewWebStop,
+    /// The `Runtime missing` card's sentence.
+    WebFailRuntimeSay,
+    /// Its one verb.
+    WebFailRuntimeVerb,
+    /// The `Process stopped` card's sentence. Names the render process, because
+    /// that is the fact a reader can act on: the window did not die, one page's
+    /// renderer did.
+    WebFailCrashSay,
+    /// The `Blocked` card's sentence when the address carries no scheme to name.
+    /// The spelling that *can* name one is `web_fail_blocked_scheme` below.
+    WebFailBlockedSay,
+    /// Its one verb — the address is on the card, so the verb is to take it.
+    WebFailBlockedVerb,
+    /// The `Download refused` card's two sentences. The second is the fact, not
+    /// prose: it says which property of the request cannot cross a plain link,
+    /// which is the difference between this card and one that could offer a
+    /// retry.
+    WebFailDownloadSay,
+    /// Its one verb. The download is gone; the page that asked for it is not,
+    /// and handing *that* over is the one action that still gets the file.
+    WebFailDownloadVerb,
+    /// `General ▸ Search engine` — the row.
+    RowSearchEngine,
+    /// Its sentence. Says the one thing the three names cannot: **when** this
+    /// row is consulted at all.
+    DescSearchEngine,
 }
 
 impl Text {
@@ -2115,7 +2179,11 @@ impl Text {
             Self::ShortcutSavePreview => pick(lang, "Save the open document", "保存打开的文档"),
             Self::ShortcutPrevCommandMark => pick(lang, "Previous command", "上一条命令"),
             Self::ShortcutNextCommandMark => pick(lang, "Next command", "下一条命令"),
-            Self::ShortcutOpenSearch => pick(lang, "Find in the terminal", "在终端里查找"),
+            // **"in this pane" since 2026-08-22**, and the row's scope is why:
+            // the capsule has two hosts now (§7.7 ②) and a title naming one of
+            // them would be a shortcut page telling a reader the key does not
+            // work where it does. It names the surface both hosts are — a pane.
+            Self::ShortcutOpenSearch => pick(lang, "Find in this pane", "在这个窗格里查找"),
             Self::ShortcutNextMatch => pick(lang, "Next match", "下一处匹配"),
             Self::ShortcutPrevMatch => pick(lang, "Previous match", "上一处匹配"),
             Self::ShortcutSummonPip1 => pick(lang, "Summon PiP slot 1", "唤出 PiP 槽位 1"),
@@ -2524,6 +2592,63 @@ impl Text {
             // and not something this button chose — and not a name, because
             // which browser answers is the machine's business.
             Self::PreviewOpenInBrowser => pick(lang, "Open in browser", "在浏览器中打开"),
+            Self::ShortcutWebAddress => pick(lang, "Address", "地址"),
+            Self::ShortcutWebDevTools => pick(lang, "Developer tools", "开发者工具"),
+            Self::ShortcutCloseSearch => pick(lang, "Close search", "关闭搜索"),
+            // "On a page" and not "In the web preview": every other tag in this
+            // family names where the keyboard is standing, and the reader of
+            // this line is looking for the state their hands are in.
+            Self::ShortcutScopeWebPage => pick(lang, "On a page", "键盘在网页里时"),
+            // Names what is true of both hosts rather than listing them: a tag
+            // reading "On a terminal's own scrollback or on a page" is a
+            // sentence, and every other tag in this family is a place.
+            Self::ShortcutScopeSearchHost => {
+                pick(lang, "Where there is text to search", "有正文可查找的地方")
+            }
+            Self::PreviewWebBack => pick(lang, "Back", "后退"),
+            Self::PreviewWebForward => pick(lang, "Forward", "前进"),
+            Self::PreviewWebReload => pick(lang, "Reload", "重新加载"),
+            Self::PreviewWebStop => pick(lang, "Stop", "停止"),
+            // The product name stays in Latin in both columns because it is the
+            // name of the thing to install, and a reader searching for it in a
+            // list of installed programs will read it there in Latin.
+            Self::WebFailRuntimeSay => pick(
+                lang,
+                "Microsoft Edge WebView2 Runtime is not installed.",
+                "未安装 Microsoft Edge WebView2 Runtime。",
+            ),
+            Self::WebFailRuntimeVerb => pick(lang, "Download the runtime", "下载运行时"),
+            Self::WebFailCrashSay => pick(
+                lang,
+                "This page stopped running. Its render process exited.",
+                "这个页面停止运行了。它的渲染进程已退出。",
+            ),
+            Self::WebFailBlockedSay => pick(
+                lang,
+                "This address does not open in a preview.",
+                "这个地址不在预览中打开。",
+            ),
+            Self::WebFailBlockedVerb => pick(lang, "Copy address", "复制地址"),
+            Self::WebFailDownloadSay => pick(
+                lang,
+                "This download cannot be handed to your browser. The request carried data a plain link cannot replay.",
+                "这次下载没法交给浏览器。请求里带着普通链接重放不出来的东西。",
+            ),
+            Self::WebFailDownloadVerb => pick(
+                lang,
+                "Open this page in your browser",
+                "在浏览器中打开这个页面",
+            ),
+            Self::RowSearchEngine => pick(lang, "Search engine", "搜索引擎"),
+            // Names the field rather than the feature, because that is where a
+            // reader meets it: they typed a word into the place an address goes
+            // and something happened. It says nothing about which engine is
+            // better — the three names are on the picker beside this line.
+            Self::DescSearchEngine => pick(
+                lang,
+                "Where a web preview's address field sends text that is not an address",
+                "在网页预览的地址栏里打了一段不是地址的文字时,交给哪个搜索引擎",
+            ),
         }
     }
 
@@ -2539,7 +2664,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 427] = [
+    pub const ALL: [Self; 445] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -2967,6 +3092,24 @@ impl Text {
         Self::RowFocusCardHeight,
         Self::DescFocusCardHeight,
         Self::PreviewOpenInBrowser,
+        Self::ShortcutWebAddress,
+        Self::ShortcutWebDevTools,
+        Self::ShortcutCloseSearch,
+        Self::ShortcutScopeWebPage,
+        Self::ShortcutScopeSearchHost,
+        Self::PreviewWebBack,
+        Self::PreviewWebForward,
+        Self::PreviewWebReload,
+        Self::PreviewWebStop,
+        Self::WebFailRuntimeSay,
+        Self::WebFailRuntimeVerb,
+        Self::WebFailCrashSay,
+        Self::WebFailBlockedSay,
+        Self::WebFailBlockedVerb,
+        Self::WebFailDownloadSay,
+        Self::WebFailDownloadVerb,
+        Self::RowSearchEngine,
+        Self::DescSearchEngine,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
@@ -2995,6 +3138,37 @@ impl Text {
 // A separate family rather than a `Text` variant with holes in it, because these
 // return `String` and every one of the table's entries is `&'static str`. Mixing
 // the two would make the whole table allocate to serve fifteen of its members.
+
+/// The `Did not load` card's sentence (§7.7 ④), which names the host that was
+/// asked and nothing else.
+///
+/// The host and not the whole URL: the URL is on the head, in full, three
+/// centimetres above this card, and a sentence that repeated it would be the
+/// window reading its own address field back to a reader who is looking at it.
+/// What the sentence adds is *which name did not answer*, which is the half of
+/// a URL that a connection failure is about.
+#[must_use]
+pub fn web_fail_did_not_respond(host: &str) -> String {
+    match current() {
+        Lang::English => format!("{host} did not respond."),
+        Lang::Chinese => format!("{host} 没有响应。"),
+    }
+}
+
+/// The `Blocked` card's sentence when the refused address named a scheme
+/// (§7.7 ④). The scheme comes from `webnav::scheme_of` and from nowhere else —
+/// a second reading of an address is a second answer about it.
+///
+/// The colon stays glued to the scheme in both columns because it is part of
+/// the thing being named: `mailto` is a word and `mailto:` is an address's
+/// first token, and it is the token a reader is looking at in their own field.
+#[must_use]
+pub fn web_fail_blocked_scheme(scheme: &str) -> String {
+    match current() {
+        Lang::English => format!("{scheme}: addresses do not open in a preview."),
+        Lang::Chinese => format!("{scheme}: 开头的地址不在预览中打开。"),
+    }
+}
 
 /// `title="New tab (${defaultProfile().title})"` — mock-up 4367 and 4369, worn
 /// by the strip's `+` and the rail's alike.

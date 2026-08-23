@@ -371,6 +371,25 @@ pub struct SearchState {
     /// `install` is the one door they come through: anything that changed them went through it,
     /// and anything that did not, did not.
     revision: u64,
+    /// **The tally of a host that counts its own matches** (§7.7 ②, W2 slice ④).
+    ///
+    /// The capsule's second host is a page, and a page's matches are not
+    /// [`Hit`]s: a `Hit` is a range of a transcript line addressed by a
+    /// [`ContentAnchor`], and a document inside an engine has neither. What the
+    /// engine reports is a count and which match is current, so that is what is
+    /// kept — `(count, active)` with `active` 1-based and `0` for none, exactly
+    /// as `ICoreWebView2Find` states them.
+    ///
+    /// `None` means "this host counts through [`Self::hits`]", which is what
+    /// keeps a terminal's capsule byte-identical to what it was.
+    engine_matches: Option<(i32, i32)>,
+    /// Whether the host under this capsule counts its own matches at all.
+    ///
+    /// Separate from [`Self::engine_matches`] because the two say different
+    /// things and the difference is a number on the glass: a page that has not
+    /// been asked yet has **no** count, and `0/0` on it would be the capsule
+    /// claiming an answer nobody has given.
+    counts_its_own: bool,
 }
 
 impl SearchState {
@@ -449,14 +468,58 @@ impl SearchState {
     }
 
     /// What the counter box reads right now.
+    ///
+    /// **One counter, two ways of arriving at the numbers** (§7.7 ②: 「换的是谁
+    /// 数命中,不换胶囊」). A terminal's are counted here out of [`Self::hits`];
+    /// a page's are counted by the engine and reported. `counter_text` is the
+    /// same function either way, so the four states it writes — empty, broken,
+    /// `n/m`, `0/0` — are the same four wherever the capsule is standing.
     #[must_use]
     pub fn counter(&self) -> String {
+        if self.counts_its_own && self.engine_matches.is_none() {
+            // Asked for and not yet answered. Empty is what the capsule already
+            // says for a query nobody has typed, and it means the same thing
+            // here: there is no count, as against a count of none.
+            return String::new();
+        }
+        if let Some((count, active)) = self.engine_matches {
+            return counter_text(
+                self.field.is_empty(),
+                self.error.is_some(),
+                count.max(0) as usize,
+                (active > 0).then(|| active as usize - 1),
+            );
+        }
         counter_text(
             self.field.is_empty(),
             self.error.is_some(),
             self.hits.len(),
             self.current,
         )
+    }
+
+    /// A host that counts its own matches has reported.
+    ///
+    /// Returns whether the tally moved, so the caller can leave the chrome alone
+    /// on the several events a single find sends for one answer.
+    pub fn report_engine_matches(&mut self, count: i32, active: i32) -> bool {
+        let reported = Some((count, active));
+        let moved = self.engine_matches != reported;
+        self.engine_matches = reported;
+        moved
+    }
+
+    /// This host counts through [`Self::hits`] again — or has not answered yet.
+    ///
+    /// Called on every door that changes what is being searched, so a stale
+    /// `12/40` cannot survive the query that produced it.
+    pub fn forget_engine_matches(&mut self) {
+        self.engine_matches = None;
+    }
+
+    /// Say whether the host under this capsule counts its own matches.
+    pub fn set_counts_its_own(&mut self, counts: bool) {
+        self.counts_its_own = counts;
     }
 
     /// Open on a pane, or re-focus the one already open there.
@@ -479,6 +542,7 @@ impl SearchState {
         self.seat = Some(seat);
         self.focused = true;
         self.field.select_all();
+        self.engine_matches = None;
         moved
     }
 
@@ -493,6 +557,7 @@ impl SearchState {
     pub fn close(&mut self) -> bool {
         let was_open = self.seat.take().is_some();
         self.focused = false;
+        self.engine_matches = None;
         self.hits.clear();
         self.current = None;
         self.error = None;
@@ -1061,6 +1126,20 @@ pub struct CapsuleLook<'a> {
     /// What the counter box reads.
     pub counter: &'a str,
     pub flags: SearchFlags,
+    /// **Which toggles the host under the capsule can actually honour**
+    /// (§7.7 ②, W2 slice ④).
+    ///
+    /// A terminal answers all three. A page answers `Aa` and no more:
+    /// `ICoreWebView2FindOptions` carries a find term, a case fold and a
+    /// highlight-all, and there is no word-boundary and no pattern anywhere in
+    /// that interface.
+    ///
+    /// **Dimmed and inert rather than gone**, which is this slice's own ruling
+    /// about the navigation buttons applied to the same problem one surface
+    /// over: 「a button that vanishes when the history runs out moves the two
+    /// beside it under the pointer」. A capsule that grew and shrank between
+    /// hosts would be a second capsule.
+    pub offered: SearchFlags,
     /// Which element the pointer is on, if any.
     pub hover: Option<SearchElement>,
 }
@@ -1160,8 +1239,13 @@ pub fn build(
         (SearchFlag::Regex, REGEX_LABEL),
     ] {
         let box_ = capsule.toggle(flag);
-        let on = look.flags.is_on(flag);
-        let hovered = look.hover == Some(SearchElement::Toggle(flag));
+        let offered = look.offered.is_on(flag);
+        // A toggle the host cannot honour is drawn at rest, at the same reveal
+        // the head's spent navigation buttons wear, and never lit and never
+        // hovered — the state says "there is nothing behind this here" without
+        // moving anything.
+        let on = offered && look.flags.is_on(flag);
+        let hovered = offered && look.hover == Some(SearchElement::Toggle(flag));
         // `.sb-tg.on, .sb-tg.on:hover` — **the on state overrules the hover** (A34), so a switched
         // toggle does not change under the pointer. That is what makes "it is on" a fact you can
         // read while your hand is on it.
@@ -1180,7 +1264,15 @@ pub fn build(
                 1.0,
             ));
         }
-        let ink = if on {
+        // **A toggle its host cannot honour is drawn in the ink this surface
+        // uses for structure rather than for verbs** — the capsule's own
+        // hairline colour. It keeps its box, so the two beside it do not move
+        // under the pointer (this slice's own ruling about the navigation
+        // buttons, one surface over), and it stops reading as something to
+        // press.
+        let ink = if !offered {
+            palette.menu_item_unavailable_text
+        } else if on {
             palette.accent
         } else if hovered {
             palette.menu_item_text_selected
@@ -2116,5 +2208,153 @@ mod tests {
             history.len(),
             volatile.len(),
         );
+    }
+}
+
+/// **The capsule over its second host** (§7.7 ②, W2 slice ④): a page answers one
+/// of the three toggles and counts its own matches.
+#[cfg(test)]
+mod second_host_tests {
+    use super::*;
+
+    const SCALE: f32 = 1.0;
+    const PANE: [f32; 4] = [0.0, 0.0, 900.0, 600.0];
+
+    fn drawn(offered: SearchFlags, flags: SearchFlags) -> Vec<ChromeLabel> {
+        let capsule = lay_out(PANE, None, SCALE, 40.0);
+        let palette = bt_render::chrome_palette();
+        build(
+            &capsule,
+            &CapsuleLook {
+                text: "ripgrep",
+                typed: true,
+                caret_x: 20.0,
+                focused: true,
+                broken: false,
+                counter: "1/4",
+                flags,
+                offered,
+                hover: Some(SearchElement::Toggle(SearchFlag::Word)),
+            },
+            &palette,
+            SCALE,
+        )
+        .labels
+    }
+
+    fn ink_of(labels: &[ChromeLabel], text: &str) -> [u8; 3] {
+        labels
+            .iter()
+            .find(|label| label.text == text)
+            .map(|label| label.color)
+            .unwrap_or_else(|| panic!("the capsule draws {text:?}"))
+    }
+
+    /// PIN (§7.7 ②) — **a toggle its host cannot honour is drawn fainter than
+    /// one it can, keeps its box, and does not light under the pointer.**
+    ///
+    /// `ICoreWebView2FindOptions` carries a find term, a case fold and a
+    /// highlight-all; there is no word boundary and no pattern anywhere in that
+    /// interface. Dimmed and inert rather than gone, which is this slice's own
+    /// ruling about the three navigation buttons applied one surface over: a
+    /// control that vanishes moves the ones beside it under the pointer.
+    ///
+    /// MUTATIONS:
+    /// ① draw an un-offered toggle in `menu_border` — that is an alpha-blended
+    ///    hairline colour whose opaque value is pure white, so the two that
+    ///    cannot be pressed come out **brighter** than the one that can, which
+    ///    is what the real window showed on 2026-08-22;
+    /// ② let the hover light an un-offered toggle — the last assertion goes red
+    ///    and a control that answers nothing lights up under the hand.
+    #[test]
+    fn a_toggle_its_host_cannot_honour_is_drawn_fainter_and_never_lights() {
+        let palette = bt_render::chrome_palette();
+        let all = SearchFlags {
+            case_sensitive: true,
+            whole_word: true,
+            regex: true,
+        };
+        let page = SearchFlags {
+            case_sensitive: true,
+            whole_word: false,
+            regex: false,
+        };
+        let nothing_on = SearchFlags::default();
+
+        let on_a_page = drawn(page, nothing_on);
+        assert_eq!(ink_of(&on_a_page, CASE_LABEL), palette.menu_item_hint_text);
+        assert_eq!(
+            ink_of(&on_a_page, WORD_LABEL),
+            palette.menu_item_unavailable_text,
+            "a word boundary is not a thing this host can be asked for"
+        );
+        assert_eq!(
+            ink_of(&on_a_page, REGEX_LABEL),
+            palette.menu_item_unavailable_text
+        );
+        // Fainter, and not merely different — this is the half the first draft
+        // got backwards.
+        let ground = palette.menu_surface;
+        let distance = |ink: [u8; 3]| {
+            (0..3)
+                .map(|i| (i32::from(ink[i]) - i32::from(ground[i])).abs())
+                .sum::<i32>()
+        };
+        assert!(
+            distance(palette.menu_item_unavailable_text) < distance(palette.menu_item_hint_text),
+            "an unavailable toggle must sit closer to its own ground than a resting one"
+        );
+
+        // On a terminal every one of the three is offered: the two the pointer
+        // is not on rest in the hint ink, and the one it is on lights.
+        let on_a_terminal = drawn(all, nothing_on);
+        for label in [CASE_LABEL, REGEX_LABEL] {
+            assert_eq!(
+                ink_of(&on_a_terminal, label),
+                palette.menu_item_hint_text,
+                "{label} is offered on a terminal"
+            );
+        }
+        assert_eq!(
+            ink_of(&on_a_terminal, WORD_LABEL),
+            palette.menu_item_text_selected,
+            "and the one under the pointer lights"
+        );
+        // **The pointer is on `ab` in both draws.** On the page it changed
+        // nothing, which is the second half of the ruling: a control that
+        // answers nothing does not light under the hand.
+        assert_eq!(
+            ink_of(&on_a_page, WORD_LABEL),
+            palette.menu_item_unavailable_text
+        );
+    }
+
+    /// PIN (§7.7 ②) — **a host that counts its own matches has no count until it
+    /// has answered, and `0/0` is not that.**
+    ///
+    /// The engine is asked when the reader asks — Enter, the walk — so between
+    /// the keystroke and the answer there genuinely is no tally. `0/0` there
+    /// would be the capsule inventing one.
+    ///
+    /// MUTATION: drop `counts_its_own` and the first assertion reads `0/0`,
+    /// which is the capsule claiming a page has no matches before it has looked.
+    #[test]
+    fn a_host_that_counts_its_own_has_no_count_until_it_has_answered() {
+        let mut state = SearchState::default();
+        state.open(SeatId(2));
+        state.set_counts_its_own(true);
+        state.field_mut().insert("ripgrep");
+        assert_eq!(state.counter(), "", "asked for, not yet answered");
+        assert!(state.report_engine_matches(4, 1));
+        assert_eq!(state.counter(), "1/4");
+        // A term that moves takes the answer down with it.
+        state.forget_engine_matches();
+        assert_eq!(state.counter(), "");
+        // And a terminal's capsule is untouched: it counts through its own hits,
+        // so an empty hit set really is `0/0`.
+        let mut terminal = SearchState::default();
+        terminal.open(SeatId(1));
+        terminal.field_mut().insert("ripgrep");
+        assert_eq!(terminal.counter(), EMPTY_COUNT);
     }
 }

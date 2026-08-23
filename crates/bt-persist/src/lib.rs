@@ -79,7 +79,7 @@ pub use settings::{
     DEFAULT_FOCUS_CARD_HEIGHT, DEFAULT_LIGHT_SCHEME, DEFAULT_PROFILE_UNSET,
     DEFAULT_SCROLLBACK_LINES, DEFAULT_TERMINAL_FONT_FAMILY, DEFAULT_TERMINAL_FONT_SIZE, LanguageV1,
     MINIMUM_BACKGROUND_OPACITY, MinimumContrastV1, PsReadLineInviteV1, SETTINGS_SCHEMA_VERSION,
-    SettingsV1, SplitDirectionV1, ThemeModeV1,
+    SearchEngineV1, SettingsV1, SplitDirectionV1, ThemeModeV1,
 };
 pub use write_tracker::{WriteAlertAction, WriteFailureTracker};
 

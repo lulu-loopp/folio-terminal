@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use bt_persist::{
     BackgroundFitV1, DegradationReport, FilesViewV1, LanguageV1, LayoutNodeV1, LeafNodeV1,
     MinimumContrastV1, PreviewLeafV1, PreviewPaneV1, PreviewPoolEntryV1, PreviewSourceV1,
-    PsReadLineInviteV1, ReadReport, RecentPreviewV1, RecentSeedV1, SESSION_SCHEMA_VERSION,
+    PsReadLineInviteV1, SearchEngineV1, ReadReport, RecentPreviewV1, RecentSeedV1, SESSION_SCHEMA_VERSION,
     SETTINGS_SCHEMA_VERSION, SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1,
     SessionThemeV1, SessionV1, SessionWindowV1, SettingsV1, SplitDirectionV1, TabPreviewV1, TabV1,
     TermLeafV1, ThemeModeV1, read_session, read_settings, write_session_atomic,
@@ -855,7 +855,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 19,
+        SETTINGS_SCHEMA_VERSION, 20,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -876,8 +876,16 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          the v14-to-v15, and the Appearance page's own Minimum contrast the \
          v15-to-v16, and the Terminal page's own Notifications the v16-to-v17, \
          and the Terminal page's own Offer PowerShell integration the v17-to-v18, \
-         and the Appearance page's own Focus card height the v18-to-v19 — one key \
-         on one day, nine times running"
+         and the Appearance page's own Focus card height the v18-to-v19, and the \
+         General page's own Search engine the v19-to-v20 — one key on one day, \
+         ten times running"
+    );
+    assert_eq!(
+        defaults.search_engine,
+        SearchEngineV1::DuckDuckGo,
+        "the address field's whole job is that what a reader types is what they \
+         get, so the engine it ships pointed at is the one that needs no account \
+         and no cookie to answer and returns the same page in every region"
     );
     assert_eq!(
         defaults.minimum_contrast,
@@ -2134,4 +2142,61 @@ fn a_v10_document_arrives_at_v11_reading_every_preview_row_as_a_file() {
         Some(r"D:\work\folio\docs\DESIGN.md"),
         "and the file it named is still the file it names"
     );
+}
+
+/// PIN (`docs/DESIGN.md` §7.7 ②, W2 slice ④) — **a v19 settings file migrates to
+/// v20 pointed at the engine this feature ships with, and a v20 file that names
+/// another one is heard.**
+///
+/// The tenth one-key bump in a row, and it lands the way v17 and v18 did rather
+/// than the way v13–v16 did: there was no behaviour to carry forward. Before
+/// this key a web preview had no address field and no way at all to type a word
+/// into one, so the migration is not choosing between a habit and a product
+/// default — it is writing the default the feature ships with.
+///
+/// MUTATION: leave the key out of the migration and every settings file on every
+/// machine that has ever run this product falls back to defaults whole — which
+/// is what `missing field search_engine` looked like on the day this was written.
+#[test]
+fn settings_v19_migrates_to_the_engine_the_feature_ships_with_and_v20_keeps_another() {
+    let (migrated, report) = read_settings(&fixture_path("settings_v19_focus_card_height.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(migrated.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        migrated.search_engine,
+        SearchEngineV1::DuckDuckGo,
+        "no build before v20 had an address field, so nothing is being carried \
+         forward and the default is simply written"
+    );
+    assert_eq!(
+        migrated.focus_card_height, 320,
+        "one key crosses; every sibling crosses untouched"
+    );
+
+    let (chosen, report) = read_settings(&fixture_path("settings_v20_search_engine.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(chosen.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        chosen.search_engine,
+        SearchEngineV1::Google,
+        "a reader who has an account with one of the three is heard"
+    );
+
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-settings-v20-search-engine-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    write_settings_atomic(&path, &chosen).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains(r#""search_engine": "Google""#),
+        "a name and never a URL template, which is what keeps a settings file \
+         from being a way to hand a browser engine an arbitrary address: {on_disk}"
+    );
+    let (round_tripped, report) = read_settings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, chosen);
+    std::fs::remove_dir_all(&dir).unwrap();
 }

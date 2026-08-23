@@ -75,6 +75,7 @@ mod trace;
 mod watch_clock;
 mod webhost;
 mod webnav;
+mod websheet;
 mod wsl;
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -4938,6 +4939,23 @@ struct WindowRuntime {
     /// cannot measure, and "the button you can press is the button you can see"
     /// has to be true by one number rather than by two functions agreeing.
     preview_button_width: f32,
+    /// **Each preview card's own button, as the hit test has to see it** (§7.7
+    /// ④, W2 slice ④): its caption's measured width, whether the card carries a
+    /// fact line — which moves the button — and whose press it is.
+    ///
+    /// Beside [`Self::preview_button_width`] and for its reason, and *per seat*
+    /// rather than a singleton because the five failure cards do not share a
+    /// caption with `Open in default app`: one stored width would size every
+    /// button to whichever card was drawn last.
+    preview_card_verbs: BTreeMap<SeatId, seats::PreviewCardButton>,
+    /// **The download sheet's boxes as they were last drawn** (§7.7 ④), and
+    /// which seat they belong to.
+    ///
+    /// Stored for the search capsule's own reason: the press router is `&self`
+    /// and cannot lay anything out, so "the button you can press is the button
+    /// you can see" has to be true by one number rather than by two functions
+    /// agreeing.
+    web_sheet_layout: Option<(SeatId, websheet::SheetLayout)>,
     /// How wide one character of the mini transcript's face is drawn, in physical
     /// pixels (§7.1.6b′ F2).
     ///
@@ -5153,6 +5171,20 @@ struct WindowRuntime {
     /// on — a hover that never ends is a link that stays lit after the hand has
     /// gone.
     web_pointer_inside: bool,
+    /// Whether something of this window's stood over the page on the previous
+    /// frame — a modal's scrim, or the page's own download sheet.
+    ///
+    /// **The bit that takes the keyboard back** (§7.7 ④, W2 slice ④). A page
+    /// keeps every key this window's shortcut table does not claim, and Escape
+    /// is one of them; so a surface raised *over* a page that could only be
+    /// dismissed with Escape would be a surface with no way out at all. A modal
+    /// already hides the page and a sheet already covers it — both are this
+    /// window saying "not that, this" — and taking the keyboard is the rest of
+    /// that sentence.
+    ///
+    /// The edge and not the level: `SetFocus` on every frame a dialog is open
+    /// would fight anything inside this window that wanted the keys.
+    web_covered: bool,
     window: Arc<Window>,
     /// The geometry changes the most recent layout commit produced (T230).
     ///
@@ -6731,6 +6763,16 @@ impl TabState {
 
     /// The mark the chrome draws for one seat's shell — this tab's per-seat half
     /// of [`Self::terminal_names`], and threaded through the chrome the same way.
+    /// **A page's seat is in here too** (§7.7 ②, W2 slice ④), and the map's
+    /// name is what makes that fit rather than a stretch: it is the mark a leaf
+    /// wears, and the one thing `seats::pane_mark` cannot work out from a
+    /// [`SeatKind`] is which *content* a leaf is holding. A terminal's answer is
+    /// its shell; a preview's is a globe when there is a page on it and nothing
+    /// at all when there is not, which leaves `#i-file` exactly where it was.
+    ///
+    /// Through the same map as the shells, so that the head, the strip row above
+    /// it, the drag ghost and the collapse bar cannot end up drawing four glyphs
+    /// for one seat — which is the mock-up's `pvMarkId`, said once.
     fn leaf_marks(&self) -> BTreeMap<SeatId, marks::ChromeMark> {
         self.sessions
             .iter()
@@ -6759,7 +6801,13 @@ impl TabState {
     /// as [`Self::display_title`]'s: giving a folder tab a second glyph, chosen
     /// somewhere else, is how a strip row and the pane under it start describing
     /// two different things.
-    fn tab_mark(&self) -> marks::ChromeMark {
+    /// `page` is the seat this **window** has a page on, when it has one
+    /// (§7.7 ②, W2 slice ④) — the one fact about a leaf's content that a tab
+    /// cannot answer for itself in this build, because the page is not in the
+    /// preview pool yet (slice ③ puts it there and this parameter goes away).
+    /// A tab whose identity seat is that seat wears the globe, exactly as the
+    /// head above it does, through the same `seats::pane_mark`.
+    fn tab_mark(&self, page: Option<SeatId>) -> marks::ChromeMark {
         let seat = if self.sessions.contains_key(&self.focused_leaf) {
             self.focused_leaf
         } else {
@@ -6770,11 +6818,19 @@ impl TabState {
             .tree()
             .find_seat(seat)
             .map_or(bt_layout::SeatKind::Terminal, |seat| seat.kind);
-        let (mark, _, _) = seats::pane_mark(
-            kind,
-            Some(profiles::mark(self.leaf_profile(seat))),
-            bt_render::chrome_palette(),
-        );
+        // **Which content this leaf is holding**, which is the one thing
+        // `pane_mark` cannot work out from a kind. A terminal answers with its
+        // shell; a preview answers with the globe when the page is on it and
+        // with nothing at all otherwise, which leaves `#i-file` where it was.
+        // Handing a *shell's* mark to a preview seat, which is what this call
+        // used to do unconditionally, was harmless only while the preview arm
+        // ignored the argument.
+        let content = match kind {
+            bt_layout::SeatKind::Terminal => Some(profiles::mark(self.leaf_profile(seat))),
+            bt_layout::SeatKind::Preview if page == Some(seat) => Some(marks::ChromeMark::Globe),
+            _ => None,
+        };
+        let (mark, _, _) = seats::pane_mark(kind, content, bt_render::chrome_palette());
         mark
     }
 
@@ -7762,6 +7818,23 @@ fn preview_opened_label() -> &'static str {
     i18n::Text::PreviewOpened.text()
 }
 
+/// **What one preview seat's card says**, owned, because a failure's sentence is
+/// built from a host or a scheme and a `&'static str` cannot carry one (§7.7 ④).
+struct CardWords {
+    notice: String,
+    /// The one line of fact, or empty.
+    detail: String,
+    /// The one verb.
+    verb: String,
+    /// This content class's own mark, above the sentence.
+    mark: marks::ChromeMark,
+    /// Whether the button belongs to a page's fault rather than to a refused
+    /// file — which is what decides where the press goes.
+    fault: bool,
+    /// The verb's measured width, filled in beside the renderer.
+    width: f32,
+}
+
 /// The preview head's two measured strings and the state they were measured for.
 ///
 /// One value rather than two returns, because a name and the tools it was
@@ -7776,6 +7849,13 @@ struct PreviewHeadFrame {
     /// (user ruling 2026-08-19) — a third string the frame owns for the same
     /// reason it owns the two above.
     edit: Option<seats::TabEdit>,
+    /// **The open address will not be navigated to** (§7.7 ④, W2 slice ④), so
+    /// the draft is written in `--err` where it is being typed.
+    ///
+    /// Beside the editor rather than inside `TabEdit`, because `TabEdit` is the
+    /// tab strip's and the rail's as well as this head's, and neither of those
+    /// two has a door that can refuse what is in the box.
+    refused: bool,
     content: seats::PreviewHeadContent<'static>,
 }
 
@@ -9283,6 +9363,21 @@ fn frame_row_of_anchor(
 ///
 /// What the subject decides is only what OPENING seeds and what COMMITTING
 /// writes — which is exactly the two ends a rename has.
+/// One of the four verbs a page's head carries (§7.7 ②).
+///
+/// A name for what was pressed, so that the chrome target, the tooltip anchor
+/// and the call all say the same word — the three that would otherwise be three
+/// places to get the mapping the wrong way round.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebHeadVerb {
+    Back,
+    Forward,
+    /// Reload, or stop while a navigation is in flight. **One verb because it is
+    /// one button**: 「同一秒里刷新钮变停止钮,三个钮还是三个钮」.
+    Reload,
+    DevTools,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum RenameSubject {
     /// A tab's manual name. Empty commits it back to the automatic one.
@@ -9296,6 +9391,18 @@ enum RenameSubject {
         surface: PreviewSurface,
         source: preview::PreviewSource,
     },
+    /// **The address a page's head names** (§7.7 ②, W2 slice ④).
+    ///
+    /// The same editor one content class over, and deliberately not a second
+    /// one: same cell, same double click, same Enter / Escape / blur, same
+    /// silence on a refusal. Two things differ and both are decided by what is
+    /// in the box — the whole of a URL is selected rather than a stem, because
+    /// going somewhere almost always means going somewhere else, and the field
+    /// takes the head's remaining room, because a URL is not a label.
+    ///
+    /// The seat and not a surface: a page lives on one, and this build has one
+    /// page at a time (slice ③ owns the pool).
+    WebAddress { seat: SeatId },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -9415,11 +9522,25 @@ impl TabRename {
         Self::seed(RenameSubject::PreviewName { surface, source }, text, dot)
     }
 
+    /// **Open on the address a page's head names** (§7.7 ②).
+    ///
+    /// The whole draft is selected, so by [`seed`]'s invariant the caret is at
+    /// the end — the tab door's arithmetic, for the tab door's reason: what is
+    /// in the box is the thing being replaced, not a stem with a suffix to
+    /// keep.
+    ///
+    /// [`seed`]: TabRename::seed
+    fn open_address(seat: SeatId, url: &str) -> Self {
+        let text = url.to_owned();
+        let whole = text.len();
+        Self::seed(RenameSubject::WebAddress { seat }, text, whole)
+    }
+
     /// The tab this is renaming, or `None` when it is renaming a file.
     fn tab(&self) -> Option<TabId> {
         match self.subject {
             RenameSubject::Tab(tab) => Some(tab),
-            RenameSubject::PreviewName { .. } => None,
+            RenameSubject::PreviewName { .. } | RenameSubject::WebAddress { .. } => None,
         }
     }
 
@@ -11961,6 +12082,18 @@ fn read_motion_preference() -> Motion {
 
 /// `.pring.indeterminate { animation: pring-spin 1.1s linear infinite }`.
 ///
+/// **`flex: 1 1 auto` said in one number** (§7.7 ②): a width no head can grant,
+/// so `seats::preview_head_geometry`'s own clamp gives the address field
+/// everything the tools left it. Finite rather than `f32::MAX` because the
+/// geometry adds the switcher's trimmings to it before clamping, and an infinity
+/// with something added to it is not a number.
+const ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD: f32 = 1.0e6;
+
+/// `.preview-head .pv-fav.loading { border: 1.4px }` — the stroke the page's own
+/// spinner is drawn at, which is thinner than a tab ring's two because the box
+/// it turns in is fourteen pixels rather than eighteen.
+const PAGE_SPINNER_STROKE_LOGICAL_PX: f32 = 1.4;
+
 /// A fixed arc (`stroke-dasharray: 13 40.4`, line 283) carried around the ring
 /// at a constant rate, which is what "indeterminate" means: the shape says how
 /// much is done — nothing knowable — and the motion says it is still going.
@@ -13835,6 +13968,20 @@ struct OverlayStack {
     /// One per pane and not a singleton: the offer is about one shell's startup
     /// file, and two PowerShell panes in one tab each owe their own.
     pane_notices: Vec<marks::OverlayLayer>,
+    /// **The download sheet** (§7.7 ④, W2 slice ④) — the one failure card that
+    /// stands *over* a page rather than instead of one.
+    ///
+    /// Above the capsule and the notice strip, below every menu, and that is the
+    /// same order §7.7 ④ gives its Escape: 「Esc 梯子里排在 pane 菜单之上」. It
+    /// is a notice on one pane's own body, so a menu dropped out of that pane's
+    /// head is entitled to cover it — and a modal, which is the window asking a
+    /// question, covers it with everything else.
+    ///
+    /// It is in the overlay at all for a reason no other card has: the page is
+    /// composed under wgpu and the transparency hole is punched over everything
+    /// the seats draw (§7.8 ②), so a card painted into the pane's own chrome
+    /// would be erased by the very page it is standing on.
+    web_sheet: Vec<marks::OverlayLayer>,
     /// One layer, and there is at most one of it — the singleton (mock 8515)
     /// showing up in the z-order. Two capsules would need an order between them,
     /// and there is no order because there is one search.
@@ -13936,6 +14083,7 @@ impl OverlayStack {
             ground,
             search,
             pane_notices,
+            web_sheet,
             layout_peek,
             float,
             modal,
@@ -13956,6 +14104,7 @@ impl OverlayStack {
             ground,
             search,
             pane_notices,
+            web_sheet,
             layout_peek,
             float,
             modal,
@@ -19433,6 +19582,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         card_aim: None,
         table_paints: HashMap::new(),
         preview_button_width: 0.0,
+        preview_card_verbs: BTreeMap::new(),
+        web_sheet_layout: None,
         preview_opened_at: None,
         pending_frames: LatestFrameSlot::default(),
         modifiers: ModifiersState::default(),
@@ -19454,6 +19605,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         preview_watch: preview_watch::PreviewWatch::default(),
         web_cursor: None,
         web_pointer_inside: false,
+        web_covered: false,
         window,
         last_layout_events: Vec::new(),
         resize_trace_logged_transaction: 0,
@@ -21551,6 +21703,10 @@ impl Runtime<'_> {
             .drag
             .as_ref()
             .and_then(|drag| drag.tab_carry().map(|carry| carry.offset));
+        // The seat this window has a page on, threaded into the strip so that a
+        // tab whose identity pane is that seat wears the globe (§7.7 ②) — the
+        // same glyph the head under it wears, through the same `pane_mark`.
+        let page_seat = self.window.web.as_ref().map(|web| web.seat);
         let grabbed = self.window.drag.as_ref().and_then(|drag| {
             let tab = drag.tab()?;
             self.window
@@ -21586,7 +21742,7 @@ impl Runtime<'_> {
                 (
                     tab.display_title(),
                     pane_count,
-                    tab.tab_mark(),
+                    tab.tab_mark(page_seat),
                     tab.mark_state(
                         index == self.window.active_tab,
                         now,
@@ -21737,7 +21893,36 @@ impl Runtime<'_> {
         // C28, per leaf: every terminal pane head names its *own* shell. Resolved
         // here rather than in `seats`, which knows nothing about sessions (L1).
         let terminal_names = self.terminal_names();
-        let leaf_marks = self.leaf_marks();
+        // **A page's seat wears the globe** (§7.7 ②, W2 slice ④). Added here
+        // rather than inside `leaf_marks`, because that function belongs to the
+        // tab and a page belongs to the window — but it goes into the *same*
+        // map, so the head, the strip row above it, the drag ghost and the
+        // collapse bar cannot end up drawing four glyphs for one seat. The map's
+        // meaning is "which content is this leaf holding", which is the one
+        // thing `seats::pane_mark` cannot work out from a `SeatKind`.
+        let mut leaf_marks = self.leaf_marks();
+        if let Some((seat, page)) = self.window.web.as_ref().map(|web| (web.seat, web.page())) {
+            // **While a navigation is in flight the mark spins in place**
+            // (§7.7 ②): no progress hairline, no second row, and no second
+            // glyph — the seat gains nothing for a state that lasts a second,
+            // and the arc it borrows is the one this window already turns on a
+            // working tab. `stroke_px` is the mock-up's own 1.4.
+            leaf_marks.insert(
+                seat,
+                match page.loading_since.filter(|_| page.loading) {
+                    Some(since) => marks::ChromeMark::ProgressRing {
+                        start_milliturns: indeterminate_start_milliturns(
+                            now.saturating_duration_since(since),
+                            self.app.motion,
+                        ),
+                        sweep_milliturns: (bt_render::WINDOW_TAB_RING_INDETERMINATE_TURNS * 1000.0)
+                            .round() as u16,
+                        stroke_px: (PAGE_SPINNER_STROKE_LOGICAL_PX * scale).round().max(1.0) as u32,
+                    },
+                    None => marks::ChromeMark::Globe,
+                },
+            );
+        }
         // B14, per leaf: every files pane head names its *own* root. Resolved
         // beside the terminal names for the same reason and by the same rule.
         let files_names = self.files_names();
@@ -21832,20 +22017,56 @@ impl Runtime<'_> {
         // word: the paint draws a body notice only where there is no card, so
         // one refused file used to blank the "Loading …" of every other preview
         // pane on screen.
-        let preview_card_notices: Vec<(SeatId, &'static str)> = self
+        // **The five failure cards, and the one card that was already here**
+        // (§7.7 ④, W2 slice ④). One drawing, and the words are owned rather
+        // than borrowed because a fault's sentence is built from a host or a
+        // scheme — `web_fail_did_not_respond`, `web_fail_blocked_scheme` — and
+        // a `&'static str` cannot carry one.
+        //
+        // Four of the five *are* the seat's content and are drawn as pane
+        // chrome; the fifth stands over a page that is still there and is an
+        // overlay (`websheet`), because the transparency hole is punched over
+        // everything the seats draw (§7.8 ②).
+        let preview_open_label = self.preview_open_button_label(now);
+        let preview_card_notices: Vec<(SeatId, CardWords)> = self
             .seats
             .preview_seats()
             .into_iter()
             .filter_map(|seat| {
+                if let Some(fault) = self
+                    .web_on(seat)
+                    .and_then(webhost::WebSeat::fault)
+                    .filter(|fault| !fault.stands_over_the_page())
+                {
+                    return Some((
+                        seat,
+                        CardWords {
+                            notice: fault.say(),
+                            detail: fault.detail().unwrap_or_default().to_owned(),
+                            verb: fault.verb_text().text().to_owned(),
+                            mark: marks::ChromeMark::Globe,
+                            fault: true,
+                            width: 0.0,
+                        },
+                    ));
+                }
                 Some((
                     seat,
-                    self.preview_buffer_on(PreviewSurface::Seat(seat))?
-                        .refusal()?
-                        .notice(),
+                    CardWords {
+                        notice: self
+                            .preview_buffer_on(PreviewSurface::Seat(seat))?
+                            .refusal()?
+                            .notice()
+                            .to_owned(),
+                        detail: String::new(),
+                        verb: preview_open_label.to_owned(),
+                        mark: marks::ChromeMark::File,
+                        fault: false,
+                        width: 0.0,
+                    },
                 ))
             })
             .collect();
-        let preview_open_label = self.preview_open_button_label(now);
         // The head's own run and the strip along the bottom, both measured here
         // beside the card and for the card's reason: only something holding a
         // font can say how wide a name is drawn, and the hit test reads the
@@ -21871,25 +22092,57 @@ impl Runtime<'_> {
             .into_iter()
             .filter_map(|seat| Some((seat, self.dress_preview_foot(seat, scale, now)?)))
             .collect();
+        // **Each card's own verb, measured** (§7.7 ④). The five failure cards
+        // do not share a caption with `Open in default app`, so a single stored
+        // width would size every button to whichever card was drawn last — and
+        // the hit test reads that number.
+        let mut preview_card_notices = preview_card_notices;
+        for (_, words) in &mut preview_card_notices {
+            words.width = self.window.renderer.measure_chrome_text(
+                &mut self.app.gpu,
+                &words.verb,
+                seats::PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX * scale,
+            );
+        }
         self.window.preview_button_width = self.window.renderer.measure_chrome_text(
             &mut self.app.gpu,
             preview_open_label,
             seats::PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX * scale,
         );
-        let preview_cards: Vec<(SeatId, seats::PreviewCardContent<'_>)> = preview_card_notices
-            .into_iter()
-            .map(|(seat, notice)| {
+        self.window.preview_card_verbs = preview_card_notices
+            .iter()
+            .map(|(seat, words)| {
                 (
-                    seat,
+                    *seat,
+                    seats::PreviewCardButton {
+                        text_px: words.width,
+                        has_detail: !words.detail.is_empty(),
+                        fault: words.fault,
+                    },
+                )
+            })
+            .collect();
+        let preview_cards: Vec<(SeatId, seats::PreviewCardContent<'_>)> = preview_card_notices
+            .iter()
+            .map(|(seat, words)| {
+                (
+                    *seat,
                     seats::PreviewCardContent {
-                        notice,
-                        button: preview_open_label,
-                        button_text_px: self.window.preview_button_width,
+                        notice: &words.notice,
+                        detail: &words.detail,
+                        mark: words.mark,
+                        fault: words.fault,
+                        button: &words.verb,
+                        button_text_px: words.width,
                         // The hover already named a seat; now the card it lights
                         // is that seat's, so two "Open in default app" buttons
                         // side by side no longer light together.
                         button_hovered: self.window.seat_pointer.hover
-                            == Some(seats::ChromeTarget::PreviewOpenButton(seat)),
+                            == Some(if words.fault {
+                                seats::ChromeTarget::PreviewFaultVerb(*seat)
+                            } else {
+                                seats::ChromeTarget::PreviewOpenButton(*seat)
+                            }),
                     },
                 )
             })
@@ -21933,6 +22186,7 @@ impl Runtime<'_> {
                             caret_px: edit.caret_px,
                             selection_px: edit.selection_px,
                             caret_lit: edit.caret_lit,
+                            refused: head.refused,
                         }),
                         ..head.content
                     },
@@ -21949,6 +22203,7 @@ impl Runtime<'_> {
                         revealed: words.flashing,
                         notice: &words.notice,
                         notice_width: words.notice_width,
+                        web: self.seat_holds_a_page(*seat),
                     },
                 )
             })
@@ -22214,6 +22469,53 @@ impl Runtime<'_> {
                     rect,
                     i18n::Text::PreviewOpenInBrowser.text(),
                 );
+            }
+            // **A page's four**, in the same pass and inside the same guard
+            // (§7.7 ②). Only the seats whose head actually draws them register:
+            // `preview_head_tools` answers `web: false` for every other seat, so
+            // the boxes are `None` and nothing is pushed.
+            let previews: Vec<SeatId> = self.seats.preview_seats();
+            for seat in previews {
+                let loading = self.web_on(seat).is_some_and(|web| web.page().loading);
+                for (tool, box_, text) in [
+                    (
+                        tooltip::WebNavTool::Back,
+                        self.preview_web_tool_box(seat, WebHeadVerb::Back),
+                        i18n::Text::PreviewWebBack,
+                    ),
+                    (
+                        tooltip::WebNavTool::Forward,
+                        self.preview_web_tool_box(seat, WebHeadVerb::Forward),
+                        i18n::Text::PreviewWebForward,
+                    ),
+                    (
+                        tooltip::WebNavTool::Reload,
+                        self.preview_web_tool_box(seat, WebHeadVerb::Reload),
+                        // The tip changes with the button, because the button
+                        // changes: one control, two states, and a tip that said
+                        // `Reload` over a stop would be the head describing what
+                        // it was doing a second ago.
+                        if loading {
+                            i18n::Text::PreviewWebStop
+                        } else {
+                            i18n::Text::PreviewWebReload
+                        },
+                    ),
+                    (
+                        tooltip::WebNavTool::DevTools,
+                        self.preview_web_tool_box(seat, WebHeadVerb::DevTools),
+                        i18n::Text::ShortcutWebDevTools,
+                    ),
+                ] {
+                    let Some(box_) = box_ else {
+                        continue;
+                    };
+                    anchors.push(
+                        tooltip::TooltipAnchorId::PreviewWebNav(seat, tool),
+                        box_,
+                        text.text(),
+                    );
+                }
             }
             // The search capsule's own controls, pushed after the heads and
             // before the Git page's rows for this list's own innermost-first
@@ -23517,10 +23819,64 @@ impl Runtime<'_> {
     /// over a full-screen program would sit there reading `0/0` for as long as the program ran,
     /// which is R3's named failure. `Ctrl+F` is not in the table there either, so the key reaches
     /// the program and means whatever the program says it means.
+    ///
+    /// **A page is the second host** (§7.7 ②, W2 slice ④). The mock-up's own
+    /// selector has read `.term, .pv-web-doc` since W1, and the ruling is that
+    /// this is a second host and not a second implementation: the same capsule,
+    /// in the same corner, opened with the same chord. What differs is who
+    /// counts the matches — see [`Self::refresh_search`].
     fn seat_can_search(&self, seat: SeatId) -> bool {
+        if self.seat_holds_a_page(seat) {
+            return true;
+        }
         self.sessions
             .get(&seat)
             .is_some_and(|leaf| !leaf.session.terminal_modes().alternate_screen)
+    }
+
+    /// Whether this window's page is on that seat.
+    ///
+    /// The seam slice ③ moves: today a window has at most one page and it names
+    /// its own seat, and when the preview pool learns about pages this becomes a
+    /// question about the buffer on the seat.
+    fn seat_holds_a_page(&self, seat: SeatId) -> bool {
+        self.web_on(seat).is_some()
+    }
+
+    /// **The page on one seat, and the one door to it** — every reader of a
+    /// hosted page goes through this pair.
+    ///
+    /// It is a pair of one-line functions on purpose: `WindowRuntime::web` is
+    /// one page today because `BT_WEB_DEV` is the only way to reach one, and it
+    /// becomes a map keyed by seat the moment a preview buffer can be a page
+    /// (slice ③). Every caller already asks "the page on *this* seat", so when
+    /// that day comes the lookup changes here and in no other place.
+    fn web_on(&self, seat: SeatId) -> Option<&webhost::WebSeat> {
+        self.window.web.as_ref().filter(|web| web.seat == seat)
+    }
+
+    fn web_on_mut(&mut self, seat: SeatId) -> Option<&mut webhost::WebSeat> {
+        self.window.web.as_mut().filter(|web| web.seat == seat)
+    }
+
+    /// Which toggles the capsule's current host can honour (§7.7 ②).
+    ///
+    /// A terminal answers all three — the regex engine behind it is this
+    /// product's own. A page answers the case fold and no more:
+    /// `ICoreWebView2FindOptions` carries a term, a case fold and a
+    /// highlight-all, and neither a word boundary nor a pattern appears
+    /// anywhere in that interface.
+    fn search_flags_offered(&self) -> search::SearchFlags {
+        let on_a_page = self
+            .window
+            .search
+            .seat()
+            .is_some_and(|seat| self.seat_holds_a_page(seat));
+        search::SearchFlags {
+            case_sensitive: true,
+            whole_word: !on_a_page,
+            regex: !on_a_page,
+        }
     }
 
     /// `Ctrl+F` / `Ctrl+Shift+F`, and the `Find…` a menu row will send here.
@@ -23544,6 +23900,26 @@ impl Runtime<'_> {
             self.clear_search_highlights(previous);
         }
         self.window.search.open(seat);
+        // Which kind of host is under it, so the counter knows whether an empty
+        // tally means "none" or "nobody has been asked".
+        self.window
+            .search
+            .set_counts_its_own(self.seat_holds_a_page(seat));
+        // **The capsule takes the keyboard back from a page** (§7.7 ②), and it
+        // has to for the address field's reason one door over: a page keeps
+        // every key this window's table does not claim, and §7.8 ④ measured that
+        // **a bare printable key never enters `AcceleratorKeyPressed` at all**.
+        // A field raised over a page that still holds the keys is a field you
+        // can open, switch and close, and never type in.
+        //
+        // Only over a page. A terminal never had the Win32 focus to begin with,
+        // and calling `SetFocus` on the window it is already in would be this
+        // window taking something from itself.
+        if self.seat_holds_a_page(seat)
+            && let Ok(hwnd) = window_hwnd(&self.window.window)
+        {
+            let _ = bt_platform::take_keyboard_focus(hwnd);
+        }
         self.refresh_search(true)?;
         self.after_search_change()
     }
@@ -23560,6 +23936,14 @@ impl Runtime<'_> {
             return Ok(false);
         };
         self.clear_search_highlights(seat);
+        // A page keeps its own highlights, so putting the capsule away has to
+        // tell the engine as well — otherwise the marks stay on a document
+        // nobody is searching any more.
+        if let Some(web) = self.web_on_mut(seat)
+            && let Err(error) = web.find_stop()
+        {
+            eprintln!("BT_WEB {error}");
+        }
         self.window.search.close();
         self.window.search_layout = None;
         self.window.search_hover = None;
@@ -23631,6 +24015,49 @@ impl Runtime<'_> {
             self.window.search_scan = None;
             return Ok(());
         };
+        // **The page's own branch, and it stops here** (§7.7 ②). Everything
+        // below this line reads a transcript: frozen lines, a live grid, a scan
+        // cache keyed on a source generation. A document inside an engine has
+        // none of those, and the engine counts its own matches — so what this
+        // host owes is the term and the one flag the engine can honour, and the
+        // count arrives later as `WebOutcome::FindMatches`.
+        if self.seat_holds_a_page(seat) {
+            // **Typing does not search a page** (§7.7 ②, ruled 2026-08-22 on the
+            // machine). A terminal's capsule searches on every keystroke because
+            // the search is this window's own regex over its own transcript and
+            // touches nothing; `ICoreWebView2Find::Start` **moves the keyboard
+            // into the page**, and there is no option that says otherwise — so a
+            // live find over a page is a field that takes one character and then
+            // types into the document. What runs the find is the ask: `Enter`,
+            // the two walk buttons, `F3`. See `WebSeat::find_or_step`.
+            //
+            // What a keystroke *does* do is take the last answer down: a tally
+            // is about a term, and the term has just changed.
+            let query = self.window.search.query().to_owned();
+            // **Only when the term has actually moved.** This runs on the quiet
+            // path too — once per published frame — and a tally forgotten every
+            // frame is a counter that can never be filled in (found on the
+            // machine, 2026-08-22: the matches lit up and the count stayed
+            // blank). What the seat was asked is the one place that knows.
+            let asked = self
+                .window
+                .web
+                .as_ref()
+                .filter(|web| web.seat == seat)
+                .map(|web| web.found().to_owned())
+                .unwrap_or_default();
+            if asked != query {
+                self.window.search.forget_engine_matches();
+            }
+            if query.is_empty()
+                && let Some(web) = self.web_on_mut(seat)
+                && let Err(error) = web.find_stop()
+            {
+                eprintln!("BT_WEB {error}");
+            }
+            self.window.search_scan = None;
+            return self.settle_search_change(forced);
+        }
         // A pane that has gone — closed, torn into another tab, turned into a preview — ends the
         // search silently (B64/B77). There is nothing to search and nothing to draw on.
         if !self.sessions.contains_key(&seat) {
@@ -23758,10 +24185,51 @@ impl Runtime<'_> {
 
     /// `Enter` / `F3` / the `▲▼` buttons — walk one match, wrapping at both ends.
     fn step_search(&mut self, forwards: bool) -> Result<()> {
+        // On a page the walk is the engine's: it owns the highlights, the
+        // scroll and which match is current, and it reports the new tally back
+        // through `WebOutcome::FindMatches`.
+        if let Some(seat) = self.window.search.seat()
+            && self.seat_holds_a_page(seat)
+        {
+            let query = self.window.search.query().to_owned();
+            let case_sensitive = self.window.search.flags().case_sensitive;
+            if let Some(web) = self.web_on_mut(seat)
+                && let Err(error) = web.find_or_step(&query, case_sensitive, forwards)
+            {
+                eprintln!("BT_WEB {error}");
+            }
+            return Ok(());
+        }
         if self.window.search.step(forwards).is_none() {
             return Ok(());
         }
         self.after_current_hit_moved()
+    }
+
+    /// The engine answered a find (§7.7 ②).
+    ///
+    /// **And the keyboard comes back here, not merely at the call.** Starting a
+    /// find moves the Win32 focus into the page, and it does so *asynchronously*
+    /// — measured on the machine, 2026-08-22: a capsule over a page took exactly
+    /// one character, the one that started the find, and every keystroke after
+    /// it went to the document. A `SetFocus` issued beside `Find::Start` loses
+    /// that race; one issued when the engine has answered does not, because the
+    /// answer is the engine having finished.
+    ///
+    /// Only while the caret is in the field. B81's second stance — search open,
+    /// hands back on the surface — is a reader who has deliberately given the
+    /// page the keyboard, and taking it away from them once per match count
+    /// would be this window arguing with a click.
+    fn web_find_reported(&mut self, count: i32, active: i32) -> Result<()> {
+        if self.window.search.is_focused()
+            && let Ok(hwnd) = window_hwnd(&self.window.window)
+        {
+            let _ = bt_platform::take_keyboard_focus(hwnd);
+        }
+        if !self.window.search.report_engine_matches(count, active) {
+            return Ok(());
+        }
+        self.after_search_change()
     }
 
     /// **A press on a match tick of the results rail** (B40-B41, S4).
@@ -23951,6 +24419,13 @@ impl Runtime<'_> {
 
     /// Flip one toggle and re-ask (`Aa` / `ab` / `.*`).
     fn toggle_search_flag(&mut self, flag: search::SearchFlag) -> Result<()> {
+        // A toggle the host cannot honour is not switched, and the press is the
+        // whole of what happens: the box is drawn in the surface's structural
+        // ink rather than a verb's, so what is refused here is what the capsule
+        // already said it could not do.
+        if !self.search_flags_offered().is_on(flag) {
+            return Ok(());
+        }
         self.window.search.flags_mut().toggle(flag);
         self.window.search_revision = self.window.search_revision.wrapping_add(1);
         // *"Any press hands the caret back"* (B74) — the capsule is one control, and a toggle you
@@ -24289,11 +24764,73 @@ impl Runtime<'_> {
                 broken,
                 counter: &counter,
                 flags,
+                offered: self.search_flags_offered(),
                 hover,
             },
             &palette,
             scale,
         )]
+    }
+
+    /// **The download sheet, when a page is showing one** (§7.7 ④, W2 slice ④).
+    ///
+    /// Its rectangle is stored beside the layer for the search capsule's own
+    /// reason: the press router is `&self` and cannot lay anything out, so the
+    /// box you can press has to be the box that was drawn.
+    fn web_sheet_layers(&mut self) -> Vec<marks::OverlayLayer> {
+        self.window.web_sheet_layout = None;
+        let Some((seat, say, detail, verb)) = self
+            .window
+            .web
+            .as_ref()
+            .and_then(|web| web.fault().map(|fault| (web.seat, fault)))
+            .filter(|(_, fault)| fault.stands_over_the_page())
+            .map(|(seat, fault)| {
+                (
+                    seat,
+                    fault.say(),
+                    fault.detail().unwrap_or_default().to_owned(),
+                    fault.verb_text().text().to_owned(),
+                )
+            })
+        else {
+            return Vec::new();
+        };
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let Some(body) = seats::preview_body_rect(&self.seats, &self.seat_layout, scale) else {
+            return Vec::new();
+        };
+        let width = self.window.renderer.measure_chrome_text(
+            &mut self.app.gpu,
+            &verb,
+            websheet::verb_font_px(scale),
+        );
+        // **The sentence is wrapped before the card is laid out**, because how
+        // many lines it takes is what decides how tall the card is. The wrap is
+        // `restore::wrap` — the one in this window that knows a Latin word may
+        // not be broken and a run of ideographs may — because a second one would
+        // be a second answer about where a line ends.
+        let say_font = websheet::say_font_px(scale);
+        let say_width = websheet::say_width(body, scale);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let say_lines = restore::wrap(&say, say_width, |text| {
+            renderer.measure_chrome_text(gpu, text, say_font)
+        });
+        let layout = websheet::lay_out(body, width, say_lines.len(), !detail.is_empty(), scale);
+        let palette = bt_render::chrome_palette();
+        let layer = websheet::build(
+            &layout,
+            websheet::SheetContent {
+                say: &say_lines,
+                detail: &detail,
+                verb: &verb,
+                verb_hovered: self.window.seat_pointer.hover
+                    == Some(seats::ChromeTarget::PreviewFaultVerb(seat)),
+            },
+            &palette,
+        );
+        self.window.web_sheet_layout = Some((seat, layout));
+        vec![layer]
     }
 
     /// Show a settled tip, and keep paying the fade's frames until it lands.
@@ -25151,6 +25688,7 @@ impl Runtime<'_> {
             // change — see `App::context_menu_installed`.
             context_menu: self.app.context_menu_installed,
             split_direction: self.app.settings_store.loaded().split_direction,
+            search_engine: self.app.settings_store.loaded().search_engine,
             minimum_contrast: self.app.settings_store.loaded().minimum_contrast,
             language: self.app.settings_store.loaded().language,
             default_profile: self.default_profile(),
@@ -25309,6 +25847,11 @@ impl Runtime<'_> {
             // the two can never overlap and the order between them says which
             // would win if the arithmetic were ever broken.
             pane_notices: self.notice_layers(),
+            // **Above the capsule and the strip, below every menu.** It is a
+            // notice standing on one pane's own body, and §7.7 ④ puts its Escape
+            // 「排在 pane 菜单之上」 — so the paint and the ladder agree by being
+            // written in the same order.
+            web_sheet: self.web_sheet_layers(),
             ..OverlayStack::default()
         };
         // **The gate is above the settings dialog**, and that is the one ordering
@@ -25911,7 +26454,7 @@ impl Runtime<'_> {
                     // strip draws it with — a ghost is a picture of the tab it
                     // was lifted out of, so the two must not disagree about what
                     // that tab is.
-                    tab.tab_mark(),
+                    tab.tab_mark(self.window.web.as_ref().map(|web| web.seat)),
                     bt_render::WINDOW_TAB_MARK_LOGICAL_PX,
                     palette.accent,
                     tab.display_title(),
@@ -26386,6 +26929,9 @@ impl Runtime<'_> {
         if let Some(install) = settings::context_menu_requested(target) {
             self.apply_context_menu(install)?;
         }
+        if let Some(engine) = settings::search_engine_requested(target) {
+            self.apply_search_engine(engine)?;
+        }
         if let Some(direction) = settings::split_direction_requested(target) {
             self.apply_split_direction(direction)?;
         }
@@ -26619,6 +27165,7 @@ impl Runtime<'_> {
             | Row::BlockMaxHeight
             | Row::GitPanel
             | Row::DefaultProfile
+            | Row::SearchEngine
             | Row::Language
             // And doubly never: what it would be putting back is not a value in
             // this file at all, it is two keys in the user's own registry, and
@@ -28238,6 +28785,17 @@ impl Runtime<'_> {
     /// `bt_render::set_minimum_contrast` advances the theme revision on a real change, which is
     /// what discards the composed rows shaped under the old floor — so the work here is the
     /// file, the push, and one repaint.
+    /// **Where a non-address goes** (§7.7 ②, 方案 §0's five extras).
+    ///
+    /// One write and nothing else: the engine is read at the moment the address
+    /// field commits, so there is no cached copy anywhere to push it into and
+    /// nothing on the glass changes until somebody types a word.
+    fn apply_search_engine(&mut self, engine: bt_persist::SearchEngineV1) -> Result<bool> {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.search_engine = engine;
+        Ok(self.app.settings_store.store(settings))
+    }
+
     fn apply_minimum_contrast(&mut self, floor: bt_persist::MinimumContrastV1) -> Result<bool> {
         let mut settings = self.app.settings_store.loaded().clone();
         settings.minimum_contrast = floor;
@@ -28931,8 +29489,12 @@ impl Runtime<'_> {
         scale: f32,
         tools: seats::PreviewHeadTools,
     ) -> (seats::PreviewHeadTools, Option<seats::TabEdit>) {
+        // **The address field is this editor** (§7.7 ②) — same cell, same
+        // metrics, same box. Which subject is open decides only what committing
+        // writes and what a refusal looks like.
         let editing = self.window.rename.as_ref().is_some_and(|editor| {
             matches!(&editor.subject, RenameSubject::PreviewName { surface: at, .. } if *at == surface)
+                || matches!(editor.subject, RenameSubject::WebAddress { seat: at } if at == seat)
         });
         if !editing {
             return (tools, None);
@@ -28944,11 +29506,23 @@ impl Runtime<'_> {
             .as_ref()
             .map(|editor| editor.text.clone())
             .unwrap_or_default();
+        // **A file's box is the width of its name; an address's box is the head's
+        // remaining room** (§7.7 ②), and the difference is what is in it: 「URL
+        // 不是标签」. `preview_head_geometry` already clamps a wanted width to
+        // what is left after the tools, so asking for more than the head has is
+        // exactly how a field takes the rest of it.
+        let editing_an_address = matches!(
+            self.window.rename.as_ref().map(|editor| &editor.subject),
+            Some(RenameSubject::WebAddress { .. })
+        );
         let tools = seats::PreviewHeadTools {
-            name_width: self
-                .window
-                .renderer
-                .measure_chrome_text(&mut self.app.gpu, &draft, font),
+            name_width: if editing_an_address {
+                ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD
+            } else {
+                self.window
+                    .renderer
+                    .measure_chrome_text(&mut self.app.gpu, &draft, font)
+            },
             ..tools
         };
         let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
@@ -30649,12 +31223,22 @@ impl Runtime<'_> {
             // §7.1.5d. Both chords of the row arrive here — the alias is a
             // second chord, never a second verb — and so will the `Find…` a
             // menu will one day carry.
-            shortcuts::Action::OpenSearch => self.open_search(self.focused_leaf),
+            shortcuts::Action::OpenSearch => self.open_search(self.search_host_seat()),
             // B81's second stance: the capsule is up, the hands are back on the
             // shell, and the function key still walks. `Enter` cannot do this —
             // it belongs to the shell the moment the caret leaves the box.
             shortcuts::Action::NextMatch => self.step_search(true),
             shortcuts::Action::PrevMatch => self.step_search(false),
+            // §7.7 W2 ④: the one rung of the Escape ladder that a page can be
+            // standing under while still owning the key. On a terminal the
+            // ladder has already answered and this arm is unreachable — see
+            // [`shortcuts::Action::CloseSearch`].
+            shortcuts::Action::CloseSearch => {
+                self.close_search()?;
+                Ok(())
+            }
+            shortcuts::Action::WebAddress => self.open_web_address(),
+            shortcuts::Action::WebDevTools => self.open_web_dev_tools(),
         }
     }
 
@@ -31743,6 +32327,12 @@ impl Runtime<'_> {
         // that appeared only for documents would blink out every time you looked
         // at a `.png`.
         let md_source = self.preview_md_source(surface);
+        // **A page on this seat answers for its own head** (§7.7 ②). Its name is
+        // the document's title and its verbs are the three buttons, so it is
+        // asked before the buffer: this build's page does not live in the pool
+        // yet (slice ③), and a seat with a page and no buffer would otherwise
+        // draw an empty caption over a live document.
+        let page = self.web_on(seat).map(|web| web.page().clone());
         let (name, tools, dirty, flip_to_source) = match self.preview_buffer_on(surface) {
             Some(buffer) => (
                 buffer.name.clone(),
@@ -31767,6 +32357,40 @@ impl Runtime<'_> {
                 false,
                 false,
             ),
+        };
+        // **What a page's head says, over whatever the buffer said.** The name
+        // cell is the document's title — and the address until a document has
+        // said what it is called, because a blank caption over a page that is
+        // loading would be the one moment this head says nothing at all. The
+        // dirty slot stays structurally present and structurally empty: a page
+        // has no unsaved text, and an empty cell is what this window looks like
+        // when it has no ledger to speak from (§7.1.6h, the same sentence).
+        // A seat whose one navigation was refused has no title and no committed
+        // address, and the head must still name what it was handed — otherwise
+        // the one cell that says what this seat is about is blank while the card
+        // under it names the address in full.
+        let refused_address = self
+            .web_on(seat)
+            .and_then(webhost::WebSeat::fault)
+            .and_then(webhost::WebFault::refused_address);
+        let (name, tools, dirty, flip_to_source) = match &page {
+            Some(page) => (
+                if page.name().is_empty() {
+                    refused_address.unwrap_or_default()
+                } else {
+                    page.name().to_owned()
+                },
+                seats::PreviewHeadTools {
+                    save: false,
+                    flip: false,
+                    browser: false,
+                    web: true,
+                    ..tools
+                },
+                false,
+                false,
+            ),
+            None => (name, tools, dirty, flip_to_source),
         };
         let pool = self.preview_pool.len();
         // `othersDirty` (P19): the pane's own dot already speaks for the buffer on
@@ -31805,10 +32429,21 @@ impl Runtime<'_> {
         // is what the store below is for.
         let (tools, edit) = self.dress_preview_name_editor(seat, surface, scale, tools);
         self.window.preview_head_measures.insert(seat, tools);
+        // The same door the commit goes through, asked without knocking — an
+        // empty field is unfinished rather than wrong, so it does not light up.
+        let refused = matches!(
+            self.window.rename.as_ref().map(|editor| &editor.subject),
+            Some(RenameSubject::WebAddress { .. })
+        ) && !self
+            .window
+            .rename
+            .as_ref()
+            .is_some_and(|editor| webhost::WebSeat::would_go_to(&editor.text));
         Some(PreviewHeadFrame {
             name,
             count,
             edit,
+            refused,
             content: seats::PreviewHeadContent {
                 tools,
                 dirty,
@@ -31816,6 +32451,11 @@ impl Runtime<'_> {
                 flip_to_source,
                 pinned: self.seats.preview_is_pinned(seat),
                 menu_open: self.window.preview_menu.seat() == Some(seat),
+                web: page.as_ref().map(|page| seats::WebHeadState {
+                    can_go_back: page.can_go_back,
+                    can_go_forward: page.can_go_forward,
+                    loading: page.loading,
+                }),
                 ..seats::PreviewHeadContent::default()
             },
         })
@@ -31848,6 +32488,11 @@ impl Runtime<'_> {
             save: self.preview_is_editable(surface),
             flip: buffer.is_some_and(|buffer| buffer.ftype == preview::PreviewFtype::Markdown),
             browser: buffer.is_some_and(|buffer| preview_page_hand_off(&buffer.source).is_some()),
+            // **A page on this seat** (§7.7 ②). The seam slice ③ moves: today a
+            // window has one page and it names its own seat, and when the
+            // preview pool learns about pages this becomes a question about the
+            // buffer above.
+            web: self.seat_holds_a_page(seat),
             switcher: self.preview_switcher_rows(seat) > 1,
             // Zero until this seat's head has been drawn once, which is the
             // honest answer for a frame the paint has not reached yet: a pill
@@ -31879,6 +32524,62 @@ impl Runtime<'_> {
         now: Instant,
     ) -> Option<seats::FootWords> {
         let surface = PreviewSurface::Seat(seat);
+        // **A page's foot is a landing band and a hover line at once** (§7.7 ③,
+        // W2 slice ④). It says where this seat's content lives and hands it to
+        // the system, exactly as a file's does; and while the pointer is over a
+        // link inside the page it says **the resolved target of that link**
+        // instead — `#/download` written out as
+        // `http://127.0.0.1:5173/download`, because the `href` as printed would
+        // be this band reporting the page's source rather than its meaning.
+        //
+        // A target this window will not follow is written out in full and
+        // stamped `· blocked`, and pressing it does nothing at all. That is not
+        // a new ruling: it is the 2026-08-20 one about a terminal's hover line,
+        // landing on the surface that already had a hover line — and it is
+        // stamped with the very same words, from `Text::HyperlinkBlockedSuffix`.
+        let page = self.web_on(seat).map(|web| web.page().clone());
+        if let Some(page) = page {
+            let hovering = !page.hover.is_empty();
+            let target = if hovering { &page.hover } else { &page.url };
+            let mut lead = target.clone();
+            // The stamp goes on the *hovered* target only. The seat's own URL
+            // committed, so it is by definition one this window went to, and a
+            // band that stamped it would be arguing with the page behind it.
+            if hovering && !matches!(webnav::address_bar(target), webnav::Decision::Navigate(_)) {
+                lead.push_str(i18n::Text::HyperlinkBlockedSuffix.text());
+            }
+            let revealed = self.foot_reveal_is_fresh(RevealedFoot::Preview(seat), now);
+            let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
+            let run =
+                seats::pane_foot_geometry(rect, bt_layout::SeatKind::Preview, scale).foot_path;
+            let font = seats::FILES_FOOT_FONT_LOGICAL_PX * scale;
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
+            return Some(seats::dress_foot(
+                seats::FootDress {
+                    run,
+                    lead: &lead,
+                    // The same word the `Open in default app` card flashes,
+                    // because it is the same sentence: this window handed the
+                    // thing to the machine and the machine has it now.
+                    flash: revealed.then(preview_opened_label),
+                    // A page has no standing fact to hang on the right: the two
+                    // this strip carries — a truncated read and a refused save —
+                    // are both about a *buffer*, and a page holds none.
+                    notice: "",
+                    // **A path is cut from the front and a URL from the back.**
+                    // The scheme and the host are what identify a URL and the
+                    // query is what is expendable, which is the opposite end
+                    // from a path, whose file name is its identity. Same band,
+                    // same ellipsis, opposite ends, because the two kinds of
+                    // address are read from opposite ends.
+                    cut_left: false,
+                    font_px: font,
+                    gap_px: seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX * scale,
+                },
+                &mut measure,
+            ));
+        }
         // **A path, because the left hand of this strip is "where is this".**
         // A document with no file behind it has no answer to that question in
         // this vocabulary, so it answers in its own: `folio · src/main.rs`, the
@@ -31934,6 +32635,15 @@ impl Runtime<'_> {
     /// Show the file on the seat in File Explorer — `.preview-pane .files-foot`
     /// (P32), the same verb and the same confirmation a files column's foot has.
     fn reveal_preview_file(&mut self, seat: SeatId) -> Result<()> {
+        // **A page's band hands the page over instead** (§7.7 ③): 「外链一律外
+        // 交」, and this is the one place a web seat has to say it. The flash is
+        // the same flash — one band, one confirmation, one duration.
+        if let Some(url) = self.web_on(seat).map(|web| web.page().url.clone()) {
+            self.hand_url_to_the_browser(&url)?;
+            self.window.revealed_foot = Some((RevealedFoot::Preview(seat), Instant::now()));
+            self.refresh_chrome();
+            return self.present_chrome_change();
+        }
         let surface = PreviewSurface::Seat(seat);
         // **The one file verb a composed document keeps** (G-3). Explorer points
         // at files, and a diff has none — but the diff is *of* a file, and that
@@ -33169,7 +33879,41 @@ impl Runtime<'_> {
             // the terminal", so a flag that meant "the field is focused" would
             // switch the row off in exactly the state it is wanted.
             search_open: self.window.search.is_open(),
+            // **A page holding the keyboard, and not merely a page being on
+            // screen** (§7.7, W2 slice ④). `Ctrl+L` and `F12` are the page's
+            // verbs and `Escape` is claimed only while there is a capsule to put
+            // away; every one of them has to fall through the instant the
+            // keyboard is somewhere else, or a chord aimed at a shell in the
+            // pane beside it would be taken by a document nobody is typing into.
+            web_page: self.page_holds_the_keyboard(),
         }
+    }
+
+    /// Whether a hosted page is the thing typing goes into right now.
+    ///
+    /// Two facts and both are needed: this window has a page, and the seat it
+    /// stands on is the one holding the keyboard. The engine's own `GotFocus` is
+    /// *not* asked, and that is deliberate — it arrives one message pump later
+    /// than the click that caused it, so a chord pressed in the same breath as
+    /// the click would be judged against the focus the window had before it.
+    ///
+    /// **The layout's focus and never `focused_leaf`** (found on the machine,
+    /// 2026-08-22: clicking inside a page and pressing `Ctrl+L` did nothing).
+    /// `focused_leaf` names *the shell the keyboard falls back to* — it is only
+    /// ever written for a seat that is in `sessions`, which is to say for a
+    /// terminal — so a preview seat can never be it, and a predicate written
+    /// against it answers `false` on every page there has ever been. What names
+    /// the pane a press put the keyboard in is `focused_preview_seat`, which is
+    /// the same reading `Focus::preview` one line above already takes.
+    fn page_holds_the_keyboard(&self) -> bool {
+        let Some(seat) = self.focused_preview_seat() else {
+            return false;
+        };
+        // And not while the quick edit or a float has it: those are answered by
+        // `preview_keyboard_surface` above and are a different surface's
+        // keyboard, whatever seat is focused underneath them.
+        self.preview_keyboard_surface() == Some(PreviewSurface::Seat(seat))
+            && self.seat_holds_a_page(seat)
     }
 
     /// **Whether a shell is the one holding the keyboard** — `InputOwner ==
@@ -33344,6 +34088,23 @@ impl Runtime<'_> {
     /// Travel keys honour repeats and nothing else does, which is the same line
     /// the tree draws: holding an arrow is one continuous "further".
     fn preview_browse_key(&mut self, event: &KeyEvent) -> Result<bool> {
+        // **A field standing over this surface is asked before it** (§7.7 ②,
+        // B69: 「search keys are the search box's」).
+        //
+        // This function ends in `_ => return Ok(true)`: a focused preview
+        // swallows every key it does not use, which was written when the only
+        // thing under it was a shell. The search capsule's second host is a
+        // **page**, and a page's seat is a focused preview — so with the capsule
+        // up on one, every character typed into it was being eaten here. Found
+        // on the machine, 2026-08-22: `Ctrl+F` over a page raised a capsule
+        // nothing could be typed into.
+        //
+        // The condition is the caret's, not the capsule's: B81's second stance —
+        // search open, hands back on the surface — is exactly the state in which
+        // this surface should go on swallowing.
+        if self.window.search.is_focused() {
+            return Ok(false);
+        }
         let Some(surface) = self.preview_keyboard_surface() else {
             return Ok(false);
         };
@@ -41964,6 +42725,24 @@ impl Runtime<'_> {
         seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat)).browser
     }
 
+    /// The box one of a page's four head verbs is drawn in (§7.7 ②).
+    ///
+    /// The same derivation the paint and the hit test read, for their reason: a
+    /// tip anchored on a second computation is a tip that stands beside the
+    /// button rather than on it.
+    fn preview_web_tool_box(&self, seat: SeatId, verb: WebHeadVerb) -> Option<[f32; 4]> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
+        let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
+        let geometry = seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat));
+        match verb {
+            WebHeadVerb::Back => geometry.back,
+            WebHeadVerb::Forward => geometry.forward,
+            WebHeadVerb::Reload => geometry.reload,
+            WebHeadVerb::DevTools => geometry.devtools,
+        }
+    }
+
     /// The pane menu's own level of the overlay stack, or nothing when none is
     /// up.
     fn pane_menu_layer(&mut self) -> Vec<marks::OverlayLayer> {
@@ -47595,6 +48374,19 @@ impl Runtime<'_> {
             .file_trees
             .values()
             .any(|cache| cache.any_turning(now, motion));
+        // §7.7 ②, and the same argument once more: a page's mark spins while a
+        // navigation is in flight, and nothing else in the window is moving
+        // while it does — the engine reports when the navigation *ends*, not
+        // sixty times a second on the way. Under reduced motion the phase is
+        // pinned at twelve o'clock, so the arc is a still picture and asks for
+        // no frames at all, which is what keeps `Reduced` a genuinely idle
+        // window rather than a fast animation.
+        let page_loading = motion != Motion::Reduced
+            && self
+                .window
+                .web
+                .as_ref()
+                .is_some_and(|web| web.page().loading);
         [
             (tabs_moving
                 || chevron_turning
@@ -47602,7 +48394,8 @@ impl Runtime<'_> {
                 || cards_moving
                 || focus_arriving
                 || rail_moving
-                || files_turning)
+                || files_turning
+                || page_loading)
                 .then(|| now + STRIP_ANIMATION_FRAME),
             self.window.pane_motion.deadline(now, motion),
         ]
@@ -50173,18 +50966,16 @@ impl Runtime<'_> {
         // The card's button, asked only while the card is up: a control that
         // answers a hit test it is not on screen for is an invisible button.
         .or_else(|| {
-            self.current_preview_buffer()
-                .and_then(preview::PreviewBuffer::refusal)
-                .and_then(|_| {
-                    seats::hit_preview_card_button(
-                        &self.seats,
-                        &self.seat_layout,
-                        self.window.preview_button_width,
-                        scale,
-                        position.x,
-                        position.y,
-                    )
-                })
+            let seat = self.seats.preview()?;
+            let button = self.window.preview_card_verbs.get(&seat).copied()?;
+            seats::hit_preview_card_button(
+                &self.seats,
+                &self.seat_layout,
+                button,
+                scale,
+                position.x,
+                position.y,
+            )
         })
         // **The switch before the page it switches**, and before the tree too:
         // it stands between the head and the body, and a thirty-pixel strip the
@@ -51881,6 +52672,35 @@ impl Runtime<'_> {
             self.refresh_chrome();
             return self.present_chrome_change();
         }
+        // **The address a page's head names** (§7.7 ②). The same two paths, and
+        // a third thing that is not a path: an address the door will not take
+        // **leaves the editor open**. Enter on a refused address does nothing —
+        // 「回车什么都不做、原来的页面原地不动」 — and the field goes on saying so
+        // where it is being typed, which is the search capsule's own answer to a
+        // regex that will not parse.
+        if let RenameSubject::WebAddress { seat } = editor.subject {
+            if commit {
+                let engine = self.app.settings_store.loaded().search_engine;
+                let compositor_outcomes = {
+                    let window = &mut *self.window;
+                    window
+                        .web
+                        .as_mut()
+                        .filter(|web| web.seat == seat)
+                        .map(|web| web.go_to(&editor.text, engine, &window.compositor))
+                };
+                if let Some((taken, outcomes)) = compositor_outcomes {
+                    if !taken {
+                        self.window.rename = Some(editor);
+                        self.refresh_chrome();
+                        return self.present_chrome_change();
+                    }
+                    self.apply_web_outcomes(outcomes)?;
+                }
+            }
+            self.refresh_chrome();
+            return self.present_chrome_change();
+        }
         if commit
             && let Some(index) = self
                 .window
@@ -52119,6 +52939,11 @@ impl Runtime<'_> {
                 // A float's head is not chrome, so there is no target that can
                 // be inside it and every press out here is a blur.
                 RenameSubject::PreviewName { .. } => None,
+                // The address field is the same cell as the name it replaced, so
+                // it is the same target: a press inside it puts a caret, and a
+                // press anywhere else — the page below very much included — is a
+                // blur that commits.
+                RenameSubject::WebAddress { seat } => Some(seats::ChromeTarget::PreviewName(*seat)),
             };
             if editing.is_some() && target == editing {
                 // "编辑器内的按下/双击不触发拖拽或再次进入编辑" (J103): the press
@@ -52439,6 +53264,34 @@ impl Runtime<'_> {
                 self.window.files_row_clicks.interrupt();
                 self.open_preview_in_browser(seat)?;
             }
+            // A page's four, and the one verb on the card a failed page shows
+            // (§7.7 ②, ④). Each goes through the verb the chord goes through, so
+            // a button and a key are two doors onto one room.
+            seats::ChromeTarget::PreviewBack(seat) => {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                self.run_web_head_verb(seat, WebHeadVerb::Back)?;
+            }
+            seats::ChromeTarget::PreviewForward(seat) => {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                self.run_web_head_verb(seat, WebHeadVerb::Forward)?;
+            }
+            seats::ChromeTarget::PreviewReload(seat) => {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                self.run_web_head_verb(seat, WebHeadVerb::Reload)?;
+            }
+            seats::ChromeTarget::PreviewDevTools(seat) => {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                self.run_web_head_verb(seat, WebHeadVerb::DevTools)?;
+            }
+            seats::ChromeTarget::PreviewFaultVerb(seat) => {
+                self.window.tab_clicks.interrupt();
+                self.window.files_row_clicks.interrupt();
+                self.run_web_fault_verb(seat)?;
+            }
             seats::ChromeTarget::PreviewPin(seat) => {
                 self.window.tab_clicks.interrupt();
                 self.window.files_row_clicks.interrupt();
@@ -52475,7 +53328,16 @@ impl Runtime<'_> {
                     == TabClick::Double
                 {
                     self.close_preview_menu()?;
-                    self.open_preview_rename(seat)?;
+                    // **The same double click, on the same cell** (§7.7 ②).
+                    // What opens is decided by what the cell is naming: a
+                    // file's name opens the rename editor, a page's title opens
+                    // the address. One gesture, seeded two ways, because the
+                    // gesture is inherited and not invented.
+                    if self.seat_holds_a_page(seat) {
+                        self.open_web_address_on(seat)?;
+                    } else {
+                        self.open_preview_rename(seat)?;
+                    }
                     self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-preview-name-double state={state:?} button={button:?} target={traced_target:?}"));
                     return Ok(true);
                 }
@@ -53197,6 +54059,18 @@ impl Runtime<'_> {
             && button == MouseButton::Left
             && let Some(position) = self.window.pointer_position
             && self.press_search(position)?
+        {
+            return Ok(());
+        }
+        // **The download sheet takes every press inside it** (§7.7 ④), above
+        // the capsule and the strip in the order it is drawn. The verb answers;
+        // the scrim and the card swallow. **A press on the scrim is not a
+        // dismissal**: the one thing a reader must not be able to lose by
+        // accident is the only notice saying a file they asked for did not
+        // arrive, so Escape is the way out and it is the only one.
+        if state == ElementState::Pressed
+            && let Some(position) = self.window.pointer_position
+            && self.press_web_sheet(position)?
         {
             return Ok(());
         }
@@ -55417,6 +56291,18 @@ impl Runtime<'_> {
             }
             return Ok(());
         }
+        // **The download sheet's rung** (§7.7 ④, W2 slice ④). Above the pane
+        // menu and below the modals, which is where the ruling puts it: 「Esc 梯
+        // 子里排在 pane 菜单之上,顶层优先」. It is the one failure card with a
+        // way out, and the reason is that there is a page under it to come back
+        // to — the other four *are* the seat, and dismissing one of those would
+        // leave the black hole a hidden WebView draws.
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape))
+            && !event.repeat
+            && self.dismiss_web_sheet()?
+        {
+            return Ok(());
+        }
         // A popup is not a modal, so it owns exactly one key: the one that puts
         // it away. Everything else is still the terminal's.
         // The preview's switcher is asked **before** the file menu's own rung
@@ -56421,6 +57307,19 @@ impl Runtime<'_> {
         for (seat, outcomes) in outcomes {
             self.apply_web_outcomes(seat, outcomes)?;
         }
+        // **Everything the head, the foot and the cards read arrives here**
+        // (§7.7 ②, ③, ④, W2 slice ④): the title, the address, the two history
+        // flags, the hover line, the failure. Slice ① needed no repaint because
+        // no chrome read the page; every one of those is chrome now, and an
+        // engine that speaks between frames would otherwise be a head that says
+        // what was true a navigation ago.
+        //
+        // Asked of `refresh_chrome` rather than tracked per field: it already
+        // answers "did anything move", which is the same question and one
+        // answer.
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
         Ok(())
     }
 
@@ -56466,11 +57365,21 @@ impl Runtime<'_> {
                         self.window.renderer.set_web_holes(Vec::new());
                     }
                 }
+                // Still said out loud, and now also drawn where §7.7 ④ says: the
+                // seat keeps the refusal as its own card and this line stays,
+                // because the difference between "the policy stopped it" and "it
+                // went and came back" is not otherwise visible from outside the
+                // process.
                 webhost::WebOutcome::Refused(uri) => eprintln!("BT_WEB refused {uri}"),
-                // Slice 4 owns the five failure cards; until they exist this
-                // goes where `BT_DPI` goes and for its reason — a fact with
-                // nowhere yet to be drawn is still a fact.
+                // What no card covers. The five §7.7 ④ states are drawn by the
+                // seat itself; this is the residue, and it goes where `BT_DPI`
+                // goes for its reason — a fact with nowhere to be drawn is still
+                // a fact.
                 webhost::WebOutcome::Fault(text) => eprintln!("BT_WEB {text}"),
+                webhost::WebOutcome::HandOff(url) => self.hand_url_to_the_browser(&url)?,
+                webhost::WebOutcome::FindMatches { count, active } => {
+                    self.web_find_reported(count, active)?;
+                }
             }
         }
         Ok(())
@@ -56690,6 +57599,252 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    // ── The page's own chrome (slice ④) ────────────────────────────────────
+
+    /// Hand one address to whatever this machine opens `https` with.
+    ///
+    /// **Through the address door first, without exception.** Every string that
+    /// reaches here came from somewhere — a download the engine started, the
+    /// page's own committed URL, a constant of this build — and 「钉不是授权」
+    /// is the same sentence about all of them: the check is at the point of use,
+    /// not at the point of storage. `shell_execute` is what hands an arbitrary
+    /// scheme to whatever the machine registered for it, and `address_bar` is
+    /// what makes sure the scheme is not arbitrary.
+    fn hand_url_to_the_browser(&mut self, url: &str) -> Result<()> {
+        let webnav::Decision::Navigate(target) = webnav::address_bar(url) else {
+            return Ok(());
+        };
+        let result = window_hwnd(&self.window.window).and_then(|hwnd| {
+            bt_platform::shell_execute(hwnd, &target)
+                .map_err(|error| anyhow!(error))
+                .context("hand a page's address to the system browser")
+        });
+        if let Err(error) = result {
+            eprintln!("recoverable web hand-off failure: {error:#}");
+        }
+        Ok(())
+    }
+
+    /// Put one string on the clipboard, through the door every other copy in
+    /// this window uses.
+    fn copy_text_to_clipboard(&mut self, text: &str) {
+        let result = window_hwnd(&self.window.window).and_then(|hwnd| {
+            bt_platform::set_clipboard_text(hwnd, text)
+                .map_err(|error| anyhow!(error))
+                .context("copy a refused address to the clipboard")
+        });
+        let _ = recoverable_clipboard_write(result, "web address copy");
+    }
+
+    /// **Which seat `Ctrl+F` opens the capsule on** (§7.7 ②, W2 slice ④).
+    ///
+    /// `focused_leaf` names the shell the keyboard falls back to and is only
+    /// ever written for a seat that is in `sessions` — so on a window whose
+    /// keyboard is in a page it still names the terminal beside it, and a
+    /// capsule opened through it lands on the wrong pane (found on the machine,
+    /// 2026-08-22: `Ctrl+F` over a page opened a search on the shell next door).
+    /// The capsule has two hosts now, so the question has two answers and this
+    /// is where they are chosen between.
+    fn search_host_seat(&self) -> SeatId {
+        self.focused_web_seat().unwrap_or(self.focused_leaf)
+    }
+
+    /// The seat this window's page is on, when that seat is the one holding the
+    /// keyboard.
+    ///
+    /// **`focused_preview_seat` and never `focused_leaf`**, for
+    /// [`Self::page_holds_the_keyboard`]'s reason and found the same way: the
+    /// latter only ever names a seat that is in `sessions`, so it is never a
+    /// preview seat and a chord routed through it never fires. One predicate,
+    /// asked twice, is how the two came to differ in the first place — so this
+    /// is now that predicate.
+    fn focused_web_seat(&self) -> Option<SeatId> {
+        self.page_holds_the_keyboard()
+            .then(|| self.focused_preview_seat())
+            .flatten()
+    }
+
+    /// **`Ctrl+L`, and the double click on the name cell** — the address
+    /// field's two doors (§7.7 ②).
+    ///
+    /// One function for both, which is what "the second door onto the same
+    /// room" means here: the editor, its seeding and its selection are decided
+    /// once, so a URL typed after a double click and one typed after the chord
+    /// cannot be seeded differently.
+    fn open_web_address(&mut self) -> Result<()> {
+        let Some(seat) = self.focused_web_seat() else {
+            return Ok(());
+        };
+        self.open_web_address_on(seat)
+    }
+
+    fn open_web_address_on(&mut self, seat: SeatId) -> Result<()> {
+        let Some(url) = self.web_on(seat).map(|web| web.page().url.clone()) else {
+            return Ok(());
+        };
+        self.finish_rename(true)?;
+        // **The field takes the keyboard back from the page, and it has to**
+        // (found on the machine, 2026-08-22: `Ctrl+L` opened a field nothing
+        // could be typed into). A page keeps every key this window's table does
+        // not claim, and §7.8 ④ measured the shape of that exactly: **a bare
+        // printable key never enters `AcceleratorKeyPressed` at all**. So a
+        // field raised over a page that still holds the keys is a field that can
+        // be opened, selected and dismissed, and never typed in.
+        //
+        // The same sentence the download sheet and a modal already make, said at
+        // the third surface this window stands over a page with: whatever is
+        // asking for keys takes them.
+        if let Ok(hwnd) = window_hwnd(&self.window.window) {
+            let _ = bt_platform::take_keyboard_focus(hwnd);
+        }
+        self.window.rename = Some(TabRename::open_address(seat, &url));
+        self.window.rename_blink.reset(Instant::now());
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
+    /// `F12`, and the head's `</>` tool.
+    fn open_web_dev_tools(&mut self) -> Result<()> {
+        let Some(seat) = self.focused_web_seat() else {
+            return Ok(());
+        };
+        self.open_web_dev_tools_on(seat)
+    }
+
+    fn open_web_dev_tools_on(&mut self, seat: SeatId) -> Result<()> {
+        if let Some(web) = self.web_on(seat)
+            && let Err(error) = web.open_dev_tools()
+        {
+            eprintln!("BT_WEB {error}");
+        }
+        Ok(())
+    }
+
+    /// One of the head's three navigation buttons, or the `</>` beside them.
+    fn run_web_head_verb(&mut self, seat: SeatId, verb: WebHeadVerb) -> Result<()> {
+        if verb == WebHeadVerb::DevTools {
+            return self.open_web_dev_tools_on(seat);
+        }
+        let Some(web) = self.web_on_mut(seat) else {
+            return Ok(());
+        };
+        let outcome = match verb {
+            WebHeadVerb::Back => web.go(false),
+            WebHeadVerb::Forward => web.go(true),
+            WebHeadVerb::Reload => web.reload_or_stop(),
+            WebHeadVerb::DevTools => Ok(()),
+        };
+        if let Err(error) = outcome {
+            eprintln!("BT_WEB {error}");
+        }
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
+    /// The one verb on the failure card this seat is showing (§7.7 ④).
+    fn run_web_fault_verb(&mut self, seat: SeatId) -> Result<()> {
+        let Some(verb) = self
+            .web_on(seat)
+            .and_then(|web| web.fault())
+            .map(webhost::WebFault::verb)
+        else {
+            return Ok(());
+        };
+        match verb {
+            webhost::WebFaultVerb::DownloadTheRuntime => {
+                self.hand_url_to_the_browser(webhost::RUNTIME_DOWNLOAD_PAGE)
+            }
+            webhost::WebFaultVerb::Reload => self.run_web_head_verb(seat, WebHeadVerb::Reload),
+            webhost::WebFaultVerb::CopyAddress(address) => {
+                self.copy_text_to_clipboard(&address);
+                Ok(())
+            }
+            // The page is still there — that is the whole reason this card is a
+            // sheet — so what is handed over is the address it is standing on.
+            webhost::WebFaultVerb::OpenPageInBrowser => {
+                let page = self
+                    .window
+                    .web
+                    .as_ref()
+                    .map(|web| web.page().url.clone())
+                    .unwrap_or_default();
+                self.hand_url_to_the_browser(&page)
+            }
+        }
+    }
+
+    /// A press anywhere on the download sheet. Returns whether it landed there.
+    fn press_web_sheet(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some((seat, layout)) = self.window.web_sheet_layout.clone() else {
+            return Ok(false);
+        };
+        let (x, y) = (position.x as f32, position.y as f32);
+        if !websheet::covers(&layout, x, y) {
+            return Ok(false);
+        }
+        if websheet::hit(&layout, seat, x, y).is_some() {
+            self.run_web_fault_verb(seat)?;
+        }
+        Ok(true)
+    }
+
+    /// Take the download sheet away. The one card with an Escape, and the
+    /// reason is that there is a page under it to come back to.
+    fn dismiss_web_sheet(&mut self) -> Result<bool> {
+        let dismissed = self
+            .window
+            .web
+            .as_mut()
+            .is_some_and(webhost::WebSeat::dismiss_sheet);
+        if dismissed {
+            self.refresh_chrome();
+            self.present_chrome_change()?;
+        }
+        Ok(dismissed)
+    }
+
+    /// Whether a point is inside the page as it stands on the glass this frame.
+    ///
+    /// **Less whatever this window has standing on it** (§7.7 ②, ④, W2 slice
+    /// ④). Two of this window's own surfaces are drawn *over* a page — the
+    /// search capsule in the pane's top-right corner, and the download sheet —
+    /// and both are overlay layers, which is above the transparency hole and
+    /// therefore above the page (§7.8 ②). One subtraction here rather than four
+    /// guards, because the press, the wheel, the hover and the cursor all ask
+    /// this same question: a pointer that is over the capsule is not over the
+    /// page, whatever the rectangles say.
+    fn point_is_on_the_web_page(&self, position: PhysicalPosition<f64>) -> bool {
+        let Some(bounds) = self
+            .window
+            .web
+            .as_ref()
+            .and_then(webhost::WebSeat::shown_at)
+        else {
+            return false;
+        };
+        let (x, y) = (position.x as f32, position.y as f32);
+        let inside = |box_: [f32; 4]| x >= box_[0] && x < box_[2] && y >= box_[1] && y < box_[3];
+        if self
+            .window
+            .web_sheet_layout
+            .as_ref()
+            .is_some_and(|(_, layout)| websheet::covers(layout, x, y))
+        {
+            return false;
+        }
+        if self
+            .window
+            .search_layout
+            .is_some_and(|capsule| self.window.search.is_open() && inside(capsule.frame))
+        {
+            return false;
+        }
+        position.x >= f64::from(bounds.x)
+            && position.y >= f64::from(bounds.y)
+            && position.x < f64::from(bounds.x + bounds.width as i32)
+            && position.y < f64::from(bounds.y + bounds.height as i32)
+    }
+
     fn revive_web_pages(&mut self, index: usize) -> Result<()> {
         let Some(tab) = self.window.tabs.get(index) else {
             return Ok(());
@@ -56873,6 +58028,18 @@ impl Runtime<'_> {
             // The seat takes the layout focus exactly as any pane does when it
             // is pressed (D40), and then the keyboard goes inside the page.
             self.focus_pane_at(position)?;
+            // **A station, because this is a `return` nobody can see from
+            // outside** (`BT_MOUSE_TRACE`'s own rule). Which seat the press
+            // landed the focus on is the whole of whether `Ctrl+L` and `F12`
+            // are claimed from the page a moment later.
+            self.mouse_trace(|| {
+                format!(
+                    "press_web_page focus={:?} page_seat={:?} holds={}",
+                    self.seats.focus(),
+                    Some(seat),
+                    self.page_holds_the_keyboard()
+                )
+            });
             if let Some(web) = self.window.web.get(&seat)
                 && let Err(error) = web.focus_page()
             {
@@ -56892,6 +58059,23 @@ impl Runtime<'_> {
     /// its own to move, and the two axes are the page's exactly as they are in
     /// any other browser.
     fn scroll_web_page(&mut self, position: PhysicalPosition<f64>, x: f32, y: f32) {
+        // **`Ctrl`+wheel zooms the page** (方案 §0's five extras).
+        //
+        // Nothing is being taken from anything: this product has no type-size
+        // zoom bound to a wheel at all — a picture zooms on the *bare* wheel —
+        // so `Ctrl`+wheel is empty everywhere else in this window, which is what
+        // makes it free to be the browser gesture here.
+        //
+        // The notch is not forwarded as well. A page that received both would
+        // scroll while it zoomed, which is the one combination no browser does.
+        if self.window.modifiers.control_key() && y != 0.0 {
+            if let Some(web) = self.window.web.as_mut()
+                && let Err(error) = web.zoom_by(y > 0.0)
+            {
+                eprintln!("BT_WEB {error}");
+            }
+            return;
+        }
         // `WHEEL_DELTA`, which is what a page's own `deltaY` is derived from.
         let notch = |value: f32| (value * 120.0).round().clamp(-32768.0, 32767.0) as i16;
         if y != 0.0 {
@@ -61765,10 +62949,24 @@ mod tests {
         // walking a graph's rows are two different presses and neither can reach
         // the other. What the graph's keys may not survive is a row claiming the
         // *same* press, which is what this asserts.
+        //
+        // **`Scope::SearchOpen` is exempt, and the ladder is why** (§7.7, W2
+        // slice ④). The one row that claims a bare key on this list is
+        // `close-search`, and its scope is exactly the state in which §7.1.5's
+        // Escape ladder has *already* taken the key: `close_search` answers at
+        // its own rung, which stands whole screens above `preview_key` where the
+        // graph's rung is. So the row is never the thing that takes an Escape
+        // from a graph — with a capsule up, the graph did not have it before
+        // this row existed either. What the assertion protects is a row taking
+        // one of the six in a state where the ladder would have left it alone,
+        // and that is still nobody's.
         for binding in shortcuts::BINDINGS {
             let Some(chord) = &binding.chord else {
                 continue;
             };
+            if binding.scope == shortcuts::Scope::SearchOpen {
+                continue;
+            }
             assert!(
                 !matches!(
                     chord.key,
@@ -61825,6 +63023,7 @@ mod tests {
             ground: mark(2),
             search: mark(14),
             pane_notices: mark(17),
+            web_sheet: mark(18),
             layout_peek: mark(3),
             float: mark(4),
             modal: mark(5),
@@ -61844,9 +63043,11 @@ mod tests {
             .collect();
         assert_eq!(
             order,
-            vec![0, 16, 13, 1, 2, 14, 17, 3, 4, 5, 6, 7, 12, 15, 8, 9, 10, 11],
+            vec![
+                0, 16, 13, 1, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 8, 9, 10, 11
+            ],
             "bottom to top: pane bars, terminal thumbs, command rails, rail, ground, search \
-             capsule, integration strips, schematic, float, modal, file menu, pane menu, git \
+             capsule, integration strips, download sheet, schematic, float, modal, file menu, git \
              menu, terminal menu, notices, tip, glance, ghost"
         );
         let at = |tag: u8| {
@@ -72169,6 +73370,7 @@ mod tests {
                     preview: false,
                     terminal_primary: true,
                     search_open: false,
+                    web_page: false,
                 },
             )
         };
@@ -72181,6 +73383,7 @@ mod tests {
                     preview: true,
                     terminal_primary: false,
                     search_open: false,
+                    web_page: false,
                 },
             )
         };
@@ -83054,7 +84257,7 @@ mod tests {
             "B14: named by its folder's last segment, the same string its head prints"
         );
         assert_eq!(
-            torn.tab_mark(),
+            torn.tab_mark(None),
             marks::ChromeMark::Folder,
             "and wearing the same folder mark, not a shell's"
         );
@@ -83119,7 +84322,7 @@ mod tests {
             "P15: named by the file, the same string the pane head prints"
         );
         assert_eq!(
-            torn.tab_mark(),
+            torn.tab_mark(None),
             marks::ChromeMark::File,
             "and wearing the file mark"
         );
@@ -83228,7 +84431,7 @@ mod tests {
             "there is still nothing to type into, which is the honest reading"
         );
         assert_eq!(tab.display_title(), "folio");
-        assert_eq!(tab.tab_mark(), marks::ChromeMark::Folder);
+        assert_eq!(tab.tab_mark(None), marks::ChromeMark::Folder);
         assert_eq!(
             tab.mark_state(
                 true,
@@ -83953,7 +85156,7 @@ mod tests {
              because the profile rides on the session that moved"
         );
         assert_eq!(
-            torn.tab_mark(),
+            torn.tab_mark(None),
             profiles::mark(gitbash),
             "so the strip draws the new tab as the shell actually running in it"
         );
