@@ -9411,7 +9411,7 @@
        Ctrl+click, so it needs a door of its own, and this is it.
        THE REAL EXTENSION AND NEVER A SUBSTRING: `index.htmlx` is a template
        dialect and `report.html.txt` is a text file that spells `.html` in the
-       middle of itself, which is `names_an_html_page`'s own rule and not a second
+       middle of itself, which is the page class's own rule and not a second
        reading of it. Not on a web seat: a page that is already a page is handed
        over by its foot (「外链一律外交」), and the arrow would be that band's
        second spelling. */
@@ -9421,7 +9421,18 @@
        draws the page now, and a seat with no way to the machine's own browser
        would be that complaint upside down. A page with no local file behind it
        still has none: its foot hands the address over (「外链一律外交」). */
-    const page = /\.html?$/i.test(isWebBuf(pv) ? decodeURI(pv.web.url) : pv.name)
+    /* AND THE QUESTION IS "IS THIS A PAGE", NOT "IS THIS HTML" (user ruling
+       2026-08-23, the second ruling of that day; DESIGN §7.10 ⑥). This test used
+       to spell `.html?` itself, which was the same question only while those two
+       spellings were the whole page class. `pdf` joined the class that morning
+       and the two came apart: one class, two heads. So it asks `previewFtype` —
+       the one place the class is written down here, `preview::PAGE_EXTENSIONS`
+       natively — and the whole-name `.html` dotfile keeps falling to the text
+       arm before the page arm is ever reached, exactly as it does natively.
+       THE `.pdf` NEEDS THIS ARROW MOST: the browser's own reader prints,
+       rotates and annotates where an embedded one does not, and `</>` — the
+       head's other door out — has nothing to show over a PDF. */
+    const page = previewFtype(isWebBuf(pv) ? decodeURI(pv.web.url) : pv.name) === "web"
       && (!isWebBuf(pv) || /^file:\/\/\//i.test(pv.web.url));
     /* THE CHEVRON FOLLOWS THE LIST, NOT THE POOL (found on the machine,
        2026-08-19). It is the only door into this list, and it used to open on

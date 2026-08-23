@@ -3572,6 +3572,14 @@ fn path_is_previewable_image(path: &Path) -> bool {
 /// The two page spellings come from [`names_an_html_page`] rather than a second
 /// list, so `.htm` and `.html` cannot come apart here; the real extension and
 /// never a substring, for that predicate's own reason.
+///
+/// **This is where the page class is written down**, and since the second ruling
+/// of 2026-08-23 the head's `↗` asks it too ([`preview_page_hand_off`]) rather
+/// than the narrower [`names_an_html_page`] it grew up asking. A predicate that
+/// says which lane a name opens on and a button that says "this seat's content
+/// can go to a browser" are one claim about one class; written twice, the class
+/// came apart the morning `pdf` joined it, and a local `.pdf` page sat under a
+/// head that a local `.html` page did not have.
 fn path_opens_as_a_page(path: &Path) -> bool {
     names_an_html_page(path)
         || path
@@ -11292,10 +11300,27 @@ fn names_an_html_page(path: &Path) -> bool {
 ///
 /// It composes the two functions that already answer the halves —
 /// [`preview::PreviewSource::file_path`], the one door every file-only
-/// capability asks through, and [`names_an_html_page`], §7.1.5g's own reading of
-/// what names a page. So a document this window composed out of a repository
-/// answers `None` however its path inside the repo is spelled: it is not a file,
-/// so it is not a page.
+/// capability asks through, and [`path_opens_as_a_page`], this window's own
+/// reading of what names a page. So a document this window composed out of a
+/// repository answers `None` however its path inside the repo is spelled: it is
+/// not a file, so it is not a page.
+///
+/// **The question is "is this a page", not "is this HTML"** (user ruling
+/// 2026-08-23, the second ruling of that day; §7.10 ⑥). It asked
+/// [`names_an_html_page`] until then, which had been the same question while
+/// `html` and `htm` were the only spellings this window opened on the engine's
+/// lane. That morning's ruling put `pdf` on that lane too, and the two
+/// predicates came apart: one class, two heads — a local `.html` page wore the
+/// arrow and a local `.pdf` page did not. So the arrow now asks the lane's own
+/// predicate, which is the only place the page class is written down, and a
+/// third spelling of the class cannot appear here because there is nothing here
+/// to spell it with.
+///
+/// **And the `.pdf` is the member of the class that needs this button most.**
+/// The browser's own reader prints, rotates and annotates where the embedded
+/// one does not, and the head's other door out — `</>`, the page's developer
+/// tools — has nothing to show over a PDF. An `.html` page shut out of a
+/// browser at least keeps its source; a `.pdf` would have kept nothing.
 ///
 /// **And a page that is being *rendered* is still a file** (user ruling
 /// 2026-08-23). Until that ruling the arrow was drawn over a `.html` shown as
@@ -11312,11 +11337,11 @@ fn names_an_html_page(path: &Path) -> bool {
 fn preview_page_hand_off(source: &preview::PreviewSource) -> Option<PathBuf> {
     if let Some(url) = source.web_url() {
         let (path, _tail) = webnav::Mint::path_and_tail_of_file_url(url)?;
-        return names_an_html_page(&path).then_some(path);
+        return path_opens_as_a_page(&path).then_some(path);
     }
     source
         .file_path()
-        .filter(|path| names_an_html_page(path))
+        .filter(|path| path_opens_as_a_page(path))
         .map(Path::to_path_buf)
 }
 
@@ -69813,9 +69838,20 @@ mod tests {
     /// second spelling of "which file" would be a button that hands over
     /// whatever the *focused* seat is showing rather than the one it stands on.
     ///
+    /// **And the page it asks about is the page class, not one spelling of it**
+    /// (user ruling 2026-08-23, second ruling of the day; §7.10 ⑥). The class
+    /// was settled that morning — `.html`, `.htm` and `.pdf` open on one lane
+    /// from every door — and the arrow was still reading the older, narrower
+    /// predicate, so one class had two heads: a local `.html` page wore the
+    /// arrow and a local `.pdf` page did not. The `.pdf` is the member that
+    /// needs it most, because the browser's reader prints, rotates and
+    /// annotates where the embedded one does not, and because `</>` is no
+    /// second door for it — there is nothing in a PDF for developer tools to
+    /// show.
+    ///
     /// MUTATIONS:
-    /// ① drop the `names_an_html_page` filter — every preview head in the window
-    ///    grows an arrow, and `notes.md` gets handed to a browser;
+    /// ① drop the page filter — every preview head in the window grows an
+    ///    arrow, and `notes.md` gets handed to a browser;
     /// ② answer from the buffer's `name` instead of `source.file_path()` — a git
     ///    diff of `index.html` grows an arrow over a document that has no file
     ///    at all, and the press has nothing to give the shell;
@@ -69827,12 +69863,19 @@ mod tests {
     /// which, since the ruling of that day, is always. The seat would then have
     /// no way to the page's own front at all, which is §7.1.5g ②″'s complaint
     /// with the two views swapped.
+    ///
+    /// **⑤ (2026-08-23) narrow the filter back to [`names_an_html_page`]** on
+    /// either arm and every `.pdf` assertion below fails: the class the window
+    /// opens on one lane would be wearing two different heads again.
     #[test]
     fn only_a_page_with_a_file_behind_it_is_handed_over_to_a_browser() {
         for name in [
             r"D:\Developer\BetterTerminal\design\ui-mockup.html",
             r"C:\Users\me\TIMELINE.HTM",
             r"D:\中文\页.html",
+            r"D:\reports\report.pdf",
+            r"C:\Users\me\MANUAL.PDF",
+            r"D:\中文\说明书.pdf",
         ] {
             let source = preview::PreviewSource::file(name);
             assert_eq!(
@@ -69854,6 +69897,7 @@ mod tests {
                 "file:///C:/Program%20Files/report.htm",
                 r"C:\Program Files\report.htm",
             ),
+            ("file:///D:/reports/report.pdf", r"D:\reports\report.pdf"),
         ] {
             assert_eq!(
                 preview_page_hand_off(&preview::PreviewSource::Web(url.to_owned())),
@@ -69861,10 +69905,16 @@ mod tests {
                 "a rendered local page hands over the file under it: {url:?}"
             );
         }
+        // **A remote page still has nothing to hand over, and that is not the
+        // narrow reading coming back** — it is the arrow asking for a *file*.
+        // The address is handed over by the foot (§7.7 ③), so a `.pdf` served
+        // over `https` answers here exactly as `.html` does.
         for url in [
             "http://localhost:5173/app",
             "https://example.test/index.html",
+            "https://example.test/manual.pdf",
             "file://server/share/page.html",
+            "file://server/share/report.pdf",
         ] {
             assert_eq!(
                 preview_page_hand_off(&preview::PreviewSource::Web(url.to_owned())),
@@ -69873,14 +69923,17 @@ mod tests {
             );
         }
         // Everything else the seat can show. The extension is the real one and
-        // never a substring of the name, which is `names_an_html_page`'s own
+        // never a substring of the name, which is `path_opens_as_a_page`'s own
         // rule reaching this button rather than a second reading of it.
         for name in [
             r"C:\Users\me\notes.md",
             r"C:\Users\me\a.png",
             r"C:\site\index.htmlx",
             r"C:\site\report.html.txt",
+            r"C:\site\report.pdfx",
+            r"C:\site\notes.pdf.txt",
             r"C:\site\html",
+            r"C:\site\pdf",
         ] {
             assert_eq!(
                 preview_page_hand_off(&preview::PreviewSource::file(name)),
