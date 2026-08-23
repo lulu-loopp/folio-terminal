@@ -7,9 +7,12 @@ use std::{
     io::{Read, Write},
     num::{NonZeroU16, NonZeroUsize},
     path::{Path, PathBuf},
-    sync::{Arc, Condvar, Mutex, MutexGuard},
+    sync::{
+        Arc, Condvar, Mutex, MutexGuard,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     thread::JoinHandle,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use portable_pty::{
@@ -88,33 +91,122 @@ const PTY_DUMP_ENV: &str = "BT_PTY_DUMP";
 pub const TERM_PROGRAM: &str = "Folio";
 const TERM_PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Diagnostic-only byte sink for one ConPTY reader. The main file is byte-for-byte suitable for
+/// Diagnostic-only byte sink for **one** ConPTY reader. The main file is byte-for-byte suitable for
 /// `BT_PROBE_INPUT`; the adjacent `.chunks` file preserves reader arrival boundaries and timing.
+///
+/// **One recorder per pane, and therefore one file per pane.** `BT_PTY_DUMP` names a file, and
+/// every [`PtySession::spawn`] used to open *that* file with a truncating create — so the moment a
+/// run's second pane started, the first pane's recording was cut back to nothing underneath a
+/// reader that went on writing past the hole, and the manifest beside it became two runs' lines
+/// interleaved with no way to tell which was which. The named path now belongs to the run's
+/// **first** recording, so every probe that replays `$BT_PTY_DUMP` keeps reading what it always
+/// read, and each further recording takes a name beside it — `<path>.2`, `<path>.3` — announced on
+/// stderr as it opens. See [`pty_dump_session_path`].
+///
+/// **A recording that caught nothing must not look like a recording that never ran.** The byte file
+/// is replay input and stays byte-exact, so it has nowhere to say anything and an empty one is
+/// genuinely zero bytes; the manifest is where the recording says whose it is ([`PtyDump::create`]'s
+/// `# SESSION` line: which recording of which process, and when it began) and where it says the
+/// stream ended with nothing in hand (`# END`). Both are `#` comments, which every existing
+/// manifest parser already skips.
 struct PtyDump {
+    path: PathBuf,
     bytes: File,
     chunks: File,
     started: Instant,
     sequence: u64,
+    total_bytes: u64,
+    /// False once the stream has ended, which is how the publisher thread learns to stop.
+    live: Arc<AtomicBool>,
 }
+
+/// How stale the size Windows publishes for a **live** recording is allowed to get.
+///
+/// Writes to a [`File`] are unbuffered, so a killed process loses nothing: the bytes are in the
+/// file the instant `write_all` returns, and anything that *opens* the file sees them. What does
+/// not happen is the directory entry being brought up to date — `dir`, `Get-ChildItem`,
+/// `FileInfo.Length` and Explorer all read that cached entry, and while the writing handle is open
+/// and unflushed it goes on saying **0 bytes** about a file that already holds a whole session.
+/// That is the whole of the "`BT_PTY_DUMP` sometimes records an empty file" report: the file was
+/// never empty, its published size was, and the "sometimes" is whether anyone happened to close a
+/// handle to it before you looked.
+///
+/// Measured on this host, 2026-08-23, one writer per row appending every 500ms while a sampler
+/// read only the directory entry once a second:
+///
+/// ```text
+/// write only ........ 0   0   0   0   0    → 150 the moment the writer exits
+/// + FlushFileBuffers  30  60  90  120 150
+/// + close & reopen .. 15  45  75  105 135
+/// ```
+///
+/// So a flush publishes and nothing else does. It is deliberately **not** done per chunk: chunks
+/// arrive every 16 KiB, and a disk round trip inside the loop whose own *timing* this file records
+/// would be measuring the recorder. It is done by [`spawn_dump_publisher`] on this fixed interval
+/// instead, which costs five flushes a second whether the child is silent or shouting — the case a
+/// per-chunk cadence gets wrong is precisely the quiet pane, whose last chunk arrives during the
+/// startup burst and whose size would then never be published at all.
+const PTY_DUMP_PUBLISH_INTERVAL: Duration = Duration::from_millis(200);
+
+/// How many recordings this process has opened, which is what gives each one its own name.
+static PTY_DUMP_RECORDINGS: AtomicU64 = AtomicU64::new(0);
 
 impl PtyDump {
     fn from_environment() -> Result<Option<Self>, PtyError> {
         let Some(path) = std::env::var_os(PTY_DUMP_ENV) else {
             return Ok(None);
         };
-        Self::create(&PathBuf::from(path)).map(Some)
+        Self::open(&PathBuf::from(path)).map(Some)
     }
 
-    fn create(path: &Path) -> Result<Self, PtyError> {
+    /// Open this run's next recording under `base` — the named path for the first, a name beside
+    /// it for every pane after that.
+    fn open(base: &Path) -> Result<Self, PtyError> {
+        let ordinal = PTY_DUMP_RECORDINGS.fetch_add(1, Ordering::Relaxed);
+        Self::create(&pty_dump_session_path(base, ordinal), ordinal)
+    }
+
+    /// Where this recording's bytes are actually going.
+    #[cfg(test)]
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn create(path: &Path, ordinal: u64) -> Result<Self, PtyError> {
         let bytes = File::create(path)?;
         let mut chunks = File::create(pty_dump_chunks_path(path))?;
         writeln!(chunks, "# BT_PTY_DUMP_CHUNKS_V1 sequence elapsed_us bytes")?;
-        Ok(Self {
+        // Whose recording this is, said in the file itself: which recording of which process, and
+        // when it began on the wall clock the `elapsed_us` column counts from. A dump found on
+        // disk long afterwards — or two recorders that were pointed at one path from two
+        // processes, which nothing in one process can prevent — can be told apart by this line.
+        writeln!(
+            chunks,
+            "# SESSION ordinal={ordinal} pid={} started_unix_ms={} bytes={}",
+            std::process::id(),
+            unix_millis(),
+            path.display()
+        )?;
+        let dump = Self {
+            path: path.to_path_buf(),
             bytes,
             chunks,
             started: Instant::now(),
             sequence: 0,
-        })
+            total_bytes: 0,
+            live: Arc::new(AtomicBool::new(true)),
+        };
+        dump.publish()?;
+        spawn_dump_publisher(&dump)?;
+        eprintln!("BT_PTY_DUMP recording {ordinal} to {}", dump.path.display());
+        Ok(dump)
+    }
+
+    /// Hand the recording's current size to the operating system, so that the tools which read the
+    /// directory entry rather than the file stop reporting zero. See [`PTY_DUMP_PUBLISH_INTERVAL`].
+    fn publish(&self) -> std::io::Result<()> {
+        self.bytes.sync_data()?;
+        self.chunks.sync_data()
     }
 
     fn write_chunk(&mut self, chunk: &[u8]) -> std::io::Result<()> {
@@ -127,7 +219,24 @@ impl PtyDump {
             chunk.len()
         )?;
         self.sequence = self.sequence.saturating_add(1);
+        self.total_bytes = self
+            .total_bytes
+            .saturating_add(chunk.len().try_into().unwrap_or(u64::MAX));
         Ok(())
+    }
+
+    /// The stream ended. Say so, and say with how much — a recording that caught nothing is a
+    /// legal outcome (a pane nobody typed in, a shell that never printed), and this is the line
+    /// that separates it from a recording that was killed mid-sentence, which has no `# END` at all.
+    fn finish(&mut self) -> std::io::Result<()> {
+        let elapsed_us = u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        writeln!(
+            self.chunks,
+            "# END chunks={} bytes={} elapsed_us={elapsed_us}",
+            self.sequence, self.total_bytes
+        )?;
+        self.live.store(false, Ordering::Release);
+        self.publish()
     }
 
     /// Interleave a resize marker with the byte chunks so a replay can apply the new dimensions
@@ -136,6 +245,74 @@ impl PtyDump {
         let elapsed_us = u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX);
         writeln!(self.chunks, "# RESIZE {columns} {rows} {elapsed_us}")
     }
+}
+
+impl Drop for PtyDump {
+    /// The publisher thread's other way out. [`PtyDump::finish`] is the ordinary one and it runs
+    /// when a *stream* ends — but a recording is opened before the pseudoconsole is, so a spawn
+    /// that fails between the two (a `BT_SHELL` naming a program that is not there, say) drops a
+    /// recording no reader thread ever touched. Without this its publisher would go on flushing a
+    /// finished file, and its two duplicated handles would stay open, for the life of the process.
+    fn drop(&mut self) {
+        self.live.store(false, Ordering::Release);
+    }
+}
+
+/// Keep a live recording's size honest on disk for as long as it is recording.
+///
+/// A thread rather than a check inside the write path, and the reason is the pane that goes quiet:
+/// a cadence spent on chunk arrivals cannot publish anything after the *last* chunk, so a shell
+/// that prints its prompt in the first fifty milliseconds and then waits for a human would sit at
+/// a published size of zero for as long as the window is open — which is the exact report this
+/// whole ticket came from. It holds duplicates of the two handles rather than the recording's lock,
+/// so a flush never stands between the reader and the bytes it is recording, and it lets go the
+/// moment [`PtyDump::finish`] says the stream is over.
+fn spawn_dump_publisher(dump: &PtyDump) -> std::io::Result<()> {
+    let bytes = dump.bytes.try_clone()?;
+    let chunks = dump.chunks.try_clone()?;
+    let live = Arc::clone(&dump.live);
+    std::thread::spawn(move || {
+        while live.load(Ordering::Acquire) {
+            std::thread::sleep(PTY_DUMP_PUBLISH_INTERVAL);
+            if bytes.sync_data().is_err() || chunks.sync_data().is_err() {
+                // The write path is the one that reports a broken sink, and it will: this thread
+                // only republishes what that path already wrote.
+                return;
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Milliseconds since the Unix epoch, for the one line of a manifest that has to be comparable
+/// with clocks outside this process. Everything else in a manifest is measured from
+/// [`PtyDump::started`], which is monotonic and therefore cannot be compared with anything.
+fn unix_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis())
+        .unwrap_or_default()
+}
+
+/// Which file this process's `ordinal`-th recording writes to.
+///
+/// The first one is the named path itself: `BT_PTY_DUMP=<file>` means that file, every probe and
+/// every replay in this repository reads exactly it, and a scheme that decorated even the first
+/// name would break all of them to fix a collision they never hit. The panes after it take the
+/// name with an ordinal on the end — `<file>.2`, `<file>.3` — which reads the way the `.chunks`
+/// sidecar already reads and sorts next to it in a directory listing.
+///
+/// The count is per **process**, which is the whole of what one process can promise. Two `folio`
+/// runs pointed at one path still land on one file; nothing inside either can see the other, and
+/// the honest answer to that is the `# SESSION` line's `pid=`, which makes the collision visible
+/// instead of silent.
+fn pty_dump_session_path(base: &Path, ordinal: u64) -> PathBuf {
+    if ordinal == 0 {
+        return base.to_path_buf();
+    }
+    let mut name = base.as_os_str().to_os_string();
+    name.push(format!(".{}", ordinal.saturating_add(1)));
+    PathBuf::from(name)
 }
 
 fn pty_dump_chunks_path(path: &Path) -> PathBuf {
@@ -200,6 +377,13 @@ fn read_pty_output_with_dump(
             break;
         }
         wake();
+    }
+    let closed = dump
+        .lock()
+        .map_err(|_| std::io::Error::other("dump mutex poisoned"))
+        .and_then(|mut dump| dump.finish());
+    if let Err(error) = closed {
+        eprintln!("BT_PTY_DUMP could not close its manifest: {error}");
     }
 }
 
@@ -1705,7 +1889,7 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("bt-pty-dump-{}-{unique}.vt", std::process::id()));
         let chunks_path = pty_dump_chunks_path(&path);
-        let dump = PtyDump::create(&path).unwrap();
+        let dump = PtyDump::create(&path, 0).unwrap();
         let ring = OutputRing::new(NonZeroUsize::new(64).unwrap());
         let mut reader = std::io::Cursor::new(b"first\x1b[2Jsecond".to_vec());
 
@@ -1733,6 +1917,116 @@ mod tests {
 
         std::fs::remove_file(path).unwrap();
         std::fs::remove_file(chunks_path).unwrap();
+    }
+
+    /// A run has as many recordings as it has panes, and they may not be the same file.
+    ///
+    /// The named path is the first recording's, so every probe that replays `$BT_PTY_DUMP` keeps
+    /// reading what it always read; the second pane of the same run gets a name beside it.
+    #[test]
+    fn the_second_recording_of_a_run_takes_a_name_of_its_own() {
+        let base = std::env::temp_dir().join("bt-pty-dump-naming.vt");
+        let beside = |suffix: &str| {
+            let mut name = base.as_os_str().to_os_string();
+            name.push(suffix);
+            PathBuf::from(name)
+        };
+
+        assert_eq!(pty_dump_session_path(&base, 0), base);
+        assert_eq!(pty_dump_session_path(&base, 1), beside(".2"));
+        assert_eq!(pty_dump_session_path(&base, 7), beside(".8"));
+    }
+
+    /// The defect this is here for: `BT_PTY_DUMP` is one path, every `PtySession::spawn` opened it
+    /// with a truncating create, and so the moment a run's second pane started, the first pane's
+    /// recording was cut to nothing under a reader that went on writing past the hole.
+    #[test]
+    fn a_second_recording_does_not_truncate_the_first_ones_file() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "bt-pty-two-panes-{}-{unique}.vt",
+            std::process::id()
+        ));
+
+        let first = PtyDump::open(&base).unwrap();
+        let second = PtyDump::open(&base).unwrap();
+        let (first_path, second_path) = (first.path().to_path_buf(), second.path().to_path_buf());
+        assert_ne!(first_path, second_path);
+
+        let ring = OutputRing::new(NonZeroUsize::new(64).unwrap());
+        read_pty_output(
+            &mut std::io::Cursor::new(b"FIRST-PANE".to_vec()),
+            &ring,
+            &no_wake(),
+            Some(Arc::new(Mutex::new(first))),
+        );
+        let _ = ring.try_pop(NonZeroUsize::new(64).unwrap());
+        read_pty_output(
+            &mut std::io::Cursor::new(b"SECOND-PANE".to_vec()),
+            &ring,
+            &no_wake(),
+            Some(Arc::new(Mutex::new(second))),
+        );
+
+        assert_eq!(std::fs::read(&first_path).unwrap(), b"FIRST-PANE");
+        assert_eq!(std::fs::read(&second_path).unwrap(), b"SECOND-PANE");
+
+        for path in [first_path, second_path] {
+            std::fs::remove_file(pty_dump_chunks_path(&path)).unwrap();
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    /// A recording that caught nothing is a legal outcome — a pane nobody typed in, a shell that
+    /// never printed. What it may not be is *indistinguishable from a recording that never ran*,
+    /// which is what a bare zero-byte file was. The byte file stays byte-exact (it is replay
+    /// input), so the manifest beside it is where the recording says whose it was and when it
+    /// began, and says out loud that it reached the end of the stream with nothing in hand.
+    #[test]
+    fn a_recording_that_caught_nothing_still_says_whose_it_was() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base =
+            std::env::temp_dir().join(format!("bt-pty-silent-{}-{unique}.vt", std::process::id()));
+
+        let dump = PtyDump::open(&base).unwrap();
+        let path = dump.path().to_path_buf();
+        let chunks_path = pty_dump_chunks_path(&path);
+        read_pty_output(
+            &mut std::io::Cursor::new(Vec::new()),
+            &OutputRing::new(NonZeroUsize::new(64).unwrap()),
+            &no_wake(),
+            Some(Arc::new(Mutex::new(dump))),
+        );
+
+        assert!(std::fs::read(&path).unwrap().is_empty());
+        let manifest = std::fs::read_to_string(&chunks_path).unwrap();
+        let session = manifest
+            .lines()
+            .find(|line| line.starts_with("# SESSION "))
+            .unwrap_or_else(|| panic!("the manifest names no session: {manifest}"));
+        assert!(
+            session.contains(&format!("pid={}", std::process::id())),
+            "the session line does not say which process recorded it: {session}"
+        );
+        assert!(
+            session.contains("started_unix_ms="),
+            "the session line does not say when the recording began: {session}"
+        );
+        assert!(
+            manifest
+                .lines()
+                .any(|line| line.starts_with("# END ") && line.contains("bytes=0")),
+            "a stream that ended with nothing in it did not say so: {manifest}"
+        );
+
+        std::fs::remove_file(chunks_path).unwrap();
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
