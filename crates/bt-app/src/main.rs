@@ -19573,6 +19573,9 @@ fn pane_into_new_tab(
     tab.git_trees = git_trees;
     tab.git_scroll = git_scroll;
     tab.preview_views = preview_views;
+    // The pane is a different leaf now, so everything it had out with a worker
+    // is addressed to a leaf that has gone — see [`forget_work_in_flight_for_seat`].
+    forget_work_in_flight_for_seat(&mut tab, key);
     debug_assert!(
         from.sessions_match_terminals(),
         "item 6: the tab a pane left still matches its own tree"
@@ -19742,6 +19745,53 @@ fn move_seat_content(
         if brought_a_picture {
             target.preview_raster.get_or_insert(arrived);
         }
+    }
+    forget_work_in_flight_for_seat(target, now);
+}
+
+/// **A pane that has just been given a new address gives up on the answers owed
+/// to its old one** (F1b; `plan.md` v4 增补 ②, `codex-final.md` §2's "pane 升格
+/// 换号的活性仍缺一半").
+///
+/// Every question this pane put to a worker travels as a [`LeafId`] — its tab
+/// and its seat — and both change when it is promoted into a tab of its own or
+/// moved into another one. **Safety** is already had, and had by construction:
+/// the tab it left no longer has that seat, so an answer addressed to the old
+/// leaf finds nothing and is dropped. The v3 draft stopped there, on the ground
+/// that "the old address fails to match once the source tab dies" — but the
+/// source tab does not die. A pane is only promotable out of a tab that has
+/// another one, so the tab it left is still open, still drawing, and the answers
+/// it drops are silently gone.
+///
+/// **Liveness** is this. Four ledgers say "already asked" and all four travel
+/// with the pane — a `Pending` directory node, a `Pending` git slot, a claimed
+/// head read, and a session's own in-flight sets — so each of them would go on
+/// suppressing the question that would have been re-asked, for the rest of the
+/// session. Cleared here, at the one moment the address changes, they let the
+/// ordinary per-frame asking ask again under the leaf the pane now is.
+///
+/// **The seat given here is the one it landed under**, never the one it left:
+/// the whole point is to reach the tables *after* they have been re-keyed.
+fn forget_work_in_flight_for_seat(tab: &mut TabState, seat: SeatId) {
+    if let Some(leaf) = tab.sessions.get_mut(&seat) {
+        leaf.session.forget_work_in_flight();
+    }
+    if let Some(cache) = tab.file_trees.get_mut(&seat) {
+        cache.forget_pending();
+    }
+    if let Some(cache) = tab.git_trees.get_mut(&seat) {
+        cache.forget_pending();
+    }
+    // A preview pane's question is held by the *buffer* it is showing, which is
+    // the tab's and not the pane's (§7.1.3) — so it is reached through the pane,
+    // and only the one this seat is looking at.
+    if let Some(source) = tab
+        .preview_panes
+        .get(PreviewSurface::Seat(seat))
+        .and_then(|pane| pane.buffer.clone())
+        && let Some(buffer) = tab.preview_pool.get_mut(&source)
+    {
+        buffer.forget_head_read();
     }
 }
 
@@ -87453,6 +87503,79 @@ mod tests {
         assert!(
             torn.files_match_files_seats(),
             "A3: and so does the tab it became"
+        );
+    }
+
+    /// PIN (F1b, `plan.md` v4 增补 ②; `codex-final.md` §2 "pane 升格换号的活性
+    /// 仍缺一半") — **a pane promoted into a tab of its own asks its outstanding
+    /// questions again, under the name it now has.**
+    ///
+    /// A pane is addressed by [`LeafId`], which is its tab and its seat. Promote
+    /// it and both change, so everything already out with a worker is addressed
+    /// to a leaf that no longer exists — and, crucially, **the tab it left is
+    /// still open**, because it had a sibling. The v3 draft said the old answers
+    /// would "naturally fail to match once the source tab died"; the source tab
+    /// does not die, and that sentence is void.
+    ///
+    /// Safety is had by construction: the old tab no longer has that seat, so an
+    /// answer addressed to the old leaf is dropped. This test is the other half,
+    /// **liveness**. Every ledger that says "already asked" travels with the pane
+    /// — `DirNode::Pending` in its directory cache, a claimed head read on its
+    /// buffer, a path already out for verification — and a ledger that survives
+    /// an answer that never comes is a column that stays on "Loading …" for the
+    /// rest of the session. So the promotion clears them, and the ordinary
+    /// per-frame asking asks again under the new leaf: `wanted` is exactly what
+    /// [`files::tree_view`] puts a key on when the cache has never heard of it.
+    ///
+    /// MUTATION: drop the `forget_work_in_flight_for_seat` call out of
+    /// `pane_into_new_tab` and the torn-out column keeps its `Pending` node,
+    /// `wanted` comes back empty, and nothing ever asks again.
+    #[test]
+    fn a_pane_promoted_into_its_own_tab_asks_its_outstanding_questions_again() {
+        let mut source = tab_with_a_files_column(1, "D:\\work\\folio");
+        let column = source.seats.files()[0];
+        // One read is out with the worker, addressed to `LeafId { tab: 1, seat:
+        // column }`, and the cache says so.
+        source
+            .file_trees
+            .entry(column)
+            .or_default()
+            .mark_pending("");
+        assert!(
+            files::tree_view(&source.files[&column].clone(), &source.file_trees[&column])
+                .wanted
+                .is_empty(),
+            "a directory already asked about is not asked about twice — which is \
+             the ledger this test is about"
+        );
+
+        let torn = tear_pane_into_tab(
+            &mut source,
+            &cross_metrics(),
+            column,
+            TabId(9),
+            Instant::now(),
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("a files column may become a tab of its own");
+        let landed = torn.seats.files()[0];
+
+        assert!(
+            !source.files.contains_key(&column),
+            "safety: the tab it left no longer has that seat, so the answer to \
+             the old question lands nowhere"
+        );
+        assert!(
+            !source.sessions.is_empty(),
+            "and it is still open, which is why the old address failing to match \
+             is not enough on its own"
+        );
+        assert_eq!(
+            files::tree_view(&torn.files[&landed].clone(), &torn.file_trees[&landed]).wanted,
+            vec![String::new()],
+            "liveness: the promoted column wants its root read again, under the \
+             leaf it now is"
         );
     }
 

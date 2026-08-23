@@ -5571,6 +5571,53 @@ impl DualPlaneSession {
             .or_else(|| self.take_live_worker_task().map(SessionMathTask::Live))
     }
 
+    /// **This shell has been given a new address; give up on every answer owed to
+    /// the old one** (Folio F1b, `plan.md` v4 增补 ②).
+    ///
+    /// A decoration task carries the leaf that asked for it, and a pane promoted
+    /// into a tab of its own — or moved into another tab — is a different leaf
+    /// afterwards. The applying end cannot find a seat for the old address and
+    /// drops the answer, which is right; what is not right is that the ledgers
+    /// saying "already asked" go on standing, so nothing ever asks again. This
+    /// clears the two that a session keeps:
+    ///
+    /// * every path already out for verification, so
+    ///   [`Self::ask_about_path`] will queue it again;
+    /// * every display raster already out for resampling, so
+    ///   `request_inline_image_displays` will ask for it again on the next turn
+    ///   of the hand-out.
+    ///
+    /// and re-arms every frozen candidate whose scan is out, through the exact
+    /// machinery that exists for a scan dropped at the other end
+    /// (`stranded_pending`): re-opened at the next quiescent checkpoint rather
+    /// than here, so the re-issue cannot chase a source that is still moving.
+    ///
+    /// **What it does not cover, and why that is written down rather than
+    /// hidden.** An inline image whose *first decode* is in flight is not asked
+    /// again: the queue that held it keeps no record of what it handed out, and
+    /// the bytes went with the task. The picture stays blank until the source is
+    /// reprinted. It is a real gap, bounded to one gesture on one already-moving
+    /// image, and closing it means giving the decode queue an in-flight ledger of
+    /// its own — a change to the lane rather than to the move.
+    pub fn forget_work_in_flight(&mut self) {
+        self.path_verify_in_flight.clear();
+        for record in self.inline_images.values_mut() {
+            record.display_pending = None;
+        }
+        let out: Vec<(TranscriptId, VersionStamp)> = self
+            .decorations
+            .iter()
+            .filter(|(_, record)| {
+                record.source == SourceLifecycle::Frozen
+                    && record.decoration == DecorationLifecycle::Pending
+            })
+            .map(|(id, record)| (*id, record.versions))
+            .collect();
+        for (id, versions) in out {
+            self.account_stranded_pending(id, versions);
+        }
+    }
+
     pub fn take_decoration_worker_task(&mut self) -> Option<SessionDecorationTask> {
         // The display size a record needs is a pure function of the layout and its native
         // dimensions, and anything can move either — a zoom, a reflow, an anchor migrating into

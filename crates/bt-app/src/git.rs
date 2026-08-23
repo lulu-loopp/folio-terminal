@@ -2779,6 +2779,14 @@ pub enum GitSlot<T> {
 }
 
 impl<T> GitSlot<T> {
+    /// **A question that was asked and will never be answered was not asked**
+    /// (F1b) — see [`GitCache::forget_pending`], the one caller.
+    fn forget_pending(&mut self) {
+        if matches!(self, Self::Pending) {
+            *self = Self::Idle;
+        }
+    }
+
     #[must_use]
     pub fn ready(&self) -> Option<&T> {
         match self {
@@ -3470,6 +3478,29 @@ impl GitCache {
     }
 
     /// Record that a question has been sent, so that it is not sent again.
+    /// **Give up on every question that is still out** (F1b, `plan.md` v4 增补
+    /// ②) — [`crate::files::DirCache::forget_pending`]'s twin, for the same
+    /// reason and at the same moment.
+    ///
+    /// The pane this cache belongs to has been given a new [`crate::LeafId`], so
+    /// every answer in flight is addressed to a surface that no longer exists and
+    /// will be dropped where it lands. `Pending` therefore goes back to `Idle`,
+    /// which is what [`Self::pending_questions`] reads as "owed", and the three
+    /// one-shot ledgers are cleared so the rows they dim can be pressed again.
+    ///
+    /// **Only the pending slots.** An answer already in hand stays: a column that
+    /// merely changed tabs must not blink back to "Loading …" and re-run the
+    /// `git status` that told it where it is standing.
+    pub fn forget_pending(&mut self) {
+        self.repo.forget_pending();
+        self.status.forget_pending();
+        self.refs.forget_pending();
+        self.log.forget_pending();
+        self.pending_writes.clear();
+        self.pending_refs.clear();
+        self.checkout = None;
+    }
+
     pub fn mark_pending(&mut self, question: &GitQuestion) {
         match question {
             GitQuestion::RepoProbe { .. } => self.repo = GitSlot::Pending,

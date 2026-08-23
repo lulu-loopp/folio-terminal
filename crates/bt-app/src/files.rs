@@ -315,6 +315,28 @@ impl DirCache {
         self.revision = self.revision.wrapping_add(1);
     }
 
+    /// **Give up on every read that is still out** (F1b, `plan.md` v4 增补 ②).
+    ///
+    /// Called when the column this cache belongs to is given a new [`crate::LeafId`]
+    /// — a pane promoted into a tab of its own, or moved into another tab. Every
+    /// question it has out carries the old address and will be dropped when it
+    /// lands, so the ledger that stops it being asked twice has to stop saying it
+    /// was asked at all: `Pending` becomes *unheard of*, which is what
+    /// [`tree_view`] turns into a `wanted` entry.
+    ///
+    /// **Only the pending nodes.** A directory already listed is an answer in
+    /// hand, and throwing it away would blink a column that merely changed tabs
+    /// back to "Loading …" — the flicker `pane_into_new_tab` carries these caches
+    /// across tabs to prevent.
+    pub fn forget_pending(&mut self) {
+        let before = self.dirs.len();
+        self.dirs
+            .retain(|_, node| !matches!(node, DirNode::Pending));
+        if self.dirs.len() != before {
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
     /// Take an answer from the worker.
     pub fn accept(&mut self, key: &str, outcome: DirOutcome) {
         let node = match outcome {
