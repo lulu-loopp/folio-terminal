@@ -268,6 +268,26 @@ target  ← CreateTargetForHwnd(hwnd, topmost = true)
 
 **验收。** 全套测试绿（bt-app 1808，bt-persist 94 + 35 + 6 + 5 + 3，vendor ref 45/45），clippy `-D warnings` 与 `fmt --check` 干净。红测先红后绿逐条验过：v8→v9 迁移少搬一个键 → 两条迁移断言变红；`degrade_in_place` 只走第一扇窗 → 计数 1≠2；`plan_windows` 不排队第二扇窗 → 队列为空；窗口种子的键不开第四槽 → 与 tab 键相撞。
 
+### 2.8 一个进程一个主题、一个光标形状（多窗块 片 E1，2026-08-23，已落地；`crates/bt-render/src/theme.rs`、`crates/bt-platform/src/lib.rs`、`crates/bt-app/src/main.rs`）
+
+**裁决：全进程一个主题，三个进程级 static 不搬。** §2.5 末尾把「进程级 static 升进 `App`」记成片 E 的欠条，本片是那张欠条的答复，而答复是**不搬**——`bt-render` 的 `THEME` 与 `CURSOR_STYLE`、`bt-platform` 的 `WINDOW_CLASS_BACKGROUND` 一律留在原地，各自补一条注指向本节。三条理由：**① 窗口类画刷天生按类共享**——winit 给一个进程的所有窗只注册一个窗口类，窗口背景是**类**状态（spike Q5 第 1 条点名的那面墙），所以第二套主题的第一件事不是多一个字段而是多注册一个窗口类；**② 设置是应用的**——主题从 `settings.json` 来，那是这个程序的文件，不是某一扇窗的（§2.7 把 `theme` 与 `cursor_style` 留在文件顶层，正是同一句话的持久化那一半）；**③ atlas 共享下 per-theme 缓存翻倍是纯付费**——字形 atlas 与 composed row cache 一个进程一份且以 `theme_revision` 为 key（§2.2、§2.6），per-window 主题要么让它们各存一份，要么让两扇窗互相作废对方的缓存，而买单的是每一个进程，包括绝大多数只想要一种主题的。
+
+**这张欠条只清掉主题这一段。** §2.5 的 ③ 同时点名了 `profile_revision` 背后的表与探针的 static；它们不是主题状态，也没有窗口类那一层的约束，本裁决不覆盖它们，本片也一个字没动——它们仍旧留在原地，理由各自另说。
+
+**被否的方案写在这里，不是被忘掉：per-window 主题。** 它要的是每窗一个注册窗口类、每窗一把类刷、两份按主题分开的缓存，以及「这扇窗是什么颜色」这个问题在七万行里每一处 `current_theme()` 上重新被问一遍。没有需求在等它——用户没提过，两扇窗穿两种颜色也不是任何一条已定裁决的前提（片 D 改判 `tab_layout` / `sidebar_mode` 时，改判的理由是「两扇窗**可以真的**穿着两种不同的条与栏」，主题没有这样的场景）。所以它是**另一片自己的工单**，而不是本片省下的工作；哪天有人写它，这三条注就是它的第一页。
+
+**光标形状同权：它是应用的第三件事，走同一条通道。** `CURSOR_STYLE` 和 `THEME` 一样是一个进程一份，可 `apply_cursor_style` 此前只给**发起窗**发一帧——按下 Appearance 里那一行的窗当场换形状，别的窗还画着旧形状，直到有别的事情碰它才改。这不是渲染 bug，是一个动作只付了 N 分之一的账：§2.5 那条「进程级 static 改变了的东西，欠每一扇窗一次重新求解」当时列了三样（字体、配色与主题、语言），光标形状是第四样，只是漏了。本片把它接上 `App::pending_application_change`——发起窗当场付清，事件循环在同一轮里把同一笔账交给其余的窗，与换字体、换配色、换语言一个字不差的路径。
+
+**第三个位，不是复用 `look`。** `ApplicationChange` 从两个 flag 变三个，因为三者的代价不同：换脸要重量每一格并重设每个 shell 的列数，换配色要重建 chrome、重刷 rail 缓存、重推 math layout key，换光标形状**只要一帧**——形状是绘制时从 static 上读的（`cursor_pixel_bounds_for_style`），所以别的窗欠的就是画一张新图，别的什么都不欠。把它折进 `look` 就是让每一次换光标形状把每一扇窗的公式栅格全部作废，去画四个不一样的像素。**唯一一处 flag 之间的互动写死并注明**：`caret` 与 `font` / `look` 同时欠时不再单独发帧——上面两条分支各自以一次 publish 收尾，而那张图里已经有新形状了；这条依赖被写成一句注，而不是留给下一个改动的人去发现。
+
+**「同帧」是平台给不了的，所以合同写成「同一轮」。** 可验的那半：同一次事件循环轮次内，每扇欠账的窗都从同一个 static 快照重新求解并各自排入 redraw，`about_to_wait` 在算下一次唤醒之前把这笔账结清，所以**返回 `ControlFlow::Wait` 前没有一扇窗还持着旧状态**。不可验的那半明写不承诺：两扇窗有两条 swapchain，Windows 没有给跨 swapchain 的原子 present，所以本节不写「两扇窗在同一帧翻面」这种话，测试里也没有断言它——**平台没给的同步语义不钉**（片 E 方案 v2 #6 采纳的原话）。
+
+**账本不写两遍。** `mark_session_dirty` 只留在发起窗那一次调用里：光标形状是 `session.json` 的**顶层**键（§2.7 的「顶层留下的三样是进程的事实」），一次改动落一次写，不因为有几扇窗跟着重画就变成几次。
+
+**片 A1 的小账复核（spike Q5 第 2 条）。** 标题栏几何的两份副本**已经收成一处**，A1 落地时就做掉了（`2ea208f`）：`bt-platform` 不再自己藏 `TITLE_BAR_LOGICAL_PX` / `CAPTION_BUTTON_LOGICAL_PX`，`CustomWindowFrame::install` 收一个 `CustomFrameGeometry`，两个数由 `bt-render` 的 `WINDOW_TITLE_BAR_LOGICAL_PX` / `WINDOW_CAPTION_BUTTON_LOGICAL_PX` 一路传进去——命中测试用的和绘制用的现在字面上是同一个数。开第一扇窗与开第二扇窗两处都传同一对常量，所以多窗没有让它复活。**本片无事可做，核对结果记在这里。**
+
+**验收。** 全套测试绿（bt-app 2117），clippy `-D warnings` 与 `fmt --check` 干净。红测先红后绿：`every_verb_that_moves_a_process_static_hands_it_to_the_other_windows`（`apply_cursor_style` 动了进程 static 却不进通道 → 红）、`the_sweep_spends_every_flag_the_record_can_carry`（flag 名单从 `ApplicationChange` 的声明上读，`adopt_application_change` 不读 `change.caret` → 红）；另两条钉住本来就对的那一半：`a_theme_switch_is_owed_to_the_window_that_did_not_flip_it`、`no_window_is_left_holding_yesterday_when_the_loop_goes_to_sleep`（settle 排在算唤醒时刻之前）。实机（自建 debug、隔离 `APPDATA`、`BT_PTY_DUMP`）：`Ctrl+Shift+M` 开第二扇窗并排放置，在 A 窗的 Appearance 里把光标形状从 Bar 改成 Block，**B 窗同一轮换成空心方块**（失焦形状，§7.1 的淡化规则）；再把主题从 Dark 切到 Light，两窗同变；stderr 无异常。
+
 ## 3. 内容模型
 
 ### 3.1 内容生命周期事件表（v3.7：单一所有权版）
