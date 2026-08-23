@@ -30148,7 +30148,10 @@ mod tests {",
         // ② that survives (no tear-out here) has somewhere to bite.
         let first = column.cards[0].body;
         assert_eq!(
-            run.slot_at(f64::from(first[0] - 1.0), f64::from((first[1] + first[3]) / 2.0)),
+            run.slot_at(
+                f64::from(first[0] - 1.0),
+                f64::from((first[1] + first[3]) / 2.0)
+            ),
             None,
             "a pointer beside the cards is on the column and on no card"
         );
