@@ -35877,13 +35877,32 @@ impl Runtime<'_> {
         // rectangle the solver has not answered for yet is a body whose every
         // paragraph is a box no clip can keep, and by the time the picture is on
         // screen the numbers that made it are gone.
+        //
+        // **`bytes` and `owed` are the two the 2026-08-23 report needed and did
+        // not have.** `built … paragraphs=0` was saying two completely different
+        // things with one number — "this document really is empty" and "the head
+        // read never came home" — and it was the second, because the answer had
+        // been taken off the shared channel by another window and dropped. The
+        // buffer's own two facts separate them at the station that already runs:
+        // how much text it is holding, and whether it is still owed a read.
         preview_trace::emit(preview_trace::global(), || {
             let scroll = self
                 .preview_pane(surface)
                 .map_or([0.0, 0.0], |pane| pane.scroll);
+            let buffer = self.preview_buffer_on(surface);
+            let bytes = buffer.map_or(0, |buffer| {
+                buffer.content.as_ref().map_or(0, std::string::String::len)
+            });
+            let owed = buffer.is_some_and(preview::PreviewBuffer::awaiting_head_read);
             format!(
-                "build {surface:?} scale={scale} body=[{},{},{},{}] scroll=[{},{}]",
-                body[0], body[1], body[2], body[3], scroll[0], scroll[1]
+                "build {surface:?} scale={scale} body=[{},{},{},{}] scroll=[{},{}] bytes={bytes} owed={}",
+                body[0],
+                body[1],
+                body[2],
+                body[3],
+                scroll[0],
+                scroll[1],
+                u8::from(owed)
             )
         });
         self.rebuild_preview_document(surface, body, scale);

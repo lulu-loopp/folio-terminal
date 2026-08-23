@@ -12,10 +12,15 @@
 //! The four are named on [`bt_render::PreviewTextFrame`], and the two stations
 //! here are the two halves of the answer:
 //!
-//! * `build seat=<n> scale=<f> body=[l,t,r,b] view=<view> blocks=<n> scroll=[x,y]`
+//! * `build seat=<n> scale=<f> body=[l,t,r,b] scroll=[x,y] bytes=<n> owed=<0|1>`
 //!   — the inputs one body was built from, written **before** it is built, so a
 //!   body built at a scale of zero or into a rectangle the layout had not solved
 //!   yet says so in its own line rather than being inferred from the picture.
+//!   `bytes` and `owed` are the buffer's own two facts, added on 2026-08-23
+//!   because `built … paragraphs=0` had been saying two different things with one
+//!   number: a document that really is empty, and a head read whose answer never
+//!   came home (it had been taken off the one shared worker channel by another
+//!   window and dropped — see `docs/DESIGN.md` §2.4).
 //! * `built seat=<n> paragraphs=<n> quads=<n> blocks=<n>`, or
 //!   `built seat=<n> leave=<no-rect|no-buffer|picture>` — what came out.
 //! * `frame bodies=<n> paragraphs=<n> quads=<n> drawn=<n> prepared=<0|1>` — what

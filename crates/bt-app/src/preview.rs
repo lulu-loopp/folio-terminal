@@ -1995,6 +1995,18 @@ impl PreviewBuffer {
             )
     }
 
+    /// Whether a read of this buffer's head is **out with the worker right now**.
+    ///
+    /// [`Self::wants_head_read`]'s other side, and the one `BT_PREVIEW_TRACE`'s
+    /// build station prints: a buffer holding no text because its answer is still
+    /// on the disk and a buffer holding no text because its answer was taken by
+    /// somebody else and dropped look identical from the glass, and this is the
+    /// bit that tells them apart (user report, 2026-08-23).
+    #[must_use]
+    pub fn awaiting_head_read(&self) -> bool {
+        self.head_asked
+    }
+
     /// **Take this buffer's head read** — [`Self::wants_head_read`] and the
     /// filing of the question, in one breath.
     ///
@@ -2550,6 +2562,7 @@ impl PreviewRequest {
     /// **`want` is part of the target.** Without it a size question would
     /// supersede the head read of the same picture and the body would never
     /// arrive, which is coalescing turned into cancellation.
+    ///
     /// **And the window is part of it**: two windows asking the same thing about
     /// the same file of their own `TabId(1)` are two questions, and one answer
     /// standing in for both leaves one of them waiting for ever.
