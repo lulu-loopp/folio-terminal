@@ -426,6 +426,55 @@ impl BackgroundDecodeMailbox {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct TabId(u64);
 
+/// **Every tab this process opens, numbered once — and no number given out
+/// twice** (F1b; `plan.md` 的 v3 增补「身份 A 案」, closed by v4 ①).
+///
+/// A `TabId` used to come off `WindowRuntime::next_tab_id`, a counter that
+/// started again in every window, so `TabId(1)` named a tab in each of them at
+/// once. That was survivable for exactly as long as two things held: a tab could
+/// not leave the window it was opened in, and every address travelling on a
+/// worker lane carried the [`WindowId`] it had been asked from. F1b ends the
+/// first, and the second cannot be repaired by carrying the window harder — a
+/// tab that moves *while an answer is in flight* makes the window it was asked
+/// from the wrong window by the time the answer lands.
+///
+/// So the counter comes up a layer, and two properties follow:
+///
+/// * **Unique across the process.** This is what lets an answer be routed by the
+///   tab it names and nothing else — [`Runtime::owns`] claims an answer because
+///   the tab is standing in this window *now*, not because a `WindowId` stamped
+///   at request time still agrees. The window on the wire stops being an
+///   authority over anything a tab owns.
+/// * **Never reused, for the life of the process.** A number handed to a tab
+///   that was then abandoned — a merge that ejected nothing, a tear-out the
+///   layout refused — is *spent*, not returned. A gap in the numbering costs
+///   nothing; a number given out again is an answer still in flight for a closed
+///   tab landing in whichever tab inherited its number. There is deliberately no
+///   door here for giving one back, and the absence is the whole of the rule.
+///
+/// `SeatId` is untouched and stays local to its tab ([`LeafId`] says so): a seat
+/// only ever has to be unique among the seats of the tab it moves with, and a
+/// tab moves whole.
+struct TabIds {
+    next: u64,
+}
+
+impl TabIds {
+    /// The first tab this process opens is `TabId(1)`, exactly as it always has
+    /// been. The numbering starts where it started; it just no longer starts
+    /// over in every window.
+    fn new() -> Self {
+        Self { next: 1 }
+    }
+
+    /// One number, and it is gone.
+    fn mint(&mut self) -> TabId {
+        let id = TabId(self.next);
+        self.next += 1;
+        id
+    }
+}
+
 /// Which shell a unit of decoration work belongs to.
 ///
 /// A tab was a sufficient address while a tab was one shell. Since U12 it is a tree of them, and
@@ -4655,6 +4704,11 @@ struct App {
     /// window — which would have made every later window's device the property
     /// of whichever window happened to open first.
     gpu: GpuContext,
+    /// **The one counter that numbers tabs** (F1b). See [`TabIds`] for why it is
+    /// here and not on the window, and for what a window gives up by not having
+    /// one: nothing, because a tab was never a fact about a window — only about
+    /// which window it is standing in this second.
+    tab_ids: TabIds,
     event_proxy: EventLoopProxy<AppEvent>,
     math_worker: MathWorker,
     math_worker_running: bool,
@@ -5038,7 +5092,6 @@ struct WindowRuntime {
     renderer: WindowRenderer,
     tabs: Vec<TabState>,
     active_tab: usize,
-    next_tab_id: u64,
     /// The one bit every shell in this window nudges the loop through. See
     /// [`PtyWakeSignal`].
     pty_wake: PtyWakeSignal,
@@ -5776,7 +5829,8 @@ struct WindowRuntime {
     focus_reveal: RevealTween,
     /// **The next place in the attention queue** (§7.1.5b P1-8).
     ///
-    /// The window's own counter, like `next_tab_id` above it, and per window for
+    /// The window's own counter — and, since F1b took the tab numbering up to
+    /// [`TabIds`], the only one left down here. Per window for
     /// the reason the badge is per title bar: a queue is a claim on *your*
     /// attention in *this* window, and two windows sharing one counter would make
     /// "who has been waiting longest" a question about a program rather than
@@ -6853,6 +6907,166 @@ mod worker_answer_routing_tests {
             "and which window is walked first is a fact about the opening order, \
              not about whose answer this is"
         );
+    }
+}
+
+#[cfg(test)]
+mod tab_identity_tests {
+    use super::*;
+
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// [`layer_shape_tests::fn_body`]'s reader, kept beside the pins that use it
+    /// for the reason that module keeps its own: a shape pin that reaches into
+    /// another module for its witness is a pin that moves when that module does.
+    fn fn_body(name: &str) -> &'static str {
+        let head = format!(
+            "
+    fn {name}("
+        );
+        let start = SOURCE
+            .find(&head)
+            .unwrap_or_else(|| panic!("`fn {name}` is declared once in an `impl`"))
+            + head.len();
+        let end = start
+            + SOURCE[start..]
+                .find(
+                    "
+    }
+",
+                )
+                .expect("a method is closed by a `}` at the `impl`'s indentation");
+        &SOURCE[start..end]
+    }
+
+    /// The field lines of a top-level `struct <name> { … }`, prose taken out —
+    /// [`layer_shape_tests::struct_fields`]'s reader, and its reason for
+    /// dropping the doc comments: these pins read the body as text, and a
+    /// sentence *about* a field that has gone reads exactly like the field.
+    fn struct_fields(name: &str) -> String {
+        let head = format!(
+            "
+struct {name} {{
+"
+        );
+        let start = SOURCE
+            .find(&head)
+            .unwrap_or_else(|| panic!("`struct {name}` is declared at the top level"))
+            + head.len();
+        let end = start
+            + SOURCE[start..]
+                .find(
+                    "
+}
+",
+                )
+                .expect("a top-level struct is closed by a `}` in column zero");
+        SOURCE[start..end]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// PIN (F1b, `plan.md` v4 增补 ③ contract 1) — **the application mints every
+    /// tab number, and a number it has spent never comes back.**
+    ///
+    /// The A-case ruling in one test. Uniqueness is what lets an answer be routed
+    /// by the tab it names; never-reused is what makes that routing safe *over
+    /// time*, because an answer still in flight for a tab that has since closed
+    /// must find nobody rather than find whoever inherited its number.
+    ///
+    /// MUTATION: give `TabIds` a way to hand a number back — `fn release`, or a
+    /// `next` that is recomputed from the tabs that exist — and the strict climb
+    /// below is what says so.
+    #[test]
+    fn the_application_mints_every_tab_number_and_never_a_second_time() {
+        let mut ids = TabIds::new();
+        let minted: Vec<TabId> = (0..1024).map(|_| ids.mint()).collect();
+        assert_eq!(
+            minted.first().copied(),
+            Some(TabId(1)),
+            "the numbering starts where it always started — it just no longer \
+             starts again in every window"
+        );
+        let distinct: std::collections::HashSet<TabId> = minted.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            minted.len(),
+            "a number handed out twice is a live answer landing in a tab that is \
+             not the tab that asked"
+        );
+        assert!(
+            minted.windows(2).all(|pair| pair[0] < pair[1]),
+            "and it only ever climbs: a tab abandoned before it was ever shown \
+             spends its number, it does not return it"
+        );
+    }
+
+    /// PIN (F1b) — **no window keeps a tab counter of its own.**
+    ///
+    /// The whole of the A case is that there is one allocator. A second one, on
+    /// a window, is `TabId(1)` naming a tab in every window again — and it would
+    /// not announce itself, because every window would still work perfectly on
+    /// its own.
+    ///
+    /// MUTATION: put `next_tab_id` back on `WindowRuntime` — or on the parts a
+    /// window is assembled from — and this test names it before any window is
+    /// opened.
+    #[test]
+    fn no_window_keeps_a_tab_counter_of_its_own() {
+        for layer in ["WindowRuntime", "NewWindowParts"] {
+            let fields = struct_fields(layer);
+            assert!(
+                !fields.contains("next_tab_id"),
+                "a per-window tab counter is the defect this slice removed, and \
+                 the only witness to its absence is the text of `{layer}`"
+            );
+        }
+        assert!(
+            struct_fields("App").contains("tab_ids: TabIds"),
+            "and the one that replaced it is the application's"
+        );
+    }
+
+    /// PIN (F1b, `plan.md` v4 增补 ③ contract 1) — **all six doors that open a
+    /// tab ask the application for its number.**
+    ///
+    /// The ruling's own list: restore, a new window, a new tab, and a pane
+    /// promoted into one. The last is three doors in this file rather than one,
+    /// because a pane becomes a tab by being torn out, by being ejected from a
+    /// merge, and by being ejected from a cross-tab move.
+    ///
+    /// MUTATION: mint one of them from a literal or from `tabs.len() + 1` and the
+    /// door is named here.
+    #[test]
+    fn every_door_that_opens_a_tab_asks_the_application_for_its_number() {
+        for door in [
+            // Restore, and the process's first window.
+            "create",
+            // A second window — `Ctrl+Shift+M`, a Recent window seed, a restored
+            // window that was not the one the process opened with.
+            "open_window",
+            // A new tab.
+            "new_tab_with_profile",
+            // Undo-close and the Recent list.
+            "reopen_recent",
+            // The restore card's "yes".
+            "answer_restore",
+            // A merge that pushed a pane out.
+            "absorb_tab",
+            // A cross-tab pane move that pushed a pane out.
+            "move_pane_across_tabs",
+            // A pane torn out over the strip.
+            "extract_pane_into_new_tab",
+        ] {
+            let body = fn_body(door);
+            assert!(
+                body.contains("tab_ids.mint()"),
+                "`{door}` opens a tab, so the number it opens with is the \
+                 application's to give: {body}"
+            );
+        }
     }
 }
 
@@ -20108,7 +20322,6 @@ struct NewWindowParts {
     renderer: WindowRenderer,
     tabs: Vec<TabState>,
     active_tab: usize,
-    next_tab_id: u64,
     pty_wake: PtyWakeSignal,
     translucency_available: bool,
     custom_window_frame: bt_platform::CustomWindowFrame,
@@ -20143,7 +20356,6 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         renderer,
         tabs,
         active_tab,
-        next_tab_id,
         pty_wake,
         translucency_available,
         custom_window_frame,
@@ -20163,7 +20375,6 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         renderer,
         tabs,
         active_tab,
-        next_tab_id,
         pty_wake,
         // Resting values; the caller that knows what a new window opens as
         // (settings.focus_mode, §7.1.6b′ ①) sets the bit right after assembly.
@@ -20756,12 +20967,17 @@ impl Runtime<'_> {
             }
             roots
         };
+        // **The process's tab numbering starts here, once** (F1b). Built before
+        // the `App` it will live in, because the first window's tabs are numbered
+        // before there is an `App` to ask — and numbered by the same allocator
+        // every later window asks, which is the whole of the A case.
+        let mut tab_ids = TabIds::new();
         let mut tabs = Vec::with_capacity(restored_roots.len());
         let mut conpty_sources = Vec::with_capacity(restored_roots.len());
         for (index, (seats, seed, leaves, files, preview)) in restored_roots.into_iter().enumerate()
         {
             let (tab, conpty_source) = create_tab_state(
-                TabId(index as u64 + 1),
+                tab_ids.mint(),
                 seats,
                 &renderer,
                 render_physical,
@@ -20838,6 +21054,7 @@ impl Runtime<'_> {
         let git_worker = git::GitWorker::spawn(proxy.clone())?;
         let mut app = App {
             gpu,
+            tab_ids,
             event_proxy: proxy.clone(),
             git_watch: git_watch::GitWatch::default(),
             math_worker,
@@ -20940,7 +21157,6 @@ impl Runtime<'_> {
             renderer,
             tabs,
             active_tab,
-            next_tab_id: conpty_sources.len() as u64 + 1,
             pty_wake,
             translucency_available,
             custom_window_frame,
@@ -21225,9 +21441,9 @@ impl Runtime<'_> {
                 )]
             });
         let mut tabs = Vec::with_capacity(roots.len());
-        for (index, (seats, seed, leaves, files, preview)) in roots.into_iter().enumerate() {
+        for (seats, seed, leaves, files, preview) in roots {
             let (tab, _) = create_tab_state(
-                TabId(index as u64 + 1),
+                app.tab_ids.mint(),
                 seats,
                 &renderer,
                 render_physical,
@@ -21249,7 +21465,6 @@ impl Runtime<'_> {
             )?;
             tabs.push(tab);
         }
-        let next_tab_id = tabs.len() as u64 + 1;
         let active_tab = plan_launched
             .as_ref()
             .and_then(|plan| plan.active_open)
@@ -21259,7 +21474,13 @@ impl Runtime<'_> {
             .as_ref()
             .map(|plan| plan.ask.clone())
             .unwrap_or_default();
-        let placeholder = plan_launched.as_ref().is_some_and(|plan| plan.placeholder);
+        // **Which tab, and not which number** — read off the tab that was built
+        // rather than written as `TabId(1)`, which stopped being this window's
+        // first tab the day the numbering became the application's (F1b).
+        let placeholder_tab = plan_launched
+            .as_ref()
+            .is_some_and(|plan| plan.placeholder)
+            .then(|| tabs[0].id);
         let (_, _, terminal_seat, seat_viewport) = solve_seats(
             &tabs[active_tab].seats,
             &renderer,
@@ -21274,7 +21495,6 @@ impl Runtime<'_> {
             renderer,
             tabs,
             active_tab,
-            next_tab_id,
             pty_wake,
             translucency_available,
             custom_window_frame,
@@ -21299,7 +21519,7 @@ impl Runtime<'_> {
             // Only a shell opened *because there was no answer* is scaffolding —
             // the launch's own rule, kept here because this door now takes the
             // same plan the launch does.
-            placeholder_tab: placeholder.then_some(TabId(1)),
+            placeholder_tab,
         });
         window.focus_mode = app.settings_store.loaded().focus_mode;
         window.focus_reveal =
@@ -21445,8 +21665,7 @@ impl Runtime<'_> {
         let render_physical =
             presentation_physical_size(self.window.renderer.presentation_geometry());
         let wake = self.window.pty_wake.wake();
-        let id = TabId(self.window.next_tab_id);
-        self.window.next_tab_id += 1;
+        let id = self.app.tab_ids.mint();
         // Both facts are read off the *same* leaf — the focused session, which is
         // also what `working_directory()` is asked of. A profile taken from one
         // pane and a directory from another would be the exact mismatch the rule
@@ -21628,8 +21847,7 @@ impl Runtime<'_> {
         let render_physical =
             presentation_physical_size(self.window.renderer.presentation_geometry());
         let wake = self.window.pty_wake.wake();
-        let id = TabId(self.window.next_tab_id);
-        self.window.next_tab_id += 1;
+        let id = self.app.tab_ids.mint();
         // **The one seat the entry names, whichever of the three shapes it is**
         // (§7.1.6h). Everything after this point is shape-blind: the pages, the
         // pins, the `create_tab_state` call and the pin ruling are the same three
@@ -21911,8 +22129,7 @@ impl Runtime<'_> {
         for tab in &pending {
             let (seats, seed, leaves, files, preview) = revive_plan(tab);
             let wake = self.window.pty_wake.wake();
-            let id = TabId(self.window.next_tab_id);
-            self.window.next_tab_id += 1;
+            let id = self.app.tab_ids.mint();
             let (revived, _) = create_tab_state(
                 id,
                 seats,
@@ -53522,7 +53739,12 @@ impl Runtime<'_> {
             index, self.window.active_tab,
             "K129: a tab cannot merge into the layout it is already showing"
         );
-        let id = TabId(self.window.next_tab_id);
+        // **Minted whether or not the merge ejects anything** (F1b). This used to
+        // be a reservation that only became a number when a pane was pushed out;
+        // under an allocator that never reuses, a number handed back is a number
+        // that can arrive twice, so an unspent one is simply spent. A gap in the
+        // numbering is invisible and free.
+        let id = self.app.tab_ids.mint();
         let render_physical =
             presentation_physical_size(self.window.renderer.presentation_geometry());
         let renderer = &self.window.renderer;
@@ -53542,9 +53764,6 @@ impl Runtime<'_> {
             self.window.tabs[index].sessions.is_empty(),
             "T226: the absorbed tab is leaving with shells still filed under it"
         );
-        if ejected.is_some() {
-            self.window.next_tab_id += 1;
-        }
         absorb_tab_into_strip(
             &mut self.window.tabs,
             &mut self.window.active_tab,
@@ -53640,11 +53859,14 @@ impl Runtime<'_> {
             return Ok(false);
         }
         let metrics = self.seat_metrics();
+        // Spent whether or not the arrival pushes a pane out — [`Runtime::absorb_tab`]'s
+        // reason, and the same allocator.
+        let ejected_id = self.app.tab_ids.mint();
         let arrival = PaneArrival {
             metrics: &metrics,
             viewport: self.window.seat_viewport,
             aim,
-            ejected_id: TabId(self.window.next_tab_id),
+            ejected_id,
         };
         let watching = self.window.tabs[self.window.active_tab].id;
         let render_physical =
@@ -53672,9 +53894,6 @@ impl Runtime<'_> {
             self.window.tabs[into].seats.tree().contains(moved.landed),
             "§7.1.6k: the pane landed under an id its new tree does not have"
         );
-        if moved.ejected.is_some() {
-            self.window.next_tab_id += 1;
-        }
         if moved.source_emptied {
             // The tab did not close — it was emptied by a move, and `close_tab`
             // would file a still-running shell into Recent and shut it down. This
@@ -53738,7 +53957,9 @@ impl Runtime<'_> {
     /// implementation is exactly how a move quietly becomes a respawn.
     fn extract_pane_into_new_tab(&mut self, leaf: LeafId, slot: usize) -> Result<bool> {
         let metrics = self.seat_metrics();
-        let id = TabId(self.window.next_tab_id);
+        // Spent whether or not the layout lets the pane out — [`Runtime::absorb_tab`]'s
+        // reason, and the same allocator.
+        let id = self.app.tab_ids.mint();
         let render_physical =
             presentation_physical_size(self.window.renderer.presentation_geometry());
         let renderer = &self.window.renderer;
@@ -53768,7 +53989,6 @@ impl Runtime<'_> {
         let Some(torn) = torn else {
             return Ok(false);
         };
-        self.window.next_tab_id += 1;
         // The survey already clamped this against the same strip (N158); the
         // `min` is the ordinary bound on an insertion index, not a second opinion
         // about the partition.
