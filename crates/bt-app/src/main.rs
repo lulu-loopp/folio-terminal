@@ -16501,10 +16501,13 @@ enum DropLanding {
     /// this one names a *tab*, which the strip may re-order all it likes without
     /// changing which room the pane is going into.
     ///
-    /// Never the tab the pane already lives in. Appending a pane to the end of
-    /// the tree it is already in is K135's sentence one surface up — a gesture
-    /// that would do nothing, honestly reported as nothing there — so the strip
-    /// goes on offering that pointer the tear-out it always offered.
+    /// **The tab the pane already lives in, only once the spring has taken the
+    /// stage away from it** (§7.1.6k″). While that tab is the one on screen this
+    /// landing would do nothing — K135's sentence one surface up — so the strip
+    /// goes on offering that pointer the tear-out it always offered. Once the
+    /// stage is somebody else's, the same entry is the way home: resting on it
+    /// springs the view back, and letting go on it moves no pane at all, because
+    /// the pane never left. See [`pane_strip_landing`].
     StripAdopt { tab: TabId },
     /// **K130/G82** — the layout's own rim: the *root* splits on this side.
     ///
@@ -17117,7 +17120,7 @@ fn landing_for_aim(
 }
 
 /// **What a tab list offers a pane, stated once** — §7.1.6k's whole decision, as
-/// five plain facts and no window.
+/// six plain facts and no window.
 ///
 /// The two offers a run makes a pane are read off two different questions about
 /// one pointer, and which one is being asked is decided here rather than inside
@@ -17133,10 +17136,19 @@ fn landing_for_aim(
 /// * `over` — the tab whose own rectangle the pointer is standing on
 ///   ([`seats::TabRun::slot_at`]), and `None` for the run's padding.
 /// * `holding` — the tab the pane in the hand lives in.
+/// * `showing` — the tab whose layout is on the stage right now, which the
+///   spring can have moved away from `holding` at any point in the gesture. It
+///   is [`landing_for_aim`]'s own second argument and it is here for the same
+///   reason: whether a room is "the one you are standing in" is a fact about
+///   the *view*, and a pane is a tab and a seat (K135).
 /// * `adopt_fits` — whether that tab's tree can actually take another pane
 ///   (H93/M147). A tab that lights up under the pointer and then does nothing
 ///   when the hand opens is the silent refusal M147 forbids, and the strip has
-///   no dashed form to wear instead — so it says no by not lighting up.
+///   no dashed form to wear instead — so it says no by not lighting up. **Not
+///   consulted for the pane's own tab**: a pane that is already a leaf of that
+///   tree fits in it by standing there, and asking `plan_drop` would be asking
+///   whether the tree could hold one *more* — a question about a world that is
+///   not the one the gesture is in.
 /// * `extract_slot` — the slot a tear-out would take, or `None` when the pane
 ///   cannot become a tab of its own ([`Runtime::tear_out_is_hostable`]).
 ///
@@ -17151,21 +17163,44 @@ fn pane_strip_landing(
     offers: seats::PaneOffers,
     over: Option<TabId>,
     holding: TabId,
+    showing: TabId,
     adopt_fits: bool,
     extract_slot: Option<usize>,
 ) -> Option<DropLanding> {
-    // The pane's own tab falls through deliberately: appending a pane to the end
-    // of the tree it is already in is K135's sentence one surface up, so that
-    // pointer goes on getting the tear-out it always got — where there is one.
+    // **§7.1.6k″ (user's report 2026-08-24) — your own tab is a room too, from
+    // the moment you are no longer standing in it.**
     //
-    // **A card column's own card therefore answers nothing at all**, and that is
-    // both halves of the re-judged ② meeting: the hand-over is refused because
-    // it would do nothing, and the tear-out is refused because the column does
-    // not make tabs. Two reasons, one honest silence.
+    // The rule this replaces was `tab != holding`, and its stated reason was
+    // that the hand-over "would do nothing": appending a pane to the end of the
+    // tree it is already in is K135's sentence one surface up. That reason is
+    // true at home and **false the instant the spring has moved the stage**. The
+    // pane is still filed under `holding`, the stage belongs to somebody else,
+    // and the entry the hand is resting on is the only thing on screen that can
+    // give the gesture its own tab back. Refusing it is what left the user's
+    // drag one-way: out to any tab, never back.
+    //
+    // So the condition is about the *view* and not about the hand alone. Away
+    // from home, `holding`'s entry answers `StripAdopt` like any other entry —
+    // which is what arms the spring ([`Runtime::drive_drag`] reads the survey's
+    // answer, never the pointer's coordinates), so the way back is the same
+    // quarter-second rest as the way out, on the same clock, with no second
+    // gesture invented for it.
+    //
+    // At home the old sentence stands **unchanged**, and now for a reason that
+    // is visible rather than merely arithmetic: a landing that means nothing at
+    // all would light a tab up and then do nothing when the hand opened, which
+    // is the silent refusal M147 forbids. Away from home the landing *does*
+    // something you can watch — the stage comes back — so lighting the entry is
+    // the truth. The tear-out that pointer has always been offered goes on being
+    // offered, and **a card column's own card therefore still answers nothing at
+    // all** while it is the card on the stage: both halves of the re-judged ②
+    // meeting, the hand-over refused because it would do nothing and the
+    // tear-out refused because the column does not make tabs.
     if let Some(tab) = over
-        && tab != holding
+        && (tab != holding || showing != holding)
     {
-        return (offers.adopt && adopt_fits).then_some(DropLanding::StripAdopt { tab });
+        return (offers.adopt && (adopt_fits || tab == holding))
+            .then_some(DropLanding::StripAdopt { tab });
     }
     // Still no fall-through from a refused adopt, and now not from a refused
     // *offer* either: the paragraph above is about a pointer that named a room,
@@ -55158,6 +55193,13 @@ impl Runtime<'_> {
                     run.pane_offers,
                     over,
                     leaf.tab,
+                    // **§7.1.6k″ — where the stage is, which the spring moves.**
+                    // Read here rather than remembered on the drag for the
+                    // reason every other reading of it is: `active_tab` is the
+                    // one place this window says which tree is on screen, and a
+                    // survey that kept its own copy would go on answering about
+                    // a stage that had already moved under it.
+                    self.window.tabs[self.window.active_tab].id,
                     // Asked of every pointer move rather than at the release, and
                     // that ordering is M147's: refuse at the release and the tab
                     // stays lit right up until the hand opens on nothing.
@@ -55361,7 +55403,13 @@ impl Runtime<'_> {
                     // The pane's own tab, which cannot be in *this* window's run
                     // — so the "resting on its own tab" arm is unreachable from
                     // here, and reachable from `survey_strip` exactly as before.
+                    // §7.1.6k″'s `showing` is handed in for the same reason and
+                    // is equally unreachable: `over` can never equal `holding`
+                    // here, so neither half of that condition is ever the one
+                    // deciding. This window's own stage is the honest answer to
+                    // "which tree is on screen" all the same.
                     leaf.tab,
+                    self.window.tabs[self.window.active_tab].id,
                     over.is_some_and(|tab| {
                         cargo_tree.is_some_and(|tree| self.arrival_fits(tab, tree))
                     }),
@@ -85372,10 +85420,15 @@ mod tests {
     ///
     /// Red gate: answer `StripExtract` for a pointer over a foreign tab (which is
     /// what this file did until §7.1.6k) and the first row fails; let the pane's
-    /// **own** tab answer `StripAdopt` and the second does; ask one `hosts` bit
-    /// of both verbs — which is what this file did until 2026-08-23 — and the
-    /// card column's *first* row does; fall back to the tear-out when the target
-    /// will not fit and the last one does.
+    /// **own** tab answer `StripAdopt` *while it is the tab on screen* and the
+    /// second does; ask one `hosts` bit of both verbs — which is what this file
+    /// did until 2026-08-23 — and the card column's *first* row does; fall back
+    /// to the tear-out when the target will not fit and the last one does.
+    ///
+    /// Every row here is a hand that is **still standing in the tab it picked
+    /// the pane up from** (`showing == mine`). §7.1.6k″'s rows — the same
+    /// pointers once the spring has moved the stage — are
+    /// [`a_pane_that_sprang_away_comes_home_by_its_own_tab_entry`]'s.
     #[test]
     fn the_strip_hands_a_pane_to_the_tab_under_it_and_makes_a_new_one_in_the_gaps() {
         let mine = TabId(1);
@@ -85383,51 +85436,162 @@ mod tests {
         let both = seats::PaneOffers::BOTH;
         let cards = seats::PaneOffers::ADOPT_ONLY;
         assert_eq!(
-            pane_strip_landing(both, Some(other), mine, true, Some(3)),
+            pane_strip_landing(both, Some(other), mine, mine, true, Some(3)),
             Some(DropLanding::StripAdopt { tab: other }),
             "resting on somebody else's tab is asking to be put in it"
         );
         assert_eq!(
-            pane_strip_landing(both, Some(mine), mine, true, Some(3)),
+            pane_strip_landing(both, Some(mine), mine, mine, true, Some(3)),
             Some(DropLanding::StripExtract { slot: 3 }),
-            "resting on your own tab is not a move, so the strip's ordinary \
-             offer stands"
+            "resting on your own tab while you are standing in it is not a \
+             move, so the strip's ordinary offer stands"
         );
         assert_eq!(
-            pane_strip_landing(both, None, mine, true, Some(3)),
+            pane_strip_landing(both, None, mine, mine, true, Some(3)),
             Some(DropLanding::StripExtract { slot: 3 }),
             "and the run's padding is the gap between tabs, which is where a \
              new tab has always been made"
         );
         assert_eq!(
-            pane_strip_landing(cards, Some(other), mine, true, Some(3)),
+            pane_strip_landing(cards, Some(other), mine, mine, true, Some(3)),
             Some(DropLanding::StripAdopt { tab: other }),
             "§7.1.6b′ ② as re-judged 2026-08-23: a card takes the pane, because \
              focus mode hides the strip and ① forbids it having fewer verbs"
         );
         assert_eq!(
-            pane_strip_landing(cards, None, mine, true, Some(3)),
+            pane_strip_landing(cards, None, mine, mine, true, Some(3)),
             None,
             "and the blank between cards still makes no tab — the half of ② the \
              user kept"
         );
         assert_eq!(
-            pane_strip_landing(cards, Some(mine), mine, true, Some(3)),
+            pane_strip_landing(cards, Some(mine), mine, mine, true, Some(3)),
             None,
-            "so a pane over its own card is answered by nobody: the hand-over \
-             would do nothing and the column does not make tabs"
+            "so a pane over its own card is answered by nobody *while that card \
+             is the one on the stage*: the hand-over would do nothing and the \
+             column does not make tabs"
         );
         assert_eq!(
-            pane_strip_landing(both, Some(other), mine, false, Some(3)),
+            pane_strip_landing(both, Some(other), mine, mine, false, Some(3)),
             None,
             "M147: a tab whose tree will not take the pane says so by not \
              lighting up — and emphatically does not fall through to a tear-out"
         );
         assert_eq!(
-            pane_strip_landing(both, None, mine, true, None),
+            pane_strip_landing(both, None, mine, mine, true, None),
             None,
             "and a pane that cannot become a tab of its own is still turned \
              away in the gaps (K124/G84)"
+        );
+    }
+
+    /// **§7.1.6k″ — the way back, and it is the way out read in the other
+    /// direction** (user's report 2026-08-24, Claude's ruling).
+    ///
+    /// The report: pick a pane up in tab A, rest it on tab B until the spring
+    /// takes you there, change your mind — and there is nowhere to go. A's own
+    /// entry answered the tear-out, which arms no spring, and the stage under
+    /// the pointer is B's for the rest of the gesture. **Out to any tab, never
+    /// back.**
+    ///
+    /// The ruling is one clause: your own tab is a room like any other from the
+    /// moment you are not standing in it. Nothing else about the gesture is new
+    /// — the same `StripAdopt`, the same `SpringGate`, the same quarter second,
+    /// the same `DragRelease::Adopt` — which is why this test is a walk down the
+    /// existing chain rather than a description of a second one.
+    ///
+    /// **Letting go on it moves no pane**, and that is the whole of "回家" rather
+    /// than a hole in it: the tree was never touched while the pane was in the
+    /// air (`DragCarry::Pane`), so [`Runtime::move_pane_across_tabs`]'s
+    /// `from == into` answers `false`, `release_drag` falls to
+    /// [`Runtime::settle_home`], and the pane is exactly where the user left it.
+    /// The honest inverse of `Move pane to new tab` is that the move never
+    /// happened.
+    ///
+    /// Red gate (verified red on `813fa7d`, before the fix): the condition
+    /// `tab != holding` alone answers `Some(StripExtract { slot: 3 })` for the
+    /// first assertion, the spring is then told `None`, and the second one gets
+    /// no tab back at all.
+    #[test]
+    fn a_pane_that_sprang_away_comes_home_by_its_own_tab_entry() {
+        let mine = TabId(1);
+        let other = TabId(2);
+        let both = seats::PaneOffers::BOTH;
+        let cards = seats::PaneOffers::ADOPT_ONLY;
+
+        // The hand holds a pane of `mine`; the spring has left the stage on
+        // `other`.
+        let away = pane_strip_landing(both, Some(mine), mine, other, true, Some(3));
+        assert_eq!(
+            away,
+            Some(DropLanding::StripAdopt { tab: mine }),
+            "your own tab is a room like any other once you are not standing \
+             in it"
+        );
+        assert_eq!(
+            pane_strip_landing(both, Some(mine), mine, mine, true, Some(3)),
+            Some(DropLanding::StripExtract { slot: 3 }),
+            "and it stops being one the moment you are back in it — K135's own \
+             sentence, unchanged, because there the landing really would do \
+             nothing"
+        );
+
+        // The spring reads the survey's answer and never the pointer, so the
+        // way home arms it without being told that home is special.
+        let start = Instant::now();
+        let mut spring = SpringGate::default();
+        spring.observe(
+            match away {
+                Some(DropLanding::StripAdopt { tab }) => Some(tab),
+                _ => None,
+            },
+            start,
+        );
+        assert_eq!(
+            spring.due(start + profiles::CHEVRON_HOVER_OPEN),
+            Some(mine),
+            "and resting on it brings the stage back, on the same quarter \
+             second that took you away"
+        );
+        assert_eq!(
+            release_verdict(away),
+            DragRelease::Adopt { tab: mine },
+            "letting go on it is the tab entry's own verdict, which for the \
+             tab the pane never left is a move from a tab to itself — no tree \
+             is edited and the pane stays exactly where it is"
+        );
+
+        // H93 is not asked about the tab the pane is already in: `plan_drop`
+        // would be answering whether that tree could hold one *more* pane, and
+        // nothing is arriving.
+        assert_eq!(
+            pane_strip_landing(both, Some(mine), mine, other, false, Some(3)),
+            Some(DropLanding::StripAdopt { tab: mine }),
+            "a pane fits in the tree it is standing in, whatever a plan for a \
+             tree with one more pane in it would have said"
+        );
+        assert_eq!(
+            pane_strip_landing(both, Some(other), mine, other, false, Some(3)),
+            None,
+            "while the tab it would really arrive in is judged exactly as \
+             before (M147)"
+        );
+
+        // §7.1.6b′ ②'s silence was 「the hand-over would do nothing」, and that
+        // premise is what the spring falsifies — so the card column gets the
+        // way home for the same reason and by the same line.
+        assert_eq!(
+            pane_strip_landing(cards, Some(mine), mine, other, true, Some(3)),
+            Some(DropLanding::StripAdopt { tab: mine }),
+            "focus mode hides the strip, so the card is the only way back \
+             there — and ① forbids the stage having fewer verbs than the \
+             ordinary one"
+        );
+        assert_eq!(
+            pane_strip_landing(cards, None, mine, other, true, Some(3)),
+            None,
+            "and the blank beside the cards still makes no tab, sprung or not \
+             — the half of ② the user kept is about the *blank*"
         );
     }
 
@@ -85457,14 +85621,14 @@ mod tests {
         let other = TabId(2);
         let cards = seats::PaneOffers::ADOPT_ONLY;
 
-        let on_a_card = pane_strip_landing(cards, Some(other), mine, true, Some(3));
+        let on_a_card = pane_strip_landing(cards, Some(other), mine, mine, true, Some(3));
         assert_eq!(
             on_a_card,
             Some(DropLanding::StripAdopt { tab: other }),
             "a card is a room, and pointing at it asks to be put in it"
         );
         assert_eq!(
-            pane_strip_landing(cards, None, mine, true, Some(3)),
+            pane_strip_landing(cards, None, mine, mine, true, Some(3)),
             None,
             "and the blank between cards is not a room — ② keeps its tear-out \
              refusal, so letting go there is J120's clean nothing"
@@ -85500,7 +85664,7 @@ mod tests {
              in, appended at the end of that tree"
         );
         assert_eq!(
-            release_verdict(pane_strip_landing(cards, None, mine, true, Some(3))),
+            release_verdict(pane_strip_landing(cards, None, mine, mine, true, Some(3))),
             DragRelease::Home,
             "while letting go in the blank goes home"
         );

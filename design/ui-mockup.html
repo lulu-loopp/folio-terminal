@@ -11864,14 +11864,25 @@
            above a tab and the empty tail answer only the second. Resting on your
            OWN tab is not a move, so it falls through to the tear-out — appending
            a pane to the end of the tree it is already in is K135's sentence one
-           surface up. */
+           surface up.
+
+           §7.1.6k″ (user's report 2026-08-24) — AND THAT LAST SENTENCE IS ONLY
+           TRUE WHILE YOU ARE STILL STANDING IN IT. Once the spring has taken the
+           view to another tab, your own entry is the one thing on screen that
+           can give this gesture its own stage back, and refusing it made the
+           drag one-way: out to any tab, never home. So the condition is about
+           the VIEW and not about the hand alone. Away from home the entry
+           answers like any other — it lights up, the spring arms on the same
+           quarter second, and letting go on it moves no pane at all, because
+           `movePaneToTab`'s `src === tgt` is the whole of "回家": the pane never
+           left. */
         const overEl = stripEntries().find(el => {
           const r = el.getBoundingClientRect();
           return e.clientX >= r.left && e.clientX <= r.right
               && e.clientY >= r.top && e.clientY <= r.bottom;
         });
         const overWs = overEl ? +overEl.dataset.ws : null;
-        if (overWs !== null && overWs !== drag.homeWs) {
+        if (overWs !== null && (overWs !== drag.homeWs || state.active !== drag.homeWs)) {
           clearDropPreview();
           setAimed(overEl);
           /* The ghost STAYS. The two strip landings hide it because the strip
