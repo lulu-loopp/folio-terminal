@@ -1,0 +1,8 @@
+BT_DPI stage=create winit_scale=2 win32_dpi=192 authoritative_scale=2 metrics_scale=n/a rect=343,343,2263,1543 swapchain_size=1920x1200 inner_size=1920x1200
+BT_PTY_DUMP recording 0 to C:\Users\Weiyi\AppData\Local\Temp\claude\D--Developer-BetterTerminal\ccea9546-63d0-4a20-ba77-75caa4e8533c\scratchpad\run3\pty.log
+BT_DPI stage=show winit_scale=2 win32_dpi=192 authoritative_scale=2 metrics_scale=2 rect=343,343,2263,1543 swapchain_size=1920x1200 inner_size=1920x1200
+BT_DPI stage=first-present winit_scale=2 win32_dpi=192 authoritative_scale=2 metrics_scale=2 rect=343,343,2263,1543 swapchain_size=1920x1200 inner_size=1920x1200
+BT_DPI stage=resized winit_scale=2 win32_dpi=192 authoritative_scale=2 metrics_scale=2 rect=343,343,2263,1543 swapchain_size=1920x1200 inner_size=1920x1200
+BT_DPI stage=resized winit_scale=2 win32_dpi=192 authoritative_scale=2 metrics_scale=2 rect=343,343,2263,1543 swapchain_size=1920x1200 inner_size=1920x1200
+BT_DPI stage=resized winit_scale=2 win32_dpi=192 authoritative_scale=2 metrics_scale=2 rect=343,343,2263,1543 swapchain_size=1920x1200 inner_size=1920x1200
+BT_DPI stage=resized winit_scale=2 win32_dpi=192 authoritative_scale=2 metrics_scale=2 rect=343,343,2263,1543 swapchain_size=1920x1200 inner_size=1920x1200

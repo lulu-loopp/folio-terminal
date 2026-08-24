@@ -11,6 +11,7 @@
 
 use std::{
     backtrace::Backtrace,
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashMap},
     fs::OpenOptions,
     io::Write,
@@ -18,6 +19,7 @@ use std::{
     ops::{Deref, DerefMut},
     panic,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -31,6 +33,7 @@ mod cli;
 mod cmdrail;
 mod context_menu;
 mod dir_news;
+mod favicon;
 mod file_peek;
 mod files;
 mod float;
@@ -4856,6 +4859,35 @@ struct App {
     /// window — which would have made every later window's device the property
     /// of whichever window happened to open first.
     gpu: GpuContext,
+    /// **Every icon this session has been told a site wears** (the favicon
+    /// slice, §7.7 ②).
+    ///
+    /// On the application layer and not on a window, and the reason is the same
+    /// one that put the device here: a favicon is not a property of the window
+    /// that happened to learn it. A page carries its icon through a tab
+    /// tear-out (F1a/F1b) because the seat moves and the *store it looks itself
+    /// up in* does not; two windows on one dev server upload one texture rather
+    /// than two; and a Recent row in a window opened after the page was closed
+    /// still knows what that server looks like.
+    ///
+    /// `Rc<RefCell<_>>` because both layers read it in one frame — the drawing
+    /// side asks it which icon a mark means, and `marks::ChromeMarkRasters` asks
+    /// it for the pixels at the moment it would otherwise strike a globe. There
+    /// is one thread here for the reason `bt_platform::webview`'s `ENVIRONMENT`
+    /// gives: everything in this process runs on the event loop's own thread.
+    favicons: Rc<RefCell<favicon::Favicons>>,
+    /// **Somebody's icon changed and the other windows have not heard.**
+    ///
+    /// A window repaints itself when one of *its* pages speaks; an icon is the
+    /// one thing a page says that is true for every window at once, because the
+    /// store is filed by site. This is how that crosses the layer — set where
+    /// the store is written and spent once, on the same beat, in
+    /// [`App::user_event`]'s `WebPageSpoke` arm.
+    ///
+    /// A flag and not a call, because the write happens inside a loop that is
+    /// already holding one window's `Runtime`: reaching the others from there
+    /// would be a window walking the application's list while standing in it.
+    favicons_changed: bool,
     /// **The one counter that numbers tabs** (F1b). See [`TabIds`] for why it is
     /// here and not on the window, and for what a window gives up by not having
     /// one: nothing, because a tab was never a fact about a window — only about
@@ -8349,7 +8381,7 @@ impl TabState {
     /// window and a seat number restarts at one in every tab, so asking it about
     /// a bare number is asking a question two tabs can answer yes to: a preview
     /// pane numbered the same as another tab's page wore that other tab's globe.
-    fn tab_mark(&self, pages: &BTreeSet<LeafId>) -> marks::ChromeMark {
+    fn tab_mark(&self, pages: &BTreeMap<LeafId, Option<favicon::FaviconId>>) -> marks::ChromeMark {
         let seat = if self.sessions.contains_key(&self.focused_leaf) {
             self.focused_leaf
         } else {
@@ -8369,9 +8401,14 @@ impl TabState {
         // ignored the argument.
         let content = match kind {
             bt_layout::SeatKind::Terminal => Some(profiles::mark(self.leaf_profile(seat))),
-            bt_layout::SeatKind::Preview if pages.contains(&LeafId { tab: self.id, seat }) => {
-                Some(marks::ChromeMark::Globe)
-            }
+            // **And the site's own icon where it has one** (§7.7 ②) — which is
+            // why the argument is a map and not the set it was: "this leaf holds
+            // a page" and "this is the icon that page wears" are one fact about
+            // one leaf, and a strip that had to look the second one up somewhere
+            // else would be the mock-up's `pvMarkId` said twice.
+            bt_layout::SeatKind::Preview => pages
+                .get(&LeafId { tab: self.id, seat })
+                .map(|favicon| marks::ChromeMark::Globe { favicon: *favicon }),
             _ => None,
         };
         let (mark, _, _) = seats::pane_mark(kind, content, bt_render::chrome_palette());
@@ -21800,6 +21837,10 @@ fn drain_tab_pty(tab: &mut TabState) -> Result<DrainOutcome> {
 /// a field added to the window layer gets its resting value in one place
 /// instead of drifting between a launch and a `New window`.
 struct NewWindowParts {
+    /// The application's favicon store, handed to this window's mark rasterizer
+    /// so that a page drawn here wears what any window in the process learned
+    /// about its site — see [`App::favicons`].
+    favicons: Rc<RefCell<favicon::Favicons>>,
     renderer: WindowRenderer,
     tabs: Vec<TabState>,
     active_tab: usize,
@@ -21834,6 +21875,7 @@ struct NewWindowParts {
 /// everything else.
 fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
     let NewWindowParts {
+        favicons,
         renderer,
         tabs,
         active_tab,
@@ -21965,7 +22007,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         search_hover: None,
         search_scan: None,
         search_revision: 0,
-        chrome_marks: marks::ChromeMarkRasters::default(),
+        chrome_marks: marks::ChromeMarkRasters::sharing(favicons),
         settings: settings::SettingsPanel::default(),
         profile_undo: None,
         checkout_from: None,
@@ -22536,6 +22578,8 @@ impl Runtime<'_> {
         let git_worker = git::GitWorker::spawn(proxy.clone())?;
         let mut app = App {
             gpu,
+            favicons: Rc::new(RefCell::new(favicon::Favicons::default())),
+            favicons_changed: false,
             tab_ids,
             event_proxy: proxy.clone(),
             git_watch: git_watch::GitWatch::default(),
@@ -22638,6 +22682,7 @@ impl Runtime<'_> {
                     .collect();
         }
         let mut window = new_window_runtime(NewWindowParts {
+            favicons: Rc::clone(&app.favicons),
             renderer,
             tabs,
             active_tab,
@@ -22976,6 +23021,7 @@ impl Runtime<'_> {
         let maximized = placement.is_some_and(|placement| placement.maximized);
         let id = window.id();
         let mut window = new_window_runtime(NewWindowParts {
+            favicons: Rc::clone(&app.favicons),
             renderer,
             tabs,
             active_tab,
@@ -24009,10 +24055,18 @@ impl Runtime<'_> {
             .drag
             .as_ref()
             .and_then(|drag| drag.tab_carry().map(|carry| carry.offset));
-        // The panes this window has pages on, threaded into the strip so that a
-        // tab whose identity pane is one of them wears the globe (§7.7 ②) — the
-        // same glyph the head under it wears, through the same `pane_mark`.
-        let page_seats: BTreeSet<LeafId> = self.window.web.keys().copied().collect();
+        // The panes this window has pages on **and the icon each page's site
+        // wears**, threaded into the strip so that a tab whose identity pane is
+        // one of them wears it (§7.7 ②) — the same drawing the head under it
+        // wears, through the same `pane_mark`.
+        let page_seats: BTreeMap<LeafId, Option<favicon::FaviconId>> = {
+            let favicons = self.app.favicons.borrow();
+            self.window
+                .web
+                .iter()
+                .map(|(leaf, web)| (*leaf, favicons.of_url(&web.page().url)))
+                .collect()
+        };
         let grabbed = self.window.drag.as_ref().and_then(|drag| {
             let tab = drag.tab()?;
             self.window
@@ -24240,7 +24294,17 @@ impl Runtime<'_> {
                             .round() as u16,
                         stroke_px: (PAGE_SPINNER_STROKE_LOGICAL_PX * scale).round().max(1.0) as u32,
                     },
-                    None => marks::ChromeMark::Globe,
+                    // **And where the site has an icon, the icon** (§7.7 ②:
+                    // 「站点有图标画 favicon」). Asked with the URL the engine
+                    // last committed, so a page that navigates to another server
+                    // changes what this mark means in the same frame the address
+                    // changes — the store is keyed by site and this is a lookup,
+                    // not a copy, so there is nothing to invalidate. A site with
+                    // no icon answers `None` and the globe is drawn, which is
+                    // both halves of §7.7 ② in one expression.
+                    None => marks::ChromeMark::Globe {
+                        favicon: self.app.favicons.borrow().of_url(&page.url),
+                    },
                 },
             );
         }
@@ -24365,7 +24429,14 @@ impl Runtime<'_> {
                             notice: fault.say(),
                             detail: fault.detail().unwrap_or_default().to_owned(),
                             verb: fault.verb_text().text().to_owned(),
-                            mark: marks::ChromeMark::Globe,
+                            // **The class's mark and never the site's**, the
+                            // same ruling `websheet` states at length: §7.7 ④
+                            // says a failure card wears 「一枚本类的记号」, and
+                            // what these four cards are about is this window's
+                            // report on a page that is not there. A server's own
+                            // icon over that sentence would read as the server
+                            // having said it.
+                            mark: marks::ChromeMark::Globe { favicon: None },
                             fault: true,
                             width: 0.0,
                         },
@@ -24525,6 +24596,12 @@ impl Runtime<'_> {
                         notice: &words.notice,
                         notice_width: words.notice_width,
                         web: self.seat_holds_a_page(*seat),
+                        // The head's own answer, asked the same way, so that the
+                        // band and the head above it cannot name one page with
+                        // two drawings — see [`seats::FootStrip::favicon`].
+                        favicon: self
+                            .web_on(*seat)
+                            .and_then(|web| self.app.favicons.borrow().of_url(&web.page().url)),
                     },
                 )
             })
@@ -28311,6 +28388,11 @@ impl Runtime<'_> {
         } else if let Some(layout) = self.profile_menu_layout() {
             {
                 let default = self.default_profile();
+                // Taken before the device is borrowed mutably, and handed over as
+                // a borrow of the store rather than of `self.app`: the measure
+                // closure below holds the GPU for the whole call.
+                let favicons = Rc::clone(&self.app.favicons);
+                let favicons = favicons.borrow();
                 let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
                 let mut measure =
                     |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
@@ -28321,6 +28403,7 @@ impl Runtime<'_> {
                     self.window.profile_menu.hover(),
                     self.app.recent.entries(),
                     SystemTime::now(),
+                    &favicons,
                     &mut measure,
                 )
             }
@@ -28378,9 +28461,11 @@ impl Runtime<'_> {
             // however the flags are set.
             let items = self.preview_menu_items(seat);
             let hover = self.window.preview_menu.hover();
+            let favicons = Rc::clone(&self.app.favicons);
+            let favicons = favicons.borrow();
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
-            profiles::preview_menu_build(&layout, &items, hover, &mut measure)
+            profiles::preview_menu_build(&layout, &items, hover, &favicons, &mut measure)
         } else {
             Vec::new()
         };
@@ -28911,7 +28996,14 @@ impl Runtime<'_> {
                     // strip draws it with — a ghost is a picture of the tab it
                     // was lifted out of, so the two must not disagree about what
                     // that tab is.
-                    tab.tab_mark(&self.window.web.keys().copied().collect()),
+                    tab.tab_mark(&{
+                        let favicons = self.app.favicons.borrow();
+                        self.window
+                            .web
+                            .iter()
+                            .map(|(leaf, web)| (*leaf, favicons.of_url(&web.page().url)))
+                            .collect()
+                    }),
                     bt_render::WINDOW_TAB_MARK_LOGICAL_PX,
                     palette.accent,
                     tab.display_title(),
@@ -61442,6 +61534,32 @@ impl Runtime<'_> {
                 webhost::WebOutcome::FindMatches { count, active } => {
                     self.web_find_reported(count, active)?;
                 }
+                // **What one page learned about its site's icon, filed for the
+                // whole application** (the favicon slice, `docs/DESIGN.md` §7.13, §7.7 ②).
+                //
+                // Filed here and drawn nowhere: every surface that draws a page
+                // already asks the store while it builds its marks, so what this
+                // owes is the store and one repaint. The repaint is asked for
+                // only when something actually changed — an icon re-announced
+                // unchanged, which is what a reload does, must not cost a frame.
+                //
+                // Decoding happens inside `learn`, on this thread. It is a
+                // 32-pixel PNG arriving once per site, not the 1146-pixel
+                // photograph §7.11 ③ ⓑ had to move off the render thread; the
+                // measurement is in §7.13.
+                webhost::WebOutcome::Favicon { site, png } => {
+                    let changed = match png {
+                        Some(png) => self.app.favicons.borrow_mut().learn(&site, &png),
+                        None => self.app.favicons.borrow_mut().forget(&site),
+                    };
+                    // This window is repainted by `drive_web_page`'s own tail,
+                    // which already asks "did anything move" once for every
+                    // fact a page can change. What that tail cannot reach is
+                    // **the other windows**: the store is the application's, so
+                    // a second window standing on the same server is now wearing
+                    // a different icon and has no other reason to redraw.
+                    self.app.favicons_changed |= changed;
+                }
             }
         }
         Ok(())
@@ -65965,7 +66083,32 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             AppEvent::NotificationClicked => self.route_clicked_notifications(),
             // Every window, on this family's standing reason: an answer carries
             // its own address and a window with no page finds nothing to read.
-            AppEvent::WebPageSpoke => self.for_each_window(|runtime| runtime.drive_web_page()),
+            AppEvent::WebPageSpoke => self
+                .for_each_window(|runtime| runtime.drive_web_page())
+                // **And the windows that heard nothing** (the favicon slice, `docs/DESIGN.md` §7.13).
+                // A site's icon is filed for the whole application, so a page
+                // learning one in this window changes what a page on the same
+                // server draws in the next — see [`App::favicons_changed`]. The
+                // pass costs a walk of a handful of windows only in the frame an
+                // icon actually arrived in; the window that learned it has
+                // already answered "nothing moved" by the time it is reached.
+                .and_then(|()| {
+                    if self
+                        .app
+                        .as_mut()
+                        .is_some_and(|app| std::mem::take(&mut app.favicons_changed))
+                    {
+                        self.for_each_window(|runtime| {
+                            if runtime.refresh_chrome() {
+                                runtime.present_chrome_change()
+                            } else {
+                                Ok(())
+                            }
+                        })
+                    } else {
+                        Ok(())
+                    }
+                }),
             // Nothing is done here either, on `GitChanged`'s own reasoning a
             // third time: the moment the folder moved is already in
             // `preview_watch`'s mailbox, and `about_to_wait` is where the quiet
@@ -90650,7 +90793,7 @@ mod tests {
             "B14: named by its folder's last segment, the same string its head prints"
         );
         assert_eq!(
-            torn.tab_mark(&BTreeSet::new()),
+            torn.tab_mark(&BTreeMap::new()),
             marks::ChromeMark::Folder,
             "and wearing the same folder mark, not a shell's"
         );
@@ -90788,7 +90931,7 @@ mod tests {
             "P15: named by the file, the same string the pane head prints"
         );
         assert_eq!(
-            torn.tab_mark(&BTreeSet::new()),
+            torn.tab_mark(&BTreeMap::new()),
             marks::ChromeMark::File,
             "and wearing the file mark"
         );
@@ -90837,12 +90980,28 @@ mod tests {
         let here = LeafId { tab: torn.id, seat };
 
         assert_eq!(
-            torn.tab_mark(&BTreeSet::from([here])),
-            marks::ChromeMark::Globe,
+            torn.tab_mark(&BTreeMap::from([(here, None)])),
+            marks::ChromeMark::Globe { favicon: None },
             "the pane is hosting a page, so the strip row says page"
         );
+        // **And the strip wears the site's own icon where the page has one**
+        // (the favicon slice, `docs/DESIGN.md` §7.13). The map is the same map — "which leaves hold a
+        // page" and "what each of those pages wears" are one fact — so this is
+        // the third assertion of the same sentence rather than a second door.
+        //
+        // MUTATION: drop the favicon out of `tab_mark`'s `Preview` arm and this
+        // fails while the two either side of it still pass, which is exactly the
+        // shape of a strip that has stopped agreeing with the head under it.
+        let icon = favicon::FaviconId::for_tests(3);
         assert_eq!(
-            torn.tab_mark(&BTreeSet::new()),
+            torn.tab_mark(&BTreeMap::from([(here, Some(icon))])),
+            marks::ChromeMark::Globe {
+                favicon: Some(icon)
+            },
+            "the strip row draws what the head under it draws"
+        );
+        assert_eq!(
+            torn.tab_mark(&BTreeMap::new()),
             marks::ChromeMark::File,
             "and says file again the moment the page leaves that pane"
         );
@@ -90851,7 +91010,7 @@ mod tests {
             seat,
         };
         assert_eq!(
-            torn.tab_mark(&BTreeSet::from([another_tabs_page])),
+            torn.tab_mark(&BTreeMap::from([(another_tabs_page, None)])),
             marks::ChromeMark::File,
             "a page on another tab's seat is not this tab's page — and the seat \
              number is deliberately the same one, because that is the state a \
@@ -90958,7 +91117,7 @@ mod tests {
             "there is still nothing to type into, which is the honest reading"
         );
         assert_eq!(tab.display_title(), "folio");
-        assert_eq!(tab.tab_mark(&BTreeSet::new()), marks::ChromeMark::Folder);
+        assert_eq!(tab.tab_mark(&BTreeMap::new()), marks::ChromeMark::Folder);
         assert_eq!(
             tab.mark_state(
                 true,
@@ -91689,7 +91848,7 @@ mod tests {
              because the profile rides on the session that moved"
         );
         assert_eq!(
-            torn.tab_mark(&BTreeSet::new()),
+            torn.tab_mark(&BTreeMap::new()),
             profiles::mark(gitbash),
             "so the strip draws the new tab as the shell actually running in it"
         );
@@ -94673,13 +94832,23 @@ mod tests {
         );
         assert!(!rows[0].is_page() && rows[1].is_page());
         assert_eq!(
-            marks::preview_row_mark(rows[1].is_page()),
-            marks::ChromeMark::Globe
+            marks::preview_row_mark(rows[1].is_page(), None),
+            marks::ChromeMark::Globe { favicon: None }
         );
         assert_eq!(
-            marks::preview_row_mark(rows[0].is_page()),
+            marks::preview_row_mark(rows[0].is_page(), None),
             marks::ChromeMark::File,
             "and the file beside it is unchanged"
+        );
+        // **And the row can name the site it would ask about** (the favicon
+        // slice): the address it keeps is the address the store is keyed by, so
+        // the row needs nothing this list was not already holding.
+        assert_eq!(rows[1].page_url(), Some("http://localhost:5173/app"));
+        assert_eq!(rows[0].page_url(), None);
+        assert_eq!(
+            marks::preview_row_mark(rows[0].is_page(), Some(favicon::FaviconId::for_tests(1))),
+            marks::ChromeMark::File,
+            "and an icon handed to a file is refused rather than drawn"
         );
     }
 

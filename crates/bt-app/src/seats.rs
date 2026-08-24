@@ -7421,6 +7421,7 @@ pub fn build_chrome_for_tabs(
                             notice: "",
                             notice_width: 0.0,
                             web: false,
+                            favicon: None,
                         }),
                     };
                     let target = match placement.kind {
@@ -13729,6 +13730,15 @@ pub struct FootStrip<'a> {
     /// up, in [`FootDress::cut_left`], because that is a property of the string
     /// and not of the strip.
     pub web: bool,
+    /// **The site's own icon**, where the session has one (the favicon slice, `docs/DESIGN.md` §7.13).
+    ///
+    /// Here as well as on the head because the comment beside the mark below
+    /// says the band "is naming the same thing the head is naming" — a head
+    /// wearing a server's icon over a foot wearing the class globe would make
+    /// that sentence false, and it is the sentence that decides what the mark
+    /// means. Ignored outright when [`Self::web`] is not set, by
+    /// [`crate::marks::preview_row_mark`]'s own rule.
+    pub favicon: Option<crate::favicon::FaviconId>,
 }
 
 /// **The gap between the path and the phrase hung beside it.**
@@ -13897,9 +13907,13 @@ fn push_files_foot(
         if revealed {
             ChromeMark::Check
         } else if strip.is_some_and(|strip| strip.web) {
-            // `#i-globe` — the same mark this seat wears on its head, because
-            // the band is naming the same thing the head is naming.
-            ChromeMark::Globe
+            // `#i-globe`, or the site's own icon — **the same mark this seat
+            // wears on its head, because the band is naming the same thing the
+            // head is naming.** That sentence is why the favicon rides on the
+            // strip at all: it has to be able to say both halves.
+            ChromeMark::Globe {
+                favicon: strip.and_then(|strip| strip.favicon),
+            }
         } else {
             ChromeMark::FolderOpen
         },
@@ -17087,6 +17101,7 @@ mod tests {
                 notice,
                 notice_width,
                 web: false,
+                favicon: None,
             }),
             true,
             1.0,
@@ -33576,8 +33591,13 @@ mod tests {",
     fn a_page_wears_the_globe_and_a_document_the_file() {
         let palette = chrome_palette();
         assert_eq!(
-            pane_mark(SeatKind::Preview, Some(ChromeMark::Globe), palette).0,
-            ChromeMark::Globe
+            pane_mark(
+                SeatKind::Preview,
+                Some(ChromeMark::Globe { favicon: None }),
+                palette
+            )
+            .0,
+            ChromeMark::Globe { favicon: None }
         );
         assert_eq!(
             pane_mark(SeatKind::Preview, None, palette).0,
@@ -33587,7 +33607,12 @@ mod tests {",
         // Same box either way, so a column of heads does not shuffle when one
         // seat's content has an icon and the next one's has not.
         assert_eq!(
-            pane_mark(SeatKind::Preview, Some(ChromeMark::Globe), palette).1,
+            pane_mark(
+                SeatKind::Preview,
+                Some(ChromeMark::Globe { favicon: None }),
+                palette
+            )
+            .1,
             pane_mark(SeatKind::Preview, None, palette).1
         );
     }

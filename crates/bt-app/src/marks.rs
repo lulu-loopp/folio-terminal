@@ -19,7 +19,7 @@
 //! solver's rectangles. This module answers only "what does it look like, at this
 //! many physical pixels, in this colour".
 
-use std::{collections::HashMap, fmt::Write as _, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, fmt::Write as _, rc::Rc, sync::Arc};
 
 use bt_render::{ChromeIcon, ChromeLabel, OverlayQuad};
 
@@ -260,16 +260,30 @@ pub enum ChromeMark {
     /// [`preview_row_mark`] and the head and strip through `seats::pane_mark`,
     /// so there is one glyph and a named place it is chosen.
     ///
-    /// **The site's own favicon is not this mark and is not drawn yet.** §7.7 ②
-    /// asks for the favicon where a site has one and this globe where it has
-    /// not, and the two halves are not the same kind of work: every variant of
-    /// this enum is a vector symbol struck from a path list and cached by name,
-    /// and a favicon is a raster the engine fetches at runtime — a second
-    /// pipeline into the chrome atlas that no mark has. It is slice ⑥'s, and is
-    /// recorded as an open item rather than faked: a coloured square with a
-    /// letter in it would be this window inventing an icon for somebody else's
-    /// site.
-    Globe,
+    /// **`favicon` is the site's own icon standing in for this drawing**, where
+    /// the session has one (§7.7 ②: "站点有图标画 favicon，没有画本类的地球").
+    ///
+    /// It is an id and not a site string for one reason, and the reason is this
+    /// enum's `Copy`: a mark travels through the window inside maps, tuples and
+    /// comparisons — `leaf_marks`, `pane_mark`, `preview_row_mark`, `tab_mark`,
+    /// the drag ghost, the collapsed bar, the focus card, the download sheet —
+    /// and a `String` here would have rewritten every one of those to say the
+    /// same thing. [`crate::favicon::Favicons`] mints the number, owns the
+    /// pixels, and is the only thing that can turn one back into the other.
+    ///
+    /// **`None` is not a failure**, it is the whole of the failure vocabulary:
+    /// a site with no icon, a site whose icon would not decode, a page that has
+    /// not come up yet, a restored session that has asked nobody anything. All
+    /// four draw the globe, and none of them has anything to report. An id whose
+    /// site has since been forgotten falls through to the same place at the last
+    /// possible moment, in [`ChromeMarkRasters::icons_for`].
+    ///
+    /// Nothing is invented in either direction: a coloured square with a letter
+    /// in it would be this window inventing an icon for somebody else's site,
+    /// and this globe is what it draws instead.
+    Globe {
+        favicon: Option<crate::favicon::FaviconId>,
+    },
     /// `#i-folder`.
     Folder,
     /// `#i-panel` — a pane whose kind this build cannot name.
@@ -732,7 +746,7 @@ impl ChromeMark {
             // them apart is a parameter `mark_key` adds.
             Self::ProfileGeneric { .. } => "p-shell",
             Self::File => "i-file",
-            Self::Globe => "i-globe",
+            Self::Globe { .. } => "i-globe",
             Self::Folder => "i-folder",
             Self::FolderOpen => "i-folder-open",
             // One id for every angle, on `Self::Chevron`'s precedent above.
@@ -1049,6 +1063,21 @@ impl OverlayLayer {
 #[derive(Default)]
 pub struct ChromeMarkRasters {
     rasters: HashMap<String, Raster>,
+    /// **The session's favicons**, shared with every other window (the favicon
+    /// slice).
+    ///
+    /// Here rather than passed into [`Self::resolve`] because this is the one
+    /// place a mark identity becomes pixels, and a favicon is a mark identity
+    /// becoming somebody else's pixels — a parameter would have said the same
+    /// thing to twenty-odd callers, every one of which would then be able to
+    /// forget it and get the globe.
+    ///
+    /// Shared and not per window because a page keeps its icon across a tab
+    /// tear-out (F1a/F1b): the seat moves, its URL moves with it, and the store
+    /// it looks itself up in has to be the same store on the other side. A
+    /// `Default` store is private and permanently empty, which is exactly right
+    /// for `settings_marks` and for every test that has no page in it.
+    favicons: Rc<RefCell<crate::favicon::Favicons>>,
 }
 
 #[derive(Clone)]
@@ -1059,6 +1088,20 @@ struct Raster {
 }
 
 impl ChromeMarkRasters {
+    /// The same, drawing from a favicon store this window shares with the
+    /// others.
+    ///
+    /// The only door to a non-empty store: `Default` leaves it private and
+    /// empty, so anything built that way draws the globe for every page and
+    /// draws it correctly.
+    #[must_use]
+    pub fn sharing(favicons: Rc<RefCell<crate::favicon::Favicons>>) -> Self {
+        Self {
+            rasters: HashMap::new(),
+            favicons,
+        }
+    }
+
     /// Rasterize whatever is not already in hand and return the draw list, in
     /// the order the sprites were requested — which is the order they paint.
     pub fn resolve(&mut self, sprites: &[ChromeSprite]) -> Vec<ChromeIcon> {
@@ -1112,6 +1155,42 @@ impl ChromeMarkRasters {
                 continue;
             }
             let (width_px, height_px) = (width_px as u32, height_px as u32);
+            // **The one place the globe becomes somebody's favicon.**
+            //
+            // Here and not at the twenty drawing sites, because this is already
+            // the seam where a mark identity turns into pixels — every one of
+            // those sites hands over a `ChromeMark` and none of them has ever
+            // known what a raster is. So a page's head, its strip row, its drag
+            // ghost, its collapsed bar, its focus card, the switcher row, the
+            // Recent row, the restore prompt's row and the download sheet all
+            // wear the site's icon by having changed nothing.
+            //
+            // The store is asked *last*, at the moment of drawing, so that an id
+            // whose site has been forgotten or evicted since the frame chose it
+            // falls straight through to the vector globe below — which is the
+            // right picture and needs no one to be told. Nothing is inserted
+            // into `kept`: these pixels are the store's, cut once per box and
+            // held there, and a copy in a map the frame rebuilds would be a
+            // second owner of one icon.
+            if let ChromeMark::Globe {
+                favicon: Some(favicon),
+            } = sprite.mark
+                && let Some(raster) = self
+                    .favicons
+                    .borrow_mut()
+                    .raster(favicon, width_px, height_px)
+            {
+                icons.push(ChromeIcon {
+                    key: favicon.texture_key(width_px, height_px),
+                    rect: sprite.rect,
+                    rgba: raster.rgba,
+                    width_px: raster.width_px,
+                    height_px: raster.height_px,
+                    opacity: sprite.opacity,
+                    clip: None,
+                });
+                continue;
+            }
             let key = mark_key(sprite, width_px, height_px);
             let raster = match kept.get(&key).or_else(|| self.rasters.get(&key)) {
                 Some(raster) => raster.clone(),
@@ -1608,7 +1687,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::Plus => 4,
         ChromeMark::ProfilePowerShell => 5,
         ChromeMark::File => 6,
-        ChromeMark::Globe => 41,
+        ChromeMark::Globe { .. } => 41,
         ChromeMark::Folder => 7,
         ChromeMark::FolderOpen => 15,
         ChromeMark::TreeDisclosure { .. } => 16,
@@ -1679,10 +1758,18 @@ fn symbol_index(mark: ChromeMark) -> usize {
 /// buffer to ask: a Recent row and a pinned URL stand for a page nothing has
 /// opened, and what they have is the vault's or the pin file's own word for
 /// which of the two the row is.
+///
+/// `favicon` is what [`crate::favicon::Favicons::of_url`] answered for the row's
+/// own URL, and every one of these three surfaces can ask — a row has a URL even
+/// where it has no pane, which is the point of a store keyed by site. It is
+/// ignored outright for a file, because a file has no site: passing one would be
+/// a caller saying something about a row it had mistaken for a page, and taking
+/// it here rather than trusting the caller is what keeps `#i-file` unable to
+/// wear somebody's icon.
 #[must_use]
-pub fn preview_row_mark(is_page: bool) -> ChromeMark {
+pub fn preview_row_mark(is_page: bool, favicon: Option<crate::favicon::FaviconId>) -> ChromeMark {
     if is_page {
-        ChromeMark::Globe
+        ChromeMark::Globe { favicon }
     } else {
         ChromeMark::File
     }
@@ -2576,7 +2663,7 @@ mod tests {
             (ChromeMark::ProfileCmd, 15.0),
             (ChromeMark::File, 14.0),
             // The page's mark, at the file mark's size: they share one column.
-            (ChromeMark::Globe, 14.0),
+            (ChromeMark::Globe { favicon: None }, 14.0),
             (ChromeMark::Folder, 13.0),
             (ChromeMark::Panel, 13.0),
             // `.panehead .pane-split svg { width: 13px }` — the folder's size,
@@ -3959,5 +4046,206 @@ mod tests {
             sprite(ChromeMark::Folder, 13.0, 13.0, [1, 2, 3]),
         ]);
         assert_eq!(icons.len(), 1);
+    }
+
+    /// A store holding one site's icon, for the three gates below.
+    fn a_store_holding(site: &str, colour: [u8; 4]) -> Rc<RefCell<crate::favicon::Favicons>> {
+        let mut buffer = image::RgbaImage::new(32, 32);
+        for pixel in buffer.pixels_mut() {
+            *pixel = image::Rgba(colour);
+        }
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(buffer)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("an in-memory PNG encodes");
+        let mut store = crate::favicon::Favicons::default();
+        assert!(store.learn(site, png.get_ref()));
+        Rc::new(RefCell::new(store))
+    }
+
+    /// **Red gate (the favicon slice, `docs/DESIGN.md` §7.13): a globe that names a site is drawn as
+    /// that site's pixels, in the globe's own box.**
+    ///
+    /// The whole seam in one assertion. Everything that draws a page hands over
+    /// a `ChromeMark`, and this is the one place a `ChromeMark` becomes pixels —
+    /// so this is the one place a favicon can replace a drawing without any
+    /// drawing site learning a new word. The rectangle is the sprite's own,
+    /// unchanged: §7.7 ② puts the favicon and the globe in *one* 14px box so a
+    /// column of heads does not shuffle when one seat's site has an icon.
+    ///
+    /// MUTATION: delete the substitution in `icons_for` and the key is
+    /// `chrome-mark:i-globe:…` and the pixels are the struck glyph — which is
+    /// the state of the tree before this slice.
+    #[test]
+    fn a_globe_that_names_a_site_is_drawn_as_that_site() {
+        let store = a_store_holding("http://localhost:8642", [10, 200, 30, 255]);
+        let favicon = store
+            .borrow()
+            .of_url("http://localhost:8642/docs")
+            .expect("the store holds it");
+        let mut rasters = ChromeMarkRasters::sharing(Rc::clone(&store));
+        let icons = rasters.resolve(&[sprite(
+            ChromeMark::Globe {
+                favicon: Some(favicon),
+            },
+            14.0,
+            14.0,
+            [1, 2, 3],
+        )]);
+        let [icon] = icons.as_slice() else {
+            panic!("one mark in, {} out", icons.len());
+        };
+        assert_eq!(icon.key, favicon.texture_key(14, 14));
+        assert!(!icon.key.starts_with("chrome-mark:"));
+        assert_eq!(icon.rect, [0.0, 0.0, 14.0, 14.0], "the globe's own box");
+        assert_eq!((icon.width_px, icon.height_px), (14, 14));
+        assert_eq!(rgb_at(icon, 7, 7), [10, 200, 30]);
+        assert!(
+            rasters.rasters.is_empty(),
+            "the pixels are the store's — the frame's map holds no copy"
+        );
+    }
+
+    /// **Red gate: a globe that names nothing, and a globe whose site the store
+    /// has let go of, are both the struck glyph.**
+    ///
+    /// §7.7 ②'s second half, and the fourth rule of the slice: there is no
+    /// error state here, only a drawing. The second case is the one that has to
+    /// be checked at the *draw* and not at the choice — a site can be forgotten
+    /// or evicted between the frame that picked the mark and the frame that
+    /// paints it.
+    ///
+    /// MUTATION: substitute on `Globe { .. }` regardless of what the store
+    /// answers, and the second case draws nothing at all.
+    #[test]
+    fn a_globe_with_no_icon_behind_it_is_the_glyph() {
+        let store = a_store_holding("http://localhost:8642", [10, 200, 30, 255]);
+        let stale = store
+            .borrow()
+            .of_url("http://localhost:8642/")
+            .expect("the store holds it");
+        store.borrow_mut().forget("http://localhost:8642");
+        let mut rasters = ChromeMarkRasters::sharing(Rc::clone(&store));
+        let icons = rasters.resolve(&[
+            sprite(ChromeMark::Globe { favicon: None }, 14.0, 14.0, [1, 2, 3]),
+            sprite(
+                ChromeMark::Globe {
+                    favicon: Some(stale),
+                },
+                14.0,
+                14.0,
+                [1, 2, 3],
+            ),
+        ]);
+        assert_eq!(icons.len(), 2, "both are drawn, and both are the globe");
+        for icon in &icons {
+            assert!(
+                icon.key.starts_with("chrome-mark:i-globe:"),
+                "unexpected key {}",
+                icon.key
+            );
+        }
+        assert_eq!(
+            icons[0].key, icons[1].key,
+            "a named site the store cannot answer for is the same drawing as an \
+             unnamed one, and therefore the same texture"
+        );
+    }
+
+    /// **Red gate: one site at two sizes is two textures, and two sites are
+    /// never one.**
+    ///
+    /// The texture cache is asked by key and answers with whatever it kept, so
+    /// a key that dropped either half would draw one server's icon for another
+    /// or draw a 14px cut into a 28px box.
+    ///
+    /// MUTATION: leave the size out of `FaviconId::texture_key` and the first
+    /// assertion fails; mint one id for every site and the second does.
+    #[test]
+    fn a_favicon_texture_is_named_by_its_site_and_its_box() {
+        let store = a_store_holding("https://one.test", [200, 0, 0, 255]);
+        assert!(
+            store.borrow_mut().learn(
+                "https://two.test",
+                {
+                    let mut buffer = image::RgbaImage::new(32, 32);
+                    for pixel in buffer.pixels_mut() {
+                        *pixel = image::Rgba([0, 0, 200, 255]);
+                    }
+                    let mut png = std::io::Cursor::new(Vec::new());
+                    image::DynamicImage::ImageRgba8(buffer)
+                        .write_to(&mut png, image::ImageFormat::Png)
+                        .expect("an in-memory PNG encodes");
+                    png.into_inner()
+                }
+                .as_slice()
+            )
+        );
+        let one = store.borrow().of_url("https://one.test/").expect("held");
+        let two = store.borrow().of_url("https://two.test/").expect("held");
+        let mut rasters = ChromeMarkRasters::sharing(Rc::clone(&store));
+        let icons = rasters.resolve(&[
+            sprite(
+                ChromeMark::Globe { favicon: Some(one) },
+                14.0,
+                14.0,
+                [1, 2, 3],
+            ),
+            sprite(
+                ChromeMark::Globe { favicon: Some(one) },
+                28.0,
+                28.0,
+                [1, 2, 3],
+            ),
+            sprite(
+                ChromeMark::Globe { favicon: Some(two) },
+                14.0,
+                14.0,
+                [1, 2, 3],
+            ),
+        ]);
+        assert_ne!(icons[0].key, icons[1].key, "one site, two boxes");
+        assert_ne!(icons[0].key, icons[2].key, "two sites, one box");
+        assert_eq!(rgb_at(&icons[0], 7, 7), [200, 0, 0]);
+        assert_eq!(rgb_at(&icons[2], 7, 7), [0, 0, 200]);
+        assert_eq!((icons[1].width_px, icons[1].height_px), (28, 28));
+    }
+
+    /// **Red gate: a page carries its icon into the window it is moved to
+    /// (F1a/F1b).**
+    ///
+    /// The tear-out requirement, pinned at the layer that actually decides it.
+    /// A transfer moves the `WebSeat` whole — `source.web.remove(leaf)` into
+    /// `target.web.insert(leaf, …)` — and the seat's URL goes with it; the only
+    /// way the icon could be lost is if the store it looks itself up in were the
+    /// window's. It is the application's, and *this* is what that means: two
+    /// windows' rasterizers, one store, one texture key.
+    ///
+    /// One key rather than two is the second half and not a detail: the shared
+    /// GPU cache is asked by key, so two windows on one server that minted two
+    /// names would upload the same icon twice and evict each other's.
+    ///
+    /// MUTATION: give `ChromeMarkRasters` a store of its own instead of a shared
+    /// handle, and the second window draws the struck globe.
+    #[test]
+    fn a_page_moved_into_another_window_keeps_its_icon() {
+        let store = a_store_holding("http://localhost:8642", [77, 88, 99, 255]);
+        let favicon = store
+            .borrow()
+            .of_url("http://localhost:8642/app")
+            .expect("the store holds it");
+        let mark = ChromeMark::Globe {
+            favicon: Some(favicon),
+        };
+        let mut source = ChromeMarkRasters::sharing(Rc::clone(&store));
+        let mut target = ChromeMarkRasters::sharing(Rc::clone(&store));
+        let here = source.resolve(&[sprite(mark, 14.0, 14.0, [1, 2, 3])]);
+        let there = target.resolve(&[sprite(mark, 14.0, 14.0, [1, 2, 3])]);
+        assert_eq!(here[0].key, there[0].key, "one server, one texture name");
+        assert_eq!(rgb_at(&there[0], 7, 7), [77, 88, 99]);
+        assert!(
+            Arc::ptr_eq(&here[0].rgba, &there[0].rgba),
+            "and one set of pixels — the cut is the store's, made once"
+        );
     }
 }

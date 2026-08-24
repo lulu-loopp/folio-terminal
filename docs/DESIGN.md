@@ -1775,7 +1775,7 @@ HKCU\Software\Classes\AppUserModelId\Folio.Terminal
 
 **① 头上的六件,和它们各自的出处。**
 
-* **记号**:`ChromeMark::Globe`(小样 4358 的 `#i-globe` 逐字),由 `seats::pane_mark` 选,选的依据是 `leaf_marks` 里那一格——原本只装 shell 的那张表现在也装内容,因为 `pane_mark` 唯一说不出的就是「这片叶子拿的是什么」。一处选择,头、strip、拖拽幽灵、折叠条同时对,这就是小样 `pvMarkId` 那句话说一次的意思。**导航在途时这一格自转**:借的是本窗已经在转的那道弧(`indeterminate_start_milliturns` + `WINDOW_TAB_RING_INDETERMINATE_TURNS`),不是第二个 spinner;`strip_animation_deadline` 多一项把帧要回来,`Motion::Reduced` 下相位钉死在十二点、一帧都不要——这是本窗对「减少动态」的一贯答法。**站点自己的 favicon 没画**,记在末尾的欠账里。
+* **记号**:`ChromeMark::Globe`(小样 4358 的 `#i-globe` 逐字),由 `seats::pane_mark` 选,选的依据是 `leaf_marks` 里那一格——原本只装 shell 的那张表现在也装内容,因为 `pane_mark` 唯一说不出的就是「这片叶子拿的是什么」。一处选择,头、strip、拖拽幽灵、折叠条同时对,这就是小样 `pvMarkId` 那句话说一次的意思。**导航在途时这一格自转**:借的是本窗已经在转的那道弧(`indeterminate_start_milliturns` + `WINDOW_TAB_RING_INDETERMINATE_TURNS`),不是第二个 spinner;`strip_animation_deadline` 多一项把帧要回来,`Motion::Reduced` 下相位钉死在十二点、一帧都不要——这是本窗对「减少动态」的一贯答法。**站点自己的 favicon 后来画上了**(§7.13):同一格、同一个盒子,`ChromeMark::Globe` 多带一个 `favicon` 号,站点有图就画图、没有就还是这枚地球。
 * **名字即地址**:`RenameSubject::WebAddress`——**继承的不是形状是那台机器**,同一格、同一次双击、同一套 `.rename` 声明、同一组 Enter/Escape/blur、同一种沉默的拒绝。差别恰好是内容决定的那两处:整条 URL 全选(去一个地方几乎总是这个意思),以及**这个框吃掉头的剩余宽度**——`ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD` 是把 `flex: 1 1 auto` 写成一个没有哪个头给得起的数,让 `preview_head_geometry` 本来就有的夹持去发钱。**第二扇门是 `Ctrl+L`**(用户裁决)。**打不进去的地址在打字的地方说**:`PreviewNameEdit::refused` 把那一行写成 `--err`,回车什么都不做,页面原地不动——这是搜索胶囊对一条编译不了的正则的同一个答法。
 * **三钮**:`[后退][前进][刷新]` 坐在 `Save` / `Edit source` 那一格,**用户裁决 2026-08-22「同族优先于浏览器惯例」**。钉这条的不是一句不等式而是一个等式:一份文本文件的 `save` 盒子与一张网页的 `devtools` 盒子**是同一个矩形**(`the_three_buttons_sit_where_save_and_edit_source_sit`)——本类动词槽只有一格,两种内容轮流坐。三钮**常驻**(`PREVIEW_NAV_REST`),其余照旧随 pane 悬停淡入;走投无路的那一钮**暗到 `PREVIEW_NAV_SPENT` 且不接受指针**,不隐藏,因为一枚消失的钮会把它旁边两枚挪到指针底下。刷新钮在途中变停止钮,一个钮两个字形。启用态**全部来自 `HistoryChanged`**,不是每帧去问引擎——W1 报告点名的「不要照抄小样的 420ms 假节拍」在这里是一条事件而不是一个时钟。
 * **DevTools**:悬停工具,`#i-code`,与 markdown 的 `Edit source` 同一个字形同一句话——底下是那个东西本身而不是它的一张渲染。**分隔线属于它后面那一组**:只在 pane 被指着时和它一起淡入,因为一条一侧空着的竖线是在给一段空白作介绍。
@@ -1856,7 +1856,7 @@ HKCU\Software\Classes\AppUserModelId\Folio.Terminal
 
 **⑫ 欠账(逐条,各带理由)。**
 
-* **站点自己的 favicon 没画,地球标是全部。** 这一格是对的、大小是对的、来源是一处,缺的是把 `ICoreWebView2_15::GetFavicon` 取回来的那张位图放进 chrome 的图集——本枚举里每一个记号都是一份由路径表刻出来的矢量符号,并按名字缓存,而一枚 favicon 是运行时取来的栅格,那是第二条管线。不伪造:一枚带字母的彩色方块会是本窗替别人的站点发明了一个图标。
+* ~~**站点自己的 favicon 没画,地球标是全部。**~~ **已清(2026-08-23,§7.13)。** 当时写的是「那是第二条管线」,而落地时它不是:`ChromeIcon` 一直就是一段像素加一个键,片⑥ 早已从这条道送过一张网页的最后一帧,所以 favicon 是在 `ChromeMarkRasters` 本来要刻出地球的那一刻换掉像素——没有一个作画的地方学了新词。「不伪造」那一句照旧成立,而且现在有第二半:取不到就画地球,不出声。
 * **`· blocked` 只有一种墨。** 小样给那三个字一份更淡的 `--ink3`;本窗的脚只有一条 label,所以它随整条带子的墨。
 * **加载失败那一行的事实是 `WebErrorStatus · <名字>`,不是小样写的 `ERR_CONNECTION_REFUSED`。** 后者是 **Chromium** 的词汇,这颗 API 不说它;小样那一行是演示常量而不是裁决。实机上环回口的连接被拒报的是 `Unknown`——那是引擎自己的答案,卡照抄。
 * **`Ctrl+0` 没有。** 五加项写的是「`Ctrl`+滚轮 / `Ctrl+0`」;用户 2026-08-22 的裁决点名进表的是两行,加第三行是另一次裁决。梯子上 `1.0` 是一档,所以滚轮回得去。
@@ -2036,7 +2036,7 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 
 **第二跑专门验 ⑥ 那道门,因为它要的是真的编码器而不是测试里的字节。** 同一张页,只多一句`setInterval` 改 `document.title`——标题不在页面上画,所以窗口一直在转帧(`DocumentTitleChanged` → chrome 重建 → 一趟投影)而页面的像素一个没动。一分钟后那一行:`visible=1 projections=6 unchanged=253 throttled=1 dropped=0 captures=27 pictures=1 page-hidden=0 page-closing=0 page-blank=16 page-inflight=1 page-throttled=82 page-unchanged=26 page-stale=0`——**照了 27 张相,存下 1 张,26 张逐字节相同被扔在解码之前**；`projections=6` 而不是 27,即卡片也没为它们重投。两跑 stderr 上都没有 `BT_WEB` 故障,收尾后本进程 0 个残留 folio、0 个残留 msedgewebview2。
 
-**⑪ 欠账。** ⓐ **favicon 仍然没有**:§7.7 的头写的是「favicon/地球标」,今天两处画的都是地球标;没有图的网页卡因此说的是标题 + 类型词而不是标题 + favicon,这跟本片是两件事(引擎侧要接 `FaviconChanged`),归片④ 的后续。ⓑ **第一次进聚焦模式时,除当前 tab 外的网页卡都是面**——它们的页面从没在「有人看着」的时候站上过玻璃。这是门 1 的价钱,不是缺陷;真要抹掉它,得让模式关着的时候也照相,那是另一条裁决。ⓒ **卡片改高之后,已下台页面的那张图会被拉伸**(纹理是旧尺寸、框是这一帧的格子),直到它再一次上台;拒绝画反而会让它永久变白,见 ④。
+**⑪ 欠账。** ⓐ ~~**favicon 仍然没有**~~ —— **已清(2026-08-23,§7.13)**:引擎侧接上了 `FaviconChanged`,头、strip、脚与卡片的面都戴站点自己的图标,取不到时才是地球。ⓑ **第一次进聚焦模式时,除当前 tab 外的网页卡都是面**——它们的页面从没在「有人看着」的时候站上过玻璃。这是门 1 的价钱,不是缺陷;真要抹掉它,得让模式关着的时候也照相,那是另一条裁决。ⓒ **卡片改高之后,已下台页面的那张图会被拉伸**(纹理是旧尺寸、框是这一帧的格子),直到它再一次上台;拒绝画反而会让它永久变白,见 ④。
 
 ### 7.12 一张页由它的 pane 叫出名字（Web 预览块 F1b′，2026-08-23，已落地；`crates/bt-platform/src/{lib,webview}.rs`、`crates/bt-app/src/{main,webhost,web_thumb}.rs`）
 
@@ -2069,6 +2069,54 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 ![移交之后的两扇窗:左窗是搬进去的 TAB-TWO(PAGE BETA,boot 未变,shell 打出 BT-TRANSFER-ALIVE),右窗是留下的 TAB-ONE(PAGE ALPHA,boot 未变)](spikes/artifacts/page-keys/two-tabs-two-pages-and-one-of-them-moved.png)
 
 **欠账两笔,ⓐ 已清。** ⓐ ~~`transfer_tab` 不修 pin 分区~~ —— **本片报出当日即清**(合并方落修):model commit 在目标窗 push 后补上与所有 strip 编辑同一次 `settle_pin_partition`(源侧无需——移除不会破坏已分区的 run),钉进 `the_transfer_is_a_transaction_and_its_commit_pays_every_debt` 的欠单。ⓑ **`PreviewSurface::Seat` 本身还是一个座位号**:④ 只把网页这条道上的三处按叶定位了,预览块其余按 `preview_tab_index` 找 tab 的读者仍然是「第一张有这个号的 tab」。要根治得把预览表面也按叶寻址,那是预览块的单。
+
+### 7.13 站点自己的图标（Web 预览块 favicon 单，2026-08-23，已落地；`crates/bt-app/src/{favicon(新),marks,webnav,webhost,profiles,restore,seats,websheet,main}.rs`、`crates/bt-platform/src/webview.rs`）
+
+**§7.7 ② 的那句话到今天只对了一半。** 它写的是「站点有图标画 favicon，没有画本类的地球」，而 W2 四片交下来两处画的都是地球标（§7.11 ⑪ 的欠账 ⓐ）。挡在中间的东西 `marks.rs` 自己记过：本枚举里每一个记号都是一份由路径表刻出来的矢量符号并按名字缓存，而一枚 favicon 是运行时取来的栅格。本片补的就是这一半，**并且没有开出第二条管线**。
+
+**① 它看起来是第二条管线，其实不是。** `bt_render::ChromeIcon` 从存在的第一天起就是「一段像素加一个键」，而 W2 片⑥ 早就把一张网页的最后一帧从这条道送进渲染器、一个字都没光栅化（§7.11 ⑤）。所以 favicon 走的是同一道缝：`favicon::Favicons` 拥有字节和身份，`marks::ChromeMarkRasters::icons_for` 在**它本来要刻出那枚地球的那一刻**把像素换掉，而**没有任何一个作画的地方学一个新词**。头、strip、拖拽幽灵、折叠条、聚焦卡、切换器行、Recent 行——每一处都是把手里那枚 `ChromeMark` 照旧递出去，然后就戴上了站点的图标。
+
+**② 记号里带的是一个号，而不是一个站名，理由写在 `Copy` 上。** `ChromeMark` 在本窗是按值走的：`leaf_marks` 的 map、`pane_mark` 的返回、`tab_mark` 的比较、`preview_row_mark` 的选择。挂一个 `String` 上去等于让这个枚举不再 `Copy`，那会把上面每一处都重写一遍。`FaviconId` 是 `Favicons` 铸的一个序号——`Copy`、`Eq`、可进纹理键，而且**站点换图必须换号**：GPU 纹理缓存是按键问、按它留下的东西答的，号不动就是老图片钉死到窗口关掉为止（`web-thumb:<tab>:<seat>:<serial>` 是同一个手法同一个理由）。
+
+**③ 键是站点，不是座位，而这正是这一单被立起来的原因。** 2026-08-23 的裁决点的名是「切换器/Recent 里网页行全是地球标、只能靠读文字区分」。**一行没有座位，从来也不会有**——它手里只有一个 URL。所以 store 按 `webnav::site_key`（`scheme://host[:port]`，默认端口按 `switcher_key` 的规矩去掉）做键，于是同一台服务器上翻页不重新取图、两块 pane 共一张纹理、而一行也答得出来。**scheme 参与**：`http://` 与 `https://` 同主机是两台服务器，一个只按 host 做的键会把安全站的图交给明文站（红测 `a_favicon_is_filed_under_scheme_host_and_port` 的最后一行钉这个）。
+
+代价说清楚：**一台服务器只记一枚图**，所以同站两页各挂各图时，最后说话的那一页说了算。这是「按站点缓存」这四个字本来就含着的意思，也是浏览器在没有逐页记录时的同一个答案；换成按整条 URL 做键，就变成每点一次翻页取一次图、而一行 Recent 明明去过这台服务器却还是地球。取前者。
+
+**④ 一个座位关掉不带走这一条，而这要说出来而不是被发现。** 它不需要带走——一个没有页的座位根本没有 URL 可以去查，所以它按构造就戴地球；而带走会让一行明明这个会话去过的站点当场变白。store 的寿命是**会话**的。
+
+**⑤ 一个字节也不落盘。** 理由是 §3 早就对 URL 说过的那一条：本窗明文持久化「去过哪里」，而一份磁盘上的 favicon 缓存会是**第二份**同样的记录——没有 schema、没有版本、没有任何读者能被要求去忘掉它。所以会话恢复回来的那一刻每一行都是地球，直到它的页真的起来说话为止，那正是那一刻本窗知道的全部。恢复提示那张卡因此**永远**是地球，这是裁决不是遗漏：它是在任何东西恢复之前画的。
+
+**⑥ 引擎侧：一次通告、一次取、一个在飞。** `ICoreWebView2_15::add_FaviconChanged` 只说「换了」，地址在 `FaviconUri` 上，图要另外 `GetFavicon` 去拿——所以事件与答案是两个 `WebEvent`（`FaviconChanged { uri }` 与 `Favicon { png }`），和 `CapturePreview` 一样发起即返回。三条规矩：
+
+* **空地址是一句话，不是沉默。** 一页从有图的站导到没图的站会带一个空 `FaviconUri` 来，吞掉它等于把前一台服务器的图留在头上。
+* **一次一个在飞，飞行中再变只欠一次。** 引擎每次 `GetFavicon` 都重读资源，不设闸门就是一次通告一次抓；而一个先画占位再换真图的前端一次导航里就通告两次。
+* **答案按「问的时候是哪台服务器」归档，不按「答回来时座位在哪」。** 中间可能已经导航走了，按现在归档就是把一台服务器的图挂到另一台名下。红测 `an_answer_is_filed_under_the_site_that_was_asked_about` 钉这一条，它的 MUTATION 就是那个错法。
+
+**PNG 而不是 JPEG，而且这一次不是速度的平手。** 站点真正供的常常是 `.ico`，本仓一个解码器都没有；问引擎要 PNG，`.ico` 就不再是本仓的问题。
+
+**⑦ 失败一律是地球，一律不出声。** 取不回来、解不开、站点没有——四种，一个共同的后果（画地球）和一句共同的报告（没有）。`WebOutcome::Favicon { png: None }` 让 store 放手，`learn` 对解不开的字节答 `false` 并**留着上一枚**（一次失败的解码说不出上一枚是不是对的）。没有重试风暴：重试的唯一触发是引擎再通告一次。
+
+**⑧ 尺寸与 DPI。** `GetFavicon` 没有尺寸参数，引擎给什么是什么。所以：解码时压到 `SOURCE_CEILING_PX = 64` 见方为止（14 逻辑 px 的记号盒在 300% 下是 42 物理 px，这是留了富余的上限；不这么做，一个供 512 图的站要存四分之一兆去画十四个像素），画的时候按**这一帧这个盒子的物理尺寸**重采样一次并缓存。滤镜取 `Lanczos3` 而不是 `web_thumb::shrink` 的 `Triangle`——同一条理由走到相反的答案：一张 1146 px 的照片缩进卡片里锐化滤镜买不到任何看得见的东西且贵三倍，而一枚 32 px 的画落进 14 px 的盒子**全部都是细节**，它存在的意义就是让人不必读字就分得清两行。
+
+**⑨ 有两处刻意仍画本类的地球，是裁决不是漏。** 五张失败卡与那张下载 sheet。§7.7 ④ 写的是「一枚**本类**的记号、一句话、至多一行事实、唯一一个动词」——这些卡说的是**本窗**对一张不在的页的报告，把服务器自己的图案压在那句话上会读成那句话是服务器说的。
+
+**⑩ 一个改动跨窗：`App::favicons`。** store 挂在应用层而不是窗口层，和设备挂在那里是同一条理由——一枚图标不是「碰巧学到它的那扇窗」的属性。三个后果都是要的：一张 tab 被拽进另一扇窗（F1a/F1b）时页带着图标走，因为**座位搬了而它查询的那张表没搬**（红测 `a_page_moved_into_another_window_keeps_its_icon`）；两扇窗开同一台 dev server 只上传一张纹理；一扇后开的窗里的 Recent 行也认得那台服务器。跨窗重画走 `App::favicons_changed` 一个标记，在 `WebPageSpoke` 那一拍花掉——写的时候正握着某一扇窗的 `Runtime`，从那里去够别的窗就是一扇窗站在应用的名单里遍历那张名单。
+
+**⑪ 红证与绿证。** 二十四条，两跑留档在 `docs/plans/web-preview/favicon-evidence/`：
+- **A 跑**（`red-A-of-url-answers-none.log`）：只把 `Favicons::of_url` 改成恒答 `None`——也就是本片之前那棵树的状态——**14 条红**。
+- **B 跑**（`red-B-nine-mutations.log`）：九条各自具名的 MUTATION 同时下（无 scheme 的键、复用旧号、不淘汰、不缓存重采样、不设上限、删掉替换、按现在归档、吞掉空通告、拿掉在飞闸门），**20 条红**。
+- 全部撤回后 24 条全绿（`green-after-revert.log`），三门（`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets`、`cargo test --workspace`）全绿。**字符串表一个字没加，仍是 456**：这一片画的是图，没有一句新话。
+
+**⑫ 实机（2026-08-23，debug，`APPDATA`/`LOCALAPPDATA`/UDF 全隔离到临时目录，`BT_PTY_DUMP`，本地静态服务器 127.0.0.1:8642，不访问外网）。** fixture 是一张挂 `<link rel=icon>` 的页加一枚 32×32 的 PNG：**纯品红底、白环、黑心**——三块平色硬边，因为本窗没有一处画品红，所以照片里出现一个品红像素**本身就是那句断言**。
+
+- 一扇 1920×1200 的窗（`authoritative_scale=2`），左边一根 PowerShell，右边这一页。**头上那一格和脚上那一条都戴着这枚图标**，不是地球。
+- 逐像素数过：整帧只有两簇 `(255,0,255)`，**第 95–122 行 × 第 983–1010 列**（28×28 物理，正是 §7.7 ② 那个 14 逻辑 px 的盒子在 2× 下的样子）与**第 1160–1185 行 × 第 985–1010 列**（脚上那一格自己的尺寸）。别处一个都没有。
+- **换一台没有图标的服务器，两处当场回到地球**，那张加载失败卡上的记号也是地球（`a-site-with-no-icon-is-the-globe.png`）。
+- 收尾：`stderr` 上 **0 行 `BT_WEB`**，属于本次运行的 `folio` **0 个**，`msedgewebview2` 回到起跑前的数目。
+
+![一枚品红的 favicon 同时戴在网页座位的头上和脚上，而不是地球](plans/web-preview/favicon-evidence/favicon-on-head-and-foot.png)
+
+**⑬ 欠账。** ⓐ **切换器行与 Recent 行只有测试担保，没有照片**：这台机器上的中文输入法把探针注入的标点改写掉（`/` 变成 `、`），所以地址栏打不进第二个 URL，而这两张表面都要先有第二个缓冲或一次关 tab 才出得来。担保它们的是 `profiles::tests::a_recent_row_wears_its_sites_icon_where_the_session_learned_one`、`a_switcher_row_that_is_a_page_can_name_the_site_it_asks_about`，以及每一行都必经的那道替换缝的三条 marks 红测。ⓑ **同站两页各挂各图时后说话的赢**，见 ③。ⓒ **淘汰按「最近学到」而不是「最近看到」**：查询是 `&self`（每次重建 chrome 都问它），一个从那里去改自己的缓存等于一张表在被读的当中重排；64 个站点的上限下这条只可能在一个会话开过六十四台服务器之后才看得见。
 
 ## 8. 依赖策略
 

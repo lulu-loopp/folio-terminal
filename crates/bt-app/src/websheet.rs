@@ -260,8 +260,18 @@ pub fn build(
     );
     let mut labels = Vec::new();
     let mut sprites = vec![
-        ChromeSprite::new(ChromeMark::Globe, layout.mark, palette.files_row_muted)
-            .with_opacity(MARK_OPACITY),
+        // **The class's mark and never the site's**, and that is §7.7 ④'s own
+        // word for it: a failure card is 「一枚本类的记号、一句话、至多一行事实、
+        // 唯一一个动词」. What this card is about is *this window's* refusal to
+        // replay a download, so the drawing at the top of it is the drawing for
+        // "a web page" and not the drawing a particular server chose for itself
+        // — a favicon here would read as the site's own notice.
+        ChromeSprite::new(
+            ChromeMark::Globe { favicon: None },
+            layout.mark,
+            palette.files_row_muted,
+        )
+        .with_opacity(MARK_OPACITY),
     ];
     for (line, rect) in content.say.iter().zip(layout.say.iter()) {
         labels.push(ChromeLabel {

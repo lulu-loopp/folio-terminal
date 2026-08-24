@@ -1,0 +1,12 @@
+test marks::tests::a_page_moved_into_another_window_keeps_its_icon ... ok
+test marks::tests::a_globe_that_names_a_site_is_drawn_as_that_site ... ok
+test favicon::tests::a_box_is_cut_once_and_then_handed_out ... ok
+test favicon::tests::a_site_that_changes_its_icon_changes_its_identity ... ok
+test marks::tests::a_favicon_texture_is_named_by_its_site_and_its_box ... ok
+test profiles::tests::a_recent_row_wears_your_name_for_it_or_the_folder_it_stood_in ... ok
+test marks::tests::a_globe_with_no_icon_behind_it_is_the_glyph ... ok
+test favicon::tests::the_store_does_not_grow_without_end ... ok
+test favicon::tests::an_oversized_icon_is_cut_down_before_it_is_kept ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 2184 filtered out; finished in 0.01s
+

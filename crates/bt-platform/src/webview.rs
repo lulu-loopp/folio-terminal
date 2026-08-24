@@ -45,14 +45,14 @@ use webview2_com::{
     AcceleratorKeyPressedEventHandler, BrowserProcessExitedEventHandler,
     CapturePreviewCompletedHandler, CreateCoreWebView2CompositionControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, CursorChangedEventHandler,
-    DocumentTitleChangedEventHandler, DownloadStartingEventHandler,
+    DocumentTitleChangedEventHandler, DownloadStartingEventHandler, FaviconChangedEventHandler,
     FindActiveMatchIndexChangedEventHandler, FindMatchCountChangedEventHandler,
-    FindStartCompletedHandler, FocusChangedEventHandler, HistoryChangedEventHandler,
-    LaunchingExternalUriSchemeEventHandler, MoveFocusRequestedEventHandler,
-    NavigationCompletedEventHandler, NavigationStartingEventHandler,
-    NewBrowserVersionAvailableEventHandler, NewWindowRequestedEventHandler,
-    PermissionRequestedEventHandler, ProcessFailedEventHandler, SourceChangedEventHandler,
-    StatusBarTextChangedEventHandler, take_pwstr,
+    FindStartCompletedHandler, FocusChangedEventHandler, GetFaviconCompletedHandler,
+    HistoryChangedEventHandler, LaunchingExternalUriSchemeEventHandler,
+    MoveFocusRequestedEventHandler, NavigationCompletedEventHandler,
+    NavigationStartingEventHandler, NewBrowserVersionAvailableEventHandler,
+    NewWindowRequestedEventHandler, PermissionRequestedEventHandler, ProcessFailedEventHandler,
+    SourceChangedEventHandler, StatusBarTextChangedEventHandler, take_pwstr,
 };
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::core::{BOOL, HSTRING, IUnknown, Interface as _, PCWSTR, PWSTR};
@@ -238,6 +238,29 @@ pub enum WebEvent {
     /// that did not arrive has exactly one consequence for the caller — the seat
     /// still shows the last one it had.
     Captured {
+        png: Option<Vec<u8>>,
+    },
+    /// **The page now wears a different icon** — `uri` is where that icon lives,
+    /// or empty when the page has none (the favicon slice, `docs/DESIGN.md` §7.13, §7.7 ②).
+    ///
+    /// The address and not the bytes, because `FaviconChanged` carries neither:
+    /// the engine says *that* it changed and the picture is a second, asynchronous
+    /// ask ([`WebHost::get_favicon`]). Handing the caller the empty string rather
+    /// than swallowing it is the whole of the "site with no icon" case — a page
+    /// that navigates from one that had an icon to one that has not fires this
+    /// with nothing in it, and a caller that never heard would leave the previous
+    /// site's drawing standing.
+    FaviconChanged {
+        uri: String,
+    },
+    /// **A `GetFavicon` finished** — the icon as PNG, or `None` if the engine
+    /// refused or the stream could not be read.
+    ///
+    /// The same shape and the same `Option` as [`Self::Captured`], for the same
+    /// reason: the answer arrives tens of milliseconds later on the engine's own
+    /// clock, and a picture that did not arrive has exactly one consequence,
+    /// which is that the seat goes on wearing what it already wore.
+    Favicon {
         png: Option<Vec<u8>>,
     },
 }
@@ -1310,6 +1333,41 @@ impl WebHost {
                 )
                 .map_err(|error| failure("add_PermissionRequested", &error))?;
 
+            // **The site's own icon** (the favicon slice, `docs/DESIGN.md` §7.13, §7.7 ②). Announced and
+            // never polled, exactly as the title and the address beside it are:
+            // the head is rebuilt from what the seat last heard, and the engine
+            // is the only thing that knows when a page has swapped its icon.
+            //
+            // `ICoreWebView2_15` is the interface that carries it, and the cast
+            // is made once here rather than inside the callback for the reason
+            // the `_12` cast above is made outside its own: a build whose runtime
+            // is too old to answer this must fail while the handlers are being
+            // installed — before the first navigation — and not silently draw
+            // globes for ever.
+            let shared = Rc::clone(&self.shared);
+            let icons: ICoreWebView2_15 = webview
+                .cast()
+                .map_err(|error| failure("ICoreWebView2_15", &error))?;
+            icons
+                .add_FaviconChanged(
+                    &FaviconChangedEventHandler::create(Box::new(move |view, _| {
+                        // The address is read off the sender rather than the
+                        // args, because `FaviconChanged`'s args are a bare
+                        // `IUnknown` — the event says only *that* it changed.
+                        let uri = match view.as_ref().and_then(|view| view.cast().ok()) {
+                            Some(view15) => {
+                                let view15: ICoreWebView2_15 = view15;
+                                read_string(|out| view15.FaviconUri(out))
+                            }
+                            None => String::new(),
+                        };
+                        shared.push(WebEvent::FaviconChanged { uri });
+                        Ok(())
+                    })),
+                    &mut token,
+                )
+                .map_err(|error| failure("add_FaviconChanged", &error))?;
+
             let external: ICoreWebView2_18 = webview
                 .cast()
                 .map_err(|error| failure("ICoreWebView2_18", &error))?;
@@ -1829,6 +1887,50 @@ impl WebHost {
             )
         }
         .map_err(|error| failure("CapturePreview", &error))
+    }
+
+    /// **Ask the engine for the icon the page is wearing** (the favicon slice, `docs/DESIGN.md` §7.13).
+    ///
+    /// Asked rather than pushed, and asked only after
+    /// [`WebEvent::FaviconChanged`] has said there is something new: the engine
+    /// re-reads the resource each time, so a caller that asked on its own clock
+    /// would be paying for an answer it already had.
+    ///
+    /// Three things this signature is shaped around, and two of them are
+    /// [`Self::capture_preview`]'s:
+    ///
+    /// * **It is asynchronous**, so this returns the moment the ask is made and
+    ///   the picture arrives as [`WebEvent::Favicon`].
+    /// * **The stream is the engine's**, not the caller's — unlike
+    ///   `CapturePreview`, which is handed one to write into. So there is no
+    ///   `CreateStreamOnHGlobal` here; the completion hands over a stream that
+    ///   is already full.
+    /// * **PNG and not JPEG**, and here that is not a tie broken on speed. What
+    ///   a site actually served is very often an `.ico`, a format nothing in
+    ///   this workspace can decode; asking for PNG makes the engine re-encode
+    ///   whatever it holds, which is how the `.ico` problem stops being ours.
+    ///   Lossless also matters at this size in a way it does not for a
+    ///   thumbnail: fourteen pixels of a drawing have no detail to spare.
+    pub fn get_favicon(&self) -> Result<(), String> {
+        let Some(webview) = self.webview.as_ref() else {
+            return Ok(());
+        };
+        let icons: ICoreWebView2_15 = webview
+            .cast()
+            .map_err(|error| failure("ICoreWebView2_15", &error))?;
+        let shared = Rc::clone(&self.shared);
+        let handler = GetFaviconCompletedHandler::create(Box::new(
+            move |result: windows::core::Result<()>,
+                  stream: Option<windows::Win32::System::Com::IStream>| {
+                let png = result
+                    .ok()
+                    .and_then(|()| stream.as_ref().and_then(read_stream));
+                shared.push(WebEvent::Favicon { png });
+                Ok(())
+            },
+        ));
+        unsafe { icons.GetFavicon(COREWEBVIEW2_FAVICON_IMAGE_FORMAT_PNG, &handler) }
+            .map_err(|error| failure("GetFavicon", &error))
     }
 
     /// Close a controller that arrived for a generation nobody wants any more.
