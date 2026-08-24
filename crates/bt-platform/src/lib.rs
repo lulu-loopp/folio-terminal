@@ -1019,7 +1019,7 @@ mod windows_impl {
         },
         Graphics::Gdi::{
             CreateSolidBrush, DeleteObject, GetMonitorInfoW, HGDIOBJ, MONITOR_DEFAULTTONEAREST,
-            MONITORINFO, MonitorFromWindow,
+            MONITORINFO, MonitorFromPoint, MonitorFromWindow,
         },
         Storage::FileSystem::{
             CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED,
@@ -1059,8 +1059,8 @@ mod windows_impl {
             },
         },
         UI::{
-            HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
-            Input::KeyboardAndMouse::{GetKeyboardLayout, SetFocus, VkKeyScanW},
+            HiDpi::{GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI},
+            Input::KeyboardAndMouse::{GetCapture, GetKeyboardLayout, SetFocus, VkKeyScanW},
             Shell::{
                 Common::COMDLG_FILTERSPEC, DefSubclassProc, FO_DELETE, FOF_ALLOWUNDO,
                 FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING,
@@ -1072,17 +1072,18 @@ mod windows_impl {
                 TBPF_NORMAL, TBPF_PAUSED, TaskbarList,
             },
             WindowsAndMessaging::{
-                AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu,
-                GCLP_HBRBACKGROUND, GetClientRect, GetCursorPos, GetWindowRect, HTBOTTOM,
-                HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
-                HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsZoomed,
-                MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MF_STRING, MINMAXINFO, MessageBoxW,
-                NCCALCSIZE_PARAMS, PostMessageW, RegisterWindowMessageW, SM_CXFRAME,
-                SM_CXPADDEDBORDER, SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES,
+                AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu, GA_ROOT,
+                GCLP_HBRBACKGROUND, GetAncestor, GetClientRect, GetCursorPos, GetSystemMetrics,
+                GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT,
+                HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic,
+                IsZoomed, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MF_STRING, MINMAXINFO,
+                MessageBoxW, NCCALCSIZE_PARAMS, PostMessageW, RegisterWindowMessageW, SM_CXFRAME,
+                SM_CXPADDEDBORDER, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+                SM_YVIRTUALSCREEN, SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES,
                 SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
                 SWP_NOZORDER, SetCaretPos, SetClassLongPtrW, SetWindowPos, SystemParametersInfoW,
                 TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CLOSE, WM_GETMINMAXINFO,
-                WM_NCCALCSIZE, WM_NCHITTEST,
+                WM_NCCALCSIZE, WM_NCHITTEST, WindowFromPoint,
             },
         },
     };
@@ -3611,6 +3612,140 @@ mod windows_impl {
         unsafe { IsIconic(HWND(hwnd.get() as *mut c_void)) }.as_bool()
     }
 
+    /// **Which top-level window the window manager itself puts under this screen
+    /// point** (multiwindow slice F2/F4).
+    ///
+    /// A drag that has left its own window has to answer "whose glass is under
+    /// the pointer now", and the honest answer is not one this process can
+    /// compute. Z-order, minimisation, a modal dialog somebody else raised, a
+    /// full-screen window from another application — all of them decide the
+    /// answer and none of them is visible from a list of our own rectangles.
+    /// `WindowFromPoint` *is* that decision, made by the only party entitled to
+    /// make it, and asking it is the difference between "this pointer is inside
+    /// window A's rectangle" and "this pointer is on window A".
+    ///
+    /// `GA_ROOT` because the hit lands on whatever child owns the pixel — a
+    /// hosted browser's own HWND, a tooltip — and what a caller can match
+    /// against its window list is the top-level window that child belongs to.
+    ///
+    /// `None` for the desktop, for a point no window covers, and for a window
+    /// this process cannot name; those are one answer to the caller ("not one of
+    /// ours") and it is deliberately not three.
+    pub fn top_level_window_at(x: i32, y: i32) -> Option<NonZeroIsize> {
+        // SAFETY: both calls are read-only hit tests over screen coordinates and
+        // take no pointers; `WindowFromPoint` answers a null handle for a point
+        // no window covers, which `GetAncestor` in turn answers null for.
+        let root = unsafe {
+            let hit = WindowFromPoint(POINT { x, y });
+            GetAncestor(hit, GA_ROOT)
+        };
+        NonZeroIsize::new(root.0 as isize)
+    }
+
+    /// **Which window in this thread holds the Win32 mouse capture, if any**
+    /// (multiwindow slice F2/F4).
+    ///
+    /// winit takes the capture on button-down and gives it back on button-up,
+    /// which is what makes a drag hear motion outside its own window at all. It
+    /// does not surface `WM_CAPTURECHANGED`, so a capture taken away by the
+    /// system — a secure-desktop switch, another window starting a drag of its
+    /// own — is invisible to an application that only listens to winit's events.
+    /// This is that fact asked for directly, and it is the OS's own answer rather
+    /// than an inference from anything else.
+    ///
+    /// Thread-scoped by definition: `GetCapture` reports the capture of the
+    /// *calling* thread, and every window in this program is on the loop's
+    /// thread, so "the capture" and "this thread's capture" are the same thing
+    /// here.
+    pub fn thread_mouse_capture() -> Option<NonZeroIsize> {
+        // SAFETY: a read-only query taking no arguments and returning a handle
+        // that may be null, which is exactly the "nobody has it" answer.
+        let held = unsafe { GetCapture() };
+        NonZeroIsize::new(held.0 as isize)
+    }
+
+    /// **The whole virtual desktop, in physical pixels** (multiwindow slice
+    /// F2/F4).
+    ///
+    /// A gesture that has left its window reasons entirely in screen
+    /// coordinates, so a display being added, removed or re-arranged under it
+    /// invalidates every rectangle it is holding — including the one it was
+    /// about to open a window in. Windows announces that with `WM_DISPLAYCHANGE`
+    /// and winit does not surface it, so what is watched instead is the thing
+    /// that changes: the bounding box of every monitor together. Four cached
+    /// system metrics, read only while a cross-window drag is actually in the
+    /// air.
+    pub fn virtual_screen_rect() -> WindowRect {
+        // SAFETY: `GetSystemMetrics` is a read-only query over a system index and
+        // takes no pointers.
+        let (x, y, width, height) = unsafe {
+            (
+                GetSystemMetrics(SM_XVIRTUALSCREEN),
+                GetSystemMetrics(SM_YVIRTUALSCREEN),
+                GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            )
+        };
+        WindowRect {
+            left: x,
+            top: y,
+            right: x.saturating_add(width),
+            bottom: y.saturating_add(height),
+        }
+    }
+
+    /// The work area of the monitor **this screen point** is on, in physical
+    /// pixels (multiwindow slice F5).
+    ///
+    /// [`get_work_area`]'s sibling, and it exists because a tear-out has no
+    /// window to ask with: the rectangle is being computed *before* the window
+    /// that will stand in it is created, and the monitor that decides both the
+    /// dpi and the clamp is the one the pointer is over.
+    pub fn work_area_at(x: i32, y: i32) -> Result<WindowRect, String> {
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: `MonitorFromPoint` with `MONITOR_DEFAULTTONEAREST` always
+        // answers a valid monitor handle, and `info` stays valid and exclusively
+        // borrowed across this read-only query with its `cbSize` set as the API
+        // requires.
+        let ok = unsafe {
+            let monitor = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+            GetMonitorInfoW(monitor, &mut info)
+        };
+        if !ok.as_bool() {
+            return Err("GetMonitorInfoW(point) failed".to_owned());
+        }
+        Ok(WindowRect {
+            left: info.rcWork.left,
+            top: info.rcWork.top,
+            right: info.rcWork.right,
+            bottom: info.rcWork.bottom,
+        })
+    }
+
+    /// The dpi of the monitor **this screen point** is on (multiwindow slice F5).
+    ///
+    /// [`get_dpi_for_window`]'s sibling, and it exists for [`work_area_at`]'s
+    /// reason: the window whose size is being computed does not exist yet, and
+    /// the plan's rule is that the size wanted is the source's *logical* frame
+    /// read at the **target** monitor's dpi. Falling back to 96 rather than
+    /// failing, because `GetDpiForMonitor` refusing means the machine has no
+    /// per-monitor answer to give, and 96 is then the true one.
+    pub fn dpi_at(x: i32, y: i32) -> u32 {
+        let mut dpi_x = 0_u32;
+        let mut dpi_y = 0_u32;
+        // SAFETY: `MonitorFromPoint` with `MONITOR_DEFAULTTONEAREST` always
+        // answers a valid monitor handle; both out-parameters are exclusively
+        // borrowed for the call and only read after it succeeds.
+        let ok = unsafe {
+            let monitor = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+            GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y)
+        };
+        if ok.is_err() { 96 } else { dpi_x.max(1) }
+    }
+
     pub fn get_window_rect(hwnd: NonZeroIsize) -> Result<WindowRect, String> {
         let mut rect = RECT::default();
         // SAFETY: `hwnd` originates from winit's live Win32WindowHandle and `rect` remains valid
@@ -5591,13 +5726,15 @@ pub use windows_impl::{
     Compositor, CustomWindowFrame, DirWatch, FilePickKind, FolderPicker, ImagePicker,
     ImeSystemCaret, MathContextMenu, Notifier, PROGRAM_REFUSED, Taskbar, adopt_parent_console,
     client_area_animation_enabled, clipboard_text, current_thread_priority, documents_directory,
-    file_product_version, get_dpi_for_window, get_window_rect, get_work_area, install_context_menu,
-    install_window_class_background, is_window_minimized, message_box, monospace_font_families,
-    open_local_file, open_local_path, open_system_fonts_page, os_ui_language, read_context_menu,
-    recycle, remove_context_menu, request_window_close, reveal_in_explorer, set_clipboard_text,
-    set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
-    set_window_topmost, shell_execute, spawn_at_priority, system_backdrop_available,
-    take_keyboard_focus, virtual_key_for_character, wheel_scroll_amount, write_to_console,
+    dpi_at, file_product_version, get_dpi_for_window, get_window_rect, get_work_area,
+    install_context_menu, install_window_class_background, is_window_minimized, message_box,
+    monospace_font_families, open_local_file, open_local_path, open_system_fonts_page,
+    os_ui_language, read_context_menu, recycle, remove_context_menu, request_window_close,
+    reveal_in_explorer, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
+    set_window_dark_mode, set_window_outer_rect, set_window_topmost, shell_execute,
+    spawn_at_priority, system_backdrop_available, take_keyboard_focus, thread_mouse_capture,
+    top_level_window_at, virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount,
+    work_area_at, write_to_console,
 };
 
 /// The bands, asked of the kernel rather than of the source.

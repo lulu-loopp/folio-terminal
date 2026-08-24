@@ -5140,6 +5140,23 @@ struct App {
     /// and queues the other two, and an accepted restore prompt can queue as many
     /// as the file described.
     pending_new_windows: Vec<NewWindowPlan>,
+    /// **The drag that is crossing a window boundary**, if one is (multiwindow
+    /// slice F2/F4). See [`DragBroker`] for why the pointer needs a broker at all
+    /// and why the clock is here rather than on either window.
+    ///
+    /// On `App` and not on [`FolioApp`] because every `Runtime` has to reach it —
+    /// the source publishes its pointer into it on each move, and both exits
+    /// (Esc, and the release) take it down from inside the window that was
+    /// holding the payload.
+    drag_broker: Option<DragBroker>,
+    /// **A cross-window release that has been decided and not yet performed**
+    /// (multiwindow slice F2).
+    ///
+    /// [`Self::pending_new_windows`]'s shape for its reason, one verb over: the
+    /// button-up arrives at one window's `Runtime`, and moving a tab between two
+    /// windows — or opening a third to hold it — is [`FolioApp`]'s. Recorded at
+    /// the release and spent at the door, in the same turn and before any frame.
+    pending_handover: Option<DragHandover>,
     /// **A quit this application has been asked for and has not begun**
     /// (multiwindow slice E2).
     ///
@@ -5217,6 +5234,16 @@ struct TearOut {
     /// *and* the pane is a tab of this window now — because the first half of
     /// the journey cannot be taken back by any door this window has.
     promoted: bool,
+    /// **Where the window should stand** (multiwindow slice F5), or `None` for a
+    /// verb that did not name a place.
+    ///
+    /// The menu row does not name one: a reader who pressed `Move pane to new
+    /// window` pointed at a *verb*, and the window opens where every other new
+    /// window opens. A tear-out does name one — the hand let go somewhere, and
+    /// that somewhere is the whole of what it said — so it carries the pointer
+    /// and the grip and [`tear_out_rect`] turns them into a rectangle at the
+    /// target monitor's dpi.
+    at: Option<((i32, i32), TearGrip)>,
 }
 
 impl NewWindowPlan {
@@ -6181,6 +6208,19 @@ struct WindowRuntime {
     /// selection — asks this one field, so a source added later is silenced by
     /// all of them without touching any of them.
     drag: Option<Drag>,
+    /// **A gesture another window is holding, over this window's glass**
+    /// (multiwindow slice F2). See [`ForeignDrag`].
+    ///
+    /// Beside [`Self::drag`] and never both at once, which is a fact rather than
+    /// an invariant to keep: the pointer is over exactly one window, and the one
+    /// it is over is either the one holding it or not.
+    ///
+    /// **Written only by [`FolioApp::drive_drag_broker`]**, and rebuilt from the
+    /// broker on every turn instead of being kept in step by each thing that
+    /// might change it. That is the whole difference between a mailbox and a
+    /// second copy of the gesture: nothing here can be left behind, because
+    /// nothing here is remembered.
+    foreign: Option<ForeignDrag>,
     /// The dock drawing on screen — U6's whole state (M144-M155).
     ///
     /// Beside the drag rather than inside it, and for a reason the type system
@@ -7848,6 +7888,9 @@ struct {name} {{
             tab: TabId(7),
             from: asker,
             promoted: true,
+            // The menu row's own answer (F1c): a verb names no place. F2's drag
+            // names one, and that is [`tear_out_rect`]'s own pin.
+            at: None,
         };
         let carrying = NewWindowPlan::receiving(asker, errand);
         let carried = carrying.receives.expect("this window is opened to receive");
@@ -17170,6 +17213,384 @@ fn release_verdict(landing: Option<DropLanding>) -> DragRelease {
     }
 }
 
+/// **The four facts a ghost is, wherever it happens to be drawn** (multiwindow
+/// slice F2).
+///
+/// [`Runtime::drag_label`] answers them out of the window holding the payload,
+/// and once the pointer has crossed into another window that window has to draw
+/// the same four with no access to the tab they came from. So they travel: a
+/// mark, the size that mark is drawn at, its colour, and one line of text.
+///
+/// Deliberately *not* a rectangle or a laid-out layer. A ghost is laid out
+/// against the scale of the window it is over — the plan's 「混合 DPI 下幽灵尺寸
+/// 随所在窗」 — so what crosses the boundary is what the label *says*, and where
+/// it sits is each window's own arithmetic.
+#[derive(Clone, Debug)]
+struct GhostFace {
+    mark: marks::ChromeMark,
+    mark_logical: f32,
+    colour: [u8; 3],
+    text: String,
+}
+
+/// **What another window's gesture is doing over this window's glass**
+/// (multiwindow slice F2).
+///
+/// The mirror of [`Drag`] for a window that is *not* holding the pointer, and it
+/// is deliberately much smaller: there is no carry, no home rectangle and no
+/// spring here, because none of those are facts about the window being flown
+/// over. It is written by [`FolioApp::drive_drag_broker`] and by nothing else,
+/// and it is rebuilt from the broker every turn rather than being kept in step —
+/// a mailbox, not a second copy of the gesture.
+#[derive(Clone, Debug)]
+struct ForeignDrag {
+    /// Where the pointer is, in **this** window's client physical pixels. It is
+    /// outside this window's own event stream by construction: the source holds
+    /// the Win32 capture, so no `CursorMoved` for this position will ever arrive
+    /// here.
+    pointer: PhysicalPosition<f64>,
+    /// What this window's tab list offers that payload, or `None` for a pointer
+    /// over its body — where F2 offers nothing at all.
+    landing: Option<DropLanding>,
+    face: GhostFace,
+}
+
+/// **Where a torn-out window stands, in the terms it has to be stated in**
+/// (multiwindow slice F5).
+///
+/// Both numbers are **logical** and both are read at the press. Logical because
+/// the whole point is that the window is the same size to the eye on a monitor
+/// with a different scale; read at the press because the grip is *where the hand
+/// closed on the tab* and that does not move because the strip scrolled.
+#[derive(Clone, Copy, Debug)]
+struct TearGrip {
+    /// Where inside the source window's outer rectangle the hand closed.
+    grab_logical: (f32, f32),
+    /// The source window's outer size.
+    size_logical: (f32, f32),
+}
+
+/// **F5 — the rectangle a torn-out window opens in.**
+///
+/// *"屏幕命中与 work-area 一律物理坐标;期望尺寸 = 源窗**逻辑**外框换算到目标显示器
+/// DPI;**保持抓握点相对 tab 的 offset** 再做 work-area clamp;走
+/// `set_window_outer_rect`"*.
+///
+/// The dpi is the **target** monitor's, which is the whole of the mixed-dpi
+/// half: a window torn from a 100% display onto a 200% one has to grow, in
+/// pixels, to stay the same size to the eye, and the grip has to grow with it or
+/// the tab slides out from under the hand at the boundary.
+///
+/// The clamp moves before it resizes, and resizes only for a window that will
+/// not fit the display at all. A window nudged an inch left is still the window
+/// the reader tore off; a window silently shrunk to fit is not.
+fn tear_out_rect(
+    pointer: (i32, i32),
+    grip: TearGrip,
+    dpi: u32,
+    work: bt_platform::WindowRect,
+) -> bt_platform::WindowRect {
+    let physical = |logical: f32| {
+        bt_platform::logical_px_for_dpi(logical.max(0.0).round().max(1.0) as u32, dpi.max(1))
+    };
+    let work_width = work.right.saturating_sub(work.left).max(1);
+    let work_height = work.bottom.saturating_sub(work.top).max(1);
+    let width = physical(grip.size_logical.0).min(work_width);
+    let height = physical(grip.size_logical.1).min(work_height);
+    // The grip is clamped to the window it is inside: a grab point past the
+    // right-hand edge of a window that has just been shrunk to fit the display
+    // would put the whole window off to the left of the pointer.
+    let grab_x = physical(grip.grab_logical.0).min(width);
+    let grab_y = physical(grip.grab_logical.1).min(height);
+    let left = (pointer.0 - grab_x).clamp(work.left, work.right - width);
+    let top = (pointer.1 - grab_y).clamp(work.top, work.bottom - height);
+    bt_platform::WindowRect {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    }
+}
+
+/// **The one guard behind the three ways a cross-window gesture is taken away**
+/// (multiwindow slice F2/F4; `plan.md` v3 增补 *"broker 撤防清单"*).
+///
+/// The plan lists Win32 capture loss, the lock screen and a display
+/// configuration change, and gives all three the same result — *"取消预览、清高
+/// 亮、载荷归源"*. Two of them are one fact: the capture is what makes a pointer
+/// stream outside a window arrive at all, and both a system drag and the secure
+/// desktop take it. The third does not touch the capture but invalidates every
+/// screen rectangle the gesture is holding, so it is watched by the thing that
+/// changes.
+///
+/// **Sampled, not subscribed**, and that is the argument rather than the saving:
+/// winit surfaces neither `WM_CAPTURECHANGED` nor `WM_DISPLAYCHANGE`, so a
+/// subscription means a window subclass whose messages arrive on a schedule this
+/// state machine does not control. Two read-only queries on the turns of a drag
+/// that is actually in the air — and none at all otherwise — answer the same
+/// question at the one moment anybody asks it.
+///
+/// The fourth cause on the plan's list, *"源窗拖动中被关"*, is not sampled here
+/// because it is not a platform fact: a window that has gone is a window
+/// [`FolioApp::windows`] no longer holds, and the broker checks its own source
+/// against that map.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DragGuard {
+    /// Which window holds the loop thread's mouse capture.
+    capture: Option<isize>,
+    /// The bounding box of every monitor together.
+    screen: bt_platform::WindowRect,
+}
+
+impl DragGuard {
+    /// Read both facts as they are now, for the window that should be holding
+    /// the capture.
+    fn sample() -> Self {
+        Self {
+            capture: bt_platform::thread_mouse_capture().map(std::num::NonZeroIsize::get),
+            screen: bt_platform::virtual_screen_rect(),
+        }
+    }
+
+    /// Whether the world this gesture began in is still the world it is in.
+    fn still_holds(&self, now: &Self) -> bool {
+        self.capture == now.capture && self.screen == now.screen
+    }
+}
+
+/// **Where a cross-window gesture is pointing right now** (multiwindow slice
+/// F2/F4).
+///
+/// Three places and not two, because "over another window's tab list" and "over
+/// another window's body" are different answers and folding them together is the
+/// mistake the plan asked to be written down: *"要定义:拖到目标窗正文(= 无落
+/// 点)"*. A body with no landing is J120's clean nothing; only "over no window of
+/// ours at all" tears a window off.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum BrokerAim {
+    /// Over the window the gesture started in — so that window's own survey is
+    /// the whole of the answer and the broker has nothing to say.
+    Home,
+    /// Over another Folio window, and what *its* tab list offers this payload.
+    Window {
+        window: WindowId,
+        landing: Option<DropLanding>,
+    },
+    /// Over no window of ours: the desktop, or somebody else's application.
+    Away,
+}
+
+impl BrokerAim {
+    /// The tab the spring is being rested on, if any, and the window that would
+    /// have to switch to it.
+    ///
+    /// Only a hand-over arms the spring. A tear-out caret is already showing the
+    /// whole of what letting go would do, so there is nothing a switch could
+    /// reveal; a hand-over is a promise about a tree that is not on screen, and
+    /// the switch is how you get to see it.
+    fn resting_on(&self) -> Option<(WindowId, TabId)> {
+        match self {
+            Self::Window {
+                window,
+                landing: Some(DropLanding::StripAdopt { tab }),
+            } => Some((*window, *tab)),
+            Self::Window { .. } | Self::Home | Self::Away => None,
+        }
+    }
+}
+
+/// **What letting go does when the hand is not over the window that is holding
+/// it** (multiwindow slice F2) — [`release_verdict`]'s counterpart one level up.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrokerRelease {
+    /// Nothing crossed a boundary, so the window's own verdict stands.
+    Local,
+    /// Into another window's tab list, at the landing that window was drawing.
+    Into {
+        window: WindowId,
+        landing: DropLanding,
+    },
+    /// **F1 — 「拖到无窗处=撕成新窗」**, by the same road `Move pane to new
+    /// window` takes.
+    NewWindow,
+    /// J120's clean nothing: the hand was over a window of ours and that window
+    /// offered nothing.
+    Nothing,
+}
+
+/// The table [`BrokerRelease`] is, stated once and away from every window.
+fn broker_verdict(aim: &BrokerAim) -> BrokerRelease {
+    match aim {
+        BrokerAim::Home => BrokerRelease::Local,
+        BrokerAim::Window {
+            window,
+            landing: Some(landing),
+        } => BrokerRelease::Into {
+            window: *window,
+            landing: *landing,
+        },
+        BrokerAim::Window { landing: None, .. } => BrokerRelease::Nothing,
+        BrokerAim::Away => BrokerRelease::NewWindow,
+    }
+}
+
+/// **The application-level drag broker** (multiwindow slice F2/F4; `plan.md`
+/// F2+F4 and the v3 增补「F2 spring deadline」).
+///
+/// # Why there is one at all
+///
+/// winit takes the Win32 mouse capture on button-down, so the window the gesture
+/// began in goes on hearing motion and is guaranteed its button-up wherever the
+/// pointer travels. That is exactly enough for a tear-out and **not** enough for
+/// an adoption: the window being dragged *onto* receives nothing at all — no
+/// motion, no enter, no leave — so its tab list cannot light up, its spring
+/// cannot arm and its stand-in cannot appear by anything that window hears.
+///
+/// So the pointer is brokered. The source publishes where its hand is in screen
+/// coordinates; the application asks the window manager whose glass that point
+/// is on; the target window is asked what *it* offers there, in its own client
+/// pixels at its own scale; and the answer is posted back to that window as a
+/// [`ForeignDrag`] for it to draw. One reading of the geometry per turn, one
+/// author for every highlight.
+///
+/// # The clock
+///
+/// `next_deadline` is the whole reason this is a state machine and not a
+/// function. §7.1.6k's spring has to come due under a hand that has deliberately
+/// stopped moving, and across a window boundary "stopped moving" is not a figure
+/// of speech: the target window will receive no further event of any kind. The
+/// broker therefore states its next instant to the loop, which folds it into the
+/// same `ControlFlow::WaitUntil` every other clock in this program reaches
+/// through.
+///
+/// # What it is not
+///
+/// It does not hold the payload — the source's [`Drag`] still does, and that is
+/// what makes every teardown "the payload goes home" for free. It does not own
+/// the transfer — [`FolioApp::transfer_tab`] does, through
+/// [`FolioApp::settle_drag_handover`]. It is the *pointer's* broker and nothing
+/// else's.
+#[derive(Clone, Debug)]
+struct DragBroker {
+    /// The window holding the capture, and therefore the payload.
+    source: WindowId,
+    /// What is in the air. Only a tab and a pane can leave a window: a row's
+    /// payload is a path, and there is no verb yet for a path let go over
+    /// another window ([`DragSource::Row`] never opens a broker).
+    cargo: DragSource,
+    /// The label the ghost says, refreshed from the source every move so that a
+    /// tab renamed mid-gesture reads its new name over the target's glass.
+    face: Option<GhostFace>,
+    /// The arriving subtree, for the one question only the target can answer:
+    /// whether its tree can actually take this pane (H93/M147). `None` for a tab,
+    /// which the tab list never adopts.
+    cargo_tree: Option<bt_layout::LayoutNode>,
+    /// Where the pointer is, in screen physical pixels.
+    pointer: (f64, f64),
+    /// F5's two numbers, read at the press.
+    grip: TearGrip,
+    aim: BrokerAim,
+    spring: SpringGate,
+    /// The world this gesture began in — see [`DragGuard`].
+    guard: DragGuard,
+}
+
+impl DragBroker {
+    /// Tell the broker where the hand is pointing, and let the spring hear it.
+    ///
+    /// The spring is told what the *survey* answered and never where the pointer
+    /// is — §7.1.6k's own discipline, carried across the boundary unchanged: a
+    /// tab the target would not hand this pane to is a tab the hand cannot spring
+    /// to either, and a target window whose card column refuses the hand-over
+    /// reaches the spring through the same door without being said twice.
+    fn aim_at(&mut self, aim: BrokerAim, now: Instant) {
+        self.spring
+            .observe(aim.resting_on().map(|(_, tab)| tab), now);
+        self.aim = aim;
+    }
+
+    /// The tab a switch is owed to at `now`, and the window that owes it.
+    fn due(&self, now: Instant) -> Option<(WindowId, TabId)> {
+        let tab = self.spring.due(now)?;
+        let (window, resting) = self.aim.resting_on()?;
+        (resting == tab).then_some((window, tab))
+    }
+
+    /// The rest has been paid.
+    fn spend(&mut self, tab: TabId) {
+        self.spring.spend(tab);
+    }
+
+    /// **The broker's own wake-up, for the loop's set** — the v3 增补's
+    /// 「`next_deadline` 并接 event-loop wait-until」.
+    ///
+    /// `None` for every gesture that is not resting on somebody else's tab, which
+    /// is every gesture most of the time, so a drag across a desktop costs no
+    /// wake-ups at all.
+    fn next_deadline(&self) -> Option<Instant> {
+        self.spring.deadline()
+    }
+
+    /// A broker with nothing aimed at and nothing in the air, for the rulings
+    /// above to be driven through.
+    #[cfg(test)]
+    fn for_test(source: WindowId) -> Self {
+        Self {
+            source,
+            cargo: DragSource::Tab(TabId(1)),
+            face: None,
+            cargo_tree: None,
+            pointer: (0.0, 0.0),
+            grip: TearGrip {
+                grab_logical: (0.0, 0.0),
+                size_logical: (0.0, 0.0),
+            },
+            aim: BrokerAim::Home,
+            spring: SpringGate::default(),
+            guard: DragGuard {
+                capture: None,
+                screen: bt_platform::WindowRect {
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 0,
+                },
+            },
+        }
+    }
+}
+
+/// **What a cross-window release asked for**, written down by the window that
+/// was holding the payload and spent by the loop's own door (multiwindow slice
+/// F2).
+///
+/// [`App::pending_new_windows`]'s standing shape and its standing reason: only
+/// an `ActiveEventLoop` may create a window, and only [`FolioApp`] can see two
+/// windows at once — while a release arrives at one `Runtime` that can see
+/// neither. So the release records the errand and `about_to_wait` spends it, in
+/// the same turn and before any frame.
+#[derive(Clone, Debug)]
+struct DragHandover {
+    cargo: DragSource,
+    from: WindowId,
+    into: HandoverInto,
+}
+
+/// Where a [`DragHandover`] is going.
+#[derive(Clone, Copy, Debug)]
+enum HandoverInto {
+    /// Another window's tab list, at the landing that window was drawing.
+    Window {
+        window: WindowId,
+        landing: DropLanding,
+    },
+    /// **F1/F5 — a window of its own**, standing where the hand let go.
+    NewWindow {
+        pointer: (i32, i32),
+        grip: TearGrip,
+    },
+}
+
 /// **Which panes may become a tab of their own, stated once and asked in two
 /// places.**
 ///
@@ -21583,6 +22004,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         peek_picture: None,
         peek_card_pending: None,
         drag: None,
+        foreign: None,
         drop_preview: None,
         last_drawn_dock_reveal: None,
         seat_viewport,
@@ -22178,6 +22600,8 @@ impl Runtime<'_> {
             pending_restore_answer: None,
             pending_application_change: None,
             pending_new_windows: Vec::new(),
+            drag_broker: None,
+            pending_handover: None,
             quit_requested: false,
             quit: None,
         };
@@ -23285,6 +23709,9 @@ impl Runtime<'_> {
                 .is_some_and(|tab| drag.tab() == Some(tab.id))
         }) {
             self.window.drag = None;
+            // F2: the payload stopped existing, so the application's pointer has
+            // nothing left to broker either.
+            self.app.drag_broker = None;
         }
         match tab_close_action(self.window.tabs.len(), self.window.active_tab, index) {
             TabCloseAction::CloseWindow => {
@@ -23607,12 +24034,20 @@ impl Runtime<'_> {
         // *about* to be handed a pane are one picture of one event seen at three
         // moments. A fourth mark invented here would be a second vocabulary for
         // "this is where it goes".
+        //
+        // **F2 — and a tab another window's hand is resting on wears it too.**
+        // Read off [`ForeignDrag`] rather than off the drag this window does not
+        // have, and folded into the same expression rather than drawn beside it:
+        // the two are never both set (the pointer is over one window), and one
+        // `Option<TabId>` is the whole of what the strip needs to know.
         let aimed = self
             .window
             .drag
             .as_ref()
-            .and_then(|drag| match drag.landing {
-                Some(DropLanding::StripAdopt { tab }) => Some(tab),
+            .and_then(|drag| drag.landing)
+            .or_else(|| self.window.foreign.as_ref().and_then(|visit| visit.landing))
+            .and_then(|landing| match landing {
+                DropLanding::StripAdopt { tab } => Some(tab),
                 _ => None,
             });
         let tabs = self
@@ -28003,6 +28438,31 @@ impl Runtime<'_> {
     /// has just filled it are the same picture, which is what makes the landing
     /// read as the thing you were dragging coming to rest.
     fn strip_stand_in(&self) -> Option<(usize, seats::TabContent)> {
+        // **F2 — a visitor's stand-in, dressed out of the label that travelled.**
+        //
+        // The same slot, the same wash, the same picture; the only difference is
+        // that the mark and the name arrive on the broker
+        // ([`GhostFace`]) rather than being read out of a tab this window holds,
+        // because the tab this window is about to be given is still in another
+        // window's hands. Checked first because the two are never both set: the
+        // pointer is over exactly one window.
+        if let Some(foreign) = self.window.foreign.as_ref() {
+            let DropLanding::StripExtract { slot } = foreign.landing? else {
+                return None;
+            };
+            return Some((
+                slot.min(self.window.tabs.len()),
+                seats::TabContent {
+                    title: foreign.face.text.clone(),
+                    // Zero for a tab that does not exist here yet, exactly as the
+                    // local stand-in answers zero — both draw nothing, and zero is
+                    // the honest one.
+                    pane_count: 0,
+                    mark_kind: foreign.face.mark,
+                    ..seats::TabContent::default()
+                },
+            ));
+        }
         let drag = self.window.drag.as_ref()?;
         let DropLanding::StripExtract { slot } = drag.landing? else {
             return None;
@@ -28343,18 +28803,49 @@ impl Runtime<'_> {
     /// invisible layer still costs a text shaping pass and a raster lookup every
     /// frame the pointer moves, and "not drawn" is the same picture either way.
     fn drag_ghost_layer(&mut self) -> Vec<marks::OverlayLayer> {
-        let Some(drag) = self
-            .window
-            .drag
-            .as_ref()
-            .filter(|drag| drag.ghost_is_shown())
-        else {
-            return Vec::new();
-        };
-        let (pointer, source) = (drag.pointer, drag.source.clone());
-        let palette = bt_render::chrome_palette();
-        let Some((mark, mark_logical, mark_color, text)) = self.drag_label(&source, palette) else {
-            return Vec::new();
+        // **F2 — the visitor's ghost, laid out at *this* window's scale.**
+        //
+        // The four facts it says arrived on the broker ([`GhostFace`]); where
+        // they sit is this window's own arithmetic, which is the whole of
+        // 「混合 DPI 下幽灵尺寸随所在窗」 — one label, measured against the font
+        // size the window it is over draws chrome at, so a tab carried from a
+        // 100% display onto a 200% one grows as it crosses rather than staying
+        // the size of the window it left. It yields to the stand-in on exactly
+        // the same terms a local ghost does ([`DropLanding::shows_itself`]).
+        let visiting = self.window.foreign.as_ref().and_then(|visit| {
+            visit
+                .landing
+                .is_none_or(|landing| !landing.shows_itself())
+                .then(|| {
+                    (
+                        visit.pointer,
+                        visit.face.mark,
+                        visit.face.mark_logical,
+                        visit.face.colour,
+                        visit.face.text.clone(),
+                    )
+                })
+        });
+        let (pointer, mark, mark_logical, mark_color, text) = match visiting {
+            Some(visiting) => visiting,
+            None => {
+                let Some(drag) = self
+                    .window
+                    .drag
+                    .as_ref()
+                    .filter(|drag| drag.ghost_is_shown())
+                else {
+                    return Vec::new();
+                };
+                let (pointer, source) = (drag.pointer, drag.source.clone());
+                let palette = bt_render::chrome_palette();
+                let Some((mark, mark_logical, mark_color, text)) =
+                    self.drag_label(&source, palette)
+                else {
+                    return Vec::new();
+                };
+                (pointer, mark, mark_logical, mark_color, text)
+            }
         };
         let scale = self.window.renderer.metrics().scale_factor as f32;
         // Only the font knows how wide a line is, so the measuring happens here,
@@ -28371,7 +28862,12 @@ impl Runtime<'_> {
             scale,
         );
         vec![seats::build_drag_ghost(
-            &layout, mark, mark_color, &text, scale, palette,
+            &layout,
+            mark,
+            mark_color,
+            &text,
+            scale,
+            bt_render::chrome_palette(),
         )]
     }
 
@@ -46907,6 +47403,8 @@ impl Runtime<'_> {
             tab: promoted.unwrap_or(standing),
             from: self.window_id(),
             promoted: promoted.is_some(),
+            // A menu row names no place — see [`TearOut::at`].
+            at: None,
         };
         let like = self.window_id();
         self.app
@@ -54288,6 +54786,11 @@ impl Runtime<'_> {
         // row that is now travelling is not a row the pointer is resting on
         // (P145 — "gone on leave/press/scroll/**drag**").
         self.hide_file_peek();
+        // **F2 — the application takes the pointer too.** Opened here rather than
+        // on the first move that crosses a boundary, because the two numbers F5
+        // needs are facts about the *press* and there is no second chance to read
+        // them.
+        self.open_broker(&source, position);
         self.window.drag = Some(Drag {
             source,
             carry,
@@ -54626,10 +55129,25 @@ impl Runtime<'_> {
     /// One tree walk and one solve per pointer move, on a tree of a few leaves,
     /// and only while a pane is actually resting on a foreign tab.
     fn pane_adopt_fits(&self, leaf: LeafId, target: TabId) -> bool {
-        let (Some(from), Some(into)) = (self.tab_state(leaf.tab), self.tab_state(target)) else {
+        let Some(from) = self.tab_state(leaf.tab) else {
             return false;
         };
         let Some(travelling) = from.seats.tree().find_seat(leaf.seat).cloned() else {
+            return false;
+        };
+        self.arrival_fits(target, &bt_layout::LayoutNode::seat(travelling))
+    }
+
+    /// The same question with the arriving shape handed in (multiwindow slice
+    /// F2).
+    ///
+    /// Split out because across a window boundary the pane is not in this
+    /// window's tabs to be found: the subtree travels on the broker
+    /// ([`DragBroker::cargo_tree`]) and this window answers about *its* tree with
+    /// *its* viewport and *its* setting, which is the only place those three
+    /// live. One author for "will it fit", asked by two callers.
+    fn arrival_fits(&self, target: TabId, arriving: &bt_layout::LayoutNode) -> bool {
+        let Some(into) = self.tab_state(target) else {
             return false;
         };
         into.seats
@@ -54637,9 +55155,139 @@ impl Runtime<'_> {
                 &self.seat_metrics(),
                 self.window.seat_viewport,
                 seats::LayoutAim::Rim(self.append_edge()),
-                seats::DropCargo::Layout(&bt_layout::LayoutNode::seat(travelling)),
+                seats::DropCargo::Layout(arriving),
             )
             .is_some_and(|plan| plan.fits())
+    }
+
+    /// **What this window's tab list offers a payload another window is
+    /// holding** (multiwindow slice F2).
+    ///
+    /// [`Runtime::survey_strip`]'s counterpart for a pointer this window will
+    /// never hear about, and it is deliberately the *same* table: the run's own
+    /// [`seats::PaneOffers`], the run's own `slot_at`, and
+    /// [`pane_strip_landing`]. A card column that refuses a tear-out refuses it
+    /// to a visitor too, and it does not have to learn that this slice happened.
+    ///
+    /// **The tab list is the whole door, and the body offers nothing.** That is
+    /// F2's own shape — 「拖到另一扇 Folio 窗的 tab 条 = 移入」 — and the
+    /// alternative was rejected where the plan asked for it to be written down
+    /// (*"拖到目标窗正文(= 无落点)"*): a pointer over a foreign terminal that tore
+    /// a window off would be one gesture meaning two things depending on which
+    /// window happened to be underneath.
+    ///
+    /// **A tab arriving reads as [`DropLanding::StripExtract`]**, and that is a
+    /// reuse rather than a pun: what that landing has always named is *this run
+    /// gains an entry at this slot*, drawn as the stand-in
+    /// ([`Runtime::strip_stand_in`]) the reader is about to see become a tab.
+    /// What differs is only who performs it, and no foreign landing is ever
+    /// handed to [`release_verdict`] — [`broker_verdict`] is the verdict for a
+    /// hand that opened somewhere else.
+    fn foreign_strip_landing(
+        &self,
+        cargo: &DragSource,
+        cargo_tree: Option<&bt_layout::LayoutNode>,
+        screen: (f64, f64),
+    ) -> Option<DropLanding> {
+        let position = self.screen_to_client(screen)?;
+        let run = self.tab_run(Instant::now())?;
+        if !run.contains(position.x, position.y) {
+            return None;
+        }
+        let mids = run.mids();
+        let pinned = self
+            .window
+            .tabs
+            .iter()
+            .map(|tab| tab.pinned)
+            .collect::<Vec<_>>();
+        // N158's clamp, on this window's own partition: the slot the visitor
+        // watches is the slot the hand-over inserts at.
+        let slot = strip_insert_slot(
+            seats::insert_index_at(&mids, run.pos(position.x, position.y)),
+            &pinned,
+        );
+        match cargo {
+            // A whole tab has one offer here and it does not depend on the run's
+            // pane bits: those say what a *pane* may do to a tab list, and a tab
+            // arriving in a tab list is the thing a tab list is for. A card
+            // column takes it for the same reason it takes a reorder — the column
+            // *is* the tab list of that window (§7.1.6b′ ①).
+            DragSource::Tab(_) => Some(DropLanding::StripExtract { slot }),
+            DragSource::Pane(leaf) => {
+                let over = run
+                    .slot_at(position.x, position.y)
+                    .and_then(|index| self.window.tabs.get(index))
+                    .map(|tab| tab.id);
+                pane_strip_landing(
+                    run.pane_offers,
+                    over,
+                    // The pane's own tab, which cannot be in *this* window's run
+                    // — so the "resting on its own tab" arm is unreachable from
+                    // here, and reachable from `survey_strip` exactly as before.
+                    leaf.tab,
+                    over.is_some_and(|tab| {
+                        cargo_tree.is_some_and(|tree| self.arrival_fits(tab, tree))
+                    }),
+                    // **A lone pane may cross a boundary even though it may not
+                    // be torn out where it stands.** G84 refuses to empty a tree,
+                    // which is why `tear_out_is_hostable` says no at home; over
+                    // another window there is nothing to empty, because the tab
+                    // it is the whole of travels with it. That is F1c's own
+                    // sentence — 「独 pane 跳过升格那半段」 — and this is the
+                    // surface it is said on.
+                    Some(slot),
+                )
+            }
+            // A row's payload is a path, so it never opens a broker and never
+            // reaches here ([`Runtime::open_broker`]).
+            DragSource::Row(_) => None,
+        }
+    }
+
+    /// **The hand opened somewhere this window does not own** (multiwindow slice
+    /// F2).
+    ///
+    /// Answers whether the release has been taken over. Everything it can do
+    /// here it does — J120's settle, so the tab list this payload was travelling
+    /// through goes back to the order it was in — and everything it cannot, it
+    /// writes down: moving a tab into another window, or opening a window to hold
+    /// it, are [`FolioApp`]'s and are spent at the loop's door in this same turn.
+    fn hand_over_across_windows(&mut self, drag: &Drag) -> Result<bool> {
+        let Some(broker) = self.app.drag_broker.as_ref() else {
+            return Ok(false);
+        };
+        // Only the window that is holding the payload may spend the broker's
+        // answer. Any other window reaching this line is a button-up that did not
+        // belong to this gesture.
+        if broker.source != self.window_id() {
+            return Ok(false);
+        }
+        let verdict = broker_verdict(&broker.aim);
+        if verdict == BrokerRelease::Local {
+            return Ok(false);
+        }
+        let cargo = broker.cargo.clone();
+        let grip = broker.grip;
+        let pointer = broker.pointer;
+        let from = self.window_id();
+        // The strip goes home first, on every one of these paths. A reorder made
+        // on the way to a drop is part of that drop's gesture (J120), and a
+        // payload that has left the window entirely must not leave half of one
+        // behind in the tab list it walked through.
+        self.settle_home(drag);
+        let into = match verdict {
+            // Over one of our windows, on nothing it offers: J120's clean
+            // nothing, and the settle above is the whole of it.
+            BrokerRelease::Nothing | BrokerRelease::Local => return Ok(true),
+            BrokerRelease::Into { window, landing } => HandoverInto::Window { window, landing },
+            BrokerRelease::NewWindow => HandoverInto::NewWindow {
+                pointer: (pointer.0.round() as i32, pointer.1.round() as i32),
+                grip,
+            },
+        };
+        self.app.pending_handover = Some(DragHandover { cargo, from, into });
+        Ok(true)
     }
 
     /// The tab with this id, by identity.
@@ -54716,6 +55364,147 @@ impl Runtime<'_> {
     /// ghost moves *first* and unconditionally, because it is the report on where
     /// the hand is and a hand that has moved has moved whether or not anything is
     /// willing to receive it.
+    /// This window's client origin in screen physical pixels — the one number a
+    /// pointer has to be added to before two windows can talk about it
+    /// (multiwindow slice F2).
+    ///
+    /// `inner_position` and not the outer rectangle: winit reports every pointer
+    /// in client coordinates, and this window's `WM_NCCALCSIZE` has made client
+    /// and outer the same rectangle anyway ([`bt_platform::CustomWindowFrame`]),
+    /// so the two are one origin here and only one of them stays right if that
+    /// ever stops being true.
+    fn client_origin_on_screen(&self) -> Option<(f64, f64)> {
+        let origin = self.window.window.inner_position().ok()?;
+        Some((f64::from(origin.x), f64::from(origin.y)))
+    }
+
+    /// A pointer of this window's, in screen physical pixels.
+    fn to_screen(&self, position: PhysicalPosition<f64>) -> Option<(f64, f64)> {
+        let (x, y) = self.client_origin_on_screen()?;
+        Some((x + position.x, y + position.y))
+    }
+
+    /// A screen point, in this window's client physical pixels.
+    fn screen_to_client(&self, point: (f64, f64)) -> Option<PhysicalPosition<f64>> {
+        let (x, y) = self.client_origin_on_screen()?;
+        Some(PhysicalPosition::new(point.0 - x, point.1 - y))
+    }
+
+    /// **Whether the glass under this pointer is this window's own**
+    /// (multiwindow slice F2).
+    ///
+    /// Asked of the window manager and not of a rectangle, and the difference is
+    /// the whole of F2's correctness. Two Folio windows overlap all the time: a
+    /// pointer resting on B's tab list is *inside A's client rectangle* whenever
+    /// B is on top of A, so a source that surveyed its own geometry would light a
+    /// slot in A and hand the payload to A when the hand opened, while the reader
+    /// watched B. Z-order, minimisation and everybody else's windows decide this,
+    /// and none of them is visible from here.
+    ///
+    /// A window this process cannot ask about answers `true`, which is the
+    /// conservative half: with no answer, the gesture is the ordinary one it
+    /// always was, in the window that is holding it.
+    fn pointer_is_on_our_own_glass(&self, position: PhysicalPosition<f64>) -> bool {
+        let Some((x, y)) = self.to_screen(position) else {
+            return true;
+        };
+        let Ok(mine) = window_hwnd(&self.window.window) else {
+            return true;
+        };
+        bt_platform::top_level_window_at(x.round() as i32, y.round() as i32)
+            .is_none_or(|under| under == mine)
+    }
+
+    /// **Open the broker for a payload that is allowed to leave this window**
+    /// (multiwindow slice F2).
+    ///
+    /// A tab and a pane may; a row may not, and that is [`DragSource::Row`]'s own
+    /// standing note rather than a rule invented here — a row travels as a
+    /// *path*, and there is no verb in this program for a path let go over
+    /// another window. No broker means no aim, which means every one of that
+    /// drag's answers is its own window's, exactly as it was before this slice.
+    ///
+    /// F5's two numbers are read here and never again: the grip is where the hand
+    /// closed on the window, and where the hand closed does not move because the
+    /// tab list scrolled underneath it.
+    fn open_broker(&mut self, source: &DragSource, position: PhysicalPosition<f64>) {
+        if matches!(source, DragSource::Row(_)) {
+            // Stated rather than left to the exits: "there is no broker" is what
+            // a row drag *means*, and a field that happened to be empty is a
+            // weaker way to say it than one that is emptied.
+            self.app.drag_broker = None;
+            return;
+        }
+        let scale = self.window.renderer.metrics().scale_factor.max(0.01);
+        let size = self.window.window.inner_size();
+        let window = self.window_id();
+        self.app.drag_broker = Some(DragBroker {
+            source: window,
+            cargo: source.clone(),
+            face: None,
+            cargo_tree: None,
+            pointer: self.to_screen(position).unwrap_or((position.x, position.y)),
+            grip: TearGrip {
+                grab_logical: ((position.x / scale) as f32, (position.y / scale) as f32),
+                size_logical: (
+                    (f64::from(size.width) / scale) as f32,
+                    (f64::from(size.height) / scale) as f32,
+                ),
+            },
+            aim: BrokerAim::Home,
+            spring: SpringGate::default(),
+            guard: DragGuard::sample(),
+        });
+    }
+
+    /// **Tell the broker where the hand is and what it is carrying** — the
+    /// source's whole half of a cross-window gesture (multiwindow slice F2).
+    ///
+    /// The label and the arriving subtree are refreshed on every move rather than
+    /// captured once, and both for the same reason the local ghost re-reads its
+    /// tab every frame: a tab renamed under a gesture in flight says its new name
+    /// over the target's glass too, and a pane whose sibling closed is a
+    /// different subtree than it was a moment ago.
+    ///
+    /// `ours` is passed in rather than asked again: [`Self::drive_drag`] has
+    /// already spent that syscall on this very pointer, and asking twice invites
+    /// two answers about one instant.
+    fn publish_to_broker(&mut self, drag: &Drag, position: PhysicalPosition<f64>, ours: bool) {
+        let face = self
+            .drag_label(&drag.source, bt_render::chrome_palette())
+            .map(|(mark, mark_logical, colour, text)| GhostFace {
+                mark,
+                mark_logical,
+                colour,
+                text,
+            });
+        // The arriving shape, for the one question only the target can answer.
+        // A pane is a one-leaf subtree — §7.1.6k′'s own finding, that a foreign
+        // pane was always `DropCargo::Layout` and never a third arm.
+        let cargo_tree = drag.source.pane().and_then(|leaf| {
+            self.tab_state(leaf.tab)
+                .and_then(|tab| tab.seats.tree().find_seat(leaf.seat).cloned())
+                .map(bt_layout::LayoutNode::seat)
+        });
+        let screen = self.to_screen(position);
+        let Some(broker) = self.app.drag_broker.as_mut() else {
+            return;
+        };
+        broker.face = face;
+        broker.cargo_tree = cargo_tree;
+        if let Some(screen) = screen {
+            broker.pointer = screen;
+        }
+        // Coming home is stated here and now, so that the frame drawn on the
+        // pointer move that re-entered this window is already the ordinary one.
+        // Leaving is *not* stated here: which other window the hand went to is a
+        // question only the application can answer, and it answers it before this
+        // turn ends.
+        if ours {
+            broker.aim_at(BrokerAim::Home, Instant::now());
+        }
+    }
+
     fn drive_drag(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
         let Some(mut drag) = self.window.drag.clone() else {
             return Ok(false);
@@ -54726,6 +55515,8 @@ impl Runtime<'_> {
         // left to drag, and the state must not survive the thing it points at.
         if !self.drag_source_lives(&drag.source) {
             self.window.drag = None;
+            // F2: and the application's pointer with it — see [`Self::finish_drag`].
+            self.app.drag_broker = None;
             self.apply_pointer_cursor();
             if self.refresh_chrome() {
                 self.present_chrome_change()?;
@@ -54734,7 +55525,19 @@ impl Runtime<'_> {
         }
         drag.pointer = position;
         self.leave_strip(&mut drag, position)?;
-        drag.landing = self.survey_drop(&drag.source, drag.home, position);
+        // **F2 — the window that is holding the payload offers nothing while the
+        // hand is over somebody else's glass.**
+        //
+        // Asked before the survey rather than filtered out of it, because it is
+        // not a fact about geometry at all: the pointer may be squarely inside
+        // this window's tab list and still be resting on the window that is
+        // sitting on top of it. What the target offers is the *target's* to say,
+        // and it says it through [`FolioApp::drive_drag_broker`].
+        let ours = self.pointer_is_on_our_own_glass(position);
+        drag.landing = ours
+            .then(|| self.survey_drop(&drag.source, drag.home, position))
+            .flatten();
+        self.publish_to_broker(&drag, position, ours);
         // **§7.1.6k — the spring is told what the survey answered, not where the
         // pointer is.** One reading of the geometry per move, and the dwell then
         // agrees with the drop by construction: a tab the strip would not hand
@@ -54992,6 +55795,18 @@ impl Runtime<'_> {
         self.window.pane_press = None;
         self.window.row_press = None;
         self.window.tab_clicks.interrupt();
+        // **F2 — the hand may have opened over another window, or over none.**
+        //
+        // Asked before the local verdict rather than folded into it, because the
+        // two answer about different surfaces: `release_verdict` reads a landing
+        // this window surveyed, and there is no such landing to read when the
+        // pointer was never over this window's glass. What is left to this window
+        // on those paths is J120's settle, which is the same thing it does for a
+        // release that landed nowhere — the payload has not moved, and everything
+        // that will move it happens at the loop's door.
+        if self.hand_over_across_windows(&drag)? {
+            return self.finish_drag();
+        }
         match release_verdict(drag.landing) {
             DragRelease::Commit => {
                 if let (Some(tab), Some(carry)) = (drag.tab(), drag.tab_carry())
@@ -55570,6 +56385,12 @@ impl Runtime<'_> {
     /// Answers `true` — a drag that got this far consumed the event that ended
     /// it, which is what both callers report to their own callers.
     fn finish_drag(&mut self) -> Result<bool> {
+        // **F2 — and the fifth thing, which is that the application's pointer
+        // goes down with the window's.** Every exit passes through here (Esc, the
+        // release, and the source's own capture loss), so the broker has one
+        // grave and the highlight it was drawing in some other window is taken
+        // down by that window's next turn — which is this one.
+        self.app.drag_broker = None;
         // J117 in reverse: the pointer stops being pinned the instant the hand
         // is empty, and takes back the shape of whatever it is now over.
         self.apply_pointer_cursor();
@@ -64251,6 +65072,31 @@ impl FolioApp {
     ///   with no tabs files no seed into Recent, so nothing is remembered that
     ///   nobody ever had.
     fn settle_tear_out(&mut self, errand: TearOut, into: WindowId) -> Result<()> {
+        // **F5 — a window a hand let go of stands where the hand let go**
+        // (multiwindow slice F2). Before the transfer rather than after, so the
+        // tab arrives into the rectangle it will live in and the tree is solved
+        // once. `None` for the menu row, which named a verb and not a place.
+        if let Some((pointer, grip)) = errand.at
+            && let Some(window) = self.windows.get_mut(into)
+            && let Ok(hwnd) = window_hwnd(&window.window)
+        {
+            // Both asked of the *point*, not of the new window: the window is
+            // standing wherever it was created, which on a two-monitor desktop is
+            // very often not the monitor the hand is over — and it is that
+            // monitor's dpi and work area the plan names.
+            let dpi = bt_platform::dpi_at(pointer.0, pointer.1);
+            let work = bt_platform::work_area_at(pointer.0, pointer.1)
+                .unwrap_or_else(|_| bt_platform::virtual_screen_rect());
+            if let Err(error) =
+                bt_platform::set_window_outer_rect(hwnd, tear_out_rect(pointer, grip, dpi, work))
+            {
+                // A window that could not be placed is still a window holding the
+                // reader's tab, so this is reported and not fatal — the same
+                // judgment `restore_window_placement` makes about a saved corner
+                // no monitor can see.
+                eprintln!("BT_TEAR_OUT place failed: {error}");
+            }
+        }
         let stand_in = self
             .windows
             .get_mut(into)
@@ -64283,6 +65129,302 @@ impl FolioApp {
             }
         }
         Ok(())
+    }
+
+    /// **Which window this HWND is** (multiwindow slice F2).
+    ///
+    /// [`Self::owner_of`]'s shape and its reason: linear over a handful of
+    /// windows, on a lane that runs while a hand is actually crossing a boundary,
+    /// and no second table to be kept in step with the first.
+    fn window_holding(&mut self, hwnd: std::num::NonZeroIsize) -> Option<WindowId> {
+        (0..self.windows.len()).find_map(|index| {
+            let id = self.windows.key_at(index)?;
+            let window = self.windows.get_mut(id)?;
+            (window_hwnd(&window.window).ok() == Some(hwnd)).then_some(id)
+        })
+    }
+
+    /// Take down whatever any window is drawing for a gesture it is not holding.
+    ///
+    /// The other half of [`WindowRuntime::foreign`] being a mailbox: it is
+    /// rebuilt from the broker every turn, so the only thing that has to be said
+    /// once is that there is nothing to rebuild it from.
+    fn clear_visitors(&mut self) -> Result<()> {
+        for index in 0..self.windows.len() {
+            let Some(mut runtime) = self.runtime_at(index) else {
+                continue;
+            };
+            if runtime.window.foreign.take().is_some() && runtime.refresh_chrome() {
+                runtime.present_chrome_change()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// **Turn the application's pointer** (multiwindow slice F2/F4; `plan.md`
+    /// F2+F4 and the v3 增补「F2 spring deadline」).
+    ///
+    /// The whole of the brokering, once per turn, in the order the facts depend
+    /// on each other:
+    ///
+    /// 1. **The guard.** Three of the plan's four teardowns are answered here and
+    ///    with one result — 「取消预览、清高亮、载荷归源」 — because they are one
+    ///    event to this gesture: the pointer stream has ended without a button-up.
+    ///    A source window that has gone is the fourth and is answered by the map
+    ///    rather than by the platform.
+    /// 2. **Whose glass.** The window manager is asked, because z-order is its
+    ///    fact and not a derivation from our own rectangles
+    ///    ([`Runtime::pointer_is_on_our_own_glass`] says why at length).
+    /// 3. **What that window offers**, in its own client pixels at its own scale
+    ///    and off its own tab run ([`Runtime::foreign_strip_landing`]).
+    /// 4. **The spring**, told what the survey answered and never where the
+    ///    pointer is — §7.1.6k's discipline carried across the boundary — and, when
+    ///    it comes due, moving the *target* window's view.
+    /// 5. **The post.** Exactly one window is given a [`ForeignDrag`] and every
+    ///    other window's is taken away, so a highlight cannot outlive the aim
+    ///    that lit it.
+    ///
+    /// Answers the broker's own next wake-up, which `about_to_wait` folds in
+    /// beside every window's. That fold is the whole reason this is a clock: the
+    /// target window will receive no further event of any kind, so a dwell over
+    /// it that waited for one would wait for ever.
+    fn drive_drag_broker(&mut self, now: Instant) -> Result<Option<Instant>> {
+        let Some(broker) = self.app.as_ref().and_then(|app| app.drag_broker.as_ref()) else {
+            self.clear_visitors()?;
+            return Ok(None);
+        };
+        let source = broker.source;
+        let held = broker.guard.still_holds(&DragGuard::sample());
+        if !held || !self.windows.contains(source) {
+            // One result for every cause, which is what the plan asked for. The
+            // payload goes home by the route Esc already takes — the drag is
+            // cancelled in the window that is holding it, and `finish_drag` takes
+            // the broker down on the way out.
+            if let Some(mut runtime) = self.runtime(source) {
+                runtime.cancel_drag()?;
+            }
+            if let Some(app) = self.app.as_mut() {
+                app.drag_broker = None;
+            }
+            self.clear_visitors()?;
+            return Ok(None);
+        }
+        let pointer = broker.pointer;
+        let cargo = broker.cargo.clone();
+        let cargo_tree = broker.cargo_tree.clone();
+        let face = broker.face.clone();
+        let under = bt_platform::top_level_window_at(pointer.0.round() as i32, pointer.1.round() as i32)
+            .and_then(|hwnd| self.window_holding(hwnd));
+        let aim = match under {
+            Some(window) if window == source => BrokerAim::Home,
+            Some(window) => {
+                let landing = self.runtime(window).and_then(|runtime| {
+                    runtime.foreign_strip_landing(&cargo, cargo_tree.as_ref(), pointer)
+                });
+                BrokerAim::Window { window, landing }
+            }
+            // The desktop, somebody else's application, or a window of ours that
+            // is minimised or covered — one answer, because to this gesture they
+            // are one fact: nothing of ours is under the hand.
+            None => BrokerAim::Away,
+        };
+        if let Some(app) = self.app.as_mut()
+            && let Some(broker) = app.drag_broker.as_mut()
+        {
+            broker.aim_at(aim.clone(), now);
+        }
+        // Spent before the switch is attempted and not after — `advance_drag_spring`'s
+        // own note, for its own reason: a gate left armed because the tab had been
+        // reaped would ask again on every turn for the rest of the gesture.
+        let due = self
+            .app
+            .as_ref()
+            .and_then(|app| app.drag_broker.as_ref())
+            .and_then(|broker| broker.due(now));
+        if let Some((window, tab)) = due {
+            if let Some(app) = self.app.as_mut()
+                && let Some(broker) = app.drag_broker.as_mut()
+            {
+                broker.spend(tab);
+            }
+            if let Some(mut runtime) = self.runtime(window)
+                && let Some(index) = runtime.tab_slot_of(tab)
+            {
+                runtime.activate_tab(index, false)?;
+            }
+        }
+        for index in 0..self.windows.len() {
+            let Some(id) = self.windows.key_at(index) else {
+                continue;
+            };
+            let Some(mut runtime) = self.runtime(id) else {
+                continue;
+            };
+            let visit = match (&aim, face.as_ref()) {
+                (BrokerAim::Window { window, landing }, Some(face)) if *window == id => runtime
+                    .screen_to_client(pointer)
+                    .map(|pointer| ForeignDrag {
+                        pointer,
+                        landing: *landing,
+                        face: face.clone(),
+                    }),
+                _ => None,
+            };
+            let was = runtime.window.foreign.is_some();
+            runtime.window.foreign = visit;
+            if (was || runtime.window.foreign.is_some()) && runtime.refresh_chrome() {
+                runtime.present_chrome_change()?;
+            }
+        }
+        Ok(self
+            .app
+            .as_ref()
+            .and_then(|app| app.drag_broker.as_ref())
+            .and_then(DragBroker::next_deadline))
+    }
+
+    /// **Perform the release that crossed a window boundary** (multiwindow slice
+    /// F2).
+    ///
+    /// Written down by [`Runtime::hand_over_across_windows`] at the button-up and
+    /// spent here, in the same turn and before any frame —
+    /// [`App::pending_new_windows`]'s standing shape and its standing reason.
+    ///
+    /// **Every step is a verb that already existed**, and that is the whole of
+    /// what this function is allowed to be. `plan.md` F0's sentence is 「pane 拖出
+    /// 窗界 = 先按 `StripExtract` 升格成 tab 再成窗,一条路」 and F2's is
+    /// 「松手=`transfer_tab`(或 pane 先升格再移交的既有组合)」, so:
+    ///
+    /// * a pane becomes a tab through [`Runtime::extract_pane_into_new_tab`] —
+    ///   the same tear-out the menu row and the drop on this window's own tab
+    ///   list both spend, and a lone pane's `None` is F1c's recorded skip rather
+    ///   than a failure, because that pane already *is* the whole tab;
+    /// * the tab changes windows through [`Self::transfer_tab`], which is the
+    ///   only thing in this program that moves a tab between windows and
+    ///   therefore the only place a page that cannot be named is refused;
+    /// * a hand-over onto one of the target's own tabs finishes through that
+    ///   window's [`Runtime::move_pane_across_tabs`], run once the tab has
+    ///   arrived — so the pane joins the tree by §7.1.6k's own append, and the
+    ///   tab it rode in on empties and leaves the run by that function's own
+    ///   rule;
+    /// * a release over no window of ours takes F1c's road exactly:
+    ///   [`NewWindowPlan::receiving`], spent by [`Self::open_pending_window`]
+    ///   later in this same turn, and now carrying the place the hand named.
+    ///
+    /// **A refusal says its one sentence in the window the payload is still in**
+    /// (M147), and it says two when a pane was promoted to make the journey —
+    /// [`Runtime::report_move_refusal`]'s existing pair of facts, unchanged.
+    fn settle_drag_handover(&mut self) -> Result<()> {
+        let Some(errand) = self.app.as_mut().and_then(|app| app.pending_handover.take()) else {
+            return Ok(());
+        };
+        let from = errand.from;
+        // The first half of the journey, and it is the source window's: a pane
+        // becomes a tab where it stands, and a tab is already one.
+        let (tab, promoted) = match &errand.cargo {
+            DragSource::Tab(tab) => (*tab, false),
+            DragSource::Pane(leaf) => {
+                let Some(mut runtime) = self.runtime(from) else {
+                    return Ok(());
+                };
+                let slot = runtime.window.tabs.len();
+                match runtime.extract_pane_into_new_tab(*leaf, slot)? {
+                    Some(made) => (made, true),
+                    None => (leaf.tab, false),
+                }
+            }
+            // A row never opened a broker, so it never wrote one of these.
+            DragSource::Row(_) => return Ok(()),
+        };
+        match errand.into {
+            HandoverInto::NewWindow { pointer, grip } => {
+                if let Some(app) = self.app.as_mut() {
+                    app.pending_new_windows.push(NewWindowPlan::receiving(
+                        from,
+                        TearOut {
+                            tab,
+                            from,
+                            promoted,
+                            at: Some((pointer, grip)),
+                        },
+                    ));
+                }
+                Ok(())
+            }
+            HandoverInto::Window { window, landing } => {
+                match self.transfer_tab(tab, window)? {
+                    TransferOutcome::Refused(refusal) => {
+                        if let Some(mut runtime) = self.runtime(from) {
+                            runtime.report_move_refusal(&refusal, promoted)?;
+                        }
+                        Ok(())
+                    }
+                    TransferOutcome::Moved(_) => self.settle_arrival(tab, window, landing),
+                }
+            }
+        }
+    }
+
+    /// **Put the arrived tab where the target window was drawing it**
+    /// (multiwindow slice F2).
+    ///
+    /// [`Self::transfer_tab`] puts a tab in the strip; *where* in the strip is
+    /// this gesture's, because the slot the visitor watched a stand-in stand in
+    /// is the slot the release owes them (N158's discipline, one surface out).
+    ///
+    /// The hand-over arm runs the target window's own cross-tab move rather than
+    /// anything of its own: after the transfer both tabs are in one window, which
+    /// is exactly the situation §7.1.6k already answers.
+    fn settle_arrival(
+        &mut self,
+        tab: TabId,
+        window: WindowId,
+        landing: DropLanding,
+    ) -> Result<()> {
+        let Some(mut runtime) = self.runtime(window) else {
+            return Ok(());
+        };
+        match landing {
+            DropLanding::StripExtract { slot } => {
+                let Some(index) = runtime.tab_slot_of(tab) else {
+                    return Ok(());
+                };
+                // F57 again, and re-applied rather than trusted: the partition
+                // this slot was clamped against is the strip as it stood *before*
+                // the arrival, and the arrival is in it now.
+                let pinned = runtime
+                    .window
+                    .tabs
+                    .iter()
+                    .map(|tab| tab.pinned)
+                    .collect::<Vec<_>>();
+                let to = partition_clamped(&pinned, index, slot.min(pinned.len() - 1));
+                runtime.move_tab_with_flip(index, to, Instant::now(), None);
+                runtime.mark_session_dirty(Instant::now());
+                Ok(())
+            }
+            DropLanding::StripAdopt { tab: host } => {
+                // The tab that arrived holds exactly one seat — it is either a
+                // pane just promoted, or a lone pane that was already its whole
+                // tab — so "the pane that travelled" is the one seat in its tree.
+                let Some(seat) = runtime
+                    .tab_state(tab)
+                    .and_then(|state| state.seats.tree().seats_in_order().first().map(|s| s.id))
+                else {
+                    return Ok(());
+                };
+                let aim = seats::LayoutAim::Rim(runtime.append_edge());
+                runtime.move_pane_across_tabs(LeafId { tab, seat }, host, aim)?;
+                Ok(())
+            }
+            // No other landing is ever offered across a boundary
+            // ([`Runtime::foreign_strip_landing`]), and a landing that is not
+            // offered is not one a release may invent.
+            DropLanding::StripReorder { .. }
+            | DropLanding::RootRim { .. }
+            | DropLanding::SeatEdge { .. }
+            | DropLanding::SeatCentre { .. } => Ok(()),
+        }
     }
 
     /// **Spend the restore prompt's one answer, over every window it is about**
@@ -64923,6 +66065,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         if let Err(error) = self
             .settle_application_change()
             .and_then(|()| self.settle_restore_answer())
+            // **F2 — before the window door and after everything that could have
+            // closed a window.** A release that asked for a window of its own
+            // queues the plan the very next line spends, so the whole journey —
+            // promote, transfer, open, place — lands in one turn and no frame is
+            // ever drawn of a window half way through it.
+            .and_then(|()| self.settle_drag_handover())
             .and_then(|()| self.open_pending_window(event_loop))
             .and_then(|()| self.settle_quit(event_loop))
         {
@@ -64930,11 +66078,23 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             return;
         }
         let now = Instant::now();
+        // **The application's own pointer, turned before the windows are**
+        // (multiwindow slice F2/F4). It writes what a target window draws, so it
+        // has to have written it before that window takes its turn — and its
+        // deadline joins the same fold every window's clocks reach through, which
+        // is what lets a spring come due over a window that will hear nothing
+        // else at all.
+        let mut wake_deadline = match self.drive_drag_broker(now) {
+            Ok(deadline) => deadline,
+            Err(error) => {
+                self.fail(event_loop, error);
+                return;
+            }
+        };
         // **Every window's own turn, and the earliest wake-up any of them asked
         // for.** A loop that woke for the first window's clocks and not the
         // second's would be a second window whose caret blinks only when the
         // first one's does.
-        let mut wake_deadline = None;
         for index in 0..self.windows.len() {
             let Some(mut runtime) = self.runtime_at(index) else {
                 continue;
@@ -94085,6 +95245,28 @@ mod cross_window_drag_tests {
                  the loop for nothing at all"
             );
         }
+
+        // And the other half of "comes due": the loop has to be *told*. A clock
+        // nothing folds into `ControlFlow::WaitUntil` is a clock that fires on
+        // the next thing to twitch, which over a window that will hear nothing at
+        // all is never.
+        let wait = fn_body("about_to_wait");
+        let (before, after) = wait
+            .split_once("let mut wake_deadline = match self.drive_drag_broker(now)")
+            .expect(
+                "the broker is turned once a loop, and its answer is what the \
+                 windows' own deadlines are then folded into",
+            );
+        assert!(
+            before.contains("self.settle_drag_handover()"),
+            "and the release it decided is spent before the window door opens, \
+             so promote, transfer, open and place all land in one turn:\n{wait}"
+        );
+        assert!(
+            after.contains("earliest_deadline([wake_deadline, deadline])"),
+            "every window's clocks fold onto the broker's rather than replacing \
+             it:\n{after}"
+        );
     }
 
     /// **Every place a cross-window release can land, and its one verdict**
@@ -94198,14 +95380,18 @@ mod cross_window_drag_tests {
         let cramped = tear_out_rect((500, 400), grip, 96, small);
         assert_eq!(
             (
-                cramped.left,
-                cramped.top,
                 cramped.right - cramped.left,
                 cramped.bottom - cramped.top
             ),
-            (0, 0, 1000, 600),
-            "clamped into the work area it is landing in, because a window no \
-             part of which can be reached is not a window the reader asked for"
+            (1000, 600),
+            "1200 logical will not fit a 1000px work area, so the width — and \
+             only the width — gives way"
+        );
+        assert_eq!(
+            (cramped.left, cramped.top),
+            (0, 100),
+            "and then it moves: the grip would have put it at -300 across and \
+             388 down, which is left of the work area and 288px past its foot"
         );
     }
 
@@ -94315,7 +95501,15 @@ mod cross_window_drag_tests {
     /// taking two ids.
     #[test]
     fn a_pane_carried_into_another_window_is_promoted_and_then_transferred() {
-        let body = fn_body("settle_drag_handover");
+        // The two halves of one release: what the errand *is* and where the
+        // arrival *goes*. Read together because the claim is about the journey,
+        // and the journey is split in two only because the second half needs the
+        // tab to have arrived before it can be run.
+        let body = format!(
+            "{}{}",
+            fn_body("settle_drag_handover"),
+            fn_body("settle_arrival")
+        );
         for (owed, why) in [
             (
                 "extract_pane_into_new_tab",
@@ -94364,15 +95558,18 @@ mod cross_window_drag_tests {
     /// pictures drift apart the first time either is touched.
     #[test]
     fn a_window_draws_a_visitors_landing_in_its_own_tab_lists_words() {
+        // The *read*, not the word: an arm that still mentions a visitor while
+        // no longer asking the window whether it has one is exactly the mutation
+        // this pin exists to catch.
         let stand_in = fn_body("strip_stand_in");
         assert!(
-            stand_in.contains("foreign"),
+            stand_in.contains("self.window.foreign"),
             "the stand-in a foreign tear-out draws is the stand-in a local one \
              draws:\n{stand_in}"
         );
         let ghost = fn_body("drag_ghost_layer");
         assert!(
-            ghost.contains("foreign"),
+            ghost.contains("self.window.foreign"),
             "and the ghost over this window's glass is built here, at this \
              window's scale — 「混合 DPI 下幽灵尺寸随所在窗」:\n{ghost}"
         );
