@@ -7127,7 +7127,6 @@ impl TransferRefusal {
                 i18n::Text::MoveRefusedGone.text().to_owned()
             }
             Self::AlreadyThere => i18n::Text::MoveRefusedAlreadyThere.text().to_owned(),
-            Self::AmbiguousPage(_) => i18n::Text::MoveRefusedAmbiguousPage.text().to_owned(),
             // The engine's own words, passed through: they are the only text
             // that separates a controller that had already gone from a parent
             // window Windows would not set.
@@ -7877,8 +7876,11 @@ struct {name} {{
     /// `NoSuchWindow` deliberately say one thing — "it closed before the move" —
     /// and everything else says its own.
     ///
-    /// MUTATION: return an empty string for any arm, or give `AmbiguousPage` the
-    /// same words as `AlreadyThere`, and this fails.
+    /// MUTATION: return an empty string for any arm, or give `AlreadyThere` the
+    /// same words as `MoveRefusedGone`, and this fails.
+    ///
+    /// (`AmbiguousPage` stood in this list until the web tables learned to key
+    /// by leaf — the ambiguity retired with the refusal, §7.12.)
     #[test]
     fn every_refusal_of_a_move_says_one_sentence() {
         let said = |refusal: TransferRefusal| refusal.notice();
@@ -7889,35 +7891,26 @@ struct {name} {{
             "a tab that closed and a window that closed are the same fact to the \
              reader who watched one of them close"
         );
-        let ambiguous = said(TransferRefusal::AmbiguousPage(SeatId(1)));
         let already = said(TransferRefusal::AlreadyThere);
         let kept = said(TransferRefusal::PageKept(
             SeatId(1),
             "put_ParentWindow failed".to_owned(),
         ));
-        for sentence in [&gone, &ambiguous, &already, &kept] {
+        for sentence in [&gone, &already, &kept] {
             assert!(
                 !sentence.trim().is_empty(),
                 "a refusal nobody is told about is a row that did nothing"
             );
         }
         assert!(
-            [&gone, &ambiguous, &already]
-                .iter()
-                .all(|other| **other != kept),
+            [&gone, &already].iter().all(|other| **other != kept),
             "the platform's own words are what separate this one from the rest"
         );
         assert!(
             kept.contains("put_ParentWindow failed"),
             "and they are passed through rather than summarised: {kept}"
         );
-        assert_ne!(ambiguous, already);
-        assert_ne!(ambiguous, gone);
-        assert!(
-            !ambiguous.contains("SeatId") && !ambiguous.contains("Seat"),
-            "no seat number reaches a card: it is this program's word for a place \
-             in a layout tree, and the reader has never been shown one — {ambiguous}"
-        );
+        assert_ne!(already, gone);
     }
 
     /// PIN (F1c) — **a refusal that arrives after the pane was promoted says
@@ -7932,7 +7925,7 @@ struct {name} {{
     /// the unpromoted one.
     #[test]
     fn a_refusal_after_a_promotion_reports_the_promotion_too() {
-        let said = TransferRefusal::AmbiguousPage(SeatId(1)).notice();
+        let said = TransferRefusal::AlreadyThere.notice();
         assert_eq!(
             i18n::move_refusal_notice(&said, false),
             said,

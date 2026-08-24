@@ -1523,13 +1523,6 @@ pub enum Text {
     /// is the container — which is the whole of the difference between the two
     /// verbs, so it is the only word that may differ.
     PaneMenuMoveToNewWindow,
-    /// **The card a move refused because a page could not be named** (§2.10's
-    /// `AmbiguousPage`).
-    ///
-    /// It says what is true of the two tabs rather than what the reader should
-    /// do about it: nothing they can do about it is true today, and a card that
-    /// suggested one would be inventing it.
-    MoveRefusedAmbiguousPage,
     /// The card when the tab or the window stopped being open between the press
     /// and the move. A timing the platform is entitled to, said plainly.
     MoveRefusedGone,
@@ -2559,12 +2552,6 @@ impl Text {
             Self::PaneMenuMoveToNewWindow => {
                 pick(lang, "Move pane to new window", "把窗格移到新窗口")
             }
-            Self::MoveRefusedAmbiguousPage => pick(
-                lang,
-                "This tab's page shares a seat number with another tab's, so it cannot be \
-                 told apart. The tab did not move.",
-                "这个 tab 的页与另一个 tab 的页共用座位号，分不出是哪一台，所以 tab 没有移动。",
-            ),
             Self::MoveRefusedGone => pick(
                 lang,
                 "That tab or that window closed before the move. Nothing moved.",
@@ -2799,7 +2786,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 457] = [
+    pub const ALL: [Self; 456] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3253,7 +3240,6 @@ impl Text {
         Self::PreviewLock,
         Self::PreviewUnlock,
         Self::PaneMenuMoveToNewWindow,
-        Self::MoveRefusedAmbiguousPage,
         Self::MoveRefusedGone,
         Self::MoveRefusedAlreadyThere,
         Self::MoveRefusedPaneIsNowATab,
