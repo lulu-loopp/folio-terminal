@@ -2045,12 +2045,17 @@ pub enum SettingsRow {
     AlwaysOnTop,
     Cursor,
     TabLayout,
+    /// **Directly under `Tab layout`** (§7.1.6c-4d 裁决一), the one conditional
+    /// row in the dialog — see [`visible_rows`] for both halves of that.
+    Sidebar,
     /// **`Focus mode`, door 1 of five** (§7.1.6b′).
     ///
-    /// It stands between `Tab layout` and `Sidebar` because the three answer one
-    /// question between them: what shape is this window. Unlike `Sidebar` it
+    /// It stands under the `Tab layout`/`Sidebar` pair because the four answer
+    /// one question between them: what shape is this window. Unlike `Sidebar` it
     /// carries no condition — focus mode works from either tab layout, so the
-    /// row is on the page whichever one is in force.
+    /// row is on the page whichever one is in force, and it is *under* the
+    /// conditional row rather than over it because `Sidebar` has the closer
+    /// claim on `Tab layout`'s foot (put back 2026-08-24).
     ///
     /// It is the row that makes the mode **persist**: the other four doors write
     /// the same one bit, and this is the one that writes it to `settings.json`
@@ -2078,7 +2083,6 @@ pub enum SettingsRow {
     /// A quantity row like `Maximum height` and `Scrollback`, and its three
     /// rungs come from `bt_render` — see [`FOCUS_CARD_HEIGHT_OPTIONS`].
     FocusCardHeight,
-    Sidebar,
     /// User ruling 2026-08-10. Last, because it is the only row of the second
     /// group; it used to sit above the conditional Tab layout/Sidebar pair to
     /// keep it from sliding up and down the dialog, and being in a group of its
@@ -3357,29 +3361,43 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
         SettingsRow::FontSize,
         SettingsRow::Cursor,
         SettingsRow::TabLayout,
-        // **Beside the two rows it shares a question with** (§7.1.6b′ ①), and
-        // above `Sidebar` rather than below it because it is unconditional and
-        // `Sidebar` is not: a row that comes and goes must not have a permanent
-        // one appear underneath it, or the permanent one moves whenever the
-        // conditional one does.
-        SettingsRow::FocusMode,
-        // **Directly under the row that turns the mode on** (user ruling
-        // 2026-08-21), and unconditional beside it: a height for a card is only
-        // a sentence once you know what a card is, and this row is the only
-        // place in the dialog that sentence can be read. It is *not* behind the
-        // disclosure — the reader it exists for is one who has already looked at
-        // the column and found it showing the wrong thirteen rows, which is
-        // `PsReadLine`'s own measure for what does not belong under Advanced.
-        SettingsRow::FocusCardHeight,
     ];
     // **Directly under the row it depends on** (user ruling 2026-08-18, which
     // returns it here from the Advanced group 2026-08-17 had filed it in). It
     // is the one conditional row in the dialog, and a row that only exists
     // while the rail is on has to stand where the rail was just switched on —
     // two headings away it is a row nobody finds.
+    //
+    // **Directly means directly** (put back 2026-08-24, after the user found it
+    // on the machine): the two focus rows landed between the pair on 2026-08-19
+    // and 2026-08-21 and turned "紧贴" into a run of four, which reads as the
+    // same group but is not the same sentence. The reader that ruling is about
+    // has just chosen `Vertical` and is asking what that rail looks like, and
+    // the answer is on the next line or it is not the answer to that question.
+    // Pinned by `the_sidebar_row_stands_directly_under_the_row_that_conditions_it`.
+    //
+    // The cost this pays is the one the 2026-08-19 filing named: an
+    // unconditional row now sits under a row that comes and goes, so `Focus
+    // mode` and `Focus card height` shift by a row as the tab layout is
+    // switched. That is a shift the *whole page below them* already takes — the
+    // ground, the disclosure, everything — so it buys nothing to make the two
+    // focus rows the exception, and it costs the adjacency the ruling was for.
     if tab_layout == TabLayoutMode::Vertical {
         rows.push(SettingsRow::Sidebar);
     }
+    // **Beside the row they share a question with** (§7.1.6b′ ①): `Tab layout`,
+    // `Sidebar` and these two answer "what shape is this window" between them,
+    // and these two are the half that is unconditional — focus mode works from
+    // either tab layout, so the pair is on the page whichever one is in force.
+    rows.push(SettingsRow::FocusMode);
+    // **Directly under the row that turns the mode on** (user ruling
+    // 2026-08-21): a height for a card is only a sentence once you know what a
+    // card is, and this row is the only place in the dialog that sentence can be
+    // read. It is *not* behind the disclosure — the reader it exists for is one
+    // who has already looked at the column and found it showing the wrong
+    // thirteen rows, which is `PsReadLine`'s own measure for what does not
+    // belong under Advanced.
+    rows.push(SettingsRow::FocusCardHeight);
     // ── Appearance, advanced ──
     //
     // The window's ground, read downwards as one sentence (§7.1.6c-4b): is
@@ -12503,27 +12521,24 @@ mod tests {
             .iter()
             .position(|row| *row == SettingsRow::Sidebar)
             .expect("a vertical tab layout grows the Sidebar row");
-        // **The run, not the neighbour** (§7.1.6b′ ①, 2026-08-19). It read
-        // `railed[at - 1] == TabLayout` until focus mode's own row landed
-        // between the two, which the mock-up puts there deliberately: those
-        // three rows answer one question between them — what shape is this
-        // window — so the group is the adjacency the 2026-08-18 ruling was
-        // asking for. What that ruling actually refuses is still refused here,
-        // and it is what this now asserts: the conditional row may not be two
-        // headings away or behind a disclosure from the row that switches it on.
+        // **The neighbour, and then the run** (§7.1.6c-4d 裁决一, put back
+        // 2026-08-24). This read `railed[at.saturating_sub(3)..=at]` between
+        // 2026-08-19 and 2026-08-24, on the argument that the group is the
+        // adjacency the ruling was asking for — which let focus mode's two rows
+        // wedge in between the pair, and the user found the gap on the machine.
+        // The ruling's words are 紧贴, so the distance is one; the rest of the
+        // "what shape is this window" group follows the pair instead of
+        // splitting it.
         assert_eq!(
-            &railed[at.saturating_sub(3)..=at],
-            &[
-                SettingsRow::TabLayout,
-                SettingsRow::FocusMode,
-                // Focus card height joined the run on 2026-08-21: it is the one
-                // preference *about* focus mode, so it stands directly under the
-                // row that turns the mode on — and the "what shape is this
-                // window" group grew by one without Sidebar leaving its foot.
-                SettingsRow::FocusCardHeight,
-                SettingsRow::Sidebar
-            ],
-            "and it stands in the run the row that conditions it opens"
+            &railed[at - 1..=at],
+            &[SettingsRow::TabLayout, SettingsRow::Sidebar],
+            "and it stands on the foot of the row that conditions it"
+        );
+        assert_eq!(
+            &railed[at + 1..=at + 2],
+            &[SettingsRow::FocusMode, SettingsRow::FocusCardHeight],
+            "the two unconditional rows of the same question follow the pair — \
+             `Focus card height` under the row that turns the mode on"
         );
         assert!(
             !SettingsRow::PsReadLine.advanced(),
@@ -12549,6 +12564,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// PIN (§7.1.6c-4d 裁决一, user ruling 2026-08-18; put back 2026-08-24) —
+    /// **`Sidebar` is the row directly under `Tab layout`, with nothing wedged
+    /// between them.**
+    ///
+    /// The ruling's own words are "紧贴 `Tab layout` 之下", and its reason is a
+    /// reader's sentence rather than a taxonomy: someone has just chosen
+    /// `Vertical` and is asking what that rail looks like, so the answer may not
+    /// be one row further down for every row a later slice thinks of. A run of
+    /// four is not the adjacency that ruling bought — `Focus mode` and `Focus
+    /// card height` landed between the two on 2026-08-19 and 2026-08-21 without
+    /// anyone restating it, and the user found the gap on the machine.
+    ///
+    /// Stated as an index and not as a slice, because the claim is exactly the
+    /// distance: one. What may follow the pair is the next test's business.
+    ///
+    /// Red gate: push `Sidebar` after either focus row — which is where it stood
+    /// until this was written — and the arithmetic goes red naming the distance
+    /// it found.
+    #[test]
+    fn the_sidebar_row_stands_directly_under_the_row_that_conditions_it() {
+        let railed = visible_rows(TabLayoutMode::Vertical);
+        let tab_layout = railed
+            .iter()
+            .position(|row| *row == SettingsRow::TabLayout)
+            .expect("the dialog asks where the tabs go");
+        let sidebar = railed
+            .iter()
+            .position(|row| *row == SettingsRow::Sidebar)
+            .expect("a vertical tab layout grows the Sidebar row");
+        assert_eq!(
+            sidebar,
+            tab_layout + 1,
+            "the conditional row stands on the foot of the row that conditions \
+             it: a reader who just chose `Vertical` reads the answer to \"what \
+             does that rail look like\" on the very next line, not past whatever \
+             unconditional rows a later slice filed under `Tab layout`"
+        );
     }
 
     /// PIN (user ruling 2026-08-17) — **a collapsed group costs no band, no
@@ -17029,9 +17083,9 @@ mod tests {
                 SettingsRow::FontSize,
                 SettingsRow::Cursor,
                 SettingsRow::TabLayout,
+                SettingsRow::Sidebar,
                 SettingsRow::FocusMode,
                 SettingsRow::FocusCardHeight,
-                SettingsRow::Sidebar,
                 SettingsRow::BackgroundImage,
                 SettingsRow::ImageFit,
                 SettingsRow::ImageOpacity,

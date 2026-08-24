@@ -5030,6 +5030,42 @@
           </div>
         </div>
 
+        <!-- SIDEBAR TOUCHES TAB LAYOUT AGAIN (user ruling 2026-08-18),
+             reversing the 2026-08-17 filing of it under Advanced. The argument
+             for the move was that the CONDITION carries the dependency once the
+             group does the hiding — the row is not there at all while the tabs
+             run across the top. In use it does not carry it: a row that appears
+             only under a vertical rail, two headings below the row that turns
+             the rail on and behind a collapsed disclosure, is a row nobody
+             meets. The disclosure had hidden the answer to the question the row
+             above it had just raised. Adjacency again, condition unchanged.
+             TOUCHES MEANS TOUCHES (user report 2026-08-24). The two focus rows
+             below landed between this row and `Tab layout` on 2026-08-19 and
+             2026-08-21, on the reading that the four are one group and the group
+             is the adjacency. A group is not a sentence: the reader this ruling
+             is about has just chosen `Vertical` and is asking what that rail
+             looks like, and the answer has to be the next line. The rest of the
+             family follows the pair instead of splitting it. -->
+        <div class="row" id="row-railmode">
+          <div class="text">
+            <div class="title">Sidebar</div>
+            <div class="desc">How the vertical tab sidebar rests</div>
+          </div>
+          <div class="combo" data-combo="railmode">
+            <button aria-haspopup="listbox"><span class="value">Expanded</span><span class="chev">▼</span></button>
+            <!-- user ruling 2026-08-10: "Icons, expand on hover" → "Icons".
+                 The sentence form named the hover behaviour in the one place a
+                 label has no room for it, and it was the only option string in
+                 the whole dialog wide enough to overrun its own popup. The
+                 hover-to-expand behaviour is unchanged — it is simply not
+                 spelled out in the picker any more. -->
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="expanded" role="option"><span class="tick">✓</span>Expanded</div>
+              <div class="combo-item" data-v="icons" role="option"><span class="tick">✓</span>Icons</div>
+            </div>
+          </div>
+        </div>
+
         <!-- FOCUS MODE IS A ROW, AND IT SITS IN THIS FAMILY (user ruling
              2026-08-19). The earlier reading — "a mode entered many times a day
              is a verb, not a preference, and a modal you must dismiss is the
@@ -5040,10 +5076,12 @@
              Settings row, over ONE bit. So: this row and the quick doors write
              the same `state.focusMode`, and the row is what makes it PERSIST — a
              window closed in focus mode reopens in focus mode (`settings.json`
-             v14 → v15). It stands beside `Tab layout` and `Sidebar` because the
-             three answer one question between them: what shape is this window.
-             Unlike those two it carries no condition — it works from either tab
-             layout (see the `.window.focusmode` rules).
+             v14 → v15). It stands under the `Tab layout`/`Sidebar` pair because
+             the four answer one question between them: what shape is this
+             window. Unlike those two it carries no condition — it works from
+             either tab layout (see the `.window.focusmode` rules) — and it is
+             below the conditional row rather than above it because `Sidebar` has
+             the closer claim on `Tab layout`'s foot (2026-08-24).
              This is DOOR 1 of two, and both of them work in both directions; the
              other is `Ctrl+Shift+Z`. The two doors that hung off a pane — a
              double-click on its header and a row in its ⌄ menu — were withdrawn
@@ -5108,35 +5146,6 @@
               <div class="combo-item selected" data-v="160" role="option"><span class="tick">✓</span>160 px</div>
               <div class="combo-item" data-v="240" role="option"><span class="tick">✓</span>240 px</div>
               <div class="combo-item" data-v="320" role="option"><span class="tick">✓</span>320 px</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- SIDEBAR TOUCHES TAB LAYOUT AGAIN (user ruling 2026-08-18),
-             reversing the 2026-08-17 filing of it under Advanced. The argument
-             for the move was that the CONDITION carries the dependency once the
-             group does the hiding — the row is not there at all while the tabs
-             run across the top. In use it does not carry it: a row that appears
-             only under a vertical rail, two headings below the row that turns
-             the rail on and behind a collapsed disclosure, is a row nobody
-             meets. The disclosure had hidden the answer to the question the row
-             above it had just raised. Adjacency again, condition unchanged. -->
-        <div class="row" id="row-railmode">
-          <div class="text">
-            <div class="title">Sidebar</div>
-            <div class="desc">How the vertical tab sidebar rests</div>
-          </div>
-          <div class="combo" data-combo="railmode">
-            <button aria-haspopup="listbox"><span class="value">Expanded</span><span class="chev">▼</span></button>
-            <!-- user ruling 2026-08-10: "Icons, expand on hover" → "Icons".
-                 The sentence form named the hover behaviour in the one place a
-                 label has no room for it, and it was the only option string in
-                 the whole dialog wide enough to overrun its own popup. The
-                 hover-to-expand behaviour is unchanged — it is simply not
-                 spelled out in the picker any more. -->
-            <div class="combo-menu" role="listbox">
-              <div class="combo-item selected" data-v="expanded" role="option"><span class="tick">✓</span>Expanded</div>
-              <div class="combo-item" data-v="icons" role="option"><span class="tick">✓</span>Icons</div>
             </div>
           </div>
         </div>
