@@ -26,7 +26,21 @@ windows = { version = "0.62.2", features = [
     "UI_Notifications",
     "Win32_Foundation",
     "Win32_Globalization",
+    # The four that let the composition device rasterize **one** thing: the
+    # 1×1 premultiplied surface every web pane's ground is scaled out of
+    # (`page_ground`). A composition device built on a null rendering device
+    # cannot create surfaces at all, so the ground goes through
+    # `CreateSurfaceFactory`, which takes a rendering device of its own — a
+    # D3D11 one, because that is the only kind `IDXGIDevice` comes on and
+    # `Direct2D` is a second stack for a call `ClearView` already makes.
+    # `Direct2D_Common` is here for `D2D_MATRIX_3X2_F` alone, which is the type
+    # `IDCompositionVisual::SetTransform` takes.
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
     "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_DirectWrite",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",

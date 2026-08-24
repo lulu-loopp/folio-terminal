@@ -6189,6 +6189,14 @@ struct WindowRuntime {
     ///
     /// Empty in a horizontal layout, and empty until the first chrome build.
     rail_chrome: seats::ChromeGroup,
+    /// **Whatever the window is moving this frame** — a tab in the hand or
+    /// mid-FLIP, a rail row, a focus card — and its shadow (§7.1.6b″).
+    ///
+    /// Beside [`Self::rail_chrome`] and for its reason: it is a product of the
+    /// chrome build, sampled on that build's own `now`, and rebuilding it at the
+    /// overlay would be asking a second clock. Empty on every frame nothing is
+    /// moving, which is almost all of them.
+    flight_chrome: seats::ChromeGroup,
     /// The rail state the chrome was last built with, quantised to what can
     /// actually reach the glass — the rail's half of the frame debt.
     ///
@@ -15207,6 +15215,47 @@ impl FlipTween {
         let progress = elapsed.as_secs_f32() / TAB_FLIP.as_secs_f32();
         (self.from * (1.0 - cubic_bezier(progress, GRAB_EASE)), true)
     }
+
+    /// **How much of this slide is left**, `1.0` at the moment it started and
+    /// `0.0` once it is over (§7.1.6b″).
+    ///
+    /// [`Self::sample`]'s fraction without its distance, and the distance is
+    /// exactly what has to go. What reads this is how a moving row is *drawn* —
+    /// which level it is on and how heavy its shadow is — and those are
+    /// properties of the movement rather than of its length: a tab swapping with
+    /// its neighbour and a tab thrown five slots along are one event, and a
+    /// shadow keyed on `from` would be five times heavier for the second.
+    ///
+    /// The same `motion` gate as `sample`, so reduced motion answers `0.0` for
+    /// the same reason it answers "not moving": there is no slide, so there is
+    /// nothing to lift and nothing to cast a shadow.
+    fn remaining(self, now: Instant, motion: Motion) -> f32 {
+        let Some(started) = self.started.filter(|_| motion == Motion::Full) else {
+            return 0.0;
+        };
+        let elapsed = now.saturating_duration_since(started);
+        if elapsed >= TAB_FLIP {
+            return 0.0;
+        }
+        let progress = elapsed.as_secs_f32() / TAB_FLIP.as_secs_f32();
+        (1.0 - cubic_bezier(progress, GRAB_EASE)).clamp(0.0, 1.0)
+    }
+
+    /// **How far through a flight this element is**, from whichever of the two
+    /// clocks is driving it — [`Self::sample`]'s split, on the fraction.
+    ///
+    /// `grabbed` is the offset the pointer has put the element at, and its
+    /// *presence* is the whole of what is read: a row in the hand is fully
+    /// lifted whatever that offset happens to be, including zero. Reading the
+    /// number instead is the bug this signature refuses — a card carried back to
+    /// exactly its own slot would drop into the list under its neighbours on the
+    /// one frame the hand passed over home.
+    fn flight(self, now: Instant, motion: Motion, grabbed: Option<f32>) -> f32 {
+        match grabbed {
+            Some(_) => 1.0,
+            None => self.remaining(now, motion),
+        }
+    }
 }
 
 /// `@keyframes tab-land` running down (mock-up 955-968).
@@ -16096,6 +16145,31 @@ struct OverlayStack {
     /// `.rail { z-index: 15 }` — chrome that floats over the panes and over
     /// nothing else. Every surface below is entitled to cover it.
     rail: Vec<marks::OverlayLayer>,
+    /// **Whatever is in motion in one of the three lists** — a tab in the strip,
+    /// a row in the rail, a card in the focus column (§7.1.6b″; Claude's shape,
+    /// user-approved 2026-08-24).
+    ///
+    /// Directly above [`Self::rail`] and nowhere else, and both halves of that
+    /// are the ruling:
+    ///
+    /// * **Above the rail**, because the thing it has to cover is the list it
+    ///   came out of, and a card flies over the other cards of its own column.
+    ///   Being last in the rail's own group was never enough — a group is drawn
+    ///   fill-then-mark-then-text, so a resting card's *text* still printed
+    ///   through the face of the card passing over it, which is the report this
+    ///   slot answers.
+    /// * **And no higher**, because "the one that is moving is on top" is a
+    ///   statement about its neighbours and not about the window. A menu, a
+    ///   modal, a tooltip and the drag ghost are all still entitled to cover it;
+    ///   a tab that flew over an open dialog would be a strip that had escaped
+    ///   the question the window is asking.
+    ///
+    /// The drag ghost is deliberately *not* here. It hangs off the pointer in
+    /// [`Self::drag_ghost`], stays translucent, and is a picture of what you are
+    /// carrying — while what flies here is the row itself. Making the ghost
+    /// opaque would hide the strip you are aiming at with a copy of the thing
+    /// you are aiming.
+    flight: Vec<marks::OverlayLayer>,
     /// The arriving panes' veil and the dock drawing (`#dock-shift` 24,
     /// `#dock-preview` 25) — drawings *on* the layout rather than surfaces over
     /// the window. See [`ground_overlay_layers`].
@@ -16234,6 +16308,7 @@ impl OverlayStack {
             terminal_bars,
             command_rail,
             rail,
+            flight,
             ground,
             search,
             pane_notices,
@@ -16255,6 +16330,7 @@ impl OverlayStack {
             terminal_bars,
             command_rail,
             rail,
+            flight,
             ground,
             search,
             pane_notices,
@@ -18522,6 +18598,19 @@ impl TabState {
             Some(offset) => offset,
             None => self.flip.sample(now, motion).0,
         }
+    }
+
+    /// **How far through a flight this tab is** — `1.0` while it is in the hand,
+    /// the slide's remaining fraction while it settles, `0.0` at rest
+    /// (§7.1.6b″).
+    ///
+    /// [`Self::drawn_offset`]'s companion, with the same two sources and the
+    /// same split: a tab in the hand is *fully* lifted whatever the pointer has
+    /// done with it — including putting it back exactly where it started, which
+    /// is the case an offset-derived answer gets wrong — and every other tab is
+    /// however much of its slide home is left.
+    fn drawn_flight(&self, now: Instant, motion: Motion, grabbed: Option<f32>) -> f32 {
+        self.flip.flight(now, motion, grabbed)
     }
 
     /// Whether *any* shell in this tab is working — the breath's reading of a
@@ -22599,6 +22688,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         // the window restored into, not a fold arriving out of nowhere.
         rail_fold: RevealTween::resting(f32::from(u8::from(!rail.collapsed)), RAIL_TRANSITION),
         rail_chrome: seats::ChromeGroup::default(),
+        flight_chrome: seats::ChromeGroup::default(),
         last_drawn_rail: None,
         tab_press: None,
         pane_press: None,
@@ -22931,6 +23021,11 @@ impl Runtime<'_> {
         let compositor = bt_platform::Compositor::new(hwnd)
             .map_err(|error| anyhow!(error))
             .context("open the window's DirectComposition visual tree")?;
+        // The floor's colour is settled with the tree and not with the first
+        // page: a page can be born at launch (`BT_WEB_DEV`, a restored session),
+        // and a floor that learned its colour only from the *next* theme flip
+        // would be black under the first one.
+        install_page_ground_color(&compositor);
         let (mut gpu, mut renderer) = pollster::block_on(GpuContext::open(
             bt_render::WindowTarget::CompositionVisual(compositor.gpu_visual_ptr()),
             physical.width,
@@ -23459,6 +23554,9 @@ impl Runtime<'_> {
         let compositor = bt_platform::Compositor::new(hwnd)
             .map_err(|error| anyhow!(error))
             .context("open the window's DirectComposition visual tree")?;
+        // Beside the first window's, and for its reason: a second window can be
+        // opened straight onto a page (`Move pane to new window` on a web seat).
+        install_page_ground_color(&compositor);
         // **This application's device, not a second one** (§2.2). The surface is
         // created by the instance that created the device and its format is
         // asked of the same adapter, which is the whole of the sharing contract;
@@ -24696,6 +24794,15 @@ impl Runtime<'_> {
                         self.app.motion,
                         carried.filter(|_| grabbed == Some(index)),
                     ),
+                    // **How far through a flight this tab is** (§7.1.6b″), read
+                    // off the same clock and the same hand as the offset beside
+                    // it, and deliberately not derived from it — see
+                    // [`TabState::drawn_flight`].
+                    tab.drawn_flight(
+                        now,
+                        self.app.motion,
+                        carried.filter(|_| grabbed == Some(index)),
+                    ),
                     // The wash the tween is running, or a full one while this tab
                     // is the one under a carried pane — whichever is louder, so a
                     // tab that has only just landed and is now being aimed at
@@ -24758,7 +24865,17 @@ impl Runtime<'_> {
         let mut tabs = tabs
             .into_iter()
             .map(
-                |(title, pane_count, mark_kind, mark, trailer, offset, landing, placeholder)| {
+                |(
+                    title,
+                    pane_count,
+                    mark_kind,
+                    mark,
+                    trailer,
+                    offset,
+                    flight,
+                    landing,
+                    placeholder,
+                )| {
                     seats::TabContent {
                         mark_kind,
                         badge_text_width: if pane_count > 1 {
@@ -24783,6 +24900,7 @@ impl Runtime<'_> {
                         mark,
                         trailer,
                         offset,
+                        flight,
                         landing,
                     }
                 },
@@ -25264,7 +25382,11 @@ impl Runtime<'_> {
                 pane_menu_seat: self.window.pane_menu.as_ref().map(|menu| menu.seat),
             },
         );
-        let seats::WindowChrome { seats, rail } = chrome;
+        let seats::WindowChrome {
+            seats,
+            rail,
+            flight,
+        } = chrome;
         dump_chrome_frame(&seats);
         let icons = self.window.chrome_marks.resolve(&seats.sprites);
         let chrome_changed = self
@@ -25278,6 +25400,10 @@ impl Runtime<'_> {
         // sampled on this frame's `now`, and asking for it again a few lines
         // later would be asking a second clock.
         self.window.rail_chrome = rail;
+        // **And whatever is in motion, on the level above both** (§7.1.6b″).
+        // Kept beside the rail's and for the rail's reason: it is a product of
+        // this build, sampled on this frame's `now`.
+        self.window.flight_chrome = flight;
         // From the same geometry, on the same beat: what the strip draws is what
         // can be tipped, and both are decided here or neither is.
         self.rebuild_tooltip_anchors(scale, width as f32, now);
@@ -28844,6 +28970,14 @@ impl Runtime<'_> {
             terminal_bars: self.terminal_bar_layers(),
             command_rail: self.command_rail_layers(),
             rail: self.rail_overlay_layers(),
+            // **Directly above the list it came out of** (§7.1.6b″). At full
+            // opacity and never at the rail's fold: the fold is what a panel
+            // *leaving* looks like, and a card in flight is a card that is very
+            // much here — a column fading out while one of its cards travelled
+            // at full strength would be the fold saying one thing and the flight
+            // saying another. The two cannot be up together anyway; passing
+            // `1.0` states which one would win.
+            flight: rail_overlay_layer(&self.window.flight_chrome, 1.0),
             ground: ground_overlay_layers(self.pane_fade_veils(now), self.dock_overlay_layers(now)),
             // `.srchbar { z-index: 30 }` — above the ground drawings, below the
             // schematic. It also stores the capsule's rectangle for the press
@@ -32068,6 +32202,14 @@ impl Runtime<'_> {
         // drawn from that statement, not from anything in this process's frame.
         self.apply_window_dark_mode()?;
         install_theme_class_background(&self.window.window)?;
+        // **And the floor under every page in this window** (§7.14). Beside
+        // the class brush and not somewhere else, because the two answer the
+        // same question about the same ground for two different surfaces —
+        // what a resize band shows, and what a web pane shows where the browser
+        // has not caught up. Splitting them is how one of the pair gets left
+        // behind on a theme flip, which is the whole reason the brush's own
+        // hot-swap was written here in §7.1.6c-4b.
+        install_page_ground_color(&self.window.compositor);
         self.sync_math_layout_key();
         // The one thing a rail's key cannot see. A palette is not a fact about a
         // pane, so [`cmdrail::RailKey`] does not carry one — which means a rail
@@ -69071,6 +69213,33 @@ mod background_mailbox_tests {
     }
 }
 
+/// **Tell one window's compositor what colour the floor under its pages is**
+/// (§7.14; user ruling 2026-08-24).
+///
+/// [`install_theme_class_background`]'s opposite number, and every door that
+/// calls one calls the other: the class brush answers "what does a resize band
+/// show", this answers "what does a web pane show where the page has not
+/// reached yet", and both answers are the same ground.
+///
+/// The colour comes from [`bt_render::window_ground_premultiplied_srgb`] and is
+/// never computed here, because the arithmetic that turns a scheme's background
+/// and a ground alpha into the bytes a surface holds belongs to the renderer
+/// that already owns both — a second copy of it in this file is a second thing
+/// to keep in step with the clear.
+///
+/// **Failure is reported and not propagated.** A window whose floor could not be
+/// painted is a window that draws exactly what it drew before this slice, which
+/// is a defect and not a reason to refuse a theme change; and the two callers
+/// are a window opening and a person pressing a combo, neither of which has
+/// anywhere to put the error.
+fn install_page_ground_color(compositor: &bt_platform::Compositor) {
+    if let Err(error) =
+        compositor.set_page_ground_color(bt_render::window_ground_premultiplied_srgb())
+    {
+        eprintln!("BT_WEB page ground colour: {error}");
+    }
+}
+
 fn install_theme_class_background(window: &Window) -> Result<()> {
     let opaque = bt_render::window_ground().alpha >= 1.0;
     bt_platform::install_window_class_background(window_hwnd(window)?, opaque.then(background_rgb))
@@ -70200,6 +70369,7 @@ mod tests {
             terminal_bars: mark(16),
             command_rail: mark(13),
             rail: mark(1),
+            flight: mark(19),
             ground: mark(2),
             search: mark(14),
             pane_notices: mark(17),
@@ -70224,11 +70394,11 @@ mod tests {
         assert_eq!(
             order,
             vec![
-                0, 16, 13, 1, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 8, 9, 10, 11
+                0, 16, 13, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 8, 9, 10, 11
             ],
-            "bottom to top: pane bars, terminal thumbs, command rails, rail, ground, search \
-             capsule, integration strips, download sheet, schematic, float, modal, file menu, git \
-             menu, terminal menu, notices, tip, glance, ghost"
+            "bottom to top: pane bars, terminal thumbs, command rails, rail, flight, ground, \
+             search capsule, integration strips, download sheet, schematic, float, modal, file \
+             menu, git menu, terminal menu, notices, tip, glance, ghost"
         );
         let at = |tag: u8| {
             order
@@ -70242,6 +70412,21 @@ mod tests {
         assert!(
             at(5) > at(4),
             "the settings panel is painted over the floating window, not under it"
+        );
+        // §7.1.6b″, and the pair is the whole ruling: a card in flight covers
+        // the column it came out of, and every surface you *summoned* still
+        // covers it. Written as two comparisons rather than trusted to the
+        // vector above, because "highest of its neighbours" and "highest in the
+        // window" are the two readings the ruling had to choose between and the
+        // wrong one is a tab flying over an open dialog.
+        assert!(
+            at(19) > at(1),
+            "the card that is moving is above the column it came out of"
+        );
+        assert!(
+            at(19) < at(5) && at(19) < at(9) && at(19) < at(11),
+            "and below the modal, the tip and the ghost: it is the top of its \
+             own list, not the top of the window"
         );
         // P2-9 slice 1: the two instruments that share a terminal pane's right
         // edge. They never overlap a pixel, so this is a statement about which
@@ -83718,6 +83903,75 @@ mod tests {
         pty.shutdown().unwrap();
     }
     // ── T5: the drag's own clocks and rulings ──
+
+    /// PIN (§7.1.6b″) — **"in flight" is a fraction of the journey, not a
+    /// distance, and a hand is always the whole of it.**
+    ///
+    /// Three claims, and each one is a way the obvious implementation goes
+    /// wrong:
+    ///
+    /// * A tab *in the hand* answers `1.0` even when the pointer has carried it
+    ///   back to exactly its own slot. `offset != 0.0` gets this wrong, and the
+    ///   frame it gets wrong is the one where a card you are still holding drops
+    ///   back into the list under its neighbours.
+    /// * A settling tab answers the *remaining fraction* and not `from`. Two
+    ///   tabs displaced by one slot and by five are one event at two magnitudes;
+    ///   a shadow keyed on the distance is five times heavier for the second.
+    /// * **Reduced motion answers `0.0`**, because there is no slide: with no
+    ///   animation the tab is simply in its slot, and lifting a thing that is
+    ///   not moving would be inventing a state the reader asked not to see.
+    ///
+    /// Red gate: derive the answer from `sample().0` and the first assertion
+    /// goes red; drop the `motion` filter in `FlipTween::remaining` and the last
+    /// one does.
+    #[test]
+    fn a_flight_is_how_much_of_the_journey_is_left_and_a_hand_is_all_of_it() {
+        let now = Instant::now();
+        let resting = FlipTween::default();
+
+        assert_eq!(
+            resting.flight(now, Motion::Full, None),
+            0.0,
+            "a tab nothing has touched is not in flight"
+        );
+        assert_eq!(
+            resting.flight(now, Motion::Full, Some(0.0)),
+            1.0,
+            "a tab carried back to its own slot is still in the hand"
+        );
+
+        // Two tabs displaced by very different distances, sampled at the same
+        // instant of the same tween: one event, one answer.
+        let mut near = FlipTween::default();
+        let mut far = FlipTween::default();
+        near.displace(12.0, now, Motion::Full);
+        far.displace(600.0, now, Motion::Full);
+        let quarter = now + TAB_FLIP / 4;
+        assert!(
+            (near.flight(quarter, Motion::Full, None) - far.flight(quarter, Motion::Full, None))
+                .abs()
+                < 1e-6,
+            "a one-slot swap and a five-slot swap are the same flight"
+        );
+        assert!(
+            near.flight(quarter, Motion::Full, None) < 1.0,
+            "and it has already begun to fade"
+        );
+        assert_eq!(
+            near.flight(now + TAB_FLIP, Motion::Full, None),
+            0.0,
+            "it is over when the tween is"
+        );
+
+        let mut reduced = FlipTween::default();
+        reduced.displace(120.0, now, Motion::Reduced);
+        assert_eq!(
+            reduced.flight(quarter, Motion::Reduced, None),
+            0.0,
+            "there is no slide to be in the middle of when the machine has been \
+             asked not to animate"
+        );
+    }
 
     #[test]
     fn a_grabbed_tab_follows_the_hand_until_the_strip_runs_out() {

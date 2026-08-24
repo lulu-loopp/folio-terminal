@@ -202,7 +202,8 @@ pub enum VisualLayer {
 
 impl VisualLayer {
     /// The `insertAbove` argument to pass `AddVisual` **when the reference
-    /// visual is NULL**, which is the only form this program calls it in.
+    /// visual is NULL** — the form that names no sibling and asks for an end of
+    /// the list.
     #[must_use]
     pub const fn insert_above_with_null_reference(self) -> bool {
         match self {
@@ -211,6 +212,20 @@ impl VisualLayer {
         }
     }
 }
+
+/// The `insertAbove` argument that puts a visual **directly above a named
+/// sibling**, and the second form this program calls `AddVisual` in.
+///
+/// The same `TRUE` [`VisualLayer::Bottom`] passes, and it means something else:
+/// with a NULL reference it asks for the beginning of the child list, and with
+/// a reference it asks for the slot just above that one visual. Spelled as its
+/// own name rather than reached through the enum, because a reader who has
+/// learned "`Bottom` is `TRUE`" would otherwise read the page's own `AddVisual`
+/// — which puts it *above* its ground — as putting it at the bottom again.
+///
+/// One caller: `Compositor::attach_web_visual`, where a page has to land on the
+/// floor built for it in the same breath (§7.14).
+pub const INSERT_ABOVE_REFERENCE: bool = true;
 
 /// **The four switches a locally minted page is hosted behind** (W2 slice 5;
 /// `docs/plans/web-preview/plan.md` section 3, the controlled file entry).
@@ -321,8 +336,18 @@ mod visual_layer_tests {
     /// once by this slice's own acceptance shots. What a test *can* hold is that
     /// the product's one web `AddVisual` is the call the photograph was taken
     /// of.
+    ///
+    /// **Re-judged 2026-08-24 (§7.14).** The page is no longer added at the
+    /// beginning of the child list; it is added *directly above the floor built
+    /// for it in the same call*, which is a stronger statement of the same
+    /// stacking — the floor is at the beginning of the list, the page is the
+    /// slot above it, and `gpu` is still above them both. The weaker spelling
+    /// would now be a bug rather than a simplification: two pages each asking
+    /// for "the beginning of the list" would interleave with each other's
+    /// floors, and a page whose floor ended up on top of it is a pane of solid
+    /// theme colour where a web page should be.
     #[test]
-    fn the_compositor_adds_the_web_visual_at_the_bottom_and_nowhere_else() {
+    fn the_compositor_adds_the_web_visual_directly_above_its_own_ground() {
         // Whitespace out, because rustfmt decides where the line breaks in a
         // three-argument call go and the claim is about the arguments. Every
         // needle is spelled in pieces so that this test's own source is not one
@@ -343,15 +368,76 @@ mod visual_layer_tests {
         assert!(
             call.starts_with(concat!(
                 "AddVisual",
-                "(&web,VisualLayer::Bottom.insert_above_with_null_reference(),"
+                "(&web,INSERT_ABOVE_REFERENCE,Some(&ground.holder))"
             )),
-            "the web visual's insertion must name the layer it is claiming \
-             rather than a bare boolean: {}",
+            "the web visual's insertion must name the sibling it is claiming a \
+             slot above rather than a bare boolean and a NULL: {}",
             &call[..call.len().min(120)]
         );
         assert!(
             !source.contains(concat!("AddVisual", "(&web,VisualLayer::Top")),
             "nothing may add the web visual above anything"
+        );
+        // And the floor itself is the one thing that does ask for the beginning
+        // of the list, so there is always a sibling for the page to sit above.
+        let ground_call = concat!(
+            "AddVisual",
+            "(&holder,VisualLayer::Bottom.insert_above_with_null_reference(),None::<&IDCompositionVisual>,)"
+        );
+        assert_eq!(
+            source.matches(ground_call).count(),
+            1,
+            "exactly one call puts a page's floor at the bottom of the tree"
+        );
+    }
+
+    /// **The floor is placed by the call that places the page, and taken out by
+    /// the call that takes the page out** (§7.14; user ruling 2026-08-24).
+    ///
+    /// The defect this slice fixes is *two rectangles disagreeing*: Folio stops
+    /// painting a pane on the frame the pane moves, and the browser underneath
+    /// grows into it on a clock of its own. A floor that had a placement path of
+    /// its own would be a third rectangle in that race, and the frames where it
+    /// lagged would show the desktop exactly as before — so the pin is that
+    /// there is no second path.
+    ///
+    /// Red gate: give `PageGround` its own `place_page_ground` entry point and
+    /// call it from the app; the first assertion goes red because the placement
+    /// is no longer inside `place_web_visual`. Drop the removal from
+    /// `detach_web_visual` and the second goes red, which is the state that
+    /// leaves a rectangle of theme colour standing where a pane no longer is.
+    #[test]
+    fn a_pages_floor_is_placed_and_removed_with_the_page_and_never_alone() {
+        let source: String = include_str!("lib.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        let placement = source
+            .find(concat!("pubfnplace_web", "_visual("))
+            .expect("the one door that places a page");
+        let next_door = source[placement..]
+            .find(concat!("fnplace_", "clip("))
+            .expect("the helper that follows it");
+        let body = &source[placement..placement + next_door];
+        for owed in [
+            "ground.holder.SetOffsetX2(x)",
+            "ground.holder.SetOffsetY2(y)",
+            "self.place_clip(&ground.holder,clip,",
+            "ground.scale.SetMatrixElement2(0,0,",
+        ] {
+            assert!(
+                body.contains(owed),
+                "the call that places a page must place its floor too, and this \
+                 half of it is missing: {owed}"
+            );
+        }
+        let teardown = source
+            .find(concat!("pubfndetach_web", "_visual("))
+            .expect("the one door that takes a page out");
+        let teardown_body = &source[teardown..teardown + 700];
+        assert!(
+            teardown_body.contains(concat!("web_ground", ".borrow_mut().remove(&page)")),
+            "a page's floor leaves with the page"
         );
     }
 
@@ -1065,8 +1151,14 @@ mod windows_impl {
             RPC_E_CHANGED_MODE, SetLastError, WAIT_EVENT, WAIT_OBJECT_0, WIN32_ERROR, WPARAM,
         },
         Globalization::{GetUserDefaultUILanguage, GetUserPreferredUILanguages, MUI_LANGUAGE_NAME},
+        Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE,
+        Graphics::Direct3D11::{
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
+            ID3D11DeviceContext1, ID3D11RenderTargetView, ID3D11Resource, ID3D11Texture2D,
+        },
         Graphics::DirectComposition::{
             DCompositionCreateDevice3, IDCompositionDesktopDevice, IDCompositionDevice3,
+            IDCompositionMatrixTransform, IDCompositionSurface, IDCompositionSurfaceFactory,
             IDCompositionTarget, IDCompositionVisual,
         },
         Graphics::DirectWrite::{
@@ -1078,6 +1170,10 @@ mod windows_impl {
             DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE, DWMSBT_AUTO, DWMSBT_NONE,
             DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
             DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+        },
+        Graphics::Dxgi::{
+            Common::{DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM},
+            IDXGIDevice,
         },
         Graphics::Gdi::{
             CreateSolidBrush, DeleteObject, GetMonitorInfoW, HGDIOBJ, MONITOR_DEFAULTTONEAREST,
@@ -1151,9 +1247,10 @@ mod windows_impl {
     };
 
     use super::{
-        CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, NonZeroIsize, PageVisual,
-        TaskbarProgress, TaskbarProgressState, ThreadPriority, VisualLayer, WheelScrollAmount,
-        WindowRect, composition_visual_offset, custom_frame_hit_test, logical_px_for_dpi,
+        CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, INSERT_ABOVE_REFERENCE,
+        NonZeroIsize, PageVisual, TaskbarProgress, TaskbarProgressState, ThreadPriority,
+        VisualLayer, WheelScrollAmount, WindowRect, composition_visual_offset,
+        custom_frame_hit_test, logical_px_for_dpi,
     };
 
     /// GDI brush currently owned by this process and installed on winit's shared window class.
@@ -1283,6 +1380,82 @@ mod windows_impl {
         /// present funnel holds the compositor by shared reference and always
         /// has.
         web: RefCell<BTreeMap<PageVisual, IDCompositionVisual>>,
+        /// **The floor under each page** — one [`PageGround`] per entry in
+        /// [`Self::web`], created and destroyed with it. See [`PageGround`].
+        web_ground: RefCell<BTreeMap<PageVisual, PageGround>>,
+        /// The one surface every page ground is scaled out of, minted on the
+        /// first [`Compositor::attach_web_visual`] and never again.
+        ///
+        /// `None` until then, and that is the whole of what a window with no
+        /// page pays: no D3D11 device, no surface factory, no surface. The
+        /// composition device itself is still built on a null rendering device
+        /// — this is the one thing in the tree that is rasterized, and it is
+        /// rasterized through a factory of its own.
+        ground_surface: RefCell<Option<GroundSurface>>,
+        /// The colour last put on that surface, premultiplied and sRGB-encoded.
+        ///
+        /// Kept because the two events that need it arrive in either order: a
+        /// page can be attached before the app has said what the ground is, and
+        /// the ground can change while no page exists. Whichever happens first
+        /// leaves the answer here for the other one.
+        ground_color: Cell<[f32; 4]>,
+    }
+
+    /// The two visuals one page's ground is.
+    ///
+    /// **Two and not one**, because a DirectComposition visual's offset and its
+    /// transform are not independent: the offset is applied *inside* the
+    /// transform, so a single visual carrying both a `scale(w, h)` (to stretch
+    /// one texel over the pane) and the pane's own origin would place that
+    /// origin `w` and `h` times too far out. Splitting them is what keeps each
+    /// number meaning one thing — `holder` is *where the pane is* and `fill` is
+    /// *how big one texel has to become* — rather than a product two readers
+    /// have to un-multiply.
+    struct PageGround {
+        /// Carries the pane's origin and its clip, exactly as the page's own
+        /// visual does, so the two can never be placed apart.
+        holder: IDCompositionVisual,
+        /// Carries the scale and the surface. A child of `holder`, so it is in
+        /// the holder's coordinates and the clip above it crops it.
+        ///
+        /// Held rather than dropped after `AddVisual` even though nothing reads
+        /// it again: the tree owns a reference of its own, so this handle is
+        /// the *record* that the pair was built, and a `PageGround` that only
+        /// carried one visual would not say what it is.
+        #[allow(dead_code, reason = "the tree owns it; this is the record of it")]
+        fill: IDCompositionVisual,
+        /// The scale itself, built once and set on `fill` once.
+        ///
+        /// A transform *object* rather than four numbers written straight at
+        /// the visual, because `IDCompositionVisual::SetTransform2` takes a
+        /// `Matrix3x2` from a numerics crate this workspace does not carry, and
+        /// `SetMatrixElement2` says the same thing with the packages already in
+        /// the tree. It is mutated in place on every placement — two floats —
+        /// rather than rebuilt, which is the same discipline the clip is owed
+        /// and does not yet get (`place_web_visual`'s standing debt).
+        scale: IDCompositionMatrixTransform,
+    }
+
+    /// Everything needed to keep one 1×1 premultiplied surface painted.
+    ///
+    /// The device is a D3D11 one and it exists for a single reason: a
+    /// composition device created with a **null** rendering device — which this
+    /// one is, deliberately, because it arranges visuals and rasterizes nothing
+    /// — cannot create surfaces at all. `CreateSurfaceFactory` is the documented
+    /// door for exactly that case, and it takes a rendering device of its own.
+    /// D3D11 rather than the D3D12 device wgpu already holds, because the
+    /// factory wants an `IDXGIDevice` and a D3D12 device is not one.
+    struct GroundSurface {
+        /// Held for its lifetime: the factory and the surface are its children,
+        /// and the surface's texels stop being valid when it goes.
+        _device: ID3D11Device,
+        /// `ClearView` is on the `Context1` face and takes a rectangle, which is
+        /// the whole reason the narrowing happens: `ClearRenderTargetView`
+        /// clears the *entire* atlas texture DirectComposition hands back from
+        /// `BeginDraw`, not the tile inside it that this surface owns.
+        context: ID3D11DeviceContext1,
+        _factory: IDCompositionSurfaceFactory,
+        surface: IDCompositionSurface,
     }
 
     impl Compositor {
@@ -1315,6 +1488,13 @@ mod windows_impl {
                 root,
                 gpu,
                 web: RefCell::new(BTreeMap::new()),
+                web_ground: RefCell::new(BTreeMap::new()),
+                ground_surface: RefCell::new(None),
+                // Opaque black until the app says otherwise, which it does
+                // before the first page can exist. A page ground that somehow
+                // reached the glass ahead of that answer is still a floor and
+                // not a hole, which is the property this whole slice is about.
+                ground_color: Cell::new([0.0, 0.0, 0.0, 1.0]),
             };
             // The tree exists on screen only once it is committed, and this one
             // is empty until wgpu sets the swapchain on `gpu` — so what this
@@ -1407,17 +1587,199 @@ mod windows_impl {
             if self.web.borrow().contains_key(&page) {
                 return Ok(());
             }
+            // **The floor goes down before the page does** (§7.14). It is a
+            // sibling at the very bottom and the page is inserted *above it by
+            // name* rather than at the beginning of the list again, so the two
+            // cannot be ordered by the accident of which call ran last.
+            let ground = self.create_page_ground()?;
             let web = Self::create_visual(&self.device, "web")?;
             unsafe {
-                self.root.AddVisual(
-                    &web,
+                self.root
+                    .AddVisual(&web, INSERT_ABOVE_REFERENCE, Some(&ground.holder))
+            }
+            .map_err(|error| compositor_failure("IDCompositionVisual::AddVisual(web)", &error))?;
+            self.web_ground.borrow_mut().insert(page, ground);
+            self.web.borrow_mut().insert(page, web);
+            Ok(())
+        }
+
+        /// **A page's floor: one texel of the window's own ground, stretched.**
+        ///
+        /// # What is actually being fixed (user ruling, 2026-08-24)
+        ///
+        /// A web pane is a *hole*: `bt_render::WindowRenderer::set_web_holes`
+        /// writes `(0, 0, 0, 0)` over the pane's rectangle so the page composed
+        /// underneath can be seen at all. The hole is punched from Folio's own
+        /// rectangle for that pane, on the frame the pane moves — and the page
+        /// underneath is a browser, which resizes its surface on its own clock.
+        /// For the few frames between the two, the difference between the pane
+        /// Folio has already stopped painting and the picture the browser has
+        /// not yet grown into is a region where **nothing in the tree paints at
+        /// all**, and a window bound `topmost = true` over a per-pixel-alpha
+        /// HWND shows the desktop there. Photographed 2026-08-24: growing the
+        /// window put the applications behind Folio inside Folio's own frame.
+        ///
+        /// The floor is the answer the ruling names: the pane's rectangle,
+        /// under the page, carrying the window's own ground. Where the browser
+        /// has painted, the page covers it and nothing changes; where it has
+        /// not, what shows is the colour the rest of the window is.
+        ///
+        /// # Why it does not double the translucency
+        ///
+        /// Because the hole is a hole. A window at 60% ground draws its clear
+        /// at `a = 0.6` everywhere *except* the pane, where the same pipeline
+        /// writes `a = 0`; so over the pane the swapchain contributes nothing
+        /// and this floor is the only thing there, at the very same 0.6. One
+        /// sheet of glass, exactly as §7.1.6c-4b requires — and the reason this
+        /// is a floor **under the pane** rather than a floor under the whole
+        /// window, which would be composited *with* the clear and leave a 60%
+        /// window reading at 84%.
+        fn create_page_ground(&self) -> Result<PageGround, String> {
+            let holder = Self::create_visual(&self.device, "web ground")?;
+            let fill = Self::create_visual(&self.device, "web ground fill")?;
+            let surface = self.ground_surface()?;
+            unsafe { fill.SetContent(&surface) }.map_err(|error| {
+                compositor_failure("IDCompositionVisual::SetContent(web ground)", &error)
+            })?;
+            let scale = unsafe { self.device.CreateMatrixTransform() }.map_err(|error| {
+                compositor_failure("IDCompositionDevice2::CreateMatrixTransform", &error)
+            })?;
+            // The shear terms are written once and never again: a matrix left
+            // at whatever `CreateMatrixTransform` happened to start with is a
+            // floor that could arrive skewed, and the only two numbers this
+            // object is ever asked to change are the two on the diagonal and
+            // the two in the last row.
+            unsafe {
+                scale
+                    .SetMatrixElement2(0, 1, 0.0)
+                    .and_then(|()| scale.SetMatrixElement2(1, 0, 0.0))
+            }
+            .map_err(|error| {
+                compositor_failure("IDCompositionMatrixTransform::SetMatrixElement", &error)
+            })?;
+            unsafe { fill.SetTransform(&scale) }.map_err(|error| {
+                compositor_failure("IDCompositionVisual::SetTransform(web ground fill)", &error)
+            })?;
+            unsafe {
+                holder.AddVisual(
+                    &fill,
                     VisualLayer::Bottom.insert_above_with_null_reference(),
                     None::<&IDCompositionVisual>,
                 )
             }
-            .map_err(|error| compositor_failure("IDCompositionVisual::AddVisual(web)", &error))?;
-            self.web.borrow_mut().insert(page, web);
-            Ok(())
+            .map_err(|error| {
+                compositor_failure("IDCompositionVisual::AddVisual(web ground fill)", &error)
+            })?;
+            unsafe {
+                self.root.AddVisual(
+                    &holder,
+                    VisualLayer::Bottom.insert_above_with_null_reference(),
+                    None::<&IDCompositionVisual>,
+                )
+            }
+            .map_err(|error| {
+                compositor_failure("IDCompositionVisual::AddVisual(web ground)", &error)
+            })?;
+            Ok(PageGround {
+                holder,
+                fill,
+                scale,
+            })
+        }
+
+        /// The shared 1×1 surface, minting it on first use.
+        ///
+        /// **One texel for every ground in the window**, and one for every size
+        /// each of them is ever drawn at: a surface of a single colour is the
+        /// one picture a bilinear sampler cannot get wrong however far it is
+        /// stretched, so the floor never has to be redrawn when a pane resizes.
+        /// That is the whole of "常驻，不按帧重建" — the only thing that ever
+        /// touches these texels again is the theme changing.
+        fn ground_surface(&self) -> Result<IDCompositionSurface, String> {
+            if let Some(existing) = self.ground_surface.borrow().as_ref() {
+                return Ok(existing.surface.clone());
+            }
+            let mut device: Option<ID3D11Device> = None;
+            let mut context = None;
+            // SAFETY: every out-parameter is a fresh `Option`, and the two the
+            // call fills are read only after it has reported success. No
+            // adapter is named, so the runtime picks the default one; the flag
+            // is the BGRA support `DXGI_FORMAT_B8G8R8A8_UNORM` needs.
+            unsafe {
+                D3D11CreateDevice(
+                    None,
+                    D3D_DRIVER_TYPE_HARDWARE,
+                    windows::Win32::Foundation::HMODULE::default(),
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&raw mut device),
+                    None,
+                    Some(&raw mut context),
+                )
+            }
+            .map_err(|error| compositor_failure("D3D11CreateDevice", &error))?;
+            let device = device
+                .ok_or_else(|| "D3D11CreateDevice reported success with no device".to_owned())?;
+            let context: ID3D11DeviceContext1 = context
+                .ok_or_else(|| "D3D11CreateDevice reported success with no context".to_owned())?
+                .cast()
+                .map_err(|error| compositor_failure("ID3D11DeviceContext::cast", &error))?;
+            let dxgi: IDXGIDevice = device
+                .cast()
+                .map_err(|error| compositor_failure("ID3D11Device::cast(IDXGIDevice)", &error))?;
+            let factory = unsafe { self.device.CreateSurfaceFactory(&dxgi) }.map_err(|error| {
+                compositor_failure("IDCompositionDevice2::CreateSurfaceFactory", &error)
+            })?;
+            let surface = unsafe {
+                factory.CreateSurface(
+                    1,
+                    1,
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    DXGI_ALPHA_MODE_PREMULTIPLIED,
+                )
+            }
+            .map_err(|error| {
+                compositor_failure("IDCompositionSurfaceFactory::CreateSurface", &error)
+            })?;
+            let held = GroundSurface {
+                _device: device,
+                context,
+                _factory: factory,
+                surface: surface.clone(),
+            };
+            paint_ground_surface(&held, self.ground_color.get())?;
+            *self.ground_surface.borrow_mut() = Some(held);
+            Ok(surface)
+        }
+
+        /// **Put the window's ground colour under every page in this window.**
+        ///
+        /// Takes it *premultiplied and sRGB-encoded* — four numbers in
+        /// `0.0..=1.0` — because that is what the swapchain leaves in its own
+        /// bytes and the two have to match to the byte or the pane reads as a
+        /// slightly different shade of the same window. The arithmetic that
+        /// produces them belongs to the renderer, which owns both the palette
+        /// and the linear/sRGB boundary; this crate must not learn either.
+        ///
+        /// Idempotent, and cheap when nothing moved: a settings write that did
+        /// not touch the ground costs one comparison. When it did move, one
+        /// texel is redrawn and **every** page ground in the window follows,
+        /// because they all show the same surface — which is why hot theme
+        /// switching needs no list of pages anywhere.
+        pub fn set_page_ground_color(&self, premultiplied_srgb: [f32; 4]) -> Result<(), String> {
+            if self.ground_color.get() == premultiplied_srgb {
+                return Ok(());
+            }
+            self.ground_color.set(premultiplied_srgb);
+            let borrowed = self.ground_surface.borrow();
+            let Some(surface) = borrowed.as_ref() else {
+                // No page has ever opened in this window, so there is nothing
+                // to repaint and the colour above is what the first one will
+                // be born with.
+                return Ok(());
+            };
+            paint_ground_surface(surface, premultiplied_srgb)
         }
 
         /// Take the web preview's visual back out of the tree.
@@ -1426,6 +1788,16 @@ mod windows_impl {
         /// visual behind would cost nothing on screen and would still be a lie
         /// in the tree, which is the thing this file is for.
         pub fn detach_web_visual(&self, page: PageVisual) -> Result<(), String> {
+            // The floor goes with the page it was under, and it goes even if
+            // the page's own removal fails: a ground left behind is a rectangle
+            // of theme colour standing where a pane no longer is, which is the
+            // one way this slice could put something on screen that is not
+            // true.
+            if let Some(ground) = self.web_ground.borrow_mut().remove(&page) {
+                unsafe { self.root.RemoveVisual(&ground.holder) }.map_err(|error| {
+                    compositor_failure("IDCompositionVisual::RemoveVisual(web ground)", &error)
+                })?;
+            }
             let Some(web) = self.web.borrow_mut().remove(&page) else {
                 return Ok(());
             };
@@ -1471,6 +1843,61 @@ mod windows_impl {
             unsafe { web.SetOffsetY2(y) }.map_err(|error| {
                 compositor_failure("IDCompositionVisual::SetOffsetY(web)", &error)
             })?;
+            self.place_clip(web, clip, "web")?;
+            // **The floor is placed by the same call, at the same rectangle.**
+            // Not by a second call the caller has to remember, and not on a
+            // clock of its own: the whole defect this fixes is two rectangles
+            // disagreeing for a few frames, and a floor that could be placed
+            // separately from the pane it is under would be a third one.
+            let grounds = self.web_ground.borrow();
+            let Some(ground) = grounds.get(&page) else {
+                return Ok(());
+            };
+            unsafe { ground.holder.SetOffsetX2(x) }.map_err(|error| {
+                compositor_failure("IDCompositionVisual::SetOffsetX(web ground)", &error)
+            })?;
+            unsafe { ground.holder.SetOffsetY2(y) }.map_err(|error| {
+                compositor_failure("IDCompositionVisual::SetOffsetY(web ground)", &error)
+            })?;
+            self.place_clip(&ground.holder, clip, "web ground")?;
+            // One texel stretched to the clip. `max(0)` rather than a refusal:
+            // a pane can legitimately be solved to nothing on the frame a split
+            // collapses, and a negative scale is a floor drawn inside out.
+            //
+            // Rows 0 and 1 are the linear part and row 2 is the translation,
+            // which is the 3×2 convention `IDCompositionMatrixTransform` shares
+            // with Direct2D.
+            unsafe {
+                ground
+                    .scale
+                    .SetMatrixElement2(0, 0, (clip.2 - clip.0).max(0.0))
+                    .and_then(|()| {
+                        ground
+                            .scale
+                            .SetMatrixElement2(1, 1, (clip.3 - clip.1).max(0.0))
+                    })
+                    .and_then(|()| ground.scale.SetMatrixElement2(2, 0, clip.0))
+                    .and_then(|()| ground.scale.SetMatrixElement2(2, 1, clip.1))
+            }
+            .map_err(|error| {
+                compositor_failure(
+                    "IDCompositionMatrixTransform::SetMatrixElement(ground)",
+                    &error,
+                )
+            })
+        }
+
+        /// Crop one visual to `clip`, in that visual's own coordinates.
+        ///
+        /// Shared by the page and by the floor under it so that the two can
+        /// only ever be cropped to the same box — the pair this slice exists to
+        /// keep together.
+        fn place_clip(
+            &self,
+            visual: &IDCompositionVisual,
+            clip: (f32, f32, f32, f32),
+            role: &str,
+        ) -> Result<(), String> {
             let rectangle = unsafe { self.device3.CreateRectangleClip() }.map_err(|error| {
                 compositor_failure("IDCompositionDevice3::CreateRectangleClip", &error)
             })?;
@@ -1482,8 +1909,9 @@ mod windows_impl {
                     .and_then(|()| rectangle.SetBottom2(clip.3))
             }
             .map_err(|error| compositor_failure("IDCompositionRectangleClip::Set*", &error))?;
-            unsafe { web.SetClip(&rectangle) }
-                .map_err(|error| compositor_failure("IDCompositionVisual::SetClip", &error))
+            unsafe { visual.SetClip(&rectangle) }.map_err(|error| {
+                compositor_failure(&format!("IDCompositionVisual::SetClip({role})"), &error)
+            })
         }
 
         /// Publish this frame. **Call once per presented frame.**
@@ -1508,6 +1936,82 @@ mod windows_impl {
             unsafe { self.device.Commit() }
                 .map_err(|error| compositor_failure("IDCompositionDevice2::Commit", &error))
         }
+    }
+
+    /// Write one premultiplied colour into the single texel every page ground
+    /// shows.
+    ///
+    /// # `ClearView` and not `ClearRenderTargetView`
+    ///
+    /// `BeginDraw` does not hand back a 1×1 texture. It hands back a *tile* of
+    /// an atlas DirectComposition owns, plus the offset of this surface inside
+    /// it, and the contract is that only that tile may be written.
+    /// `ClearRenderTargetView` ignores every rectangle it is given and clears
+    /// the whole resource — which is every other surface in the atlas, drawn by
+    /// whoever else is using this factory. `ID3D11DeviceContext1::ClearView`
+    /// takes the rectangle, and taking it is the whole reason the context is
+    /// narrowed to `Context1` when it is created.
+    fn paint_ground_surface(
+        held: &GroundSurface,
+        premultiplied_srgb: [f32; 4],
+    ) -> Result<(), String> {
+        let mut offset = POINT::default();
+        // SAFETY: the surface is 1×1 and `None` asks for all of it; the
+        // interface asked for is the one a D3D11-backed factory produces.
+        // Every path out of this function past this point ends in `EndDraw`.
+        let texture: ID3D11Texture2D = unsafe { held.surface.BeginDraw(None, &raw mut offset) }
+            .map_err(|error| compositor_failure("IDCompositionSurface::BeginDraw", &error))?;
+        let painted = paint_ground_texel(held, &texture, offset, premultiplied_srgb);
+        // Unconditional: a surface left open is a surface DirectComposition
+        // will refuse every later `BeginDraw` on, so a failure inside must not
+        // also cost the ability to try again.
+        let closed = unsafe { held.surface.EndDraw() }
+            .map_err(|error| compositor_failure("IDCompositionSurface::EndDraw", &error));
+        painted.and(closed)
+    }
+
+    /// The one texel, once the atlas tile is in hand.
+    ///
+    /// Separated from the `BeginDraw`/`EndDraw` pair above so that every early
+    /// return in it is still followed by the `EndDraw` its caller owes.
+    fn paint_ground_texel(
+        held: &GroundSurface,
+        texture: &ID3D11Texture2D,
+        offset: POINT,
+        premultiplied_srgb: [f32; 4],
+    ) -> Result<(), String> {
+        let resource: ID3D11Resource = texture
+            .cast()
+            .map_err(|error| compositor_failure("ID3D11Texture2D::cast", &error))?;
+        let mut view: Option<ID3D11RenderTargetView> = None;
+        // The device is asked of the context rather than carried beside it:
+        // there is exactly one, and a second handle to it is a second thing
+        // that could be the wrong one.
+        //
+        // SAFETY: the context is live for as long as the `GroundSurface` that
+        // owns it, which is this call's own argument.
+        let device: ID3D11Device = unsafe { held.context.GetDevice() }
+            .map_err(|error| compositor_failure("ID3D11DeviceChild::GetDevice", &error))?;
+        // SAFETY: `resource` is the texture DirectComposition just handed over,
+        // a null description asks for the resource's own format, and the
+        // out-parameter is a fresh `Option`.
+        unsafe { device.CreateRenderTargetView(&resource, None, Some(&raw mut view)) }
+            .map_err(|error| compositor_failure("ID3D11Device::CreateRenderTargetView", &error))?;
+        let view =
+            view.ok_or_else(|| "CreateRenderTargetView reported success with no view".to_owned())?;
+        let tile = RECT {
+            left: offset.x,
+            top: offset.y,
+            right: offset.x + 1,
+            bottom: offset.y + 1,
+        };
+        // SAFETY: the view is over the resource `BeginDraw` returned and the
+        // rectangle is the one texel this surface owns inside it.
+        unsafe {
+            held.context
+                .ClearView(&view, &premultiplied_srgb, Some(&[tile]))
+        };
+        Ok(())
     }
 
     /// One shape for every DirectComposition refusal: the call that refused, in

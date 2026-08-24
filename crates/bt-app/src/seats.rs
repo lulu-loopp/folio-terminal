@@ -229,6 +229,71 @@ pub const TAB_LAND_RING_ALPHA: f32 = 0.45;
 /// The `1.5px` of that inset ring, in logical pixels.
 pub const TAB_LAND_RING_LOGICAL_PX: f32 = 1.5;
 
+// ── What a thing in flight looks like (§7.1.6b″) ─────────────────────────────
+//
+// **One rule, one implementation, three surfaces.** The strip reorders tabs, the
+// vertical rail reorders rows and the focus column reorders cards, and until
+// this ruling each of them drew a moving element the way it drew a resting one:
+// pushed later in its own channel and otherwise identical. That is not a
+// stacking order. Chrome is drawn fill-then-mark-then-text over a whole run, so
+// "pushed later" only ever wins *within* a channel — and the thing a moving card
+// passes over is mostly **text**, which runs after every fill in the same run.
+// Two cards of densely-set text therefore composed into one unreadable block
+// (user report with screenshot, 2026-08-24), and it read as translucency
+// although no alpha was involved anywhere.
+//
+// The rule the ruling states is four sentences, and all four fall out of moving
+// the element to a stack level of its own:
+//
+//   ① it carries its own opaque body, so what it passes over is covered;
+//   ② it is above everything it passes over, in every channel;
+//   ③ it casts a light shadow while it travels, and the shadow fades as it lands;
+//   ④ the drag ghost is untouched — it is a *virtual* image and stays translucent.
+//
+// ④ is not an exception. The ghost hangs off the pointer in `OverlayStack::drag_ghost`
+// and is a picture of what you are carrying; what flies here is the row itself.
+// A product that made the ghost opaque would be hiding the strip you are aiming
+// at with a copy of the thing you are aiming.
+
+/// `box-shadow` under a moving row, at its heaviest — the moment it leaves.
+///
+/// **Light on purpose.** The mock-up's own lifted surfaces sit between 18% and
+/// 34% (`.tab.grabbed`, `.fcard.dragging`), and a reorder is the smallest of
+/// those events: a chip moving one slot along a row it never leaves. The number
+/// is at the bottom of that band because the shadow's job here is only to say
+/// *this one is above the others* for the fifth of a second it is true, and
+/// anything heavier reads as the element having been picked up and taken
+/// somewhere, which is the drag ghost's sentence and not this one's.
+pub const FLIGHT_SHADOW_ALPHA: f32 = 0.18;
+
+/// How far outside its own box that shadow reaches, in logical pixels.
+///
+/// The same shape `@keyframes fcard-wait`'s halo is drawn with — a ring outside
+/// the border rather than a blur, which is what `box-shadow`'s spread is in this
+/// module's vocabulary and the one soft edge the mark rasterizer already makes.
+pub const FLIGHT_SHADOW_SPREAD_LOGICAL_PX: f32 = 3.0;
+
+/// How dark the shadow under a thing in flight is drawn this frame.
+///
+/// A pure function of [`TabContent::flight`], so the three surfaces cannot
+/// disagree about it and so a test can stand somewhere. Linear in the flight and
+/// not in the easing: the element's *position* runs on `GRAB_EASE` and arrives
+/// gently, and a shadow that ran the same curve would still be at a third of its
+/// weight when the element had visibly stopped. What "落地即褪" asks for is that
+/// the shadow be gone when the movement is, and the movement is over when the
+/// fraction reaches zero.
+///
+/// Reduced motion needs no branch here and gets none: with no animation the
+/// fraction is never anything but `0.0` for a settling element, so there is no
+/// shadow to suppress. A *carried* element still answers `1.0`, and that is
+/// correct — a row under the pointer is lifted whether or not the machine
+/// animates, and `prefers-reduced-motion` is a statement about animation rather
+/// than about depth.
+#[must_use]
+pub fn flight_shadow_opacity(flight: f32) -> f32 {
+    FLIGHT_SHADOW_ALPHA * flight.clamp(0.0, 1.0)
+}
+
 /// §2.5 asks `bt-layout` to hold its own subpixel denominator and to pin it
 /// against `bt-doc`'s "on the seam that can legally see both crates". This is
 /// that seam: `bt-app` is the first place both are in scope at once.
@@ -5997,6 +6062,7 @@ pub fn build_chrome_with_preview(
     preview_message: Option<&str>,
 ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
     let tabs = [TabContent {
+        flight: 0.0,
         mark_kind: ChromeMark::ProfilePowerShell,
         title: tab_title.unwrap_or("PowerShell").to_owned(),
         pane_count: seats.pane_count(),
@@ -6117,6 +6183,24 @@ pub struct TabContent {
     /// One tab rides the pointer while its displaced neighbours run their FLIP
     /// home, and both are this one number sampled from two different clocks.
     pub offset: f32,
+    /// **How far through a flight this tab is**, `0.0` at rest and `1.0` at the
+    /// moment it left — the one number the three surfaces read to decide that
+    /// something is *moving* (§7.1.6b″; Claude's shape, user-approved
+    /// 2026-08-24).
+    ///
+    /// Deliberately not [`Self::offset`], and the difference is the whole reason
+    /// this field exists. `offset` is a *distance*, so it says how far a tab has
+    /// left to travel and nothing about whether it is travelling: a one-slot
+    /// swap and a five-slot swap are the same event drawn at two magnitudes, and
+    /// a shadow keyed on distance would be five times heavier for the longer
+    /// one. This is a *fraction of the journey*, so it is `1.0` for both at the
+    /// start and `0.0` for both at the end, and it is `1.0` — not a distance —
+    /// for a tab under the pointer, which is not travelling at all and is
+    /// nevertheless the most lifted thing in the strip.
+    ///
+    /// It is also not "`offset != 0.0`", because a tab that has been carried
+    /// exactly back to its own slot is still in the hand.
+    pub flight: f32,
     /// How much of the landing wash this tab still wears, `0.0 ..= 1.0`
     /// (`@keyframes tab-land`, mock-up 955-968).
     ///
@@ -6159,6 +6243,7 @@ impl Default for TabContent {
             mark: TabMarkState::default(),
             trailer: TabTrailer::default(),
             offset: 0.0,
+            flight: 0.0,
             landing: 0.0,
             edit: None,
         }
@@ -6636,20 +6721,10 @@ pub struct ChromeGroup {
     /// exactly as `marks::OverlayLayer::images` already does for the glance
     /// card's thumbnail — this is that slot, reached from this side.
     ///
-    /// Empty in every group but the focus column's.
+    /// Empty in every group but the focus column's — and, since §7.1.6b″, the
+    /// flight level's, which is where a card's picture goes while the card is
+    /// moving.
     pub images: Vec<bt_render::ChromeIcon>,
-}
-
-impl ChromeGroup {
-    fn as_output(
-        &mut self,
-    ) -> (
-        &mut Vec<ChromeQuad>,
-        &mut Vec<ChromeLabel>,
-        &mut Vec<ChromeSprite>,
-    ) {
-        (&mut self.quads, &mut self.labels, &mut self.sprites)
-    }
 }
 
 /// The window's chrome, cut at the one seam the compositor cares about.
@@ -6678,6 +6753,10 @@ pub struct WindowChrome {
     pub seats: ChromeGroup,
     /// The rail, which floats over it. Empty in a horizontal layout.
     pub rail: ChromeGroup,
+    /// **Whatever is in motion**, wherever it came from — over both of the above
+    /// and empty on almost every frame. See [`Self::flight`]'s own section in
+    /// §7.1.6b″.
+    pub flight: ChromeGroup,
 }
 
 impl WindowChrome {
@@ -6694,6 +6773,9 @@ impl WindowChrome {
         self.seats.quads.extend(self.rail.quads);
         self.seats.labels.extend(self.rail.labels);
         self.seats.sprites.extend(self.rail.sprites);
+        self.seats.quads.extend(self.flight.quads);
+        self.seats.labels.extend(self.flight.labels);
+        self.seats.sprites.extend(self.flight.sprites);
         (self.seats.quads, self.seats.labels, self.seats.sprites)
     }
 }
@@ -6772,6 +6854,11 @@ pub fn build_chrome_for_tabs(
     let mut quads = Vec::new();
     let mut labels = Vec::new();
     let mut sprites = Vec::new();
+    // **The level anything in motion is drawn on** (§7.1.6b″), declared before
+    // the first surface that can write to it: the strip below, and the rail or
+    // the card column further down. Empty on every frame nothing is moving,
+    // which is almost all of them.
+    let mut flight_group = ChromeGroup::default();
     let surface_width = layout
         .rects
         .iter()
@@ -6793,6 +6880,7 @@ pub fn build_chrome_for_tabs(
             rail,
         },
         (&mut quads, &mut labels, &mut sprites),
+        &mut flight_group,
     );
     // **U8 — the pane's own chrome is built into these and then clipped.**
     //
@@ -7819,10 +7907,6 @@ pub fn build_chrome_for_tabs(
     // so a pane head's caption still printed through the rail's face. It goes in
     // its own group instead — see [`WindowChrome`].
     let mut rail_group = ChromeGroup::default();
-    // The column's fourth channel, gathered beside the other three because
-    // `ChromeGroup::as_output` hands out the three that are *built* here and this
-    // one is only ever moved through — see [`ChromeGroup::images`].
-    let mut focus_images: Vec<bt_render::ChromeIcon> = Vec::new();
     let surface_height = layout
         .rects
         .iter()
@@ -7852,10 +7936,9 @@ pub fn build_chrome_for_tabs(
                 reveal: focus_reveal,
             },
             palette,
-            rail_group.as_output(),
-            &mut focus_images,
+            &mut rail_group,
+            &mut flight_group,
         );
-        rail_group.images = focus_images;
     } else {
         rail_chrome(
             surface_height,
@@ -7873,7 +7956,8 @@ pub fn build_chrome_for_tabs(
                 shown: float_shown,
             },
             palette,
-            rail_group.as_output(),
+            &mut rail_group,
+            &mut flight_group,
         );
     }
     WindowChrome {
@@ -7886,6 +7970,7 @@ pub fn build_chrome_for_tabs(
             images: Vec::new(),
         },
         rail: rail_group,
+        flight: flight_group,
     }
 }
 
@@ -8242,6 +8327,7 @@ fn window_chrome(
         &mut Vec<ChromeLabel>,
         &mut Vec<ChromeSprite>,
     ),
+    flight: &mut ChromeGroup,
 ) {
     let rail = strip.rail;
     let layout = rail.layout;
@@ -8280,7 +8366,15 @@ fn window_chrome(
         layout
     } {
         TabLayoutMode::Horizontal => {
-            window_tab_strip(width, scale, hover, strip, palette, (labels, sprites));
+            window_tab_strip(
+                width,
+                scale,
+                hover,
+                strip,
+                palette,
+                (labels, sprites),
+                flight,
+            );
         }
         TabLayoutMode::Vertical => {
             // `.panel-toggle` stands first in `.drag`, and the name begins after
@@ -8418,6 +8512,7 @@ fn window_tab_strip(
     strip: TabStrip<'_>,
     palette: ChromePalette,
     output: (&mut Vec<ChromeLabel>, &mut Vec<ChromeSprite>),
+    flight: &mut ChromeGroup,
 ) {
     let TabStrip {
         tabs,
@@ -8508,7 +8603,38 @@ fn window_tab_strip(
             let tab_hovered = hover == Some(ChromeTarget::Tab(index))
                 || hover == Some(ChromeTarget::TabClose(index))
                 || hover == Some(ChromeTarget::TabPin(index));
+            // **A tab that is moving is drawn on the level above** (§7.1.6b″).
+            // `layer_of` above is the mock-up's `z-index` and it was never
+            // enough: it orders this run's *mark* channel, and the text channel
+            // runs after every mark in the same run, so a neighbour's title
+            // printed straight through the face of the tab passing over it.
+            let flying = content.flight > 0.0;
+            let (labels, sprites) = if flying {
+                (&mut flight.labels, &mut flight.sprites)
+            } else {
+                (&mut *labels, &mut *sprites)
+            };
             let skirted = [tab_left - radius, tab_top, tab_right + radius, tab_bottom];
+            // The shadow, under the tab's own silhouette — see the card's copy of
+            // this for why it is a ring rather than a blur.
+            if flying && within_strip(viewport, tab.body) {
+                let spread = (FLIGHT_SHADOW_SPREAD_LOGICAL_PX * scale).round().max(1.0);
+                let mut shadow = ChromeSprite::new(
+                    ChromeMark::TabBodyRing {
+                        radius_px: (radius + spread) as u32,
+                        stroke_px: spread as u32,
+                    },
+                    [
+                        tab.body[0] - spread,
+                        tab.body[1] - spread,
+                        tab.body[2] + spread,
+                        tab.body[3] + spread,
+                    ],
+                    palette.rail_edge,
+                );
+                shadow.opacity = flight_shadow_opacity(content.flight);
+                sprites.push(shadow);
+            }
             if active && tab_right - tab_left >= 2.0 * radius && within_strip(viewport, skirted) {
                 sprites.push(ChromeSprite::new(
                     ChromeMark::ActiveTab {
@@ -8517,7 +8643,16 @@ fn window_tab_strip(
                     skirted,
                     palette.active_tab,
                 ));
-            } else if (tab_hovered || grabbed_here) && within_strip(viewport, tab.body) {
+            } else if (tab_hovered || grabbed_here || flying) && within_strip(viewport, tab.body) {
+                // **`flying` joins the two that were already here** (§7.1.6b″ ①).
+                // The comment on `grabbed_here` above says why that one is in the
+                // list — a tab in the hand that is neither active nor hovered
+                // drew no body at all, and being on top of nothing is being
+                // invisible — and a tab mid-FLIP is the same tab a moment later:
+                // the drag has ended, `grabbed` is `None`, and the last two
+                // hundred milliseconds of travel were drawn with no fill under
+                // them. It is the same sentence with the clock moved on, so it
+                // is the same branch and not a second one.
                 sprites.push(ChromeSprite::new(
                     ChromeMark::TabBody {
                         radius_px: radius as u32,
@@ -9287,11 +9422,8 @@ fn rail_chrome(
     hover: Option<ChromeTarget>,
     rail: Rail<'_>,
     palette: ChromePalette,
-    output: (
-        &mut Vec<ChromeQuad>,
-        &mut Vec<ChromeLabel>,
-        &mut Vec<ChromeSprite>,
-    ),
+    rest: &mut ChromeGroup,
+    flight: &mut ChromeGroup,
 ) {
     let Rail {
         tabs,
@@ -9308,7 +9440,7 @@ fn rail_chrome(
     // stays put and the button says it with its own ground instead.
     let (chevron_turn, menu_lit) =
         profile_menu_tell(state.profile_menu_side(), profile_menu_open, chevron_turn);
-    let (quads, labels, sprites) = output;
+    let (quads, labels, sprites) = (&mut rest.quads, &mut rest.labels, &mut rest.sprites);
     let trailers = tabs.iter().map(|tab| tab.trailer).collect::<Vec<_>>();
     let Some(geometry) = rail_geometry(
         height,
@@ -9477,7 +9609,40 @@ fn rail_chrome(
             // the active row already has a louder fill, and painting the quieter
             // one over it would be a downgrade.
             let shown_here = shown.contains(&index) && !active;
-            if active || hovered || grabbed_here || shown_here {
+            // **A row that is moving is drawn on the level above** (§7.1.6b″) —
+            // the strip's and the column's rule on the third surface, and for
+            // the reason all three share: the two-pass `z-index` above orders
+            // this run's marks, and a neighbour's *name* is text.
+            let flying = content.flight > 0.0;
+            let (labels, sprites) = if flying {
+                (&mut flight.labels, &mut flight.sprites)
+            } else {
+                (&mut *labels, &mut *sprites)
+            };
+            if flying {
+                let spread = (FLIGHT_SHADOW_SPREAD_LOGICAL_PX * scale).round().max(1.0);
+                let mut shadow = ChromeSprite::new(
+                    ChromeMark::ControlPillRing {
+                        radius_px: row_radius as u32 + spread as u32,
+                        stroke_px: spread as u32,
+                    },
+                    clip_to_list([
+                        row.body[0] - spread,
+                        row.body[1] - spread,
+                        row.body[2] + spread,
+                        row.body[3] + spread,
+                    ]),
+                    palette.rail_edge,
+                );
+                shadow.opacity = flight_shadow_opacity(content.flight);
+                sprites.push(shadow);
+            }
+            // `flying` joins the four that were already here, for the reason
+            // `grabbed_here` is among them (the comment two screens up): a row
+            // that draws no body is a row you can see straight through, and the
+            // two hundred milliseconds after a release are the same row still
+            // moving with `grabbed` already `None`.
+            if active || hovered || grabbed_here || shown_here || flying {
                 sprites.push(ChromeSprite::new(
                     ChromeMark::ControlPill {
                         radius_px: row_radius as u32,
@@ -10240,12 +10405,8 @@ fn focus_rail_chrome(
     hover: Option<ChromeTarget>,
     rail: FocusRail<'_>,
     palette: ChromePalette,
-    output: (
-        &mut Vec<ChromeQuad>,
-        &mut Vec<ChromeLabel>,
-        &mut Vec<ChromeSprite>,
-    ),
-    images: &mut Vec<bt_render::ChromeIcon>,
+    rest: &mut ChromeGroup,
+    flight: &mut ChromeGroup,
 ) {
     let FocusRail {
         tabs,
@@ -10262,7 +10423,6 @@ fn focus_rail_chrome(
     // rail's answer with them: this picker opens beside its button too.
     let (chevron_turn, menu_lit) =
         profile_menu_tell(state.profile_menu_side(), profile_menu_open, chevron_turn);
-    let (quads, labels, sprites) = output;
     let Some(geometry) = focus_rail_geometry(height, scale, tabs.len(), scroll, state) else {
         return;
     };
@@ -10270,13 +10430,26 @@ fn focus_rail_chrome(
     // The panel is the window's own surface wearing another name, so it is a
     // ground and takes the window's alpha — the rail's own ruling (§7.1.6c-4f),
     // and the card column is the same panel holding a different list.
-    quads.push(ChromeQuad::ground(geometry.body, ground));
-    quads.push(ChromeQuad::ink(geometry.edge, palette.rail_edge));
+    rest.quads.push(ChromeQuad::ground(geometry.body, ground));
+    rest.quads
+        .push(ChromeQuad::ink(geometry.edge, palette.rail_edge));
     // **The entrance starts here** (§7.1.6b′ F3): the panel and its hairline are
     // the *furniture*, and the furniture is where the settled posture put it on
     // the very first frame — the stage has already been solved against it. What
     // arrives is the list, and everything appended below this line is the list.
-    let entrance_from = (quads.len(), labels.len(), sprites.len());
+    //
+    // **Both levels, because a card in flight is still part of the list**
+    // (§7.1.6b″). The two can only be up together by way of a machine that
+    // decided the column had arrived and a hand that was already carrying a card
+    // — which is not reachable today — but marking one level and not the other
+    // is exactly the kind of thing that stops being unreachable later, and the
+    // second mark costs a tuple.
+    let entrance_from = (rest.quads.len(), rest.labels.len(), rest.sprites.len());
+    let flight_entrance_from = (
+        flight.quads.len(),
+        flight.labels.len(),
+        flight.sprites.len(),
+    );
 
     let [list_top, list_bottom] = geometry.viewport;
     let in_list = |rect: [f32; 4]| rect[3] > list_top && rect[1] < list_bottom;
@@ -10323,6 +10496,43 @@ fn focus_rail_chrome(
         let hovered =
             hover == Some(ChromeTarget::Tab(index)) || hover == Some(ChromeTarget::TabClose(index));
         let body = clip_to_list(card.body);
+        // **A card that is moving is drawn on the level above** (§7.1.6b″).
+        // Every one of its four channels goes there together, which is the whole
+        // of the fix: `focus_card_paint_order` below already put the carried card
+        // last in the *mark* channel, and last in a channel is not above — a
+        // resting card's title is text, the text channel runs after every mark in
+        // the same run, and two cards of densely-set text therefore composed into
+        // one block whichever order they were pushed in.
+        let flying = content.flight > 0.0;
+        let group: &mut ChromeGroup = if flying { &mut *flight } else { &mut *rest };
+        let images = &mut group.images;
+        let (quads, labels, sprites) = (&mut group.quads, &mut group.labels, &mut group.sprites);
+        // ── the shadow it casts while it is up ──
+        //
+        // Under the card's own fill and therefore under everything the card
+        // holds, which is where a `box-shadow` sits. A ring outside the border
+        // rather than a blur, for `@keyframes fcard-wait`'s reason one screen
+        // down: it is the one soft edge the mark rasterizer already makes, and
+        // the alpha rides `ChromeSprite::opacity` so a shadow fading over 200ms
+        // is one raster and not two hundred.
+        if flying {
+            let spread = (FLIGHT_SHADOW_SPREAD_LOGICAL_PX * scale).round().max(1.0);
+            let mut shadow = ChromeSprite::new(
+                ChromeMark::ControlPillRing {
+                    radius_px: card_radius + spread as u32,
+                    stroke_px: spread as u32,
+                },
+                clip_to_list([
+                    card.body[0] - spread,
+                    card.body[1] - spread,
+                    card.body[2] + spread,
+                    card.body[3] + spread,
+                ]),
+                palette.rail_edge,
+            );
+            shadow.opacity = flight_shadow_opacity(content.flight);
+            sprites.push(shadow);
+        }
         sprites.push(ChromeSprite::new(
             ChromeMark::ControlPill {
                 radius_px: card_radius,
@@ -10647,6 +10857,10 @@ fn focus_rail_chrome(
     // The column is still where new tabs come from, and `paintFocusRail` writes
     // `focusRailHtml() + railNewHtml()` for that reason: focus mode replaces the
     // *list*, not the panel's own furniture.
+    //
+    // Furniture never flies, so the rest of this function writes to `rest` and
+    // names it once here rather than reaching through the group at every push.
+    let (quads, labels, sprites) = (&mut rest.quads, &mut rest.labels, &mut rest.sprites);
     let new_hovered = hover == Some(ChromeTarget::NewTab);
     let menu_hovered = hover == Some(ChromeTarget::NewTabMenu);
     let row_radius = (RAIL_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
@@ -10732,6 +10946,12 @@ fn focus_rail_chrome(
         geometry.body,
         entrance_from,
         (quads, labels, sprites),
+    );
+    focus_rail_entrance(
+        reveal,
+        geometry.body,
+        flight_entrance_from,
+        (&mut flight.quads, &mut flight.labels, &mut flight.sprites),
     );
 }
 
@@ -19223,6 +19443,7 @@ mod tests {",
         let tabs = titles
             .iter()
             .map(|title| TabContent {
+                flight: 0.0,
                 mark_kind: ChromeMark::ProfilePowerShell,
                 title: title.clone(),
                 pane_count: 1,
@@ -21675,6 +21896,7 @@ mod tests {",
     #[test]
     fn the_pane_count_badge_appears_only_above_one_pane() {
         let tab = |pane_count| TabContent {
+            flight: 0.0,
             mark_kind: ChromeMark::ProfilePowerShell,
             title: "tab".to_owned(),
             pane_count,
@@ -21760,6 +21982,7 @@ mod tests {",
     /// A tab with the rename editor open on it, already measured.
     fn editing_tab(edit: TabEdit) -> TabContent {
         TabContent {
+            flight: 0.0,
             mark_kind: ChromeMark::ProfilePowerShell,
             title: "committed-title".to_owned(),
             pane_count: 1,
@@ -21789,6 +22012,7 @@ mod tests {",
     fn the_editor_takes_the_titles_own_box_and_leaves_the_tab_alone() {
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let resting_tab = TabContent {
+                flight: 0.0,
                 mark_kind: ChromeMark::ProfilePowerShell,
                 title: "committed-title".to_owned(),
                 pane_count: 1,
@@ -22119,6 +22343,7 @@ mod tests {",
             for pane_count in [1_usize, 3] {
                 let badge_text_width = if pane_count > 1 { 6.0 * scale } else { 0.0 };
                 let tabs = [TabContent {
+                    flight: 0.0,
                     mark_kind: ChromeMark::ProfilePowerShell,
                     title: "measure-me".to_owned(),
                     pane_count,
@@ -22149,6 +22374,7 @@ mod tests {",
 
     fn tab_with(mark: TabMarkState) -> TabContent {
         TabContent {
+            flight: 0.0,
             mark_kind: ChromeMark::ProfilePowerShell,
             title: "session".to_owned(),
             pane_count: 1,
@@ -22169,6 +22395,7 @@ mod tests {",
     /// One tab that carries nothing but the trailer under test.
     fn pinnable_tab(trailer: TabTrailer) -> TabContent {
         TabContent {
+            flight: 0.0,
             mark_kind: ChromeMark::ProfilePowerShell,
             title: "tab".to_owned(),
             pane_count: 1,
@@ -22425,6 +22652,7 @@ mod tests {",
         let palette = chrome_palette();
         let tabs = [
             TabContent {
+                flight: 0.0,
                 mark_kind: ChromeMark::ProfilePowerShell,
                 title: "a".to_owned(),
                 pane_count: 2,
@@ -22436,6 +22664,7 @@ mod tests {",
                 edit: None,
             },
             TabContent {
+                flight: 0.0,
                 mark_kind: ChromeMark::ProfilePowerShell,
                 title: "b".to_owned(),
                 pane_count: 3,
@@ -23436,6 +23665,7 @@ mod tests {",
     fn plain_tabs(count: usize) -> Vec<TabContent> {
         (0..count)
             .map(|index| TabContent {
+                flight: 0.0,
                 mark_kind: ChromeMark::ProfilePowerShell,
                 title: format!("tab {index}"),
                 pane_count: 1,
@@ -23936,6 +24166,7 @@ mod tests {",
             pointer,
             ChromeContent {
                 tabs: &[TabContent {
+                    flight: 0.0,
                     mark_kind: ChromeMark::ProfilePowerShell,
                     title: "PowerShell".to_owned(),
                     pane_count: seats.pane_count(),
@@ -28912,6 +29143,7 @@ mod tests {",
     /// One card's worth of tab, with whatever it has to report.
     fn card_tab(title: &str, pane_count: usize, mark: TabMarkState, pinned: bool) -> TabContent {
         TabContent {
+            flight: 0.0,
             mark_kind: ChromeMark::ProfilePowerShell,
             title: title.to_owned(),
             pane_count,
@@ -28942,6 +29174,244 @@ mod tests {",
     /// The same column, caught partway through its entrance (§7.1.6b′ F3).
     fn window_chrome_at_reveal(tabs: &[TabContent], rail: RailState, reveal: f32) -> WindowChrome {
         window_chrome_with_thumbnails(tabs, 0, rail, None, &[], reveal)
+    }
+
+    // ── §7.1.6b″: what a thing in flight looks like ─────────────────────────
+    //
+    // One rule, three surfaces, and the tests below drive two of them from the
+    // same fixture on purpose: the strip and the card column disagree about
+    // almost everything (a chip against a card, a row against a column, `TabBody`
+    // against `ControlPill`) and agree about exactly this.
+
+    /// Is this group empty in all four of its channels?
+    fn nothing_drawn(group: &ChromeGroup) -> bool {
+        group.quads.is_empty()
+            && group.labels.is_empty()
+            && group.sprites.is_empty()
+            && group.images.is_empty()
+    }
+
+    fn says(group: &ChromeGroup, text: &str) -> bool {
+        group.labels.iter().any(|label| label.text == text)
+    }
+
+    /// PIN (§7.1.6b″; user report with screenshot, 2026-08-24) — **a card in
+    /// flight leaves its list, in every channel at once.**
+    ///
+    /// The report is two cards of densely-set text composed into one unreadable
+    /// block, and it looked exactly like translucency although no alpha was
+    /// involved anywhere: `focus_card_paint_order` had already put the moving
+    /// card last, but last is not above. A group reaches the glass as
+    /// fill-then-mark-then-text over the *whole* run, so a resting card's title
+    /// printed straight through the face of the card passing over it, whichever
+    /// order the two cards were pushed in.
+    ///
+    /// Being in **both** groups would be the same bug with an extra copy, so the
+    /// second assertion is as load-bearing as the first.
+    ///
+    /// Red gate: delete the `if flying` arm in `focus_rail_chrome` that picks the
+    /// group, so every card writes to `rest` — the first assertion goes red, and
+    /// the screen goes back to the screenshot.
+    #[test]
+    fn a_card_in_flight_is_drawn_on_the_level_above_the_column_it_came_out_of() {
+        let mut tabs = [
+            card_tab("alpha", 1, TabMarkState::default(), false),
+            card_tab("beta", 1, TabMarkState::default(), false),
+        ];
+        let rail = focus_rail(TabLayoutMode::Vertical);
+
+        let resting = window_chrome_with_rail(&tabs, 0, rail, None);
+        assert!(
+            nothing_drawn(&resting.flight),
+            "a column with nothing moving in it draws nothing on the level above"
+        );
+        assert!(
+            says(&resting.rail, "beta"),
+            "and its cards are in the column"
+        );
+
+        tabs[1].flight = 1.0;
+        tabs[1].offset = -40.0;
+        let flying = window_chrome_with_rail(&tabs, 0, rail, None);
+        assert!(
+            says(&flying.flight, "beta"),
+            "the card that is moving is drawn on the level above, name and all"
+        );
+        assert!(
+            !says(&flying.rail, "beta"),
+            "and it is drawn there instead of in the column, not as well: a card \
+             in both runs is a card painted twice"
+        );
+        assert!(
+            says(&flying.rail, "alpha"),
+            "the cards that are not moving are exactly where they were"
+        );
+    }
+
+    /// PIN (§7.1.6b″ ①) — **a card in flight brings its own opaque body with
+    /// it.**
+    ///
+    /// The level is only half the ruling. A card's fill is a `ControlPill` in
+    /// `--focus-card`, drawn unconditionally, so what this holds is that the
+    /// fill travels *with* the card rather than being left in the column under
+    /// it — a lifted card over a hole in its own list is the same picture as no
+    /// fill at all.
+    ///
+    /// Red gate: move the fill push above the group selection in
+    /// `focus_rail_chrome`.
+    #[test]
+    fn a_card_in_flight_carries_its_own_fill_and_leaves_no_hole_behind() {
+        let mut tabs = [
+            card_tab("alpha", 1, TabMarkState::default(), false),
+            card_tab("beta", 1, TabMarkState::default(), false),
+        ];
+        tabs[1].flight = 1.0;
+        tabs[1].offset = -40.0;
+        let chrome = window_chrome_with_rail(&tabs, 0, focus_rail(TabLayoutMode::Vertical), None);
+        let pills = |group: &ChromeGroup| {
+            group
+                .sprites
+                .iter()
+                .filter(|sprite| {
+                    matches!(sprite.mark, ChromeMark::ControlPill { .. })
+                        && sprite.opacity >= 1.0
+                        && sprite.color == chrome_palette().focus_card
+                })
+                .count()
+        };
+        assert_eq!(
+            pills(&chrome.flight),
+            1,
+            "the card that is moving is drawn on its own opaque ground"
+        );
+        assert_eq!(
+            pills(&chrome.rail),
+            0,
+            "and the ground it was standing on went with it"
+        );
+    }
+
+    /// PIN (§7.1.6b″ ③) — **a card in flight casts a light shadow, and the
+    /// shadow is gone when the movement is.**
+    ///
+    /// Three claims in one test because they are one rule read at three points
+    /// of one journey: there is a shadow at the start, it is *lighter* halfway,
+    /// and there is none at rest. The middle one is what "落地即褪" is; the last
+    /// one is also the whole of the reduced-motion answer, because a machine
+    /// that does not animate never leaves `flight` above zero for a settling
+    /// card.
+    ///
+    /// Red gate: return `FLIGHT_SHADOW_ALPHA` from `flight_shadow_opacity`
+    /// instead of scaling it, and the middle assertion goes red — a shadow that
+    /// is full strength on the last frame of the flight is a shadow that snaps
+    /// off instead of fading.
+    #[test]
+    fn a_card_in_flight_casts_a_shadow_that_fades_as_it_lands() {
+        let shadows = |flight: f32| -> Vec<f32> {
+            let mut tabs = [
+                card_tab("alpha", 1, TabMarkState::default(), false),
+                card_tab("beta", 1, TabMarkState::default(), false),
+            ];
+            tabs[1].flight = flight;
+            tabs[1].offset = -40.0 * flight;
+            let chrome =
+                window_chrome_with_rail(&tabs, 0, focus_rail(TabLayoutMode::Vertical), None);
+            chrome
+                .flight
+                .sprites
+                .iter()
+                .chain(chrome.rail.sprites.iter())
+                .filter(|sprite| {
+                    matches!(sprite.mark, ChromeMark::ControlPillRing { .. })
+                        && sprite.color == chrome_palette().rail_edge
+                })
+                .map(|sprite| sprite.opacity)
+                .collect()
+        };
+        let leaving = shadows(1.0);
+        assert_eq!(leaving.len(), 1, "one shadow, under the one that is moving");
+        assert!(
+            (leaving[0] - FLIGHT_SHADOW_ALPHA).abs() < 1e-6,
+            "at its heaviest it is the stated alpha and no more: {leaving:?}"
+        );
+        let landing = shadows(0.25);
+        assert!(
+            landing[0] < leaving[0] && landing[0] > 0.0,
+            "and it is lighter the closer the card is to its slot: {landing:?}"
+        );
+        assert!(
+            shadows(0.0).is_empty(),
+            "a card at rest casts nothing — which is also every card on a \
+             machine that has been asked not to animate"
+        );
+    }
+
+    /// PIN (§7.1.6b″) — **the strip answers the ruling the same way the column
+    /// does, and the tab it lifts is given a body it would not otherwise have.**
+    ///
+    /// The second half is the one with teeth. A card's fill is unconditional; a
+    /// tab's is not — the strip draws a body for the active tab, the hovered tab
+    /// and the tab in the hand, and a tab that has just been *released* is none
+    /// of those while it spends two hundred milliseconds sliding into its slot.
+    /// It therefore flew with nothing under it and the strip showed straight
+    /// through it, which is the same defect the report photographed one surface
+    /// over.
+    ///
+    /// Red gate: drop `flying` from the fill's condition in `window_tab_strip`.
+    #[test]
+    fn a_tab_in_flight_is_lifted_out_of_the_strip_and_given_a_body() {
+        let mut tabs = [
+            tab_with(TabMarkState::default()),
+            tab_with(TabMarkState::default()),
+        ];
+        tabs[0].title = "held".to_owned();
+        tabs[1].title = "settling".to_owned();
+        // Tab 0 is the active one, so tab 1 is neither active nor hovered — the
+        // state a just-released tab is actually in.
+        tabs[1].flight = 0.6;
+        tabs[1].offset = 30.0;
+        let chrome = window_chrome_with_rail(&tabs, 0, RailState::default(), None);
+        assert!(
+            says(&chrome.flight, "settling"),
+            "the tab that is moving is drawn on the level above the strip"
+        );
+        assert!(!says(&chrome.seats, "settling"));
+        assert!(
+            says(&chrome.seats, "held"),
+            "and the strip keeps every tab that is not moving"
+        );
+        assert!(
+            chrome.flight.sprites.iter().any(|sprite| {
+                matches!(sprite.mark, ChromeMark::TabBody { .. })
+                    && sprite.opacity >= 1.0
+                    && sprite.color == chrome_palette().caption_hover
+            }),
+            "a released tab is neither active nor hovered, and it still may not \
+             be see-through while it travels"
+        );
+    }
+
+    /// PIN (§7.1.6b″ ③) — the shadow's own arithmetic, without a window.
+    ///
+    /// Its own test because the three surfaces read it and none of them owns it:
+    /// a rule two of the three agreed on and the third did not would be exactly
+    /// the "一处一改" the ruling forbids.
+    #[test]
+    fn the_flight_shadow_is_the_stated_alpha_scaled_by_the_flight_and_nothing_else() {
+        assert_eq!(flight_shadow_opacity(0.0), 0.0);
+        assert!((flight_shadow_opacity(1.0) - FLIGHT_SHADOW_ALPHA).abs() < 1e-6);
+        assert!((flight_shadow_opacity(0.5) - FLIGHT_SHADOW_ALPHA / 2.0).abs() < 1e-6);
+        // Out of range on both sides, because a caller's tween can overshoot and
+        // a shadow darker than the ruling is a shadow nobody chose.
+        assert_eq!(flight_shadow_opacity(-1.0), 0.0);
+        assert!((flight_shadow_opacity(4.0) - FLIGHT_SHADOW_ALPHA).abs() < 1e-6);
+        // 「很轻」 is a comparison, and the thing it is lighter than is the
+        // landing ring the same surfaces already draw. A `const` block because
+        // both sides are constants: this is a claim about the design's own
+        // numbers, and it should fail to compile rather than fail to run.
+        const {
+            assert!(FLIGHT_SHADOW_ALPHA < TAB_LAND_RING_ALPHA);
+        }
     }
 
     /// [`window_chrome_with_rail`] with the F2 thumbnails named — the shape the
