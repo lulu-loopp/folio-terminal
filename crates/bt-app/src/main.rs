@@ -21447,6 +21447,17 @@ fn absorb_tab_into_layout(
 struct DrainOutcome {
     /// Bytes reached the screen.
     arrived: bool,
+    /// **A pane's ring still held bytes when its turn was over.**
+    ///
+    /// The turn is bounded — [`drain_leaf_pty`] takes one
+    /// [`bt_pty::TERM_READ_QUANTUM`] out of a pane and goes back to the message
+    /// pump — so the loop has to be told that there is more, or a shell printing
+    /// faster than the window drains would sit in a full ring with nobody coming
+    /// back for it. [`PtyWakeSignal::raise`] is what this becomes, and the reason
+    /// it cannot simply be left to the reader thread is that a thread blocked in
+    /// `bt_pty::OutputRing::push` is a thread that will not raise anything: it is
+    /// waiting for the very drain it would be asking for.
+    pending: bool,
     /// Bytes reached the screen of a leaf that is **not** the one holding this
     /// tab's keyboard.
     ///
@@ -21486,6 +21497,7 @@ struct DrainOutcome {
 impl DrainOutcome {
     fn merge(&mut self, other: Self) {
         self.arrived |= other.arrived;
+        self.pending |= other.pending;
         self.arrived_off_focus |= other.arrived_off_focus;
         self.renamed |= other.renamed;
         self.moved |= other.moved;
@@ -21556,15 +21568,41 @@ fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<DrainOutcome> {
     // and only for a pane that asked to hear about it (DEC 2031).
     leaf.session.set_color_palette(terminal_palette_in_force());
     let mut changed = false;
-    loop {
-        let bytes = leaf
-            .pty
-            .as_ref()
-            .expect("PTY mode checked above")
-            .read_output();
-        if bytes.is_empty() {
-            break;
-        }
+    // **One quantum, and then back to the message pump.**
+    //
+    // This was `loop { read; if empty { break } ; feed }`, and the exit it named
+    // is one a busy pane never reaches. `read_output` is
+    // [`bt_pty::OutputRing::try_pop`] over a one-MiB ring that a *reader thread*
+    // refills while this runs, so "the ring is empty" is a question about one
+    // instant, and while the child prints at least as fast as `feed_at` absorbs
+    // it that instant never arrives. Measured on 2026-08-24, release build, one
+    // pane running `for(;;){ [Console]::Out.WriteLine('x'*4000) }` and nothing
+    // else — no second pane, no page, nobody touching the frame: the window
+    // stopped answering **two seconds** after launch and never answered again,
+    // one core burned flat, ~35 MB/s of memory on top, `IsHungAppWindow` true
+    // and the window thread `Running` — not blocked on anything, simply never
+    // returning. That is the whole of the "drag it bigger and the program dies"
+    // report: hosting a page takes a frame from 26 ms to 50 ms, so a pane that
+    // stays just ahead of the terminal at rest falls behind while the frame is
+    // being dragged, and once it is behind the loop stops terminating.
+    //
+    // The budget is not a number invented here. [`bt_pty::TERM_READ_QUANTUM`] is
+    // *already* "the serialized Term actor quantum" of `DESIGN.md` §1.3 — the
+    // unit of output one turn is meant to carry — and `try_pop` already takes at
+    // most one of them. So the fix is to stop asking for a second one on the
+    // same turn, and to say out loud that more is owed.
+    //
+    // Nothing is dropped and nothing waits on a clock: the leftover is answered
+    // on the very next turn, which [`Runtime::drain_pty`] guarantees by raising
+    // the wake. A pane that outruns the window is throttled by the ring and the
+    // pipe behind it, which is what backpressure is for and what the ring was
+    // built to do.
+    let bytes = leaf
+        .pty
+        .as_ref()
+        .expect("PTY mode checked above")
+        .read_output();
+    if !bytes.is_empty() {
         debug_assert!(bytes.len() <= bt_pty::TERM_READ_QUANTUM.get());
         leaf.session
             .feed_at(&bytes, Instant::now())
@@ -21578,9 +21616,19 @@ fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<DrainOutcome> {
         }
         changed = true;
     }
+    // Asked of the ring itself rather than guessed from the chunk's length: a
+    // pop that happened to return exactly one quantum may have emptied it, and a
+    // pop that returned less may already have been overtaken by the reader.
+    let pending = leaf
+        .pty
+        .as_ref()
+        .expect("PTY mode checked above")
+        .ring_stats()
+        .current_bytes
+        > 0;
     // A canvas notification, and any colour answer queued behind it, is owed to
     // a child that has said nothing — so the reply channel is drained once more
-    // outside the read loop, which only turns when the child speaks.
+    // outside the read above, which only feeds when the child speaks.
     for reply in leaf.session.take_pty_writes() {
         leaf.pty
             .as_mut()
@@ -21635,6 +21683,7 @@ fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<DrainOutcome> {
             .into_iter()
             .collect(),
         arrived: changed,
+        pending,
         // A leaf cannot know whether it is the one the frame path will compose;
         // that is a fact about the tab, and [`drain_tab_pty`] is where it is
         // known and where this is filled in.
@@ -51457,8 +51506,10 @@ impl Runtime<'_> {
         let mut moved = false;
         let mut command_ends: Vec<PathBuf> = Vec::new();
         let mut notifications: Vec<NotificationRequest> = Vec::new();
+        let mut pending = false;
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             let outcome = drain_tab_pty(tab)?;
+            pending |= outcome.pending;
             // Resolved here and spent below: the pane's name and its profile's are
             // facts of this tab, and raising reaches a field of `App` that this
             // loop's borrow of `self.window.tabs` cannot be holding at the time.
@@ -51486,6 +51537,22 @@ impl Runtime<'_> {
             }
             chrome_changed |= outcome.renamed;
             moved |= outcome.moved;
+        }
+        // **A ring that still holds bytes is a turn this window owes itself.**
+        //
+        // [`drain_leaf_pty`] takes one quantum from a pane and returns, so the
+        // rest of a burst is answered by coming back — and coming back has to be
+        // asked for here, because the thread that would otherwise ask is the
+        // reader, and a reader with a full ring is blocked inside
+        // [`bt_pty::OutputRing::push`] waiting for this very drain. Left to it,
+        // the loop would go to `ControlFlow::Wait` with a pane mid-sentence.
+        //
+        // Raised *after* the drain and not before: [`PtyWakeSignal::accept`]
+        // lowered the bit at the top of this function precisely so that bytes
+        // arriving during the drain raise it again, and this is the same
+        // sentence said for the bytes that were already there.
+        if pending {
+            self.window.pty_wake.raise();
         }
         self.raise_notifications(notifications);
         // Raised before anything below can publish, because it is what that
@@ -64525,6 +64592,151 @@ mod quit_transaction_tests {
         ));
         assert_eq!(one.tabs.len(), 1);
         let _: &TabV1 = &one.tabs[0];
+    }
+}
+
+/// **How much of one pane's output a single turn of the loop may swallow.**
+///
+/// The window's thread is the terminal's parser *and* the message pump, so what
+/// bounds one is what keeps the other alive. Nothing here can be asked of a
+/// `LeafSession` in a unit test — the drain needs a live ConPTY with a child
+/// printing into it, which is what the acceptance in `HANDOFF`/`DESIGN` is for —
+/// so what is pinned is the *shape*: that the read is taken once and not in a
+/// loop, that the leftover is reported, and that the report becomes a wake.
+#[cfg(test)]
+mod pty_drain_budget_tests {
+    /// This file as text, for [`application_change_tests::SOURCE`]'s reason.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The body of a free function declared at module level.
+    ///
+    /// [`textless_present_tests::fn_body`] reads methods, which are indented one
+    /// level further; the two are the same idea at two indentations and are kept
+    /// apart rather than generalised because a helper that guessed the
+    /// indentation would find the wrong `}`.
+    fn free_fn_body(name: &str) -> &'static str {
+        let head = format!("\nfn {name}(");
+        let start = SOURCE
+            .find(&head)
+            .unwrap_or_else(|| panic!("`fn {name}` is declared at module level"))
+            + head.len();
+        let end = start
+            + SOURCE[start..]
+                .find("\n}\n")
+                .expect("a free function is closed by a `}` in column one");
+        &SOURCE[start..end]
+    }
+
+    fn method_body(name: &str) -> &'static str {
+        let head = format!("\n    fn {name}(");
+        let start = SOURCE
+            .find(&head)
+            .unwrap_or_else(|| panic!("`fn {name}` is declared as a method"))
+            + head.len();
+        let end = start
+            + SOURCE[start..]
+                .find("\n    }\n")
+                .expect("a method is closed by a `}` at its `impl`'s indentation");
+        &SOURCE[start..end]
+    }
+
+    /// PIN (user report, 2026-08-24) — **a pane that prints faster than the
+    /// window absorbs it must not be able to keep the window's thread.**
+    ///
+    /// `drain_leaf_pty` used to read its pane in a `loop` whose only exit was an
+    /// empty ring. The ring is one MiB and a *reader thread* refills it while the
+    /// loop runs, so that exit is a question about one instant, and a child
+    /// printing at least as fast as `feed_at` absorbs never lets that instant
+    /// arrive. The loop never returned, the thread never reached the message
+    /// pump, and Windows called the window not responding.
+    ///
+    /// Red gate, measured on the release build of 813fa7d: one pane running
+    /// `for(;;){ [Console]::Out.WriteLine('x'*4000) }`, no second pane, no page,
+    /// nobody touching the frame — `Responding` went false **two seconds** after
+    /// launch and never came back, with one core burned flat and ~35 MB/s of
+    /// memory behind it. The user met the same defect through its amplifier:
+    /// hosting a page takes a frame from 26 ms to 50 ms, so a pane that stays
+    /// just ahead of the terminal at rest falls behind while the frame is being
+    /// dragged.
+    ///
+    /// Mutation: put the read back in a `loop`, or drop the `pending` report,
+    /// or stop raising the wake for it.
+    #[test]
+    fn one_turn_takes_one_quantum_from_a_pane_and_says_what_is_left() {
+        let drain = free_fn_body("drain_leaf_pty");
+        let read = drain
+            .find("read_output()")
+            .expect("`drain_leaf_pty` reads its pane's ring");
+        assert_eq!(
+            drain.matches("read_output()").count(),
+            1,
+            "one turn asks a pane for its output exactly once; a second ask is \
+             the unbounded loop coming back"
+        );
+        let head = &drain[..read];
+        for spelling in ["\n    loop {", "\n    while "] {
+            assert!(
+                !head.contains(spelling),
+                "the read is taken once and not inside a `{}` — a loop around \
+                 it is what kept the window's thread",
+                spelling.trim()
+            );
+        }
+        assert!(
+            drain.contains("ring_stats()"),
+            "what one turn leaves behind is asked of the ring, not guessed"
+        );
+        assert!(
+            drain.contains("pending,"),
+            "and it is reported, or nobody comes back for it"
+        );
+    }
+
+    /// PIN — **the leftover becomes a wake, and the window that owes it asks
+    /// for the turn itself.**
+    ///
+    /// Leaving this to the reader thread is the trap: a reader with a full ring
+    /// is blocked inside `OutputRing::push`, waiting for the drain it would be
+    /// asking for. So a bounded turn without this line is a pane stopped
+    /// mid-sentence until something unrelated wakes the loop.
+    #[test]
+    fn a_pane_with_more_to_say_is_a_turn_the_window_asks_itself_for() {
+        let body = method_body("drain_pty");
+        let merged = body
+            .find("outcome.pending")
+            .expect("`drain_pty` reads each tab's leftover");
+        let raised = body
+            .find("pty_wake.raise()")
+            .expect("`drain_pty` turns a leftover into a wake");
+        assert!(
+            merged < raised,
+            "the leftover has to be gathered before it can be raised"
+        );
+        let accepted = body
+            .find("pty_wake.accept()")
+            .expect("`drain_pty` lowers the bit at the top");
+        assert!(
+            accepted < raised,
+            "raising before the accept would lower the bit this turn just set"
+        );
+    }
+
+    /// A tab is drained leaf by leaf and a window tab by tab, so one pane with
+    /// something left owes the whole window a turn.
+    #[test]
+    fn a_leftover_anywhere_survives_the_merge() {
+        let mut all = super::DrainOutcome::default();
+        assert!(!all.pending);
+        all.merge(super::DrainOutcome {
+            pending: true,
+            ..Default::default()
+        });
+        assert!(all.pending, "one busy pane is the window's answer");
+        all.merge(super::DrainOutcome::default());
+        assert!(
+            all.pending,
+            "and a quiet pane drained after it does not cancel it"
+        );
     }
 }
 
