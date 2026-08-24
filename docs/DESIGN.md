@@ -2014,7 +2014,7 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 
 ![移交之后的两扇窗:左窗是搬进去的 TAB-TWO(PAGE BETA,boot 未变,shell 打出 BT-TRANSFER-ALIVE),右窗是留下的 TAB-ONE(PAGE ALPHA,boot 未变)](spikes/artifacts/page-keys/two-tabs-two-pages-and-one-of-them-moved.png)
 
-**欠账两笔。** ⓐ **`transfer_tab` 不修 pin 分区**:把一张**钉住的** tab 搬进一扇 tab 没钉住的窗,目标窗的 strip 就成了「未钉在前、已钉在后」,`tab_trailers` 的 `debug_assert!` 当场喊 F57(实机撞到过一次,debug 档才响)。这是 F1b 的 model commit 少调一次 `settle_pin_partition`,不是本片引入的,也不在本片的地界里——记在这里给接手 `transfer_tab` 的那一片。ⓑ **`PreviewSurface::Seat` 本身还是一个座位号**:④ 只把网页这条道上的三处按叶定位了,预览块其余按 `preview_tab_index` 找 tab 的读者仍然是「第一张有这个号的 tab」。要根治得把预览表面也按叶寻址,那是预览块的单。
+**欠账两笔,ⓐ 已清。** ⓐ ~~`transfer_tab` 不修 pin 分区~~ —— **本片报出当日即清**(合并方落修):model commit 在目标窗 push 后补上与所有 strip 编辑同一次 `settle_pin_partition`(源侧无需——移除不会破坏已分区的 run),钉进 `the_transfer_is_a_transaction_and_its_commit_pays_every_debt` 的欠单。ⓑ **`PreviewSurface::Seat` 本身还是一个座位号**:④ 只把网页这条道上的三处按叶定位了,预览块其余按 `preview_tab_index` 找 tab 的读者仍然是「第一张有这个号的 tab」。要根治得把预览表面也按叶寻址,那是预览块的单。
 
 ## 8. 依赖策略
 
