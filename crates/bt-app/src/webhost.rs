@@ -1123,6 +1123,21 @@ pub(crate) enum WebOutcome {
         png: Option<Vec<u8>>,
         source: Option<(u32, u32)>,
     },
+    /// **What this seat learned about a site's icon** (the favicon slice, `docs/DESIGN.md` §7.13,
+    /// §7.7 ②).
+    ///
+    /// `site` and not a seat, because that is what the answer is *about*: the
+    /// application's store is keyed by site so that a switcher row, a Recent row
+    /// and a second window's pane can all be answered by one seat's engine
+    /// having asked once. `None` means the site has no icon and whatever was
+    /// filed under it should go.
+    ///
+    /// **The site is the one that was asked about, not the one the seat is on
+    /// now.** A page that navigates away between the ask and the answer would
+    /// otherwise file one server's drawing under another's name — and the answer
+    /// is still a true fact about the server it was asked of, so it is kept
+    /// rather than dropped.
+    Favicon { site: String, png: Option<Vec<u8>> },
 }
 
 /// Why the driver is waiting for a browser process to go.
@@ -1300,6 +1315,24 @@ pub(crate) struct WebSeat {
     /// frame rate against a drain running at twelve a second. It is kept here
     /// and not in the store because the engine is what is busy.
     capturing: bool,
+    /// **Which site a `GetFavicon` is out for**, and `None` when none is (the
+    /// favicon slice).
+    ///
+    /// One ask at a time, for [`Self::capturing`]'s reason and one more: the
+    /// engine re-reads the icon resource on every ask, so a second ask made
+    /// before the first landed would be two fetches of one file. It holds the
+    /// *site* rather than a flag because the answer has to be filed under the
+    /// server it was asked of — see [`WebOutcome::Favicon`].
+    fetching_favicon: Option<String>,
+    /// **Whether the icon changed again while an ask was in flight.**
+    ///
+    /// A page can swap its icon twice inside one navigation — a shell that
+    /// paints a placeholder and then the real thing does exactly that — and a
+    /// build that only refused the second ask would leave the placeholder up for
+    /// good. One bit and not a queue: what the caller wants is the *current*
+    /// icon, so any number of changes during one flight collapse into one more
+    /// ask when it lands.
+    favicon_changed_again: bool,
     /// The page's zoom as this window last set it.
     ///
     /// Kept here as well as in the controller because `Ctrl`+wheel steps from
@@ -1371,6 +1404,8 @@ impl WebSeat {
             fault: None,
             refusal,
             capturing: false,
+            fetching_favicon: None,
+            favicon_changed_again: false,
             zoom: 1.0,
         };
         let effect = web.machine.request(url);
@@ -1650,6 +1685,74 @@ impl WebSeat {
                 });
                 WebEffect::Ignore
             }
+            // **The site swapped its icon** (the favicon slice, `docs/DESIGN.md` §7.13, §7.7 ②). Two
+            // answers and no third: an empty address is a page that has none, and
+            // it is said out loud rather than ignored — a page navigating from a
+            // site with an icon to one without would otherwise leave the first
+            // one's drawing standing on the head.
+            //
+            // Otherwise the bytes are a second ask, made here rather than by the
+            // window because the thing that is busy is this seat's engine. A seat
+            // that cannot name its own site — nothing committed yet, so
+            // `page.url` is empty — asks for nothing: there would be nowhere to
+            // file the answer, and the store is the only thing the answer is for.
+            WebEvent::FaviconChanged { uri } => {
+                let Some(site) = crate::webnav::site_key(&self.page.url) else {
+                    return WebEffect::Ignore;
+                };
+                if uri.trim().is_empty() {
+                    self.favicon_changed_again = false;
+                    outcomes.push(WebOutcome::Favicon { site, png: None });
+                    return WebEffect::Ignore;
+                }
+                if self.fetching_favicon.is_some() {
+                    self.favicon_changed_again = true;
+                    return WebEffect::Ignore;
+                }
+                self.ask_for_the_favicon(site);
+                WebEffect::Ignore
+            }
+            // **And the bytes.** A refusal travels as `None` for the reason every
+            // other `None` in this file does — the store lets go of what it was
+            // holding — and neither half is worth a word on `stderr`: an icon
+            // this build cannot read is a site's business, not a fault of the
+            // window, and the globe is already the sentence about it (§7.7 ②).
+            WebEvent::Favicon { png } => {
+                if let Some(site) = self.fetching_favicon.take() {
+                    outcomes.push(WebOutcome::Favicon {
+                        site,
+                        png: png.clone(),
+                    });
+                }
+                // Asked again only if something actually changed while this one
+                // was in flight, and asked about wherever the seat is *now* —
+                // which may be another server by this point, and is then exactly
+                // the site whose icon is missing.
+                if std::mem::take(&mut self.favicon_changed_again)
+                    && let Some(site) = crate::webnav::site_key(&self.page.url)
+                {
+                    self.ask_for_the_favicon(site);
+                }
+                WebEffect::Ignore
+            }
+        }
+    }
+
+    /// Put one `GetFavicon` in flight and record which site it is about.
+    ///
+    /// One place, because the two callers above must not be able to disagree
+    /// about the bookkeeping: an ask recorded without being made would wedge the
+    /// seat's icon for ever, and an ask made without being recorded would drop
+    /// its own answer on the floor.
+    ///
+    /// **A refusal is silent and leaves nothing in flight** (rule ④). The engine
+    /// declining to fetch an icon has one consequence — the site goes on wearing
+    /// whatever it wore, which for a new site is the globe — and a window that
+    /// reported it would be spending the one channel it has on somebody else's
+    /// missing decoration.
+    fn ask_for_the_favicon(&mut self, site: String) {
+        if self.host.get_favicon().is_ok() {
+            self.fetching_favicon = Some(site);
         }
     }
 
@@ -3096,18 +3199,18 @@ mod folder_tests {
 mod rehost_address_tests {
     use super::*;
 
-    fn hwnd(value: isize) -> std::num::NonZeroIsize {
+    pub(super) fn hwnd(value: isize) -> std::num::NonZeroIsize {
         std::num::NonZeroIsize::new(value).expect("a non-zero window handle")
     }
 
-    fn page(tab: u64, seat: u64) -> bt_platform::PageVisual {
+    pub(super) fn page(tab: u64, seat: u64) -> bt_platform::PageVisual {
         bt_platform::PageVisual { tab, seat }
     }
 
     /// A seat with an address, a machine and an engine that has never been
     /// started. **No environment is requested**, which is what keeps these
     /// tests browserless.
-    fn detached(address: SeatAddress) -> WebSeat {
+    pub(super) fn detached(address: SeatAddress) -> WebSeat {
         WebSeat {
             address,
             folder: PathBuf::from(r"C:\nowhere"),
@@ -3132,6 +3235,8 @@ mod rehost_address_tests {
             fault: None,
             refusal: Rc::new(RefCell::new(None)),
             capturing: false,
+            fetching_favicon: None,
+            favicon_changed_again: false,
             zoom: 1.0,
         }
     }
@@ -3712,5 +3817,199 @@ mod search_tests {
         assert!(!WebSeat::would_go_to("javascript:alert(1)"));
         assert!(!WebSeat::would_go_to("file:///C:/Windows/win.ini"));
         assert!(!WebSeat::would_go_to("mailto:a@b.c"));
+    }
+}
+
+/// **What a seat does with the news that its site changed its icon** (the
+/// favicon slice, `docs/DESIGN.md` §7.7 ②, §7.13).
+///
+/// Browserless, the way [`rehost_address_tests`] is and for its reason: what is
+/// under test is the seat's bookkeeping — which site an answer is filed under,
+/// how many asks one change costs, and what a page with nothing to say costs.
+/// `bt_platform::WebHost` with no controller answers `get_favicon` with `Ok(())`
+/// and pushes nothing, which is exactly the shape of "the ask was made".
+#[cfg(test)]
+mod favicon_tests {
+    use super::rehost_address_tests::{detached, hwnd, page};
+    use super::*;
+
+    /// A detached seat standing on one address, as if a navigation had
+    /// committed.
+    fn seat_on(url: &str) -> WebSeat {
+        let mut web = detached(SeatAddress {
+            page: page(1, 1),
+            hwnd: hwnd(0x40),
+        });
+        web.page.url = url.to_owned();
+        web
+    }
+
+    fn digest(web: &mut WebSeat, event: bt_platform::WebEvent) -> Vec<WebOutcome> {
+        let mut outcomes = Vec::new();
+        web.digest(&event, &mut outcomes);
+        outcomes
+    }
+
+    /// **Red gate: an announcement is an ask, and the answer is filed under the
+    /// site that was asked about.**
+    ///
+    /// The whole engine half in one run. `FaviconChanged` carries an address and
+    /// no bytes, so the seat has to ask; and the answer arrives tens of
+    /// milliseconds later, so what it is *about* has to have been written down
+    /// at the moment of asking.
+    ///
+    /// MUTATION: file the answer under `webnav::site_key(&self.page.url)` read at
+    /// delivery instead of the recorded site, and the last assertion says
+    /// `https://second.test` — one server's drawing under another's name.
+    #[test]
+    fn an_answer_is_filed_under_the_site_that_was_asked_about() {
+        let mut web = seat_on("https://first.test/a");
+        let asked = digest(
+            &mut web,
+            bt_platform::WebEvent::FaviconChanged {
+                uri: "https://first.test/favicon.ico".to_owned(),
+            },
+        );
+        assert!(
+            asked.is_empty(),
+            "an announcement reports nothing by itself"
+        );
+        assert_eq!(web.fetching_favicon.as_deref(), Some("https://first.test"));
+
+        // The page moves on while the engine is still fetching.
+        web.page.url = "https://second.test/b".to_owned();
+        let answered = digest(
+            &mut web,
+            bt_platform::WebEvent::Favicon {
+                png: Some(vec![1, 2, 3]),
+            },
+        );
+        assert_eq!(
+            answered,
+            vec![WebOutcome::Favicon {
+                site: "https://first.test".to_owned(),
+                png: Some(vec![1, 2, 3]),
+            }]
+        );
+        assert_eq!(web.fetching_favicon, None, "the flight is over");
+    }
+
+    /// **Red gate: a page with no icon says so, and says it about its own
+    /// site.**
+    ///
+    /// §7.7 ②'s second half has to be *reported*, not merely not-reported: a
+    /// page navigating from a site that had an icon to one that has none fires
+    /// this with an empty address, and a seat that swallowed it would leave the
+    /// first server's drawing standing on the head.
+    ///
+    /// MUTATION: return early on an empty `uri` and the outcome list is empty —
+    /// the store keeps an icon for a site that just said it has none.
+    #[test]
+    fn a_page_with_no_icon_says_so() {
+        let mut web = seat_on("https://first.test/a");
+        assert_eq!(
+            digest(
+                &mut web,
+                bt_platform::WebEvent::FaviconChanged { uri: String::new() },
+            ),
+            vec![WebOutcome::Favicon {
+                site: "https://first.test".to_owned(),
+                png: None,
+            }]
+        );
+        assert_eq!(web.fetching_favicon, None, "and nothing was asked for");
+    }
+
+    /// **Red gate: one ask at a time, and a change during a flight costs one
+    /// more ask and not one per announcement.**
+    ///
+    /// The engine re-reads the icon resource on every ask, so an unguarded seat
+    /// would fetch a file once per announcement — and a shell that paints a
+    /// placeholder and then the real icon announces twice inside one
+    /// navigation.
+    ///
+    /// MUTATION: drop the `fetching_favicon.is_some()` guard and the second
+    /// announcement overwrites the first flight's site, so the first answer is
+    /// filed under the wrong name. MUTATION: drop `favicon_changed_again` and
+    /// the placeholder stays up for good.
+    #[test]
+    fn a_second_announcement_during_a_flight_is_one_more_ask_and_not_two() {
+        let mut web = seat_on("https://first.test/a");
+        digest(
+            &mut web,
+            bt_platform::WebEvent::FaviconChanged {
+                uri: "https://first.test/one.png".to_owned(),
+            },
+        );
+        for _ in 0..5 {
+            digest(
+                &mut web,
+                bt_platform::WebEvent::FaviconChanged {
+                    uri: "https://first.test/two.png".to_owned(),
+                },
+            );
+        }
+        assert_eq!(
+            web.fetching_favicon.as_deref(),
+            Some("https://first.test"),
+            "still the one flight"
+        );
+        assert!(web.favicon_changed_again, "and one ask is owed");
+
+        digest(
+            &mut web,
+            bt_platform::WebEvent::Favicon { png: Some(vec![9]) },
+        );
+        assert_eq!(
+            web.fetching_favicon.as_deref(),
+            Some("https://first.test"),
+            "the owed ask went out on the answer's heels"
+        );
+        assert!(
+            !web.favicon_changed_again,
+            "and it is owed once, however many times it was announced"
+        );
+    }
+
+    /// **Red gate: a seat that cannot name its own site asks for nothing.**
+    ///
+    /// A page that has committed nothing has an empty address, and the store is
+    /// keyed by site — so there would be nowhere to file the answer. Asking
+    /// anyway would be spending a fetch on a picture with no name.
+    ///
+    /// MUTATION: ask regardless and `fetching_favicon` is `Some("")`, which is
+    /// an entry the store would file every unnamed page's icon into.
+    #[test]
+    fn a_seat_with_no_address_asks_for_nothing() {
+        let mut web = seat_on("");
+        assert!(
+            digest(
+                &mut web,
+                bt_platform::WebEvent::FaviconChanged {
+                    uri: "https://first.test/one.png".to_owned(),
+                },
+            )
+            .is_empty()
+        );
+        assert_eq!(web.fetching_favicon, None);
+    }
+
+    /// **An answer nobody asked for is dropped.**
+    ///
+    /// The seat's own version of `web_thumb`'s `page-stale`: a `Favicon` event
+    /// arriving with no flight recorded — a rebuilt engine answering for the one
+    /// before it — has no site to be about, and inventing one out of wherever
+    /// the seat happens to be now is the bug the recorded site exists to
+    /// prevent.
+    #[test]
+    fn an_answer_with_no_flight_behind_it_is_dropped() {
+        let mut web = seat_on("https://first.test/a");
+        assert!(
+            digest(
+                &mut web,
+                bt_platform::WebEvent::Favicon { png: Some(vec![1]) },
+            )
+            .is_empty()
+        );
     }
 }

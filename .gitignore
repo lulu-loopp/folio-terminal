@@ -21,6 +21,7 @@
 !docs/plans/web-preview/w2-slice1-evidence/*.png
 !docs/plans/web-preview/w2-slice5-evidence/*.png
 !docs/plans/web-preview/w2-slice4-integration-evidence/*.png
+!docs/plans/web-preview/favicon-evidence/*.png
 dist/
 .tmp-repaint-capture/
 .claude/worktrees/

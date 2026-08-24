@@ -601,6 +601,43 @@ pub fn site_label(url: &str) -> String {
     }
 }
 
+/// **Whose icon this is** — `scheme://host[:port]`, the key a favicon is filed
+/// under (§7.7 ②, the favicon slice, `docs/DESIGN.md` §7.13).
+///
+/// A favicon belongs to a *site* and not to a page: `/`, `/docs` and
+/// `/docs?q=1` on one server wear one icon, and the engine only re-announces it
+/// when it actually changes. So the store this feeds is keyed by the part of an
+/// address that names the server, which is the same half [`site_label`] shows a
+/// reader — with the **scheme kept**, because `http://localhost:8642` and
+/// `https://localhost:8642` are two servers and the store must not hand one of
+/// them the other's icon.
+///
+/// The default port is dropped exactly where [`switcher_key`] drops it, and for
+/// its reason: `:443` on an `https` URL is the same site wearing a hat, and a
+/// build in which the switcher row and the icon disagree about that is a build
+/// where one row draws a globe beside another row's favicon for one server.
+///
+/// `None` — rather than the string itself, which is what `site_label` answers —
+/// for anything this module cannot read as a URL. `site_label` has a row to
+/// fill and must print *something*; this has a cache to key, and a key made out
+/// of a string nobody could parse would file an icon under a name no lookup
+/// will ever be able to spell again.
+pub fn site_key(url: &str) -> Option<String> {
+    let (scheme, rest) = split_scheme(url.trim())?;
+    let (host, port) = split_host_port(authority(rest));
+    if host.is_empty() {
+        return None;
+    }
+    let kept_port = match (scheme.as_str(), port.as_deref()) {
+        ("http", Some("80")) | ("https", Some("443")) => None,
+        (_, port) => port,
+    };
+    Some(match kept_port {
+        Some(port) => format!("{scheme}://{host}:{port}"),
+        None => format!("{scheme}://{host}"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1401,5 +1438,55 @@ mod tests {
         ] {
             assert_eq!(site_label(url), expected, "for {url}");
         }
+    }
+
+    /// **Red gate (the favicon slice, `docs/DESIGN.md` §7.13): the key an icon is filed under is the
+    /// server and the whole server.**
+    ///
+    /// Four claims. The path, query and fragment are not part of it — one server
+    /// wears one icon and re-asking per page would be a fetch per click. The
+    /// scheme *is* part of it: plain text and TLS on one host are two servers.
+    /// The default port is dropped where `switcher_key` drops it, so the row and
+    /// the icon cannot disagree about which site a page is on. And a string this
+    /// module cannot read is refused outright rather than becoming a key nothing
+    /// will ever spell the same way twice.
+    ///
+    /// MUTATION: build the key out of `site_label` and the fourth row equals the
+    /// third — the plain-text server is handed the secure one's icon.
+    #[test]
+    fn a_favicon_is_filed_under_scheme_host_and_port() {
+        for (url, expected) in [
+            (
+                "http://localhost:5173/app?tab=logs#top",
+                Some("http://localhost:5173"),
+            ),
+            ("http://localhost:5173/", Some("http://localhost:5173")),
+            ("https://example.com/a/b", Some("https://example.com")),
+            ("http://example.com/a/b", Some("http://example.com")),
+            ("https://example.com:443/", Some("https://example.com")),
+            ("http://example.com:80/", Some("http://example.com")),
+            (
+                "https://example.com:8443/",
+                Some("https://example.com:8443"),
+            ),
+            ("https://EXAMPLE.com/", Some("https://example.com")),
+            ("  https://example.com/  ", Some("https://example.com")),
+            ("http://[::1]:3000/x", Some("http://::1:3000")),
+            ("not a url at all", None),
+            ("https://", None),
+            ("", None),
+        ] {
+            assert_eq!(site_key(url).as_deref(), expected, "for {url}");
+        }
+        assert_eq!(
+            site_key("https://example.com:443/one"),
+            site_key("https://example.com/two"),
+            "one server however its default port is spelled"
+        );
+        assert_ne!(
+            site_key("https://example.com/"),
+            site_key("http://example.com/"),
+            "and two servers where the scheme differs"
+        );
     }
 }

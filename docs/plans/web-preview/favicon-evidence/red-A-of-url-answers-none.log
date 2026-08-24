@@ -1,0 +1,45 @@
+---- favicon::tests::an_icon_that_will_not_decode_changes_nothing stdout ----
+
+thread 'favicon::tests::an_icon_that_will_not_decode_changes_nothing' (60104) panicked at crates\bt-app\src\favicon.rs:414:60:
+filed
+
+---- favicon::tests::a_box_is_cut_once_and_then_handed_out stdout ----
+
+thread 'favicon::tests::a_box_is_cut_once_and_then_handed_out' (69132) panicked at crates\bt-app\src\favicon.rs:540:56:
+filed
+
+---- marks::tests::a_favicon_texture_is_named_by_its_site_and_its_box stdout ----
+
+thread 'marks::tests::a_favicon_texture_is_named_by_its_site_and_its_box' (58600) panicked at crates\bt-app\src\marks.rs:4182:62:
+held
+
+---- favicon::tests::one_server_is_one_icon_and_two_servers_are_two stdout ----
+
+thread 'favicon::tests::one_server_is_one_icon_and_two_servers_are_two' (64288) panicked at crates\bt-app\src\favicon.rs:483:56:
+filed
+
+---- favicon::tests::the_store_does_not_grow_without_end stdout ----
+
+thread 'favicon::tests::the_store_does_not_grow_without_end' (63036) panicked at crates\bt-app\src\favicon.rs:574:9:
+the last server learned is still held
+
+
+failures:
+    favicon::tests::a_box_is_cut_once_and_then_handed_out
+    favicon::tests::a_box_with_no_area_is_refused
+    favicon::tests::a_site_that_changes_its_icon_changes_its_identity
+    favicon::tests::a_site_with_an_icon_is_not_a_globe
+    favicon::tests::a_site_with_no_icon_has_no_id_at_all
+    favicon::tests::an_icon_that_will_not_decode_changes_nothing
+    favicon::tests::one_server_is_one_icon_and_two_servers_are_two
+    favicon::tests::the_same_icon_twice_is_not_a_new_identity
+    favicon::tests::the_store_does_not_grow_without_end
+    marks::tests::a_favicon_texture_is_named_by_its_site_and_its_box
+    marks::tests::a_globe_that_names_a_site_is_drawn_as_that_site
+    marks::tests::a_globe_with_no_icon_behind_it_is_the_glyph
+    marks::tests::a_page_moved_into_another_window_keeps_its_icon
+    profiles::tests::a_recent_row_wears_its_sites_icon_where_the_session_learned_one
+
+test result: FAILED. 10 passed; 14 failed; 0 ignored; 0 measured; 2184 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p bt-app --bin folio`

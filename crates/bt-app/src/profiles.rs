@@ -3897,6 +3897,16 @@ fn contains(rect: [f32; 4], x: f32, y: f32) -> bool {
 /// [`crate::settings::build`], where the picker is a second layer over the dialog
 /// it hangs off.
 #[must_use]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "eight, and none of them is this menu's own: the boxes, which \
+              shells this machine has, which one is the default, where the \
+              pointer is, what the vault remembers, what time it is, and which \
+              sites the session has icons for. Every one is a fact the caller \
+              holds and this module has no way to ask for — the same division \
+              `settings::layout_for_menu` states at length. Bundling them into \
+              a struct would move the list rather than shorten it"
+)]
 pub fn build(
     layout: &ProfileMenuLayout,
     programs: &ProfilePrograms,
@@ -3904,6 +3914,7 @@ pub fn build(
     hover: Option<MenuRow>,
     recent: &[RecentEntry],
     now: SystemTime,
+    favicons: &crate::favicon::Favicons,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
@@ -4043,7 +4054,7 @@ pub fn build(
         push_row(
             &Row {
                 rect: *row,
-                mark: Some(recent_mark(&entry.seed)),
+                mark: Some(recent_mark(&entry.seed, favicons)),
                 name: &recent_label(&entry.seed),
                 // Still the age, and deliberately not `not installed`: a Recent
                 // row's one annotation answers "when", the grey already answers
@@ -4359,15 +4370,25 @@ fn separator_alpha(ink: [u8; 3]) -> f32 {
 /// and a file wears the file the pane is — the same pairing `pane_mark` already
 /// makes one module over, so a row and the head it reopens cannot wear two
 /// different glyphs for one thing.
-fn recent_mark(seed: &Seed) -> ChromeMark {
+fn recent_mark(seed: &Seed, favicons: &crate::favicon::Favicons) -> ChromeMark {
     match seed {
         Seed::Term { profile_id, .. } => mark(index_of_id(profile_id)),
         Seed::Files { .. } => ChromeMark::Folder,
         // A page wears the web class's globe and a file wears `#i-file`, through
-        // the one door every preview row asks (`docs/DESIGN.md` §7.7 ⑤/⑥).
-        Seed::Preview { source, .. } => {
-            crate::marks::preview_row_mark(*source == bt_persist::PreviewSourceV1::Url)
-        }
+        // the one door every preview row asks (`docs/DESIGN.md` §7.7 ⑤/⑥) —
+        // **and the site's own icon where the session has one.** A vault row has
+        // no pane and never did, which is exactly why the store is keyed by site
+        // rather than by seat: what a row needs to look one up is a URL, and a
+        // row is a URL. A page from a previous session wears the globe until
+        // something opens it, because nothing on disk holds an icon (see
+        // `favicon`'s module head).
+        Seed::Preview { source, path } => crate::marks::preview_row_mark(
+            *source == bt_persist::PreviewSourceV1::Url,
+            match source {
+                bt_persist::PreviewSourceV1::Url => favicons.of_url(path),
+                bt_persist::PreviewSourceV1::File => None,
+            },
+        ),
         // **A window wears a window** (multiwindow slice D), and it is the one
         // row in this list whose mark is not its content's: a row captioned
         // `alpha` with a PowerShell mark says "that shell", and the whole
@@ -8905,6 +8926,21 @@ impl PreviewMenuItem {
             .as_ref()
             .is_some_and(|keep| keep.kind == bt_persist::PinKind::Url)
     }
+
+    /// **The address this row stands for**, for a row that is a page.
+    ///
+    /// The one thing a favicon has to be looked up by, off the field the row
+    /// already carries. `None` for a file, and for the same reason
+    /// [`crate::marks::preview_row_mark`] ignores an icon handed to a file: what
+    /// makes a row a page is its category, and a row that is not one has no site
+    /// to be given somebody's icon from.
+    #[must_use]
+    pub fn page_url(&self) -> Option<&str> {
+        self.keep
+            .as_ref()
+            .filter(|keep| keep.kind == bt_persist::PinKind::Url)
+            .map(|keep| keep.target.as_str())
+    }
 }
 
 /// **What one switcher row keeps** — a `pins.json` row's two halves.
@@ -9159,6 +9195,7 @@ pub fn preview_menu_build(
     layout: &PreviewMenuLayout,
     items: &[PreviewMenuItem],
     hover: Option<PreviewMenuHit>,
+    favicons: &crate::favicon::Favicons,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
@@ -9202,8 +9239,14 @@ pub fn preview_menu_build(
                 rect: *rect,
                 // **A page wears the web class's globe and a file wears
                 // `#i-file`, in the same box** (`docs/DESIGN.md` §7.7 ⑤), through
-                // the one door every preview row asks.
-                mark: Some(crate::marks::preview_row_mark(item.is_page())),
+                // the one door every preview row asks — **and the site's own
+                // icon in that same box where the session has one.** This is the
+                // surface the favicon slice, `docs/DESIGN.md` §7.13 was called for: a switcher holding
+                // six pages of six servers could until now only be read.
+                mark: Some(crate::marks::preview_row_mark(
+                    item.is_page(),
+                    item.page_url().and_then(|url| favicons.of_url(url)),
+                )),
                 name: &item.name,
                 // Reserved on every row and inked on the dirty ones. Drawn as an
                 // empty string rather than omitted so the name's box ends in the
@@ -9358,7 +9401,13 @@ mod tests {
             &items,
             &mut fake_measure,
         );
-        let layer = one_layer(preview_menu_build(&layout, &items, None, &mut fake_measure));
+        let layer = one_layer(preview_menu_build(
+            &layout,
+            &items,
+            None,
+            &crate::favicon::Favicons::default(),
+            &mut fake_measure,
+        ));
         for (name, _, _) in [("a.txt", 0, 0), ("notes.md", 0, 0), ("main.rs", 0, 0)] {
             assert!(
                 layer.labels.iter().any(|label| label.text == name),
@@ -9494,7 +9543,13 @@ mod tests {
             "the box grew to hold the section it gained"
         );
 
-        let layer = one_layer(preview_menu_build(&layout, &items, None, &mut fake_measure));
+        let layer = one_layer(preview_menu_build(
+            &layout,
+            &items,
+            None,
+            &crate::favicon::Favicons::default(),
+            &mut fake_measure,
+        ));
         assert!(
             layer
                 .labels
@@ -9537,7 +9592,13 @@ mod tests {
             .iter()
             .position(|item| item.current)
             .expect("one buffer is on screen");
-        let resting = one_layer(preview_menu_build(&layout, &items, None, &mut fake_measure));
+        let resting = one_layer(preview_menu_build(
+            &layout,
+            &items,
+            None,
+            &crate::favicon::Favicons::default(),
+            &mut fake_measure,
+        ));
         assert_eq!(
             resting
                 .sprites
@@ -9551,6 +9612,7 @@ mod tests {
             &layout,
             &items,
             Some(PreviewMenuHit::Row(current_row)),
+            &crate::favicon::Favicons::default(),
             &mut fake_measure,
         ));
         assert_eq!(
@@ -10743,6 +10805,7 @@ mod tests {
                 None,
                 NO_RECENT,
                 now(),
+                &crate::favicon::Favicons::default(),
                 &mut fake_measure,
             );
             let captioned: Vec<usize> = layout
@@ -10805,6 +10868,7 @@ mod tests {
                     None,
                     &vault,
                     now(),
+                    &crate::favicon::Favicons::default(),
                     &mut fake_measure,
                 ));
                 // Rows are one line box tall, so two labels sharing a row are the
@@ -11463,6 +11527,7 @@ mod tests {
             None,
             NO_RECENT,
             now(),
+            &crate::favicon::Favicons::default(),
             &mut fake_measure,
         ));
         let name = layer
@@ -11584,6 +11649,7 @@ mod tests {
             None,
             &vault,
             now(),
+            &crate::favicon::Favicons::default(),
             &mut fake_measure,
         ));
         let git = layer
@@ -11747,6 +11813,7 @@ mod tests {
             None,
             NO_RECENT,
             now(),
+            &crate::favicon::Favicons::default(),
             &mut fake_measure,
         ));
         let hover = one_layer(build(
@@ -11756,6 +11823,7 @@ mod tests {
             Some(MenuRow::Profile(0)),
             NO_RECENT,
             now(),
+            &crate::favicon::Favicons::default(),
             &mut fake_measure,
         ));
         let (rest_quads, rest_labels, sprites) = (rest.quads, rest.labels, rest.sprites);
@@ -11907,6 +11975,7 @@ mod tests {
             None,
             NO_RECENT,
             now(),
+            &crate::favicon::Favicons::default(),
             &mut fake_measure,
         );
         let labels: Vec<_> = layers.iter().flat_map(|layer| &layer.labels).collect();
@@ -11993,6 +12062,7 @@ mod tests {
                 None,
                 NO_RECENT,
                 now(),
+                &crate::favicon::Favicons::default(),
                 &mut fake_measure,
             ));
             assert!(
@@ -12323,6 +12393,7 @@ mod tests {
             None,
             &vault,
             now(),
+            &crate::favicon::Favicons::default(),
             &mut fake_measure,
         ));
         assert!(
@@ -12364,6 +12435,7 @@ mod tests {
             None,
             &vault,
             now(),
+            &crate::favicon::Favicons::default(),
             &mut fake_measure,
         ));
         let heading = layer
@@ -12453,6 +12525,7 @@ mod tests {
             None,
             &vault,
             now(),
+            &crate::favicon::Favicons::default(),
             &mut fake_measure,
         ));
         let drawn: Vec<&str> = layer
@@ -12488,6 +12561,7 @@ mod tests {
             None,
             &vault,
             now(),
+            &crate::favicon::Favicons::default(),
             &mut fake_measure,
         ));
 
@@ -12511,11 +12585,14 @@ mod tests {
         // An id this build does not have costs the row its shell choice, never
         // its mark — `index_of_id` falls back rather than refusing.
         assert_eq!(
-            recent_mark(&Seed::Term {
-                profile_id: "a-shell-from-a-newer-build".to_owned(),
-                cwd: "C:\\repo".to_owned(),
-                manual_name: None,
-            }),
+            recent_mark(
+                &Seed::Term {
+                    profile_id: "a-shell-from-a-newer-build".to_owned(),
+                    cwd: "C:\\repo".to_owned(),
+                    manual_name: None,
+                },
+                &crate::favicon::Favicons::default(),
+            ),
             mark(fallback_profile())
         );
 
@@ -12563,6 +12640,7 @@ mod tests {
             Some(MenuRow::Recent(0)),
             &vault,
             now(),
+            &crate::favicon::Favicons::default(),
             &mut fake_measure,
         ));
         let row = layout.recent[0];
@@ -16114,9 +16192,13 @@ mod tests {
             path: r"D:\work\folio\README.md".to_owned(),
             source: bt_persist::PreviewSourceV1::File,
         };
-        assert_eq!(recent_mark(&page), ChromeMark::Globe);
+        let nothing = crate::favicon::Favicons::default();
         assert_eq!(
-            recent_mark(&file),
+            recent_mark(&page, &nothing),
+            ChromeMark::Globe { favicon: None }
+        );
+        assert_eq!(
+            recent_mark(&file, &nothing),
             ChromeMark::File,
             "and the file beside it is unchanged"
         );
@@ -16124,5 +16206,107 @@ mod tests {
         assert_eq!(recent_label(&file), "README.md");
         assert_eq!(recent_tip(&page), URL, "the tip is the whole address");
         assert_eq!(recent_tip(&file), r"D:\work\folio\README.md");
+    }
+
+    /// **Red gate (the favicon slice, `docs/DESIGN.md` §7.13): a Recent row for a site this session has
+    /// seen wears that site's icon, and the file beside it cannot be given
+    /// one.**
+    ///
+    /// The surface the slice was called for, in its hardest form: a Recent row
+    /// has no pane and never did, so it can only be answered by a store keyed by
+    /// site. The second half is the guard — `preview_row_mark` refuses an icon
+    /// handed to something that is not a page, so a caller's mistake cannot put
+    /// a server's drawing on `README.md`.
+    ///
+    /// MUTATION: pass `None` from `recent_mark`'s page arm and the row is a
+    /// globe again, which is the state of the tree before this slice. MUTATION:
+    /// drop `preview_row_mark`'s `is_page` branch and the file wears the icon.
+    #[test]
+    fn a_recent_row_wears_its_sites_icon_where_the_session_learned_one() {
+        let mut store = crate::favicon::Favicons::default();
+        let mut buffer = image::RgbaImage::new(16, 16);
+        for pixel in buffer.pixels_mut() {
+            *pixel = image::Rgba([3, 4, 5, 255]);
+        }
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(buffer)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("an in-memory PNG encodes");
+        assert!(store.learn("http://localhost:5173", png.get_ref()));
+        let learned = store
+            .of_url("http://localhost:5173/app")
+            .expect("the store holds it");
+
+        let page = Seed::Preview {
+            path: "http://localhost:5173/app?tab=logs#top".to_owned(),
+            source: bt_persist::PreviewSourceV1::Url,
+        };
+        assert_eq!(
+            recent_mark(&page, &store),
+            ChromeMark::Globe {
+                favicon: Some(learned)
+            },
+            "a row with a URL is all a site-keyed store needs to be asked"
+        );
+
+        // A file whose *path* would parse as nothing at all, beside a page on a
+        // site the store knows: the row that must stay `#i-file`.
+        let file = Seed::Preview {
+            path: r"D:\work\folio\README.md".to_owned(),
+            source: bt_persist::PreviewSourceV1::File,
+        };
+        assert_eq!(recent_mark(&file, &store), ChromeMark::File);
+
+        // And a page on a server nobody has been to is the globe — the other
+        // half of §7.7 ②, with nothing to report about it.
+        let elsewhere = Seed::Preview {
+            path: "https://unvisited.test/".to_owned(),
+            source: bt_persist::PreviewSourceV1::Url,
+        };
+        assert_eq!(
+            recent_mark(&elsewhere, &store),
+            ChromeMark::Globe { favicon: None }
+        );
+    }
+
+    /// **Red gate (the favicon slice, `docs/DESIGN.md` §7.13): a switcher row asks with its own
+    /// address.**
+    ///
+    /// The 2026-08-23 ruling's own example — 「切换器/Recent 里网页行全是地球标、
+    /// 只能靠读文字区分」. What makes it answerable is [`PreviewMenuItem::page_url`]:
+    /// the row already carries the pin target it would keep, and that target is
+    /// the address.
+    ///
+    /// MUTATION: have `page_url` answer `Some` for a file row and a document
+    /// named after a URL would be handed that site's icon.
+    #[test]
+    fn a_switcher_row_that_is_a_page_can_name_the_site_it_asks_about() {
+        let page = PreviewMenuItem {
+            name: "Logs".to_owned(),
+            dirty: false,
+            current: true,
+            keep: Some(PreviewMenuTarget {
+                kind: bt_persist::PinKind::Url,
+                target: "http://localhost:5173/app".to_owned(),
+            }),
+            pinned: false,
+            pool: Some(0),
+        };
+        let file = PreviewMenuItem {
+            keep: Some(PreviewMenuTarget {
+                kind: bt_persist::PinKind::File,
+                target: r"D:\work\folio\README.md".to_owned(),
+            }),
+            ..page.clone()
+        };
+        let unkeepable = PreviewMenuItem {
+            keep: None,
+            ..page.clone()
+        };
+        assert_eq!(page.page_url(), Some("http://localhost:5173/app"));
+        assert_eq!(file.page_url(), None);
+        assert_eq!(unkeepable.page_url(), None);
+        assert!(page.is_page());
+        assert!(!file.is_page());
     }
 }

@@ -351,8 +351,14 @@ impl RestoreRow {
             // the identity, and the whole address underneath says *which* page at
             // that site this is. The mark comes through the one door every
             // preview row asks (`marks::preview_row_mark`).
+            // **`None`, and it is a ruling rather than an omission.** This
+            // prompt is drawn before anything has been restored — that is what
+            // it is *for* — so no page has come up, no engine has announced an
+            // icon, and the store nothing on disk feeds (see `favicon`'s module
+            // head) is empty by construction. Threading it in here would be
+            // wiring a lookup that is provably `None` every time it is made.
             Seed::Preview { path, source } => (
-                crate::marks::preview_row_mark(*source == bt_persist::PreviewSourceV1::Url),
+                crate::marks::preview_row_mark(*source == bt_persist::PreviewSourceV1::Url, None),
                 match source {
                     bt_persist::PreviewSourceV1::File => {
                         crate::cwd_leaf(Path::new(path)).unwrap_or_else(|| path.clone())
