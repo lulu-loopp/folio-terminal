@@ -4747,6 +4747,31 @@ fn pins_file_kept_in(lang: Lang, file: &str) -> String {
     }
 }
 
+/// **A switcher row the pin would not keep** (§7.7 ⑤, 2026-08-24).
+///
+/// A pin is a press and a press is owed an answer. §7.7 ③'s 「什么都没发生比一个
+/// 确认框更诚实」 is about *going* somewhere — a seat that does not move is a
+/// seat the reader can see did not move — and it does not carry over to a
+/// control whose whole effect is in a file: a pin that refused in silence is
+/// indistinguishable from a pin that is broken, which is precisely how this one
+/// was reported.
+///
+/// Two facts and no opinion: what was not kept, and that this window would not
+/// open it now. The target is passed through whole because which string was
+/// refused is the only thing that separates a page whose file has been moved
+/// from a row somebody edited by hand.
+#[must_use]
+pub fn switcher_pin_refused(target: &str) -> String {
+    switcher_pin_refused_in(current(), target)
+}
+
+fn switcher_pin_refused_in(lang: Lang, target: &str) -> String {
+    match lang {
+        Lang::English => format!("Not pinned: this window would not open {target} now"),
+        Lang::Chinese => format!("没有钉住：本窗现在不会打开 {target}"),
+    }
+}
+
 /// **The engine would not hand its page over** (multiwindow slice F1c, §2.10's
 /// `PageKept`).
 ///
@@ -5545,6 +5570,10 @@ mod tests {
                     pins_file_unreadable_in(lang, "pins.json"),
                 ),
                 ("pins_file_kept", pins_file_kept_in(lang, "pins.json")),
+                (
+                    "switcher_pin_refused",
+                    switcher_pin_refused_in(lang, "file:///D:/site/report.html"),
+                ),
             ]
         };
         let english = said(Lang::English);

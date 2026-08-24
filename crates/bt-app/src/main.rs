@@ -19152,9 +19152,6 @@ fn switcher_row_destination(target: &str) -> Option<String> {
 /// path is still there is a filesystem question, and `pins.json`'s own header
 /// records that this store deliberately does not ask it.
 ///
-/// **An unpin is never gated**, which is why this is asked only of a row that is
-/// not already kept: taking a row *out* of that file must be allowed whatever the
-/// row says, or a tightened policy leaves rows nobody can delete.
 /// **What a stored row navigates to, and the mint it needs to get there**
 /// (W2 slice 5).
 ///
@@ -19212,8 +19209,43 @@ fn revived_page_of(source: &preview::PreviewSource) -> Option<(String, webnav::M
     Some((url, mint))
 }
 
+/// **Whether a switcher row may be written into `pins.json`** — the *first* of
+/// the pin's two validations.
+///
+/// A page is kept only if this window would navigate to it now, so a target the
+/// policy refuses never reaches the file at all. A file is not asked: whether a
+/// path is still there is a filesystem question, and `pins.json`'s own header
+/// records that this store deliberately does not ask it.
+///
+/// **An unpin is never gated**, which is why this is asked only of a row that is
+/// not already kept: taking a row *out* of that file must be allowed whatever the
+/// row says, or a tightened policy leaves rows nobody can delete.
+///
+/// **The door is [`page_destination`] and not [`switcher_row_destination`]**,
+/// which is the whole of the 2026-08-24 fix. "Would navigate to it now" is a
+/// question only the door the press actually goes through can answer, and since
+/// W2 slice ⑤ that door has been `page_destination`: a `file:` row is a *name
+/// for a path*, taken back to the disk and minted again, because
+/// `webnav::address_bar` refuses `file:` from every door and always will. Asking
+/// the address door here made the pin refuse every local page in the switcher —
+/// the row was drawn, the pin was drawn, and pressing it wrote nothing.
+///
+/// The one clause `page_destination` does not carry is the page class, and it is
+/// here rather than there because the two callers want different halves: the
+/// press is asked of a row that already exists, and this is asked of a row about
+/// to be *made*. A local page row can only have come from
+/// [`path_opens_as_a_page`] — that predicate is what put the seat on the engine
+/// lane, and `Mint::admits` keeps it there, so no `file:` row this window wrote
+/// names anything else. Asking it again is that same claim said at the moment
+/// the string is about to outlive the window, which is what keeps a hand-written
+/// `file:///C:/Windows/System32/drivers/etc/hosts` out of the kept list.
 fn switcher_pin_is_allowed(kind: bt_persist::PinKind, target: &str) -> bool {
-    kind != bt_persist::PinKind::Url || switcher_row_destination(target).is_some()
+    if kind != bt_persist::PinKind::Url {
+        return true;
+    }
+    page_destination(target).is_some()
+        && webnav::Mint::path_and_tail_of_file_url(target)
+            .is_none_or(|(path, _)| path_opens_as_a_page(&path))
 }
 
 /// **What a switcher row keeps, and under which category** — `None` for a
@@ -43993,7 +44025,21 @@ impl Runtime<'_> {
     /// An unpin is never gated. Taking a row *out* of that file is allowed
     /// whatever the row says, and a build that could not remove a target it
     /// refuses to load would be a build with rows nobody can delete.
-    fn toggle_switcher_pin(&mut self, keep: &profiles::PreviewMenuTarget) -> Result<()> {
+    ///
+    /// **A refusal is drawn** (user ruling 2026-08-24). It used to be an
+    /// `eprintln!` and nothing else, and that is how a pin that refused every
+    /// local page in the switcher shipped: the press did nothing, and nothing is
+    /// what a broken control does too. §7.7 ③'s "什么都没发生比一个确认框更诚实"
+    /// governs *going* somewhere — a seat that did not move is visibly a seat
+    /// that did not move — and a control whose whole effect is a line in a file
+    /// has no such evidence to offer. The card is anchored on the seat whose
+    /// switcher is open, which is [`Self::toast`]'s own rule: a notice appears
+    /// where the attention already is.
+    fn toggle_switcher_pin(
+        &mut self,
+        seat: SeatId,
+        keep: &profiles::PreviewMenuTarget,
+    ) -> Result<()> {
         let already = self
             .app
             .pins_store
@@ -44001,8 +44047,12 @@ impl Runtime<'_> {
             .iter()
             .any(|(_, target)| *target == keep.target);
         if !already && !switcher_pin_is_allowed(keep.kind, &keep.target) {
-            eprintln!("BT_WEB refused {}", keep.target);
-            return Ok(());
+            return self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::PreviewSeat(seat),
+                None,
+                i18n::switcher_pin_refused(&keep.target),
+            );
         }
         self.app.pins_store.toggle(keep.kind, &keep.target);
         if self.refresh_chrome() {
@@ -57960,7 +58010,7 @@ impl Runtime<'_> {
                                 if let Some(keep) =
                                     items.get(index).and_then(|item| item.keep.clone())
                                 {
-                                    self.toggle_switcher_pin(&keep)?;
+                                    self.toggle_switcher_pin(seat, &keep)?;
                                 }
                             }
                             Some(profiles::PreviewMenuHit::Row(index)) => {
@@ -95040,6 +95090,84 @@ mod tests {
             bt_persist::PinKind::File,
             r"C:\work\notes.md"
         ));
+    }
+
+    /// **A local page is kept by the same door that presses it** (§7.7 ⑤;
+    /// `plan.md` §3「钉不是授权」).
+    ///
+    /// The bug this is the gate for: the switcher's pin did nothing at all on a
+    /// `file:///…/demo.html` row. W2 slice ⑤ gave the *press* a second door —
+    /// [`page_destination`], which takes a `file:` string back to the disk and
+    /// mints it again — and left the *pin* asking [`switcher_row_destination`],
+    /// which is `webnav::address_bar` and refuses `file:` from every door and
+    /// always will. So the two validations the design calls "the same door" were
+    /// two different doors, and the one that decides what reaches `pins.json`
+    /// was the one that cannot say yes to a local page. Nothing was drawn,
+    /// nothing was written, and the only report was an `eprintln!` nobody sees.
+    ///
+    /// RED GATE: put [`switcher_row_destination`] back in
+    /// [`switcher_pin_is_allowed`] and the first assertion fails — the row the
+    /// user pressed is refused, exactly as it was on the real machine.
+    #[test]
+    fn a_local_page_is_kept_by_the_same_door_that_presses_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "folio-switcher-pin-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let page = dir.join("sidebar-focus-demo.html");
+        std::fs::write(&page, b"<h1>demo</h1>").expect("a page on a disk");
+        let canonical = std::fs::canonicalize(&page).expect("canonicalise it");
+        let url = webnav::Mint::file(&canonical)
+            .expect("a local path mints")
+            .target()
+            .expect("a mint names its URL")
+            .to_owned();
+
+        assert!(
+            switcher_pin_is_allowed(bt_persist::PinKind::Url, &url),
+            "the row the user pressed reaches pins.json: {url}"
+        );
+        assert!(
+            page_destination(&url).is_some(),
+            "and it is the press door that said so, which is the whole claim"
+        );
+        // A page reached over the network is unchanged by any of this.
+        assert!(switcher_pin_is_allowed(
+            bt_persist::PinKind::Url,
+            "https://example.com/report#ch3"
+        ));
+
+        // The three refusals that survive, each for its own reason. A `file:`
+        // row is admitted by being taken back to the disk, so a string the disk
+        // does not answer for is still refused — and now visibly.
+        let missing = url.replace("sidebar-focus-demo", "never-existed");
+        assert!(
+            !switcher_pin_is_allowed(bt_persist::PinKind::Url, &missing),
+            "a page whose file is not there is not kept: {missing}"
+        );
+        // A local file that is not a page could never have been a page row, and
+        // the pin door asks the same question the lane fork asked to make one.
+        let notes = dir.join("notes.md");
+        std::fs::write(&notes, b"# notes\n").expect("a document on a disk");
+        let notes_url =
+            webnav::Mint::file(&std::fs::canonicalize(&notes).expect("canonicalise the document"))
+                .expect("a local path mints")
+                .target()
+                .expect("a mint names its URL")
+                .to_owned();
+        assert!(
+            !switcher_pin_is_allowed(bt_persist::PinKind::Url, &notes_url),
+            "a document is not a page, however it is spelled: {notes_url}"
+        );
+        // And the file going away takes the pin's answer with it, which is the
+        // press door's own answer for the same row.
+        std::fs::remove_file(&page).expect("take the page away");
+        assert!(!switcher_pin_is_allowed(bt_persist::PinKind::Url, &url));
+        assert_eq!(page_destination(&url), None, "both doors, one answer");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// PIN (W2 slice 5) - **which content lane a row activated in the files
