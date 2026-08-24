@@ -93975,3 +93975,406 @@ mod tests {
         );
     }
 }
+
+/// **F2/F4 — the application-level drag broker, and the whole of what it decides**
+/// (`docs/plans/multiwindow-ef/plan.md` F2+F4 and the v3 增补「F2 spring deadline」).
+///
+/// Everything here is asked of plain values. The gesture itself needs two live
+/// windows, a Win32 capture and a compositor, and none of those can stand up in
+/// a test — but the *rulings* can, and this is the file's standing rule about
+/// rulings: a decision that needs a `Renderer` to state is a decision no test
+/// ever reads back.
+#[cfg(test)]
+mod cross_window_drag_tests {
+    use std::time::Instant;
+
+    use super::{
+        BrokerAim, BrokerRelease, DragBroker, DragGuard, DropLanding, TabId, TearGrip, WindowId,
+        broker_verdict, profiles, tear_out_rect,
+    };
+
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The body of a method declared at an `impl`'s own indentation.
+    fn fn_body(name: &str) -> &'static str {
+        let head = format!("\n    fn {name}(");
+        let start = SOURCE
+            .find(&head)
+            .unwrap_or_else(|| panic!("`fn {name}` is declared as a method"))
+            + head.len();
+        let end = start
+            + SOURCE[start..]
+                .find("\n    }\n")
+                .expect("a method is closed by a `}` at its `impl`'s indentation");
+        &SOURCE[start..end]
+    }
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> bt_platform::WindowRect {
+        bt_platform::WindowRect {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    /// **The spring across a window boundary comes due under a hand that has
+    /// stopped moving** (plan v3 增补: *"红测 = 进入后零后续 motion,250ms 到点仍
+    /// spring-open"*).
+    ///
+    /// The source window owns the Win32 capture, so the *target* window hears
+    /// nothing at all — no motion, no enter, no leave. A dwell that only ever
+    /// fired on the next pointer event would therefore never fire over another
+    /// window: there is no next pointer event that window will see. So the clock
+    /// is the broker's, and the broker states its next instant to the loop, which
+    /// is what turns a `ControlFlow::Wait` into a `WaitUntil`.
+    ///
+    /// Red gate: leave the broker without a `next_deadline`, or leave
+    /// `about_to_wait` folding only the windows' own deadlines, and the loop
+    /// sleeps until something else happens to wake it — which on an idle machine
+    /// with a still hand is never.
+    #[test]
+    fn the_spring_across_windows_comes_due_with_no_further_motion() {
+        let start = Instant::now();
+        let other = TabId(7);
+        let source = WindowId::from(1_u64);
+        let target = WindowId::from(2_u64);
+        let mut broker = DragBroker::for_test(source);
+        broker.aim_at(
+            BrokerAim::Window {
+                window: target,
+                landing: Some(DropLanding::StripAdopt { tab: other }),
+            },
+            start,
+        );
+        assert_eq!(
+            broker.next_deadline(),
+            Some(start + profiles::CHEVRON_HOVER_OPEN),
+            "the same quarter second the `⌄` menus and the in-window spring rest \
+             for — one constant, three clocks"
+        );
+        assert_eq!(
+            broker.due(start + profiles::CHEVRON_HOVER_OPEN),
+            Some((target, other)),
+            "and it names the window as well as the tab, because the window that \
+             has to switch is not the window holding the pointer"
+        );
+
+        // Each way the plan says the clock is taken away, on its own.
+        for (what, aim) in [
+            (
+                "the aim moved to that window's body",
+                BrokerAim::Window {
+                    window: target,
+                    landing: None,
+                },
+            ),
+            ("the aim came home", BrokerAim::Home),
+            (
+                "the aim left every window of ours — or the target closed under \
+                 the hand, which is the same answer arriving by a different road",
+                BrokerAim::Away,
+            ),
+        ] {
+            let mut gone = broker.clone();
+            gone.aim_at(aim, start);
+            assert_eq!(
+                gone.next_deadline(),
+                None,
+                "{what}: the clock goes with the aim, so an unaimed broker asks \
+                 the loop for nothing at all"
+            );
+        }
+    }
+
+    /// **Every place a cross-window release can land, and its one verdict**
+    /// (plan F2+F4: *"要定义:拖到目标窗正文(= 无落点)、目标窗悬停中被关闭、源窗
+    /// 失焦、Esc、显示器/DPI 变化——各自的结果逐条写进切片工单"*).
+    ///
+    /// Red gate: fold "over another window but on nothing" into "over nothing at
+    /// all" and letting go on a foreign terminal tears a window off — the one
+    /// outcome the plan does not offer, because the tab list is the door F2
+    /// names.
+    #[test]
+    fn every_place_a_cross_window_release_can_land_has_one_verdict() {
+        let target = WindowId::from(2_u64);
+        assert_eq!(
+            broker_verdict(&BrokerAim::Home),
+            BrokerRelease::Local,
+            "over the window the gesture started in, that window's own survey \
+             decides — the broker has nothing to say about a drag that never left"
+        );
+        assert_eq!(
+            broker_verdict(&BrokerAim::Window {
+                window: target,
+                landing: Some(DropLanding::StripExtract { slot: 2 }),
+            }),
+            BrokerRelease::Into {
+                window: target,
+                landing: DropLanding::StripExtract { slot: 2 },
+            },
+            "on another window's tab list, at the slot the stand-in was drawn in"
+        );
+        assert_eq!(
+            broker_verdict(&BrokerAim::Window {
+                window: target,
+                landing: Some(DropLanding::StripAdopt { tab: TabId(9) }),
+            }),
+            BrokerRelease::Into {
+                window: target,
+                landing: DropLanding::StripAdopt { tab: TabId(9) },
+            },
+            "and on one of its tabs, which is the hand-over the spring showed you"
+        );
+        assert_eq!(
+            broker_verdict(&BrokerAim::Window {
+                window: target,
+                landing: None,
+            }),
+            BrokerRelease::Nothing,
+            "over another window's *body* there is no landing, so letting go is \
+             J120's clean nothing — not a tear-out, which would make one pointer \
+             mean two things depending on which window happened to be under it"
+        );
+        assert_eq!(
+            broker_verdict(&BrokerAim::Away),
+            BrokerRelease::NewWindow,
+            "and over no window of ours at all, the payload becomes a window — \
+             the plan's 「拖到无窗处=撕成新窗」"
+        );
+    }
+
+    /// **F5 — the torn window keeps the grip under the pointer, at the dpi of the
+    /// monitor it is landing on, inside that monitor's work area.**
+    ///
+    /// *"屏幕命中与 work-area 一律物理坐标;期望尺寸 = 源窗**逻辑**外框换算到目标
+    /// 显示器 DPI;**保持抓握点相对 tab 的 offset** 再做 work-area clamp"*.
+    ///
+    /// Red gate: convert the size at the *source's* dpi and the same gesture from
+    /// a 100% monitor onto a 200% one opens a window half the size it should be;
+    /// drop the clamp and the window opens with its foot under the taskbar.
+    #[test]
+    fn the_torn_window_keeps_the_grip_and_stays_inside_the_work_area() {
+        let grip = TearGrip {
+            grab_logical: (300.0, 12.0),
+            size_logical: (1200.0, 600.0),
+        };
+        let work = rect(1920, 0, 4480, 1440);
+
+        let at_200 = tear_out_rect((2600, 500), grip, 192, work);
+        assert_eq!(
+            (at_200.right - at_200.left, at_200.bottom - at_200.top),
+            (2400, 1200),
+            "the size is the source's *logical* frame read at the target \
+             monitor's dpi, so the same window is the same size to the eye"
+        );
+        assert_eq!(
+            at_200.left, 2000,
+            "and the point the hand closed on is still under the pointer: \
+             2600 - 300 logical at 2x"
+        );
+        assert_eq!(
+            at_200.top, 240,
+            "the vertical grip would have put the window's foot past the work \
+             area, so the rectangle slides up until it sits inside it"
+        );
+
+        let at_100 = tear_out_rect((2600, 500), grip, 96, work);
+        assert_eq!(
+            (at_100.right - at_100.left, at_100.bottom - at_100.top),
+            (1200, 600),
+            "the very same gesture onto a 100% monitor asks for half the pixels"
+        );
+        assert_eq!(
+            (at_100.left, at_100.top),
+            (2300, 488),
+            "and the grip is the same *logical* offset, which is what keeps the \
+             tab under the hand across a dpi boundary"
+        );
+
+        // A window larger than the display it is being torn onto is the one case
+        // that resizes rather than only moving.
+        let small = rect(0, 0, 1000, 700);
+        let cramped = tear_out_rect((500, 400), grip, 96, small);
+        assert_eq!(
+            (
+                cramped.left,
+                cramped.top,
+                cramped.right - cramped.left,
+                cramped.bottom - cramped.top
+            ),
+            (0, 0, 1000, 600),
+            "clamped into the work area it is landing in, because a window no \
+             part of which can be reached is not a window the reader asked for"
+        );
+    }
+
+    /// **One guard, three ways a gesture is taken away** (plan v3 增补:
+    /// *"broker 撤防清单补:Win32 capture lost、源窗拖动中被关、锁屏/显示配置突变
+    /// ——统一结果 = 取消预览、清高亮、载荷归源"*).
+    ///
+    /// Two of the three are the *same fact*: a system drag and the secure desktop
+    /// both take the mouse capture away, and the capture is the only thing that
+    /// makes a pointer stream outside a window arrive at all. The third — a
+    /// display topology change — does not touch the capture, so it is its own
+    /// sample. Neither is a heuristic: both are the OS's own answer, asked at the
+    /// one moment it matters and at no other.
+    ///
+    /// Red gate: sample only the capture and a monitor unplugged mid-drag leaves
+    /// a highlight burning on a window that has moved out from under the pointer;
+    /// sample neither and a stolen capture leaves a tab floating over a tab list
+    /// nobody is holding any more.
+    #[test]
+    fn one_guard_answers_every_way_a_cross_window_gesture_is_taken_away() {
+        let held = DragGuard {
+            capture: Some(0x1234),
+            screen: rect(0, 0, 3840, 2160),
+        };
+        assert!(
+            held.still_holds(&held),
+            "nothing changed, so the gesture is still the reader's"
+        );
+        assert!(
+            !held.still_holds(&DragGuard {
+                capture: None,
+                ..held
+            }),
+            "the capture is gone: the pointer stream has ended with no button-up \
+             to end it, which is this platform's `pointercancel`"
+        );
+        assert!(
+            !held.still_holds(&DragGuard {
+                capture: Some(0x9999),
+                ..held
+            }),
+            "and a capture that belongs to somebody else is the same fact said \
+             more loudly"
+        );
+        assert!(
+            !held.still_holds(&DragGuard {
+                screen: rect(0, 0, 1920, 1080),
+                ..held
+            }),
+            "the desktop changed shape under a gesture whose whole state is \
+             screen coordinates, so every rectangle it was reasoning about is \
+             stale — including the one it was about to open a window in"
+        );
+    }
+
+    /// **The source stops offering itself the moment the glass under the pointer
+    /// is somebody else's** — and it asks the window manager rather than
+    /// comparing rectangles.
+    ///
+    /// Two Folio windows overlap all the time. A pointer resting on B's tab list
+    /// is *inside A's client rectangle* whenever B is on top of A, so a source
+    /// that surveyed its own geometry would light a slot in A and hand the pane
+    /// to A when the hand opened — while the reader watched B's tab list. Z-order
+    /// and visibility are the window manager's facts and it is asked for them.
+    ///
+    /// Red gate: take the guard out of `drive_drag` and the overlap case commits
+    /// into the wrong window, with no drawing anywhere that says so.
+    #[test]
+    fn a_drag_over_somebody_elses_glass_offers_nothing_of_its_own() {
+        let body = fn_body("drive_drag");
+        assert!(
+            body.contains("pointer_is_on_our_own_glass"),
+            "the survey is gated on whose window the pointer is actually over:\n{body}"
+        );
+        let broker = fn_body("drive_drag_broker");
+        for (owed, why) in [
+            (
+                "still_holds",
+                "the guard is re-sampled every turn, which is the only place a \
+                 stolen capture or a changed desktop can be noticed",
+            ),
+            (
+                "foreign =",
+                "the broker is the one author of what a target window draws for a \
+                 gesture it is not itself holding",
+            ),
+            (
+                "activate_tab",
+                "and the spring, when it comes due, moves the *target* window's \
+                 view",
+            ),
+        ] {
+            assert!(
+                broker.contains(owed),
+                "the broker owes `{owed}`: {why}\n{broker}"
+            );
+        }
+    }
+
+    /// **A cross-window release composes the verbs that already exist and adds
+    /// none** (plan F0: *"pane 拖出窗界 = 先按 `StripExtract` 升格成 tab 再成窗,
+    /// 一条路"*; F2: *"松手=`transfer_tab`(或 pane 先升格再移交的既有组合)"*).
+    ///
+    /// Red gate: give the drop its own move-a-pane-between-windows function and
+    /// the day a page cannot be named it will refuse at one door and not at the
+    /// other — §2.10's whole reason for `transfer_tab` being a plain function
+    /// taking two ids.
+    #[test]
+    fn a_pane_carried_into_another_window_is_promoted_and_then_transferred() {
+        let body = fn_body("settle_drag_handover");
+        for (owed, why) in [
+            (
+                "extract_pane_into_new_tab",
+                "a pane becomes a tab through the same tear-out the menu row and \
+                 the strip drop both spend",
+            ),
+            (
+                "transfer_tab",
+                "and the tab changes windows through the one transaction that \
+                 moves a tab between windows",
+            ),
+            (
+                "move_pane_across_tabs",
+                "a hand-over onto one of the target's own tabs is that window's \
+                 cross-tab move, run once the tab has arrived",
+            ),
+            (
+                "report_move_refusal",
+                "and a refusal says its one sentence in the window the payload is \
+                 still in (M147)",
+            ),
+            (
+                "NewWindowPlan::receiving",
+                "while a release over no window of ours takes F1c's own road into \
+                 the loop's window door",
+            ),
+        ] {
+            assert!(
+                body.contains(owed),
+                "the hand-over owes `{owed}`: {why}\n{body}"
+            );
+        }
+    }
+
+    /// **The target draws the visitor's landing in the vocabulary its own tab
+    /// list already has** (plan F2: *"幽灵/缩略图跨窗画法按方案与既有 `tab-land`
+    /// 声明"*).
+    ///
+    /// `.drop-preview` and `@keyframes tab-land`'s `from` are one pair of
+    /// declarations, worn by the slot a drop will fill, by the tab that has just
+    /// been filled, and by the tab that is about to be handed a pane. A fourth
+    /// mark invented for "and by a tab another window's hand is resting on" would
+    /// be a second vocabulary for one sentence.
+    ///
+    /// Red gate: draw the foreign landing with anything of its own and the two
+    /// pictures drift apart the first time either is touched.
+    #[test]
+    fn a_window_draws_a_visitors_landing_in_its_own_tab_lists_words() {
+        let stand_in = fn_body("strip_stand_in");
+        assert!(
+            stand_in.contains("foreign"),
+            "the stand-in a foreign tear-out draws is the stand-in a local one \
+             draws:\n{stand_in}"
+        );
+        let ghost = fn_body("drag_ghost_layer");
+        assert!(
+            ghost.contains("foreign"),
+            "and the ghost over this window's glass is built here, at this \
+             window's scale — 「混合 DPI 下幽灵尺寸随所在窗」:\n{ghost}"
+        );
+    }
+}
