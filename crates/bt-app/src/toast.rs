@@ -47,7 +47,7 @@ use bt_render::{ChromeLabel, ChromeLabelWeight, ChromePalette, OverlayQuad};
 
 use crate::marks::{ChromeMark, ChromeSprite, OverlayLayer};
 use crate::settings::push_float_window;
-use crate::{EASE, cubic_bezier};
+use crate::{EASE, LeafId, cubic_bezier};
 
 // ── the clocks ─────────────────────────────────────────────────────────────
 
@@ -268,7 +268,14 @@ pub enum ToastAnchor {
     /// Only a column that has closed altogether has no surface left to stand on.
     FilesColumn(SeatId),
     /// A preview seat — the graph whose double-click checkout git refused.
-    PreviewSeat(SeatId),
+    ///
+    /// **The whole [`LeafId`], not the seat number** (§7.12 ⓑ). A notice lives
+    /// on the window and outlives a tab switch, while a seat number means
+    /// something only inside its own tab; anchoring by the number alone pointed
+    /// a card at whichever pane the tab in front happened to have numbered the
+    /// same. A card whose pane is on a tab you are not looking at has no surface
+    /// to stand on and takes the corner — see `Runtime::toast_anchor_rect`.
+    PreviewSeat(LeafId),
     /// No surface: the window itself, bottom-right. **The fallback only.**
     Window,
 }
@@ -1283,7 +1290,10 @@ mod tests {
         // A card on another anchor is not part of this crowd.
         let elsewhere = host.raise(
             ToastKind::Error,
-            ToastAnchor::PreviewSeat(SEAT),
+            ToastAnchor::PreviewSeat(LeafId {
+                tab: crate::TabId(1),
+                seat: SEAT,
+            }),
             None,
             "graph",
             None,

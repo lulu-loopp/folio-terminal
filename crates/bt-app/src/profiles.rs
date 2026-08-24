@@ -51,6 +51,7 @@ use bt_render::{
 };
 
 use crate::{
+    LeafId,
     marks::{ChromeMark, ChromeSprite, MarkColour, OverlayLayer},
     seed::{RECENT_CAPACITY, RecentEntry, Seed, ago_label},
     settings::push_float_window,
@@ -8963,7 +8964,15 @@ pub struct PreviewMenuTarget {
 /// the next frame; there is no second place holding an "open" flag to forget.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PreviewMenu {
-    open: Option<bt_layout::SeatId>,
+    /// **The pane the switcher is hanging under, by its whole [`LeafId`]**
+    /// (§7.12 ⓑ).
+    ///
+    /// This state is the *window's* — one pointer, one open menu — while the
+    /// head it hangs from is a tab's. On a bare seat number, switching tabs with
+    /// the switcher open handed it to whichever pane the arriving tab had
+    /// numbered the same: the chevron turned, the rows listed that tab's pool,
+    /// and a click chose a file for a pane the gesture had never been about.
+    open: Option<LeafId>,
     hover: Option<PreviewMenuHit>,
 }
 
@@ -8992,14 +9001,14 @@ impl PreviewMenuHit {
 }
 
 impl PreviewMenu {
-    pub fn seat(self) -> Option<bt_layout::SeatId> {
+    pub fn leaf(self) -> Option<LeafId> {
         self.open
     }
 
     /// The name button: open here, or shut if this very pane already has it open
     /// (P136 — "同一个 `data-leaf` 再点 → 收").
-    pub fn toggle(&mut self, seat: bt_layout::SeatId) {
-        self.open = (self.open != Some(seat)).then_some(seat);
+    pub fn toggle(&mut self, leaf: LeafId) {
+        self.open = (self.open != Some(leaf)).then_some(leaf);
         self.hover = None;
     }
 
@@ -9660,19 +9669,44 @@ mod tests {
     ///
     /// Mutation: make `toggle` always open, and a second press on the name leaves
     /// the menu up with its chevron flipped for good.
+    ///
+    /// **The third pane here is `one`'s seat number on another tab** (§7.12 ⓑ).
+    /// MUTATION: key this state by `leaf.seat` and that press *shuts* the menu
+    /// instead of moving it, because the two panes are the same pane to a bare
+    /// number — which on the glass is the switcher vanishing when you open it on
+    /// the second of two tabs that happen to have numbered their preview panes
+    /// alike.
     #[test]
     fn the_switcher_belongs_to_one_pane_and_its_own_button_shuts_it() {
         let mut menu = PreviewMenu::default();
-        let one = bt_layout::SeatId(1);
-        let two = bt_layout::SeatId(2);
-        assert_eq!(menu.seat(), None);
+        let one = LeafId {
+            tab: crate::TabId(1),
+            seat: bt_layout::SeatId(1),
+        };
+        let two = LeafId {
+            tab: crate::TabId(1),
+            seat: bt_layout::SeatId(2),
+        };
+        let one_next_door = LeafId {
+            tab: crate::TabId(2),
+            seat: bt_layout::SeatId(1),
+        };
+        assert_eq!(menu.leaf(), None);
         menu.toggle(one);
-        assert_eq!(menu.seat(), Some(one));
+        assert_eq!(menu.leaf(), Some(one));
         menu.toggle(one);
-        assert_eq!(menu.seat(), None, "the same button shuts it");
+        assert_eq!(menu.leaf(), None, "the same button shuts it");
         menu.toggle(one);
         menu.toggle(two);
-        assert_eq!(menu.seat(), Some(two), "and another pane's takes it over");
+        assert_eq!(menu.leaf(), Some(two), "and another pane's takes it over");
+        menu.toggle(one);
+        menu.toggle(one_next_door);
+        assert_eq!(
+            menu.leaf(),
+            Some(one_next_door),
+            "a pane on another tab is another pane, however the seats are \
+             numbered — the same number in two tabs is two switchers"
+        );
         assert!(menu.set_hover(Some(PreviewMenuHit::Row(1))));
         assert_eq!(menu.hover(), Some(PreviewMenuHit::Row(1)));
         assert!(menu.close());

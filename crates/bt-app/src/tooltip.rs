@@ -2275,7 +2275,13 @@ mod tests {
         let mut host = TooltipHost::default();
         host.observe(
             Some((
-                TooltipAnchorId::PreviewHex(crate::PreviewSurface::Seat(bt_layout::SeatId(1)), 12),
+                TooltipAnchorId::PreviewHex(
+                    crate::PreviewSurface::Seat(crate::LeafId {
+                        tab: crate::TabId(1),
+                        seat: bt_layout::SeatId(1),
+                    }),
+                    12,
+                ),
                 TipFace::Swatch {
                     rgba: [0x22, 0x88, 0xff, 0xff],
                 },
