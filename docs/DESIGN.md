@@ -1770,6 +1770,27 @@ HKCU\Software\Classes\AppUserModelId\Folio.Terminal
 
 **Claude 定,用户可否决。** 本段是一张命名单的裁决而不是一次实现选择,所以按本文件的惯例标明:`Lock` 这个词、挂锁这个形、以及「改名到磁盘键为止」这条边界,三样都可以被推翻;推翻其中任何一样,上面那三条红测就是它要改的清单。
 
+**⑨ `Ctrl+Shift+L` = 打开地址,全窗动词;没有页就先铸一张空白页(Claude 定 2026-08-24,用户可否决;`crates/bt-app/src/{shortcuts,webhost,i18n,main}.rs`)。**
+
+**先说不动的那一半:`Ctrl+L` 一个字没改。** 它是 `Action::WebAddress`、`Scope::WebPage`,而这条 scope 存在的全部理由就是 `^L` 是 readline 的清屏——纪律(1)不许从终端手里拿走一个裸 `Ctrl+字母`,`Ctrl+S` 那条裁决(裁决 9)给出的形状是「不是不拿,是只在没有终端可拿的那张面上拿」。既有的钉 `the_address_and_the_developer_tools_answer_only_over_a_page` 逐字仍在,本条一条断言都没有翻。
+
+**新的是第二行,不是第二个和弦。** 表里「一个动词一行」是 2026-08-18 的用户裁决(`open-search` 那枚别名就是那天退役的),而这里本来也不该是同一行:**在一个没有页的 tab 上,两条规则要做的事不一样**。`Ctrl+L` 可以假定有一张页在,因为它只在页上有效;`Ctrl+Shift+L` 手在 shell 上时就要答话,而那时「没有页」是常态,唯一有用的答案是**造一张**。一行只能带一个答案,所以是两行:`window-address`,`Scope::Window`,`Ctrl+Shift+L`——`Ctrl+Shift+<字母>` 是本窗的命名空间,该和弦此前空闲。代价照单付:`BINDINGS` 38→39、`Text::ALL` 456→457(一行新串 `ShortcutWindowAddress` = `Open address` / 「打开地址」;它与两行之上的 `Address` 差在动词,所以动词就是区分它们的那个词),webhost 那张「页面必须交还的和弦表」34→35——它是 `Scope::Window` 的行,所以在页上也要交还,否则最想要地址栏的那张面反而是它失灵的地方。
+
+**有页 → 进同一台机器。** 落到 `open_web_address_on`,与双击名字格是同一扇门、同一份种子、同一条整条全选。两扇门共用一个函数,是「同一个房间的第二扇门」在这里的字面意思。
+
+**没页 → 按既有 preview 落位规矩铸一张空白页,再进地址编辑,而且地址栏是空的。** 空白页走 `webnav::Mint::Blank`(该形早就在,是宿主给自己留的空页)并经 `open_minted_page` 出门——**本 build 自己写的 URL 不比人打的多一分信任**(方案 §3),所以它和别的导航走同一道门。落在哪由 `preview_landing_surface` 答,不为这条动词新写一条落位规矩:一张页进一个 tab,不因为是谁要求的而换地方。**地址栏空,是没人安排的结果**:`about:blank` 是宿主的脚手架不是读者的地址,`WebSeat` 的 `SourceChanged` 早就拒绝把它写进头,于是种子就是那个空串——编辑器里没有第二条关于空白页的规矩。
+
+**没输地址就走掉,这张空白座位撤走(推荐案,可否决)。** 开门是一个手势,不能反悔的手势就是有代价的手势;Esc 与点开都关掉那个框,而框关掉之后 tab 应当与按键之前一模一样。判据不是本条自己记的账:`WebSeat::identity` 就是 `WebMachine::recoverable_url`,只有**成功的**导航写它,而写它的那两行点名拒绝 `about:blank`——所以「从来没去过任何地方」是机器本来就持有的状态,不是第二本账。去过的页(包括去了失败、座位上立着一张卡的)一律不撤。撤的时候还回去的东西按落位当时记下的收据:**pane 是这张页带来的就跟它一起走**(`close_pane`,与头上那枚 `×` 同一条路),**pane 原本在读一份文档就把文档放回去**(`land_preview_source_on`,所以光标与滚动位置也一并回来),**pane 原本是空的就留它空着**。三种收据都在页落下之前取,因为落下就是把这两件事都毁掉的那一步。
+
+**顺带定死一句本来含糊的话:空框不是被拒绝的地址,是没写完的草稿。** 地址被拒时编辑框留在原地(「说在打字的地方」)——那只有在**写了东西**的时候才是个答案;一个空框被自己的 blur 重新打开,就是一个关不掉的框。`would_go_to` 早就从另一头说过同一句(空框不标红,因为它不是错的,它是没写完)。这条不是为新门开的例外,是新门逼出来的一次把话说全。
+
+**边界一条,写下来而不是留着。** 收据只在这张页自己的 tab 在前面时兑现:两个动词都靠「前台 tab + 座位号」定位一个 pane,而 seat 号只在 tab 内唯一。field 还开着就切到别的 tab,收据作废、空白页留下——它此后就是一张普通的空白页,自己有地址栏可以打字。
+
+**红测四条。** `shortcuts::the_windows_own_address_door_answers_everywhere_and_leaves_control_l_alone`(四种焦点态都答 `WindowAddress`,而 `^L` 在终端与回滚上仍然 `None`);`the_blank_pages_door_remembers_what_it_took_so_it_can_give_it_back`(收据三形);`a_blank_page_is_a_page_that_has_never_been_anywhere`(机器级:`about:blank` 提交完成后 `recoverable_url` 仍是 `None`);`the_windows_address_door_mints_a_page_and_can_be_taken_back`(读本文件的文本,钉住三句接线——分岔、经铸门出门、关框时答话)。外加 `the_blank_pages_address_field_opens_empty` 钉住两种种子。
+
+**Claude 定,用户可否决。** 可推翻的有三样:`Ctrl+Shift+L` 这个和弦、「未导航即撤走空白座位」这条(留着一张空白页也是一个自洽的答案,Chrome 的新标签页就是这么做的)、以及「空框即关框」。推翻其中任何一样,上面那四条红测就是它要改的清单。
+
+
 #### W2 片② 落地:导航策略是一个纯模块(2026-08-22;`crates/bt-app/src/webnav.rs`,**只有模块与它的合同测试,一根接线也没有**)
 
 **这一片交付的是一条规则,不是一个能用的网页座位。** 方案 §3 的每一句话在这里成了类型与判定函数——无 I/O、无 COM、无宿主依赖,不查 DNS、不读 `hosts`、不问磁盘——产品里除了新文件本身,只多了 `main.rs` 的一行 `mod webnav;`。接线归后面几片:片① 在 `NavigationStarting` 上装这扇门,片③ 拿 `switcher_key` 当预览池的去重键,片④ 拥有地址栏 UI 与搜索引擎的选择,片⑤ 的 files 列入口调 `Mint::file`。本节记的是规则本身,以及每一条是从哪一条既有裁决或哪一次实测推出来的。

@@ -1537,6 +1537,18 @@ pub enum Text {
     /// already happened, and a card reporting only the refusal would leave the
     /// reader to discover the tab for themselves.
     MoveRefusedPaneIsNowATab,
+
+    // ── the window's own address door (§7.7 ⑨, Claude 定 2026-08-24) ────────
+    //
+    // One contiguous block at the end, per this table's standing rule. One
+    // entry.
+    /// **The `Open address` row of the shortcut table** — `Ctrl+Shift+L`.
+    ///
+    /// Not `Address`, which is the row two lines above it in the editor and
+    /// means the other thing: that one puts the caret in a field that is already
+    /// on the glass, and this one is answerable for there being a field at all.
+    /// The verb is the difference, so the verb is the word that separates them.
+    ShortcutWindowAddress,
 }
 
 impl Text {
@@ -2568,6 +2580,10 @@ impl Text {
                 "这个窗格现在是本窗的一个 tab。",
             ),
 
+            // The verb, because the verb is what separates this row from
+            // `ShortcutWebAddress` two lines above it on the same page.
+            Self::ShortcutWindowAddress => pick(lang, "Open address", "打开地址"),
+
             Self::GitDocumentEmpty => pick(lang, "No changes to show", "没有可显示的改动"),
 
             // ── a drag's landing caption ───────────────────────────────────
@@ -2786,7 +2802,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 456] = [
+    pub const ALL: [Self; 457] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3243,6 +3259,7 @@ impl Text {
         Self::MoveRefusedGone,
         Self::MoveRefusedAlreadyThere,
         Self::MoveRefusedPaneIsNowATab,
+        Self::ShortcutWindowAddress,
     ];
 
     /// The entries whose two columns are allowed to be the same string.

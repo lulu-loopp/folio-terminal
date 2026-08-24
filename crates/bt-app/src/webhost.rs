@@ -2948,6 +2948,12 @@ mod keyboard_tests {
         // and its developer tools.
         ("close-search", "Escape"),
         ("web-address", "Ctrl+l"),
+        // **One more on 2026-08-24** (§7.7 ⑨). It is a `Scope::Window` row, so a
+        // page hands it back in every focus state — which is the whole of what
+        // the row is for: the address door has to answer over a page as well as
+        // beside one, or the one surface where an address is most obviously
+        // wanted would be the one place the chord went missing.
+        ("window-address", "Ctrl+Shift+l"),
         ("web-devtools", "F12"),
     ];
 
@@ -2982,7 +2988,7 @@ mod keyboard_tests {
             .map(|(id, chord)| (*id, (*chord).to_owned()))
             .collect();
         assert_eq!(spelled, expected);
-        assert_eq!(spelled.len(), 34);
+        assert_eq!(spelled.len(), 35);
     }
 
     /// RED — and every one of them reaches a virtual key, because
@@ -2992,7 +2998,7 @@ mod keyboard_tests {
         let claims = claimable_chords(&Shortcuts::defaults(), every_focus());
         assert_eq!(
             claims.len(),
-            34,
+            35,
             "a chord this window owns that the web host cannot name in Win32 is \
              a chord that silently stops working while a page has the focus"
         );
