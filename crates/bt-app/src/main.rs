@@ -6505,6 +6505,18 @@ struct WindowRuntime {
     /// (`docs/DESIGN.md` §7.1.5), there is exactly one keyboard, and two tabs
     /// being renamed at once is not a state this window can be in.
     rename: Option<TabRename>,
+    /// **The blank page one `Ctrl+Shift+L` minted, and what the pane it landed
+    /// on was before** (§7.7 ⑨) — or `None`, which is every other moment.
+    ///
+    /// On the runtime beside [`Self::rename`] and for that field's reason: the
+    /// door is a *window*-level stance, there is one keyboard, and the editor it
+    /// opens is the one this remembers the way back from.
+    ///
+    /// It is the door's receipt and nothing else. A page that has been somewhere
+    /// is not withdrawable however this field reads — that is asked of
+    /// [`webhost::WebSeat::identity`], which is the machine's own ledger and the
+    /// one place `about:blank` never enters.
+    blank_page: Option<BlankPage>,
     /// The rename caret's own blink, on the same beat as the terminal's.
     ///
     /// Its own instance rather than a share: typing a name must reveal the name
@@ -11017,6 +11029,65 @@ enum WebHeadVerb {
     /// one button**: 「同一秒里刷新钮变停止钮,三个钮还是三个钮」.
     Reload,
     DevTools,
+}
+
+/// **A blank page `Ctrl+Shift+L` minted, and the way back from it** (§7.7 ⑨,
+/// Claude 定 2026-08-24).
+///
+/// The door opens a room that did not exist a moment ago, so it has to be
+/// possible to leave without having furnished it: an address field closed
+/// without an address is the gesture being taken back, not an empty page being
+/// filed. What that costs is exactly this receipt — the pane the page landed on
+/// answered a question before it was a page, and the answer is not derivable
+/// afterwards.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BlankPage {
+    /// The pane the blank page is on.
+    leaf: LeafId,
+    /// What that pane owes back if the door is taken back.
+    back: BlankPageReturn,
+}
+
+/// What withdrawing a blank page puts back — the three shapes the landing rule
+/// can produce.
+///
+/// Three and not two, because [`Runtime::preview_landing_surface`] answers a
+/// question with two halves: is there an un-pinned preview pane, and is it
+/// showing anything. A blank page that took over a document owes the document;
+/// one that took over an empty pane owes the empty pane; one that arrived with
+/// the pane is the pane's only reason to exist and takes it with it.
+///
+/// The variants are named for **what the withdrawal does**, not for what the
+/// landing found, because the withdrawal is the only reader: a name that
+/// described the past would have to be translated at the one place it is used.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum BlankPageReturn {
+    /// The pane was minted for this page. It goes with it.
+    TakeThePane,
+    /// The pane was already open and showing this.
+    PutTheDocumentBack(preview::PreviewSource),
+    /// The pane was already open and showing nothing.
+    LeaveThePaneEmpty,
+}
+
+/// **What a blank page's landing owes back**, read off the pane as it stood
+/// *before* the page arrived.
+///
+/// A free function and not two lines inside the door, because it is the whole of
+/// what "the door can be taken back" means and it has to be answerable without a
+/// window: the two facts it reads are gone the instant the page lands, and a
+/// rule that could only be checked by opening a browser is a rule nobody checks.
+fn blank_page_return(
+    the_pane_was_already_open: bool,
+    was_showing: Option<preview::PreviewSource>,
+) -> BlankPageReturn {
+    if !the_pane_was_already_open {
+        return BlankPageReturn::TakeThePane;
+    }
+    was_showing.map_or(
+        BlankPageReturn::LeaveThePaneEmpty,
+        BlankPageReturn::PutTheDocumentBack,
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22192,6 +22263,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         files_notice: None,
         files_focus: FilesKeyboardFocus::default(),
         rename: None,
+        blank_page: None,
         rename_blink: CursorBlink::new(Instant::now()),
         settings_marks: marks::ChromeMarkRasters::default(),
         divider_drag: None,
@@ -33979,6 +34051,10 @@ impl Runtime<'_> {
             }
             shortcuts::Action::WebAddress => self.open_web_address(),
             shortcuts::Action::WebDevTools => self.open_web_dev_tools(),
+            // §7.7 ⑨: the row above with the scope taken off, which makes it a
+            // different verb — the page's own key can assume a page, and a key
+            // that answers with the hands on a shell has to be able to make one.
+            shortcuts::Action::WindowAddress => self.open_address_here(),
         }
     }
 
@@ -56791,7 +56867,17 @@ impl Runtime<'_> {
         // where it is being typed, which is the search capsule's own answer to a
         // regex that will not parse.
         if let RenameSubject::WebAddress { leaf } = editor.subject {
-            if commit {
+            // **An empty box is not an address the door refused — it is a draft
+            // nobody finished** (§7.7 ⑨). The refusal above keeps the field open
+            // so that what was typed can be corrected where it was typed, and
+            // that is only an answer when something *was* typed: an empty field
+            // reopened by its own blur is a field that cannot be left. It is the
+            // box `Ctrl+Shift+L` opens on a page that has never been anywhere, so
+            // the rule had to be stated before that door could exist at all —
+            // and `would_go_to` had already stated it from the other side, where
+            // an empty field is the one wrong-looking thing that does not light
+            // up red.
+            if commit && !editor.text.trim().is_empty() {
                 let engine = self.app.settings_store.loaded().search_engine;
                 let compositor_outcomes = {
                     let window = &mut *self.window;
@@ -56806,9 +56892,17 @@ impl Runtime<'_> {
                         self.refresh_chrome();
                         return self.present_chrome_change();
                     }
+                    // The seat has been asked to go somewhere, so it is a page
+                    // whatever comes back — a failure has a card of its own to
+                    // stand on it. Spent before the outcomes are applied, because
+                    // one of them can be the commit that would ask again.
+                    self.forget_a_blank_page(leaf);
                     self.apply_web_outcomes(leaf, outcomes)?;
                 }
             }
+            // Escape, a click away, or an empty box: the field is gone, and a
+            // blank page that only ever existed to hold it goes with it.
+            self.withdraw_a_blank_page(leaf)?;
             self.refresh_chrome();
             return self.present_chrome_change();
         }
@@ -61669,9 +61763,17 @@ impl Runtime<'_> {
                     // page's frame would be the only surface in the column
                     // saying something that is not true of the tab it names.
                     self.window.web_thumbs.invalidate(leaf);
+                    // And a page that has arrived somewhere is not a door
+                    // anybody can still take back (§7.7 ⑨). Said at the two
+                    // outcomes that end a blank page's life — this one and
+                    // `Gone` — as well as where the address was taken, because a
+                    // switcher row and a restore can move a seat without any
+                    // field being open.
+                    self.forget_a_blank_page(leaf);
                     self.commit_web_page(leaf)?;
                 }
                 webhost::WebOutcome::Gone => {
+                    self.forget_a_blank_page(leaf);
                     self.window.web.remove(&leaf);
                     self.window.web_cursor = None;
                     let live: BTreeSet<LeafId> = self.window.web.keys().copied().collect();
@@ -62077,10 +62179,18 @@ impl Runtime<'_> {
     }
 
     fn open_web_address_on(&mut self, seat: SeatId) -> Result<()> {
+        // **Whatever field was open leaves first, and the page is asked for
+        // after it has** (§7.7 ⑨). Closing an address field is one of the two
+        // ways a blank page is taken back, so the seat this was called about can
+        // stop being a page between the call and this line — and a field opened
+        // over a seat that has just gone is a caret in a pane nobody can see.
+        // Reading the address afterwards is also simply the more truthful of the
+        // two orders: what the box is seeded with is what the seat is showing
+        // now.
+        self.finish_rename(true)?;
         let Some(url) = self.web_on(seat).map(|web| web.page().url.clone()) else {
             return Ok(());
         };
-        self.finish_rename(true)?;
         // **The field takes the keyboard back from the page, and it has to**
         // (found on the machine, 2026-08-22: `Ctrl+L` opened a field nothing
         // could be typed into). A page keeps every key this window's table does
@@ -62099,6 +62209,155 @@ impl Runtime<'_> {
         self.window.rename_blink.reset(Instant::now());
         self.refresh_chrome();
         self.present_chrome_change()
+    }
+
+    /// **`Ctrl+Shift+L` — the address of this tab, from anywhere in the window**
+    /// (§7.7 ⑨, Claude 定 2026-08-24).
+    ///
+    /// [`Self::open_web_address`] with the one assumption it is allowed to make
+    /// taken away. `Ctrl+L` is in force only over a page, so it may ask for the
+    /// focused page and stop when there is none; this chord answers with the
+    /// hands on a shell, where "there is none" is the ordinary case and the only
+    /// useful answer is to make one.
+    ///
+    /// The fork is the whole function, and both arms end in the same place —
+    /// [`Self::open_web_address_on`] — because a caret in an address is one verb
+    /// and a second seeding of the same field is how the two doors onto it would
+    /// come to disagree.
+    fn open_address_here(&mut self) -> Result<()> {
+        // The field that is open leaves first, by its own rules, so the question
+        // below is asked of the tab as it stands rather than as it stood: a
+        // press that takes back a blank page has to find the tab without one.
+        self.finish_rename(true)?;
+        match self.web_seat_of_tab() {
+            Some(seat) => self.open_web_address_on(seat),
+            None => self.mint_a_blank_page_and_open_its_address(),
+        }
+    }
+
+    /// The second arm of [`Self::open_address_here`]: **a tab with no page gets
+    /// one, empty, and the caret lands in its address.**
+    ///
+    /// The page is the host's own blank ([`webnav::Mint::Blank`]) and it goes
+    /// out through [`Self::open_minted_page`], which is the door every navigation
+    /// this window starts passes — a URL this build wrote itself gets no more
+    /// trust than one a person typed (`plan.md` §3). Where it lands is the
+    /// preview landing rule's answer and not a new one, because a page arriving
+    /// in a tab is a page arriving in a tab however it was asked for.
+    ///
+    /// **The field opens empty and nothing arranges that.** `about:blank` is
+    /// this host's scaffolding, and `WebSeat`'s `SourceChanged` already refuses
+    /// to put it in the head — so the address the field is seeded from is the
+    /// empty string, which is what a person who has not typed an address has.
+    fn mint_a_blank_page_and_open_its_address(&mut self) -> Result<()> {
+        // Read before the page lands, because landing is what destroys both
+        // facts: the pane it takes over stops showing what it was showing, and a
+        // pane that did not exist a moment ago is indistinguishable afterwards
+        // from one that did.
+        let landing = self.seats.landing_preview();
+        let was_showing = landing.and_then(|seat| {
+            self.preview_pane(PreviewSurface::Seat(seat))
+                .and_then(|pane| pane.buffer.clone())
+        });
+        let back = blank_page_return(landing.is_some(), was_showing);
+        self.open_minted_page(webnav::Mint::Blank)?;
+        // The seat the landing rule chose, asked of the tab rather than
+        // remembered from above: `open_minted_page` is allowed to decline (no
+        // pane could be opened), and a receipt for a page that was never made
+        // would be a door with nothing behind it.
+        let Some(seat) = self.web_seat_of_tab() else {
+            return Ok(());
+        };
+        self.window.blank_page = Some(BlankPage {
+            leaf: self.leaf_here(seat),
+            back,
+        });
+        self.open_web_address_on(seat)
+    }
+
+    /// **The blank page was never given an address, so it goes** (§7.7 ⑨,
+    /// recommended by Claude and open to being overruled).
+    ///
+    /// Opening a door is a gesture, and a gesture that cannot be abandoned is a
+    /// gesture that costs something to try. Escape and a click away close the
+    /// field; this is what they leave behind, which is the tab exactly as it was
+    /// before the chord.
+    ///
+    /// **What "never given an address" means is not this function's opinion.**
+    /// [`webhost::WebSeat::identity`] is `WebMachine::recoverable_url`, the one
+    /// field a *successful* navigation writes, and the two lines that write it
+    /// name `about:blank` in order to refuse it. So a page that has been
+    /// somewhere — including somewhere that failed and left a card standing on
+    /// the seat — is a page, and this leaves it alone.
+    fn withdraw_a_blank_page(&mut self, leaf: LeafId) -> Result<()> {
+        if self.window.blank_page.as_ref().map(|door| door.leaf) != Some(leaf) {
+            return Ok(());
+        }
+        let went_somewhere = self
+            .window
+            .web
+            .get(&leaf)
+            .is_none_or(|web| web.identity().is_some());
+        // **Only on this page's own tab.** The two verbs below name a pane
+        // through the tab in front — a seat number is unique inside a tab and
+        // nowhere else — and stepping to another tab with the field still open
+        // is stepping away from the gesture. The receipt is spent either way:
+        // the field it belonged to is gone, and a blank page nobody withdrew is
+        // a page like any other, with an address bar of its own to type into.
+        if went_somewhere || leaf.tab != self.id {
+            self.window.blank_page = None;
+            return Ok(());
+        }
+        let back = self
+            .window
+            .blank_page
+            .take()
+            .expect("the door was there one line ago")
+            .back;
+        // The engine goes first and by the call the orphan sweep already makes
+        // ([`Self::advance_web_page`]): whatever the pane becomes below, it
+        // stops being a page here, in this turn, rather than a tick later.
+        let window = &mut *self.window;
+        let outcomes = window
+            .web
+            .get_mut(&leaf)
+            .map(|web| web.close(&window.compositor))
+            .unwrap_or_default();
+        self.apply_web_outcomes(leaf, outcomes)?;
+        let surface = PreviewSurface::Seat(leaf.seat);
+        match back {
+            // `close_pane` and not a bare `close_seat`: it is the one verb for a
+            // leaf leaving a tree, and the pane this door minted leaves exactly
+            // as the `×` on its head would make it leave.
+            BlankPageReturn::TakeThePane => self.close_pane(leaf.seat),
+            // The document lane's own door, so the caret and the scroll the pane
+            // filed on its way out are the ones it comes back to.
+            BlankPageReturn::PutTheDocumentBack(source) => {
+                let Some(name) = self
+                    .preview_pool
+                    .get(&source)
+                    .map(|buffer| buffer.name.clone())
+                else {
+                    return Ok(());
+                };
+                self.land_preview_source_on(surface, source, name)
+            }
+            // An empty preview pane is what was there, so an empty preview pane
+            // is what is left.
+            BlankPageReturn::LeaveThePaneEmpty => Ok(()),
+        }
+    }
+
+    /// **The door was walked through, so there is nothing to take back.**
+    ///
+    /// Its own name rather than a `= None` at three call sites, because the three
+    /// are one sentence — this seat has been asked to go somewhere — and a
+    /// receipt left lying about is a page that would be withdrawn by the *next*
+    /// field to close over the same seat number.
+    fn forget_a_blank_page(&mut self, leaf: LeafId) {
+        if self.window.blank_page.as_ref().map(|door| door.leaf) == Some(leaf) {
+            self.window.blank_page = None;
+        }
     }
 
     /// `F12`, and the head's `</>` tool.
@@ -96177,6 +96436,181 @@ mod tests {
             webnav::switcher_identity(machine.recoverable_url()),
             Some("http://localhost:5173/new".to_owned()),
             "after a redirect the seat is where it landed"
+        );
+    }
+
+    // ── the window's own address door (§7.7 ⑨, Claude 定 2026-08-24) ────────
+
+    /// PIN (§7.7 ⑨) — **the door remembers what it took, so it can give it
+    /// back.**
+    ///
+    /// The landing rule has three outcomes and a withdrawal owes a different
+    /// thing to each: a pane that came with the page goes with it, a pane that
+    /// was reading a document gets the document back, and a pane that was empty
+    /// is left empty. Both facts are destroyed the instant the page lands — the
+    /// document is cleared off the pane, and a pane minted a moment ago is
+    /// indistinguishable from one that was already there — so the answer has to
+    /// be taken before, and this is the function that takes it.
+    ///
+    /// MUTATIONS:
+    /// ① drop the `the_pane_was_already_open` arm and read only the buffer — a
+    ///    pane minted for the page reports `LeaveThePaneEmpty`, and Escape leaves a
+    ///    bare preview pane standing where there was none;
+    /// ② return `LeaveThePaneEmpty` for a pane that was showing something — Escape
+    ///    silently discards the document the door borrowed the pane from.
+    #[test]
+    fn the_blank_pages_door_remembers_what_it_took_so_it_can_give_it_back() {
+        let notes = preview::PreviewSource::file(r"D:\notes\today.md");
+        assert_eq!(
+            blank_page_return(false, None),
+            BlankPageReturn::TakeThePane,
+            "a pane that did not exist before the page is the page's own"
+        );
+        assert_eq!(
+            blank_page_return(false, Some(notes.clone())),
+            BlankPageReturn::TakeThePane,
+            "and a pane that did not exist cannot have been showing anything — \
+             the landing rule is asked first, not the buffer"
+        );
+        assert_eq!(
+            blank_page_return(true, Some(notes.clone())),
+            BlankPageReturn::PutTheDocumentBack(notes),
+            "a document the door borrowed a pane from is owed that pane back"
+        );
+        assert_eq!(
+            blank_page_return(true, None),
+            BlankPageReturn::LeaveThePaneEmpty,
+            "and an empty pane is owed nothing but its emptiness"
+        );
+    }
+
+    /// PIN (§7.7 ⑨) — **"never been anywhere" is the recovery machine's own
+    /// state and not a second account kept beside it.**
+    ///
+    /// The withdrawal has to be able to tell a page the person walked away from
+    /// apart from a page they typed an address into, and the difference is
+    /// already a field: `recoverable_url` is written by a successful navigation
+    /// and the line that writes it names `about:blank` in order to refuse it. So
+    /// a blank page's identity stays `None` however many times the engine says it
+    /// arrived, and the first real address ends the door.
+    ///
+    /// MUTATION: let `on_navigation_completed` write `about:blank` through — the
+    /// first assertion goes red, and every `Ctrl+Shift+L` becomes unwithdrawable
+    /// the moment its blank page finishes loading.
+    #[test]
+    fn a_blank_page_is_a_page_that_has_never_been_anywhere() {
+        let mut machine = webhost::WebMachine::new();
+        machine.request(webnav::BLANK_PAGE);
+        let generation = machine.generation();
+        machine.on_environment(generation, true);
+        machine.on_controller(generation, true);
+        machine.on_events_installed(generation);
+        machine.on_navigation_completed(generation, webnav::BLANK_PAGE, true);
+        assert_eq!(
+            machine.recoverable_url(),
+            None,
+            "the host's own scaffolding is not somewhere a person went"
+        );
+        machine.on_navigation_completed(generation, "http://localhost:5173/app", true);
+        assert_eq!(
+            machine.recoverable_url(),
+            Some("http://localhost:5173/app"),
+            "and the first address that is one ends the door"
+        );
+    }
+
+    /// PIN (§7.7 ⑨) — **the field over a blank page opens empty, and nothing
+    /// arranges that.**
+    ///
+    /// `about:blank` is this host's word for "no page yet", not the reader's
+    /// address, so `WebSeat` already refuses to put it in the head — the field is
+    /// seeded from that same empty string, and there is no second rule about
+    /// blank pages anywhere in the editor. The pair is pinned together because
+    /// the *other* seeding must not change with it: an address that is one opens
+    /// selected whole, because going somewhere almost always means going
+    /// somewhere else.
+    ///
+    /// MUTATION: seed the field with `webnav::BLANK_PAGE` when the page has no
+    /// address — the first three assertions go red, and the first thing a reader
+    /// types replaces a word this window made up about itself.
+    #[test]
+    fn the_blank_pages_address_field_opens_empty() {
+        let leaf = LeafId {
+            tab: TabId(1),
+            seat: SeatId(2),
+        };
+        let empty = TabRename::open_address(leaf, "");
+        assert_eq!(empty.text, "");
+        assert_eq!(empty.selected, 0, "there is nothing to select");
+        assert_eq!(empty.caret, 0);
+        let addressed = TabRename::open_address(leaf, "http://localhost:5173/app");
+        assert_eq!(
+            addressed.selected,
+            addressed.text.len(),
+            "a page that has an address opens with the whole of it selected"
+        );
+        assert_eq!(addressed.caret, addressed.text.len());
+    }
+
+    /// PIN (§7.7 ⑨) — **the three sentences of the door, read off the file that
+    /// makes them.**
+    ///
+    /// A `WindowRuntime` is a surface, a compositor and a browser, so "the chord
+    /// minted a page and the caret landed in it" is not a sentence this process
+    /// can say without a screen. What can be said without one is which function
+    /// calls which, and this module's standing rule is that those are read as
+    /// text — the same witness `every_door_that_lands_a_source_opens_a_page_as_a_page`
+    /// takes for the pool's own fork.
+    ///
+    /// The three: the chord forks on whether the tab already has a page; the arm
+    /// that has none goes out through the minted door rather than straight at the
+    /// engine; and an address field that closes without a navigation takes its
+    /// blank page with it, while one that navigated does not.
+    ///
+    /// MUTATIONS:
+    /// ① point the chord at `open_web_address` — a tab with no page answers
+    ///    nothing at all, and the first assertion goes red;
+    /// ② navigate to `BLANK_PAGE` directly instead of through
+    ///    `open_minted_page` — the second goes red, and this window starts a
+    ///    navigation that never passed a door;
+    /// ③ drop the `forget_a_blank_page` before the outcomes are applied — the
+    ///    last goes red, and a page that was just sent somewhere is withdrawn out
+    ///    from under the navigation it was given.
+    #[test]
+    fn the_windows_address_door_mints_a_page_and_can_be_taken_back() {
+        const SOURCE: &str = include_str!("main.rs");
+        let body = |signature: &str| {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        };
+
+        let door = body("    fn open_address_here(");
+        assert!(
+            door.contains("self.web_seat_of_tab()")
+                && door.contains("self.open_web_address_on(seat)")
+                && door.contains("self.mint_a_blank_page_and_open_its_address()"),
+            "the chord does not fork on whether this tab already has a page:\n{door}"
+        );
+
+        let mint = body("    fn mint_a_blank_page_and_open_its_address(");
+        assert!(
+            mint.contains("self.open_minted_page(webnav::Mint::Blank)")
+                && mint.contains("blank_page_return(landing.is_some(), was_showing)")
+                && mint.contains("self.open_web_address_on(seat)"),
+            "the blank page is not minted through the door every navigation \
+             passes, or the way back from it is not taken before it lands:\n{mint}"
+        );
+
+        let finish = body("    fn finish_rename(");
+        assert!(
+            finish.contains("self.withdraw_a_blank_page(leaf)?")
+                && finish.contains("self.forget_a_blank_page(leaf);")
+                && finish.contains("!editor.text.trim().is_empty()"),
+            "an address field that closes does not answer for the blank page it \
+             was opened over:\n{finish}"
         );
     }
 }

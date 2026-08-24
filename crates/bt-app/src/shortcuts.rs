@@ -132,6 +132,28 @@ pub(crate) enum Action {
     /// The second door onto the field the page's title already is; the first is
     /// the double click that renames a file one content class over.
     WebAddress,
+    /// **Open an address from anywhere in this window** (§7.7 ⑨, Claude 定
+    /// 2026-08-24).
+    ///
+    /// [`Self::WebAddress`] one scope out, and the two are a pair rather than a
+    /// duplicate: `Ctrl+L` is the *page's* own key and answers only where there
+    /// is already a page to steer, and this one answers with the hands on a
+    /// shell — where there may be no page at all, so the verb has to be able to
+    /// make one. What it does is one sentence with a fork inside it: put the
+    /// caret in this tab's address, minting the blank page that owns it first if
+    /// the tab has not got one.
+    ///
+    /// **Not a second chord on [`Self::WebAddress`]'s row**, which is the shape
+    /// the table already refused once (user ruling 2026-08-18, `open-search`'s
+    /// retired alias: "one verb, one row"). It is also not what this is — a row
+    /// in force everywhere and a row in force over a page do different things on
+    /// a tab with no page, and a single row could only carry one of the two
+    /// answers.
+    ///
+    /// **`Ctrl+Shift+L` and not `Ctrl+L`.** `^L` is readline's clear-screen and
+    /// discipline (1) forbids taking it from a terminal; the shifted chord is
+    /// this window's own namespace, and it was free.
+    WindowAddress,
     /// Open the developer tools on the focused page (§7.7 ②, same ruling).
     WebDevTools,
     /// Walk to the next match while the **terminal** still holds the keyboard (B81).
@@ -982,6 +1004,21 @@ pub(crate) const BINDINGS: &[Binding] = &[
         Text::ShortcutWebAddress,
         Action::WebAddress,
         Chord::new(CTRL, character("l")),
+    ),
+    // **`Ctrl+Shift+L`** (§7.7 ⑨, Claude 定 2026-08-24) — the row above with the
+    // scope taken off, and therefore a different verb. See
+    // [`Action::WindowAddress`]: the page's own key can assume a page, and a key
+    // that answers on a shell cannot, so this one mints the page it needs.
+    //
+    // The row directly under `web-address` because the two are read as a pair
+    // and the editor lists the table in the table's own order. The shifted chord
+    // is what a bare `Ctrl+letter` in this window has always had to become the
+    // moment it is in force where a terminal is.
+    Binding::window(
+        "window-address",
+        Text::ShortcutWindowAddress,
+        Action::WindowAddress,
+        Chord::new(CTRL_SHIFT, character("l")),
     ),
     Binding::web_page(
         "web-devtools",
@@ -2378,6 +2415,63 @@ mod tests {
         );
     }
 
+    /// PIN (§7.7 ⑨, Claude 定 2026-08-24) — **`Ctrl+Shift+L` opens an address
+    /// from anywhere, and takes nothing from the shell to do it.**
+    ///
+    /// The whole of the ruling in one test. The window's own address door is in
+    /// force in every focus state, because the tab it acts on exists in every
+    /// focus state — with the hands on a shell, in a document, over a page. And
+    /// the row directly above it in the table is untouched: `^L` is readline's
+    /// clear-screen and still reaches the child, which is the pin
+    /// `the_address_and_the_developer_tools_answer_only_over_a_page` states from
+    /// the other side and the reason this verb had to be a *second* row.
+    ///
+    /// MUTATIONS:
+    /// ① give the row `Scope::WebPage` — the terminal and document assertions go
+    ///    red, and the verb becomes a duplicate of the one above it that cannot
+    ///    reach the tab it was added for;
+    /// ② move it to bare `Ctrl+L` — `conflicts_with` sees the two rows in one
+    ///    focus and `the_table_holds_exactly_the_ruled_rows` goes red, and so
+    ///    does `bare_control_letters_stay_with_the_terminal`;
+    /// ③ replace the row with a second chord on `web-address` — "one verb, one
+    ///    row" goes red, and a tab with no page would have nothing to answer.
+    #[test]
+    fn the_windows_own_address_door_answers_everywhere_and_leaves_control_l_alone() {
+        for (where_, action) in [
+            ("on a shell", press(character("l"), CTRL_SHIFT)),
+            (
+                "on a scrollback",
+                press_on_primary_screen(character("l"), CTRL_SHIFT),
+            ),
+            (
+                "in a document",
+                press_in_preview(character("l"), CTRL_SHIFT),
+            ),
+            ("over a page", press_on_a_page(character("l"), CTRL_SHIFT)),
+        ] {
+            assert_eq!(
+                action,
+                Some(Action::WindowAddress),
+                "the window's address door is the window's {where_}"
+            );
+        }
+        // And the row it was added beside is exactly where it was.
+        assert_eq!(
+            press_on_a_page(character("l"), CTRL),
+            Some(Action::WebAddress)
+        );
+        assert_eq!(
+            press(character("l"), CTRL),
+            None,
+            "^L is readline's clear-screen and reaches the child untouched"
+        );
+        assert_eq!(
+            press_on_primary_screen(character("l"), CTRL),
+            None,
+            "a scrollback is still a terminal"
+        );
+    }
+
     /// PIN (§7.7, W2 slice ④) — **`Escape` puts the capsule away, and is the
     /// shell's the moment there is no capsule.**
     ///
@@ -2631,7 +2725,11 @@ mod tests {
         // for why a page turns a rung of the ladder into a row of the table.
         // **One more on 2026-08-23** (multiwindow slice E2): `quit` on
         // `Ctrl+Shift+Q`, which makes it 22 single actions.
-        assert_eq!(BINDINGS.len(), 38);
+        // **One more on 2026-08-24** (§7.7 ⑨): `window-address` on
+        // `Ctrl+Shift+L` — 23 single actions, and the second row in the table
+        // that puts a caret in an address. See [`Action::WindowAddress`] for why
+        // it is a row rather than a second chord on the first one.
+        assert_eq!(BINDINGS.len(), 39);
         assert_eq!(
             BINDINGS
                 .iter()
@@ -2712,6 +2810,9 @@ mod tests {
             Action::OpenSearch,
             Action::NextMatch,
             Action::PrevMatch,
+            Action::WebAddress,
+            Action::WebDevTools,
+            Action::WindowAddress,
         ];
         expected.extend((1..=9u8).map(Action::GotoTab));
         expected.extend((1..=4u8).map(Action::SummonPip));
