@@ -1,0 +1,60 @@
+test git::tests::a_search_ors_the_message_against_the_author_and_a_hash_lands_outright ... ok
+test git::tests::a_real_repository_answers_every_way_and_each_matches_the_command_line ... ok
+test focus_thumb::tests::the_budget_holds_under_ten_tabs_of_full_blast_output ... ok
+test tests::real_powershell_input_reaches_a_viewport_owned_frame ... ok
+
+failures:
+
+---- tests::a_folder_tab_and_a_file_tab_cross_the_disk_and_come_back_as_themselves stdout ----
+
+thread 'tests::a_folder_tab_and_a_file_tab_cross_the_disk_and_come_back_as_themselves' (55412) panicked at crates\bt-app\src\main.rs:92436:9:
+assertion `left == right` failed: with the file it was on beside the tree, where content lives (L1)
+  left: []
+ right: ["D:\\work\\notes.md"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::a_preview_torn_out_is_a_tab_with_no_shell_named_by_its_file stdout ----
+
+thread 'tests::a_preview_torn_out_is_a_tab_with_no_shell_named_by_its_file' (52740) panicked at crates\bt-app\src\main.rs:92120:9:
+assertion `left == right` failed: still showing the file it was showing
+  left: None
+ right: Some(File("D:\\work\\notes.md"))
+
+---- tests::a_preview_pane_changing_tabs_arrives_holding_the_edit_it_left_with stdout ----
+
+thread 'tests::a_preview_pane_changing_tabs_arrives_holding_the_edit_it_left_with' (57888) panicked at crates\bt-app\src\main.rs:91617:14:
+the view arrived under the id the pane now answers to
+
+---- tests::a_preview_seat_is_found_in_the_tab_that_owns_it stdout ----
+
+thread 'tests::a_preview_seat_is_found_in_the_tab_that_owns_it' (57828) panicked at crates\bt-app\src\main.rs:91521:9:
+assertion `left != right` failed: and they are still two surfaces
+  left: Seat(LeafId { tab: TabId(1), seat: SeatId(2) })
+ right: Seat(LeafId { tab: TabId(1), seat: SeatId(2) })
+
+---- tests::a_tab_is_seeded_by_the_pane_it_would_be_reopened_as stdout ----
+
+thread 'tests::a_tab_is_seeded_by_the_pane_it_would_be_reopened_as' (43636) panicked at crates\bt-app\src\main.rs:90838:9:
+assertion `left == right` failed: and a file tab as the file it was on — the vault's third shape, without which Ctrl+Shift+T would be a door onto an empty store
+  left: None
+ right: Some(Preview { path: "D:\\work\\notes.md", source: File })
+
+---- tests::merging_two_tabs_leaves_one_buffer_per_file_and_the_dirty_one_wins stdout ----
+
+thread 'tests::merging_two_tabs_leaves_one_buffer_per_file_and_the_dirty_one_wins' (58508) panicked at crates\bt-app\src\main.rs:91750:9:
+assertion `left == right` failed: the host's own pane was on the loser and now reads the winner — a surface names its buffer by source, so one buffer per file *is* the redirect
+  left: None
+ right: Some(File("D:\\notes\\notes.md"))
+
+
+failures:
+    tests::a_folder_tab_and_a_file_tab_cross_the_disk_and_come_back_as_themselves
+    tests::a_preview_pane_changing_tabs_arrives_holding_the_edit_it_left_with
+    tests::a_preview_seat_is_found_in_the_tab_that_owns_it
+    tests::a_preview_torn_out_is_a_tab_with_no_shell_named_by_its_file
+    tests::a_tab_is_seeded_by_the_pane_it_would_be_reopened_as
+    tests::merging_two_tabs_leaves_one_buffer_per_file_and_the_dirty_one_wins
+
+test result: FAILED. 2219 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.38s
+
+error: test failed, to rerun pass `-p bt-app --bin folio`

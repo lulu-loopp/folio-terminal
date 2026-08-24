@@ -1169,8 +1169,28 @@ struct PreviewHexHover {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum PreviewSurface {
-    /// A `SeatKind::Preview` leaf of this tab's layout tree.
-    Seat(SeatId),
+    /// A `SeatKind::Preview` leaf of a tab's layout tree — **named by its whole
+    /// [`LeafId`] and never by the seat number alone** (§7.12 ⓑ, 2026-08-24).
+    ///
+    /// It held a bare `SeatId` until this day, and §7.12 ④ had already reported
+    /// what that cost on the web lane. The rest of it is this: a seat number is
+    /// unique only inside its tab — every pane pulled out into a tab of its own
+    /// starts over at `SeatId(1)` (`seats::Seats::lone_seat`) — while the doors
+    /// that resolve a surface span the whole window. So the two of them
+    /// disagreed, and disagreed *silently*: [`Runtime::preview_tab`] answered
+    /// "the tab in front of you" and [`Runtime::preview_tab_index`] answered
+    /// "the first tab in the strip whose tree holds this number". Two tabs each
+    /// previewing on the same number put the **read** in one of them and the
+    /// **write** in the other — a scroll that moved a pane nobody was looking
+    /// at, a keystroke that edited a file on another tab, a save that wrote it.
+    ///
+    /// With the tab in the name there is one answer and no search: `leaf.tab`
+    /// names the tab, `leaf.seat` names the pane in it, and "walk the window for
+    /// somebody holding this number" is not a sentence that can be written any
+    /// more. Every reader that genuinely means the tab on the glass says so by
+    /// building its leaf through [`TabState::preview_here`], which is
+    /// [`TabState::leaf_here`]'s door and carries the same argument.
+    Seat(LeafId),
     /// A preview float — the second tenant of the `.float-win` chassis.
     Float(float::FloatId),
     /// **The glance card over a file row** ([`file_peek`]) — a third surface,
@@ -1208,6 +1228,19 @@ enum PreviewSurface {
     ///   `press_preview_body` and `preview_edit_focus` — are reached through
     ///   [`Runtime::preview_surface_at`], which this is still not in.
     Peek,
+}
+
+/// **Where in the strip the tab a preview surface belongs to is standing** —
+/// found by the tab's own name and by nothing else (§7.12 ⓑ).
+///
+/// A free function and not a method, for [`web_seat_among`]'s reason: what is
+/// under test is the *lookup*, and a `Runtime` is a surface, a compositor and
+/// four Win32 bridges. It is one line, and being one line is the finding — the
+/// line it replaced walked the window asking each tab's tree whether it held a
+/// seat with this number, which answered "yes" from any tab that happened to
+/// have numbered a preview pane the same way.
+fn preview_tab_index_among(tabs: &[TabState], tab: TabId) -> Option<usize> {
+    tabs.iter().position(|state| state.id == tab)
 }
 
 /// Everything **one** preview surface is showing, and how it is being looked at.
@@ -6333,7 +6366,14 @@ struct WindowRuntime {
     /// Written by [`Runtime::dress_preview_head`] as each head is measured and
     /// retired by [`Runtime::sweep_preview_panes`], so an entry cannot outlive
     /// the seat it measures.
-    preview_head_measures: BTreeMap<SeatId, seats::PreviewHeadTools>,
+    ///
+    /// **Keyed by [`LeafId`] and not by seat number** (§7.12 ⓑ). This is the
+    /// window's map and the heads it measures are a tab's, so on the bare number
+    /// a head on one tab handed its string widths to the head of the same number
+    /// on another — a name measured for `todo.txt` laying out the buttons of a
+    /// pane showing `README.md`. It is the same sentence `WindowRuntime::web`
+    /// already carries, one table over.
+    preview_head_measures: BTreeMap<LeafId, seats::PreviewHeadTools>,
     /// The file row's context menu, and the row it was raised on (K143).
     ///
     /// It holds the *path*, not the row — an index into a list the tree may
@@ -7573,6 +7613,31 @@ mod tab_identity_tests {
         &SOURCE[start..end]
     }
 
+    /// The same for a `fn` in **column zero** — a free function, which is what a
+    /// lookup written to be pinned by value tends to be (`web_seat_among`,
+    /// `preview_tab_index_among`). It is a second reader rather than a parameter
+    /// on the first because the two are closed by different `}`s, and a reader
+    /// that guessed which would be a pin that reads the wrong text.
+    fn top_level_fn_body(name: &str) -> &'static str {
+        let head = format!(
+            "
+fn {name}("
+        );
+        let start = SOURCE
+            .find(&head)
+            .unwrap_or_else(|| panic!("`fn {name}` is declared once at the top level"))
+            + head.len();
+        let end = start
+            + SOURCE[start..]
+                .find(
+                    "
+}
+",
+                )
+                .expect("a top-level function is closed by a `}` in column zero");
+        &SOURCE[start..end]
+    }
+
     /// The field lines of a top-level `struct <name> { … }`, prose taken out —
     /// [`layer_shape_tests::struct_fields`]'s reader, and its reason for
     /// dropping the doc comments: these pins read the body as text, and a
@@ -7723,6 +7788,143 @@ struct {name} {{
             Some(&"the target window's own page"),
             "least of all the page that was already standing there"
         );
+    }
+
+    /// **§7.12 ⓑ — a preview pane on one tab is not the pane of the same number
+    /// on another, and the surface says so by itself.**
+    ///
+    /// [`every_page_of_a_moving_tab_can_be_named`]'s sentence, one content class
+    /// over and one day later. `PreviewSurface::Seat` held a bare `SeatId` until
+    /// 2026-08-24 while the tables keyed by it — the window's
+    /// `git_graphs_shown`, its `preview_head_measures`, its open switcher, the
+    /// name editor's subject — span every tab of the window. Two tabs each
+    /// previewing on `SeatId(2)` is the ordinary state of a window with two tabs
+    /// (`seats::Seats::lone_seat` numbers from 1 in every tree), so this is not
+    /// an exotic arrangement: it is what a second tab *is*.
+    ///
+    /// MUTATION: drop the tab from the key — go back to `Seat(SeatId)` — and
+    /// every assertion below folds into one entry, which on the glass is one
+    /// tab's graph drawn into another tab's pane and one tab's head measured for
+    /// another tab's name.
+    #[test]
+    fn two_tabs_previewing_on_one_seat_number_are_two_surfaces() {
+        let seat = SeatId(2);
+        let here = PreviewSurface::Seat(LeafId {
+            tab: TabId(1),
+            seat,
+        });
+        let next_door = PreviewSurface::Seat(LeafId {
+            tab: TabId(2),
+            seat,
+        });
+        assert_ne!(
+            here, next_door,
+            "the seat number is the same and the panes are not"
+        );
+
+        let mut window: BTreeMap<PreviewSurface, &str> = BTreeMap::new();
+        window.insert(here, "the front tab's graph");
+        window.insert(next_door, "the tab behind it");
+        assert_eq!(
+            window.len(),
+            2,
+            "one window-level table holds both, which is the whole of the fix"
+        );
+        assert_eq!(window.get(&here), Some(&"the front tab's graph"));
+        assert_eq!(window.get(&next_door), Some(&"the tab behind it"));
+
+        // And a float that happens to have been given the same number is a third
+        // thing again — the property `PreviewSurface` was made a type for.
+        assert_ne!(here, PreviewSurface::Float(2));
+    }
+
+    /// PIN (§7.12 ⓑ) — **a preview surface is read and written in the one tab
+    /// that owns it.**
+    ///
+    /// A shape pin, because what this is about is that two doors give *one*
+    /// answer. They did not: [`Runtime::preview_tab`] answered `Some(self)` —
+    /// the tab on the glass — for every seat, while
+    /// [`Runtime::preview_tab_index`] walked the strip for a tab whose tree held
+    /// a seat with that number. On a window whose second tab was in front and
+    /// whose first tab had a preview on the same number, those are two different
+    /// tabs, and every verb on the preview in front of you read one tab and wrote
+    /// the other: the scroll moved a pane nobody could see, `heal_preview_scroll`
+    /// clamped the front pane's offset into the back pane's view, an edit went
+    /// into the background tab's buffer and a save wrote it to disk.
+    ///
+    /// Both are now `leaf.tab`, asked once, in [`Runtime::preview_tab_id`].
+    ///
+    /// MUTATION: put either old line back — `PreviewSurface::Seat(_) =>
+    /// Some(self)` in the reader, or `.position(|state|
+    /// state.seats.preview_seats().contains(&seat))` in the writer — and it is
+    /// named here.
+    #[test]
+    fn a_preview_surface_is_read_and_written_in_the_one_tab_that_owns_it() {
+        let owner = fn_body("preview_tab_id");
+        assert!(
+            owner.contains("PreviewSurface::Seat(leaf) => Some(leaf.tab)"),
+            "a seat's tab is in its own name and is not looked for\n{owner}"
+        );
+
+        for name in ["preview_tab", "preview_tab_index"] {
+            let body = fn_body(name);
+            assert!(
+                body.contains("preview_tab_id("),
+                "`{name}` routes through the one door that answers whose tab a \
+                 surface is\n{body}"
+            );
+            assert!(
+                !body.contains("preview_seats()"),
+                "`{name}` must not go looking for a tab that holds this seat \
+                 *number*: that is the defect §7.12 ⓑ names\n{body}"
+            );
+            assert!(
+                !body.contains("Some(self)"),
+                "and it must not answer with the tab in front either — a preview \
+                 lives on the tab whose tree holds it, which is not always the \
+                 tab you are looking at\n{body}"
+            );
+        }
+
+        // The seat half of the lookup is a free function so it can be pinned by
+        // value as well as by shape — see
+        // `tests::a_preview_seat_is_found_in_the_tab_that_owns_it`.
+        let among = top_level_fn_body("preview_tab_index_among");
+        assert!(
+            among.contains("state.id == tab"),
+            "and the strip is walked by the tab's own name\n{among}"
+        );
+    }
+
+    /// **§7.12 ⓑ — the window's head measurements are a leaf's, not a number's.**
+    ///
+    /// `WindowRuntime::preview_head_measures` is the width of every string in a
+    /// preview head, measured by the paint so that the hit test can agree with
+    /// it. It is the *window's* map and the heads are a tab's, so on a bare seat
+    /// number two tabs' heads shared one entry: the pane showing `README.md` was
+    /// laid out to the widths measured for `todo.txt`, which puts every button
+    /// right of the name somewhere it is not drawn — the exact failure the
+    /// field's own doc says it exists to prevent, one axis over.
+    ///
+    /// MUTATION: key it by `leaf.seat` and the second write below lands on the
+    /// first tab's entry.
+    #[test]
+    fn a_head_measured_in_one_tab_is_not_another_tabs_head() {
+        let seat = SeatId(2);
+        let front = LeafId {
+            tab: TabId(1),
+            seat,
+        };
+        let behind = LeafId {
+            tab: TabId(2),
+            seat,
+        };
+        let mut measures: BTreeMap<LeafId, u32> = BTreeMap::new();
+        measures.insert(front, 120);
+        measures.insert(behind, 64);
+        assert_eq!(measures.get(&front), Some(&120));
+        assert_eq!(measures.get(&behind), Some(&64));
+        assert_eq!(measures.len(), 2, "two heads, two measurements");
     }
 
     /// PIN (F1b) — **the transfer is one transaction with three phases, and its
@@ -8484,7 +8686,7 @@ impl TabState {
     /// pool buffer and a reader that only knew about the pool would write a pane
     /// full of picture back to disk as an empty one.
     fn preview_showing(&self, seat: SeatId) -> Option<preview::PreviewSource> {
-        let pane = self.preview_panes.get(PreviewSurface::Seat(seat))?;
+        let pane = self.preview_panes.get(self.preview_here(seat))?;
         pane.buffer.clone().or_else(|| {
             pane.image
                 .as_ref()
@@ -8540,7 +8742,7 @@ impl TabState {
                 // the bytes they used to.
                 graph: self
                     .git_graph_view
-                    .get(&PreviewSurface::Seat(seat.id))
+                    .get(&self.preview_here(seat.id))
                     .map(|view| &view.filter)
                     .filter(|filter| **filter != git_graph::GraphFilter::default())
                     .map(|filter| bt_persist::GraphFilterV1 {
@@ -8613,6 +8815,39 @@ impl DerefMut for Runtime<'_> {
 }
 
 impl TabState {
+    /// **The preview surface one seat of *this* tab is** (§7.12 ⓑ) —
+    /// `Runtime::leaf_here`'s door, one content class over, and the same
+    /// argument for existing.
+    ///
+    /// [`PreviewSurface::Seat`] carries a whole [`LeafId`] since 2026-08-24, so
+    /// a caller with nothing but a seat number in hand has half a name. This is
+    /// the other half. Reached from a `Runtime` it is the *front* tab's, by
+    /// `Deref`, and that is what every caller there already means: the chrome
+    /// dresses the tab on the glass, the pointer lands in a pane of it, the
+    /// keyboard answers a leaf of it. A caller that means some other tab — a
+    /// restore filling a tab it is building, a pane changing tabs, a float
+    /// reading the tab it was torn out of — has that tab in hand and asks *it*,
+    /// which is the whole reason this is a method on the tab and not on the
+    /// window.
+    fn preview_here(&self, seat: SeatId) -> PreviewSurface {
+        PreviewSurface::Seat(self.leaf_here(seat))
+    }
+
+    /// **This tab's name for one of its own seats** (F1b′).
+    ///
+    /// The window's pages span every tab and a seat number is unique only inside
+    /// its tab, so a seat number is half a name and this is the other half.
+    /// Reached from a `Runtime` — through `Deref`, which is how nearly every
+    /// caller reaches it — it is a function of the *front* tab, because that is
+    /// what those callers already mean: the chrome dresses the tab on the glass,
+    /// the verbs answer the pane holding the keyboard, and both reach the web
+    /// doors with nothing but a seat in hand. A caller that means some other tab
+    /// has that tab in hand and asks it directly, which is why this lives here
+    /// rather than on the window.
+    fn leaf_here(&self, seat: SeatId) -> LeafId {
+        LeafId { tab: self.id, seat }
+    }
+
     /// **The leaf holding the keyboard — the shell a keystroke belongs to, if
     /// this tab has one.**
     ///
@@ -8775,7 +9010,7 @@ impl TabState {
     /// `None` falls through to the kind's own word exactly as a rootless column
     /// does.
     fn preview_head_name(&self, seat: SeatId) -> Option<String> {
-        let pane = self.preview_panes.get(PreviewSurface::Seat(seat))?;
+        let pane = self.preview_panes.get(self.preview_here(seat))?;
         match pane.image.as_ref() {
             Some(image) => Some(image.title()),
             None => self
@@ -8836,7 +9071,7 @@ impl TabState {
     /// one of those through [`preview::PreviewBuffer::wants_head_read`], which
     /// is the same gate the ordinary doors ask.
     fn unread_card_document(&self, seat: SeatId) -> Option<preview::PreviewSource> {
-        let pane = self.preview_panes.get(PreviewSurface::Seat(seat))?;
+        let pane = self.preview_panes.get(self.preview_here(seat))?;
         if pane.image.is_some() {
             return None;
         }
@@ -8904,7 +9139,7 @@ impl TabState {
                     .unwrap_or(&files::EMPTY_DIR_CACHE),
             }),
             SeatKind::Preview => {
-                let pane = self.preview_panes.get(PreviewSurface::Seat(seat));
+                let pane = self.preview_panes.get(self.preview_here(seat));
                 let buffer = pane
                     .and_then(|pane| pane.buffer.as_ref())
                     .and_then(|buffer| self.preview_pool.get(buffer));
@@ -20516,6 +20751,12 @@ fn create_tab_state(
         preview_pool.insert(preview::PreviewBuffer::new(source.clone(), name.clone()));
     }
     let mut preview_panes = PreviewPanes::default();
+    // **The tab being built names its own panes** (§7.12 ⓑ). `id` is in hand
+    // here — the tab does not exist yet to be asked through `preview_here`, and
+    // a restore that filed its views under a bare seat number was the shape of
+    // the defect this closed: two restored tabs, each previewing on the same
+    // number, and every window-level door had to guess which.
+    let surface_of = |seat: SeatId| PreviewSurface::Seat(LeafId { tab: id, seat });
     for seat in seats.preview_seats() {
         let Some(source) = preview.cur.get(&seat) else {
             continue;
@@ -20525,7 +20766,7 @@ fn create_tab_state(
         {
             // A picture is not a pool buffer — it comes back down the decode
             // lane, exactly as a click on a `.png` row sends it.
-            preview_panes.entry(PreviewSurface::Seat(seat)).image =
+            preview_panes.entry(surface_of(seat)).image =
                 Some(PreviewImageState::new(path.to_path_buf()));
             continue;
         }
@@ -20540,7 +20781,7 @@ fn create_tab_state(
             };
             preview_pool.insert(preview::PreviewBuffer::new(source.clone(), name));
         }
-        preview_panes.entry(PreviewSurface::Seat(seat)).buffer = Some(source.clone());
+        preview_panes.entry(surface_of(seat)).buffer = Some(source.clone());
     }
     // **The filter comes back even though the graph does not** (T2/T3, v2 (3)) —
     // see [`PreviewRestore::filters`]. The view is seeded with a root of its own
@@ -20554,7 +20795,7 @@ fn create_tab_state(
     let mut graph_views: BTreeMap<PreviewSurface, GraphView> = BTreeMap::new();
     for (seat, filter) in &preview.filters {
         graph_views.insert(
-            PreviewSurface::Seat(*seat),
+            surface_of(*seat),
             GraphView {
                 filter: filter.clone(),
                 ..GraphView::default()
@@ -20821,7 +21062,13 @@ fn pane_into_new_tab(
     let mut preview_panes = PreviewPanes::default();
     let mut preview_pool = preview::PreviewPool::default();
     let mut preview_views = PreviewViewStore::default();
-    if let Some(pane) = from.preview_panes.remove(PreviewSurface::Seat(seat.id)) {
+    // **The pane's two names, before and after.** The seat number is re-minted
+    // from 1 in the tab being born (`seats::Seats::lone_seat`) and the tab is a
+    // different tab, so both halves of the address change — which since §7.12 ⓑ
+    // is one re-key rather than two tables agreeing to use the same number.
+    let was = PreviewSurface::Seat(from.leaf_here(seat.id));
+    let now = PreviewSurface::Seat(LeafId { tab: id, seat: key });
+    if let Some(pane) = from.preview_panes.remove(was) {
         // **§7.1.3 「pane 拆出/被顶出时携带其当前缓冲(同一对象)」.** The buffer is
         // *taken* out of the source pool rather than copied: a second copy left
         // behind is exactly the fork the one-buffer-per-file law exists to
@@ -20849,12 +21096,12 @@ fn pane_into_new_tab(
             preview_pool.merge_from(std::mem::take(&mut from.preview_pool));
             preview_views.absorb(std::mem::take(&mut from.preview_views));
         }
-        *preview_panes.entry(PreviewSurface::Seat(key)) = pane;
+        *preview_panes.entry(now) = pane;
     }
     let graph_view = from
         .git_graph_view
-        .remove(&PreviewSurface::Seat(seat.id))
-        .map(|view| BTreeMap::from([(PreviewSurface::Seat(key), view)]))
+        .remove(&was)
+        .map(|view| BTreeMap::from([(now, view)]))
         .unwrap_or_default();
     from.refocus_after_losing(seat.id);
     let (seat_layout, seat_overflow) = solve(&seats);
@@ -21036,10 +21283,14 @@ fn move_seat_content(
     if let Some(scroll) = source.git_scroll.remove(&was) {
         target.git_scroll.insert(now, scroll);
     }
-    if let Some(view) = source.git_graph_view.remove(&PreviewSurface::Seat(was)) {
-        target
-            .git_graph_view
-            .insert(PreviewSurface::Seat(now), view);
+    // **Both halves of the address change, and both are in the key.** The seat
+    // is renumbered by the arriving tree and the tab is a different tab, so
+    // since §7.12 ⓑ the re-key says so rather than leaving the tab half to be
+    // inferred from which map the entry happens to be sitting in.
+    let left = PreviewSurface::Seat(source.leaf_here(was));
+    let arrived = PreviewSurface::Seat(target.leaf_here(now));
+    if let Some(view) = source.git_graph_view.remove(&left) {
+        target.git_graph_view.insert(arrived, view);
     }
     // **P126/§7.1.3 「pane 拆出/被顶出时携带其当前缓冲(同一对象)」 — the whole
     // view crosses with the seat, re-keyed the same way.**
@@ -21054,8 +21305,7 @@ fn move_seat_content(
     // source or as page — for the same reason the shell beside it keeps its
     // scrollback and the files column keeps its open folders: **the pane is
     // moving, not being rebuilt.**
-    if let Some(pane) = source.preview_panes.remove(PreviewSurface::Seat(was)) {
-        let arrived = PreviewSurface::Seat(now);
+    if let Some(pane) = source.preview_panes.remove(left) {
         let brought_a_picture = pane.image.is_some();
         *target.preview_panes.entry(arrived) = pane;
         // The texture lane if it was free, and not otherwise: a picture the
@@ -21107,7 +21357,7 @@ fn forget_work_in_flight_for_seat(tab: &mut TabState, seat: SeatId) {
     // and only the one this seat is looking at.
     if let Some(source) = tab
         .preview_panes
-        .get(PreviewSurface::Seat(seat))
+        .get(tab.preview_here(seat))
         .and_then(|pane| pane.buffer.clone())
         && let Some(buffer) = tab.preview_pool.get_mut(&source)
     {
@@ -24435,7 +24685,7 @@ impl Runtime<'_> {
             .preview_seats()
             .into_iter()
             .filter_map(|seat| {
-                let surface = PreviewSurface::Seat(seat);
+                let surface = self.preview_here(seat);
                 let title = match self
                     .preview_pane(surface)
                     .and_then(|pane| pane.image.as_ref())
@@ -24538,6 +24788,21 @@ impl Runtime<'_> {
                 .iter()
                 .map(|(surface, content)| (*surface, content.clone())),
         );
+        // **The tab half of every graph key, spent here** (§7.12 ⓑ). The build
+        // above is keyed by surface so that one map answers for the panes and
+        // for the floats at once; what the chrome pass paints is one tab, and
+        // inside one tab a seat number is a whole name. Narrowing here is what
+        // lets the painter go on knowing nothing about tabs — and what stops a
+        // graph standing on a background tab from being drawn into the pane of
+        // the same number in front of you.
+        let here = self.id;
+        let graph_bodies: BTreeMap<SeatId, &git_graph::GraphContent> = git_graphs
+            .iter()
+            .filter_map(|(surface, content)| match surface {
+                PreviewSurface::Seat(leaf) if leaf.tab == here => Some((leaf.seat, content)),
+                PreviewSurface::Seat(_) | PreviewSurface::Float(_) | PreviewSurface::Peek => None,
+            })
+            .collect();
         self.window.files_view_widths = files_views
             .iter()
             .map(|(seat, content)| (*seat, content.widths))
@@ -24555,7 +24820,7 @@ impl Runtime<'_> {
             .preview_seats()
             .into_iter()
             .filter_map(|seat| {
-                let surface = PreviewSurface::Seat(seat);
+                let surface = self.preview_here(seat);
                 let message = match (
                     self.preview_pane(surface)
                         .and_then(|pane| pane.image.as_ref()),
@@ -24634,7 +24899,7 @@ impl Runtime<'_> {
                     seat,
                     CardWords {
                         notice: self
-                            .preview_buffer_on(PreviewSurface::Seat(seat))?
+                            .preview_buffer_on(self.preview_here(seat))?
                             .refusal()?
                             .notice()
                             .to_owned(),
@@ -24849,7 +25114,7 @@ impl Runtime<'_> {
                 files_trees: &files_trees,
                 files_views: &files_views,
                 git_pages: &git_pages,
-                git_graphs: &git_graphs,
+                git_graphs: &graph_bodies,
                 preview_messages: &preview_messages,
                 preview_feet: &preview_feet,
                 preview_heads: &preview_heads,
@@ -25458,9 +25723,17 @@ impl Runtime<'_> {
                 let rect = seats::files_pane_rect(&self.seat_layout, seat)?;
                 Some(seats::files_pane_geometry(rect, scale, self.git_panel_on()).body)
             }
-            toast::ToastAnchor::PreviewSeat(seat) => {
-                seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)
-            }
+            // **Its own tab's pane, or nowhere** (§7.12 ⓑ). A notice outlives a
+            // tab switch and the strip is the only thing on the glass that
+            // changed, so a card anchored to a pane on some other tab is a
+            // confident sentence pointing at a stranger. `None` is the corner,
+            // which is exactly what "the surface this was about is not in front
+            // of you" means.
+            toast::ToastAnchor::PreviewSeat(leaf) => (leaf.tab == self.id)
+                .then(|| {
+                    seats::preview_seat_body_rect(&self.seats, &self.seat_layout, leaf.seat, scale)
+                })
+                .flatten(),
             toast::ToastAnchor::Window => None,
         }
     }
@@ -26443,20 +26716,6 @@ impl Runtime<'_> {
     /// Whether the tab in front holds a page on that seat.
     fn seat_holds_a_page(&self, seat: SeatId) -> bool {
         self.web_on(seat).is_some()
-    }
-
-    /// **The window map's name for one seat of the tab in front** (F1b′).
-    ///
-    /// The window's pages span every tab and a seat number is unique only inside
-    /// its tab, so a seat number is half a name and this is the other half. It is
-    /// a function of the *front* tab because that is what every caller of the
-    /// pair below already means: the chrome dresses the tab on the glass, the
-    /// verbs answer the pane holding the keyboard, and both reach this file with
-    /// nothing but a seat in hand. A caller that means some other tab has that
-    /// tab in hand and builds the [`LeafId`] itself — `refresh_preview_file` and
-    /// [`Self::transfer_tab`] are the two, and both are loops over tabs.
-    fn leaf_here(&self, seat: SeatId) -> LeafId {
-        LeafId { tab: self.id, seat }
     }
 
     /// **The page on one seat of the tab in front, and the one door to it** —
@@ -27632,7 +27891,7 @@ impl Runtime<'_> {
         // picture's title when the seat is showing one, the buffer's name
         // otherwise.
         let preview_title = |id: SeatId| {
-            let pane = tab.preview_panes.get(PreviewSurface::Seat(id))?;
+            let pane = tab.preview_panes.get(tab.preview_here(id))?;
             match pane.image.as_ref() {
                 Some(image) => Some(image.title()),
                 None => tab
@@ -28641,7 +28900,7 @@ impl Runtime<'_> {
                 .map(|view| view.filter.clone())
                 .unwrap_or_default();
             profiles::git_filter_menu_build(&layout, &filter, hover.as_ref())
-        } else if let Some(seat) = self.window.preview_menu.seat()
+        } else if let Some(seat) = self.preview_menu_seat()
             && let Some(layout) = self.preview_menu_layout()
         {
             // The fourth arm of the same chain, and it is in the chain for E61's
@@ -29428,7 +29687,7 @@ impl Runtime<'_> {
             HoverFloat::Menu => {
                 self.window.profile_menu.is_open()
                     || self.window.root_menu.seat().is_some()
-                    || self.window.preview_menu.seat().is_some()
+                    || self.preview_menu_seat().is_some()
                     || self.window.file_menu.is_some()
                     || self.window.pane_menu.is_some()
                     || self.window.git_menu.is_some()
@@ -32199,7 +32458,7 @@ impl Runtime<'_> {
         // moment there is something to type into.
         self.preview_edit_focus = Some(surface);
         let anchor = match surface {
-            PreviewSurface::Seat(seat) => toast::ToastAnchor::PreviewSeat(seat),
+            PreviewSurface::Seat(leaf) => toast::ToastAnchor::PreviewSeat(leaf),
             PreviewSurface::Float(_) | PreviewSurface::Peek => toast::ToastAnchor::Window,
         };
         let file = path
@@ -32223,7 +32482,7 @@ impl Runtime<'_> {
     /// the head simply stays a head. That is the same sentence a bundled colour
     /// scheme's missing marks make one dialog away.
     fn open_preview_rename(&mut self, seat: SeatId) -> Result<()> {
-        let surface = PreviewSurface::Seat(seat);
+        let surface = self.preview_here(seat);
         let Some(buffer) = self.preview_buffer_on(surface) else {
             return Ok(());
         };
@@ -32441,7 +32700,7 @@ impl Runtime<'_> {
         }
         if let Err(error) = std::fs::rename(&old, &new) {
             let anchor = match surface {
-                PreviewSurface::Seat(seat) => toast::ToastAnchor::PreviewSeat(seat),
+                PreviewSurface::Seat(leaf) => toast::ToastAnchor::PreviewSeat(leaf),
                 PreviewSurface::Float(_) | PreviewSurface::Peek => toast::ToastAnchor::Window,
             };
             return self.toast(
@@ -32922,12 +33181,15 @@ impl Runtime<'_> {
                     .map(move |(surface, pane)| (tab.id, surface, pane))
             })
             .filter_map(|(tab, surface, pane)| {
-                let PreviewSurface::Seat(seat) = surface else {
+                let PreviewSurface::Seat(leaf) = surface else {
                     return None;
                 };
+                debug_assert_eq!(
+                    leaf.tab, tab,
+                    "a tab's preview map is filed under that tab's own leaves"
+                );
                 let url = pane.buffer.as_ref()?.web_url()?;
                 let (named, _) = webnav::Mint::path_and_tail_of_file_url(url)?;
-                let leaf = LeafId { tab, seat };
                 (named == path && self.window.web.contains_key(&leaf)).then_some(leaf)
             })
             .collect();
@@ -33872,7 +34134,7 @@ impl Runtime<'_> {
         // preview's: closing one leaf beside a pinned one must leave the pinned
         // one showing what it was showing.
         if kind == bt_layout::SeatKind::Preview {
-            let surface = PreviewSurface::Seat(seat);
+            let surface = self.preview_here(seat);
             self.clear_preview_image(surface);
             self.clear_preview_view(surface);
         }
@@ -34424,15 +34686,31 @@ impl Runtime<'_> {
     /// `Deref`'s active one. Read the other way, a preview float drew an empty
     /// head, an empty foot and no body the moment you switched tabs — the window
     /// still there, still yours, and showing nothing.
+    ///
+    /// **A seat's reads go the same way since §7.12 ⓑ**, and for what turns out
+    /// to be the same reason said about the other surface. This arm used to be
+    /// `Some(self)` — "a seat is the front tab's, at every site that can name
+    /// one" — while [`Self::preview_tab_index`] beside it searched the strip for
+    /// a tab holding that seat *number*. Two tabs previewing on one number made
+    /// those two different tabs, so a surface was read in one and written in the
+    /// other. Both are now the one question `leaf.tab` already answers.
     fn preview_tab(&self, surface: PreviewSurface) -> Option<&TabState> {
+        let tab = self.preview_tab_id(surface)?;
+        self.window.tabs.iter().find(|state| state.id == tab)
+    }
+
+    /// **Which tab a preview surface's content belongs to, by name.**
+    ///
+    /// One question, one answer, and no search: a seat says so in its own
+    /// [`LeafId`], a float says so on the window it was torn into, and the
+    /// glance is the window's — it reads the tab on screen, which is the tab
+    /// whose rows the pointer is over, because there is nowhere else a file row
+    /// can be.
+    fn preview_tab_id(&self, surface: PreviewSurface) -> Option<TabId> {
         match surface {
-            // The glance reads the tab on screen, which is the tab whose rows the
-            // pointer is over — there is nowhere else a file row can be.
-            PreviewSurface::Seat(_) | PreviewSurface::Peek => Some(self),
-            PreviewSurface::Float(id) => {
-                let tab = self.window.float.live(id)?.preview()?.tab;
-                self.window.tabs.iter().find(|state| state.id == tab)
-            }
+            PreviewSurface::Seat(leaf) => Some(leaf.tab),
+            PreviewSurface::Peek => Some(self.id),
+            PreviewSurface::Float(id) => Some(self.window.float.live(id)?.preview()?.tab),
         }
     }
 
@@ -34443,38 +34721,8 @@ impl Runtime<'_> {
     /// is in the host to be asked about, and the tab it means is the active one
     /// by construction.
     fn preview_tab_index(&self, surface: PreviewSurface) -> usize {
-        // **A seat belongs to the tab whose tree holds it, and until W2 slice ③
-        // that was always the active one.** Every gesture that reaches a preview
-        // *seat* is a gesture on the tab in front of you — except a page, which
-        // goes on living on a tab nobody is looking at and answers its engine
-        // from there: a navigation that commits while another tab is up would
-        // otherwise put its buffer in that other tab's pool, and the row would
-        // appear in a switcher belonging to a tab that has never been to it.
-        //
-        // Measured on the real window: a page opened at launch under the restore
-        // prompt, committing after the prompt had put a restored tab in front of
-        // it, left its row in the restored tab and none in its own.
-        if let PreviewSurface::Seat(seat) = surface {
-            return self
-                .window
-                .tabs
-                .iter()
-                .position(|state| state.seats.preview_seats().contains(&seat))
-                .unwrap_or(self.window.active_tab);
-        }
-        let PreviewSurface::Float(id) = surface else {
-            return self.window.active_tab;
-        };
-        self.window
-            .float
-            .live(id)
-            .and_then(|win| win.preview())
-            .and_then(|preview| {
-                self.window
-                    .tabs
-                    .iter()
-                    .position(|state| state.id == preview.tab)
-            })
+        self.preview_tab_id(surface)
+            .and_then(|tab| preview_tab_index_among(&self.window.tabs, tab))
             .unwrap_or(self.window.active_tab)
     }
 
@@ -34491,7 +34739,7 @@ impl Runtime<'_> {
             .seats
             .preview_seats()
             .into_iter()
-            .map(PreviewSurface::Seat)
+            .map(|seat| self.preview_here(seat))
             .collect();
         // Every float, not only this tab's: the sweep below reads this list to
         // decide what has *stopped* existing, and a window torn out of another tab
@@ -34523,7 +34771,6 @@ impl Runtime<'_> {
         // a seat only ever appears in its own tab's map, so the `alive` list —
         // which carries this tab's seats and every window — leaves the other tabs'
         // seat entries exactly where they are.
-        let active = self.window.active_tab;
         let dropped: Vec<(usize, PreviewSurface)> = self
             .window
             .tabs
@@ -34534,10 +34781,13 @@ impl Runtime<'_> {
                     .iter()
                     .map(move |(surface, _)| (index, surface))
             })
-            .filter(|(index, surface)| match surface {
+            .filter(|(_, surface)| match surface {
                 // A seat lives in its own tab's map and nowhere else, so only its
-                // own tab's tree can say whether it is gone.
-                PreviewSurface::Seat(_) => *index == active && !alive.contains(surface),
+                // own tab's tree can say whether it is gone — and `alive` is the
+                // tree that is solved, which is the tab on the glass. Since
+                // §7.12 ⓑ the surface says which tab that is instead of the walk
+                // having to compare its own index against the active one.
+                PreviewSurface::Seat(leaf) => leaf.tab == self.id && !alive.contains(surface),
                 PreviewSurface::Float(_) => !alive.contains(surface),
                 // Unreachable, and that is the point: the glance's view lives on
                 // the window ([`WindowRuntime::peek_pane`]), so no tab's map can be
@@ -34560,7 +34810,7 @@ impl Runtime<'_> {
         // its own layer every frame and stored nowhere.
         self.window
             .preview_head_measures
-            .retain(|seat, _| alive.contains(&PreviewSurface::Seat(*seat)));
+            .retain(|leaf, _| alive.contains(&PreviewSurface::Seat(*leaf)));
         if self
             .preview_edit_focus
             .is_some_and(|surface| !alive.contains(&surface))
@@ -34649,7 +34899,7 @@ impl Runtime<'_> {
                 u8::from(existed)
             )
         });
-        Some(PreviewSurface::Seat(seat))
+        Some(self.preview_here(seat))
     }
 
     /// The box **this surface's document** lives in — its body, whole.
@@ -34663,9 +34913,16 @@ impl Runtime<'_> {
     /// buffer.
     fn preview_surface_body_rect(&self, surface: PreviewSurface, scale: f32) -> Option<[f32; 4]> {
         match surface {
-            PreviewSurface::Seat(seat) => {
-                seats::preview_seat_body_rect(&self.seats, &self.seat_layout, seat, scale)
-            }
+            // **This tab's tree is the only one solved**, so a pane on a tab you
+            // are not looking at has no rectangle — which is what `None` says,
+            // and what every caller already does the right thing with. Before
+            // §7.12 ⓑ the seat number alone could not tell the two apart and
+            // this handed back the box of a pane in front of you.
+            PreviewSurface::Seat(leaf) => (leaf.tab == self.id)
+                .then(|| {
+                    seats::preview_seat_body_rect(&self.seats, &self.seat_layout, leaf.seat, scale)
+                })
+                .flatten(),
             PreviewSurface::Float(id) => self.float_body_rect(id, scale),
             // The card has no *pane* to be asked about: it is not in the tree and
             // not in the float host, it is a drawing placed beside a row. The one
@@ -34703,7 +34960,7 @@ impl Runtime<'_> {
                 self.seats
                     .preview_seats()
                     .into_iter()
-                    .map(PreviewSurface::Seat),
+                    .map(|seat| self.preview_here(seat)),
             )
             .find_map(|surface| {
                 let body = self.preview_surface_body_rect(surface, scale)?;
@@ -34758,7 +35015,10 @@ impl Runtime<'_> {
     fn preview_keyboard_surface(&self) -> Option<PreviewSurface> {
         self.preview_edit_focus()
             .or_else(|| self.focused_preview_float().map(PreviewSurface::Float))
-            .or_else(|| self.focused_preview_seat().map(PreviewSurface::Seat))
+            .or_else(|| {
+                self.focused_preview_seat()
+                    .map(|seat| self.preview_here(seat))
+            })
     }
 
     /// Land a picture on the surface a newly opened file goes to, then ask the shared
@@ -35229,7 +35489,7 @@ impl Runtime<'_> {
     /// `refresh_chrome` asks it about `seats.preview()`, and drawing a head per
     /// preview leaf is a step of its own.
     fn dress_preview_head(&mut self, seat: SeatId, scale: f32) -> Option<PreviewHeadFrame> {
-        let surface = PreviewSurface::Seat(seat);
+        let surface = self.preview_here(seat);
         // A picture has a name and no buffer, and it still gets a head: the two
         // doors into this seat fill the same caption (P36's contract), and a head
         // that appeared only for documents would blink out every time you looked
@@ -35344,7 +35604,8 @@ impl Runtime<'_> {
         // the hit test has to be handed the same number the paint used, which
         // is what the store below is for.
         let (tools, edit) = self.dress_preview_name_editor(seat, surface, scale, tools);
-        self.window.preview_head_measures.insert(seat, tools);
+        let here = self.leaf_here(seat);
+        self.window.preview_head_measures.insert(here, tools);
         // The same door the commit goes through, asked without knocking — an
         // empty field is unfinished rather than wrong, so it does not light up.
         let refused = matches!(
@@ -35366,7 +35627,7 @@ impl Runtime<'_> {
                 others_dirty,
                 flip_to_source,
                 locked: self.seats.preview_is_locked(seat),
-                menu_open: self.window.preview_menu.seat() == Some(seat),
+                menu_open: self.preview_menu_seat() == Some(seat),
                 web: page.as_ref().map(|page| seats::WebHeadState {
                     can_go_back: page.can_go_back,
                     can_go_forward: page.can_go_forward,
@@ -35397,9 +35658,13 @@ impl Runtime<'_> {
     }
 
     fn preview_head_tools(&self, seat: SeatId) -> seats::PreviewHeadTools {
-        let surface = PreviewSurface::Seat(seat);
+        let surface = self.preview_here(seat);
         let buffer = self.preview_buffer_on(surface);
-        let measured = self.window.preview_head_measures.get(&seat).copied();
+        let measured = self
+            .window
+            .preview_head_measures
+            .get(&self.leaf_here(seat))
+            .copied();
         seats::PreviewHeadTools {
             save: self.preview_is_editable(surface),
             flip: buffer.is_some_and(|buffer| buffer.ftype == preview::PreviewFtype::Markdown),
@@ -35439,7 +35704,7 @@ impl Runtime<'_> {
         scale: f32,
         now: Instant,
     ) -> Option<seats::FootWords> {
-        let surface = PreviewSurface::Seat(seat);
+        let surface = self.preview_here(seat);
         // **A page's foot is a landing band and a hover line at once** (§7.7 ③,
         // W2 slice ④). It says where this seat's content lives and hands it to
         // the system, exactly as a file's does; and while the pointer is over a
@@ -35560,7 +35825,7 @@ impl Runtime<'_> {
             self.refresh_chrome();
             return self.present_chrome_change();
         }
-        let surface = PreviewSurface::Seat(seat);
+        let surface = self.preview_here(seat);
         // **The one file verb a composed document keeps** (G-3). Explorer points
         // at files, and a diff has none — but the diff is *of* a file, and that
         // file is in the working tree where Explorer can point at it. Offered
@@ -35616,7 +35881,7 @@ impl Runtime<'_> {
     /// reader to print a word for.
     fn open_preview_in_browser(&mut self, seat: SeatId) -> Result<()> {
         let Some(path) = self
-            .preview_buffer_on(PreviewSurface::Seat(seat))
+            .preview_buffer_on(self.preview_here(seat))
             .and_then(|buffer| preview_page_hand_off(&buffer.source))
         else {
             return Ok(());
@@ -35701,7 +35966,7 @@ impl Runtime<'_> {
     /// surface first and asks about that one instead — the pane the pointer is in
     /// is not always the first preview leaf in the tree.
     fn current_preview_buffer(&self) -> Option<&preview::PreviewBuffer> {
-        self.preview_buffer_on(PreviewSurface::Seat(self.seats.preview()?))
+        self.preview_buffer_on(self.preview_here(self.seats.preview()?))
     }
 
     // `current_preview_image` stood here — the picture "the" preview seat was
@@ -36015,7 +36280,7 @@ impl Runtime<'_> {
             .preview_seats()
             .into_iter()
             .flat_map(|seat| {
-                let surface = PreviewSurface::Seat(seat);
+                let surface = self.preview_here(seat);
                 let Some(body) = self.preview_surface_body_rect(surface, scale) else {
                     return Vec::new();
                 };
@@ -36833,7 +37098,7 @@ impl Runtime<'_> {
         // And not while the quick edit or a float has it: those are answered by
         // `preview_keyboard_surface` above and are a different surface's
         // keyboard, whatever seat is focused underneath them.
-        self.preview_keyboard_surface() == Some(PreviewSurface::Seat(seat))
+        self.preview_keyboard_surface() == Some(self.preview_here(seat))
             && self.seat_holds_a_page(seat)
     }
 
@@ -36890,7 +37155,7 @@ impl Runtime<'_> {
                 || self.window.pane_menu.is_some()
                 || self.window.profile_menu.is_open()
                 || self.window.root_menu.seat().is_some()
-                || self.window.preview_menu.seat().is_some()
+                || self.preview_menu_seat().is_some()
                 || self.window.graph_filter_menu.is_some()
                 || self.window.term_menu.is_some(),
             files_tree: self.files_keyboard_seat().is_some(),
@@ -38941,16 +39206,27 @@ impl Runtime<'_> {
         // This is one sample of the clock for one commit; the frames in between
         // are re-placed by `redraw`, which is the only thing that runs per frame.
         let placement = match surface {
-            PreviewSurface::Seat(seat) => {
-                let Some(placement) = preview_image_placement(
-                    &self.seats,
-                    &self.seat_layout,
-                    seat,
-                    scale,
-                    self.window
-                        .pane_motion
-                        .transform_of(seat, Instant::now(), self.app.motion),
-                ) else {
+            // The tween and the solve are both this tab's, so a picture on a
+            // pane of another tab has no placement here — the same `None` a
+            // seat with no solved rectangle gets, reached by name rather than
+            // by the seat number happening not to be in the tree.
+            PreviewSurface::Seat(leaf) => {
+                let Some(placement) = (leaf.tab == self.id)
+                    .then(|| {
+                        preview_image_placement(
+                            &self.seats,
+                            &self.seat_layout,
+                            leaf.seat,
+                            scale,
+                            self.window.pane_motion.transform_of(
+                                leaf.seat,
+                                Instant::now(),
+                                self.app.motion,
+                            ),
+                        )
+                    })
+                    .flatten()
+                else {
                     self.hide_preview_picture(surface);
                     return;
                 };
@@ -39980,13 +40256,15 @@ impl Runtime<'_> {
                 .into_iter()
                 .find(|seat| {
                     matches!(
-                        self.preview_buffer_on(PreviewSurface::Seat(*seat))
+                        self.preview_buffer_on(self.preview_here(*seat))
                             .map(|buffer| &buffer.source),
                         Some(preview::PreviewSource::GitGraph { root: showing })
                             if showing == root
                     )
                 })
-                .map_or(toast::ToastAnchor::Window, toast::ToastAnchor::PreviewSeat),
+                .map_or(toast::ToastAnchor::Window, |seat| {
+                    toast::ToastAnchor::PreviewSeat(self.leaf_here(seat))
+                }),
             // A window is not a seat and has no pane for a card to stand over,
             // which is exactly the case the window's own corner is for.
             git::GitHost::Float { .. } => toast::ToastAnchor::Window,
@@ -40966,7 +41244,7 @@ impl Runtime<'_> {
     /// there is no pane rectangle for a card to point at.
     fn graph_toast_anchor(&self, surface: PreviewSurface) -> toast::ToastAnchor {
         match surface {
-            PreviewSurface::Seat(seat) => toast::ToastAnchor::PreviewSeat(seat),
+            PreviewSurface::Seat(leaf) => toast::ToastAnchor::PreviewSeat(leaf),
             PreviewSurface::Float(_) | PreviewSurface::Peek => toast::ToastAnchor::Window,
         }
     }
@@ -42288,7 +42566,7 @@ impl Runtime<'_> {
     fn retarget_row_drop(&mut self, payload: &RowPayload, target: SeatId) -> Result<()> {
         match payload.kind {
             RowPayloadKind::File => {
-                self.open_preview_onto(PreviewSurface::Seat(target), payload.path.clone())
+                self.open_preview_onto(self.preview_here(target), payload.path.clone())
             }
             RowPayloadKind::Folder => {
                 let root = payload.path.display().to_string();
@@ -42307,7 +42585,7 @@ impl Runtime<'_> {
     fn fill_row_leaf(&mut self, payload: &RowPayload, seat: SeatId) -> Result<()> {
         match payload.kind {
             RowPayloadKind::File => {
-                self.open_preview_onto(PreviewSurface::Seat(seat), payload.path.clone())
+                self.open_preview_onto(self.preview_here(seat), payload.path.clone())
             }
             RowPayloadKind::Folder => {
                 let root = payload.path.display().to_string();
@@ -44105,10 +44383,25 @@ impl Runtime<'_> {
     /// one's dirty bit — a list that showed only the clean ones, or only the
     /// recent ones, would be the window deciding which unsaved edits you are
     /// allowed to know about.
+    /// **The pane the switcher is hanging under, if it is on the tab in front**
+    /// (§7.12 ⓑ).
+    ///
+    /// The menu is the window's — one pointer, one popup — and the head it hangs
+    /// from is a tab's. So the two halves of its [`LeafId`] are spent in
+    /// different places: the tab half here, once, as a question about whether
+    /// this menu is on screen at all; the seat half by every reader below, each
+    /// of which is already about the tab on the glass. Before the key carried a
+    /// tab, switching tabs with the switcher open re-pointed it at whichever
+    /// pane the arriving tab had numbered the same.
+    fn preview_menu_seat(&self) -> Option<SeatId> {
+        let leaf = self.window.preview_menu.leaf()?;
+        (leaf.tab == self.id).then_some(leaf.seat)
+    }
+
     fn preview_menu_items(&self, seat: SeatId) -> Vec<profiles::PreviewMenuItem> {
         switcher_rows(
             &self.preview_pool,
-            self.preview_pane(PreviewSurface::Seat(seat))
+            self.preview_pane(self.preview_here(seat))
                 .and_then(|pane| pane.buffer.as_ref()),
             &self
                 .app
@@ -44209,7 +44502,7 @@ impl Runtime<'_> {
         if !already && !switcher_pin_is_allowed(keep.kind, &keep.target) {
             return self.toast(
                 toast::ToastKind::Error,
-                toast::ToastAnchor::PreviewSeat(seat),
+                toast::ToastAnchor::PreviewSeat(self.leaf_here(seat)),
                 None,
                 i18n::switcher_pin_refused(&keep.target),
             );
@@ -44231,7 +44524,7 @@ impl Runtime<'_> {
     /// anchor that has gone folds the menu instead of measuring a rectangle that
     /// is no longer anywhere.
     fn preview_menu_layout(&mut self) -> Option<profiles::PreviewMenuLayout> {
-        let seat = self.window.preview_menu.seat()?;
+        let seat = self.preview_menu_seat()?;
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
         let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
@@ -44260,7 +44553,8 @@ impl Runtime<'_> {
         // does it (E61): mutual exclusion cannot be left to a press falling
         // through, because every opener stops its own press from travelling.
         self.close_popups_except(Popup::Preview);
-        self.window.preview_menu.toggle(seat);
+        let here = self.leaf_here(seat);
+        self.window.preview_menu.toggle(here);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -44271,7 +44565,7 @@ impl Runtime<'_> {
     /// flipped; the root menu's lesson, applied on day one this time").
     ///
     /// There is nothing to un-flip because there is nothing holding a flipped
-    /// state: the chevron's angle is derived from `preview_menu.seat()` on the
+    /// state: the chevron's angle is derived from `preview_menu_seat()` on the
     /// next frame, so shutting the menu *is* turning it back.
     fn close_preview_menu(&mut self) -> Result<bool> {
         if !self.window.preview_menu.close() {
@@ -44334,7 +44628,7 @@ impl Runtime<'_> {
             return Ok(());
         };
         if self
-            .preview_pane(PreviewSurface::Seat(seat))
+            .preview_pane(self.preview_here(seat))
             .and_then(|pane| pane.buffer.as_ref())
             == Some(&source)
         {
@@ -44669,7 +44963,7 @@ impl Runtime<'_> {
                 Some((GitOrigin::Column(seat), root, target, None))
             }
             seats::ChromeTarget::GitGraphRow { seat, index } => {
-                let surface = PreviewSurface::Seat(seat);
+                let surface = self.preview_here(seat);
                 let root = self.window.tabs[active]
                     .git_graph_view
                     .get(&surface)?
@@ -50342,7 +50636,7 @@ impl Runtime<'_> {
     /// terminal (I106), so a preview leaf is never the only pane — but the
     /// structural answer is the one that survives that stopping being true.
     fn pop_out_preview(&mut self, seat: SeatId) -> Result<()> {
-        let surface = PreviewSurface::Seat(seat);
+        let surface = self.preview_here(seat);
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let viewport = self.float_viewport();
         // The button's own box, read while the head it stands in is still on
@@ -50366,7 +50660,7 @@ impl Runtime<'_> {
             float::FloatSizing::preview(),
         );
         // The menu hanging off this head is pointing at a head that is leaving.
-        if self.window.preview_menu.seat() == Some(seat) {
+        if self.preview_menu_seat() == Some(seat) {
             self.close_preview_menu()?;
         }
         let pane = self.preview_panes.remove(surface).unwrap_or_default();
@@ -50568,10 +50862,12 @@ impl Runtime<'_> {
             landed_a_picture,
         );
         self.window.renderer.set_preview_image(None);
-        if let PreviewSurface::Seat(seat) = landing {
+        if let PreviewSurface::Seat(leaf) = landing {
             // `DOCK` is a button and this is the click on it: the pane you just
-            // put down is the one you are looking at.
-            self.seats.set_focus(seat);
+            // put down is the one you are looking at — which is why the leaf it
+            // landed on is this tab's, and the focus goes to its seat.
+            debug_assert_eq!(leaf.tab, self.id, "a dock lands in the tab on the glass");
+            self.seats.set_focus(leaf.seat);
         }
         // Wiped rather than dismissed — a preview float has no exit to play
         // (P49 ③), so an animation frame here would be the one place it did.
@@ -54070,7 +54366,7 @@ impl Runtime<'_> {
         }
         // And the preview's switcher, on the same terms as the root menu beside
         // it: it is the same popup with a different list in it.
-        if let Some(seat) = self.window.preview_menu.seat()
+        if let Some(seat) = self.preview_menu_seat()
             && let Some(layout) = self.preview_menu_layout()
         {
             let items = self.preview_menu_items(seat);
@@ -54750,10 +55046,19 @@ impl Runtime<'_> {
                 &self.seat_layout,
                 // The docked ones. A window's graph is answered by the float
                 // host's own hit test, which runs before this whole chain.
+                // **And this tab's,** which the key now says rather than the
+                // hit test assuming: `git_graphs_shown` is the window's map and
+                // spans every tab, so before §7.12 ⓑ a graph standing on a
+                // background tab offered its rows to a press on the seat of the
+                // same number in front of you.
                 self.window.git_graphs_shown.iter().filter_map(
                     |(surface, content)| match surface {
-                        PreviewSurface::Seat(seat) => Some((*seat, content)),
-                        PreviewSurface::Float(_) | PreviewSurface::Peek => None,
+                        PreviewSurface::Seat(leaf) if leaf.tab == self.id => {
+                            Some((leaf.seat, content))
+                        }
+                        PreviewSurface::Seat(_)
+                        | PreviewSurface::Float(_)
+                        | PreviewSurface::Peek => None,
                     },
                 ),
                 scale,
@@ -57137,10 +57442,14 @@ impl Runtime<'_> {
                             .position(|tab| Some(tab.id) == editor.tab())
                     })
                     .map(seats::ChromeTarget::Tab),
+                // **This tab's head or no head** (§7.12 ⓑ): the editor lives on
+                // the window and the chrome it is drawn in is the front tab's,
+                // so a draft left open on a pane of another tab names no target
+                // here — exactly as a float's head does not.
                 RenameSubject::PreviewName {
-                    surface: PreviewSurface::Seat(seat),
+                    surface: PreviewSurface::Seat(leaf),
                     ..
-                } => Some(seats::ChromeTarget::PreviewName(*seat)),
+                } if leaf.tab == self.id => Some(seats::ChromeTarget::PreviewName(leaf.seat)),
                 // A float's head is not chrome, so there is no target that can
                 // be inside it and every press out here is a blur.
                 RenameSubject::PreviewName { .. } => None,
@@ -57418,7 +57727,7 @@ impl Runtime<'_> {
             seats::ChromeTarget::GitGraphRow { seat, index } => {
                 self.window.tab_clicks.interrupt();
                 self.window.files_row_clicks.interrupt();
-                self.press_graph_row(PreviewSurface::Seat(seat), index)?;
+                self.press_graph_row(self.preview_here(seat), index)?;
             }
             // The toolbar's four controls (T1). A click chain is broken for
             // `.files-foot`'s reason: a chain of clicks on a button is a chain of
@@ -57426,7 +57735,7 @@ impl Runtime<'_> {
             seats::ChromeTarget::GitGraphTool { seat, tool } => {
                 self.window.tab_clicks.interrupt();
                 self.window.files_row_clicks.interrupt();
-                self.press_graph_tool(PreviewSurface::Seat(seat), tool)?;
+                self.press_graph_tool(self.preview_here(seat), tool)?;
             }
             // A part of the open row's detail block (v2 ②). It breaks a click
             // chain for `.files-foot`'s reason — a chain of clicks on a button is
@@ -57435,7 +57744,7 @@ impl Runtime<'_> {
             seats::ChromeTarget::GitGraphDetail { seat, part, .. } => {
                 self.window.tab_clicks.interrupt();
                 self.window.files_row_clicks.interrupt();
-                self.press_graph_detail(PreviewSurface::Seat(seat), part)?;
+                self.press_graph_detail(self.preview_here(seat), part)?;
             }
             seats::ChromeTarget::GitAct { seat, index, act } => {
                 self.window.tab_clicks.interrupt();
@@ -58216,7 +58525,7 @@ impl Runtime<'_> {
         // their press. Its "except the button that opened it" is the name, which
         // toggles for itself (P136) and would otherwise be shut here and
         // re-opened one line later.
-        if let Some(seat) = self.window.preview_menu.seat()
+        if let Some(seat) = self.preview_menu_seat()
             && let (Some(layout), Some(position)) =
                 (self.preview_menu_layout(), self.window.pointer_position)
         {
@@ -60855,8 +61164,11 @@ impl Runtime<'_> {
         }
         // And the preview's switcher, on the identical terms (P137: "`#pv-menu`
         // 打开时吞掉所有字符键"). A keystroke aimed at a menu you can see must not
-        // reach a shell you cannot — the same sentence, one popup along.
-        if self.window.preview_menu.seat().is_some() {
+        // reach a shell you cannot — the same sentence, one popup along. **On
+        // the tab in front**, which is the same sentence again: a switcher whose
+        // pane is on a tab you are not looking at is not a menu you can see, and
+        // it draws nothing, so it must swallow nothing.
+        if self.preview_menu_seat().is_some() {
             return Ok(());
         }
         // **`InputOwner::FilesTree`** (§7.1.5, D47) — the last layer above the
@@ -61863,7 +62175,7 @@ impl Runtime<'_> {
             .keys()
             .copied()
             .filter(|leaf| {
-                let surface = PreviewSurface::Seat(leaf.seat);
+                let surface = PreviewSurface::Seat(*leaf);
                 !self
                     .window
                     .tabs
@@ -61967,11 +62279,11 @@ impl Runtime<'_> {
         let seat = match self.web_seat_of_tab() {
             Some(seat) => seat,
             None => {
-                let Some(PreviewSurface::Seat(seat)) = self.preview_landing_surface() else {
+                let Some(PreviewSurface::Seat(leaf)) = self.preview_landing_surface() else {
                     eprintln!("BT_WEB no preview seat could be opened for {url}");
                     return Ok(());
                 };
-                seat
+                leaf.seat
             }
         };
         self.open_web_page_on(self.leaf_here(seat), url, minted)?;
@@ -62041,18 +62353,18 @@ impl Runtime<'_> {
                 // better part of a second.
                 //
                 // **On this page's own tab, and named as one** (F1b′, found on
-                // the machine). `PreviewSurface::Seat` carries a seat number, and
-                // the three doors that take one resolve it against the tab in
-                // front or against the first tab whose tree holds that number —
-                // neither of which is this page's tab when a restore is opening
-                // a page on the tab behind. What that cost, measured: a window
-                // restored with a page in each of two tabs cleared the first
-                // tab's buffer twice and left the second tab's file buffer
-                // standing under its own engine, so `advance_web_page` read that
-                // buffer as "something else landed here" and closed the page it
-                // had just opened. One of the two pages was gone within a frame
-                // of arriving.
-                let surface = PreviewSurface::Seat(seat);
+                // the machine; §7.12 ⓑ made the name carry it). What that cost,
+                // measured: a window restored with a page in each of two tabs
+                // cleared the first tab's buffer twice and left the second tab's
+                // file buffer standing under its own engine, so
+                // `advance_web_page` read that buffer as "something else landed
+                // here" and closed the page it had just opened. One of the two
+                // pages was gone within a frame of arriving. It was cured here
+                // first, by reaching the tab through `leaf.tab` while
+                // `PreviewSurface::Seat` still held a bare number; the surface
+                // now carries the whole leaf, so the two lines below say it
+                // rather than work around it.
+                let surface = PreviewSurface::Seat(leaf);
                 let showing_a_page = self.window.tabs[index]
                     .preview_panes
                     .get(surface)
@@ -62256,7 +62568,7 @@ impl Runtime<'_> {
         // from one that did.
         let landing = self.seats.landing_preview();
         let was_showing = landing.and_then(|seat| {
-            self.preview_pane(PreviewSurface::Seat(seat))
+            self.preview_pane(self.preview_here(seat))
                 .and_then(|pane| pane.buffer.clone())
         });
         let back = blank_page_return(landing.is_some(), was_showing);
@@ -62324,7 +62636,7 @@ impl Runtime<'_> {
             .map(|web| web.close(&window.compositor))
             .unwrap_or_default();
         self.apply_web_outcomes(leaf, outcomes)?;
-        let surface = PreviewSurface::Seat(leaf.seat);
+        let surface = PreviewSurface::Seat(leaf);
         match back {
             // `close_pane` and not a bare `close_seat`: it is the one verb for a
             // leaf leaving a tree, and the pane this door minted leaves exactly
@@ -62470,11 +62782,12 @@ impl Runtime<'_> {
             .preview_panes
             .iter()
             .filter_map(|(surface, pane)| {
-                let PreviewSurface::Seat(seat) = surface else {
+                let PreviewSurface::Seat(leaf) = surface else {
                     return None;
                 };
+                debug_assert_eq!(leaf.tab, id, "a tab's panes are filed under its own leaves");
                 let (url, minted) = revived_page_of(pane.buffer.as_ref()?)?;
-                Some((LeafId { tab: id, seat }, url, minted))
+                Some((leaf, url, minted))
             })
             .collect();
         for (leaf, url, minted) in pages {
@@ -62508,7 +62821,7 @@ impl Runtime<'_> {
         };
         let key = webnav::switcher_key(url);
         let source = preview::PreviewSource::Web(key.clone());
-        let surface = PreviewSurface::Seat(leaf.seat);
+        let surface = PreviewSurface::Seat(leaf);
         // **This page's own tab, which is not always the one in front.** A page
         // commits on whatever tab it lives on, so the row goes in that tab's
         // pool: a navigation that commits while another tab is up would otherwise
@@ -69409,6 +69722,19 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A preview surface on one tab, spelled the way a test means it (§7.12 ⓑ).
+    ///
+    /// Every one of these used to be `PreviewSurface::Seat(SeatId(n))`, which
+    /// stopped compiling on the day a seat number stopped being a name. A test
+    /// that does not care which tab says `TAB_ONE` and means it — and the two
+    /// that do care say two different tabs, which is the whole point.
+    fn seat_of(tab: TabId, seat: SeatId) -> PreviewSurface {
+        PreviewSurface::Seat(LeafId { tab, seat })
+    }
+
+    /// The tab a test that has only ever had one tab is talking about.
+    const TAB_ONE: TabId = TabId(1);
+
     /// PIN (P2-9 slice 2) — **the capacity a pane is born with and the capacity a
     /// fresh `settings.json` is written with are the same number**, and a file that
     /// names zero lines is read as the product's answer rather than as a pane with
@@ -70339,7 +70665,7 @@ mod tests {
     /// red on every name that has a suffix.
     #[test]
     fn a_files_box_opens_with_its_stem_selected() {
-        let surface = PreviewSurface::Seat(SeatId(7));
+        let surface = seat_of(TAB_ONE, SeatId(7));
         let source = preview::PreviewSource::file(r"C:\notes\notes.md");
         let editor = TabRename::open_file(surface, source.clone(), "notes.md");
         assert_eq!(editor.text, "notes.md", "the whole name is in the box");
@@ -70378,7 +70704,7 @@ mod tests {
         // And `→` out of the selection lands at its end rather than at the end
         // of the draft, which is what a prefix selection means.
         let mut walked = TabRename::open_file(
-            PreviewSurface::Seat(SeatId(7)),
+            seat_of(TAB_ONE, SeatId(7)),
             preview::PreviewSource::file(r"C:\notes\notes.md"),
             "notes.md",
         );
@@ -70732,7 +71058,7 @@ mod tests {
         let a = || Key::Character("a".into());
 
         let mut file = TabRename::open_file(
-            PreviewSurface::Seat(SeatId(7)),
+            seat_of(TAB_ONE, SeatId(7)),
             preview::PreviewSource::file(r"C:\notes\notes.md"),
             "notes.md",
         );
@@ -70777,7 +71103,7 @@ mod tests {
         // is spelling with it. This editor swallows Ctrl+Alt as it always has;
         // what matters is that the select-all arm is not what does it.
         let mut altgr = TabRename::open_file(
-            PreviewSurface::Seat(SeatId(7)),
+            seat_of(TAB_ONE, SeatId(7)),
             preview::PreviewSource::file(r"C:\notes\notes.md"),
             "notes.md",
         );
@@ -71627,7 +71953,7 @@ mod tests {
             pool.insert(preview::PreviewBuffer::new(source.clone(), name.clone()));
         }
         let mut panes = PreviewPanes::default();
-        panes.entry(PreviewSurface::Seat(pinned)).buffer =
+        panes.entry(seat_of(TAB_ONE, pinned)).buffer =
             Some(preview::PreviewSource::file(readme.clone()));
         let (layout, overflow) = cross_solve(&seats);
         let tab = assemble_tab_state(
@@ -71729,7 +72055,7 @@ mod tests {
             .expect("a preview lands");
         let focused = seats.identity();
         let mut panes = PreviewPanes::default();
-        panes.entry(PreviewSurface::Seat(seat)).buffer =
+        panes.entry(seat_of(TAB_ONE, seat)).buffer =
             Some(preview::PreviewSource::file(r"D:\notes\README.md"));
         let (layout, overflow) = cross_solve(&seats);
         let tab = assemble_tab_state(
@@ -71782,7 +72108,7 @@ mod tests {
             let mut views = BTreeMap::new();
             if let Some(filter) = filter {
                 views.insert(
-                    PreviewSurface::Seat(seat),
+                    seat_of(TAB_ONE, seat),
                     GraphView {
                         filter,
                         ..GraphView::default()
@@ -78302,17 +78628,17 @@ mod tests {
         let float = 3_u64;
         let target: PeekThumbnailTarget = ("push-pin".to_owned(), 320, 180);
         let mut panes = PreviewPanes::default();
-        panes.entry(PreviewSurface::Seat(seat)).image =
+        panes.entry(seat_of(TAB_ONE, seat)).image =
             Some(pending_picture("push-pin.png", target.clone()));
 
         assert_eq!(
             panes.awaiting_scale(&target),
-            Some(PreviewSurface::Seat(seat)),
+            Some(seat_of(TAB_ONE, seat)),
             "the docked pane is the one that asked"
         );
 
         // `pop_out_preview`: the view travels whole, under a new address.
-        let pane = panes.remove(PreviewSurface::Seat(seat)).expect("the pane");
+        let pane = panes.remove(seat_of(TAB_ONE, seat)).expect("the pane");
         *panes.entry(PreviewSurface::Float(float)) = pane;
 
         assert_eq!(
@@ -78363,8 +78689,8 @@ mod tests {
     /// one function now precisely because it has to be the same at both doors.
     #[test]
     fn docking_a_picture_takes_the_texture_lane_back_and_a_document_gives_it_up() {
-        let seat = PreviewSurface::Seat(SeatId(11));
-        let other = PreviewSurface::Seat(SeatId(12));
+        let seat = seat_of(TAB_ONE, SeatId(11));
+        let other = seat_of(TAB_ONE, SeatId(12));
         let window = PreviewSurface::Float(4_u64);
 
         assert_eq!(
@@ -78405,7 +78731,7 @@ mod tests {
     /// worse, a target a later picture could match by accident.
     #[test]
     fn an_in_flight_resample_cannot_outlive_the_surface_that_asked_for_it() {
-        let seat = PreviewSurface::Seat(SeatId(9));
+        let seat = seat_of(TAB_ONE, SeatId(9));
         let target: PeekThumbnailTarget = ("push-pin".to_owned(), 64, 64);
         let mut panes = PreviewPanes::default();
         panes.entry(seat).image = Some(pending_picture("push-pin.png", target.clone()));
@@ -78930,7 +79256,7 @@ mod tests {
 
     #[test]
     fn two_presses_in_one_place_are_a_double_click_and_a_third_starts_over() {
-        let surface = PreviewSurface::Seat(SeatId(2));
+        let surface = seat_of(TAB_ONE, SeatId(2));
         let now = Instant::now();
         let mut clicks = ImageClicks::default();
         assert!(!clicks.register(surface, [400.0, 300.0], now));
@@ -78955,7 +79281,7 @@ mod tests {
         let mut elsewhere = ImageClicks::default();
         assert!(!elsewhere.register(surface, [400.0, 300.0], now));
         assert!(!elsewhere.register(
-            PreviewSurface::Seat(SeatId(3)),
+            seat_of(TAB_ONE, SeatId(3)),
             [400.0, 300.0],
             now + Duration::from_millis(90)
         ));
@@ -79089,17 +79415,14 @@ mod tests {
     #[test]
     fn the_glance_card_mirrors_at_fit_and_cannot_be_zoomed() {
         assert!(!surface_takes_image_zoom(PreviewSurface::Peek));
-        assert!(surface_takes_image_zoom(PreviewSurface::Seat(SeatId(1))));
+        assert!(surface_takes_image_zoom(seat_of(TAB_ONE, SeatId(1))));
         assert!(surface_takes_image_zoom(PreviewSurface::Float(7)));
     }
 
     #[test]
     fn two_surfaces_of_one_buffer_hold_their_own_zoom() {
         let mut panes = PreviewPanes::default();
-        let (left, right) = (
-            PreviewSurface::Seat(SeatId(4)),
-            PreviewSurface::Seat(SeatId(5)),
-        );
+        let (left, right) = (seat_of(TAB_ONE, SeatId(4)), seat_of(TAB_ONE, SeatId(5)));
         panes.entry(left).zoom = ImageZoom {
             mode: ImageZoomMode::Scale(2.5),
             pan: [30.0, -12.0],
@@ -89536,7 +89859,7 @@ mod tests {
     fn two_surfaces_on_one_markdown_buffer_flip_independently() {
         let mut panes = PreviewPanes::default();
         let source = preview::PreviewSource::file(r"C:\w\notes.md");
-        let pane = PreviewSurface::Seat(SeatId(1));
+        let pane = seat_of(TAB_ONE, SeatId(1));
         let float = PreviewSurface::Float(7);
         for surface in [pane, float] {
             panes.entry(surface).buffer = Some(source.clone());
@@ -91129,7 +91452,7 @@ mod tests {
             pool.insert(buffer);
         }
         let mut panes = PreviewPanes::default();
-        panes.entry(PreviewSurface::Seat(preview_seat)).buffer = showing;
+        panes.entry(seat_of(TabId(id), preview_seat)).buffer = showing;
         let (layout, overflow) = cross_solve(&seats);
         let tab = assemble_tab_state(
             TabId(id),
@@ -91145,6 +91468,84 @@ mod tests {
             overflow,
         );
         (tab, preview_seat)
+    }
+
+    /// **§7.12 ⓑ — a preview surface is resolved in the tab it names, and the
+    /// two tabs below name the same seat number.**
+    ///
+    /// The value half of
+    /// `tab_identity_tests::a_preview_surface_is_read_and_written_in_the_one_tab_that_owns_it`,
+    /// on two tabs a real window builds the ordinary way: every tree numbers its
+    /// own seats from 1, so a window with two tabs each holding one terminal and
+    /// one preview has **two panes on `SeatId(2)`** — and it always did.
+    ///
+    /// What the defect cost is the last two assertions. Every window-level door
+    /// into a preview resolved a seat number by walking the strip for a tab whose
+    /// tree held it, so the answer was always the *first* such tab: with the
+    /// second tab in front, a scroll, a keystroke, a save and a goto on the pane
+    /// you were looking at all landed in the pane you were not.
+    ///
+    /// MUTATION — **the seat number is the whole name again**: have
+    /// [`TabState::preview_here`] answer
+    /// `PreviewSurface::Seat(LeafId { tab: TabId(1), seat })` whatever tab it is
+    /// asked of. Both panes become one surface, `preview_tab_index_among`
+    /// answers `Some(0)` for both, and the two reads at the bottom come back
+    /// `todo.txt` twice and `README.md` never — which is the defect, in the
+    /// three lines it takes to see it.
+    #[test]
+    fn a_preview_seat_is_found_in_the_tab_that_owns_it() {
+        let (first, first_seat) = tab_with_a_preview(
+            1,
+            vec![buffer_saying(r"D:\notes\todo.txt", "todo.txt", "milk\n")],
+        );
+        let (second, second_seat) = tab_with_a_preview(
+            2,
+            vec![buffer_saying(r"D:\notes\README.md", "README.md", "# hi\n")],
+        );
+        assert_eq!(
+            first_seat, second_seat,
+            "two tabs built the ordinary way number their preview pane alike — \
+             this is the state, not a contrivance"
+        );
+
+        let tabs = [first, second];
+        let here = tabs[0].preview_here(first_seat);
+        let next_door = tabs[1].preview_here(second_seat);
+        assert_ne!(here, next_door, "and they are still two surfaces");
+
+        let PreviewSurface::Seat(here_leaf) = here else {
+            unreachable!("a preview pane is a seat surface");
+        };
+        let PreviewSurface::Seat(next_door_leaf) = next_door else {
+            unreachable!("a preview pane is a seat surface");
+        };
+        assert_eq!(
+            preview_tab_index_among(&tabs, here_leaf.tab),
+            Some(0),
+            "the first tab's pane is found in the first tab"
+        );
+        assert_eq!(
+            preview_tab_index_among(&tabs, next_door_leaf.tab),
+            Some(1),
+            "and the second tab's pane in the second — the seat number says \
+             nothing about which, and is not consulted"
+        );
+
+        // …which is what makes the content right, and the content is the whole
+        // report: this is the read a scroll, an edit and a save each make before
+        // they write back through the very same lookup.
+        let read = |surface: PreviewSurface| {
+            let PreviewSurface::Seat(leaf) = surface else {
+                unreachable!("a preview pane is a seat surface");
+            };
+            let index = preview_tab_index_among(&tabs, leaf.tab)?;
+            let tab = &tabs[index];
+            tab.preview_pool
+                .get(tab.preview_panes.get(surface)?.buffer.as_ref()?)
+                .map(|buffer| buffer.name.clone())
+        };
+        assert_eq!(read(here).as_deref(), Some("todo.txt"));
+        assert_eq!(read(next_door).as_deref(), Some("README.md"));
     }
 
     /// Every seat of `tab`, paired with the id it will answer to after the
@@ -91187,7 +91588,7 @@ mod tests {
 
         let (mut source, seat) = tab_with_a_preview(1, vec![edited]);
         {
-            let pane = source.preview_panes.entry(PreviewSurface::Seat(seat));
+            let pane = source.preview_panes.entry(source.preview_here(seat));
             pane.scroll = [0.0, 96.0];
             pane.caret.anchor = 6;
             pane.caret.caret = 6;
@@ -91205,7 +91606,7 @@ mod tests {
 
         let pane = target
             .preview_panes
-            .get(PreviewSurface::Seat(landed))
+            .get(target.preview_here(landed))
             .expect("the view arrived under the id the pane now answers to");
         assert_eq!(
             pane.buffer.as_ref(),
@@ -91232,7 +91633,7 @@ mod tests {
         assert!(
             source
                 .preview_panes
-                .get(PreviewSurface::Seat(seat))
+                .get(source.preview_here(seat))
                 .is_none(),
             "and nothing of it is left behind to be shown twice"
         );
@@ -91342,7 +91743,7 @@ mod tests {
         assert_eq!(
             target
                 .preview_panes
-                .get(PreviewSurface::Seat(host))
+                .get(target.preview_here(host))
                 .and_then(|pane| pane.buffer.clone()),
             Some(notes.clone()),
             "the host's own pane was on the loser and now reads the winner — a \
@@ -94659,7 +95060,7 @@ mod tests {
         // layer says where, and the content plane writes there.
         let open = |seats: &mut seats::Seats, panes: &mut PreviewPanes, path: &str| {
             let seat = seats.add_preview(&metrics).expect("a preview lands");
-            let surface = PreviewSurface::Seat(seat);
+            let surface = seat_of(TAB_ONE, seat);
             panes.entry(surface).buffer = Some(preview::PreviewSource::file(path));
             surface
         };
@@ -94681,7 +95082,7 @@ mod tests {
         let PreviewSurface::Seat(pinned) = first else {
             unreachable!("the landing surface is a seat");
         };
-        assert!(seats.toggle_preview_lock(pinned));
+        assert!(seats.toggle_preview_lock(pinned.seat));
         let second = open(&mut seats, &mut panes, "c.rs");
         assert_ne!(second, first, "a locked pane is not the reuse target");
 
@@ -94730,7 +95131,7 @@ mod tests {
     /// map holds one entry answering for two windows.
     #[test]
     fn a_seat_and_a_float_that_share_a_number_are_still_two_surfaces() {
-        let seat = PreviewSurface::Seat(SeatId(1));
+        let seat = seat_of(TAB_ONE, SeatId(1));
         let float = PreviewSurface::Float(1);
         assert_ne!(seat, float);
         let mut panes = PreviewPanes::default();

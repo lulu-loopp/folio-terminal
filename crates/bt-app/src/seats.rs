@@ -5960,8 +5960,7 @@ static NO_FILES_VIEWS: BTreeMap<SeatId, FilesViewContent> = BTreeMap::new();
 #[cfg(test)]
 static NO_GIT_PAGES: BTreeMap<SeatId, crate::git_panel::GitPanelContent> = BTreeMap::new();
 #[cfg(test)]
-static NO_GIT_GRAPHS: BTreeMap<crate::PreviewSurface, crate::git_graph::GraphContent> =
-    BTreeMap::new();
+static NO_GIT_GRAPHS: BTreeMap<SeatId, &'static crate::git_graph::GraphContent> = BTreeMap::new();
 
 /// Every Terminal seat of `seats` running a PowerShell — the map a real tab of
 /// one profile hands in.
@@ -6456,13 +6455,16 @@ pub struct ChromeContent<'a> {
     /// own body, and the document's body is left empty because this *is* the
     /// document.
     ///
-    /// **Keyed by surface and not by seat**, because a graph is a document and a
-    /// document can be torn off into a window: one map answers for the seats
-    /// this pass draws and for the floats the overlay pass draws, and the two
-    /// hosts therefore cannot be looking at two different builds of one
-    /// repository. This pass reads the [`crate::PreviewSurface::Seat`] entries
-    /// and steps over the rest.
-    pub git_graphs: &'a BTreeMap<crate::PreviewSurface, crate::git_graph::GraphContent>,
+    /// **Keyed by seat, and narrowed to this tab before it gets here** (§7.12
+    /// ⓑ). The build behind it is keyed by [`crate::PreviewSurface`], because a
+    /// graph is a document and a document can be torn off into a window: one map
+    /// answers for the seats this pass draws and for the floats the overlay pass
+    /// draws, so the two hosts cannot be looking at two different builds of one
+    /// repository. What this pass draws is **one tab**, though — its own solved
+    /// tree — and inside one tab a seat number is a whole name. So the tab half
+    /// is spent by the caller and never carried in here, where there is nothing
+    /// that could ask which tab a number belonged to.
+    pub git_graphs: &'a BTreeMap<SeatId, &'a crate::git_graph::GraphContent>,
     /// What each preview pane's body says while it has no body yet — "Loading
     /// …", a decode failure, the invitation an empty pane wears — **by seat**.
     ///
@@ -7326,7 +7328,7 @@ pub fn build_chrome_for_tabs(
                 // [`ChromeInputs::git_graphs`] for why a picture goes through
                 // the chrome and not through `PreviewBody`.
                 if placement.kind == SeatKind::Preview
-                    && let Some(graph) = git_graphs.get(&crate::PreviewSurface::Seat(placement.id))
+                    && let Some(graph) = git_graphs.get(&placement.id).copied()
                     && let Some(geometry) = files_pane
                 {
                     crate::git_graph::push_graph(

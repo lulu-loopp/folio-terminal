@@ -2097,7 +2097,7 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 
 **③ `AmbiguousPage` 撤了,而且是删掉不是留成哑门。** 见 §2.10 的结清段:叫得出名字现在是键的性质,不是这条事务能测的一件事,所以 `page_key_collision` 与那一臂拒绝一起删,钉翻成正断言 `every_page_of_a_moving_tab_can_be_named`。
 
-**④ 实机上发现的第二个缺陷,由这次重键**暴露**出来,当场补掉。** `PreviewSurface::Seat` 拿的是座位号,而读它的三扇门要么问**前台那张 tab**(`preview_buffer_on`),要么问**第一张树里有这个号的 tab**(`preview_pane_mut`、`preview_tab_index`)——两者都不是这张页自己的 tab。代价在实机上量到:一扇窗恢复出两张各带一页的 tab,`open_web_page_on` 把**第一张** tab 的 buffer 清了两次,第二张 tab 的文件 buffer 就那么留在它自己的引擎底下;`advance_web_page` 读到那本 buffer,判为「别的东西落到这个 pane 上了」,把刚开出来的页当场关掉——两张页里有一张在它到达的下一帧就没了。修法是让 `open_web_page_on` 用 `leaf.tab` 直接定位 tab,走 `leave_preview_buffer_in` 与新的 `clear_preview_image_in`(后者是前者的孪生,连同它「只有台前那张 tab 有权动 renderer 手里那张图」的那半)。重键之前这条被裸号的 `any` 掩着:任何一张 tab 都能替这个号作保。
+**④ 实机上发现的第二个缺陷,由这次重键**暴露**出来,当场补掉。** `PreviewSurface::Seat` 拿的是座位号,而读它的三扇门要么问**前台那张 tab**(`preview_buffer_on`),要么问**第一张树里有这个号的 tab**(`preview_pane_mut`、`preview_tab_index`)——两者都不是这张页自己的 tab。代价在实机上量到:一扇窗恢复出两张各带一页的 tab,`open_web_page_on` 把**第一张** tab 的 buffer 清了两次,第二张 tab 的文件 buffer 就那么留在它自己的引擎底下;`advance_web_page` 读到那本 buffer,判为「别的东西落到这个 pane 上了」,把刚开出来的页当场关掉——两张页里有一张在它到达的下一帧就没了。修法是让 `open_web_page_on` 用 `leaf.tab` 直接定位 tab,走 `leave_preview_buffer_in` 与新的 `clear_preview_image_in`(后者是前者的孪生,连同它「只有台前那张 tab 有权动 renderer 手里那张图」的那半)。重键之前这条被裸号的 `any` 掩着:任何一张 tab 都能替这个号作保。**2026-08-24 补记:这一段描述的两扇门(`preview_tab` 问前台、`preview_tab_index` 问第一张有这个号的 tab)已由 §7.14 收成一扇 `preview_tab_id`,`PreviewSurface::Seat` 本身带上了 `LeafId`;上面这处修法因此不再是绕路而是照直写,`open_web_page_on` 手里那个表面就是 `PreviewSurface::Seat(leaf)`。**
 
 **红测与钉。** 四条,每一条都用它自己写下的 MUTATION 验过会红,四条同时红的那一跑留档:
 - `a_page_in_another_tab_is_not_this_tabs_page_however_the_seats_are_numbered`(`web_seat_among`,拿掉 tab → `Some(SeatId(1))`,即缺陷本身);
@@ -2115,7 +2115,7 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 
 ![移交之后的两扇窗:左窗是搬进去的 TAB-TWO(PAGE BETA,boot 未变,shell 打出 BT-TRANSFER-ALIVE),右窗是留下的 TAB-ONE(PAGE ALPHA,boot 未变)](spikes/artifacts/page-keys/two-tabs-two-pages-and-one-of-them-moved.png)
 
-**欠账两笔,ⓐ 已清。** ⓐ ~~`transfer_tab` 不修 pin 分区~~ —— **本片报出当日即清**(合并方落修):model commit 在目标窗 push 后补上与所有 strip 编辑同一次 `settle_pin_partition`(源侧无需——移除不会破坏已分区的 run),钉进 `the_transfer_is_a_transaction_and_its_commit_pays_every_debt` 的欠单。ⓑ **`PreviewSurface::Seat` 本身还是一个座位号**:④ 只把网页这条道上的三处按叶定位了,预览块其余按 `preview_tab_index` 找 tab 的读者仍然是「第一张有这个号的 tab」。要根治得把预览表面也按叶寻址,那是预览块的单。
+**欠账两笔,两笔都已清。** ⓐ ~~`transfer_tab` 不修 pin 分区~~ —— **本片报出当日即清**(合并方落修):model commit 在目标窗 push 后补上与所有 strip 编辑同一次 `settle_pin_partition`(源侧无需——移除不会破坏已分区的 run),钉进 `the_transfer_is_a_transaction_and_its_commit_pays_every_debt` 的欠单。ⓑ ~~**`PreviewSurface::Seat` 本身还是一个座位号**~~ —— **2026-08-24 由 §7.14 结清**,预览表面按叶寻址,「按号全窗搜」这句话在类型上写不出来了。
 
 ### 7.13 站点自己的图标（Web 预览块 favicon 单，2026-08-23，已落地；`crates/bt-app/src/{favicon(新),marks,webnav,webhost,profiles,restore,seats,websheet,main}.rs`、`crates/bt-platform/src/webview.rs`）
 
@@ -2168,6 +2168,48 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 **⑭ 「网页头排布异常」不是排布,是那只手早就走了(用户两张截图,2026-08-24)。** 报的是「宽窗下三钮悬在头中部离右缘很远、右侧一大段空、其余钮不见了」,另一张稍窄的却全套俱在。**逐像素量过两张图:同一扇窗、同一个宽度、每一枚控件的横坐标一模一样**(`‹` 在 1027/1024、`⟳` 在 1139/1136,两张裁切原点差 3px),差的只有 `.pane:hover` ——右边那段空白正是几何替悬停梯子留的位置,而梯子这一句 §7.1.5g 早就裁死:「pane 没被指着就一枚都不画」。所以头的**排布没有病**,`a_pages_head_hangs_its_whole_run_off_its_right_edge_at_every_width` 把这件事按住:从 480 到 3840 px 扫一遍,每一枚控件**离头右缘的距离是同一个常数**、每一枚都在座,让位的只有名字那一格。
 
 **真正的病在离开那扇门。** `ChromePointer` 有两个频道——`hover`(指针压在哪枚控件上)与 `pane_hover`(指针站在哪个 pane 里),而**每一张 pane 头的悬停行都挂在后者**:终端头的 `⌄`/🗀/`×`,网页头的分隔线、`</>`、pop-out、锁。`pointer_left` 只清了前者,于是**手离开窗口之后整行还亮着**;而**拖窗口边框调宽窄时,那条边是非客户区,整个手势里手都算「已经离开」**——这就是为什么它看起来像是随宽度来去。实机复证(1920×1200,debug,`APPDATA`/`LOCALAPPDATA`/UDF 全隔离):指针停在头上 → 十一簇墨;指针移到桌面 (5,5) → **十一簇一个不少地留着**。落地是把两个频道合进一扇门 `ChromePointer::left_the_window()`,两个字段一起取(先取后合,`||` 会短路掉第二个),这样它们再也漂不开。红测 `a_pointer_that_has_left_the_window_is_standing_in_no_pane`。
+
+### 7.14 一块预览由它的 pane 叫出名字（预览块按叶寻址，2026-08-24，已落地；`crates/bt-app/src/{main,seats,profiles,toast,tooltip}.rs`）
+
+**§7.12 ⓑ 的结清片,而且只做一件事:`PreviewSurface::Seat` 从裸 `SeatId` 换成 `LeafId{tab,seat}`。** §7.12 ④ 当日只把网页这条道上的三处按 `leaf.tab` 定位了,理由写在那一段末尾:表面本身还是一个座位号,所以剩下的读者仍然要去猜。这一片把名字补齐,和 §7.12 ② 是同一句话——**座位号只在它自己那张 tab 内唯一**,每一个被抽出来成 tab 的 pane 都从 `SeatId(1)` 重新起号(`seats::Seats::lone_seat`),而解析这个名字的门跨整扇窗。
+
+**① 缺陷是「读一张 tab、写另一张 tab」,而且它一直活着。** 两扇门对同一个座位号给两个答案:
+
+* `Runtime::preview_tab` —— `PreviewSurface::Seat(_) => Some(self)`,**前台那张 tab**。`preview_pane` / `preview_buffer_on` / `preview_md_source` / `preview_chrome_on` / `preview_is_editable` 全从这里读。
+* `Runtime::preview_tab_index` —— `tabs.iter().position(|t| t.seats.preview_seats().contains(&seat))`,**strip 里第一张树里有这个号的 tab**。`preview_pane_mut` / `preview_buffer_on_mut` / `leave_preview_buffer` / 全部 graph 动词全从这里写。
+
+一扇窗只要有两张各带预览的 tab,这两个答案就在**前台不是第一张**的时候分叉。代价逐条对得上:滚轮读前台的 `scroll`、写后台的 `scroll`(前台纹丝不动,后台被人在背后滚);`heal_preview_scroll` 拿前台的偏移去按后台的 body 夹再写回后台;一次按键走 `preview_buffer_on_mut` 落进**另一张 tab 的 buffer**,`save_preview_on` 就把那一份写到磁盘;`aim_preview_at_line` 把 goto 记在后台的 pane 上,而 `settle_preview_goto` 从前台读——那张回执永远不会被兑现,也永远不会被丢。
+
+**同一个错误还带着三张窗级表。** `WindowRuntime::git_graphs_shown`(按 `PreviewSurface` 做键)、`WindowRuntime::preview_head_measures`(按裸 `SeatId` 做键)、`profiles::PreviewMenu`(开着的切换器,按裸 `SeatId`),外加 `RenameSubject::PreviewName` 手里那个表面与 `toast::ToastAnchor::PreviewSeat`。每一张都是**窗的**,而它们记的东西都是**某张 tab 的**:同号即共用,于是后台 tab 的图会画进前台同号的 pane、一张头的字宽会去排另一张头的按钮、切换器会在换 tab 之后挂到另一个 pane 头上并列出那张 tab 的池。
+
+**② 修法与 §7.12 ② 逐字相同:把名字补齐,不在读的地方加过滤。** 枚举带上 `LeafId`,于是:
+
+* `preview_tab_id(surface)` 是**唯一**回答「这块预览属于哪张 tab」的门——座位说在自己名字里(`leaf.tab`)、小窗说在它被撕出去的那扇窗上、glance 卡是窗的(读台前那张)。`preview_tab` 与 `preview_tab_index` 都只是它的两种取法,**两者再也不可能分叉**。
+* 纯函数 `preview_tab_index_among(tabs, tab)` 只按 `state.id == tab` 找位置,一行;那句「走一遍窗问谁有这个号」在类型上写不出来了(`Seat(LeafId)` 收不下一个裸 `SeatId`)。
+* 真正只问前台的读者走 `TabState::preview_here(seat)`——`leaf_here` 的孪生门,和 F1b′ 给网页那一对留的门是同一条理由:chrome 打扮玻璃上那张 tab、指针落在它的 pane 里、键盘答它的叶。要说别的 tab 的调用方**手里就有那张 tab**(恢复在造的那张、换 tab 的 pane、小窗读它被撕出来的那张),自己拼叶。`leaf_here` 也从 `Runtime` 挪到了 `TabState`——`Runtime` 经 `Deref` 拿到的仍旧是前台那张,一个字的行为没变,但「问哪张 tab」从此是调用方选的。
+* 三张窗级表跟着换名:`git_graphs_shown` 的键自动带上 tab;`preview_head_measures` 改 `BTreeMap<LeafId, PreviewHeadTools>`;`PreviewMenu::open` 改 `LeafId`,并新开一扇 `Runtime::preview_menu_seat()`——「切换器挂在**前台**哪个 pane 上,没有就是没有」,吞键、悬停、几何、chevron 角度全从它读,所以一张挂在别的 tab 上的切换器既不画也不吞键。`ToastAnchor::PreviewSeat` 同理带叶,`toast_anchor_rect` 对不在台前的叶答 `None`(卡回窗角,这正是「这张卡说的那块表面不在你眼前」的意思)。
+* 几何门 `preview_surface_body_rect` 与图片的 `refit_preview_picture` 对**不是本 tab 的叶**答 `None`:一扇窗只解一棵树,而这条从前是靠「这个号恰好不在树里」蒙对的。
+
+**③ 画 chrome 的那一层反过来收窄了。** `seats::ChromeInputs::git_graphs` 从 `BTreeMap<PreviewSurface, _>` 改成 `BTreeMap<SeatId, &GraphContent>`,tab 那一半在 `refresh_chrome` 里**花掉**。理由写在类型上:这一趟画的是**一张** tab 的树,而一张 tab 之内座位号就是全名;把叶递进去等于让一个没有能力回答「哪张 tab」的地方拿着一个需要回答它的键。
+
+**④ 红证。** 两条 MUTATION,各自单跑留档:
+- `red-A-the-seat-number-is-the-whole-name.log` —— 让 `TabState::preview_here` 无论问哪张 tab 都答 `TabId(1)`(也就是「座位号就是全名」那棵树),**6 条红**:本片的 `tests::a_preview_seat_is_found_in_the_tab_that_owns_it`,以及五条**本来就在的**跨 tab 钉——`a_preview_pane_changing_tabs_arrives_holding_the_edit_it_left_with`、`merging_two_tabs_leaves_one_buffer_per_file_and_the_dirty_one_wins`、`a_tab_is_seeded_by_the_pane_it_would_be_reopened_as`、`a_folder_tab_and_a_file_tab_cross_the_disk_and_come_back_as_themselves`、`a_preview_torn_out_is_a_tab_with_no_shell_named_by_its_file`。
+- `red-B-the-reader-and-the-writer-name-two-tabs.log` —— 把两条老实现原样放回(`Some(self)` 与 `preview_seats().contains`),形状钉 `tab_identity_tests::a_preview_surface_is_read_and_written_in_the_one_tab_that_owns_it` 当场红,报文里印出那两行本身。
+
+四条新钉:上面两条,加 `two_tabs_previewing_on_one_seat_number_are_two_surfaces`(窗级表同号两 tab 是两条目)与 `a_head_measured_in_one_tab_is_not_another_tabs_head`;`profiles::tests::the_switcher_belongs_to_one_pane_and_its_own_button_shuts_it` 加了第三个 pane——`one` 的座位号在另一张 tab 上,按裸号它会**收**菜单而不是移过去。三门全绿(`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets`、`cargo test --workspace`),`green-after-revert.log` 留档。
+
+**⑤ 实机(2026-08-24,debug,`APPDATA`/`LOCALAPPDATA` 全隔离到临时目录,`BT_PTY_DUMP`,不访问外网)。** 会话种子是一扇窗两张 tab,各一根终端加一个预览 pane,**两张 tab 的预览都开着同一个文件、都落在 `SeatId(2)`(`leaf-1`)上**——正是从前只装得下一张的那个形状,而且是两张 tab 的窗**本来就有**的形状。文件是 400 行 `LINE nnn`,所以照片自己会说每块预览滚到了哪。TAB-TWO 在前。
+
+- **各滚各的**:在 TAB-TWO 的预览上滚 12 格 → 它到 `LINE 042`;切到 TAB-ONE,它**仍在 `LINE 001`**;在 TAB-ONE 上滚 4 格 → 它到 `LINE 014`;切回 TAB-TWO,**仍是 `LINE 042`**。重键之前这四步里前两步就该翻:滚轮写的是 strip 里第一张 tab,而前台是第二张。
+- **各编辑各的**:在 TAB-TWO 的预览里 `Ctrl+V` 贴进 `<<EDITED-IN-TAB-TWO>>` → 它自己的 `LINE 050` 带上这段字,头上 `ledger.txt` 旁边亮起脏点;切到 TAB-ONE,它的 `LINE 050` **一个字没有**,头上**没有脏点**——两份 buffer,一份被改了。
+- 收尾:属于本次运行的 `folio` **0 个**;`stderr` 9 行,全是 `BT_DPI`/`BT_PTY_DUMP`,无 `BT_WEB`、无 panic。
+- (探针注记:中文输入法把 `type` 打进去的字当成预编辑,`Escape` 会把它整段撤掉——所以这一次的编辑走剪贴板 `Ctrl+V`,和弦不经输入法。这条和 §7.13 ⑬ ⓐ 是同一台机器的同一件事。)
+
+![两张 tab 开着同一个文件,前台 TAB-TWO 的预览停在 LINE 042 并且 LINE 050 被贴进 `<<EDITED-IN-TAB-TWO>>`,头上带脏点](plans/web-preview/preview-leaf-evidence/two-tabs-one-file-the-front-tab-is-edited.png)
+
+![切到 TAB-ONE:同一个文件、同一个座位号,它停在自己的 LINE 028,LINE 050 一个字没有,头上没有脏点](plans/web-preview/preview-leaf-evidence/two-tabs-one-file-the-other-tab-is-untouched.png)
+
+**⑥ 欠账一笔。** 一张开着的切换器现在**跟着 tab 走**:换到别的 tab 它不画也不吞键,换回来它还在。这是按叶寻址落下来的直接后果,不是裁决——「换 tab 要不要顺手关掉浮层」是一条独立的规矩,本片不替它做决定;真要关,该关在换 tab 那一处,而不是让切换器把自己的身份丢掉。
 
 ## 8. 依赖策略
 

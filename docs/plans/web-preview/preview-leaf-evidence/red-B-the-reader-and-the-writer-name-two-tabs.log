@@ -1,0 +1,45 @@
+test worker_answer_routing_tests::an_answer_for_a_tab_that_has_closed_is_claimed_by_nobody ... ok
+test websheet::tests::the_verb_answers_and_the_scrim_swallows ... ok
+test worker_answer_routing_tests::every_lane_names_the_owner_of_its_answer ... ok
+test wsl::tests::the_login_shell_is_the_last_field_of_the_password_entry ... ok
+test worker_answer_routing_tests::three_answers_in_b_a_b_order_each_land_with_their_one_owner ... ok
+test wsl::tests::the_distribution_list_is_read_as_the_utf16_wsl_writes ... ok
+test wsl::tests::only_a_distribution_that_logs_into_bash_is_handed_an_init_file ... ok
+test wsl::tests::one_distribution_needs_no_qualifier_and_none_at_all_needs_no_wsl ... ok
+test tests::the_peek_overlay_carries_display_sized_pixels_under_a_display_sized_key ... ok
+test web_thumb::tests::the_shrinker_answers_the_box_it_was_asked_for_and_refuses_what_it_cannot_read ... ok
+test tests::the_unconditional_reprojection_this_replaced_costs_one_projection_a_tick ... ok
+test tests::a_keystroke_relays_a_full_head_read_inside_a_frame ... ok
+test tests::a_late_zoom_reprint_keeps_the_last_formula_frame_until_exact_source_reanchors ... ok
+test git::tests::this_workspace_answers_all_three_page_questions ... ok
+test tests::expanded_presented_row_map_drives_forwarded_mouse_row_and_column ... ok
+test highlight::tests::a_five_thousand_line_rust_file_is_walked ... ok
+test search::tests::a_hundred_thousand_lines_rebuild_in_a_time_worth_printing ... ok
+test git::tests::a_staged_rename_needs_both_names_to_read_as_a_rename ... ok
+test git::tests::a_real_repository_answers_every_way_and_each_matches_the_command_line ... ok
+test git::tests::a_search_ors_the_message_against_the_author_and_a_hash_lands_outright ... ok
+test focus_thumb::tests::the_budget_holds_under_ten_tabs_of_full_blast_output ... ok
+test tests::real_powershell_input_reaches_a_viewport_owned_frame ... ok
+
+failures:
+
+---- tab_identity_tests::a_preview_surface_is_read_and_written_in_the_one_tab_that_owns_it stdout ----
+
+thread 'tab_identity_tests::a_preview_surface_is_read_and_written_in_the_one_tab_that_owns_it' (51460) panicked at crates\bt-app\src\main.rs:7881:13:
+and it must not answer with the tab in front either — a preview lives on the tab whose tree holds it, which is not always the tab you are looking at
+&self, surface: PreviewSurface) -> Option<&TabState> {
+        // MUTATION ②
+        if let PreviewSurface::Seat(_) = surface {
+            return Some(self);
+        }
+        let tab = self.preview_tab_id(surface)?;
+        self.window.tabs.iter().find(|state| state.id == tab)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tab_identity_tests::a_preview_surface_is_read_and_written_in_the_one_tab_that_owns_it
+
+test result: FAILED. 2224 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.71s
+
+error: test failed, to rerun pass `-p bt-app --bin folio`
