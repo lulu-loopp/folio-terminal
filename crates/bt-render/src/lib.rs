@@ -869,6 +869,22 @@ pub enum RenderError {
 #[derive(Clone, Copy, Debug)]
 pub enum PresentOutcome {
     Presented(PresentReceipt),
+    /// A frame reached the glass with at least one seat's grid text missing,
+    /// because the shared glyph atlas could not take another raster
+    /// ([`PrepareFailurePolicy::PresentWithoutText`]).
+    ///
+    /// **Not a kind of `Presented`.** What is on the glass is the theme, the
+    /// cell backgrounds, the procedural box-drawing and the chrome — a picture
+    /// nobody composed. The frame the caller handed in is therefore still owed,
+    /// exactly as it is after [`Self::Skipped`], and the caller's answer is the
+    /// same one: keep the frame and ask for it again.
+    ///
+    /// The retry converges by construction. Whatever filled the atlas, the trim
+    /// at the end of [`WindowRenderer::present_frame`] unprotects it, and a
+    /// frame's own glyphs are bounded by the ink of one window — some twenty-
+    /// five times smaller than the atlas at the device limit — so the frame
+    /// after this one has room. That is why this is a retry and not a counter.
+    PresentedWithoutText(PresentReceipt),
     Skipped,
     Reconfigure,
 }
@@ -2244,6 +2260,55 @@ enum SurfaceFailurePolicy {
 fn prepare_failure_policy(error: PrepareError) -> PrepareFailurePolicy {
     match error {
         PrepareError::AtlasFull => PrepareFailurePolicy::PresentWithoutText,
+    }
+}
+
+/// Fold one text prepare into the frame's "every character reached the glass"
+/// bit, and answer whether that batch may be drawn.
+///
+/// **One rule, one implementation, for all five text renderers a frame drives**
+/// — the grid, the status overlay, the chrome, a preview's body and each
+/// overlay level. Four of them used to end in `.is_ok()`, which is the same
+/// sentence with the second half missing: the batch is not drawn *and nobody is
+/// told*, so a chrome label or a rendered page could lose its text exactly the
+/// way a pane could and there was no frame after it to put the text back.
+///
+/// There is one error ([`PrepareError::AtlasFull`]) and one policy for it, so
+/// the match is exhaustive rather than defensive.
+fn accept_text_prepare(
+    result: Result<(), PrepareError>,
+    degraded_frames: &mut u64,
+    text_complete: &mut bool,
+) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => match prepare_failure_policy(error) {
+            PrepareFailurePolicy::PresentWithoutText => {
+                if *degraded_frames == 0 {
+                    eprintln!(
+                        "Folio glyph atlas reached the device limit; presenting without text and retrying"
+                    );
+                }
+                *degraded_frames += 1;
+                *text_complete = false;
+                false
+            }
+        },
+    }
+}
+
+/// What a frame that reached the glass *is*, given whether every seat's grid
+/// text reached it too.
+///
+/// A function rather than two lines at the bottom of the frame, because this is
+/// the whole of the rule a caller depends on — a picture missing its characters
+/// is a debt, not a delivery — and it is the one part of the frame that can be
+/// asked without a device.
+fn present_outcome(text_complete: bool, receipt: PresentReceipt) -> PresentOutcome {
+    if text_complete {
+        PresentOutcome::Presented(receipt)
+    } else {
+        PresentOutcome::PresentedWithoutText(receipt)
     }
 }
 
@@ -4843,6 +4908,50 @@ impl WindowRenderer {
         seats: &[SeatFrame<'_>],
         trigger: FrameTrigger,
     ) -> Result<PresentOutcome, RenderError> {
+        let outcome = self.compose_frame(gpu, seats, trigger);
+        // **The one place the shared atlas is told the frame is over, and it is
+        // outside every way the frame can end.**
+        //
+        // glyphon protects a glyph for as long as it is in `glyphs_in_use`, and
+        // [`TextAtlas::trim`] is the only thing that empties that set. A
+        // protected glyph is one [`InnerAtlas::try_allocate`] refuses to evict:
+        // asked for room it cannot find, glyphon *grows* the atlas instead, and
+        // when the atlas is already at the device's `max_texture_dimension_2d`
+        // the answer is [`PrepareError::AtlasFull`].
+        //
+        // So the trim is owed by every frame that *prepared*, not by every frame
+        // that *presented*. It used to sit at the bottom of the body, below
+        // three exits that a real machine takes — the two `configure_surface`
+        // interrogation marks and the whole of [`Self::handle_surface_failure`]
+        // — and each of those exits left that frame's entire glyph set
+        // protected for the rest of the process's life. The set only grows, so
+        // a window that skipped enough frames drove the atlas to the device
+        // limit and every seat that then asked for a glyph it did not already
+        // have got `AtlasFull` — a pane whose backgrounds, procedural
+        // box-drawing and chrome all drew while not one character did.
+        //
+        // Why bounding it here is a proof and not a hope: one frame's protected
+        // set is one frame's *ink*, and ink is bounded by the surface it is
+        // drawn on — roughly 2.3 Mpx² for a 1920x1200 window, whatever the font
+        // size or the script, because a bigger face means proportionally fewer
+        // cells. A `max_texture_dimension_2d` of 8192 is 67 Mpx², some twenty-
+        // five screens. Trimmed every frame the atlas cannot fill; not trimmed,
+        // it is only a matter of time.
+        gpu.atlas.trim();
+        outcome
+    }
+
+    /// Everything one frame does between the caller's `seats` and the glass.
+    ///
+    /// Split from [`Self::present_frame`] for one reason: this function may
+    /// return early and that one may not, because the atlas trim it owes has to
+    /// outlive every exit here. Nothing else moved.
+    fn compose_frame(
+        &mut self,
+        gpu: &mut GpuContext,
+        seats: &[SeatFrame<'_>],
+        trigger: FrameTrigger,
+    ) -> Result<PresentOutcome, RenderError> {
         let frame_started = Instant::now();
         for entry in seats {
             entry.frame.validate_shape()?;
@@ -4885,6 +4994,12 @@ impl WindowRenderer {
         // question about ordering.
         let mut table_block_bodies: Vec<PreviewBody> = Vec::new();
         let mut focused_text_stats = None;
+        // Whether every seat's grid text reached the glass. One bit for the
+        // window and not one per seat, because what the caller does with it —
+        // keep the composed frame on the books and ask for it again — is a
+        // window-level verb, and a frame in which any pane lost its characters
+        // is a frame the window still owes.
+        let mut text_complete = true;
         let mut rows_prepared_at = validated_at;
         let mut atlas_prepared_at = validated_at;
         let mut math_prepared_at = validated_at;
@@ -4935,26 +5050,23 @@ impl WindowRenderer {
                     Err(error) => Err(error),
                 }
             };
-            let text_prepared = match text_prepare_result {
-                Ok(()) => true,
-                Err(error) => {
-                    // glyphon grows each atlas geometrically before returning AtlasFull. If the
-                    // device limit is genuinely exhausted, keep the terminal alive and present the
-                    // theme/background rectangles; trimming allows the next frame to retry.
-                    match prepare_failure_policy(error) {
-                        PrepareFailurePolicy::PresentWithoutText => {
-                            if self.glyph_degraded_frames == 0 {
-                                eprintln!(
-                                    "Folio glyph atlas reached the device limit; presenting without text and retrying"
-                                );
-                            }
-                            self.glyph_degraded_frames += 1;
-                            gpu.atlas.trim();
-                            false
-                        }
-                    }
-                }
-            };
+            // glyphon grows each atlas geometrically before returning AtlasFull. If the device
+            // limit is genuinely exhausted, keep the terminal alive and present the
+            // theme/background rectangles, and let the caller ask for the frame again.
+            //
+            // **No trim here**, though one used to stand on this line. Trimming mid-frame
+            // unprotects the glyphs the seats *already prepared in this same frame* have been
+            // handed coordinates for, so the seats after this one are free to evict them out from
+            // under a draw that has not been issued yet — the confetti
+            // [`Self::present_frame`]'s own contract warns about, bought to make one more seat
+            // fit. The trim this frame owes is the unconditional one in
+            // [`Self::present_frame`], and the retry is
+            // [`PresentOutcome::PresentedWithoutText`].
+            let text_prepared = accept_text_prepare(
+                text_prepare_result,
+                &mut self.glyph_degraded_frames,
+                &mut text_complete,
+            );
             atlas_prepared_at = Instant::now();
 
             // Math draws first: the hover dim rect decorates a block's raster, so it must know which
@@ -5169,8 +5281,10 @@ impl WindowRenderer {
             gpu.chrome_cap_height_ratio,
             1.0,
         );
-        let chrome_prepared = !chrome_layouts.is_empty()
-            && prepare_chrome_text_atlas(
+        let chrome_prepared = if chrome_layouts.is_empty() {
+            false
+        } else {
+            let result = prepare_chrome_text_atlas(
                 &mut self.chrome_text_renderer,
                 &gpu.device,
                 &gpu.queue,
@@ -5179,8 +5293,9 @@ impl WindowRenderer {
                 &self.chrome_viewport,
                 &mut gpu.swash_cache,
                 &chrome_layouts,
-            )
-            .is_ok();
+            );
+            accept_text_prepare(result, &mut self.glyph_degraded_frames, &mut text_complete)
+        };
         // One flat list over every body, because they are one draw: each body
         // already carries its own `clip` in whole-surface coordinates, so two
         // documents on screen are two sets of cropped rectangles and not two
@@ -5230,8 +5345,10 @@ impl WindowRenderer {
         for body in self.preview_bodies.iter().chain(table_block_bodies.iter()) {
             preview_text_layouts.extend(shape_preview_body(&mut gpu.font_system, body));
         }
-        let preview_text_prepared = !preview_text_layouts.is_empty()
-            && prepare_chrome_text_atlas(
+        let preview_text_prepared = if preview_text_layouts.is_empty() {
+            false
+        } else {
+            let result = prepare_chrome_text_atlas(
                 &mut self.preview_text_renderer,
                 &gpu.device,
                 &gpu.queue,
@@ -5240,8 +5357,9 @@ impl WindowRenderer {
                 &self.chrome_viewport,
                 &mut gpu.swash_cache,
                 &preview_text_layouts,
-            )
-            .is_ok();
+            );
+            accept_text_prepare(result, &mut self.glyph_degraded_frames, &mut text_complete)
+        };
         // **The forensic line for "the body drew its rules and none of its
         // words"** (user report 2026-08-21). The three numbers are the three
         // places that picture can come from and they separate them completely:
@@ -5360,8 +5478,10 @@ impl WindowRenderer {
                     None,
                 ));
             }
-            let text_prepared = !layouts.is_empty()
-                && prepare_chrome_text_atlas(
+            let text_prepared = if layouts.is_empty() {
+                false
+            } else {
+                let result = prepare_chrome_text_atlas(
                     &mut self.overlay_text_renderers[index],
                     &gpu.device,
                     &gpu.queue,
@@ -5370,8 +5490,9 @@ impl WindowRenderer {
                     &self.chrome_viewport,
                     &mut gpu.swash_cache,
                     &layouts,
-                )
-                .is_ok();
+                );
+                accept_text_prepare(result, &mut self.glyph_degraded_frames, &mut text_complete)
+            };
             overlay_draws.push(PreparedOverlayLayer {
                 ground_buffer,
                 ground_count: ground_rects.len() as u32,
@@ -5792,7 +5913,6 @@ impl WindowRenderer {
             submitted_at,
             present_called_at,
         };
-        gpu.atlas.trim();
         // The trace reports the focused seat: it is the one whose latency a
         // person is waiting on, and summing counters across seats would invent a
         // number no cache ever held (`resident_bytes` is a gauge, not a tally).
@@ -5854,7 +5974,7 @@ impl WindowRenderer {
                 total_elapsed.as_micros(),
             );
         }
-        Ok(PresentOutcome::Presented(receipt))
+        Ok(present_outcome(text_complete, receipt))
     }
 
     fn prepare_text_rows(
@@ -14062,6 +14182,160 @@ mod tests {
             prepare_failure_policy(PrepareError::AtlasFull),
             PrepareFailurePolicy::PresentWithoutText
         );
+    }
+
+    /// This file with every comment line and every space taken out — the shape
+    /// of what it *does*, so that a sentence about a rule can never satisfy the
+    /// test that guards the rule.
+    fn source_without_prose() -> String {
+        include_str!("lib.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect()
+    }
+
+    fn present_frame_source() -> String {
+        let source = source_without_prose();
+        let start = source
+            .find("pubfnpresent_frame(&mutself,gpu:&mutGpuContext,")
+            .expect("present_frame");
+        let end = source[start..]
+            .find("fncompose_frame(")
+            .expect("compose_frame follows present_frame");
+        source[start..start + end].to_owned()
+    }
+
+    /// PIN — **no way out of a frame may skip the atlas trim.**
+    ///
+    /// `TextAtlas::trim` is the only thing that empties glyphon's
+    /// `glyphs_in_use`, and a glyph in that set is one the packer refuses to
+    /// evict: asked for room it cannot find, glyphon grows the atlas instead,
+    /// and at `max_texture_dimension_2d` the answer is `AtlasFull`. So the trim
+    /// is owed by a frame that *prepared*, not by a frame that *presented* —
+    /// and the three exits that used to stand between the prepares and the trim
+    /// (`configure_surface_if_needed(gpu)?`, the `Suboptimal` reconfigure, and
+    /// the whole of `handle_surface_failure`) each left one frame's glyphs
+    /// protected for the life of the process. The set only grows, so a window
+    /// that skipped enough frames drove the shared atlas to the device limit
+    /// and the next seat to want a glyph it did not already have lost every
+    /// character it was asked to draw, while its backgrounds, its procedural
+    /// box-drawing and its chrome all went on drawing.
+    ///
+    /// There is no way to ask glyphon what it is protecting, so the invariant is
+    /// held where it is spent: `present_frame` may not fail, may not return
+    /// early, and must trim.
+    ///
+    /// Mutation: move the trim back inside `compose_frame` and this fails,
+    /// because `present_frame` stops naming it.
+    #[test]
+    fn no_exit_from_a_frame_may_skip_the_atlas_trim() {
+        let body = present_frame_source();
+        assert!(
+            body.contains("gpu.atlas.trim();"),
+            "present_frame must trim the shared atlas: {body}"
+        );
+        assert!(
+            !body.contains('?'),
+            "present_frame must have no fallible call above its trim: {body}"
+        );
+        assert!(
+            !body.contains("return"),
+            "present_frame must have no early return above its trim: {body}"
+        );
+    }
+
+    /// PIN — **and nothing inside the frame trims, either.**
+    ///
+    /// A trim taken mid-frame unprotects the glyphs the seats already prepared
+    /// *in this same frame* have been handed atlas coordinates for, so every
+    /// seat after it is free to evict them out from under a draw that has not
+    /// been issued yet — the confetti `present_frame`'s own contract warns
+    /// about, and the degraded seat used to buy exactly that to make one more
+    /// seat fit. The frame's one trim happens after the frame.
+    ///
+    /// Mutation: put `gpu.atlas.trim()` anywhere in `compose_frame`.
+    #[test]
+    fn the_frame_body_never_trims_the_shared_atlas() {
+        let source = source_without_prose();
+        let start = source.find("fncompose_frame(").expect("compose_frame");
+        let end = source[start..]
+            .find("fnprepare_text_rows(&mutself,")
+            .expect("prepare_text_rows follows compose_frame");
+        assert!(
+            !source[start..start + end].contains("gpu.atlas.trim()"),
+            "a trim inside the frame unprotects the glyphs its own earlier seats are drawing from"
+        );
+    }
+
+    /// PIN — **every text renderer a frame drives reports through the same
+    /// verb.**
+    ///
+    /// The frame prepares five batches of text — the grid, the status overlay,
+    /// the chrome, a preview's body and each overlay level — and four of them
+    /// used to end in `.is_ok()`: the batch is dropped and nobody is told, so a
+    /// chrome label or a rendered page could lose its characters exactly the way
+    /// a pane could, with no frame after it to put them back. There is one
+    /// error and one policy for it, so there is one place that spends it.
+    ///
+    /// Mutation: write `.is_ok()` after any prepare in the frame.
+    #[test]
+    fn every_text_prepare_in_a_frame_is_folded_into_the_frames_answer() {
+        let source = source_without_prose();
+        let start = source.find("fncompose_frame(").expect("compose_frame");
+        let end = source[start..]
+            .find("fnprepare_text_rows(&mutself,")
+            .expect("prepare_text_rows follows compose_frame");
+        let body = &source[start..start + end];
+        assert!(
+            !body.contains(".is_ok()"),
+            "a text prepare in the frame swallowed its refusal"
+        );
+        assert_eq!(
+            body.matches("accept_text_prepare(").count(),
+            4,
+            "the grid, the chrome, the preview body and each overlay level each report once"
+        );
+    }
+
+    /// PIN — **a picture that lost its characters is a debt, not a delivery.**
+    ///
+    /// The recovery `PresentWithoutText` promises is "the next frame will have
+    /// room", and until this the promise had no clock: nothing asked for a next
+    /// frame, so a pane that was quiet — a TUI sitting at its prompt — kept the
+    /// textless picture until something unrelated forced a redraw. Saying the
+    /// frame is still owed is what puts it back in the slot and asks the window
+    /// for another turn.
+    ///
+    /// It converges because one frame's glyphs are one window's ink, which is
+    /// bounded by the window's own area — measured on this machine, a full
+    /// 1920x1200 screen of distinct CJK draws under 2.5 Mpx² whatever the font
+    /// size, against 67 Mpx² of atlas at a `max_texture_dimension_2d` of 8192 —
+    /// so a trimmed atlas has room for the retry and the retry is one frame.
+    ///
+    /// Mutation: return `Presented` for both and the caller pays a debt nobody
+    /// settled.
+    #[test]
+    fn a_frame_that_lost_its_text_is_still_owed() {
+        let receipt = PresentReceipt {
+            trigger: FrameTrigger {
+                occurred_at: Instant::now(),
+                source: FrameSource::Expose,
+            },
+            submitted_at: Instant::now(),
+            present_called_at: Instant::now(),
+        };
+        assert!(matches!(
+            present_outcome(true, receipt),
+            PresentOutcome::Presented(_)
+        ));
+        assert!(matches!(
+            present_outcome(false, receipt),
+            PresentOutcome::PresentedWithoutText(_)
+        ));
     }
 
     /// The vertical centre of a chrome label's cap band — cap line to baseline,
