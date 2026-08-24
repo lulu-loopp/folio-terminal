@@ -9,7 +9,7 @@
 //! startup.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use bt_persist::{
@@ -26,14 +26,171 @@ use bt_persist::{
 /// its own disk write.
 const SESSION_DEBOUNCE: Duration = Duration::from_millis(1_500);
 
-/// The session file, its sentinel, and the debounce that stands between a
-/// change and the disk.
+/// One document on its way to the disk, addressed by the order it was decided in.
+struct SessionWriteRequest {
+    generation: u64,
+    path: PathBuf,
+    bytes: Vec<u8>,
+}
+
+/// What became of one of them.
+struct SessionWriteReceipt {
+    generation: u64,
+    result: Result<(), String>,
+}
+
+/// **The thread that owns the disk, and the only thing in this process that writes
+/// `session.json`** (window-thread unbounded-call sweep, 2026-08-24).
+///
+/// The store used to call `write_session_atomic` from `flush_if_due`, which runs on the window
+/// thread every turn of the event loop. That call is a `File::create`, a `write_all`, a
+/// **`sync_all`** and a `rename`, under `%APPDATA%` — a path the reader is free to have
+/// redirected onto a roaming
+/// profile, a network share or a cloud-sync folder, where an `fsync` is a round trip with no
+/// bound anybody in this process can state. A terminal that stops answering the mouse for a
+/// second and a half because OneDrive was thinking is a terminal that froze.
+///
+/// **What did *not* move is the decision.** `session_document()` still reads the window tree on
+/// the window thread and [`bt_persist::serialize_session`] still turns it into bytes there, so
+/// the document is a snapshot of one consistent instant and this thread never touches a
+/// `WindowRuntime`. What crossed is the part that has no opinions: bytes, a path, an `fsync`.
+///
+/// **One writer, so ordering is not a question.** A single thread taking one channel in order is
+/// what makes "the last document decided is the last document on the disk" true without anybody
+/// comparing timestamps. The generation on each request is not for ordering — it is so a receipt
+/// arriving after a newer request has already gone out can be recognised as stale and dropped
+/// rather than being allowed to mark the store clean over a document that has since changed.
+struct SessionWriter {
+    requests: mpsc::Sender<SessionWriteRequest>,
+    receipts: mpsc::Receiver<SessionWriteReceipt>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    /// The newest request handed over. A receipt older than this is stale.
+    sent: u64,
+    /// The newest request a receipt has come back for. `sent > landed` is "a document is still
+    /// in flight", which is the question a quit has to ask even when nothing is dirty.
+    landed: u64,
+}
+
+impl SessionWriter {
+    fn open() -> Self {
+        let (requests, incoming) = mpsc::channel::<SessionWriteRequest>();
+        let (outgoing, receipts) = mpsc::channel::<SessionWriteReceipt>();
+        // In the workers' band (§1.4): a session write must never be the reason a frame was late,
+        // and it is never the thing anybody is waiting to see.
+        let thread = bt_platform::spawn_at_priority(
+            "session-writer",
+            bt_platform::ThreadPriority::BelowNormal,
+            move || {
+                while let Ok(request) = incoming.recv() {
+                    let result = bt_persist::atomic_write(&request.path, &request.bytes)
+                        .map_err(|error| error.to_string());
+                    if outgoing
+                        .send(SessionWriteReceipt {
+                            generation: request.generation,
+                            result,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            },
+        )
+        .ok();
+        Self {
+            requests,
+            receipts,
+            thread,
+            sent: 0,
+            landed: 0,
+        }
+    }
+
+    /// The newest document still on its way to the disk, if one is.
+    fn in_flight(&self) -> Option<u64> {
+        (self.sent > self.landed).then_some(self.sent)
+    }
+
+    /// Hand one document over. Answers the generation it was filed under.
+    ///
+    /// A writer thread that could not be started (`spawn_at_priority` failed) leaves this
+    /// returning `None`: there is nowhere to send, and saying so is what lets the caller write it
+    /// here rather than pretend it was queued.
+    fn send(&mut self, path: &Path, bytes: Vec<u8>) -> Option<u64> {
+        self.thread.as_ref()?;
+        let generation = self.sent + 1;
+        self.requests
+            .send(SessionWriteRequest {
+                generation,
+                path: path.to_path_buf(),
+                bytes,
+            })
+            .ok()?;
+        self.sent = generation;
+        Some(generation)
+    }
+
+    /// Every receipt that has arrived, newest-relevant last. Never waits.
+    fn collect(&self) -> Vec<SessionWriteReceipt> {
+        self.receipts.try_iter().collect()
+    }
+
+    /// Wait for one named generation to land — **the one place this store blocks**, and the one
+    /// caller that is entitled to: a quit is a decision that rests on the answer (multiwindow
+    /// slice E2 phase ③), and the window it is holding up is already hidden.
+    ///
+    /// Receipts for older generations are returned alongside, because a synchronous wait must not
+    /// swallow the answers the ordinary path was going to read.
+    fn wait_for(&self, generation: u64) -> (Vec<SessionWriteReceipt>, Result<(), String>) {
+        let mut earlier = Vec::new();
+        loop {
+            match self.receipts.recv() {
+                Ok(receipt) if receipt.generation == generation => {
+                    return (earlier, receipt.result);
+                }
+                Ok(receipt) => earlier.push(receipt),
+                // The thread is gone and the answer is never coming. Say so as a failure rather
+                // than as a wait: a quit that hangs here is worse than a quit that reports.
+                Err(_) => {
+                    return (
+                        earlier,
+                        Err(
+                            "the session writer stopped before this document reached the disk"
+                                .to_string(),
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Let the thread finish what is queued and end. Idempotent.
+    fn close(&mut self) {
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        // Dropping the sender is what ends the thread's `recv` loop. It is replaced rather than
+        // dropped outright so the struct stays whole; nothing sends after this because `send`
+        // reads `thread` first.
+        let (dead, _) = mpsc::channel();
+        let live = std::mem::replace(&mut self.requests, dead);
+        drop(live);
+        // Bounded by construction: everything queued is already decided, and each item is one
+        // atomic write. Waiting here is the process's last act, and the alternative — walking out
+        // with a write in flight — is the session file half written.
+        let _ = thread.join();
+    }
+}
+
+/// The session file, its sentinel, the debounce that stands between a change and the disk, and
+/// the thread that actually touches it.
 pub struct SessionStore {
     session_path: PathBuf,
     sentinel_path: PathBuf,
     session: SessionV1,
     debouncer: Debouncer,
     failures: WriteFailureTracker,
+    writer: SessionWriter,
     /// True once the sentinel for *this* run exists, so a clean exit knows
     /// there is something to remove.
     armed: bool,
@@ -79,6 +236,7 @@ impl SessionStore {
             session,
             debouncer: Debouncer::new(),
             failures: WriteFailureTracker::new(),
+            writer: SessionWriter::open(),
             armed,
         }
     }
@@ -100,6 +258,7 @@ impl SessionStore {
             session: SessionV1::default(),
             debouncer: Debouncer::new(),
             failures: WriteFailureTracker::new(),
+            writer: SessionWriter::open(),
             armed: false,
         }
     }
@@ -127,10 +286,86 @@ impl SessionStore {
             .then(|| Instant::now() + SESSION_DEBOUNCE)
     }
 
-    /// Write if the quiet window has elapsed.
+    /// **Take the answers the writer has brought back, and hand it the document if the quiet
+    /// window has elapsed.** The window thread's whole part in a session write.
+    ///
+    /// Both halves in one call because both belong to the same turn of the event loop and the
+    /// second one's bookkeeping depends on the first: a receipt is what says the store is clean,
+    /// and it has to be read before this turn decides whether anything is still owed.
     pub fn flush_if_due(&mut self, now: Instant) {
+        self.take_receipts(now);
         if self.debouncer.should_flush(now, SESSION_DEBOUNCE) {
-            self.flush();
+            self.hand_over(now);
+        }
+    }
+
+    /// Hand the current document to the writer, without waiting for it to land.
+    ///
+    /// The debounce is marked flushed here rather than at the receipt, and the two are different
+    /// questions: the debouncer answers "when should this be tried again", and handing it over is
+    /// exactly the moment the answer becomes "not until something changes". Whether it *landed*
+    /// is [`Self::take_receipts`]'s, and a failure there marks the document dirty again so the
+    /// next quiet window retries it.
+    fn hand_over(&mut self, now: Instant) {
+        let bytes = match bt_persist::serialize_session(&self.session) {
+            Ok(bytes) => bytes,
+            // A document that cannot be turned into JSON is not a disk problem and no thread will
+            // fix it. It goes through the same one-alert-per-streak tracker so a broken document
+            // does not print every 1.5 seconds.
+            Err(error) => {
+                self.report_write(Err(error.to_string()), now);
+                return;
+            }
+        };
+        if self.writer.send(&self.session_path, bytes).is_some() {
+            self.debouncer.mark_flushed();
+            return;
+        }
+        // No writer thread — `spawn_at_priority` refused at startup, or it has been closed. The
+        // honest fallback is this thread, because the alternative is a session that is silently
+        // never written at all.
+        let landed = write_session_atomic(&self.session_path, &self.session)
+            .map_err(|error| error.to_string());
+        if landed.is_ok() {
+            self.debouncer.mark_flushed();
+        }
+        self.report_write(landed, now);
+    }
+
+    /// Read whatever the writer has answered, and let a failure put the document back on the
+    /// clock.
+    ///
+    /// A receipt older than the newest request is **stale and dropped**: a newer document has
+    /// already been handed over and will bring its own answer, so letting an old failure mark the
+    /// store dirty would schedule a retry of something that has since been superseded, and
+    /// letting an old success mark it clean would be answering for a document nobody wrote.
+    fn take_receipts(&mut self, now: Instant) {
+        for receipt in self.writer.collect() {
+            self.apply_receipt(receipt, now);
+        }
+    }
+
+    fn apply_receipt(&mut self, receipt: SessionWriteReceipt, now: Instant) {
+        // Recorded for every receipt, stale or not: what this answers is "is anything still on
+        // its way", and a stale receipt is still one fewer document in flight.
+        self.writer.landed = self.writer.landed.max(receipt.generation);
+        if receipt.generation < self.writer.sent {
+            return;
+        }
+        self.report_write(receipt.result, now);
+    }
+
+    /// One alert per failure streak (§5.3), and a failure leaves the document owed.
+    fn report_write(&mut self, result: Result<(), String>, now: Instant) {
+        if self.failures.record(result.is_ok()) == WriteAlertAction::AlertOnce
+            && let Err(error) = &result
+        {
+            // §5.3: one alert per failure streak, not one per attempt. A full
+            // disk must not turn into a message every 1.5 seconds.
+            eprintln!("BT_PERSIST could not write session.json: {error}");
+        }
+        if result.is_err() {
+            self.debouncer.mark_dirty(now);
         }
     }
 
@@ -153,32 +388,74 @@ impl SessionStore {
     /// gone, and `session.lock` left standing would then be this run truthfully
     /// reporting that it did not reach a clean exit.
     ///
-    /// `Ok(())` with nothing written is the honest answer when the debounce is
-    /// clean: what is on the disk already says this.
+    /// **It still goes through the one writer.** A second road to the same file, taken while
+    /// that thread may have a document of its own in flight, is two writers racing over one path
+    /// and the older one is free to land last. What is different here is only that this caller
+    /// **waits** — the one wait in this store, and the one place it is owed.
+    ///
+    /// `Ok(())` with nothing written is the honest answer when the debounce is clean *and*
+    /// nothing is still on its way. Those are two conditions and not one: the autosave hands
+    /// documents over without waiting, so "clean" can mean "handed to the writer a moment ago",
+    /// and a quit may not report as landed a document nobody has heard back about.
     pub fn flush_judged(&mut self) -> Result<(), String> {
+        let now = Instant::now();
+        self.take_receipts(now);
         if !self.debouncer.is_dirty() {
-            return Ok(());
+            // Clean, but not necessarily *landed*: a document handed over a moment ago can still
+            // be on the writer's channel.
+            let Some(outstanding) = self.writer.in_flight() else {
+                return Ok(());
+            };
+            return self.wait_for_landing(outstanding, now);
         }
-        let result = write_session_atomic(&self.session_path, &self.session);
-        if self.failures.record(result.is_ok()) == WriteAlertAction::AlertOnce
-            && let Err(error) = &result
-        {
-            // §5.3: one alert per failure streak, not one per attempt. A full
-            // disk must not turn into a message every 1.5 seconds.
-            eprintln!("BT_PERSIST could not write session.json: {error}");
-        }
-        match result {
-            Ok(()) => {
+        let bytes = bt_persist::serialize_session(&self.session).map_err(|error| {
+            let error = error.to_string();
+            self.report_write(Err(error.clone()), now);
+            error
+        })?;
+        let Some(generation) = self.writer.send(&self.session_path, bytes) else {
+            // No writer thread. This one does it, and answers for it.
+            let landed = write_session_atomic(&self.session_path, &self.session)
+                .map_err(|error| error.to_string());
+            if landed.is_ok() {
                 self.debouncer.mark_flushed();
-                Ok(())
             }
-            Err(error) => Err(error.to_string()),
+            self.report_write(landed.clone(), now);
+            return landed;
+        };
+        let landed = self.wait_for_landing(generation, now);
+        if landed.is_ok() {
+            self.debouncer.mark_flushed();
         }
+        landed
     }
 
-    /// Flush anything pending and drop this run's sentinel. Idempotent.
+    /// Stand still until one named document has an answer, and book every answer that arrives on
+    /// the way — a synchronous wait must not swallow the receipts the ordinary path was going to
+    /// read.
+    fn wait_for_landing(&mut self, generation: u64, now: Instant) -> Result<(), String> {
+        let (earlier, landed) = self.writer.wait_for(generation);
+        for receipt in earlier {
+            self.apply_receipt(receipt, now);
+        }
+        self.apply_receipt(
+            SessionWriteReceipt {
+                generation,
+                result: landed.clone(),
+            },
+            now,
+        );
+        landed
+    }
+
+    /// Flush anything pending, let the writer finish, and drop this run's sentinel. Idempotent.
+    ///
+    /// The order is the whole of it: the sentinel's absence is this run's only claim to have
+    /// exited cleanly, so it may not be removed until the document it is vouching for is on the
+    /// disk — which is why the writer is closed, and therefore joined, before the sentinel goes.
     pub fn close(&mut self) {
         self.flush();
+        self.writer.close();
         if self.armed {
             let _ = remove_sentinel(&self.sentinel_path);
             self.armed = false;
@@ -634,6 +911,172 @@ mod tests {
         assert_eq!(landed.flush_judged(), Ok(()));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Far above any honest cost of one `atomic_write`, and reached only when the answer this is
+    /// waiting for is never coming. The judgement it protects is "did that happen yet", not "has
+    /// enough time passed" — see CONVENTIONS §三.
+    const RECEIPT_CEILING: Duration = Duration::from_secs(60);
+
+    /// RED — **the autosave leaves the window thread before it is known to have landed**
+    /// (window-thread unbounded-call sweep, 2026-08-24).
+    ///
+    /// `flush_if_due` runs on the window thread, once per turn of the event loop. It used to call
+    /// `write_session_atomic` there: `File::create`, `write_all`, **`sync_all`**, `rename`, under
+    /// a `%APPDATA%` the reader is free to have redirected onto a network share or a cloud-sync
+    /// folder. An `fsync` on one of those has no bound anybody in this process can state, and a
+    /// terminal that stops answering the mouse because OneDrive was thinking is a terminal that
+    /// froze.
+    ///
+    /// The observable difference between the two designs is exactly this: **whether the verdict
+    /// is known when the call returns.** The store is pointed at a directory that does not exist,
+    /// so the write cannot succeed. Synchronously that failure was already in hand when
+    /// `flush_if_due` came back, and the document was still owed. Off-thread it cannot be: the
+    /// call returns having handed the document over and owing nothing more *this turn*, and the
+    /// failure arrives later, as a receipt, which is what puts the document back on the clock.
+    ///
+    /// Red gate: put `write_session_atomic` back into `hand_over` and the first assertion goes —
+    /// the store is already dirty again when the call returns, because the `fsync` happened on
+    /// this thread.
+    #[test]
+    fn the_autosave_hands_the_document_over_and_hears_the_verdict_later() {
+        let root = std::env::temp_dir().join(format!(
+            "bt-app-session-writer-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // Nowhere to write: no directory, so not even the atomic write's temporary sibling has a
+        // home. The real `atomic_write` refusing for a real reason, as in the quit test above.
+        let mut store = SessionStore::at(root.join("session.json"), root.join("session.lock"));
+        let mut document = SessionV1::default();
+        document
+            .windows
+            .push(bt_persist::SessionWindowV1::default());
+        let changed_at = Instant::now();
+        store.record(document, changed_at);
+        assert!(store.debouncer.is_dirty(), "a change is owed a write");
+
+        store.flush_if_due(changed_at + SESSION_DEBOUNCE);
+        assert!(
+            !store.debouncer.is_dirty(),
+            "the turn that hands the document over owes nothing more; a store that is already \
+             dirty again knows the verdict, which means the fsync happened on this thread"
+        );
+
+        // And the verdict does arrive — asked as "has it happened yet", not as "have I slept
+        // long enough", so a busy machine delivers the same answer later rather than a different
+        // one.
+        let waiting_since = Instant::now();
+        while !store.debouncer.is_dirty() {
+            assert!(
+                waiting_since.elapsed() < RECEIPT_CEILING,
+                "no receipt ever came back for a write that cannot have succeeded"
+            );
+            store.take_receipts(Instant::now());
+            std::thread::yield_now();
+        }
+
+        store.close();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// PIN — **a receipt for a document that has already been replaced answers for nothing.**
+    ///
+    /// One writer thread means the writes land in the order they were decided, so the *last*
+    /// request is the one that says what is on the disk. An older receipt arriving afterwards is
+    /// news about a document that no longer exists: letting its success mark the store clean
+    /// would be answering for bytes nobody wrote, and letting its failure mark the store dirty
+    /// would schedule a retry of something already superseded.
+    ///
+    /// Red gate: drop the generation comparison in `apply_receipt` and the stale failure below
+    /// puts a document back on the clock that a newer write has already carried.
+    #[test]
+    fn a_receipt_for_a_superseded_document_is_dropped() {
+        let root = std::env::temp_dir().join(format!(
+            "bt-app-session-stale-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&root).expect("a private directory for this test");
+        let mut store = SessionStore::at(root.join("session.json"), root.join("session.lock"));
+        // Two documents have gone out; the second is the one that speaks for the store.
+        store.writer.sent = 2;
+        let now = Instant::now();
+
+        store.apply_receipt(
+            SessionWriteReceipt {
+                generation: 1,
+                result: Err("the volume went away".to_string()),
+            },
+            now,
+        );
+        assert!(
+            !store.debouncer.is_dirty(),
+            "an older document's failure is not this document's problem"
+        );
+
+        store.apply_receipt(
+            SessionWriteReceipt {
+                generation: 2,
+                result: Err("the volume went away".to_string()),
+            },
+            now,
+        );
+        assert!(
+            store.debouncer.is_dirty(),
+            "the newest one's failure is, and it is what schedules the retry"
+        );
+
+        store.close();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// PIN — **one writer, and it is not the window thread.**
+    ///
+    /// The behavioural half above is about when a verdict is known; this is about there being
+    /// only one road to the file at all. Two roads — a thread and a window thread that sometimes
+    /// writes for itself — is two writers over one path, and the older one can land last.
+    ///
+    /// Mutation: call `write_session_atomic` from `flush_if_due` or `hand_over`'s ordinary path
+    /// and the first assertion names it.
+    #[test]
+    fn the_only_thread_that_fsyncs_session_json_is_the_writer() {
+        const SOURCE: &str = include_str!("persist.rs");
+        let body = |head: &str| -> &'static str {
+            let start = SOURCE
+                .find(head)
+                .unwrap_or_else(|| panic!("`{head}` is declared as written here"))
+                + head.len();
+            &SOURCE[start..start + SOURCE[start..].find("\n    }\n").expect("a method ends")]
+        };
+        assert!(
+            !body("\n    pub fn flush_if_due(&mut self, now: Instant) {").contains("atomic"),
+            "the turn-by-turn autosave does not touch a disk"
+        );
+        // Split so this test's own text is not one of the matches it counts.
+        let raw = ["bt_persist::atomic_", "write("].concat();
+        assert_eq!(
+            SOURCE.matches(raw.as_str()).count(),
+            1,
+            "the raw atomic write appears once, inside the writer thread's loop"
+        );
+        assert!(
+            SOURCE
+                .find(raw.as_str())
+                .is_some_and(|at| SOURCE[..at].contains("ThreadPriority::BelowNormal")),
+            "and that one is downstream of the spawn that puts it on its own thread"
+        );
+        // The two window-thread fallbacks are the ones with no thread to hand to, plus the
+        // `SettingsStore` and friends, which are a human's click rather than a per-turn autosave.
+        assert_eq!(
+            body("\n    fn hand_over(&mut self, now: Instant) {")
+                .matches("write_session_atomic(")
+                .count(),
+            1,
+            "`hand_over` writes here only when there is no writer thread to write for it"
+        );
     }
 
     /// A private `%APPDATA%` for one test, with nothing of the real one in it.

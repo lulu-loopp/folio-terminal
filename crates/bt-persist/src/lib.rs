@@ -185,12 +185,24 @@ pub fn write_pins_atomic(path: &Path, pins: &PinsV1) -> Result<(), WriteError> {
     atomic_write(path, &bytes)
 }
 
-/// Serializes `session` and writes it to `path` via [`atomic_write`].
+/// The document as bytes, without touching a disk.
+///
+/// **Split out of [`write_session_atomic`] because the two halves belong to two threads.**
+/// Deciding what the session *is* reads the whole window tree and has to happen where that tree
+/// lives; putting the bytes on a disk is an `fsync` under a `%APPDATA%` that may be redirected
+/// onto a network share or a cloud-sync folder, and has no business on the thread a message pump
+/// runs on. `bt-app`'s `SessionStore` calls this one on the window thread and hands the result to
+/// its writer.
+///
 /// Pretty-printed, same rationale as [`write_settings_atomic`].
-pub fn write_session_atomic(path: &Path, session: &SessionV1) -> Result<(), WriteError> {
-    let bytes = serde_json::to_vec_pretty(session).map_err(|source| WriteError::Serialize {
+pub fn serialize_session(session: &SessionV1) -> Result<Vec<u8>, WriteError> {
+    serde_json::to_vec_pretty(session).map_err(|source| WriteError::Serialize {
         what: "SessionV1",
         source,
-    })?;
-    atomic_write(path, &bytes)
+    })
+}
+
+/// Serializes `session` and writes it to `path` via [`atomic_write`].
+pub fn write_session_atomic(path: &Path, session: &SessionV1) -> Result<(), WriteError> {
+    atomic_write(path, &serialize_session(session)?)
 }
