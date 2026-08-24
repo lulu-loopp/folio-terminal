@@ -62357,7 +62357,14 @@ impl Runtime<'_> {
         // also the one place that can say it, and it says it only when the
         // answer moved (`BT_PREVIEW_TRACE`).
         preview_trace::frame(preview_trace::global(), echo, renderer.preview_text_frame());
-        if matches!(outcome, PresentOutcome::Presented(_)) {
+        // A textless present is still a present: an image went to the swapchain,
+        // so the composition tree has to publish it or the glass keeps showing a
+        // picture the swapchain no longer holds. What that frame *owes* is a
+        // different question, and it is answered by the callers below.
+        if matches!(
+            outcome,
+            PresentOutcome::Presented(_) | PresentOutcome::PresentedWithoutText(_)
+        ) {
             compositor
                 .commit()
                 .map_err(|error| anyhow!(error))
@@ -62480,7 +62487,14 @@ impl Runtime<'_> {
             // The swapchain was not ready. The picture is unchanged and still
             // owed, so the debt is simply re-filed — there is no frame to put
             // back in the slot, which is the whole point of this path.
-            PresentOutcome::Skipped | PresentOutcome::Reconfigure => {
+            //
+            // A frame that reached the glass without its characters is owed for
+            // the same reason and re-filed the same way: what is on the glass is
+            // not the picture this window means to be showing, and the atlas the
+            // renderer trimmed on its way out has room for it next time.
+            PresentOutcome::PresentedWithoutText(_)
+            | PresentOutcome::Skipped
+            | PresentOutcome::Reconfigure => {
                 self.window.chrome_present_pending = true;
                 self.window.window.request_redraw();
                 Ok(())
@@ -62717,7 +62731,16 @@ impl Runtime<'_> {
                 }
                 self.pending_resize_present = None;
             }
-            PresentOutcome::Skipped | PresentOutcome::Reconfigure => {
+            // The frame is still owed, so it goes back in the slot and the
+            // window asks for another turn. `PresentedWithoutText` joins the two
+            // swapchain refusals here rather than the arm above it: a picture
+            // that lost its characters is not the picture that was composed, and
+            // recording it as presented would leave `presented_picture_revision`
+            // claiming the glass holds a frame it does not — which is the licence
+            // the animation path reads before answering a tick from the screen.
+            PresentOutcome::PresentedWithoutText(_)
+            | PresentOutcome::Skipped
+            | PresentOutcome::Reconfigure => {
                 self.window
                     .pending_frames
                     .publish(frame, trigger)
@@ -64392,6 +64415,75 @@ mod quit_transaction_tests {
         ));
         assert_eq!(one.tabs.len(), 1);
         let _: &TabV1 = &one.tabs[0];
+    }
+}
+
+/// What a window does with a frame that reached the glass without its
+/// characters — `bt-render`'s [`PresentOutcome::PresentedWithoutText`].
+#[cfg(test)]
+mod textless_present_tests {
+    /// This file as text, for [`application_change_tests::SOURCE`]'s reason:
+    /// what is under test is which *arm* a variant lands in, and a
+    /// `WindowRuntime` is a surface, a compositor and four Win32 bridges.
+    const SOURCE: &str = include_str!("main.rs");
+
+    fn fn_body(name: &str) -> &'static str {
+        let head = format!("\n    fn {name}(");
+        let start = SOURCE
+            .find(&head)
+            .unwrap_or_else(|| panic!("`fn {name}` is declared as a method"))
+            + head.len();
+        let end = start
+            + SOURCE[start..]
+                .find("\n    }\n")
+                .expect("a method is closed by a `}` at its `impl`'s indentation");
+        &SOURCE[start..end]
+    }
+
+    /// PIN — **a picture that lost its characters is re-filed and asked for
+    /// again, not recorded as delivered.**
+    ///
+    /// The shared glyph atlas can refuse one more raster, and when it does the
+    /// renderer keeps the terminal alive by presenting the theme, the cell
+    /// backgrounds and the procedural box-drawing with no glyphs on them. Its
+    /// recovery is "the next frame has room" — the atlas is trimmed on the way
+    /// out of every frame — and until this arm existed the next frame was
+    /// nobody's job: a pane that was quiet, which is what a TUI sitting at its
+    /// prompt is, kept the textless picture until something unrelated forced a
+    /// redraw. That is the whole difference between a flicker and a window a
+    /// person photographs.
+    ///
+    /// It must also *not* land in the `Presented` arm, which would set
+    /// `presented_picture_revision` to the content revision and licence the
+    /// animation path to answer the next tick from a glass that is missing the
+    /// text.
+    ///
+    /// Mutation: group `PresentedWithoutText` with `Presented` in either method.
+    #[test]
+    fn a_textless_present_is_a_frame_the_window_still_owes() {
+        for method in ["redraw", "present_retained_picture"] {
+            let body = fn_body(method);
+            let owed = body
+                .find("PresentOutcome::PresentedWithoutText(_)")
+                .unwrap_or_else(|| panic!("`{method}` must name the textless outcome"));
+            let paid = body
+                .find("PresentOutcome::Presented(_)")
+                .or_else(|| body.find("PresentOutcome::Presented(receipt)"))
+                .unwrap_or_else(|| panic!("`{method}` must name the presented outcome"));
+            assert!(
+                owed > paid,
+                "`{method}` put the textless outcome in the delivered arm"
+            );
+            let arm = &body[owed..];
+            let retry = arm
+                .find("request_redraw()")
+                .expect("the textless arm must ask for another frame");
+            let next_arm = arm.find("\n            }\n").unwrap_or(arm.len());
+            assert!(
+                retry < next_arm,
+                "`{method}` asks for the retry outside the textless arm"
+            );
+        }
     }
 }
 
