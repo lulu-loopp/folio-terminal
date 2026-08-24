@@ -4,8 +4,6 @@ const CSI: &[u8] = b"\x1b[";
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
 const BRACKETED_PASTE_END: &str = "\x1b[201~";
 
-pub(crate) const PASTE_WRITE_CHUNK_BYTES: usize = 16 * 1024;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MouseProtocolButton {
     Left,

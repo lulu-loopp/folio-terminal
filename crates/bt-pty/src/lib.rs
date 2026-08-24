@@ -55,6 +55,12 @@ pub fn conpty_source() -> ConPtySource {
 
 /// DESIGN.md §1.3: each session has exactly one MiB of buffered PTY output.
 pub const PTY_RING_BYTES: NonZeroUsize = NonZeroUsize::new(1024 * 1024).unwrap();
+/// How much input may pile up behind a child that has stopped reading it — the input side's half
+/// of the same capacity contract (DESIGN.md §1.3). One MiB, the output ring's figure, because the
+/// question it answers is the same one: how far may this window run ahead of a child before the
+/// honest answer is "it is not listening". See [`InputRing`] for what the ceiling does and does
+/// not bound — a single write is never refused for its size alone.
+pub const PTY_INPUT_RING_BYTES: NonZeroUsize = NonZeroUsize::new(1024 * 1024).unwrap();
 /// Matches the serialized Term actor quantum from DESIGN.md §1.3.
 pub const TERM_READ_QUANTUM: NonZeroUsize = NonZeroUsize::new(256 * 1024).unwrap();
 /// VT input translated by ConPTY to the shell integration's Ctrl+Alt+Shift+F12 resize-anchor chord.
@@ -572,6 +578,16 @@ pub enum PtyError {
     Io(#[from] std::io::Error),
     #[error("PTY output ring was closed")]
     RingClosed,
+    /// The child is not reading its standard input and the ceiling is reached. **Not the
+    /// window's error**: see [`PtySession::write`].
+    #[error(
+        "the shell has not read {queued} queued bytes of input (ceiling {capacity}), so {offered} more were refused"
+    )]
+    InputRefused {
+        offered: usize,
+        queued: usize,
+        capacity: usize,
+    },
     #[error("PTY backend reported a zero cell dimension")]
     ZeroBackendDimension,
     #[error("PTY reader thread panicked")]
@@ -723,13 +739,155 @@ impl OutputRing {
 
 pub type OutputWake = Arc<dyn Fn() + Send + Sync + 'static>;
 
-/// One shell process, one ConPTY, and one bounded reader thread.
+#[derive(Default)]
+struct InputState {
+    writes: VecDeque<Vec<u8>>,
+    bytes: usize,
+    maximum_bytes: usize,
+    refused_writes: u64,
+    closed: bool,
+}
+
+/// What a caller can read back about the input side without holding its lock open.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InputRingStats {
+    pub capacity: usize,
+    /// Bytes handed over and not yet written to the pipe.
+    pub current_bytes: usize,
+    pub maximum_bytes: usize,
+    /// How many writes have been refused for want of room. Non-zero means a child stopped
+    /// reading its own standard input.
+    pub refused_writes: u64,
+    pub closed: bool,
+}
+
+/// Bytes on their way to a child, bounded, with nobody waiting on a pipe.
+///
+/// **The mirror image of [`OutputRing`], and it has to be one.** The output side blocks its
+/// *reader thread* on a full ring, which is the backpressure DESIGN §1.3 asks for. The input side
+/// had no thread at all: `PtySession::write` was a `write_all` + `flush` straight onto the ConPTY
+/// input pipe, called from the window thread by every keystroke, mouse report, IME commit,
+/// terminal reply and paste. A pipe write blocks when the pipe is full, and the pipe is full when
+/// conhost is not draining it — which is exactly the state a flooding pane puts conhost in, since
+/// conhost's own input pump and its output writer contend for one console lock and our reader is
+/// asleep on a full `OutputRing` waiting for the window thread that is now asleep on this write.
+/// That is not a slow write; it is a cycle, and it has no bound at all.
+///
+/// So the bound lives here and the waiting lives on a thread of its own:
+///
+/// - **A write is never split and never partly taken.** [`PtyError::InputRefused`] means zero
+///   bytes went, so a caller always knows what the child did not hear.
+/// - **Room for one, a ceiling for the rest.** A write is taken when the queue is empty whatever
+///   its size, or when it fits under [`PTY_INPUT_RING_BYTES`]. One paste is one write and one
+///   gesture the reader asked for, so it goes whole however large the clipboard was; what the
+///   ceiling bounds is *accumulation* — a program answering its own `CSI 6 n` storm while
+///   refusing to read the replies cannot grow this without end.
+/// - **Nobody waits here.** [`Self::take`] is the writer thread's blocking end;
+///   [`Self::try_push`] is the window thread's and returns in the time of one lock.
+struct InputRing {
+    capacity: NonZeroUsize,
+    state: Mutex<InputState>,
+    changed: Condvar,
+}
+
+impl InputRing {
+    fn new(capacity: NonZeroUsize) -> Self {
+        Self {
+            capacity,
+            state: Mutex::new(InputState::default()),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn state(&self) -> MutexGuard<'_, InputState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Hand over one write. Returns without waiting for anything but this ring's own lock.
+    fn try_push(&self, bytes: &[u8]) -> Result<(), PtyError> {
+        let mut state = self.state();
+        if state.closed {
+            return Err(PtyError::RingClosed);
+        }
+        if state.bytes > 0 && state.bytes + bytes.len() > self.capacity.get() {
+            state.refused_writes += 1;
+            return Err(PtyError::InputRefused {
+                offered: bytes.len(),
+                queued: state.bytes,
+                capacity: self.capacity.get(),
+            });
+        }
+        state.bytes += bytes.len();
+        state.maximum_bytes = state.maximum_bytes.max(state.bytes);
+        state.writes.push_back(bytes.to_vec());
+        self.changed.notify_all();
+        Ok(())
+    }
+
+    /// The writer thread's end: the next write, or `None` once the session is shutting down.
+    ///
+    /// A close discards whatever is still queued rather than draining it, and that is the honest
+    /// reading of the only thing that closes this: [`PtySession::shutdown`], which is about to
+    /// kill the child. Input for a process that will not exist is not owed delivery.
+    fn take(&self) -> Option<Vec<u8>> {
+        let mut state = self.state();
+        loop {
+            if state.closed {
+                return None;
+            }
+            if let Some(write) = state.writes.pop_front() {
+                state.bytes -= write.len();
+                self.changed.notify_all();
+                return Some(write);
+            }
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    fn close(&self) {
+        let mut state = self.state();
+        state.closed = true;
+        self.changed.notify_all();
+    }
+
+    fn stats(&self) -> InputRingStats {
+        let state = self.state();
+        InputRingStats {
+            capacity: self.capacity.get(),
+            current_bytes: state.bytes,
+            maximum_bytes: state.maximum_bytes,
+            refused_writes: state.refused_writes,
+            closed: state.closed,
+        }
+    }
+}
+
+/// Carry queued writes onto the pipe, and block here rather than on the window's thread.
+///
+/// A failed write ends the thread. There is nothing else honest to do with it: the pipe is gone,
+/// so every byte after it would fail the same way, and the child's death is already on its way to
+/// the window through `try_wait` and through the reader thread's end of the output ring.
+fn pump_pty_input(writer: &mut dyn Write, input: &InputRing) {
+    while let Some(bytes) = input.take() {
+        if writer.write_all(&bytes).is_err() || writer.flush().is_err() {
+            break;
+        }
+    }
+}
+
+/// One shell process, one ConPTY, and one bounded thread at each end of it.
 pub struct PtySession {
     master: Option<Box<dyn MasterPty + Send>>,
-    writer: Option<Box<dyn Write + Send>>,
     child: Option<Box<dyn Child + Send + Sync>>,
     output: Arc<OutputRing>,
+    input: Arc<InputRing>,
     reader: Option<JoinHandle<()>>,
+    writer: Option<JoinHandle<()>>,
     conpty_source: ConPtySource,
     /// Shared with the reader thread so `resize` can interleave `# RESIZE` markers with chunks.
     dump: Option<Arc<Mutex<PtyDump>>>,
@@ -958,7 +1116,7 @@ impl PtySession {
         }
         let child = pair.slave.spawn_command(builder).map_err(backend)?;
         drop(pair.slave);
-        let writer = pair.master.take_writer().map_err(backend)?;
+        let mut writer = pair.master.take_writer().map_err(backend)?;
         let mut reader = pair.master.try_clone_reader().map_err(backend)?;
         let output = Arc::new(OutputRing::new(PTY_RING_BYTES));
         let reader_output = Arc::clone(&output);
@@ -968,23 +1126,45 @@ impl PtySession {
             reader_output.close();
             wake();
         });
+        let input = Arc::new(InputRing::new(PTY_INPUT_RING_BYTES));
+        let writer_input = Arc::clone(&input);
+        // The thread that is allowed to block on the pipe, because it is not the thread the
+        // message pump lives on. See [`InputRing`].
+        let writer_thread = std::thread::spawn(move || {
+            pump_pty_input(writer.as_mut(), &writer_input);
+        });
         Ok(Self {
             master: Some(pair.master),
-            writer: Some(writer),
             child: Some(child),
             output,
+            input,
             reader: Some(reader_thread),
+            writer: Some(writer_thread),
             conpty_source,
             dump,
             shell_fallback: None,
         })
     }
 
-    pub fn write(&mut self, bytes: &[u8]) -> Result<(), PtyError> {
-        let writer = self.writer.as_mut().ok_or(PtyError::RingClosed)?;
-        writer.write_all(bytes)?;
-        writer.flush()?;
-        Ok(())
+    /// Hand one write to this session's child. **Returns in the time of one lock**, whatever the
+    /// child is doing with its standard input — see [`InputRing`] for why that is a correctness
+    /// property of the window and not a nicety.
+    ///
+    /// `&self` rather than `&mut self`, and the change is honest rather than cosmetic: there is
+    /// no longer any per-session writer state a caller could race, only a queue with a lock
+    /// around it.
+    /// An `Err` here is one of two different sentences and a caller has to know which: a broken
+    /// or shut pipe is this window's problem, while [`PtyError::InputRefused`] is a fact about
+    /// the **child** — it stopped reading its standard input and a ceiling's worth of ours is
+    /// already waiting. Ending the process over the second would be answering a wedged shell by
+    /// taking every other pane down with it.
+    pub fn write(&self, bytes: &[u8]) -> Result<(), PtyError> {
+        self.input.try_push(bytes)
+    }
+
+    /// What is queued for the child and how close it is to the ceiling.
+    pub fn input_stats(&self) -> InputRingStats {
+        self.input.stats()
     }
 
     pub fn resize(&self, size: PtySize) -> Result<(), PtyError> {
@@ -1043,6 +1223,17 @@ impl PtySession {
     }
 
     pub fn shutdown(&mut self) -> Result<Option<ExitStatus>, PtyError> {
+        // Closing the input ring releases the writer thread: it discards whatever is still queued
+        // and drops the pipe handle on its way out, which is exactly what taking the writer used
+        // to do here, done by the thread that now owns it.
+        //
+        // **Detached and not joined, and that is this ticket's own rule kept.** The writer can be
+        // standing inside a `WriteFile` on a pipe conhost is not draining — the very state this
+        // whole change exists because of — and a `join` here would put that unbounded wait back
+        // on the window thread at the one moment a window is least able to afford it. It ends on
+        // its own: the write fails the moment the pseudoconsole below is torn down, and an idle
+        // one is already awake and leaving on the `close`.
+        self.input.close();
         self.writer.take();
         let status = if let Some(mut child) = self.child.take() {
             if let Some(status) = child.try_wait()? {
@@ -2127,6 +2318,162 @@ mod tests {
         producer.join().unwrap();
         assert_eq!(ring.stats().maximum_bytes, 4);
         assert_eq!(ring.stats().blocked_pushes, 1);
+    }
+
+    /// RED — **the window's thread hands input over; it never waits for a child to take it**
+    /// (window-thread unbounded-call sweep, 2026-08-24).
+    ///
+    /// The mirror of the test above, and the asymmetry it repairs is the defect.
+    /// [`OutputRing::push`] blocks — on the *reader thread*, which is what makes it backpressure.
+    /// The input side had no thread of its own at all: `PtySession::write` was a `write_all` +
+    /// `flush` onto the ConPTY input pipe, called from the window thread by every keystroke,
+    /// paste, mouse report and terminal reply, and a pipe write blocks when nobody is draining
+    /// the pipe. Worse than slow: our reader sleeps on a full `OutputRing` waiting for the
+    /// window thread to drain it, conhost's input pump waits on the console lock its output
+    /// writer is holding while blocked on our output pipe, and the window thread waits here.
+    /// That is a cycle with no bound in it.
+    ///
+    /// Nothing takes from this ring, which is the one condition under which a blocking
+    /// implementation could not return. Red gate: replace the refusal in `InputRing::try_push`
+    /// with the condvar `wait` that [`OutputRing::push`] uses and the push never comes back —
+    /// the receive below expires and this says so with the ring's own numbers.
+    #[test]
+    fn a_write_returns_to_the_caller_even_though_nothing_is_taking_it() {
+        // Small enough to reach the ceiling in a handful of writes; the ceiling's *value* is a
+        // capacity contract and not what this is about.
+        let ring = Arc::new(InputRing::new(NonZeroUsize::new(16).unwrap()));
+        let caller_ring = Arc::clone(&ring);
+        let (done_tx, done_rx) = mpsc::channel();
+        // On a thread of its own only so that a blocking implementation fails this test instead
+        // of hanging it; the claim is about the caller, whichever thread the caller is.
+        let caller = std::thread::spawn(move || {
+            for _ in 0..4 {
+                done_tx
+                    .send(caller_ring.try_push(&[0_u8; 4]).map_err(|e| e.to_string()))
+                    .unwrap();
+            }
+            // The fifth would pass the ceiling with sixteen bytes already queued.
+            done_tx
+                .send(caller_ring.try_push(&[0_u8; 4]).map_err(|e| e.to_string()))
+                .unwrap();
+        });
+        for write in 0..4 {
+            assert_eq!(
+                done_rx.recv_timeout(PROBE_CEILING),
+                Ok(Ok(())),
+                "write {write} into a ring nobody is draining did not come back"
+            );
+        }
+        let refused = done_rx
+            .recv_timeout(PROBE_CEILING)
+            .expect("the refused write has to come back too — that is the whole property");
+        assert_eq!(
+            refused,
+            Err(PtyError::InputRefused {
+                offered: 4,
+                queued: 16,
+                capacity: 16,
+            }
+            .to_string()),
+            "and it says exactly what did not go"
+        );
+        caller.join().unwrap();
+        let stats = ring.stats();
+        assert_eq!(stats.current_bytes, 16, "four writes are queued whole");
+        assert_eq!(stats.refused_writes, 1);
+    }
+
+    /// **Room for one, a ceiling for the rest** — the rule that keeps a paste honest.
+    ///
+    /// A ceiling alone would refuse a clipboard larger than it, which is a paste silently cut in
+    /// half at a byte the reader never chose. A single write is therefore never refused for its
+    /// size: what the ceiling bounds is *accumulation*, which is the thing that can grow without
+    /// a human asking — a program answering its own `CSI 6 n` storm while refusing to read the
+    /// replies.
+    ///
+    /// Red gate: drop the `state.bytes > 0` guard and the oversized write is refused; drop the
+    /// ceiling and the second one is taken.
+    #[test]
+    fn one_write_is_never_refused_for_its_size_and_a_second_one_is() {
+        let ring = InputRing::new(NonZeroUsize::new(16).unwrap());
+        let clipboard = vec![7_u8; 1024];
+        assert!(
+            ring.try_push(&clipboard).is_ok(),
+            "a paste larger than the ceiling is still one thing the reader asked for"
+        );
+        assert_eq!(ring.stats().current_bytes, 1024);
+        assert!(
+            matches!(ring.try_push(b"x"), Err(PtyError::InputRefused { .. })),
+            "and what it costs is that nothing else is taken until it drains"
+        );
+        assert_eq!(ring.take(), Some(clipboard), "the write comes back whole");
+        assert_eq!(ring.stats().current_bytes, 0);
+        assert!(ring.try_push(b"x").is_ok(), "and the door opens again");
+    }
+
+    /// A closed ring is a session on its way out: it stops taking, and it releases the thread
+    /// that is waiting on it rather than making it drain what a dying child will never read.
+    #[test]
+    fn closing_the_input_ring_releases_its_thread_and_refuses_what_comes_after() {
+        let ring = Arc::new(InputRing::new(NonZeroUsize::new(64).unwrap()));
+        ring.try_push(b"never delivered").unwrap();
+        let waiting = Arc::clone(&ring);
+        let (took_tx, took_rx) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            // The first take finds the queued write; the second waits, and the close is what
+            // ends it.
+            took_tx.send(waiting.take()).unwrap();
+            took_tx.send(waiting.take()).unwrap();
+        });
+        assert_eq!(
+            took_rx.recv_timeout(PROBE_CEILING).unwrap(),
+            Some(b"never delivered".to_vec())
+        );
+        ring.close();
+        assert_eq!(
+            took_rx.recv_timeout(PROBE_CEILING).unwrap(),
+            None,
+            "a close is what wakes the writer thread, or a shutdown waits on it forever"
+        );
+        thread.join().unwrap();
+        assert!(matches!(ring.try_push(b"x"), Err(PtyError::RingClosed)));
+    }
+
+    /// PIN — **`PtySession::write` does not touch the pipe.**
+    ///
+    /// The behavioural tests above are about a ring; this is about the one line that decides
+    /// whether the window thread ever meets a pipe at all. There is exactly one `write_all` in
+    /// this crate's PTY path and it is inside the writer thread's own loop.
+    ///
+    /// Mutation: put a `write_all` back in `PtySession::write` and both halves go.
+    #[test]
+    fn the_only_thread_that_meets_the_pipe_is_the_writer_thread() {
+        const SOURCE: &str = include_str!("lib.rs");
+        let head = "\n    pub fn write(&self, bytes: &[u8]) -> Result<(), PtyError> {";
+        let start = SOURCE
+            .find(head)
+            .expect("`PtySession::write` takes `&self` and answers a `PtyError`")
+            + head.len();
+        let body = &SOURCE[start..start + SOURCE[start..].find("\n    }\n").unwrap()];
+        for pipe in ["write_all", "flush"] {
+            assert!(
+                !body.contains(pipe),
+                "`{pipe}` on the window's thread is the wait this whole change exists to move"
+            );
+        }
+        assert!(
+            body.contains("input.try_push"),
+            "it hands the bytes to the bounded ring and returns"
+        );
+        let thread_body = {
+            let head = "\nfn pump_pty_input(writer: &mut dyn Write, input: &InputRing) {";
+            let start = SOURCE.find(head).expect("the writer thread's loop") + head.len();
+            &SOURCE[start..start + SOURCE[start..].find("\n}\n").unwrap()]
+        };
+        assert!(
+            thread_body.contains("write_all") && thread_body.contains("flush"),
+            "and the pipe is met there, on a thread no message pump is waiting on"
+        );
     }
 
     #[test]
