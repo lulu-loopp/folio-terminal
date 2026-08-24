@@ -9510,7 +9510,7 @@ fn linear_channel_to_srgb(linear: f64) -> f64 {
 /// # Who asks, and why it cannot ask for anything simpler
 ///
 /// The floor under a web pane (`bt_platform::Compositor::set_page_ground_color`,
-/// §7.7 ⑤). That floor is a DirectComposition surface in a **`_UNORM`** format,
+/// §7.14). That floor is a DirectComposition surface in a **`_UNORM`** format,
 /// so whatever is written into it is what composites; the swapchain beside it is
 /// **`_UNORM_SRGB`**, so what composites there is `srgb(linear(c) · a)` — wgpu
 /// encodes the clear value once, on the way in. The two are the same window and

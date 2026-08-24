@@ -224,7 +224,7 @@ impl VisualLayer {
 /// — which puts it *above* its ground — as putting it at the bottom again.
 ///
 /// One caller: `Compositor::attach_web_visual`, where a page has to land on the
-/// floor built for it in the same breath (§7.7 ⑤).
+/// floor built for it in the same breath (§7.14).
 pub const INSERT_ABOVE_REFERENCE: bool = true;
 
 /// **The four switches a locally minted page is hosted behind** (W2 slice 5;
@@ -337,7 +337,7 @@ mod visual_layer_tests {
     /// the product's one web `AddVisual` is the call the photograph was taken
     /// of.
     ///
-    /// **Re-judged 2026-08-24 (§7.7 ⑤).** The page is no longer added at the
+    /// **Re-judged 2026-08-24 (§7.14).** The page is no longer added at the
     /// beginning of the child list; it is added *directly above the floor built
     /// for it in the same call*, which is a stronger statement of the same
     /// stacking — the floor is at the beginning of the list, the page is the
@@ -392,7 +392,7 @@ mod visual_layer_tests {
     }
 
     /// **The floor is placed by the call that places the page, and taken out by
-    /// the call that takes the page out** (§7.7 ⑤; user ruling 2026-08-24).
+    /// the call that takes the page out** (§7.14; user ruling 2026-08-24).
     ///
     /// The defect this slice fixes is *two rectangles disagreeing*: Folio stops
     /// painting a pane on the frame the pane moves, and the browser underneath
@@ -1587,7 +1587,7 @@ mod windows_impl {
             if self.web.borrow().contains_key(&page) {
                 return Ok(());
             }
-            // **The floor goes down before the page does** (§7.7 ⑤). It is a
+            // **The floor goes down before the page does** (§7.14). It is a
             // sibling at the very bottom and the page is inserted *above it by
             // name* rather than at the beginning of the list again, so the two
             // cannot be ordered by the accident of which call ran last.

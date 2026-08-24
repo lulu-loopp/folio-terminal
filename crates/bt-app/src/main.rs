@@ -31813,7 +31813,7 @@ impl Runtime<'_> {
         // drawn from that statement, not from anything in this process's frame.
         self.apply_window_dark_mode()?;
         install_theme_class_background(&self.window.window)?;
-        // **And the floor under every page in this window** (§7.7 ⑤). Beside
+        // **And the floor under every page in this window** (§7.14). Beside
         // the class brush and not somewhere else, because the two answer the
         // same question about the same ground for two different surfaces —
         // what a resize band shows, and what a web pane shows where the browser
@@ -68693,7 +68693,7 @@ mod background_mailbox_tests {
 }
 
 /// **Tell one window's compositor what colour the floor under its pages is**
-/// (§7.7 ⑤; user ruling 2026-08-24).
+/// (§7.14; user ruling 2026-08-24).
 ///
 /// [`install_theme_class_background`]'s opposite number, and every door that
 /// calls one calls the other: the class brush answers "what does a resize band
