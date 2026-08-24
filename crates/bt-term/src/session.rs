@@ -12502,6 +12502,102 @@ mod tests {
         assert!(session.transcript().frozen().len() >= 3);
     }
 
+    /// RED (user report 2026-08-24, activity line) — **a pane obeying its line
+    /// capacity exactly could still eat gigabytes**, and this is that pane driven
+    /// from the bytes rather than from the store's own API.
+    ///
+    /// `for(;;){ [Console]::Out.WriteLine('x'*4000) }` in an 80-column pane wraps
+    /// each line across 50 physical rows which the capture path rejoins into one
+    /// logical line of 20,232 bytes. A hundred thousand of those is 1.88 GiB, which
+    /// is what the reader measured. The ceiling arrives first now, and it arrives
+    /// through the road every other eviction takes: the ids reach
+    /// [`DualPlaneSession::delete_history`] in the ordinary pending channel, so the
+    /// document tombstones them and everything anchored to them retires with them.
+    ///
+    /// Red run with the byte arm of `enforce_frozen_limits` removed:
+    /// `lines_kept=599 resident=12471180 budget=2048000`. Green: `lines_kept=98
+    /// resident=2040360 budget=2048000`, and `document_entries` tracks
+    /// `lines_kept` exactly in both, which is the point of routing the ids through
+    /// the pending channel instead of dropping them.
+    #[test]
+    fn a_wide_line_flood_from_the_pty_stays_under_the_pane_byte_ceiling() {
+        const LINE_QUOTA: usize = 1_000;
+        const LINES: usize = 600;
+        const WIDTH: usize = 4_000;
+
+        let mut session = DualPlaneSession::with_frozen_quota(
+            nz(80),
+            nz(4),
+            NonZeroUsize::new(LINE_QUOTA).unwrap(),
+        );
+        let mut bytes = Vec::with_capacity(LINES * (WIDTH + 2));
+        for _ in 0..LINES {
+            bytes.extend(std::iter::repeat_n(b'x', WIDTH));
+            bytes.extend_from_slice(b"\r\n");
+        }
+        session.feed(&bytes).unwrap();
+
+        let transcript = session.transcript();
+        let budget = transcript.frozen_byte_budget();
+        let resident = transcript.frozen_bytes();
+        let kept = transcript.frozen().len();
+        eprintln!(
+            "PTY_WIDE_FLOOD lines_fed={LINES} lines_kept={kept} resident={resident} \
+             budget={budget} document_entries={}",
+            session.document.entries().len()
+        );
+
+        assert!(
+            resident <= budget,
+            "an 80-column pane held {resident} bytes of frozen history against a {budget} \
+             byte ceiling"
+        );
+        assert!(
+            kept < LINES,
+            "the ceiling has to have bound: {kept} of {LINES} wide lines survived"
+        );
+
+        // The newest line still arrived, and the oldest left through the ordinary
+        // deletion road rather than by being dropped on the floor.
+        let oldest = session
+            .transcript()
+            .frozen()
+            .front()
+            .expect("history is not empty")
+            .id;
+        for id in (1..oldest.0).map(TranscriptId) {
+            assert!(
+                !session.document.entries().contains_key(&id),
+                "evicted history line {id:?} is still in the document"
+            );
+            assert!(
+                session.document.tombstones().contains(&id),
+                "evicted history line {id:?} was deleted without a tombstone, so an anchor \
+                 into it dangles instead of degrading"
+            );
+        }
+        // And new output is still admitted on top of a full pane: the ceiling
+        // evicts, it does not stop accepting.
+        let newest = session
+            .transcript()
+            .frozen()
+            .back()
+            .expect("history is not empty")
+            .id;
+        session.feed(b"tail\r\ntail\r\ntail\r\ntail\r\n").unwrap();
+        let after = session
+            .transcript()
+            .frozen()
+            .back()
+            .expect("history is not empty");
+        assert!(
+            after.id > newest,
+            "a pane at its ceiling stopped freezing new lines"
+        );
+        assert_eq!(after.text, "tail");
+        assert!(session.transcript().frozen_bytes() <= budget);
+    }
+
     #[test]
     fn finalized_line_ingest_stays_linear_without_live_handoffs() {
         let mut elapsed = Vec::new();
