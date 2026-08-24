@@ -22551,6 +22551,11 @@ impl Runtime<'_> {
         let compositor = bt_platform::Compositor::new(hwnd)
             .map_err(|error| anyhow!(error))
             .context("open the window's DirectComposition visual tree")?;
+        // The floor's colour is settled with the tree and not with the first
+        // page: a page can be born at launch (`BT_WEB_DEV`, a restored session),
+        // and a floor that learned its colour only from the *next* theme flip
+        // would be black under the first one.
+        install_page_ground_color(&compositor);
         let (mut gpu, mut renderer) = pollster::block_on(GpuContext::open(
             bt_render::WindowTarget::CompositionVisual(compositor.gpu_visual_ptr()),
             physical.width,
@@ -23079,6 +23084,9 @@ impl Runtime<'_> {
         let compositor = bt_platform::Compositor::new(hwnd)
             .map_err(|error| anyhow!(error))
             .context("open the window's DirectComposition visual tree")?;
+        // Beside the first window's, and for its reason: a second window can be
+        // opened straight onto a page (`Move pane to new window` on a web seat).
+        install_page_ground_color(&compositor);
         // **This application's device, not a second one** (§2.2). The surface is
         // created by the instance that created the device and its format is
         // asked of the same adapter, which is the whole of the sharing contract;
@@ -31679,6 +31687,14 @@ impl Runtime<'_> {
         // drawn from that statement, not from anything in this process's frame.
         self.apply_window_dark_mode()?;
         install_theme_class_background(&self.window.window)?;
+        // **And the floor under every page in this window** (§7.7 ⑤). Beside
+        // the class brush and not somewhere else, because the two answer the
+        // same question about the same ground for two different surfaces —
+        // what a resize band shows, and what a web pane shows where the browser
+        // has not caught up. Splitting them is how one of the pair gets left
+        // behind on a theme flip, which is the whole reason the brush's own
+        // hot-swap was written here in §7.1.6c-4b.
+        install_page_ground_color(&self.window.compositor);
         self.sync_math_layout_key();
         // The one thing a rail's key cannot see. A palette is not a fact about a
         // pane, so [`cmdrail::RailKey`] does not carry one — which means a rail
@@ -68547,6 +68563,33 @@ mod background_mailbox_tests {
         assert!(mailbox.take_current().is_none());
         mailbox.withdraw();
         assert!(mailbox.take_current().is_none());
+    }
+}
+
+/// **Tell one window's compositor what colour the floor under its pages is**
+/// (§7.7 ⑤; user ruling 2026-08-24).
+///
+/// [`install_theme_class_background`]'s opposite number, and every door that
+/// calls one calls the other: the class brush answers "what does a resize band
+/// show", this answers "what does a web pane show where the page has not
+/// reached yet", and both answers are the same ground.
+///
+/// The colour comes from [`bt_render::window_ground_premultiplied_srgb`] and is
+/// never computed here, because the arithmetic that turns a scheme's background
+/// and a ground alpha into the bytes a surface holds belongs to the renderer
+/// that already owns both — a second copy of it in this file is a second thing
+/// to keep in step with the clear.
+///
+/// **Failure is reported and not propagated.** A window whose floor could not be
+/// painted is a window that draws exactly what it drew before this slice, which
+/// is a defect and not a reason to refuse a theme change; and the two callers
+/// are a window opening and a person pressing a combo, neither of which has
+/// anywhere to put the error.
+fn install_page_ground_color(compositor: &bt_platform::Compositor) {
+    if let Err(error) =
+        compositor.set_page_ground_color(bt_render::window_ground_premultiplied_srgb())
+    {
+        eprintln!("BT_WEB page ground colour: {error}");
     }
 }
 

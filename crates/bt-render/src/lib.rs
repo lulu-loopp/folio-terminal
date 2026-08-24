@@ -9489,6 +9489,57 @@ fn srgb_channel_to_linear(channel: u8) -> f64 {
     }
 }
 
+/// [`srgb_channel_to_linear`] run backwards, in `0.0..=1.0` on both sides.
+///
+/// Exists for one caller — [`window_ground_premultiplied_srgb`] — and for the
+/// reason that caller states: everything else in this renderer hands wgpu a
+/// *linear* number and lets the sRGB surface format encode it exactly once, so
+/// this is the only place the encode has to be done by hand.
+fn linear_channel_to_srgb(linear: f64) -> f64 {
+    let linear = linear.clamp(0.0, 1.0);
+    if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// **The window's ground as the bytes the swapchain actually leaves** —
+/// premultiplied, sRGB-encoded, `0.0..=1.0` per channel.
+///
+/// # Who asks, and why it cannot ask for anything simpler
+///
+/// The floor under a web pane (`bt_platform::Compositor::set_page_ground_color`,
+/// §7.7 ⑤). That floor is a DirectComposition surface in a **`_UNORM`** format,
+/// so whatever is written into it is what composites; the swapchain beside it is
+/// **`_UNORM_SRGB`**, so what composites there is `srgb(linear(c) · a)` — wgpu
+/// encodes the clear value once, on the way in. The two are the same window and
+/// have to be the same colour, and `c · a` in sRGB is *not* that colour: at 60%
+/// on a `#1E1E1E` ground the naive product is off by nine 1/255ths, which reads
+/// as a pane a shade lighter than the window it is in.
+///
+/// The alpha is not encoded, because alpha is not a colour: sRGB is a transfer
+/// curve for light and an sRGB surface stores its alpha channel linearly, which
+/// is the same reason `premultiplied_clear` multiplies three numbers and copies
+/// the fourth.
+///
+/// One function rather than a value on a struct, because it is a *reading* of
+/// the same two process-wide facts `theme_clear_color` reads — the scheme's
+/// default background and [`WindowGround::alpha`] — and a copy kept anywhere
+/// would be a copy that could be stale across a theme flip.
+#[must_use]
+pub fn window_ground_premultiplied_srgb() -> [f32; 4] {
+    let alpha = ground::window_ground().alpha.clamp(0.0, 1.0);
+    let premultiplied =
+        ground::premultiplied_clear(srgb_rgb_to_linear(default_background()), alpha);
+    [
+        linear_channel_to_srgb(premultiplied.r) as f32,
+        linear_channel_to_srgb(premultiplied.g) as f32,
+        linear_channel_to_srgb(premultiplied.b) as f32,
+        alpha,
+    ]
+}
+
 fn create_rect_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
@@ -13226,6 +13277,113 @@ mod tests {
             translucent,
             "and so does the ground a refused picture leaves behind"
         );
+    }
+
+    /// PIN (§7.7 ⑤; user ruling 2026-08-24) — **the floor under a web pane is
+    /// the same colour as the window it is in, and the encode is what makes it
+    /// so.**
+    ///
+    /// The swapchain is `Bgra8UnormSrgb`: wgpu takes the clear in linear light
+    /// and encodes it once on the way in, so the byte that ends up on the glass
+    /// is `srgb(linear(c) · a)`. The floor is a DirectComposition surface in a
+    /// plain `_UNORM` format, so the byte that ends up on the glass there is
+    /// whatever was written. Only one of the two conversions is a no-op, and
+    /// getting that wrong does not fail — it draws a pane a shade off the window
+    /// around it, which is exactly the kind of defect that survives a review and
+    /// gets reported from a real machine.
+    ///
+    /// Red gate ①: multiply in sRGB (`c/255 · a`) instead of encoding the
+    /// premultiplied linear value. At 60% over `#1E1E1E` the two differ by more
+    /// than three 1/255ths, which the second assertion refuses.
+    ///
+    /// Red gate ②: encode the alpha with the colours. An sRGB surface stores
+    /// alpha linearly — that is why `premultiplied_clear` multiplies three
+    /// numbers and copies the fourth — and the third assertion is that this
+    /// function copies it too.
+    #[test]
+    fn a_web_panes_floor_carries_the_windows_own_ground_encoded_the_way_the_swapchain_encodes_it() {
+        let _lock = THEME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreGround(window_ground());
+
+        // Opaque: the floor is the scheme's background and nothing else, to the
+        // byte. This is the case every acceptance shot in the product is taken
+        // in, so it is the one that may not drift by a single 1/255th.
+        let _ = set_window_ground(WindowGround::opaque());
+        let opaque = window_ground_premultiplied_srgb();
+        let background = default_background();
+        assert!((opaque[3] - 1.0).abs() < 1e-6);
+        for (channel, byte) in opaque.iter().zip(background) {
+            let as_byte = (channel * 255.0).round() as u8;
+            assert_eq!(
+                as_byte, byte,
+                "an opaque floor is the scheme's own background: {opaque:?} against {background:?}"
+            );
+        }
+
+        // Translucent: premultiplied in **linear** light and then encoded, which
+        // is strictly lighter than the naive sRGB product for every channel a
+        // dark theme has.
+        let _ = set_window_ground(WindowGround {
+            alpha: 0.6,
+            ..WindowGround::opaque()
+        });
+        let floor = window_ground_premultiplied_srgb();
+        assert!(
+            (floor[3] - 0.6).abs() < 1e-6,
+            "alpha is copied, never encoded"
+        );
+        let clear = theme_clear_color();
+        for (index, channel) in floor.iter().take(3).enumerate() {
+            let from_the_clear = linear_channel_to_srgb([clear.r, clear.g, clear.b][index]) as f32;
+            assert!(
+                (channel - from_the_clear).abs() < 1e-6,
+                "the floor and the clear are one colour said twice: {floor:?} against {clear:?}"
+            );
+        }
+        let naive = f32::from(background[0]) / 255.0 * 0.6;
+        assert_ne!(
+            (floor[0] * 255.0).round() as u8,
+            (naive * 255.0).round() as u8,
+            "multiplying in sRGB lands on a different byte, and this test \
+             exists because it is close enough to look right: {} against \
+             {naive} — {} 1/255ths apart",
+            floor[0],
+            (floor[0] - naive).abs() * 255.0
+        );
+
+        // And a ground with a picture on it answers the same as one without,
+        // for `theme_clear_color`'s reason one test up: a floor is the colour
+        // under the picture, and the picture is not painted on the floor.
+        let _ = set_window_ground(WindowGround {
+            alpha: 0.6,
+            image: Some(std::sync::Arc::new(BackgroundImage {
+                key: "image:floor".to_owned(),
+                rgba: std::sync::Arc::from(vec![255_u8, 0, 0, 255]),
+                width_px: 1,
+                height_px: 1,
+            })),
+            ..WindowGround::opaque()
+        });
+        assert_eq!(window_ground_premultiplied_srgb(), floor);
+    }
+
+    /// PIN — the sRGB transfer curve and its inverse are actually inverses.
+    ///
+    /// One assertion over the whole byte range rather than three spot checks,
+    /// because the two halves of a transfer curve meet at a threshold and a
+    /// wrong constant on either side of it is invisible in the middle.
+    #[test]
+    fn the_srgb_encode_undoes_the_srgb_decode() {
+        for byte in 0..=255_u8 {
+            let round_trip = linear_channel_to_srgb(srgb_channel_to_linear(byte));
+            assert!(
+                ((round_trip * 255.0).round() as u8) == byte,
+                "{byte} came back as {}",
+                round_trip * 255.0
+            );
+        }
     }
 
     /// PIN — the ground quad is the whole surface, six vertices, one opacity and
