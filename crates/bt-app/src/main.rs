@@ -53011,7 +53011,19 @@ impl Runtime<'_> {
         // pointer has left the window is a button claiming to be under a
         // pointer that is not there.
         let settings_hover_cleared = self.window.settings.set_hover(None);
-        if (self.window.seat_pointer.hover.take().is_some() || settings_hover_cleared)
+        // **And the pane the hand was standing in, not only the control it was
+        // on** (user report with two screenshots, 2026-08-24). The two are
+        // separate channels on purpose — [`seats::ChromePointer::pane_hover`]
+        // says why — and every pane head's hover run hangs off the second: the
+        // `×`, the `⌄` and the folder on a terminal head, and on a page's head
+        // the rule, `</>`, the pop-out and the lock. Taking `hover` alone left
+        // that whole run lit over a window nobody was pointing at, which is the
+        // very sentence the three comments above this one refuse for the `×`.
+        // It is loudest during a **resize**: the border being dragged is
+        // non-client, so the hand has left for the length of the gesture, and
+        // the run therefore looked as though it came and went with the window's
+        // width. One door clears both, so they cannot drift apart again.
+        if (self.window.seat_pointer.left_the_window() || settings_hover_cleared)
             && self.refresh_chrome()
         {
             self.present_chrome_change()?;
@@ -92621,6 +92633,74 @@ mod tests {
                 "both `⌄` answer a departure with the same verb at the same instant"
             );
         }
+    }
+
+    /// PIN (**a hand that has left the window is in no pane**) — user report
+    /// with two screenshots, 2026-08-24.
+    ///
+    /// The head's hover run — the rule, `</>`, the pop-out, the lock, the `×`,
+    /// and on a terminal head the `⌄` and the folder beside it — is drawn off
+    /// `seat_pointer.pane_hover`, which is a *different* fact from
+    /// `seat_pointer.hover`: the first is which pane the pointer is in, the
+    /// second is which control it is on. [`Self::pointer_left`] cleared only the
+    /// second, so every one of those marks stayed lit over a window the hand had
+    /// left — and the hand leaves on every window resize, because the border it
+    /// is dragging is non-client. That is what made the run look as though it
+    /// came and went with the window's *width*: it was stuck on from the last
+    /// hover for the whole drag, and gone again the moment the pointer came back
+    /// down somewhere else.
+    ///
+    /// `docs/DESIGN.md` §7.1.6/§7.7 state the ladder the same way for both
+    /// heads — 「pane 没被指着就一枚都不画」 — and three comments inside
+    /// `pointer_left` itself already refuse exactly this for the controls that
+    /// hang off `hover`: "a `×` still lit after the pointer has left the window
+    /// is a button claiming to be under a pointer that is not there".
+    ///
+    /// The wiring is read as **text** for `both_pointer_doors_tell_the_chevron_
+    /// clocks_where_the_hand_is`' reason and only that reason: what went wrong
+    /// is a door that does not say something, and no painter can be driven into
+    /// a state nobody ever puts it in. What the door leaves behind is then
+    /// asserted against the type itself.
+    ///
+    /// Red gate: drop the `left_the_window` call from `pointer_left` — or let it
+    /// go back to clearing `hover` alone — and this fails by name. What the
+    /// cleared state then means at the painter is `seats`' own
+    /// `the_three_buttons_do_not_fade_with_the_pane_and_the_tools_do` and
+    /// `the_rule_fades_in_with_the_group_it_introduces`, driven there directly.
+    #[test]
+    fn a_pointer_that_has_left_the_window_is_standing_in_no_pane() {
+        const SOURCE: &str = include_str!("main.rs");
+        let body = |signature: &str| -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        };
+        assert!(
+            body("    fn pointer_left(").contains("self.window.seat_pointer.left_the_window()"),
+            "the leave door drops the control the pointer was on AND the pane it \
+             was standing in, through the one function that owns both — without \
+             the second, every head's hover run stays lit over a window the hand \
+             has left, which is what a window resize does on every drag of its \
+             own border"
+        );
+        // The state that reaches the painter, asserted against the type rather
+        // than against the text: a departure leaves neither fact behind.
+        let mut pointer = seats::ChromePointer {
+            hover: Some(seats::ChromeTarget::PaneClose(SeatId(1))),
+            pane_hover: Some(SeatId(1)),
+            ..seats::ChromePointer::default()
+        };
+        assert!(
+            pointer.left_the_window(),
+            "something was lit and is not now"
+        );
+        assert_eq!((pointer.hover, pointer.pane_hover), (None, None));
+        assert!(
+            !pointer.left_the_window(),
+            "and a second departure changes no picture"
+        );
     }
 
     /// PIN (**the card column reaches the peek's one predicate, and only it**) —
