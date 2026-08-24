@@ -95,7 +95,7 @@ use bt_persist::{
     SessionTabLayoutV1, SessionThemeV1, SessionV1, SessionWindowV1, TabV1, TermLeafV1, ThemeModeV1,
     WindowBoundsV1, WindowStateV1,
 };
-use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtySession, PtySize};
+use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtyError, PtySession, PtySize};
 use bt_render::{
     ChromePalette, CursorStyle, FrameSource, FrameTrigger, GpuContext, GridSize, ImeCursorArea,
     LatestFrameSlot, MathHit, MathHitTarget, PREVIEW_BODY_INSET_LOGICAL_PX, PeekImageOverlay,
@@ -9936,6 +9936,39 @@ fn take_psreadline_resize_reanchor_input(
     std::mem::take(pending)
         .then(|| psreadline_resize_repaint_input(shell_input_region_open))
         .flatten()
+}
+
+/// **The one door every byte this window sends a child goes through** (window-thread
+/// unbounded-call sweep, 2026-08-24).
+///
+/// Every caller of this is on the window thread — a keystroke, a mouse report, an IME commit, a
+/// terminal reply the program asked for, a paste, the PSReadLine anchor chord. Until this
+/// existed each of them reached `PtySession::write` on its own, and that call was a `write_all`
+/// straight onto the ConPTY input pipe: it blocks when the pipe is full, and the pipe is full
+/// exactly when conhost has stopped draining it, which is the state a flooding pane puts conhost
+/// in. `bt_pty::InputRing` is where that wait went and why; what belongs here is the other half
+/// of the contract — **what a window does about a child that has stopped listening.**
+///
+/// Not an error, and the distinction is the whole reason this is a function. A refusal is a fact
+/// about one shell; `?`-ing it out of a keystroke handler would reach `App::fail` and end a
+/// process holding every other pane in the window. So it is said and the window carries on, with
+/// the numbers in the line, because a shell sitting on a megabyte of unread input is a thing the
+/// reader may want to know about the shell rather than a thing to be silent about.
+///
+/// A leaf with no child at all (`BT_PROBE_INPUT`, a restored pane whose shell is gone) is not a
+/// refusal and not an error: there is nowhere for the bytes to go and never was.
+fn write_pty_input(pty: Option<&PtySession>, bytes: &[u8], what: &'static str) -> Result<()> {
+    let Some(pty) = pty else {
+        return Ok(());
+    };
+    match pty.write(bytes) {
+        Ok(()) => Ok(()),
+        Err(refused @ PtyError::InputRefused { .. }) => {
+            eprintln!("{what}: {refused}");
+            Ok(())
+        }
+        Err(error) => Err(anyhow::Error::new(error).context(what)),
+    }
 }
 
 /// What one released resize actually moved, so the window can decide what it owes the screen.
@@ -21776,11 +21809,11 @@ fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<DrainOutcome> {
             .feed_at(&bytes, Instant::now())
             .context("apply PTY output")?;
         for reply in leaf.session.take_pty_writes() {
-            leaf.pty
-                .as_mut()
-                .expect("PTY mode checked above")
-                .write(&reply)
-                .context("return terminal protocol reply to PTY")?;
+            write_pty_input(
+                leaf.pty.as_ref(),
+                &reply,
+                "return terminal protocol reply to PTY",
+            )?;
         }
         changed = true;
     }
@@ -21798,11 +21831,11 @@ fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<DrainOutcome> {
     // a child that has said nothing — so the reply channel is drained once more
     // outside the read above, which only feeds when the child speaks.
     for reply in leaf.session.take_pty_writes() {
-        leaf.pty
-            .as_mut()
-            .expect("PTY mode checked above")
-            .write(&reply)
-            .context("return terminal protocol reply to PTY")?;
+        write_pty_input(
+            leaf.pty.as_ref(),
+            &reply,
+            "return terminal protocol reply to PTY",
+        )?;
     }
     // The one place a shell is heard to speak. Every leaf of every tab passes
     // through here on every turn of the loop, which is what lets a pane nobody
@@ -47987,12 +48020,12 @@ impl Runtime<'_> {
             projection,
             ..
         } = self.window.tabs[active].shell_mut();
-        paste_text(session, projection, &text, |chunk| {
-            if let Some(pty) = pty.as_mut() {
-                pty.write(chunk)
-                    .context("write an inserted files row path to PTY")?;
-            }
-            Ok(())
+        paste_text(session, projection, &text, |bytes| {
+            write_pty_input(
+                pty.as_ref(),
+                bytes,
+                "write an inserted files row path to PTY",
+            )
         })?;
         self.pending_keyboard_at = Some(Instant::now());
         self.publish_frame(FrameTrigger {
@@ -52356,10 +52389,12 @@ impl Runtime<'_> {
                 if let Some(reanchor_input) = take_psreadline_resize_reanchor_input(
                     &mut leaf.pending_psreadline_resize_reanchor,
                     shell_input_region_open,
-                ) && let Some(pty) = leaf.pty.as_mut()
-                {
-                    pty.write(reanchor_input)
-                        .context("request PSReadLine anchor repair after resize quiescence")?;
+                ) {
+                    write_pty_input(
+                        leaf.pty.as_ref(),
+                        reanchor_input,
+                        "request PSReadLine anchor repair after resize quiescence",
+                    )?;
                 }
                 active_finished |= index == active;
             }
@@ -53657,14 +53692,11 @@ impl Runtime<'_> {
         }
         self.pending_keyboard_at = Some(Instant::now());
         let active = self.window.active_tab;
-        if let Some(pty) = self.window.tabs[active]
+        let pty = self.window.tabs[active]
             .sessions
-            .get_mut(&seat)
-            .and_then(|leaf| leaf.pty.as_mut())
-        {
-            pty.write(bytes).with_context(|| context)?;
-        }
-        Ok(())
+            .get(&seat)
+            .and_then(|leaf| leaf.pty.as_ref());
+        write_pty_input(pty, bytes, context)
     }
 
     fn send_user_input(
@@ -53686,9 +53718,11 @@ impl Runtime<'_> {
         // has no business arriving, written as a `flatten` rather than an
         // `expect` because "nothing was typed into" is a real outcome and a
         // panic is not.
-        if let Some(pty) = self.focused_mut().and_then(|leaf| leaf.pty.as_mut()) {
-            pty.write(bytes).with_context(|| context)?;
-        }
+        write_pty_input(
+            self.focused().and_then(|leaf| leaf.pty.as_ref()),
+            bytes,
+            context,
+        )?;
         if view_changed {
             self.publish_frame(FrameTrigger {
                 occurred_at: self.pending_keyboard_at.unwrap_or_else(Instant::now),
@@ -61045,12 +61079,7 @@ impl Runtime<'_> {
                         .context("read clipboard text")
                 })
             },
-            |chunk| {
-                if let Some(pty) = pty.as_mut() {
-                    pty.write(chunk).context("write clipboard paste to PTY")?;
-                }
-                Ok(())
-            },
+            |bytes| write_pty_input(pty.as_ref(), bytes, "write clipboard paste to PTY"),
         )? {
             return Ok(());
         }
@@ -61187,10 +61216,11 @@ impl Runtime<'_> {
                 self.pending_keyboard_at = Some(Instant::now());
                 // IMM32 also emits this commit when focus/layout changes mid-composition. M0-beta
                 // deliberately accepts it exactly like Windows Terminal: every commit reaches PTY.
-                if let Some(pty) = self.focused_mut().and_then(|leaf| leaf.pty.as_mut()) {
-                    pty.write(&ime_commit_bytes(&text))
-                        .context("write IME UTF-8 commit to PTY")?;
-                }
+                write_pty_input(
+                    self.focused().and_then(|leaf| leaf.pty.as_ref()),
+                    &ime_commit_bytes(&text),
+                    "write IME UTF-8 commit to PTY",
+                )?;
                 self.publish_frame(FrameTrigger {
                     occurred_at: Instant::now(),
                     source: FrameSource::Keyboard,
@@ -65064,6 +65094,44 @@ mod pty_drain_budget_tests {
         );
     }
 
+    /// PIN — **every byte this window sends a child goes through one door, and that door does
+    /// not end the process over a shell that stopped listening.**
+    ///
+    /// `bt_pty::InputRing` is where the unbounded wait was moved to and why. What has to hold on
+    /// this side is the other half: a refusal is a fact about one shell, and every window-thread
+    /// caller — keystroke, mouse report, IME commit, terminal reply, paste, the PSReadLine
+    /// anchor chord — reaches the pipe through the one function that knows that. A caller that
+    /// `?`s a refusal out of a key handler reaches `App::fail` and takes every other pane in the
+    /// window down with it.
+    ///
+    /// Mutation: call `PtySession::write` from anywhere else in the product and the count moves.
+    #[test]
+    fn the_window_thread_sends_a_child_bytes_through_exactly_one_door() {
+        let door = ["write_pty_", "input"].concat();
+        let body = free_fn_body(&door);
+        let refusal = body
+            .find("PtyError::InputRefused")
+            .expect("the door is the place that knows what a refusal is");
+        let answer = body[refusal..]
+            .find("Ok(())")
+            .expect("and it answers a refusal with the window carrying on");
+        assert!(
+            !body[refusal..refusal + answer].contains("return Err"),
+            "a refusal turned back into an `Err` reaches `App::fail` and ends the process over \
+             one wedged shell"
+        );
+        // Every other `.write(` in this file is a test's, a clipboard's, or a `writeln!`; what
+        // this counts is the product's calls onto a `PtySession`.
+        let product = &SOURCE[..SOURCE
+            .find("\n#[cfg(test)]\nmod tests {")
+            .expect("this file's big test module")];
+        assert_eq!(
+            product.matches(&["pty.", "write("].concat()).count(),
+            1,
+            "one door in the product, and it is inside `write_pty_input`"
+        );
+    }
+
     /// PIN — **no path reaches ConPTY with a rectangle except through the quiet window.**
     ///
     /// The behavioural half lives in
@@ -67365,7 +67433,7 @@ fn paste_from_clipboard(
     session: &mut DualPlaneSession,
     projection: &mut ViewportProjection,
     read: impl FnOnce() -> Result<String>,
-    write: impl FnMut(&[u8]) -> Result<()>,
+    write: impl FnOnce(&[u8]) -> Result<()>,
 ) -> Result<bool> {
     let Some(text) = recoverable_clipboard_read(read()) else {
         return Ok(false);
@@ -67380,25 +67448,29 @@ fn paste_from_clipboard(
 /// tree's `Insert path into terminal` (K144) is a paste in every respect that
 /// matters to the shell and to the view — the selection goes, the view returns
 /// to the bottom, the bytes are bracketed if the shell asked for bracketing, and
-/// they go down the one synchronous writer in chunks so ConPTY can push back.
+/// they go down the one door onto the child's input.
 /// The only thing that differs is where the string came from, which is the one
 /// thing this function does not ask.
+///
+/// **One write, whatever the clipboard held.** This used to hand the bytes over in 16 KiB
+/// chunks, and the reason it gave was true at the time: the write was synchronous, so chunking
+/// it was how ConPTY's backpressure reached us a piece at a time instead of as one unbounded
+/// call. The wait now lives on `bt_pty`'s writer thread, which makes chunking here strictly
+/// worse — a paste split into sixty pieces is sixty chances for the child to stop reading
+/// *between* them, and `bt_pty::InputRing` only promises a whole write, never a partial one. As
+/// one write it either reaches the shell entire or is refused entire, which is the only pair of
+/// outcomes a pasted command line can survive.
 fn paste_text(
     session: &mut DualPlaneSession,
     projection: &mut ViewportProjection,
     text: &str,
-    mut write: impl FnMut(&[u8]) -> Result<()>,
+    write: impl FnOnce(&[u8]) -> Result<()>,
 ) -> Result<()> {
     let bytes = input::paste_bytes(text, session.bracketed_paste_mode());
     session.set_view_selection(None);
     projection.set_selection(None);
     projection.scroll_to_bottom();
-    // Keep paste on the sole synchronous PTY writer. Fixed-size writes let ConPTY's existing
-    // write_all/flush path apply backpressure instead of one unbounded call.
-    for chunk in bytes.chunks(input::PASTE_WRITE_CHUNK_BYTES) {
-        write(chunk)?;
-    }
-    Ok(())
+    write(&bytes)
 }
 
 fn recoverable_clipboard_read(result: Result<String>) -> Option<String> {
