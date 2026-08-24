@@ -12,6 +12,43 @@ pub const DEFAULT_STAGING_QUOTA: NonZeroUsize = NonZeroUsize::new(4096).unwrap()
 /// Spike-only value; M0 must replace it with a measured or configured quota.
 pub const SPIKE_DEFAULT_FROZEN_QUOTA: NonZeroUsize = NonZeroUsize::new(100_000).unwrap();
 
+/// How many bytes of pane memory one line of the reader's chosen capacity buys
+/// (`docs/DESIGN.md` §1.3, §7.1.6g ③).
+///
+/// **The reader's unit stays lines.** `Scrollback` on the Terminal page counts
+/// lines, `settings.json` stores lines, and nothing here adds a knob. This is the
+/// engineering ceiling standing behind that answer: `frozen_quota × this` is the
+/// most frozen history one pane may hold, and when a pane's lines are wide enough
+/// that the ceiling arrives first, [`TranscriptStore`] evicts from the oldest end
+/// through the same road a line-count overflow already takes.
+///
+/// **The number is the published ladder times a margin, not a taste.** §7.1.6g
+/// costed one 80-column frozen line and read the ladder off it — 25,000 through
+/// 200,000 lines is "about 14 MB to 112 MB a pane". This build measures that same
+/// line at 632 bytes (`the_shape_of_a_frozen_line_is_measured_not_remembered`), so
+/// 2,048 is **3.2x** the shape the ladder was costed on, and the whole ladder sits
+/// under the ceiling it derives: what a pane may hold runs 48 MiB to 391 MiB while
+/// what §7.1.6g promises runs 15 MB to 126 MB.
+///
+/// The margin is spent on the things a plain ASCII line has none of. Measured on
+/// this build: a coloured, hyperlinked 80-column line costs 1,260 bytes, and the
+/// heaviest 80-column shape there is — a new colour every fourth column, 20 style
+/// runs — costs 2,000. So an ordinary pane still gets every line its capacity
+/// promised, and the ceiling only overtakes the reader's number when the *average*
+/// logical line passes ~363 columns of filled plain text. A history that averages
+/// that for 100,000 consecutive lines is a flood, not a session.
+///
+/// **A `StyleSpan` that grows re-opens this number**, which is why the test
+/// asserts the 2,000 rather than describing it: at 72 bytes a span, twenty of them
+/// are most of the ceiling, and the arithmetic has to be re-derived rather than
+/// remembered the next time that struct gains a field.
+///
+/// What it stops is the shape the ladder never costed: a program printing 4,000
+/// characters to a line joins 50 physical rows into one logical line of 20,232
+/// bytes, and 100,000 of those is 1.88 GiB in a single pane. Under this ceiling
+/// the same flood settles at 195 MiB, roughly 10,100 lines deep.
+pub const FROZEN_BYTES_PER_LINE: usize = 2048;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperlinkRange {
     pub byte_start: usize,
@@ -707,6 +744,47 @@ pub struct FrozenLine {
     pub wrap_split: bool,
 }
 
+impl FrozenLine {
+    /// Everything this line costs the process: its own struct plus every
+    /// allocation hanging off it.
+    ///
+    /// `capacity`, not `len`, because a pane's working set is what the allocator
+    /// is holding and not what the line would need if it were rebuilt. The copy
+    /// [`TranscriptStore`] keeps is a clone, and cloning a `Vec`/`String`
+    /// allocates exactly its length, so for the stored line the two agree — but a
+    /// caller measuring a line it built itself gets the truth about that line.
+    ///
+    /// It is the arithmetic the byte ceiling is made of, so it must count the
+    /// parts that actually grow with a line's width: `text`, and the u32 per
+    /// grapheme boundary that shadows it. On a 4,000-column line those two are
+    /// 4,000 and 16,004 bytes, which is why such a line costs 32x an 80-column
+    /// one rather than the 50x its text alone would suggest.
+    #[must_use]
+    pub fn resident_bytes(&self) -> usize {
+        let hyperlink_bytes = |link: &Option<CellHyperlink>| {
+            link.as_ref().map_or(0, |link| {
+                link.uri.capacity() + link.id.as_ref().map_or(0, String::capacity)
+            })
+        };
+        std::mem::size_of::<Self>()
+            + self.text.capacity()
+            + self.grapheme_boundaries.capacity() * std::mem::size_of::<u32>()
+            + self.styles.capacity() * std::mem::size_of::<StyleSpan>()
+            + self
+                .styles
+                .iter()
+                .map(|span| hyperlink_bytes(&span.hyperlink))
+                .sum::<usize>()
+            + self.fragments.capacity() * std::mem::size_of::<PhysicalFragment>()
+            + self.shell_marks.capacity() * std::mem::size_of::<(u32, String)>()
+            + self
+                .shell_marks
+                .iter()
+                .map(|(_, mark)| mark.capacity())
+                .sum::<usize>()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StagedRow {
     pub id: StagingId,
@@ -755,6 +833,10 @@ pub struct TranscriptStore {
     /// next resize/output operation returns the whole batch to vendor reflow first.
     resize_staging: Vec<StagedRow>,
     frozen: VecDeque<FrozenLine>,
+    /// Running sum of [`FrozenLine::resident_bytes`] over `frozen`, maintained at
+    /// every push and pop so the ceiling never has to walk history to ask how big
+    /// it is.
+    frozen_bytes: usize,
     tombstones: Vec<TranscriptId>,
     pending_evictions: Vec<TranscriptId>,
 }
@@ -781,6 +863,7 @@ impl TranscriptStore {
             staging: VecDeque::new(),
             resize_staging: Vec::new(),
             frozen: VecDeque::new(),
+            frozen_bytes: 0,
             tombstones: Vec::new(),
             pending_evictions: Vec::new(),
         }
@@ -793,6 +876,26 @@ impl TranscriptStore {
     /// How many frozen logical lines this store will hold.
     pub fn frozen_quota(&self) -> usize {
         self.frozen_quota
+    }
+
+    /// What the frozen history in this store currently costs the process.
+    ///
+    /// A running sum, not a walk: it is asked once per frozen line and the answer
+    /// has to be free at that rate.
+    #[must_use]
+    pub fn frozen_bytes(&self) -> usize {
+        self.frozen_bytes
+    }
+
+    /// The most memory this store's frozen history may hold — the reader's line
+    /// capacity read as a memory budget (`FROZEN_BYTES_PER_LINE`).
+    ///
+    /// **It is derived, never stored.** There is no second setting and no second
+    /// source of truth: move `Scrollback` and the ceiling moves with it in the same
+    /// call, which is why [`Self::set_frozen_quota`] needs no ceiling argument.
+    #[must_use]
+    pub fn frozen_byte_budget(&self) -> usize {
+        self.frozen_quota.saturating_mul(FROZEN_BYTES_PER_LINE)
     }
 
     /// Name a new frozen capacity and hand back the lines it costs, oldest first.
@@ -815,11 +918,7 @@ impl TranscriptStore {
     /// inside a `capture` the caller only learns about afterwards.
     pub fn set_frozen_quota(&mut self, quota: NonZeroUsize) -> Vec<TranscriptId> {
         self.frozen_quota = quota.get();
-        let overflow = self.frozen.len().saturating_sub(self.frozen_quota);
-        if overflow == 0 {
-            return Vec::new();
-        }
-        self.evict_oldest(overflow)
+        self.enforce_frozen_limits()
     }
     pub fn frozen(&self) -> &VecDeque<FrozenLine> {
         &self.frozen
@@ -1017,6 +1116,7 @@ impl TranscriptStore {
         let mut removed = Vec::new();
         for _ in 0..count {
             if let Some(line) = self.frozen.pop_front() {
+                self.frozen_bytes = self.frozen_bytes.saturating_sub(line.resident_bytes());
                 removed.push(line.id);
                 self.tombstones.push(line.id);
             }
@@ -1034,6 +1134,7 @@ impl TranscriptStore {
             .drain(..)
             .map(|line| line.id)
             .collect::<Vec<_>>();
+        self.frozen_bytes = 0;
         self.staging.clear();
         self.staging_rows = 0;
         self.resize_staging.clear();
@@ -1059,12 +1160,67 @@ impl TranscriptStore {
         self.next_transcript += 1;
         let (line, mappings) = normalize(id, self.source_generation, candidate.rows, wrap_split);
         self.frozen.push_back(line.clone());
-        let overflow = self.frozen.len().saturating_sub(self.frozen_quota);
-        if overflow != 0 {
-            let removed = self.evict_oldest(overflow);
-            self.pending_evictions.extend(removed);
-        }
+        // The stored copy, not the one handed back: cloning a `Vec`/`String` sizes
+        // the allocation to its length, so the store's line is the cheaper of the
+        // two and it is the one the process is holding.
+        self.frozen_bytes += self
+            .frozen
+            .back()
+            .expect("the line was pushed immediately above")
+            .resident_bytes();
+        let removed = self.enforce_frozen_limits();
+        self.pending_evictions.extend(removed);
         FinalizedLine { line, mappings }
+    }
+
+    /// Bring frozen history back inside **both** of its limits, oldest first.
+    ///
+    /// The reader named a number of lines; [`FROZEN_BYTES_PER_LINE`] turns that
+    /// same number into the memory it may cost. Whichever arrives first is the one
+    /// that binds, and neither is a second eviction mechanism: both count how many
+    /// lines have to go and then hand that one number to [`Self::evict_oldest`], so
+    /// the tombstones, the single source-generation bump, and everything
+    /// `delete_history` retires downstream are character for character what a
+    /// line-count overflow has always produced.
+    ///
+    /// **The newest line is never evicted.** A capacity of N lines promises at
+    /// minimum the line just printed, so a single line wider than the whole ceiling
+    /// stays and the ceiling is exceeded — the alternative is a terminal that
+    /// forgets its own last output.
+    ///
+    /// Costed at the rate it is called: the line-count arm is a subtraction, and
+    /// the byte arm walks only the lines it is about to delete, which in steady
+    /// state is one. On a pane that is inside both limits — every ordinary pane —
+    /// it is two comparisons and a return.
+    fn enforce_frozen_limits(&mut self) -> Vec<TranscriptId> {
+        let budget = self.frozen_byte_budget();
+        let count_overflow = self.frozen.len().saturating_sub(self.frozen_quota);
+        if self.frozen_bytes <= budget {
+            // The ordinary pane, and the reason this costs nothing there: history
+            // is inside the ceiling, so the reader's line count is the only limit
+            // that has anything to say and the ceiling is one comparison.
+            return if count_overflow == 0 {
+                Vec::new()
+            } else {
+                self.evict_oldest(count_overflow)
+            };
+        }
+        let total = self.frozen.len();
+        let mut doomed = 0_usize;
+        let mut carried = self.frozen_bytes;
+        for line in &self.frozen {
+            let over_lines = doomed < count_overflow;
+            let over_bytes = carried > budget && total - doomed > 1;
+            if !over_lines && !over_bytes {
+                break;
+            }
+            carried -= line.resident_bytes();
+            doomed += 1;
+        }
+        if doomed == 0 {
+            return Vec::new();
+        }
+        self.evict_oldest(doomed)
     }
 
     fn enforce_staging_quota(&mut self) -> Vec<FinalizedLine> {
@@ -1451,6 +1607,318 @@ mod tests {
             vec!["two", "three", "four", "five"],
             "the new room is real"
         );
+    }
+
+    /// One 80-column line's cost, and the shapes that leave it behind.
+    ///
+    /// §7.1.6g read the whole `Scrollback` ladder off a single measurement — "one
+    /// 80-column frozen line occupies 588 bytes, so the ladder spans about 14 MB to
+    /// 112 MB a pane" — and then the measurement was left to drift: `CellHyperlink`
+    /// grew its OSC 8 `id`, which widened every `StyleSpan` by eight bytes. A number
+    /// a document quotes has to be a number something re-derives, so this is where
+    /// the ladder's arithmetic lives from now on.
+    ///
+    /// It also prints the shape the ladder never costed, which is the whole reason
+    /// there is a byte ceiling at all.
+    #[test]
+    fn the_shape_of_a_frozen_line_is_measured_not_remembered() {
+        fn cost(text: &str) -> usize {
+            let mut store = TranscriptStore::new(DEFAULT_STAGING_QUOTA);
+            store.capture(CapturedRow::plain(text, false));
+            store.frozen()[0].resident_bytes()
+        }
+
+        let plain_80 = cost(&"x".repeat(80));
+        let wide_4000 = cost(&"x".repeat(4_000));
+        let cjk_80 = cost(&"漢".repeat(40));
+
+        // The heaviest ordinary line there is: 80 columns changing colour every
+        // fourth one, which is about as much styling as a terminal ever paints.
+        let mut store = TranscriptStore::new(DEFAULT_STAGING_QUOTA);
+        store.capture(CapturedRow {
+            cells: (0..80_u8)
+                .map(|column| {
+                    let mut cell = CapturedCell::plain("x");
+                    cell.style.foreground = TerminalColor::Indexed(16 + column / 4);
+                    cell
+                })
+                .collect(),
+            continues: false,
+            shell_mark: None,
+        });
+        let rainbow_80 = store.frozen()[0].resident_bytes();
+
+        eprintln!(
+            "FROZEN_LINE_COST style_span={} frozen_line_struct={} plain_80={plain_80} \
+             cjk_80={cjk_80} rainbow_80={rainbow_80} wide_4000={wide_4000} \
+             ceiling_per_line={FROZEN_BYTES_PER_LINE}",
+            std::mem::size_of::<StyleSpan>(),
+            std::mem::size_of::<FrozenLine>(),
+        );
+        // Asserted, not described: twenty style spans are most of the ceiling, so
+        // a `StyleSpan` that gains a field has to re-open `FROZEN_BYTES_PER_LINE`
+        // rather than quietly shorten a rainbow pane's history.
+        assert_eq!(rainbow_80, 2_000, "the heaviest 80-column line there is");
+        assert!(
+            rainbow_80 < FROZEN_BYTES_PER_LINE,
+            "the heaviest 80-column line costs {rainbow_80}, which the ceiling would take \
+             history for"
+        );
+
+        // The ladder §7.1.6g published, re-derived rather than remembered.
+        assert_eq!(plain_80, 632, "one 80-column frozen line");
+        for (lines, megabytes) in [(25_000, 15), (100_000, 63), (200_000, 126)] {
+            assert_eq!((lines * plain_80) / 1_000_000, megabytes, "{lines} lines");
+        }
+
+        // And the shape that is not on it: joining fifty physical rows into one
+        // logical line costs its text once and a u32 per grapheme on top.
+        assert!(
+            wide_4000 > 20 * plain_80,
+            "a 4,000-column line costs {wide_4000}, only {:.1}x an 80-column one",
+            wide_4000 as f64 / plain_80 as f64
+        );
+        assert!(
+            SPIKE_DEFAULT_FROZEN_QUOTA.get() * wide_4000 > 1_500 * 1024 * 1024,
+            "the flood the ceiling exists for should still measure over 1.5 GiB a pane"
+        );
+    }
+
+    /// RED (user report 2026-08-24, activity line) — **a line quota is not a memory
+    /// bound**, and one pane can spend gigabytes obeying it exactly.
+    ///
+    /// `for(;;){ [Console]::Out.WriteLine('x'*4000) }` freezes one logical line per
+    /// fifty physical rows, each about 20 KB, and the store keeps 100,000 of them
+    /// because 100,000 is what it was told to keep. The window stayed usable (that
+    /// was the livelock, fixed separately); the memory did not stop.
+    ///
+    /// Red run, before the ceiling existed: `lines_kept=2000 of 2000
+    /// resident=40464000 budget=4096000`. Green: `lines_kept=202
+    /// resident=4086864`. The store here is scaled down 50x; the shipped
+    /// configuration is the same arithmetic — 1.88 GiB becomes 195 MiB.
+    #[test]
+    fn a_wide_line_flood_is_stopped_by_bytes_before_it_is_stopped_by_lines() {
+        const LINE_QUOTA: usize = 2_000;
+        const WIDTH: usize = 4_000;
+
+        let mut store = TranscriptStore::with_quotas(DEFAULT_STAGING_QUOTA, nz(LINE_QUOTA));
+        let wide = "x".repeat(WIDTH);
+        let mut first = None;
+        let mut last = None;
+        for _ in 0..LINE_QUOTA {
+            for finalized in store.capture(CapturedRow::plain(&wide, false)).finalized {
+                first.get_or_insert(finalized.line.id);
+                last = Some(finalized.line.id);
+            }
+        }
+        let first = first.expect("the flood froze at least one line");
+        let last = last.expect("the flood froze at least one line");
+
+        let resident = store
+            .frozen()
+            .iter()
+            .map(FrozenLine::resident_bytes)
+            .sum::<usize>();
+        eprintln!(
+            "WIDE_FLOOD lines_kept={} of {LINE_QUOTA} resident={resident} budget={}",
+            store.frozen().len(),
+            store.frozen_byte_budget()
+        );
+
+        // The ceiling holds, and it is the thing that bound: far fewer lines than
+        // the reader's number are still here.
+        assert_eq!(
+            resident,
+            store.frozen_bytes(),
+            "the running sum is the truth"
+        );
+        assert!(
+            resident <= store.frozen_byte_budget(),
+            "a pane held {resident} bytes of frozen history against a {} byte ceiling",
+            store.frozen_byte_budget()
+        );
+        assert!(
+            store.frozen().len() < LINE_QUOTA / 4,
+            "bytes must bind before lines under a wide flood, but {} of {LINE_QUOTA} lines \
+             survived",
+            store.frozen().len()
+        );
+
+        // Oldest first, newest still arriving — the same order every other eviction
+        // in this store uses.
+        assert!(
+            !store.frozen().iter().any(|line| line.id == first),
+            "the oldest line is the one that goes"
+        );
+        assert_eq!(
+            store.frozen().back().map(|line| line.id),
+            Some(last),
+            "and the newest line is still admitted"
+        );
+        assert!(
+            store.tombstones().contains(&first),
+            "a byte-evicted line leaves the same tombstone a line-evicted one does"
+        );
+    }
+
+    /// PIN — **the reader's number is still the number that binds** for a pane
+    /// printing ordinary output. A ceiling that quietly shortened everybody's
+    /// history would be a second, worse answer to a question the `Scrollback` row
+    /// already answers.
+    #[test]
+    fn an_ordinary_pane_keeps_every_line_its_capacity_promised() {
+        const LINE_QUOTA: usize = 5_000;
+
+        let mut store = TranscriptStore::with_quotas(DEFAULT_STAGING_QUOTA, nz(LINE_QUOTA));
+        // 80 columns, eight style runs and an OSC 8 target — a coloured `ls` line,
+        // which is far heavier than the plain line the ladder was costed on.
+        let mut cells = Vec::new();
+        for column in 0..80_u8 {
+            let mut cell = CapturedCell::plain("x");
+            cell.style.foreground = TerminalColor::Indexed(16 + column / 10);
+            if column < 12 {
+                cell.hyperlink = Some(CellHyperlink::implicit("https://example.test/a/b/c"));
+            }
+            cells.push(cell);
+        }
+        for _ in 0..LINE_QUOTA {
+            store.capture(CapturedRow {
+                cells: cells.clone(),
+                continues: false,
+                shell_mark: None,
+            });
+        }
+
+        eprintln!(
+            "ORDINARY_PANE lines={} resident={} budget={} per_line={}",
+            store.frozen().len(),
+            store.frozen_bytes(),
+            store.frozen_byte_budget(),
+            store.frozen_bytes() / store.frozen().len().max(1),
+        );
+        assert_eq!(
+            store.frozen().len(),
+            LINE_QUOTA,
+            "the ceiling took history from a pane of ordinary width"
+        );
+        assert!(store.take_evictions().is_empty());
+    }
+
+    /// The ceiling has to be free on the pane that never meets it, because every
+    /// pane asks it once per frozen line forever.
+    ///
+    /// Two arms measured against each other in the same window: a store at its line
+    /// quota, evicting one line per capture with the ceiling nowhere near — the
+    /// ordinary pane — versus the same work with room to spare and no eviction at
+    /// all. What the ceiling adds to the first is one comparison against a running
+    /// sum plus one `resident_bytes` walk of the line being deleted, and
+    /// `resident_bytes` is O(style runs) where `normalize` was already O(cells).
+    #[test]
+    fn the_byte_ceiling_costs_an_ordinary_pane_nothing() {
+        const LINES: usize = 100_000;
+
+        fn drive(quota: usize) -> std::time::Duration {
+            let mut store = TranscriptStore::with_quotas(DEFAULT_STAGING_QUOTA, nz(quota));
+            let row = CapturedRow::plain(
+                "cargo:rerun-if-changed=crates/bt-term/src/session.rs   ok  0.42s",
+                false,
+            );
+            let started = std::time::Instant::now();
+            for _ in 0..LINES {
+                store.capture(row.clone());
+                store.take_evictions();
+            }
+            let measured = started.elapsed();
+            assert!(store.frozen_bytes() <= store.frozen_byte_budget());
+            measured
+        }
+
+        // Warm the allocator and the branch predictor before either arm is timed.
+        drive(1_000);
+        let evicting = drive(1_000);
+        let roomy = drive(LINES + 1);
+        let overhead = evicting.as_secs_f64() / roomy.as_secs_f64();
+        eprintln!(
+            "CEILING_COST lines={LINES} at_quota={evicting:?} with_room={roomy:?} \
+             ratio={overhead:.2}"
+        );
+        assert!(
+            overhead <= 2.0,
+            "freezing at the line quota costs {overhead:.2}x freezing with room to spare \
+             ({evicting:?} vs {roomy:?}); the ceiling is supposed to be a comparison"
+        );
+    }
+
+    /// PIN — **a capacity of N lines promises the newest line unconditionally.**
+    /// One line wider than the whole ceiling is still that pane's most recent
+    /// output, and a store that answered "nothing" would be a terminal that forgets
+    /// the line it just printed.
+    #[test]
+    fn the_byte_ceiling_never_evicts_the_only_line() {
+        let mut store = TranscriptStore::with_quotas(DEFAULT_STAGING_QUOTA, nz(1));
+        let enormous = "x".repeat(FROZEN_BYTES_PER_LINE * 4);
+        store.capture(CapturedRow::plain(&enormous, false));
+
+        assert_eq!(store.frozen().len(), 1);
+        assert!(store.frozen_bytes() > store.frozen_byte_budget());
+        assert_eq!(store.frozen()[0].text.len(), enormous.len());
+    }
+
+    /// PIN — **the ceiling is derived, not stored.** `Scrollback` moves and the
+    /// ceiling moves with it in the same turn, through the same
+    /// [`TranscriptStore::set_frozen_quota`] that hands its removals back to the
+    /// caller rather than leaving them in the pending channel.
+    #[test]
+    fn retuning_the_line_capacity_retunes_the_byte_ceiling_with_it() {
+        const WIDTH: usize = 4_000;
+
+        let mut store = TranscriptStore::with_quotas(DEFAULT_STAGING_QUOTA, nz(2_000));
+        let wide = "x".repeat(WIDTH);
+        for _ in 0..400 {
+            store.capture(CapturedRow::plain(&wide, false));
+        }
+        let before = store.frozen().len();
+        assert_eq!(store.frozen_byte_budget(), 2_000 * FROZEN_BYTES_PER_LINE);
+        // The flood's own evictions are the capture path's; drain them so what is
+        // left is the retune's alone.
+        assert!(!store.take_evictions().is_empty());
+
+        let removed = store.set_frozen_quota(nz(100));
+        assert_eq!(store.frozen_byte_budget(), 100 * FROZEN_BYTES_PER_LINE);
+        assert!(
+            !removed.is_empty() && store.frozen().len() < before,
+            "a smaller capacity binds now, by bytes as well as by lines"
+        );
+        assert!(store.frozen_bytes() <= store.frozen_byte_budget());
+        assert!(
+            store.frozen().len() < 100,
+            "the new ceiling arrives before the new line count: {} lines kept for a \
+             capacity of 100",
+            store.frozen().len()
+        );
+        assert!(
+            store.take_evictions().is_empty(),
+            "a retune's removals are returned to the caller, not left pending"
+        );
+    }
+
+    /// PIN — clearing history clears the ceiling's arithmetic with it. A running
+    /// sum that survived `ESC [ 3 J` would refuse to admit lines into an empty
+    /// store.
+    #[test]
+    fn clearing_history_returns_the_byte_ledger_to_zero() {
+        let mut store = TranscriptStore::with_quotas(DEFAULT_STAGING_QUOTA, nz(8));
+        for text in ["one", "two", "three"] {
+            store.capture(CapturedRow::plain(text, false));
+        }
+        assert!(store.frozen_bytes() > 0);
+
+        store.clear_history();
+        assert_eq!(store.frozen_bytes(), 0);
+
+        store.capture(CapturedRow::plain("after", false));
+        assert_eq!(store.frozen().len(), 1);
+        assert_eq!(store.frozen_bytes(), store.frozen()[0].resident_bytes());
     }
 
     #[test]
