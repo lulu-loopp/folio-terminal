@@ -5881,6 +5881,30 @@ pub struct ChromePointer {
     pub other_drag_in_flight: bool,
 }
 
+impl ChromePointer {
+    /// **The hand has gone** — it is on no control and standing in no pane.
+    ///
+    /// Two fields and one door, because they are two answers to one departure
+    /// and clearing either alone is a lie the window then draws. The `×`, the
+    /// `⌄`, the folder, the rule, `</>`, the pop-out and the lock are every one
+    /// of them off [`Self::pane_hover`] rather than off [`Self::hover`] — that
+    /// separation is [`Self::pane_hover`]'s whole reason — so a leave that took
+    /// only the control left the entire run lit over a window nobody was
+    /// pointing at (user report with two screenshots, 2026-08-24). The hand
+    /// leaves on **every window resize**, the border being non-client, which is
+    /// what made the run look as though it came and went with the width.
+    ///
+    /// Answers whether anything was lit, so the caller repaints only when a
+    /// departure actually changed the picture. Both fields are taken before the
+    /// two answers meet: `||` would leave the second one set on every leave that
+    /// happened to be standing on a control.
+    pub fn left_the_window(&mut self) -> bool {
+        let control = self.hover.take().is_some();
+        let pane = self.pane_hover.take().is_some();
+        control || pane
+    }
+}
+
 /// Build every flat rectangle and label the chrome layer draws.
 ///
 /// Empty for a lone terminal leaf: there is no divider, no other seat, and the
@@ -33365,6 +33389,83 @@ mod tests {",
             (None, None, None, None, None),
             "no page, no navigation"
         );
+    }
+
+    /// PIN (§7.7 ②, user report with two screenshots 2026-08-24) — **a page's
+    /// head hangs its whole run off its own right edge, at every width.**
+    ///
+    /// The report was 「三钮悬在头中部离右缘很远,右侧一大段空,其余钮不见了」 next
+    /// to a second shot, a little narrower, where the run was complete and hard
+    /// against the edge. Measured, the two shots were the *same* window at the
+    /// same width and the run stood in the same place in both: what differed was
+    /// `.pane:hover`, and the empty stretch on the right of the first is the
+    /// space the geometry reserves for the marks the hover ladder was not
+    /// drawing (`docs/DESIGN.md` §7.1.5g: 「pane 没被指着就一枚都不画」).
+    ///
+    /// So what is worth pinning is the claim the report *would* have been: the
+    /// run's distance from the head's right edge is a constant, and the whole
+    /// run is seated, at every width a window can be dragged to. The name is the
+    /// one flexible child and therefore the only box that moves.
+    ///
+    /// MUTATIONS: give the run a width-dependent right edge — clamp it to a
+    /// fraction of the head, or anchor it to the title's own box instead of the
+    /// `×` — and the offsets stop agreeing across the sweep; drop any control
+    /// from the run at a large width and the second assertion names it.
+    #[test]
+    fn a_pages_head_hangs_its_whole_run_off_its_right_edge_at_every_width() {
+        // A local page: the one head that carries every optional control at
+        // once — the hand-off arrow, a page's four, and the three every pane has.
+        let tools = PreviewHeadTools {
+            browser: true,
+            ..page_tools()
+        };
+        let mut offsets: Option<Vec<f32>> = None;
+        for width in [
+            480.0_f32, 640.0, 900.0, 1_280.0, 1_600.0, 1_920.0, 2_560.0, 3_840.0,
+        ] {
+            let head = pane_head_geometry([0.0, 0.0, width, 900.0], SeatKind::Preview, 1.0);
+            let geometry = preview_head_geometry(&head, 1.0, tools);
+            let close = head.close.expect("a head this wide seats its `×`");
+            assert!(
+                width - close[2] <= SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX + 0.5,
+                "the `×` is flush against the head's own right edge at {width}px, \
+                 not floating in the middle of it"
+            );
+            let run = [
+                geometry.browser,
+                geometry.back,
+                geometry.forward,
+                geometry.reload,
+                geometry.separator,
+                geometry.devtools,
+                geometry.popout,
+                geometry.lock,
+            ];
+            let seated: Vec<f32> = run
+                .iter()
+                .enumerate()
+                .map(|(index, box_)| {
+                    let box_ =
+                        box_.unwrap_or_else(|| panic!("control {index} is seated at {width}px"));
+                    // Measured from the right edge, which is the whole claim:
+                    // the run is anchored there and not laid out from the left.
+                    width - box_[2]
+                })
+                .collect();
+            match &offsets {
+                None => offsets = Some(seated),
+                Some(first) => assert_eq!(
+                    &seated, first,
+                    "every control keeps its distance from the right edge at {width}px"
+                ),
+            }
+            // And the name is the child that gives: it is what grows with the
+            // window, which is why nothing in the run has to move.
+            assert!(
+                geometry.name[2] <= geometry.browser.expect("the arrow")[0],
+                "the name is cut short of the run, never drawn under it"
+            );
+        }
     }
 
     /// PIN (§7.7 ②) — **each of the four answers for its own rectangle.**

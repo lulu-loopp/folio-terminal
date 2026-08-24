@@ -2139,6 +2139,10 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 
 **⑬ 欠账。** ⓐ **切换器行与 Recent 行只有测试担保，没有照片**：这台机器上的中文输入法把探针注入的标点改写掉（`/` 变成 `、`），所以地址栏打不进第二个 URL，而这两张表面都要先有第二个缓冲或一次关 tab 才出得来。担保它们的是 `profiles::tests::a_recent_row_wears_its_sites_icon_where_the_session_learned_one`、`a_switcher_row_that_is_a_page_can_name_the_site_it_asks_about`，以及每一行都必经的那道替换缝的三条 marks 红测。ⓑ **同站两页各挂各图时后说话的赢**，见 ③。ⓒ **淘汰按「最近学到」而不是「最近看到」**：查询是 `&self`（每次重建 chrome 都问它），一个从那里去改自己的缓存等于一张表在被读的当中重排；64 个站点的上限下这条只可能在一个会话开过六十四台服务器之后才看得见。
 
+**⑭ 「网页头排布异常」不是排布,是那只手早就走了(用户两张截图,2026-08-24)。** 报的是「宽窗下三钮悬在头中部离右缘很远、右侧一大段空、其余钮不见了」,另一张稍窄的却全套俱在。**逐像素量过两张图:同一扇窗、同一个宽度、每一枚控件的横坐标一模一样**(`‹` 在 1027/1024、`⟳` 在 1139/1136,两张裁切原点差 3px),差的只有 `.pane:hover` ——右边那段空白正是几何替悬停梯子留的位置,而梯子这一句 §7.1.5g 早就裁死:「pane 没被指着就一枚都不画」。所以头的**排布没有病**,`a_pages_head_hangs_its_whole_run_off_its_right_edge_at_every_width` 把这件事按住:从 480 到 3840 px 扫一遍,每一枚控件**离头右缘的距离是同一个常数**、每一枚都在座,让位的只有名字那一格。
+
+**真正的病在离开那扇门。** `ChromePointer` 有两个频道——`hover`(指针压在哪枚控件上)与 `pane_hover`(指针站在哪个 pane 里),而**每一张 pane 头的悬停行都挂在后者**:终端头的 `⌄`/🗀/`×`,网页头的分隔线、`</>`、pop-out、锁。`pointer_left` 只清了前者,于是**手离开窗口之后整行还亮着**;而**拖窗口边框调宽窄时,那条边是非客户区,整个手势里手都算「已经离开」**——这就是为什么它看起来像是随宽度来去。实机复证(1920×1200,debug,`APPDATA`/`LOCALAPPDATA`/UDF 全隔离):指针停在头上 → 十一簇墨;指针移到桌面 (5,5) → **十一簇一个不少地留着**。落地是把两个频道合进一扇门 `ChromePointer::left_the_window()`,两个字段一起取(先取后合,`||` 会短路掉第二个),这样它们再也漂不开。红测 `a_pointer_that_has_left_the_window_is_standing_in_no_pane`。
+
 ## 8. 依赖策略
 
 同 v3 表格，关键修订：**alacritty_terminal 稳态配置 scrollback=0**。vendor seam 包含既有上滚事件钩子，以及窄事务操作：打开 primary native history、查询行数、在 coalesced final viewport 上用 vendor row/WRAPLINE/cursor 重新评估高度、一次性 `take_history(oldest→newest)`、清空并恢复 limit=0，以及只针对唯一未闭合 staging candidate 的 `restore_history(oldest→newest)`；没有可独立呈现的 transcript snapshot/backing 镜像，也不复制 reflow 算法。事务期 vendor grid 是 mutable tail 唯一权威；收割后转录层拥有 staging ID/配额/定稿权，vendor 只保留该候选的原生 row escrow 供下一事务无损交还。升级必须 diff `grid/resize.rs`/history 语义，跑 vendor 181 项与完整生命周期矩阵。
