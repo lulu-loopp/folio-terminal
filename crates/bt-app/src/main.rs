@@ -9938,47 +9938,144 @@ fn take_psreadline_resize_reanchor_input(
         .flatten()
 }
 
-/// Carry one solved rectangle to a pane that does not hold the keyboard.
+/// What one released resize actually moved, so the window can decide what it owes the screen.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct LeafResizeCommit {
+    /// Our own actor was still behind the released rectangle and has just caught up.
+    reflowed: bool,
+    /// The vendor reconcile answered "this closes the request that was outstanding".
+    reconciled: bool,
+}
+
+impl LeafResizeCommit {
+    /// Whether this commit changed anything a frame would show.
+    fn worth_a_frame(self) -> bool {
+        self.reflowed || self.reconciled
+    }
+}
+
+/// Carry one released rectangle to a pane — **the same four steps for every pane there is**.
 ///
-/// This is the unfocused counterpart of `flush_pending_pty_resize`, and it owes the same four
-/// steps in the same order: the actor reflows, the input-region phase is sampled *before* ConPTY
-/// hears anything, ConPTY is told, and the vendor reconcile closes the request.
+/// The actor reflows (only when it is still behind — a rectangle it already holds is not a
+/// reflow and re-entering the transaction for it would restart a resize epoch nothing asked
+/// for), the input-region phase is sampled *before* ConPTY hears anything, ConPTY is told, and
+/// the vendor reconcile closes the request.
 ///
-/// The reconcile is the step this path used to omit, and omitting it was not a missing nicety.
-/// `mark_pty_resize_requested_at` is the only caller of `ResizeEpoch::final_request_sent`, and
-/// without a final request the epoch has no quiescence deadline at all — `is_quiescent_at` is
+/// The reconcile is the step the unfocused path used to omit, and omitting it was not a missing
+/// nicety. `mark_pty_resize_requested_at` is the only caller of `ResizeEpoch::final_request_sent`,
+/// and without a final request the epoch has no quiescence deadline at all — `is_quiescent_at` is
 /// false forever, so `finish_resize_if_quiescent` skips the leaf on every turn of the loop and the
 /// repair debt recorded here can never be paid. Every pane but the focused one therefore kept a
 /// PSReadLine anchor describing a width it no longer had, which is the swallowed and overwritten
 /// first character at the prompt. It also left the epoch permanently active, which withholds
 /// decorations from a pane for the rest of its life.
-fn commit_unfocused_leaf_resize(
+fn commit_leaf_resize(
     session: &mut DualPlaneSession,
     pty: Option<&mut PtySession>,
     pending_reanchor: &mut bool,
+    local_grid: GridSize,
     next_grid: GridSize,
     physical: PhysicalSize<u32>,
     observed_at: Instant,
-) -> Result<()> {
-    session
-        .resize_at(
-            nonzero_u32(next_grid.columns.get()),
-            nonzero_u32(next_grid.rows.get()),
-            observed_at,
-        )
-        .context("resize an unfocused pane's terminal actor for a seat layout change")?;
+) -> Result<LeafResizeCommit> {
+    let reflowed = next_grid != local_grid;
+    if reflowed {
+        session
+            .resize_at(
+                nonzero_u32(next_grid.columns.get()),
+                nonzero_u32(next_grid.rows.get()),
+                observed_at,
+            )
+            .context("resize a pane's terminal actor for a released ConPTY resize")?;
+    }
     let shell_input_region_open = session.shell_input_region_open();
     if let Some(pty) = pty {
         pty.resize(pty_size(next_grid, physical))
-            .context("resize an unfocused pane's ConPTY")?;
+            .context("commit a coalesced final ConPTY resize")?;
     }
     replace_psreadline_resize_reanchor_debt(pending_reanchor, shell_input_region_open);
-    session.mark_pty_resize_requested_at(
+    let reconciled = session.mark_pty_resize_requested_at(
         nonzero_u32(next_grid.columns.get()),
         nonzero_u32(next_grid.rows.get()),
         observed_at,
     );
-    Ok(())
+    Ok(LeafResizeCommit {
+        reflowed,
+        reconciled,
+    })
+}
+
+/// **One pane hears one solved rectangle** — its own actor at once, its child at the quiet
+/// boundary.
+///
+/// The single door every geometry solve takes on its way to a leaf, focused or not. Splitting the
+/// timing in two is the whole point and is the user's 2026-08-06 ruling written down: the
+/// *picture* follows the hand in real time, so the actor reflows in this very turn, and the thing
+/// that is debounced is only the **notification to ConPTY** — a `ResizePseudoConsole` call that
+/// re-enters conhost, reflows the child's screen buffer and invalidates PSReadLine's anchor, which
+/// is not a thing to do sixty times a second on every pane of a split.
+///
+/// Before this, only the pane holding the keyboard had a coalescer. Its siblings were told
+/// unconditionally on every `Resized`, so widening a window with four panes open made three
+/// unbounded ConPTY round trips per OS event on the window thread, and paid three PSReadLine
+/// anchor repairs per event on top. The pane with the keyboard is not the pane that can afford
+/// this; it is only the pane whose defect was noticed first.
+///
+/// Answers whether our own grid moved, so a caller that keeps a shadow of it can follow.
+fn schedule_leaf_grid_change(
+    leaf: &mut LeafSession,
+    next_grid: GridSize,
+    physical: PhysicalSize<u32>,
+    observed_at: Instant,
+    context: &'static str,
+) -> Result<bool> {
+    let Some(reflow) = plan_grid_change(
+        &mut leaf.pending_pty_resize,
+        next_grid,
+        leaf.conpty_grid,
+        leaf.grid,
+        physical,
+        observed_at,
+    ) else {
+        return Ok(false);
+    };
+    leaf.session
+        .resize_at(
+            nonzero_u32(reflow.columns.get()),
+            nonzero_u32(reflow.rows.get()),
+            observed_at,
+        )
+        .context(context)?;
+    leaf.grid = reflow;
+    Ok(true)
+}
+
+/// Release whatever this one pane's quiet window has made due, and say when it could next be due.
+///
+/// The counterpart of [`schedule_leaf_grid_change`], and the only place `conpty_grid` moves: what
+/// the child was *told* is written exactly where it is told, so a drag that wanders out and comes
+/// back cancels its own request instead of replaying an intermediate size.
+fn release_due_leaf_resize(
+    leaf: &mut LeafSession,
+    now: Instant,
+) -> Result<(Option<LeafResizeCommit>, Option<Instant>)> {
+    let (due, wake) = service_pending_pty_resize(&mut leaf.pending_pty_resize, now);
+    let Some(pending) = due else {
+        return Ok((None, wake));
+    };
+    let local_grid = leaf.grid;
+    let commit = commit_leaf_resize(
+        &mut leaf.session,
+        leaf.pty.as_mut(),
+        &mut leaf.pending_psreadline_resize_reanchor,
+        local_grid,
+        pending.grid,
+        pending.physical,
+        now,
+    )?;
+    leaf.grid = pending.grid;
+    leaf.conpty_grid = pending.grid;
+    Ok((Some(commit), wake))
 }
 
 /// Who owns the pointer between a press and its release.
@@ -52295,29 +52392,10 @@ impl Runtime<'_> {
         // carry it to (§7.1.6h). The rectangle it was solved into is real and
         // the chrome uses it; what is absent is the *cell* reading of that
         // rectangle, which is a fact about a terminal.
-        let Some(leaf) = self.window.tabs[active].focused() else {
+        let Some(leaf) = self.window.tabs[active].focused_mut() else {
             return Ok(());
         };
-        let conpty_grid = leaf.conpty_grid;
-        let grid = leaf.grid;
-        let Some(reflow) = plan_grid_change(
-            &mut self.window.tabs[active].shell_mut().pending_pty_resize,
-            next_grid,
-            conpty_grid,
-            grid,
-            physical,
-            observed_at,
-        ) else {
-            return Ok(());
-        };
-        let leaf = self.window.tabs[active].shell_mut();
-        leaf.session
-            .resize(
-                nonzero_u32(reflow.columns.get()),
-                nonzero_u32(reflow.rows.get()),
-            )
-            .context(context)?;
-        leaf.grid = reflow;
+        schedule_leaf_grid_change(leaf, next_grid, physical, observed_at, context)?;
         Ok(())
     }
 
@@ -52326,12 +52404,15 @@ impl Runtime<'_> {
     ///
     /// **The geometry is the same sentence for all of them**: a leaf's grid is
     /// [`seats::pane_body_viewport`] of *that leaf's* seat, and of nothing else.
-    /// Only the timing differs. [`Self::schedule_grid_change`] speaks for the
-    /// focused leaf, where the ConPTY quiet-window coalescer lives — the pane
-    /// with the keyboard is the one a drag is being aimed at, and the one whose
-    /// child is worth telling once rather than sixty times. The others have no
-    /// drag to coalesce, so their grids follow the solver at once, actor then
-    /// ConPTY, in the order every other resize path uses.
+    /// **So is the timing.** Every leaf goes through
+    /// [`schedule_leaf_grid_change`]: its actor reflows in this turn, and its
+    /// child hears the last word of the gesture at the shared 200 ms quiet
+    /// boundary. The siblings used to be told at once instead — "they have no
+    /// drag to coalesce" was never true of them, only unnoticed, because the
+    /// drag being coalesced is the *window's* and it moves every pane's
+    /// rectangle at once. A four-pane split therefore made three uncoalesced
+    /// `ResizePseudoConsole` round trips on the window thread per OS `Resized`,
+    /// each one re-entering conhost and invalidating a PSReadLine anchor.
     ///
     /// The focused leaf used to be sized from [`Self::resolve_seat_layout`]'s
     /// return instead, which is the body of `seats.identity()` — the tab's
@@ -52366,10 +52447,8 @@ impl Runtime<'_> {
         self.window.shells_settled_revision = self.seats.structure_revision();
         let plan = leaf_resize_plan(&self.seats, &self.seat_layout, self.focused_leaf, scale);
         let active = self.window.active_tab;
-        // The panes without the keyboard, before the focused one: they take the
-        // solver's answer unconditionally, so doing them first keeps the focused
-        // leaf's coalescer the last word rather than a thing another pane's
-        // resize could race.
+        // The panes without the keyboard, before the focused one, so the pane a
+        // gesture is aimed at is the last one this turn touches.
         for target in plan.iter().copied().filter(|target| !target.focused) {
             let (seat, body) = (target.seat, target.body);
             let next_grid = self
@@ -52381,19 +52460,7 @@ impl Runtime<'_> {
             let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
                 continue;
             };
-            if next_grid == leaf.grid && next_grid == leaf.conpty_grid {
-                continue;
-            }
-            commit_unfocused_leaf_resize(
-                &mut leaf.session,
-                leaf.pty.as_mut(),
-                &mut leaf.pending_psreadline_resize_reanchor,
-                next_grid,
-                physical,
-                observed_at,
-            )?;
-            leaf.grid = next_grid;
-            leaf.conpty_grid = next_grid;
+            schedule_leaf_grid_change(leaf, next_grid, physical, observed_at, context)?;
         }
         // A seat the solver could not place has no rectangle, so there is no
         // size to carry and the leaf keeps the one it has until a later solve
@@ -52418,65 +52485,64 @@ impl Runtime<'_> {
         Ok(Some(next_grid))
     }
 
-    /// A tab with no shell has no pending ConPTY resize to release, because
-    /// nothing ever scheduled one: the queue this drains is a `LeafSession`
-    /// field, and there is no leaf (§7.1.6h). Answering `None` is answering
-    /// "nothing is owed and nothing has to be woken for", which is exactly true.
+    /// **Every leaf of every tab, because every leaf now has a queue.**
+    ///
+    /// The quiet window used to belong to the pane holding the keyboard, so this drained one
+    /// leaf and the wake-up it answered with was one leaf's. Now that a sibling's ConPTY
+    /// notification is coalesced by the same 200 ms — which is what stopped a four-pane split
+    /// from making three unbounded conhost round trips per `Resized` — its release is this
+    /// window's to make and its deadline is this window's to wake for, exactly as
+    /// `resize_finish_deadline` already reads every leaf a few lines below in `about_to_wait`.
+    ///
+    /// A tab with no shell has no pending ConPTY resize to release, because nothing ever
+    /// scheduled one: the queue this drains is a `LeafSession` field, and there is no leaf
+    /// (§7.1.6h). Answering `None` is answering "nothing is owed and nothing has to be woken
+    /// for", which is exactly true.
     fn flush_pending_pty_resize(&mut self, now: Instant) -> Result<Option<Instant>> {
-        if self.focused().is_none() {
-            return Ok(None);
+        let active = self.window.active_tab;
+        let focused_seat = self.window.tabs[active].focused_leaf;
+        let mut wake_deadline: Option<Instant> = None;
+        let mut committed_any = false;
+        let mut active_tab_wants_a_frame = false;
+        let mut focused_reflow: Option<GridSize> = None;
+        for (index, tab) in self.window.tabs.iter_mut().enumerate() {
+            for (seat, leaf) in tab.sessions.iter_mut() {
+                // The deferred local reflow lands inside this, immediately before the child hears
+                // the same size, in the same order every other resize path uses (actor first,
+                // then ConPTY, then the vendor reconcile). When nothing was deferred the actor
+                // half is a no-op: our grid already moved at the `Resized` that scheduled this.
+                //
+                // The OSC 133 phase is sampled in there too, before reconciliation mutates
+                // terminal geometry, and the repair debt it records is *replaced* rather than
+                // accumulated; the send happens in `finish_resize_if_quiescent`, after ConPTY
+                // output has also been silent, so a closed input region still writes exactly zero
+                // private bytes.
+                let (commit, leaf_wake) = release_due_leaf_resize(leaf, now)?;
+                wake_deadline = earliest_deadline([wake_deadline, leaf_wake]);
+                let Some(commit) = commit else {
+                    continue;
+                };
+                committed_any = true;
+                if index == active {
+                    active_tab_wants_a_frame |= commit.worth_a_frame();
+                    if commit.reflowed && *seat == focused_seat {
+                        focused_reflow = Some(leaf.grid);
+                    }
+                }
+            }
         }
-        let (pending, wake_deadline) =
-            service_pending_pty_resize(&mut self.shell_mut().pending_pty_resize, now);
-        let Some(pending) = pending else {
-            return Ok(wake_deadline);
-        };
-        // The deferred local reflow lands here, immediately before the child hears the same size,
-        // in the same order the undeferred path uses (actor first, then ConPTY, then the vendor
-        // reconcile). When nothing was deferred this is a no-op: our grid already moved at the
-        // `Resized` that scheduled this.
-        let reflowed = pending.grid != self.shell().grid;
-        if reflowed {
-            let leaf = self.shell_mut();
-            leaf.session
-                .resize(
-                    nonzero_u32(pending.grid.columns.get()),
-                    nonzero_u32(pending.grid.rows.get()),
-                )
-                .context("resize terminal actor for a released ConPTY resize")?;
-            leaf.grid = pending.grid;
+        if focused_reflow.is_some() {
             self.sync_math_layout_key();
-            self.pending_resize_present = Some(pending.grid);
+            self.pending_resize_present = focused_reflow;
         }
-        // Snapshot the OSC 133 phase before resize reconciliation mutates terminal geometry. It
-        // deliberately includes an empty prompt: one caches the same PSReadLine anchor and needs
-        // the same post-resize repair. Its 2.4.x handler is
-        // output-free for an empty buffer; using InvokePrompt there abandons old wrapped rows on
-        // every committed divider stop (the real-ConPTY chain probe pins that distinction).
-        let shell_input_region_open = self.shell().session.shell_input_region_open();
-        if let Some(pty) = self.shell_mut().pty.as_mut() {
-            pty.resize(pty_size(pending.grid, pending.physical))
-                .context("commit coalesced final ConPTY resize")?;
+        if committed_any {
+            // The quiet boundary is also where a resize *ends*, so it is the
+            // meaningful change §5.1 asks the session write to be debounced behind.
+            // Marking it on every intermediate `Resized` would turn one drag of a
+            // window corner into a hundred disk writes.
+            self.mark_session_dirty(now);
         }
-        // Replace, rather than accumulate, the current transaction's repair debt. The send happens
-        // in `finish_resize_if_quiescent`, after ConPTY output has also been silent; a closed input
-        // region records no debt and therefore still writes exactly zero private bytes.
-        replace_psreadline_resize_reanchor_debt(
-            &mut self.shell_mut().pending_psreadline_resize_reanchor,
-            shell_input_region_open,
-        );
-        self.shell_mut().conpty_grid = pending.grid;
-        // The quiet boundary is also where a resize *ends*, so it is the
-        // meaningful change §5.1 asks the session write to be debounced behind.
-        // Marking it on every intermediate `Resized` would turn one drag of a
-        // window corner into a hundred disk writes.
-        self.mark_session_dirty(now);
-        let reconciled = self.shell_mut().session.mark_pty_resize_requested_at(
-            nonzero_u32(pending.grid.columns.get()),
-            nonzero_u32(pending.grid.rows.get()),
-            now,
-        );
-        if reconciled || reflowed {
+        if active_tab_wants_a_frame {
             self.publish_frame(FrameTrigger {
                 occurred_at: now,
                 source: FrameSource::Resize,
@@ -64995,6 +65061,76 @@ mod pty_drain_budget_tests {
         assert!(
             all.pending,
             "and a quiet pane drained after it does not cancel it"
+        );
+    }
+
+    /// PIN — **no path reaches ConPTY with a rectangle except through the quiet window.**
+    ///
+    /// The behavioural half lives in
+    /// `tests::a_pane_without_the_keyboard_coalesces_a_drag_into_one_conpty_notification`; this
+    /// is the half that can actually be broken again, because the way it broke the first time
+    /// was a *second* commit path being written beside the coalescer rather than the coalescer
+    /// being wrong. `commit_leaf_resize` is the only thing that calls `PtySession::resize` for a
+    /// layout change, and the only thing that calls it is the release.
+    ///
+    /// Mutation: put a `commit_leaf_resize` back into `resize_leaves_to_layout` and the count
+    /// goes to two.
+    #[test]
+    fn the_only_road_from_a_solved_rectangle_to_conpty_is_the_quiet_window() {
+        let call = ["commit_leaf_", "resize("].concat();
+        assert_eq!(
+            SOURCE.matches(call.as_str()).count(),
+            // its own declaration, the one release that calls it, and the two tests that drive
+            // the four steps directly.
+            4,
+            "the commit has one caller in the product, and that caller is the release"
+        );
+        assert!(
+            free_fn_body("release_due_leaf_resize").contains(call.as_str()),
+            "and the release is it"
+        );
+        let solve = method_body("resize_leaves_to_layout");
+        assert!(
+            !solve.contains(call.as_str()),
+            "a layout solve schedules; it does not commit — the sibling panes committing here \
+             is the defect this pin exists for"
+        );
+        assert_eq!(
+            solve.matches("schedule_leaf_grid_change(").count(),
+            1,
+            "every unfocused leaf goes through the one scheduler, and the focused leaf reaches \
+             the same one through `schedule_grid_change`"
+        );
+    }
+
+    /// PIN — **the release walks every leaf, because every leaf now has a queue.**
+    ///
+    /// A coalescer whose release only ever asked the focused leaf would be worse than no
+    /// coalescer at all for the siblings: their notification would sit in the queue until the
+    /// pane happened to take the keyboard. The wake-up the loop is handed has to come from the
+    /// same walk, or the window sleeps through a boundary it owes.
+    ///
+    /// Mutation: put `self.shell_mut()` or `self.focused()` back in and the walk is gone.
+    #[test]
+    fn the_release_asks_every_pane_and_not_the_one_holding_the_keyboard() {
+        let body = method_body("flush_pending_pty_resize");
+        assert!(
+            body.contains("self.window.tabs.iter_mut()"),
+            "the release walks every tab"
+        );
+        assert!(
+            body.contains("sessions.iter_mut()"),
+            "and every leaf of each"
+        );
+        for focused_only in ["self.shell_mut()", "self.shell()", "self.focused()"] {
+            assert!(
+                !body.contains(focused_only),
+                "`{focused_only}` is the keyboard's pane and this release is not about it"
+            );
+        }
+        assert!(
+            body.contains("earliest_deadline("),
+            "one window wakes at the earliest boundary any of its panes owes"
         );
     }
 }
@@ -80947,7 +81083,7 @@ mod tests {
     /// one unfocused leaf's resize exactly as the layout solve does, then run the clock the way
     /// the event loop does; the chord has to come out the other side.
     ///
-    /// Withhold the reconcile from `commit_unfocused_leaf_resize` and this goes red at the
+    /// Withhold the reconcile from `commit_leaf_resize` and this goes red at the
     /// deadline: that is the shape of the bug, where every pane but the focused one banked a
     /// repair it would never be allowed to pay and kept a PSReadLine anchor a size out of date.
     #[test]
@@ -80963,10 +81099,11 @@ mod tests {
         );
 
         let mut pending = false;
-        commit_unfocused_leaf_resize(
+        commit_leaf_resize(
             &mut session,
             None,
             &mut pending,
+            grid_of(80, 24),
             grid_of(60, 24),
             PhysicalSize::new(480, 600),
             start,
@@ -80992,6 +81129,89 @@ mod tests {
             take_psreadline_resize_reanchor_input(&mut pending, session.shell_input_region_open()),
             Some(PSREADLINE_INVOKE_PROMPT_INPUT),
             "the pane nobody is watching gets the same anchor repair as the focused one"
+        );
+    }
+
+    /// RED — **a pane without the keyboard owes one ConPTY notification per drag, not one per
+    /// OS event** (window-thread unbounded-call sweep, 2026-08-24).
+    ///
+    /// The 200 ms quiet window belonged to the focused leaf alone. Its siblings were told
+    /// unconditionally from `resize_leaves_to_layout`: one `ResizePseudoConsole` per pane per
+    /// `Resized`, on the window thread, each one a synchronous re-entry into conhost that
+    /// reflows the child's screen buffer and banks a PSReadLine anchor repair. A four-pane split
+    /// under a live drag therefore made three of those calls sixty times a second — the pane
+    /// holding the keyboard was never the expensive one, only the one whose coalescer was
+    /// noticed.
+    ///
+    /// The two halves this pins are the whole ruling (2026-08-06 — 实时放行 resize): **the
+    /// picture is never debounced** (`leaf.grid` holds the size solved this very turn, so the
+    /// glass follows the hand) and **the child is** (`conpty_grid` does not move until the
+    /// gesture has been quiet).
+    ///
+    /// Red gate: make `schedule_leaf_grid_change` commit instead of coalescing — which is what
+    /// the unfocused path did — and `conpty_grid` moves inside the loop, sixty times, and the
+    /// release at the end has nothing left to carry.
+    #[test]
+    fn a_pane_without_the_keyboard_coalesces_a_drag_into_one_conpty_notification() {
+        let start = Instant::now();
+        let mut leaf = leaf_saying("sibling");
+        let born = leaf.grid;
+
+        // One second of a live drag, at the rate an OS resize loop delivers.
+        const EVENTS: u32 = 60;
+        const FRAME: Duration = Duration::from_millis(16);
+        let mut last = born;
+        for step in 0..EVENTS {
+            let at = start + FRAME * step;
+            // From the column after the one it was born at, so the very first event of the drag
+            // is already a rectangle the pane does not hold.
+            let next = grid_of(41 + u16::try_from(step).unwrap(), 4);
+            let physical = PhysicalSize::new(u32::from(next.columns.get()) * 8, 88);
+            assert!(
+                schedule_leaf_grid_change(&mut leaf, next, physical, at, "drag").unwrap(),
+                "every one of these rectangles is a new one, so every one is a reflow"
+            );
+            assert_eq!(
+                leaf.grid, next,
+                "the picture is not debounced: the actor holds the size solved this turn"
+            );
+            assert_eq!(
+                leaf.conpty_grid, born,
+                "and the child has heard nothing yet — it is the notification that waits"
+            );
+            let (commit, wake) = release_due_leaf_resize(&mut leaf, at).unwrap();
+            assert!(
+                commit.is_none(),
+                "mid-drag there is nothing due: every event pushed the quiet boundary out"
+            );
+            assert_eq!(
+                wake,
+                Some(at + WINDOW_RESIZE_QUIET),
+                "and the loop is asked to come back at that boundary"
+            );
+            last = next;
+        }
+
+        let quiet = start + FRAME * (EVENTS - 1) + WINDOW_RESIZE_QUIET;
+        let (commit, wake) = release_due_leaf_resize(&mut leaf, quiet).unwrap();
+        let commit = commit.expect("the quiet boundary releases the one notification a drag owes");
+        assert!(
+            !commit.reflowed,
+            "our own actor was never behind, so the release defers no reflow to here"
+        );
+        assert_eq!(
+            leaf.conpty_grid, last,
+            "the child hears the last word of the gesture and none of the sixty before it"
+        );
+        assert_eq!(
+            wake, None,
+            "nothing is owed, so nothing has to be woken for"
+        );
+
+        let (again, _) = release_due_leaf_resize(&mut leaf, quiet + WINDOW_RESIZE_QUIET).unwrap();
+        assert!(
+            again.is_none(),
+            "one drag is one notification; a second turn finds the queue empty"
         );
     }
 
@@ -92271,15 +92491,19 @@ mod tests {
             // Wide enough that the absolute path is one unwrapped line for the detector — and
             // carried through the real transaction, because a resize left open withholds every
             // decoration for as long as it stays open (`decorations_allowed`).
-            commit_unfocused_leaf_resize(
+            let local_grid = leaf.grid;
+            commit_leaf_resize(
                 &mut leaf.session,
                 None,
                 &mut leaf.pending_psreadline_resize_reanchor,
+                local_grid,
                 grid_of(200, 8),
                 PhysicalSize::new(1600, 200),
                 started,
             )
             .unwrap();
+            leaf.grid = grid_of(200, 8);
+            leaf.conpty_grid = grid_of(200, 8);
             let settled = leaf
                 .session
                 .resize_finish_deadline()
