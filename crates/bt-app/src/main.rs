@@ -7685,6 +7685,13 @@ struct {name} {{
                 "a place in one window's queue is not a place in another's",
             ),
             (
+                "settle_pin_partition(",
+                "a pinned tab pushed onto the end of an unpinned run breaks F57 \
+                 in the target strip — the machine caught this one (§7.12 ⓐ), \
+                 debug builds asserted on it, and the same settle every other \
+                 strip edit already pays is what puts the run right",
+            ),
+            (
                 "web_thumbs.take(",
                 "the last frame belongs to the seat and travels with it",
             ),
@@ -64036,6 +64043,12 @@ impl FolioApp {
         }
         target.tabs.push(carried);
         target.active_tab = target.tabs.len() - 1;
+        // A pinned tab has just been pushed onto the end of the target's strip,
+        // which is the one place F57 forbids it to stand; the same settle every
+        // other strip edit pays puts the run right and keeps the carried tab
+        // active wherever the partition seats it. The source needs no settle: a
+        // removal cannot un-partition a run that was partitioned.
+        settle_pin_partition(&mut target.tabs, &mut target.active_tab);
         let source_emptied = source.tabs.is_empty();
 
         // ── One accounting ────────────────────────────────────────────────────
