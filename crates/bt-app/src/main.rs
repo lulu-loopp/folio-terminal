@@ -65087,9 +65087,28 @@ impl FolioApp {
             let dpi = bt_platform::dpi_at(pointer.0, pointer.1);
             let work = bt_platform::work_area_at(pointer.0, pointer.1)
                 .unwrap_or_else(|_| bt_platform::virtual_screen_rect());
-            if let Err(error) =
-                bt_platform::set_window_outer_rect(hwnd, tear_out_rect(pointer, grip, dpi, work))
-            {
+            let rect = tear_out_rect(pointer, grip, dpi, work);
+            // One line, on the same terms as `BT_DPI`'s: a tear-out's rectangle
+            // is a function of four things read off the machine, and a
+            // photograph of a window in the wrong place cannot say which of them
+            // was wrong. Printed only when a window is actually being placed,
+            // which is once per tear-out.
+            eprintln!(
+                "BT_TEAR_OUT pointer={},{} grab={:?} size={:?} dpi={dpi} work={},{} {}x{} rect={},{} {}x{}",
+                pointer.0,
+                pointer.1,
+                grip.grab_logical,
+                grip.size_logical,
+                work.left,
+                work.top,
+                work.right - work.left,
+                work.bottom - work.top,
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+            );
+            if let Err(error) = bt_platform::set_window_outer_rect(hwnd, rect) {
                 // A window that could not be placed is still a window holding the
                 // reader's tab, so this is reported and not fatal — the same
                 // judgment `restore_window_placement` makes about a saved corner

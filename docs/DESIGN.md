@@ -380,7 +380,61 @@ target  ← CreateTargetForHwnd(hwnd, topmost = true)
 
 ![按下之后:两扇窗各一个 tab,左边留下的那枚与右边搬过去的那枚都还在报数](spikes/artifacts/pane-to-new-window/the-pane-in-a-window-of-its-own.png)
 
-**欠账两笔。** ① **「移到某一扇已经开着的窗」在菜单上还没有门**:方案给的是 F2 的拖拽(拖到另一扇窗的 tab 条),而一张列出各扇窗的子菜单需要先回答「一扇窗在列表里叫什么名字」——这个产品至今没有给窗起过名字,那是一次产品裁决而不是一次实现,不由本片替用户定。② **tab 级的动词面(tab 的右键/`⌄`)仍不存在**,DESIGN 1134 记的那一单原样挂着;整 tab(可能带着页)出窗因此仍只有 F1 拖出与 F2 收养两条路。
+**欠账两笔。** ① **「移到某一扇已经开着的窗」在菜单上还没有门**:方案给的是 F2 的拖拽(拖到另一扇窗的 tab 条),而一张列出各扇窗的子菜单需要先回答「一扇窗在列表里叫什么名字」——这个产品至今没有给窗起过名字,那是一次产品裁决而不是一次实现,不由本片替用户定。**手势那一半已于同日到货(§2.12),菜单那一半原样欠着**,而这正是它欠着的形状:门有了,名字还没有。② **tab 级的动词面(tab 的右键/`⌄`)仍不存在**,DESIGN 1134 记的那一单原样挂着;整 tab(可能带着页)出窗因此仍只有 F1 拖出与 F2 收养两条路——**两条都由 §2.12 交付**。
+
+### 2.12 一个 tab、一枚 pane 拖出这扇窗:App 级 drag broker(多窗块 片 F2/F4,2026-08-23,已落地;`crates/bt-app/src/main.rs`、`crates/bt-platform/src/lib.rs`、`scripts/dev/f2-drag-probe.ps1`(新))
+
+**为什么需要一个 broker,而不是「让目标窗自己看」。** winit 在按下那一刻取走 Win32 鼠标 capture,于是**源窗**在指针走到哪里都继续收到 motion、并且保证收得到那一记抬起——这对 F1「拖出去」刚好够,对 F2「拖进来」**一个字都不够**:被拖进的那扇窗**什么都收不到**,没有 motion、没有 enter、没有 leave。它的 tab 条因此点不亮、弹簧上不了弦、替身画不出来——不是因为规则没写,而是因为**那扇窗听不见**。所以这一片交付的不是一条规则,是一个**指针的中间人**:源窗把指针发布成屏幕坐标,App 问窗口管理器那个点上是谁的玻璃,目标窗按**自己的**客户区像素、**自己的**缩放、**自己的** `TabRun` 回答它给什么,答案再作为一件 `ForeignDrag` 投回那扇窗去画。每轮一次几何读数,每个高亮一个作者。
+
+**「谁的玻璃」由窗口管理器答,不由矩形算。** 两扇 Folio 窗天天互相压着:指针停在 B 的 tab 条上,只要 B 压在 A 上面,那个点**就在 A 的客户矩形里**——一个自己算矩形的源窗会在 A 里点亮一个槽、在手松开时把载荷交给 A,而读者一直看着的是 B。z-order、最小化、别人家的全屏窗都在决定这个答案,而这三样从我们自己的窗口表里一个也看不见。`bt_platform::top_level_window_at` 就是 `WindowFromPoint` + `GA_ROOT`——**由唯一有资格作这个决定的那一方作出**,而探针问的是同一句话,所以探针和被探的东西对「在上面」的含义要么一致要么当场失败。`Runtime::pointer_is_on_our_own_glass` 因此排在 survey 之前而不是从 survey 里过滤:这根本不是几何问题。**问不出答案时答 `true`**——没有答案就是那扇正握着载荷的窗的寻常手势,这是保守的那一半。
+
+**四个落点,四个判决,写在一张表里(`broker_verdict`)。** 方案 F2+F4 点名要求逐条写下来的正是这张表(*"要定义:拖到目标窗正文(= 无落点)、目标窗悬停中被关闭、源窗失焦、Esc、显示器/DPI 变化"*):
+
+- **在出发的那扇窗上** = `Local`,那扇窗自己的 `release_verdict` 说了算,broker 一个字也不插嘴;
+- **在另一扇窗的 tab 条上** = `Into`,按那扇窗当时正在画的那个落点;
+- **在另一扇窗的正文上** = `Nothing`,J120 的干干净净的什么都没有。**不回落成撕新窗**,理由与「装不下不回落到撕出」逐字相同:一枚指针的含义取决于底下碰巧是哪扇窗,是一种没人看得见的算术;
+- **不在我们任何一扇窗上** = `NewWindow`,方案原话「拖到无窗处=撕成新窗」。桌面、别人的程序、被压住或最小化的我们自己的窗,对这个手势是**同一件事**——「手底下没有我们的东西」——所以是一个答案而不是三个。
+
+**tab 条是整扇门,正文不给落点。** 这是 F2 自己的形状(「拖到另一扇 Folio 窗的 tab 条 = 移入」)。目标窗问的是**同一张表**:run 自己的 `PaneOffers`、run 自己的 `slot_at`、以及 `pane_strip_landing` 这个自由函数——一列拒绝撕出的卡片列对客人照样拒绝,而它**不必知道这一片发生过**。一枚 tab 到达读作 `DropLanding::StripExtract`,那是复用而不是双关:这个落点从来就叫「这条 run 在这个槽位上多一个条目」,画法是读者马上要看着它变成 tab 的那个替身;不同的只是谁来执行,而**任何一个跨窗落点都不会被交给 `release_verdict`**。
+
+**独 pane 过得了窗界,尽管它在原地撕不出来。** G84 不许清空一棵树,所以 `tear_out_is_hostable` 在家里对独 pane 说不;到了另一扇窗上没有什么可清空的,因为它就是的那整个 tab 跟着它走。这是 F1c 那句「独 pane 跳过升格那半段」换一个表面再说一遍。
+
+**弹簧是一口 App 级的钟,而这正是它必须是钟的理由。** §7.1.6k 的 250ms 要在**手已经停住**时到点,而跨过窗界「停住」不是修辞:目标窗此后不会再收到任何一个事件,一口只由指针移动驱动的钟在那里**永远**不会响。所以 broker 有 `next_deadline`,`about_to_wait` 把它折进每一扇窗的时钟折进的同一个 `ControlFlow::WaitUntil`;常量仍是 `profiles::CHEVRON_HOVER_OPEN`——一个数,三口钟。**只有交接(`StripAdopt`)上弦**:撕出的替身已经把「松手会怎样」整个画出来了,没有什么是切过去才看得见的;交接许的是一棵不在屏幕上的树,切过去正是去看它。弹簧被告知的是**survey 的答案**而不是指针的坐标——§7.1.6k 的纪律原样过界,于是目标窗的卡片列拒绝交接时,这条拒绝不必被说第二遍。
+
+**一枚守卫,三种被夺走的方式(`DragGuard`)。** 方案列的是 Win32 capture lost、锁屏、显示配置突变,并给三者**同一个结果**(「取消预览、清高亮、载荷归源」)。其中两者是**同一个事实**:系统拖拽与安全桌面都会夺走 capture,而 capture 正是让窗外的指针流到得了的那样东西。第三者不碰 capture,但会让这个手势手里的每一个屏幕矩形作废——包括它正要开一扇窗的那一个——所以监视的是**会变的那样东西**:所有显示器合起来的外接矩形。**是采样而不是订阅**,这是论证不是省事:winit 既不上报 `WM_CAPTURECHANGED` 也不上报 `WM_DISPLAYCHANGE`,订阅意味着一个窗口子类,而它的消息到达时刻不由这台状态机决定;两次只读查询,只在真的有手势在飞的那些轮次上跑,在唯一有人问的那一刻回答同一个问题。方案清单上的第四条(源窗拖动中被关)不在这里采样,因为它不是平台事实:一扇没了的窗是 `FolioApp::windows` 里没有的窗。**目标窗被关**由重算自己解决——下一轮 `WindowFromPoint` 答的是别人,aim 变、钟撤、高亮由那一轮的 mailbox 收走。**Esc 与源窗失焦**走的是既有那条:`cancel_drag` → `finish_drag`,而 `finish_drag` 顺手埋掉 broker,所以**每一个出口只有一座坟**。
+
+**画法一个新词都没造。** 被瞄准的 tab 穿的是 `TabContent::landing` 这个既有字段(`.drop-preview` 与 `@keyframes tab-land` 的 `from`:9% 强调色底 + 45% 强调色内描边),替身是 `strip_stand_in` 这个既有函数多长的一条臂,幽灵是 `drag_ghost_layer` 多长的一条臂。跨界的只有**标签说什么**(`GhostFace`:一个 mark、它的字号、颜色、一行字),**它坐在哪儿是每扇窗自己的算术**——这正是方案的「混合 DPI 下幽灵尺寸随所在窗」:一枚从 100% 屏拖到 200% 屏的标签在越界时长大,而不是保持它离开的那扇窗的尺寸。`WindowRuntime::foreign` 是**信箱不是副本**:只由 `FolioApp::drive_drag_broker` 写,而且每轮从 broker 重建而不是靠每个可能改动它的地方记得同步——没有什么会被落下,因为没有什么被记住。
+
+**松手是既有动词的复合,一个新的也没加。** 方案 F0 的原话是「pane 拖出窗界 = 先按 `StripExtract` 升格成 tab 再成窗,一条路」,F2 的是「松手=`transfer_tab`(或 pane 先升格再移交的既有组合)」,于是:pane 经 `extract_pane_into_new_tab` 升格(菜单行、拖到本窗 tab 条、这一条,同一个函数);tab 经 `FolioApp::transfer_tab` 换窗(这程序里唯一会移动 tab 的东西,因此也是唯一会拒绝一张叫不出名字的页的地方);交接那一支在 tab 到达之后跑**目标窗自己的** `move_pane_across_tabs`——两个 tab 此刻在同一扇窗里,那正是 §7.1.6k 已经回答过的局面,而它自己的规矩会把空掉的那个条目从 run 里取走;撕新窗那一支走 F1c 原样的 `NewWindowPlan::receiving`,由同一轮稍后的 `open_pending_window` 花掉。**拒绝在载荷仍在的那扇窗里说它那一句**(M147),升格过的说两句——`report_move_refusal` 那对既有事实一字未改。
+
+**新窗站在手松开的地方(F5)。** 「屏幕命中与 work-area 一律物理坐标;期望尺寸 = 源窗**逻辑**外框换算到目标显示器 DPI;保持抓握点相对 tab 的 offset 再做 work-area clamp;走 `set_window_outer_rect`」逐字落成 `tear_out_rect` 这个纯函数。dpi 与 work area 都问**那个点**而不是问新窗(`bt_platform::dpi_at` / `work_area_at`):窗是在它将要站的地方之外被造出来的,而决定尺寸与夹持的是指针底下那块屏。**先移动后缩放**,只有装不进那块屏的窗才缩:被推开一寸的窗还是读者撕下来的那扇,被悄悄缩小到刚好的不是。抓握点与外框尺寸都是**逻辑**的、都在按下那一刻读一次——抓握点是「手在窗上哪里合拢的」,它不因为 tab 条滚了而移动。菜单行(F1c)不带地点:按下一个**动词**的读者没有指过任何地方,那扇窗照常在每扇新窗开的地方开。
+
+**`BT_TEAR_OUT` 一行,和 `BT_DPI` 同样的道理。** 一扇窗开错地方的照片说不出四个输入里哪一个错了,所以放窗的那一刻把四个输入和结果一起打出来。只在真的放窗时打,一次撕出一行。
+
+**红测与钉(`cross_window_drag_tests`)。** 先红后绿,红证是七个名字不存在导致整个 crate 编译失败(`BrokerAim`/`BrokerRelease`/`DragBroker`/`DragGuard`/`TearGrip`/`broker_verdict`/`tear_out_rect`)。七条:① 跨窗弹簧零 motion 到点,并且 `about_to_wait` 在窗口们之前转 broker、把它们的时钟折**到** broker 的答案上;② 四个落点各一个判决;③ 撕出矩形按目标 dpi 换算、保持抓握、并被 work area 夹住(100% 与 200% 两遍,外加一次真的缩小);④ 一枚守卫答三种夺走;⑤ 源窗在别人的玻璃上什么都不给(形状钉:`drive_drag` 问 `pointer_is_on_our_own_glass`;`drive_drag_broker` 重采守卫、写 `foreign`、到点切目标窗的视图);⑥ 松手只花既有动词(`settle_drag_handover` + `settle_arrival` 两半一起读);⑦ 客人的落点用主人 tab 条自己的词画(钉的是 `self.window.foreign` 这个**读**而不是「foreign」这个词——一条还提着客人却不再问窗有没有客人的臂,正是这枚钉子要抓的变异)。⑤⑦ 各自用 MUTATION 验过会红(把 `pointer_is_on_our_own_glass` 换成 `true`、把两处 `foreign` 读成 `None::<&ForeignDrag>`、把 `runtime.window.foreign = visit` 换成丢弃——对应的三条各自变红,别的不动)。
+
+**三门。** workspace 全绿(bt-app 2181),clippy `-D warnings` 与 fmt `--check` 干净。
+
+**实机(debug 版,`APPDATA`/`LOCALAPPDATA`/UDF 全隔离到临时目录,`BT_PTY_DUMP`,不出外网;两扇窗并排各 1100×820 @200%)。** 探针是新写的 `scripts/dev/f2-drag-probe.ps1`:真输入(`SetCursorPos` + `mouse_event`),**像素归属律按travel 的两端各说一遍**——按下必须落在它点名的那扇窗上,松手必须落在这一跑说的地方(另一扇我们的窗,或者**不是我们的任何一扇**),两端都用 `WindowFromPoint` 问,也就是被测的程序问自己的那同一句话。`ui-probe.ps1` 够不着这个手势,因为它拒绝任何不在目标 pid 上的点,而**撕出恰恰结束在我们一扇窗都没有的地方**;`post-probe.ps1` 够得着任何窗但只会按,而投递来的一串移动跳过了 Windows 自己的命中测试,那正是 F2 全部的争点。
+
+- **整 tab 跨窗**:B 窗的一枚 tab 拖到 A 窗的 tab 条——手还举着时 A 的条上就多出第三个条目,穿着 `tab-land` 的底与环、写着那枚 tab 的名字(下图一);松手后 A 三个 tab、B 一个,源窗留下的次序没有半个 reorder 的残迹。
+- **跨窗弹簧 + 交接**:A 窗一枚 pane 的头拖到 B 窗**第一个** tab 上,停住 1.4 秒**一次移动都不发**——B 的第一个 tab 亮起 `tab-land` 的底与环,幽灵(`▣ Weiyi`)吊在指针下**由 B 画、按 B 的缩放**(下图二);松手后 B 切到那个 tab 且它的徽章变成 `2`、舞台上两枚 pane 并排,A 窗回到一枚 pane(下图三)。这条同时是弹簧「零 motion 到点」的实机证据:那 1.4 秒里探针一个像素都没动。
+- **撕成新窗**:A 窗一枚 tab 拖到桌面上的 `(2000,1400)`(探针先向 `WindowFromPoint` 证明那里不是我们的窗),松手后进程多一扇窗,`BT_TEAR_OUT pointer=2000,1400 grab=(255.0, 45.0) size=(550.0, 410.0) dpi=192 work=0,0 2880x1800 rect=1490,980 1100x820`,而窗表里那扇新窗正是 `rect=1490,980 1100x820`——横向是抓握点原样跟手(2000 − 255×2 = 1490),纵向被 work area 的下沿夹住(1400 − 45×2 = 1310 会让窗脚落到 2130,而 work area 到 1800,于是 980)。
+- **Esc 撤防**:拖着 B 的一枚 tab 停在 A 的条上(A 条上替身已经站着,下图四),**按住不放按 Esc**——替身当场消失、A 回到原来的一个 tab,松手后 B 的三个 tab 次序一字未动(下图五)。
+- **收尾**:两扇窗关掉后属于本次运行的 `folio` **0 个**(同时在跑的另外两个 `folio` 属于另一条工作树的会话,按纪律没有动它们),stderr 上除 `BT_DPI`/`BT_PTY_DUMP`/`BT_TEAR_OUT` 没有别的,`session.json` 记下最后那扇窗的三个 tab。
+
+![手还举着:客人的替身站在主人的 tab 条上,穿着 tab-land 的底与环](spikes/artifacts/cross-window-drag/a-visitors-stand-in-in-another-windows-strip.png)
+
+![停在另一扇窗的第一个 tab 上一次移动都不发:那个 tab 亮起来,幽灵由那扇窗按它自己的缩放画](spikes/artifacts/cross-window-drag/a-pane-rests-on-another-windows-tab.png)
+
+![松手之后:pane 进了它被停在的那个 tab,徽章变成 2,原来那扇窗回到一枚 pane](spikes/artifacts/cross-window-drag/the-pane-arrives-in-the-tab-it-was-rested-on.png)
+
+![Esc 之前:替身站在主人条上的第一个槽位](spikes/artifacts/cross-window-drag/the-landing-esc-took-away.png)
+
+![Esc 之后:替身没了,两扇窗一字未动](spikes/artifacts/cross-window-drag/after-esc-nothing-moved.png)
+
+**欠账四笔,都记在这里。** ① **`web`/`web_thumbs` 按 `LeafId` 重键那笔前置欠账仍未清**(§2.10 欠账 ①),所以带着一张同号页的跨窗拖拽和菜单行一样,得到的是 `AmbiguousPage` 那句可见的拒绝;这一条不是本片引入的,本片也没有把它弄得更糟——两扇门走同一个 `transfer_tab`,所以拒绝也只有一处。② **缩略图那条规则是被验证的而不是被安排的**:`web_thumb` 的 `due` 从落地那天起就写着「一枚换了形状的座位当场欠一张新的」,而 `transfer_tab` 的 commit 搬的是整条 entry,所以「live 重挂且页面/viewport 未变 → 最后一帧随座位重址;目标 DPI/卡尺寸变 → 旧帧作占位并当场欠一张」在这两件既有的事实之下是**构造上成立**的,本片没有为它写第二套判断;带页跨窗的实机证据要等 ① 清掉。③ **一扇只有一个 tab 的窗把那个 tab 拖到桌面上,会把窗关掉再开一扇新的**——`transfer_tab` 搬空源窗就关它,这与 F1c 的独 pane 走的是同一条规矩(§2.11),画面上是「这扇窗搬到了手松开的地方」,如实记着而不是另立一条拒绝。④ **拖到另一扇窗的正文上目前什么都不给**;方案在这一片明确要求把它定义下来,定义就是「没有落点」,而「跨窗把一枚 pane 落到另一扇窗的舞台上挑位置」是 §7.1.6k′ 在一扇窗内已经开掉的那扇门的跨窗版本——**未做,不是做不了**。
+
 
 ## 3. 内容模型
 
