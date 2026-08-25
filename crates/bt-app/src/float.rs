@@ -1067,6 +1067,26 @@ pub struct FloatFiles {
 pub struct FloatPreview {
     /// The tab whose pool and content plane this window draws from.
     pub tab: TabId,
+    /// **The live page that came out of the column with this buffer**, if there
+    /// was one (§7.14a, user report 2026-08-25: a popped-out web preview drew its
+    /// chassis and nothing inside it).
+    ///
+    /// The sentence above — "all this window has to remember is *whose* pool to
+    /// read" — is true of a *document*, whose every byte is in the tab's pool. A
+    /// **page** is not in any pool: it is a live browser, addressed by the
+    /// [`LeafId`] it was opened on, and the seat that named that leaf is closed
+    /// out of the tree the moment the pane pops out. Without this field the page
+    /// was a controller nothing in the window could name any more: it was never
+    /// given the float's rectangle, so it was placed nowhere and hidden, and the
+    /// retirement loop then read its vanished seat as "this page's pane is gone"
+    /// and closed the browser.
+    ///
+    /// It stays a *number* rather than a handle for the reason the tab does: the
+    /// window's map of pages is the window's, and a float holding a second
+    /// reference to one would be a second opinion about whether it is alive.
+    /// `SeatId`s are minted and never reused inside a tab, so the leaf a float
+    /// remembers cannot come to mean somebody else's page.
+    pub page: Option<LeafId>,
 }
 
 /// What is living inside a float this time.
@@ -3774,7 +3794,10 @@ mod tests {
             host.open(
                 FloatMode::Pinned,
                 None,
-                FloatTenant::Preview(FloatPreview { tab: TAB_ID }),
+                FloatTenant::Preview(FloatPreview {
+                    tab: TAB_ID,
+                    page: None,
+                }),
                 frame,
                 None,
                 now,
@@ -3894,7 +3917,10 @@ mod tests {
         let buffer = host.open(
             FloatMode::Pinned,
             None,
-            FloatTenant::Preview(FloatPreview { tab: TAB_ID }),
+            FloatTenant::Preview(FloatPreview {
+                tab: TAB_ID,
+                page: None,
+            }),
             frame(300.0, 200.0, 430.0, 400.0),
             None,
             now,
@@ -3950,7 +3976,10 @@ mod tests {
         let buffer = host.open(
             FloatMode::Pinned,
             None,
-            FloatTenant::Preview(FloatPreview { tab: TAB_ID }),
+            FloatTenant::Preview(FloatPreview {
+                tab: TAB_ID,
+                page: None,
+            }),
             frame(900.0, 500.0, 430.0, 400.0),
             None,
             now,

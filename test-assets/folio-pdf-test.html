@@ -1,0 +1,66 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Folio PDF fixture</title>
+<!--
+  The source the PDF beside this file is printed from.
+
+  It is committed because the PDF is a *fixture*, and a fixture nobody can
+  remake is a fixture nobody can fix. On 2026-08-25 the previous
+  `folio-pdf-test.pdf` turned out to be a document the engine's own PDF reader
+  refuses with `ERR_FILE_NOT_FOUND` — in Folio and, identically, in a
+  stand-alone Microsoft Edge on a clean profile — while every other PDF on the
+  machine opened. There was no way to tell "the product cannot open PDFs" from
+  "this one file cannot be opened" without a second PDF to compare against, and
+  making that second PDF is what this file is for.
+
+  Remake it with:
+    msedge --headless=new --disable-gpu --no-first-run ^
+           --user-data-dir=<scratch> ^
+           --print-to-pdf=test-assets\folio-pdf-test.pdf ^
+           file:///<repo>/test-assets/folio-pdf-test.html
+-->
+<style>
+  body { font: 16px/1.6 Georgia, serif; margin: 0; }
+  section { page-break-after: always; padding: 0 8px; }
+  section:last-child { page-break-after: auto; }
+  h1 { font-size: 30px; margin: 0 0 12px; }
+  h2 { font-size: 20px; margin: 20px 0 6px; }
+  code { font-family: Consolas, monospace; background: #eee; padding: 1px 4px; }
+  table { border-collapse: collapse; margin-top: 10px; }
+  td, th { border: 1px solid #999; padding: 4px 10px; text-align: left; }
+  .plate { width: 260px; height: 120px; background: linear-gradient(90deg, #4a6fd0, #e0a040); }
+</style>
+
+<section>
+  <h1>Folio PDF fixture — page 1 of 3</h1>
+  <p>This document exists so that opening a <code>.pdf</code> from the files
+     column can be checked end to end: the page lane mints one
+     <code>file:</code> URL, the engine's own reader draws it, and the head and
+     the foot name the file on disk.</p>
+  <h2>What to look for</h2>
+  <ul>
+    <li>The reader's toolbar says <strong>1 of 3</strong>.</li>
+    <li>This paragraph is legible — a reader that loaded but could not reach
+        the document draws its own "File not found" plate instead.</li>
+    <li>The address row shows the OS spelling of the path, not a
+        <code>file:///</code> URL.</li>
+  </ul>
+</section>
+
+<section>
+  <h1>Page 2 of 3 — a table and a plate</h1>
+  <p>Two shapes that exercise more of the renderer than a paragraph does.</p>
+  <table>
+    <tr><th>Surface</th><th>What it should say</th></tr>
+    <tr><td>Head title</td><td>folio-pdf-test.pdf</td></tr>
+    <tr><td>Address row</td><td>…\test-assets\folio-pdf-test.pdf</td></tr>
+    <tr><td>Foot</td><td>the same path</td></tr>
+  </table>
+  <div class="plate"></div>
+</section>
+
+<section>
+  <h1>Page 3 of 3 — the end</h1>
+  <p>Scrolling to here proves the reader has the whole document and not just
+     its first page.</p>
+</section>
