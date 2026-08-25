@@ -2343,6 +2343,29 @@ pub enum SettingsRow {
     /// switch that can only be found behind a disclosure is a switch that
     /// dismissing was permanent for.
     PowerShellOffer,
+    /// **Whether Claude Code tells this window when it is waiting for you**
+    /// (`docs/plans/attention/plan.md` §3.3, ruled 2026-08-25).
+    ///
+    /// **The third row in this dialog whose answer is a fact about the machine
+    /// rather than a line in `settings.json`**, and it is filed on
+    /// [`Self::ContextMenu`]'s reasoning exactly: what is being decided is
+    /// whether a block exists in the user's own `~/.claude/settings.json`, and
+    /// the tick is read back off that file every time the dialog is drawn. A
+    /// stored boolean would be a second copy of that truth, free to disagree
+    /// with the file the moment anybody edited it by hand — silently, which is
+    /// the one thing a switch may not do.
+    ///
+    /// **Beside the two PowerShell rows and under them**, because it answers
+    /// the same reader's third question in the same order: what is wrong with
+    /// the module this shell loads, what this shell is not loading, and what
+    /// the *program running in* this shell has no way to tell the terminal. It
+    /// is the only one of the three about a program Folio did not start.
+    ///
+    /// **Not an Advanced row**, on `Explorer context menu`'s test: a reader who
+    /// has just watched an agent wait for them with no dot on its tab is
+    /// looking for exactly this, and a switch behind a disclosure is a switch
+    /// they will not find.
+    ClaudeHooks,
 
     // ── the profile editor's own rows (§7.1.6c-6b) ─────────────────────────
     //
@@ -2442,6 +2465,7 @@ impl SettingsRow {
             // the past the pane keeps, asked sideways.
             Self::PsReadLine
             | Self::PowerShellOffer
+            | Self::ClaudeHooks
             | Self::Scrollback
             | Self::LineWrapping
             | Self::Notifications => SettingsCategory::Terminal,
@@ -2515,6 +2539,7 @@ impl SettingsRow {
             Self::LineWrapping => Text::RowLineWrapping.text(),
             Self::Notifications => Text::RowNotifications.text(),
             Self::PowerShellOffer => Text::RowPowerShellOffer.text(),
+            Self::ClaudeHooks => Text::RowClaudeHooks.text(),
             Self::GitPanel => Text::RowGitPanel.text(),
             Self::KeyHints => Text::RowKeyHints.text(),
             Self::ContextMenu => Text::RowContextMenu.text(),
@@ -2630,6 +2655,11 @@ impl SettingsRow {
             Self::Scrollback => Text::DescScrollback.text(),
             Self::Notifications => Text::DescNotifications.text(),
             Self::PowerShellOffer => Text::DescPowerShellOffer.text(),
+            // Two facts and no opinion, `Explorer context menu`'s shape: what
+            // is written, and where. The second is there because a reader who
+            // does not know a terminal is about to edit a file belonging to
+            // another program has been told something they would want to know.
+            Self::ClaudeHooks => Text::DescClaudeHooks.text(),
             // Says what Off *does* rather than what it hides, because what it
             // does is the reason to reach for it: no page, no chord, and no `git`
             // process started on your behalf.
@@ -2852,6 +2882,10 @@ impl SettingsRow {
             | Self::ContextMenu
             | Self::PsReadLine
             | Self::PowerShellOffer
+            // On the row above's test, said again for the reader who has just watched an agent
+            // wait for them with nothing on its tab: this is what they are looking for, and a
+            // switch behind a disclosure is a switch they will not find.
+            | Self::ClaudeHooks
             | Self::Scrollback
             | Self::LineWrapping
             | Self::Notifications
@@ -2949,6 +2983,7 @@ impl SettingsRow {
             | Self::PsReadLine
             | Self::Notifications
             | Self::PowerShellOffer
+            | Self::ClaudeHooks
             | Self::LineWrapping => FORMULA_OPTIONS.len(),
             Self::BlockMaxHeight => BLOCK_MAX_HEIGHT_OPTIONS.len(),
             Self::Scrollback => SCROLLBACK_OPTIONS.len(),
@@ -3014,6 +3049,7 @@ impl SettingsRow {
             | Self::PsReadLine
             | Self::Notifications
             | Self::PowerShellOffer
+            | Self::ClaudeHooks
             | Self::LineWrapping => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
             // The one item that is a word goes through the i18n table and the
             // three that are quantities do not — the table's own header lists
@@ -3325,6 +3361,13 @@ impl SettingsRow {
             Self::PowerShellOffer => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.powershell_integration_offer),
+            // The *file's* answer and not a stored one, like `ContextMenu`
+            // below and for its reason: what is ticked is whether the user's
+            // own Claude Code settings call this program, and only that file
+            // can say.
+            Self::ClaudeHooks => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.claude_hooks),
             // The *state of the machine*, like `PsReadLine` below and for the
             // same reason: what is ticked is whether Explorer's menu carries the
             // verb, which is a question only the registry can answer.
@@ -3542,6 +3585,11 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // wrong with the module this shell already loads, and what this shell is not
     // loading at all (§7.1.6j).
     rows.push(SettingsRow::PowerShellOffer);
+    // **Under both**, because it is the third question about the same pane and
+    // the only one about a program Folio did not start: what is wrong with the
+    // module this shell loads, what this shell is not loading, and what the
+    // agent running inside it has no way to tell the terminal.
+    rows.push(SettingsRow::ClaudeHooks);
     // **Under the PSReadLine row**, which is the mock-up's own order for this page
     // (4838, then 4862): the row that reports a fact about the machine stands
     // first and the row that changes what a pane does stands under it.
@@ -3831,6 +3879,10 @@ pub struct SettingsValues {
     /// uninstalled from another folder or a restored backup all move this row
     /// rather than leaving it claiming something that is no longer true.
     pub context_menu: bool,
+    /// Whether the user's own Claude Code configuration calls `folio attention`.
+    ///
+    /// Read off that file rather than stored here, for [`Self::context_menu`]'s reason.
+    pub claude_hooks: bool,
     /// Which way a split with no direction of its own cuts.
     pub split_direction: SplitDirectionV1,
     /// Where a web preview's address field sends a non-address.
@@ -3975,6 +4027,7 @@ impl SettingsValues {
             // A machine that never installed the verb, which is what a fresh
             // one is.
             context_menu: false,
+            claude_hooks: false,
             split_direction: SplitDirectionV1::Auto,
             search_engine: SearchEngineV1::DuckDuckGo,
             minimum_contrast: MinimumContrastV1::Off,
@@ -6703,6 +6756,20 @@ pub fn terminal_notifications_requested(target: SettingsTarget) -> Option<bool> 
 pub fn powershell_integration_offer_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::PowerShellOffer, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// Whether Claude Code's hooks are installed, as a press on this row's picker.
+///
+/// `On` writes them into the user's own configuration; `Off` takes them back out. Symmetric on
+/// purpose: a switch that could only be thrown one way is a switch nobody should be asked to throw.
+#[must_use]
+pub fn claude_hooks_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::ClaudeHooks, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
@@ -16324,6 +16391,7 @@ mod tests {
             vec![
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
+                SettingsRow::ClaudeHooks,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::Notifications
@@ -16410,6 +16478,7 @@ mod tests {
             vec![
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
+                SettingsRow::ClaudeHooks,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::Notifications
@@ -17372,6 +17441,7 @@ mod tests {
                 SettingsRow::ContextMenu,
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
+                SettingsRow::ClaudeHooks,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::Notifications
@@ -17410,6 +17480,7 @@ mod tests {
                 SettingsRow::ContextMenu,
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
+                SettingsRow::ClaudeHooks,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::Notifications
