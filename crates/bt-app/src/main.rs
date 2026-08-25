@@ -42,6 +42,7 @@ mod git;
 mod git_graph;
 mod git_panel;
 mod git_watch;
+mod hang_watch;
 mod hex_peek;
 mod highlight;
 mod i18n;
@@ -40379,6 +40380,7 @@ impl Runtime<'_> {
     }
 
     fn publish_frame_inner(&mut self, trigger: FrameTrigger, skip_unchanged: bool) -> Result<bool> {
+        hang_watch::at(hang_watch::Station::Present);
         // **The tripwire.** A frame is about to describe a tab whose seat set
         // may have changed; if it changed without anyone carrying the change to
         // the shells, this is the moment the two pictures diverge and the last
@@ -52656,6 +52658,7 @@ impl Runtime<'_> {
     }
 
     fn drain_pty(&mut self) -> Result<()> {
+        hang_watch::at(hang_watch::Station::Drain);
         // Lowered first: see [`PtyWakeSignal::accept`].
         self.window.pty_wake.accept();
         let mut active_changed = false;
@@ -53486,6 +53489,7 @@ impl Runtime<'_> {
     /// (§7.1.6h). Answering `None` is answering "nothing is owed and nothing has to be woken
     /// for", which is exactly true.
     fn flush_pending_pty_resize(&mut self, now: Instant) -> Result<Option<Instant>> {
+        hang_watch::at(hang_watch::Station::PtyResize);
         let active = self.window.active_tab;
         let focused_seat = self.window.tabs[active].focused_leaf;
         let mut wake_deadline: Option<Instant> = None;
@@ -60906,6 +60910,7 @@ impl Runtime<'_> {
     /// `about_to_wait`. Free — one `Option` read — for the overwhelming majority
     /// of turns, in which nobody touched the wheel.
     fn flush_wheel(&mut self) -> Result<()> {
+        hang_watch::at(hang_watch::Station::Wheel);
         let Some(burst) = self.window.wheel_burst.take() else {
             return Ok(());
         };
@@ -63159,6 +63164,7 @@ impl Runtime<'_> {
     /// The clock the browser-exit deadline is hung on, the seat's own mortality,
     /// and the chord list the focus keeps changing.
     fn advance_web_page(&mut self, now: Instant) -> Result<()> {
+        hang_watch::at(hang_watch::Station::WebPage);
         if self.window.web.is_empty() {
             return Ok(());
         }
@@ -68274,6 +68280,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        hang_watch::at(hang_watch::Station::Event);
         // **The one line the whole slice is about.** winit stamps the id of the
         // window the event happened to; before this, the loop compared it against
         // the only window there was and dropped anything else. Now it is a
@@ -68460,6 +68467,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // **The pulse, and it is the very first statement in the turn** (§1.5).
+        // Before the two early returns below, because a loop that is retiring or
+        // has no application yet is still a loop that came round, and a watchdog
+        // that took either of those states for a stopped pump would file a
+        // report on a program that is working.
+        hang_watch::beat();
+        hang_watch::run_selftest_if_due();
         if self.app.is_none() {
             return;
         }
@@ -71121,6 +71135,12 @@ fn main() -> Result<()> {
     // process does get goes to the frame first. See `bt_platform::ThreadPriority`
     // for why one step and not a multimedia scheduling class.
     bt_platform::set_current_thread_priority(bt_platform::ThreadPriority::AboveNormal);
+    // **And the witness to the day this thread stops answering** (§1.5).
+    // Started from here, on the window thread, before the loop exists: it needs
+    // this thread's id, and it needs `%APPDATA%` resolved by the thread that is
+    // allowed to pay for the one-time relocation `storage_dir` performs. A
+    // healthy run never writes a byte — see `hang_watch` for the whole bill.
+    hang_watch::start(persist::storage_dir().join(hang_watch::REPORTS_DIRECTORY));
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
         .context("create winit event loop")?;
