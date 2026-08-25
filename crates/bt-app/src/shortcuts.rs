@@ -1354,6 +1354,82 @@ impl Shortcuts {
             .map(|binding| binding.action)
     }
 
+    /// **The lines a hint card shows to a hand holding `modifiers`** (§7.1.5e′).
+    ///
+    /// The effective table and not [`BINDINGS`], on `webhost::claimable_chords`'s
+    /// own reasoning: a card that went on showing the factory chord after
+    /// somebody rebound one would be a shortcut table with two answers.
+    ///
+    /// **The modifiers must match exactly**, and that is a ruling rather than an
+    /// optimisation (Claude 定 2026-08-25). The card answers "what does the hand
+    /// I am holding do", and a hand holding `Ctrl` cannot press `Ctrl+Shift+N`
+    /// without pressing `Shift` first — at which point the card re-answers with
+    /// no second wait ([`crate::keyhint::KeyHintHost::observe`] ③). So the rows
+    /// one modifier further out are never lost, they arrive the instant that
+    /// modifier does; listing them under a bare `Ctrl` would bury the four rows
+    /// that hold is actually for under twenty-one that it is not, which is the
+    /// wall the whole 800ms wait exists to avoid.
+    ///
+    /// **A row out of scope is not in the list**, asked with the same
+    /// [`Scope::holds`] `lookup` asks — because it is the same question: a row
+    /// out of scope is not in the table for this press, so listing it would be
+    /// the card promising a verb the very next line of `lookup` will decline.
+    ///
+    /// **A stub row is not in the list either.** §7.1.5e's 「存根行是真实的行」
+    /// is about the chord being *claimed* — nothing else may take it and nothing
+    /// leaks to the shell — and the shortcut page says so in as many words on a
+    /// line with room for a note. This card has no such room and is not making
+    /// that claim: it lists what pressing a key would *do*, and a row dispatched
+    /// to an explicit no-op does nothing.
+    ///
+    /// **A family folds to one line**, derived from `family` exactly as
+    /// [`Self::editor_rows`] derives it, and for that method's own reason: nine
+    /// lines of one verb would bury the fifteen other verbs under them. The fold
+    /// is taken **only when every member of the family is in the list and the
+    /// members are a run** — a family half of whose rows have been rebound
+    /// elsewhere is listed member by member, because `1 – 9` over eight bound
+    /// digits is a line claiming a key nobody can press.
+    #[must_use]
+    pub(crate) fn hint_lines(&self, modifiers: ModifiersState, focus: Focus) -> Vec<HintLine> {
+        if modifiers.is_empty() {
+            return Vec::new();
+        }
+        let mut out: Vec<HintLine> = Vec::new();
+        let mut index = 0;
+        while index < self.rows.len() {
+            let head = &self.rows[index];
+            let end = match head.family {
+                None => index + 1,
+                Some(family) => self.rows[index..]
+                    .iter()
+                    .position(|row| row.family != Some(family))
+                    .map_or(self.rows.len(), |offset| index + offset),
+            };
+            let members = &self.rows[index..end];
+            index = end;
+            let listed: Vec<&Binding> = members
+                .iter()
+                .filter(|row| row.answers_a_hand_holding(modifiers, focus))
+                .collect();
+            if listed.is_empty() {
+                continue;
+            }
+            match (head.family, folded_key_cap(&listed)) {
+                (Some(family), Some(cap)) if listed.len() == members.len() => {
+                    out.push(HintLine {
+                        key: cap,
+                        title: family.text(),
+                    });
+                }
+                _ => out.extend(listed.iter().map(|row| HintLine {
+                    key: row_key_cap(row),
+                    title: row.title.text(),
+                })),
+            }
+        }
+        out
+    }
+
     /// **The lines the shortcut page draws**, folded, in the table's own order,
     /// with the reserved rows after them.
     ///
@@ -1413,6 +1489,69 @@ impl Shortcuts {
         }));
         out
     }
+}
+
+/// One line of a hint card: the key to press, and the name of what it does.
+///
+/// The modifiers are deliberately **not** here — the card's head says them once,
+/// and repeating `Ctrl + Shift` down sixteen lines would be sixteen copies of
+/// the one thing the reader's own fingers are already telling them.
+///
+/// A display type and not a borrow of the table, for [`ShortcutRow`]'s reason: the
+/// geometry gets strings and the chord grammar stays in the one module that owns
+/// it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HintLine {
+    /// The key cap, with the held modifiers left off.
+    pub(crate) key: String,
+    pub(crate) title: &'static str,
+}
+
+impl Binding {
+    /// Whether this row would answer a press by a hand holding exactly
+    /// `modifiers`, with the window's keyboard where `focus` says it is.
+    ///
+    /// The same three questions [`Shortcuts::lookup`] asks, minus the key itself
+    /// — which is the whole of what a hint is: everything about the press except
+    /// which key finishes it. Stated once here so the card and the dispatch
+    /// cannot drift apart.
+    fn answers_a_hand_holding(&self, modifiers: ModifiersState, focus: Focus) -> bool {
+        self.scope.holds(focus)
+            && !self.action.is_pending()
+            && self
+                .chord
+                .as_ref()
+                .is_some_and(|chord| chord.modifiers == modifiers)
+    }
+}
+
+/// One row's key, as the cap a hint card prints.
+fn row_key_cap(row: &Binding) -> String {
+    row.chord
+        .as_ref()
+        .map(|chord| key_label(&chord.key))
+        .unwrap_or_default()
+}
+
+/// A run of rows that share a family, as **one** cap reading `first – last`, or
+/// `None` when the run does not collapse.
+///
+/// [`fold_caps`]'s own predicate, asked of the key alone: the members have to
+/// share their modifiers and each reach a single printed character, or a range
+/// between the ends would be a line claiming the keys in the gaps.
+fn folded_key_cap(members: &[&Binding]) -> Option<String> {
+    let first = members.first()?.chord.as_ref()?;
+    let last = members.last()?.chord.as_ref()?;
+    if members.len() < 2 {
+        return None;
+    }
+    let runs = members.iter().all(|row| {
+        row.chord.as_ref().is_some_and(|chord| {
+            chord.modifiers == first.modifiers
+                && matches!(&chord.key, ChordKey::Character(text) if text.chars().count() == 1)
+        })
+    });
+    runs.then(|| format!("{} – {}", key_label(&first.key), key_label(&last.key)))
 }
 
 /// What a folded line says under its name.
@@ -1899,6 +2038,19 @@ pub(crate) fn classify_recording(base: &Key, modifiers: ModifiersState) -> Recor
         )),
         _ => RecordedKey::Unusable,
     }
+}
+
+/// Whether this press is a modifier and nothing else.
+///
+/// The one question the hint card asks of a key (§7.1.5e′): every *other* press
+/// spends the hold, because a hand that has pressed something is no longer a
+/// hand that has stopped. It reads [`is_modifier_key`] rather than a list of its
+/// own — the recorder and the card have to agree about what a modifier is, or a
+/// key one of them thinks is a chord and the other thinks is `Shift` would take
+/// a card down while the box beside it went on waiting.
+#[must_use]
+pub(crate) fn is_a_bare_modifier(key: &Key) -> bool {
+    matches!(key, Key::Named(named) if is_modifier_key(*named))
 }
 
 const fn is_modifier_key(named: NamedKey) -> bool {
@@ -3561,6 +3713,238 @@ mod tests {
                 "{:?} is in the table but unreachable",
                 binding.action
             );
+        }
+    }
+
+    // ── what a held modifier is told (§7.1.5e′) ────────────────────────────
+
+    /// A terminal showing its own scrollback, which is where most of this
+    /// window's rows are in force.
+    const ON_A_TERMINAL: Focus = Focus {
+        preview: false,
+        terminal_primary: true,
+        search_open: false,
+        web_page: false,
+    };
+
+    fn hint_titles(modifiers: ModifiersState, focus: Focus) -> Vec<&'static str> {
+        Shortcuts::defaults()
+            .hint_lines(modifiers, focus)
+            .into_iter()
+            .map(|line| line.title)
+            .collect()
+    }
+
+    /// PIN §7.1.5e′ — **the hold is matched exactly, never as a prefix.**
+    ///
+    /// Holding `Ctrl` lists the four rows that are `Ctrl` and something, and
+    /// none of the twenty that need a `Shift` the reader has not pressed. The
+    /// ruling and its argument are on [`Shortcuts::hint_lines`]; this is the
+    /// line that makes it a fact.
+    ///
+    /// Mutation: `chord.modifiers.contains(modifiers)` in
+    /// `answers_a_hand_holding`.
+    #[test]
+    fn a_hold_lists_the_rows_it_is_exactly_and_not_the_ones_it_is_a_prefix_of() {
+        let ctrl = hint_titles(CTRL, ON_A_TERMINAL);
+        assert!(
+            ctrl.contains(&Text::ShortcutNextTab.text()),
+            "Ctrl+Tab is a Ctrl row: {ctrl:?}"
+        );
+        assert!(
+            !ctrl.contains(&Text::RailNewTab.text()),
+            "Ctrl+Shift+N is not answered by a hand holding only Ctrl: {ctrl:?}"
+        );
+        let both = hint_titles(CTRL_SHIFT, ON_A_TERMINAL);
+        assert!(both.contains(&Text::RailNewTab.text()));
+        assert!(
+            !both.contains(&Text::ShortcutNextTab.text()),
+            "and Ctrl+Tab is not answered by a hand holding Ctrl and Shift: {both:?}"
+        );
+    }
+
+    /// PIN §7.1.5e′ — **a row out of scope is not in the list**, asked with the
+    /// same predicate `lookup` asks.
+    ///
+    /// `Ctrl+L` is the page's address row and `Ctrl+S` is the preview's save;
+    /// with the keyboard on a terminal neither is in the table for a press, so
+    /// neither may be in a card that claims to say what a press would do.
+    ///
+    /// Mutation: drop the `scope.holds(focus)` clause.
+    #[test]
+    fn a_row_out_of_scope_is_not_in_the_hint() {
+        let on_terminal = hint_titles(CTRL, ON_A_TERMINAL);
+        assert!(!on_terminal.contains(&Text::ShortcutWebAddress.text()));
+        assert!(!on_terminal.contains(&Text::ShortcutSavePreview.text()));
+        let on_page = hint_titles(
+            CTRL,
+            Focus {
+                preview: true,
+                terminal_primary: false,
+                search_open: false,
+                web_page: true,
+            },
+        );
+        assert!(
+            on_page.contains(&Text::ShortcutWebAddress.text()),
+            "and it is there where it is in force: {on_page:?}"
+        );
+        assert!(
+            on_page.contains(&Text::ShortcutSavePreview.text()),
+            "a page is a preview seat, so the save row holds too: {on_page:?}"
+        );
+    }
+
+    /// PIN §7.1.5e′ — **a row whose machine has not arrived is not offered.**
+    ///
+    /// `Ctrl+Shift+P` is claimed, in the table and dispatched to an explicit
+    /// no-op; the shortcut *page* says so on a line with room for a note, and
+    /// this card has none. A list of what a press would do may not contain a
+    /// press that does nothing.
+    ///
+    /// Mutation: drop the `!self.action.is_pending()` clause.
+    #[test]
+    fn a_row_whose_verb_has_not_arrived_is_not_offered() {
+        let held = hint_titles(CTRL_SHIFT, ON_A_TERMINAL);
+        assert!(
+            !held.contains(&Text::ShortcutCommandPalette.text()),
+            "the palette has no machine behind it yet: {held:?}"
+        );
+        assert!(
+            held.contains(&Text::ShortcutJumpAttention.text()),
+            "and the row that stopped being a stub is offered: {held:?}"
+        );
+    }
+
+    /// PIN §7.1.5e′ — **a family is one line, and its cap is the range.**
+    ///
+    /// Nine ordinals of one verb would bury the fifteen other verbs under them,
+    /// which is `editor_rows`' own argument for the same fold.
+    ///
+    /// Mutation: list the members instead of folding them.
+    #[test]
+    fn the_nine_tab_ordinals_fold_to_one_line() {
+        let lines = Shortcuts::defaults().hint_lines(CTRL_SHIFT, ON_A_TERMINAL);
+        let folded: Vec<&HintLine> = lines
+            .iter()
+            .filter(|line| line.title == Text::ShortcutFamilyGotoTab.text())
+            .collect();
+        assert_eq!(folded.len(), 1, "one line for the family");
+        assert_eq!(folded[0].key, "1 – 9");
+        assert!(
+            !lines.iter().any(|line| line.key == "5"),
+            "and no member is listed beside it: {lines:?}"
+        );
+    }
+
+    /// PIN §7.1.5e′ — **a family the user has broken up is listed member by
+    /// member**, because `1 – 9` over eight bound digits is a line claiming a
+    /// key nobody can press.
+    ///
+    /// Mutation: fold whenever `head.family` is `Some`.
+    #[test]
+    fn a_family_with_a_member_rebound_elsewhere_is_not_folded() {
+        let mut table = Shortcuts::defaults();
+        table.set("goto-tab-5", parse_chord("Alt+Shift+5"));
+        let lines = table.hint_lines(CTRL_SHIFT, ON_A_TERMINAL);
+        assert!(
+            !lines.iter().any(|line| line.key == "1 – 9"),
+            "the range is a lie once a member has left it: {lines:?}"
+        );
+        assert!(lines.iter().any(|line| line.key == "4"));
+        assert!(
+            !lines.iter().any(|line| line.key == "5"),
+            "and the one that left is not claimed by this hold: {lines:?}"
+        );
+    }
+
+    /// PIN §7.1.5e′ — **the hint reads the effective table**, so a chord the
+    /// reader recorded is the chord the card shows.
+    ///
+    /// Mutation: walk `BINDINGS` instead of `self.rows`.
+    #[test]
+    fn the_hint_shows_the_chord_a_reader_recorded_and_not_the_default() {
+        let mut table = Shortcuts::defaults();
+        table.set("new-tab", parse_chord("Ctrl+Shift+Y"));
+        let lines = table.hint_lines(CTRL_SHIFT, ON_A_TERMINAL);
+        let row = lines
+            .iter()
+            .find(|line| line.title == Text::RailNewTab.text())
+            .expect("the row is still in force");
+        assert_eq!(row.key, "Y");
+    }
+
+    /// PIN §7.1.5e′ — **a row a reader has unbound is not in the list**, which
+    /// is the whole of what `chord: None` means, and **an empty hand is asked
+    /// nothing.**
+    #[test]
+    fn an_unbound_row_and_an_empty_hand_are_both_silent() {
+        let mut table = Shortcuts::defaults();
+        table.set("new-tab", None);
+        let lines = table.hint_lines(CTRL_SHIFT, ON_A_TERMINAL);
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.title == Text::RailNewTab.text())
+        );
+        assert!(
+            Shortcuts::defaults()
+                .hint_lines(ModifiersState::empty(), ON_A_TERMINAL)
+                .is_empty(),
+            "no hold, no card"
+        );
+    }
+
+    /// PIN §7.1.5e′ — **a hold this table claims nothing for says nothing**,
+    /// which is what keeps a card off the glass for a `Shift` held while typing
+    /// and for anything carrying the Windows key.
+    ///
+    /// The `Super` half is not an omission being papered over: no row of this
+    /// table wears it, so exact matching answers it without a special case, and
+    /// this is the line that says the answer is deliberate.
+    #[test]
+    fn a_hold_this_table_claims_nothing_for_raises_nothing() {
+        assert!(
+            Shortcuts::defaults()
+                .hint_lines(ModifiersState::SHIFT, ON_A_TERMINAL)
+                .is_empty(),
+            "bare Shift on a terminal with no search open claims nothing"
+        );
+        assert!(
+            Shortcuts::defaults()
+                .hint_lines(ModifiersState::ALT, ON_A_TERMINAL)
+                .is_empty(),
+            "and bare Alt claims nothing, which is why this card changes nothing \
+             about what Windows does with the menu key"
+        );
+        assert!(
+            Shortcuts::defaults()
+                .hint_lines(
+                    ModifiersState::CONTROL.union(ModifiersState::SUPER),
+                    ON_A_TERMINAL
+                )
+                .is_empty(),
+            "and nothing in this table wears the Windows key"
+        );
+    }
+
+    /// PIN §7.1.5e′ — **every cap the card prints is a cap somebody can find on
+    /// a keyboard**, and never the empty string a name this grammar cannot
+    /// write would leave behind.
+    #[test]
+    fn every_cap_a_hint_prints_is_a_real_key() {
+        for modifiers in [CTRL, CTRL_SHIFT, ALT_SHIFT, ModifiersState::empty()] {
+            for focus in REACHABLE_FOCUS {
+                for line in Shortcuts::defaults().hint_lines(modifiers, focus) {
+                    assert!(
+                        !line.key.is_empty(),
+                        "{:?} printed an empty cap for {:?}",
+                        line.title,
+                        modifiers
+                    );
+                    assert!(!line.title.is_empty());
+                }
+            }
         }
     }
 }

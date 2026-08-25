@@ -16,6 +16,20 @@
 #                                                        sharing its scancode
 #   .\ui-probe.ps1 chord -Pid <pid> -Mods cs -Key n      → Ctrl+Shift+N (c/s/a = ctrl/shift/alt)
 #   .\ui-probe.ps1 chord -Pid <pid> -Mods c -Name Tab    → Ctrl+Tab
+#   .\ui-probe.ps1 hold  -Pid <pid> -Mods c -Out h.png [-HoldMs 1200] [-Then s] [-ThenKey n]
+#                                                      → hold modifiers down with NO key after
+#                                                        them, photograph what that raises, then
+#                                                        optionally add more modifiers (-Then) and
+#                                                        photograph again, then optionally tap a
+#                                                        key (-ThenKey) and photograph what that
+#                                                        leaves. Written for DESIGN 7.1.5e′, whose
+#                                                        whole trigger is the ABSENCE of a key
+#                                                        after the modifiers — `chord` taps one
+#                                                        between the press and the release and so
+#                                                        can never reach it. The release is in a
+#                                                        `finally`: a modifier left down by a
+#                                                        crashed probe is a desktop that stays
+#                                                        broken after the probe is gone.
 #   .\ui-probe.ps1 capture -Pid <pid> -Out shot.png [-Margin 400]  → DPI-aware capture; Margin grows the
 #                                                                    region beyond the window (IME popups
 #                                                                    are separate windows and live outside)
@@ -107,7 +121,7 @@
 
 param(
   [Parameter(Position = 0, Mandatory = $true)]
-  [ValidateSet("launch", "type", "key", "chord", "capture", "close", "wheel", "resize", "click", "rightclick", "dblclick", "hover", "drag", "burst")]
+  [ValidateSet("launch", "type", "key", "chord", "hold", "capture", "close", "wheel", "resize", "click", "rightclick", "dblclick", "hover", "drag", "burst")]
   [string]$Cmd,
   [int]$ProcId = 0,
   [string]$Text = "",
@@ -116,6 +130,12 @@ param(
   # base key named by the character printed on it (-Key "n", -Key "-", -Key "1").
   [string]$Mods = "",
   [string]$Key = "",
+  # hold: the modifiers ADDED partway through the hold, and the key tapped at
+  # the end of it. Two more parameters rather than a second invocation, because
+  # the whole point is that the keys never come up in between — a second
+  # PowerShell process would have to press them again from scratch.
+  [string]$Then = "",
+  [string]$ThenKey = "",
   [string]$Out = "$env:TEMP\ui-probe.png",
   [int]$Margin = 0,
   [int]$WaitSeconds = 15,
@@ -357,6 +377,44 @@ public class Probe {
     if (shift) { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x10, wScan = 0x2A, dwFlags = KEYEVENTF_KEYUP }; seq.Add(m); }
     if (ctrl)  { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x11, wScan = 0x1D, dwFlags = KEYEVENTF_KEYUP }; seq.Add(m); }
     return SendInput((uint)seq.Count, seq.ToArray(), Marshal.SizeOf(typeof(INPUT)));
+  }
+  /* Modifiers held down, and let go, as two separate calls — the only way to
+     drive a feature whose whole trigger is a modifier that stays down with NO
+     key after it (DESIGN.md 7.1.5e', the hint card's 800ms). `Chord` above
+     cannot reach it: it taps a base key between the press and the release, and
+     the thing under test is precisely the absence of that tap.
+
+     Split in two rather than given a duration, because what has to happen in
+     between is a screen capture and a second press, and a C# helper that slept
+     would be holding the keys through a sleep this script cannot photograph
+     inside of. The caller is responsible for the release, and the caller is
+     written so that a `finally` always makes it: a modifier left down by a
+     crashed probe is a desktop that stays broken after the probe is gone. */
+  public static uint ModsDown(bool ctrl, bool shift, bool alt) {
+    var seq = new System.Collections.Generic.List<INPUT>();
+    if (ctrl)  { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x11, wScan = 0x1D, dwFlags = 0 }; seq.Add(m); }
+    if (shift) { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x10, wScan = 0x2A, dwFlags = 0 }; seq.Add(m); }
+    if (alt)   { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x12, wScan = 0x38, dwFlags = 0 }; seq.Add(m); }
+    if (seq.Count == 0) return 0;
+    return SendInput((uint)seq.Count, seq.ToArray(), Marshal.SizeOf(typeof(INPUT)));
+  }
+  public static uint ModsUp(bool ctrl, bool shift, bool alt) {
+    var seq = new System.Collections.Generic.List<INPUT>();
+    if (alt)   { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x12, wScan = 0x38, dwFlags = KEYEVENTF_KEYUP }; seq.Add(m); }
+    if (shift) { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x10, wScan = 0x2A, dwFlags = KEYEVENTF_KEYUP }; seq.Add(m); }
+    if (ctrl)  { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x11, wScan = 0x1D, dwFlags = KEYEVENTF_KEYUP }; seq.Add(m); }
+    if (seq.Count == 0) return 0;
+    return SendInput((uint)seq.Count, seq.ToArray(), Marshal.SizeOf(typeof(INPUT)));
+  }
+  /* One base key tapped while whatever is already down stays down. `Chord`
+     presses and releases the modifiers itself, so it cannot be used to spend a
+     hold the caller is holding. */
+  public static uint TapWhileHeld(ushort vk) {
+    ushort sc = (ushort)MapVirtualKeyW(vk, 0);
+    uint ext = IsExtendedVk(vk) ? KEYEVENTF_EXTENDEDKEY : 0;
+    var down = new INPUT { type = 1 }; down.u.ki = new KEYBDINPUT { wVk = vk, wScan = sc, dwFlags = ext };
+    var up   = new INPUT { type = 1 }; up.u.ki   = new KEYBDINPUT { wVk = vk, wScan = sc, dwFlags = ext | KEYEVENTF_KEYUP };
+    return SendInput(2, new INPUT[] { down, up }, Marshal.SizeOf(typeof(INPUT)));
   }
   /* The VK of the key that prints this character on the current layout. */
   public static ushort VkForChar(char c) {
@@ -619,6 +677,70 @@ switch ($Cmd) {
     $sent = [Probe]::Chord($ctrl, $shift, $alt, [uint16]$vk)
     if ($sent -eq 0) { throw "SendInput accepted 0 events — the chord was not sent" }
     "sent chord mods=$Mods key=$(if ($Name) { $Name } else { $Key }) vk=0x$('{0:X2}' -f $vk) ($sent events accepted, foreground verified)"
+  }
+  "hold" {
+    # **Modifiers down with nothing after them** — DESIGN 7.1.5e′'s whole
+    # trigger, and the one keyboard shape `chord` cannot make.
+    #
+    # Four moments, each photographed, and the run is one process because the
+    # keys must not come up in between: held (the card is due), changed (a
+    # second modifier joins and the card re-answers with no second wait), spent
+    # (a real key lands, the card goes and the chord still fires), released.
+    $hwnd = Get-AppWindow $ProcId
+    if (-not [Probe]::BringToFront($hwnd)) { throw "REFUSED: target window did not take foreground — not sending keys blind" }
+    $r = New-Object PRECT
+    [Probe]::GetWindowRect($hwnd, [ref]$r) | Out-Null
+    $cx = [int](($r.L + $r.R) / 2); $cy = [int](($r.T + $r.B) / 2)
+    if (-not [Probe]::PointBelongsTo($cx, $cy, $ProcId)) { throw "REFUSED: the pixel at ($cx,$cy) is not owned by pid=$ProcId" }
+    Add-Type -AssemblyName System.Drawing
+    $stem = [IO.Path]::Combine([IO.Path]::GetDirectoryName($Out), [IO.Path]::GetFileNameWithoutExtension($Out))
+    $ext = [IO.Path]::GetExtension($Out); if (-not $ext) { $ext = ".png" }
+    $shot = {
+      param($tag)
+      [Probe]::GetWindowRect($hwnd, [ref]$r) | Out-Null
+      $bmp = New-Object System.Drawing.Bitmap(($r.R - $r.L), ($r.B - $r.T))
+      $g = [System.Drawing.Graphics]::FromImage($bmp)
+      $g.CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size)
+      $path = "$stem-$tag$ext"
+      $bmp.Save($path); $g.Dispose(); $bmp.Dispose()
+      $path
+    }
+    $ctrl  = $Mods -match "c"; $shift = $Mods -match "s"; $alt = $Mods -match "a"
+    $ctrl2 = $Then -match "c"; $shift2 = $Then -match "s"; $alt2 = $Then -match "a"
+    $wait = if ($HoldMs -gt 0) { $HoldMs } else { 1200 }
+    $said = @()
+    try {
+      $sent = [Probe]::ModsDown($ctrl, $shift, $alt)
+      if ($sent -eq 0) { throw "SendInput accepted 0 events — the hold was not sent" }
+      Start-Sleep -Milliseconds $wait
+      $said += "held mods=$Mods for ${wait}ms -> $(& $shot '00-held')"
+      if ($Then) {
+        $sent2 = [Probe]::ModsDown($ctrl2, $shift2, $alt2)
+        if ($sent2 -eq 0) { throw "SendInput accepted 0 events — the second hold was not sent" }
+        # Deliberately far shorter than the wait above: the claim being
+        # photographed is that adding a modifier re-answers WITHOUT a second
+        # 800ms, so a pause long enough to have re-earned one would prove
+        # nothing.
+        Start-Sleep -Milliseconds 250
+        $said += "added mods=$Then -> $(& $shot '01-changed')"
+      }
+      if ($ThenKey) {
+        $vk = [Probe]::VkForChar([char]$ThenKey)
+        if (-not $vk) { throw "'$ThenKey' is not typeable on the current layout" }
+        $sent3 = [Probe]::TapWhileHeld([uint16]$vk)
+        if ($sent3 -eq 0) { throw "SendInput accepted 0 events — the key was not sent" }
+        Start-Sleep -Milliseconds 250
+        $said += "tapped '$ThenKey' with the hold still down -> $(& $shot '02-spent')"
+      }
+    } finally {
+      # Always, and in reverse: a modifier this probe left down outlives the
+      # probe and breaks every other window on the desktop.
+      [Probe]::ModsUp($ctrl2, $shift2, $alt2) | Out-Null
+      [Probe]::ModsUp($ctrl, $shift, $alt) | Out-Null
+    }
+    Start-Sleep -Milliseconds 250
+    $said += "released -> $(& $shot '03-released')"
+    $said -join "`n"
   }
   "capture" {
     $h = Get-AppWindow $ProcId

@@ -448,14 +448,19 @@ const NAV_HOVER_GROUND_ALPHA: f32 = 0.5;
 /// changes them.
 const SHORTCUT_CAPS_WIDTH_LOGICAL_PX: f32 = 168.0;
 /// One key cap: `.combo`'s hairline-and-face recipe at a smaller round.
-const CAP_HEIGHT_LOGICAL_PX: f32 = 20.0;
-const CAP_RADIUS_LOGICAL_PX: f32 = 4.0;
-const CAP_PADDING_X_LOGICAL_PX: f32 = 6.0;
-const CAP_GAP_LOGICAL_PX: f32 = 4.0;
-const CAP_FONT_LOGICAL_PX: f32 = 11.5;
+///
+/// **`pub(crate)` since the hint card** (§7.1.5e′): [`crate::keyhint`] draws the
+/// same object on a different surface, and a cap sized from a second set of
+/// numbers is a cap that stops being the same object the first time one of the
+/// two is retuned (CONVENTIONS §4: 同一个量出现两个定义 = 回归).
+pub(crate) const CAP_HEIGHT_LOGICAL_PX: f32 = 20.0;
+pub(crate) const CAP_RADIUS_LOGICAL_PX: f32 = 4.0;
+pub(crate) const CAP_PADDING_X_LOGICAL_PX: f32 = 6.0;
+pub(crate) const CAP_GAP_LOGICAL_PX: f32 = 4.0;
+pub(crate) const CAP_FONT_LOGICAL_PX: f32 = 11.5;
 /// A cap is never narrower than it is tall: a single letter in a box a third of
 /// its height wide reads as a sliver, not as a key.
-const CAP_MIN_WIDTH_LOGICAL_PX: f32 = CAP_HEIGHT_LOGICAL_PX;
+pub(crate) const CAP_MIN_WIDTH_LOGICAL_PX: f32 = CAP_HEIGHT_LOGICAL_PX;
 
 /// The `Record` button — `.btn`'s grammar (mock-up 2000-2008) at the picker's
 /// own height, so a row's right-hand control is the same object it is on every
@@ -2130,6 +2135,22 @@ pub enum SettingsRow {
     /// would leave the reading in place, which is the half a user turning this off
     /// is actually asking about.
     GitPanel,
+    /// **Whether a held modifier raises the card that lists what it starts**
+    /// (§7.1.5e′, user proposal + Claude 定形 2026-08-25).
+    ///
+    /// **On the General page and not on `Shortcuts`**, and the reason is what
+    /// that page is: it is not a list of `SettingsRow`s at all — it is the
+    /// binding table's editor, laid out and hit-tested by three special-cased
+    /// blocks — so a preference there would be a new kind of thing on a page
+    /// that has exactly one kind. And not `Appearance` either: what this row
+    /// decides is whether the window *makes an offer*, which is something it
+    /// does rather than something it looks like. Appearance would have been the
+    /// answer if it chose how the card is drawn.
+    ///
+    /// Directly under `Language`, which is the pair it reads as: those two are
+    /// this page's rows about what the window **says to you**, and the three
+    /// below them are about what it does with your machine.
+    KeyHints,
     /// **Folio's verb in Explorer's right-click menu** (§7.4, Windows landing
     /// block slice 2) — the General page's fourth row.
     ///
@@ -2440,9 +2461,13 @@ impl SettingsRow {
             // wrong noun.
             // And the row that is about what this product is on this machine
             // rather than about what this window looks like — see the variant.
+            // And the row that decides whether this window offers to say what
+            // the keys under your hand do — a thing it *does*, which is what
+            // keeps it off the page about looks. See the variant.
             Self::GitPanel
             | Self::DefaultProfile
             | Self::Language
+            | Self::KeyHints
             | Self::SearchEngine
             | Self::ContextMenu => SettingsCategory::General,
             // The editor's eight, which are the Profiles page's second view.
@@ -2491,6 +2516,7 @@ impl SettingsRow {
             Self::Notifications => Text::RowNotifications.text(),
             Self::PowerShellOffer => Text::RowPowerShellOffer.text(),
             Self::GitPanel => Text::RowGitPanel.text(),
+            Self::KeyHints => Text::RowKeyHints.text(),
             Self::ContextMenu => Text::RowContextMenu.text(),
             // Mock-up 2360.
             Self::TabLayout => Text::RowTabLayout.text(),
@@ -2608,6 +2634,12 @@ impl SettingsRow {
             // does is the reason to reach for it: no page, no chord, and no `git`
             // process started on your behalf.
             Self::GitPanel => Text::DescGitPanel.text(),
+            // Says the gesture, because the title deliberately does not, and
+            // then the one fact that decides the question for most readers: the
+            // card never takes a key. A row about a popup that a reader suspects
+            // might swallow the chord they were reaching for is a row they
+            // switch off without trying it.
+            Self::KeyHints => Text::DescKeyHints.text(),
             // Two facts about Windows and no opinion about either: what the
             // entry says, and where Windows 11 files it. The second is there
             // because without it a reader switches this on, right-clicks a
@@ -2808,6 +2840,11 @@ impl SettingsRow {
             | Self::GitPanel
             | Self::DefaultProfile
             | Self::Language
+            // Not advanced either, and on the same measure: the reader this row
+            // exists for is one who has just met the card and wants it to stop,
+            // and a switch they have to open a disclosure to find is a switch
+            // they report as missing.
+            | Self::KeyHints
             // Not advanced, on `PsReadLine`'s own measure: it is a row that
             // repairs something the reader has already gone looking for, and a
             // reader who wants Folio in their right-click menu has no reason to
@@ -2907,6 +2944,7 @@ impl SettingsRow {
             | Self::InlineFormulas
             | Self::Tables
             | Self::GitPanel
+            | Self::KeyHints
             | Self::ContextMenu
             | Self::PsReadLine
             | Self::Notifications
@@ -2971,6 +3009,7 @@ impl SettingsRow {
             | Self::InlineFormulas
             | Self::Tables
             | Self::GitPanel
+            | Self::KeyHints
             | Self::ContextMenu
             | Self::PsReadLine
             | Self::Notifications
@@ -3277,6 +3316,9 @@ impl SettingsRow {
             Self::GitPanel => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.git_panel),
+            Self::KeyHints => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.key_hints),
             Self::Notifications => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.terminal_notifications),
@@ -3478,6 +3520,11 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     rows.push(SettingsRow::Tables);
     rows.push(SettingsRow::BlockMaxHeight);
     rows.push(SettingsRow::Language);
+    // **Directly under `Language`** (§7.1.5e′): those two are this page's rows
+    // about what the window *says to you*, and the three under them are about
+    // what it does with the machine. A row about a card full of words belongs
+    // beside the row that decides which words they are.
+    rows.push(SettingsRow::KeyHints);
     rows.push(SettingsRow::GitPanel);
     // Above `Default profile` and below `Git panel`, which keeps the last two
     // rows of this page where every keyboard walk in this file already expects
@@ -3773,6 +3820,9 @@ pub struct SettingsValues {
     pub powershell_integration_offer: bool,
     /// Whether the Files column offers its Git page at all.
     pub git_panel: bool,
+    /// Whether a modifier held on its own raises the card that lists what it
+    /// starts (§7.1.5e′).
+    pub key_hints: bool,
     /// Whether Explorer's right-click menu carries Folio's verb — **read off the
     /// registry, not out of `settings.json`**.
     ///
@@ -3921,6 +3971,7 @@ impl SettingsValues {
             terminal_notifications: true,
             powershell_integration_offer: true,
             git_panel: true,
+            key_hints: true,
             // A machine that never installed the verb, which is what a fresh
             // one is.
             context_menu: false,
@@ -6654,6 +6705,16 @@ pub fn powershell_integration_offer_requested(target: SettingsTarget) -> Option<
         SettingsTarget::Choice(SettingsRow::PowerShellOffer, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
+        _ => None,
+    }
+}
+
+/// Whether a held modifier raises the hint card, as a press on its picker
+/// (§7.1.5e′).
+#[must_use]
+pub fn key_hints_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::KeyHints, index) => FORMULA_OPTIONS.get(index).copied(),
         _ => None,
     }
 }
@@ -10593,49 +10654,80 @@ fn push_caps(
             middle + height / 2.0,
         ];
         right = rect[0] - px(CAP_GAP_LOGICAL_PX);
-        // The combo button's own recipe at a smaller round: a hairline, then a
-        // face one border in. A key cap is a control-shaped thing that is not a
-        // control, and borrowing the shape is what makes it read as a key rather
-        // than as a badge.
-        stack.quads.extend(rounded_overlay_fill(
+        push_cap(
+            stack,
             rect,
-            px(CAP_RADIUS_LOGICAL_PX),
-            palette.menu_border,
-            f32::from(palette.menu_border_alpha) / 255.0,
-        ));
-        stack.quads.extend(rounded_overlay_fill(
-            [
-                rect[0] + border,
-                rect[1] + border,
-                rect[2] - border,
-                rect[3] - border,
-            ],
-            px(CAP_RADIUS_LOGICAL_PX) - border,
+            cap,
             if reserved {
                 palette.dialog_surface
             } else {
                 palette.dialog_hover
             },
-            1.0,
-        ));
-        stack.labels.push(ChromeLabel {
-            mono: false,
-            text: cap.clone(),
-            rect,
-            font_size_px,
-            color: if reserved {
+            if reserved {
                 palette.menu_item_hint_text
             } else {
                 palette.dialog_title_text
             },
-            align_right: false,
-            align_center: true,
-            letter_spacing_em: 0.0,
-            weight: ChromeLabelWeight::Regular,
-            tabular_numerals: false,
-            clip: None,
-        });
+            scale,
+            border,
+            palette,
+        );
     }
+}
+
+/// **One key cap**: the combo button's own recipe at a smaller round — a
+/// hairline, then a face one border in.
+///
+/// A key cap is a control-shaped thing that is not a control, and borrowing the
+/// shape is what makes it read as a key rather than as a badge.
+///
+/// Lifted out of [`push_caps`] the day a second surface drew one
+/// ([`crate::keyhint`], §7.1.5e′) and `pub(crate)` for that reason: the face and
+/// the ink change with the surface a cap stands on, and everything else about it
+/// must not — two copies of this recipe are two caps that drift the first time
+/// either is retuned.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_cap(
+    stack: &mut OverlayLayer,
+    rect: [f32; 4],
+    text: &str,
+    face: [u8; 3],
+    ink: [u8; 3],
+    scale: f32,
+    border: f32,
+    palette: bt_render::ChromePalette,
+) {
+    let px = |value: f32| value * scale;
+    stack.quads.extend(rounded_overlay_fill(
+        rect,
+        px(CAP_RADIUS_LOGICAL_PX),
+        palette.menu_border,
+        f32::from(palette.menu_border_alpha) / 255.0,
+    ));
+    stack.quads.extend(rounded_overlay_fill(
+        [
+            rect[0] + border,
+            rect[1] + border,
+            rect[2] - border,
+            rect[3] - border,
+        ],
+        px(CAP_RADIUS_LOGICAL_PX) - border,
+        face,
+        1.0,
+    ));
+    stack.labels.push(ChromeLabel {
+        mono: false,
+        text: text.to_owned(),
+        rect,
+        font_size_px: px(CAP_FONT_LOGICAL_PX),
+        color: ink,
+        align_right: false,
+        align_center: true,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
+        clip: None,
+    });
 }
 
 /// `.btn` (mock-up 2000-2008): a bordered, rounded box with a word centred in
@@ -17270,6 +17362,10 @@ mod tests {
                 SettingsRow::Tables,
                 SettingsRow::BlockMaxHeight,
                 SettingsRow::Language,
+                // Directly under it since 2026-08-25 (§7.1.5e′): the two are
+                // this page's rows about what the window *says to you*, and the
+                // three under them are about what it does with the machine.
+                SettingsRow::KeyHints,
                 SettingsRow::GitPanel,
                 SettingsRow::SearchEngine,
                 SettingsRow::DefaultProfile,
@@ -17307,6 +17403,7 @@ mod tests {
                 SettingsRow::Tables,
                 SettingsRow::BlockMaxHeight,
                 SettingsRow::Language,
+                SettingsRow::KeyHints,
                 SettingsRow::GitPanel,
                 SettingsRow::SearchEngine,
                 SettingsRow::DefaultProfile,

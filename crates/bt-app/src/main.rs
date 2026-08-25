@@ -46,6 +46,7 @@ mod hex_peek;
 mod highlight;
 mod i18n;
 mod input;
+mod keyhint;
 mod marks;
 mod mouse_trace;
 mod notice;
@@ -5924,6 +5925,18 @@ struct WindowRuntime {
     /// instant and it is the one that matters — the frame the fade lands on,
     /// which "is it still fading" answers `false` for and therefore never draws.
     tooltip_drawn_opacity: Option<f32>,
+    /// **The card a held modifier raises** (§7.1.5e′) — the tip's third relative,
+    /// and its own host for [`Self::layout_peek`]'s reason.
+    ///
+    /// A singleton, and a stronger one than the tip's: a tip is about the thing
+    /// under the pointer and there is one pointer, while this is about the keys
+    /// under the hands and there is one keyboard. It is a window's and not a
+    /// pane's, because every row it can list is a row of the window's own table.
+    key_hint: keyhint::KeyHintHost,
+    /// The opacity the card was last *painted* at, or `None` when none was —
+    /// [`Self::tooltip_drawn_opacity`]'s own frame-debt question, asked about
+    /// this fade.
+    key_hint_drawn_opacity: Option<f32>,
     /// Every notice this window is showing (user ruling, 2026-08-16).
     ///
     /// One host for the window, with each card carrying the surface it belongs
@@ -16447,6 +16460,29 @@ struct OverlayStack {
     /// surfaces that are painted over it are surfaces that cannot be open while
     /// it is.
     toast: Vec<marks::OverlayLayer>,
+    /// **The card a held modifier raises** (§7.1.5e′) — above the notices and
+    /// below the tip.
+    ///
+    /// *Above the toast*, because a card the reader deliberately summoned stands
+    /// in front of one the window volunteered. The two can genuinely be up
+    /// together — a notice is still standing when a hand stops on `Ctrl` — and
+    /// this is the one of the pair that is answering a question somebody is
+    /// asking right now; a notice's own clock is paused under a pointer, which is
+    /// the gesture that reaches for it, and this card is gone the instant a
+    /// finger moves.
+    ///
+    /// *Below the tip*, on the tip's own standing rule: that level exists for the
+    /// surface whose whole job is to explain what is under **it**, and this one
+    /// explains what is under the hands. A different question, and not one that
+    /// entitles it to cover the answer to the first.
+    ///
+    /// **Its place among the menus and the modal family is bookkeeping, and that
+    /// is a claim rather than an omission**: the card is not raised at all while
+    /// any of them holds the keyboard (`Runtime::key_hints_offered`). In those
+    /// states `keyboard_input` answers long before `Shortcuts::lookup` is asked,
+    /// so every chord the card would list does nothing — and a list of verbs that
+    /// would not fire is the one thing this surface must never be.
+    key_hint: Vec<marks::OverlayLayer>,
     /// `.tip { z-index: 60 }` — the one surface in this window that is never
     /// covered, because it is the only one whose whole job is to explain what is
     /// under it.
@@ -16489,6 +16525,7 @@ impl OverlayStack {
             git_menu,
             term_menu,
             toast,
+            key_hint,
             tooltip,
             file_peek,
             drag_ghost,
@@ -16511,6 +16548,7 @@ impl OverlayStack {
             git_menu,
             term_menu,
             toast,
+            key_hint,
             tooltip,
             file_peek,
             drag_ghost,
@@ -22828,6 +22866,8 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         layout_peek: peek_strip::PeekHost::default(),
         tooltip_anchors: tooltip::TooltipAnchors::default(),
         tooltip_drawn_opacity: None,
+        key_hint: keyhint::KeyHintHost::default(),
+        key_hint_drawn_opacity: None,
         toasts: toast::ToastHost::default(),
         toast_layouts: Vec::new(),
         toasts_drawn: Vec::new(),
@@ -29006,6 +29046,7 @@ impl Runtime<'_> {
                 .loaded()
                 .powershell_integration_offer,
             git_panel: self.app.settings_store.loaded().git_panel,
+            key_hints: self.app.settings_store.loaded().key_hints,
             // The machine's own answer, cached at the three moments it can
             // change — see `App::context_menu_installed`.
             context_menu: self.app.context_menu_installed,
@@ -29375,6 +29416,7 @@ impl Runtime<'_> {
         stack.git_menu = self.git_menu_layer();
         stack.term_menu = self.term_menu_layer();
         stack.toast = self.toast_layer();
+        stack.key_hint = self.key_hint_layer();
         stack.tooltip = self.tooltip_layer();
         stack.file_peek = self.file_peek_layer();
         stack.drag_ghost = self.drag_ghost_layer();
@@ -30049,6 +30091,158 @@ impl Runtime<'_> {
         tooltip::build(&layout, &palette, scale, opacity, face)
     }
 
+    /// **The hint card's own layer**, or nothing when no hold is being answered
+    /// (§7.1.5e′).
+    ///
+    /// The lines are read out of the effective table on *this* frame rather than
+    /// remembered from the frame the card appeared on — the tip's own rule
+    /// (`el.title` is rewritten on every paint), and here it earns its keep
+    /// twice: a chord recorded in the settings dialog takes effect on the next
+    /// press, and the scope a row is in force in moves with the keyboard.
+    fn key_hint_layer(&mut self) -> Vec<marks::OverlayLayer> {
+        // Recorded at the end and only on the path that paints, so the
+        // frame-debt comparison is against what is *on screen* — the tip's own
+        // note, one surface over.
+        self.window.key_hint_drawn_opacity = None;
+        let now = Instant::now();
+        // **A card at nought is still drawn**, which is the tip's own answer to
+        // the same instant: the frame a fade starts on has an opacity of exactly
+        // zero, and a layer skipped there would leave the debt below unpayable
+        // for one turn and spend a `WaitUntil` on it. A transparent layer costs
+        // one draw of nothing; a spin costs the loop's sleep.
+        let Some((held, opacity)) = self.key_hint_on_screen(now) else {
+            return Vec::new();
+        };
+        let lines = self.app.shortcuts.hint_lines(held, self.shortcut_focus());
+        let caps = shortcuts::live_caps(held);
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let Some(layout) = keyhint::place(
+            &lines,
+            &caps,
+            (width as f32, height as f32),
+            scale,
+            &mut |run, size| renderer.measure_chrome_text(gpu, run, size),
+        ) else {
+            return Vec::new();
+        };
+        let palette = bt_render::chrome_palette();
+        self.window.key_hint_drawn_opacity = Some(opacity);
+        keyhint::build(&layout, &palette, scale, opacity)
+    }
+
+    /// **Whether this window would answer a hand holding `modifiers`**
+    /// (§7.1.5e′).
+    ///
+    /// Three conditions and they are three different sentences:
+    ///
+    /// * **The setting.** One row on the General page, default on.
+    /// * **Whether a chord would fire at all.** `keyboard_input` answers a
+    ///   modal, a gate, a rename and every menu long before `Shortcuts::lookup`
+    ///   is asked, so with any of them up the whole table is out of force — and a
+    ///   card listing verbs that would not fire is a card telling the reader
+    ///   something untrue. Asked of [`Self::keyboard_owner`], which is the
+    ///   window's one reading of who has the keys, rather than of a second list
+    ///   beside it.
+    /// * **Whether *this* hold has anything to say**, which is the same question
+    ///   the card's own contents answer. It is here rather than left to
+    ///   `keyhint::place`'s empty case for a reason that is not tidiness: a hold
+    ///   that was armed, came due and then drew nothing would leave a host
+    ///   reporting a card the paint never recorded, the frame debt below would
+    ///   never settle, and `ControlFlow::WaitUntil` would be handed an instant
+    ///   already in the past on every turn — the pinned definition of a loop that
+    ///   never sleeps. A hold with nothing to say is never armed, so it costs no
+    ///   wake-up at all.
+    ///
+    /// The window merely being unfocused is deliberately *not* here: winit stops
+    /// reporting modifiers with the window, so a hold cannot survive a blur in
+    /// the first place, and `Focused(false)` takes the card down explicitly.
+    fn key_hints_offered(&self, modifiers: ModifiersState) -> bool {
+        if !self.app.settings_store.loaded().key_hints {
+            return false;
+        }
+        let owner = self.keyboard_owner();
+        if owner.rename || owner.git_prompt || owner.menu_or_dialog {
+            return false;
+        }
+        !self
+            .app
+            .shortcuts
+            .hint_lines(modifiers, self.shortcut_focus())
+            .is_empty()
+    }
+
+    /// The hold this window is answering right now and how solid its card is —
+    /// **what should be on the glass**, which is the half of the frame-debt
+    /// question the paint cannot be trusted to have recorded.
+    ///
+    /// The offer is re-asked rather than assumed from the promotion: the
+    /// keyboard can move to a surface where the hold says nothing while the card
+    /// is still standing, and this is what makes that a card that is no longer
+    /// showing rather than a debt nothing can pay.
+    fn key_hint_on_screen(&self, now: Instant) -> Option<(ModifiersState, f32)> {
+        let held = self.window.key_hint.active()?;
+        self.key_hints_offered(held)
+            .then(|| (held, self.window.key_hint.opacity(now, self.app.motion)))
+    }
+
+    /// Whether the card on screen differs from the card last painted.
+    fn key_hint_owes_frame(&self, now: Instant) -> bool {
+        self.window.key_hint_drawn_opacity != self.key_hint_on_screen(now).map(|(_, it)| it)
+    }
+
+    /// When this window next has hint work: the 800ms while a hold is settling,
+    /// the fade's frames until it lands — and nothing at all for a window whose
+    /// hands are empty.
+    fn key_hint_deadline(&self, now: Instant) -> Option<Instant> {
+        if self.key_hint_owes_frame(now) {
+            return Some(now);
+        }
+        self.window
+            .key_hint
+            .deadline(now, self.app.motion, STRIP_ANIMATION_FRAME)
+    }
+
+    /// Note what the modifiers are now, and repaint if the answer moved a card.
+    fn note_key_hint(&mut self, now: Instant) -> Result<()> {
+        let offered = self.key_hints_offered(self.window.modifiers);
+        if self
+            .window
+            .key_hint
+            .observe(self.window.modifiers, offered, now)
+            && self.refresh_overlay()
+        {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Show a hold whose 800ms has run out, and keep paying the fade's frames
+    /// until it lands.
+    ///
+    /// **A hold that has come due with nothing to say is still promoted**, and
+    /// the card simply is not drawn ([`keyhint::place`] answers `None`). The
+    /// alternative — refusing to promote — would leave the deadline armed and
+    /// already in the past, which is the `WaitUntil` pin's own definition of a
+    /// loop that never sleeps.
+    fn advance_key_hint_if_due(&mut self, now: Instant) -> Result<()> {
+        let promoted = self.window.key_hint.activate_if_due(now);
+        if (promoted || self.key_hint_owes_frame(now)) && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Take the card down without closing the offer — the window losing focus, a
+    /// menu opening. See [`keyhint::KeyHintHost::hide`].
+    fn hide_key_hint(&mut self) -> Result<()> {
+        if self.window.key_hint.hide() && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
     /// The `˅`'s verb: show the profile list, or put away the one on screen.
     ///
     /// **E61's rule stated in both directions.** The root menu's opener has
@@ -30371,6 +30565,9 @@ impl Runtime<'_> {
         if let Some(enabled) = settings::git_panel_requested(target) {
             self.apply_git_panel(enabled)?;
         }
+        if let Some(enabled) = settings::key_hints_requested(target) {
+            self.apply_key_hints(enabled)?;
+        }
         if let Some(enabled) = settings::terminal_notifications_requested(target) {
             self.apply_terminal_notifications(enabled);
         }
@@ -30615,6 +30812,7 @@ impl Runtime<'_> {
             | Row::Tables
             | Row::BlockMaxHeight
             | Row::GitPanel
+            | Row::KeyHints
             | Row::DefaultProfile
             | Row::SearchEngine
             | Row::Language
@@ -34378,6 +34576,34 @@ impl Runtime<'_> {
         settings.focus_card_height = height;
         if !self.app.settings_store.store(settings) {
             return Ok(false);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// **Whether a held modifier raises the hint card** (§7.1.5e′).
+    ///
+    /// The key is stored and nothing else is invalidated, because nothing else
+    /// holds a copy: the card is derived from the effective shortcut table and
+    /// this key on the frame it is drawn, and the key is read through
+    /// [`Self::key_hints_offered`] at every door. It is the application's
+    /// setting, so the other windows learn it the way they learn all of them —
+    /// see `settle_application_change` — and this window learns it on the next
+    /// turn, where `note_key_hint` takes down a card the reader has just
+    /// switched off.
+    fn apply_key_hints(&mut self, enabled: bool) -> Result<bool> {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.key_hints = enabled;
+        if !self.app.settings_store.store(settings) {
+            return Ok(false);
+        }
+        // A card standing over the row that has just switched it off is the one
+        // frame this change must not leave on the glass, so it is taken here
+        // rather than waited for.
+        if !enabled {
+            self.hide_key_hint()?;
         }
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -61436,6 +61662,22 @@ impl Runtime<'_> {
             return Ok(());
         }
         let now = Instant::now();
+        // **The hint card is spent by the first key that is not a modifier**
+        // (§7.1.5e′), and this is the top of the function for the one reason
+        // that matters: every branch below it can return, and a card left
+        // standing over the thing a chord just did is the failure this surface
+        // exists to avoid. It answers nothing and consumes nothing — there is no
+        // path from `spend` that can stop an event, which is how "the hint never
+        // eats a key" is kept structurally rather than remembered.
+        //
+        // Repeats included: a held `j` in `vim` is a hand that is very much not
+        // waiting to be told anything.
+        if !shortcuts::is_a_bare_modifier(&event.logical_key)
+            && self.window.key_hint.spend(self.window.modifiers)
+            && self.refresh_overlay()
+        {
+            self.present_chrome_change()?;
+        }
         if self.reset_cursor_blink(now) {
             self.publish_frame(FrameTrigger {
                 occurred_at: now,
@@ -64660,6 +64902,18 @@ impl Runtime<'_> {
         // came due, the peek is already showing when the tip asks.
         self.advance_layout_peek_if_due(now)?;
         self.advance_tooltip_if_due(now)?;
+        // The hint card's 800ms and its fade, beside the tip's and after it:
+        // the two are the same shape — a clock armed by a hand that has stopped
+        // — and this one is the outer of the pair, so a window where both came
+        // due on one frame has already shown the tip when the card is asked.
+        //
+        // **This turn is also where a hold that became answerable is answered.**
+        // The offer can change with no keyboard event at all — a menu closing, a
+        // press on the settings row — so `note_key_hint` is asked on every turn
+        // and not only from `ModifiersChanged`; it re-arms a hold that was
+        // refused and takes down a card whose window has stopped offering.
+        self.note_key_hint(now)?;
+        self.advance_key_hint_if_due(now)?;
         // The notices' three clocks, beside the tip's and after it: a card that
         // has just left frees the pixels the tip may be about to be laid over.
         self.advance_toasts(now)?;
@@ -64769,6 +65023,11 @@ impl Runtime<'_> {
             // until it lands. A window with no tip under the pointer reports
             // nothing and costs no wake-ups at all.
             self.tooltip_deadline(now),
+            // The hint card's 800ms while a hold is settling, and the fade's
+            // own frames until it lands. A window whose hands are empty — or
+            // whose hand has already pressed something — reports nothing and
+            // costs no wake-ups at all (§7.1.5e′).
+            self.key_hint_deadline(now),
             // A notice's entrance landing, its life running out, its exit
             // finishing — and nothing at all while one is held under the pointer,
             // because a stopped clock owes no wake-ups (2026-08-16).
@@ -68338,7 +68597,14 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // ever catch up on the next mouse move, which is to say: after
                 // the hand had already decided whether to press.
                 runtime.apply_pointer_cursor();
-                Ok(())
+                // **The hint card's one input** (§7.1.5e′). winit reports the
+                // whole modifier state on every press and release of one, so
+                // this is the only line in the window that has to tell the card
+                // anything about the keys — there is no hook, no second opinion
+                // about what is down, and nothing to keep level with
+                // `window.modifiers` because it is read from it one statement
+                // after it is written.
+                runtime.note_key_hint(Instant::now())
             }
             WindowEvent::CursorMoved { position, .. } => runtime.pointer_moved(position),
             WindowEvent::CursorLeft { .. } => runtime.pointer_left(),
@@ -68375,6 +68641,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // P149's `window blur`: a glance is about where the pointer is,
                 // and a window that is not listening has no pointer.
                 runtime.hide_file_peek();
+                // And §7.1.5e′'s: a card about the keys under your hands is a
+                // card about a keyboard this window no longer has. `hide` and
+                // not `spend` — nothing was pressed, so a hand that comes back
+                // still holding `Ctrl` is answered again.
+                runtime.window.key_hint.hide();
                 runtime.window.tab_clicks.interrupt();
                 // Do not cancel or synthesize anything: IMM32 may synchronously deliver a partial
                 // Commit during this transition, and the product decision is to accept it.
@@ -71416,6 +71687,7 @@ mod tests {
             git_menu: mark(12),
             term_menu: mark(15),
             toast: mark(8),
+            key_hint: mark(20),
             tooltip: mark(9),
             file_peek: mark(10),
             drag_ghost: mark(11),
@@ -71428,11 +71700,11 @@ mod tests {
         assert_eq!(
             order,
             vec![
-                0, 16, 13, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 8, 9, 10, 11
+                0, 16, 13, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 8, 20, 9, 10, 11
             ],
             "bottom to top: pane bars, terminal thumbs, command rails, rail, flight, ground, \
              search capsule, integration strips, download sheet, schematic, float, modal, file \
-             menu, git menu, terminal menu, notices, tip, glance, ghost"
+             menu, git menu, terminal menu, notices, key hint, tip, glance, ghost"
         );
         let at = |tag: u8| {
             order
@@ -71495,6 +71767,20 @@ mod tests {
         assert!(
             at(8) < at(9),
             "and it does not cover the tip about its own ×"
+        );
+        // §7.1.5e′ — the card a held modifier raises, between the two. Above the
+        // notices because a card the reader summoned stands in front of one the
+        // window volunteered, and below the tip on the tip's own standing rule.
+        // Its place among the menus and the modal family is bookkeeping and is
+        // asserted as *nothing*: the card is never raised while any of them holds
+        // the keyboard — see `Runtime::key_hints_offered`.
+        assert!(
+            at(20) > at(8),
+            "the hint card stands over the notices it may share a floor with"
+        );
+        assert!(
+            at(20) < at(9),
+            "and under the tip, which is the surface that explains what is under it"
         );
         // The pane head's menu sits on the file menu's level, above every
         // surface either of them can be raised over.

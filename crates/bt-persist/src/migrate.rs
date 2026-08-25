@@ -56,6 +56,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (18, migrate_settings_v18_to_v19),
     (19, migrate_settings_v19_to_v20),
     (20, migrate_settings_v20_to_v21),
+    (21, migrate_settings_v21_to_v22),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -450,6 +451,26 @@ fn migrate_settings_v20_to_v21(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(21));
         object.insert("line_wrapping".to_owned(), Value::from(true));
+    }
+    value
+}
+
+/// v21 -> v22: whether a held modifier raises the card that lists what it starts, defaulted **on**
+/// (`docs/DESIGN.md` §7.1.5e′).
+///
+/// One key a twelfth time, and it lands the way `migrate_settings_v16_to_v17` did rather than the
+/// way `migrate_settings_v20_to_v21` did. The distinction those steps are written under is whether
+/// there is a habit to carry or only a default to choose, and here there is no habit at all: no
+/// build that could write a v22 file ever drew this card, so there is no answer to carry forward
+/// and `false` would freeze an absence. What is being defaulted on is an **offer** — a surface a
+/// hand has to deliberately stop for, that takes no key and leaves the moment one is pressed — and
+/// a reader who does not want it has one press that ends the offering for good.
+///
+/// See `SettingsV1::key_hints`.
+fn migrate_settings_v21_to_v22(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(22));
+        object.insert("key_hints".to_owned(), Value::from(true));
     }
     value
 }
@@ -1350,6 +1371,41 @@ mod tests {
         assert_eq!(
             migrated["search_engine"],
             json!("Google"),
+            "the sibling added one version ago is the one a copy-paste of the \
+             step above would most plausibly reset"
+        );
+    }
+
+    /// PIN §7.1.5e′ — **v21 -> v22 turns the hint card on for a file that predates it**, and
+    /// leaves every one of its siblings exactly as it found them (rule 3, "迁移函数只做结构升级").
+    ///
+    /// `true` written out as a literal, for the test above's reason: a constant compared with
+    /// itself proves nothing, and the word here is the second, independent statement that a
+    /// default-on offer is what this step decided. A step that wrote `false` would ship the
+    /// feature switched off for every reader who has ever opened this product before today —
+    /// which is every reader — and this is the line that says so.
+    #[test]
+    fn real_settings_v21_to_v22_migration_turns_the_hint_card_on() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 21,
+                "theme_mode": "Light",
+                "line_wrapping": false,
+                "scrollback_lines": 25000,
+                "search_engine": "Google"
+            }),
+            21,
+            22,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(22));
+        assert_eq!(migrated["key_hints"], json!(true));
+        assert_eq!(migrated["theme_mode"], json!("Light"));
+        assert_eq!(migrated["scrollback_lines"], json!(25000));
+        assert_eq!(
+            migrated["line_wrapping"],
+            json!(false),
             "the sibling added one version ago is the one a copy-paste of the \
              step above would most plausibly reset"
         );
