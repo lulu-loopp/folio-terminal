@@ -5674,20 +5674,27 @@ struct WindowRuntime {
     /// on — a hover that never ends is a link that stays lit after the hand has
     /// gone.
     web_pointer_inside: bool,
-    /// Whether something of this window's stood over the page on the previous
-    /// frame — a modal's scrim, or the page's own download sheet.
+    /// **The page this window has let hold the Win32 keyboard**, or `None` when
+    /// the keyboard is the window's own.
     ///
-    /// **The bit that takes the keyboard back** (§7.7 ④, W2 slice ④). A page
-    /// keeps every key this window's shortcut table does not claim, and Escape
-    /// is one of them; so a surface raised *over* a page that could only be
-    /// dismissed with Escape would be a surface with no way out at all. A modal
-    /// already hides the page and a sheet already covers it — both are this
-    /// window saying "not that, this" — and taking the keyboard is the rest of
-    /// that sentence.
+    /// §7.7 W2 片④ ⑧ says it in one line — 「凡是要键盘的表面,就把键盘拿走」 —
+    /// and this is its other half, which was missing until 2026-08-24: **a page
+    /// holds the keyboard only while it is what typing goes into, and gives it
+    /// back the moment it is not.** A page keeps every key this window's table
+    /// does not claim, Escape included, so a page still holding the keys behind
+    /// a surface that wants them is a surface with no way out at all — measured
+    /// on the machine three ways over: a modal's scrim (which is why this bit
+    /// existed at all, as `web_covered`), a shell pane the reader clicked back
+    /// into and could not type in, and the address field on the page's own head,
+    /// which is the report this was written for.
     ///
-    /// The edge and not the level: `SetFocus` on every frame a dialog is open
-    /// would fight anything inside this window that wanted the keys.
-    web_covered: bool,
+    /// Which leaf and not merely "some page", because the fault that takes the
+    /// keyboard from one page — a card, a download sheet — has no business
+    /// taking it from the page in the pane beside it.
+    ///
+    /// The edge and not the level: `SetFocus` on every frame would fight
+    /// anything inside this window that wanted the keys.
+    web_keyboard: Option<LeafId>,
     window: Arc<Window>,
     /// The geometry changes the most recent layout commit produced (T230).
     ///
@@ -11240,6 +11247,52 @@ enum RenameVerdict {
     Commit,
     /// Escape: leave the name as it was (mock-up 5896).
     Cancel,
+}
+
+/// **How the name editor is being left** — the third question `finish_rename`
+/// has to be asked, and for a long time was not.
+///
+/// "Escape restores and leaves; Enter and blur commit. Two paths, not three"
+/// (mock-up 5847-5849) is true of a name, because a name is written by *this*
+/// window and cannot be refused. The address field inherited that machine
+/// wholesale (§7.7 W2 片④ ①) and brought one thing the mock-up's editor never
+/// had: **a door that can say no.** 「回车什么都不做,页面原地不动」 is a
+/// sentence about the key called Enter, and the whole of what makes it kind is
+/// that the draft stays where it was typed so it can be corrected there — but a
+/// blur is not a keystroke, it is having already left, and an editor that
+/// answered a blur with the refusal would be an editor that could not be left
+/// at all. A `file:` address is refused by `webnav::address_bar` on every
+/// attempt, so "cannot be left" was not a corner: it was every `.html` file
+/// this product can open (user report 2026-08-24).
+///
+/// So the two paths are two *outcomes* and three *exits*, and the third is the
+/// one the boolean could not say.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RenameExit {
+    /// **Escape** — the draft is thrown away and the editor closes.
+    Discard,
+    /// **Enter** — the draft is put through, and the one door that may refuse it
+    /// keeps the field open so that what was typed can be corrected where it was
+    /// typed.
+    Submit,
+    /// **Blur** — every press outside the editor, the window losing focus, the
+    /// tab closing, the window closing, a quit. The draft is put through, and
+    /// the field is gone whether or not anything took it.
+    Blur,
+}
+
+impl RenameExit {
+    /// Whether the draft is put through at all. Escape is the one exit that does
+    /// not, which is the whole of what Escape means here.
+    fn commits(self) -> bool {
+        !matches!(self, Self::Discard)
+    }
+
+    /// Whether a door that refuses the draft may keep the field open. **Enter
+    /// alone** — see this type's own note.
+    fn may_stay_open(self) -> bool {
+        matches!(self, Self::Submit)
+    }
 }
 
 /// The tab-name editor — the tab itself, in edit mode.
@@ -22611,7 +22664,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         preview_watch: preview_watch::PreviewWatch::default(),
         web_cursor: None,
         web_pointer_inside: false,
-        web_covered: false,
+        web_keyboard: None,
         window,
         last_layout_events: Vec::new(),
         resize_trace_logged_transaction: 0,
@@ -24418,7 +24471,7 @@ impl Runtime<'_> {
                 .get(index)
                 .is_some_and(|tab| Some(tab.id) == editor.tab())
         }) {
-            self.finish_rename(true)?;
+            self.finish_rename(RenameExit::Blur)?;
         }
         if self.window.tab_press.is_some_and(|press| {
             self.window
@@ -44500,7 +44553,7 @@ impl Runtime<'_> {
             }
         }
         if let Some(name) = self.uncommitted_edit_name() {
-            self.finish_rename(true)?;
+            self.finish_rename(RenameExit::Blur)?;
             report.saved.push(name);
         }
         // **The failures are named where they happened.** One card per window
@@ -44537,7 +44590,7 @@ impl Runtime<'_> {
         for tab in &mut self.window.tabs {
             tab.preview_pool.discard_dirty();
         }
-        self.finish_rename(false)
+        self.finish_rename(RenameExit::Discard)
     }
 
     /// **Commit whatever this window still has open, and take its picture**
@@ -44554,7 +44607,7 @@ impl Runtime<'_> {
     /// **Nothing is torn down.** That is the whole of what separates this from
     /// `close_window`, and it is acceptance gate 2.
     fn photograph_for_quit(&mut self) -> Result<()> {
-        self.finish_rename(true)?;
+        self.finish_rename(RenameExit::Blur)?;
         self.mark_session_dirty(Instant::now());
         Ok(())
     }
@@ -57469,13 +57522,16 @@ impl Runtime<'_> {
     /// Close the editor, writing the draft through or throwing it away.
     ///
     /// "Escape restores and leaves; Enter and blur commit. Two paths, not
-    /// three" (mock-up 5847-5849). Doing nothing when no editor is open is the
-    /// point rather than an oversight: this is called from every blur-shaped
-    /// event in the window, and most of the time there is nothing to blur.
-    fn finish_rename(&mut self, commit: bool) -> Result<()> {
+    /// three" (mock-up 5847-5849) — two outcomes, and [`RenameExit`]'s three
+    /// exits, because the address field brought a door that can say no. Doing
+    /// nothing when no editor is open is the point rather than an oversight:
+    /// this is called from every blur-shaped event in the window, and most of
+    /// the time there is nothing to blur.
+    fn finish_rename(&mut self, exit: RenameExit) -> Result<()> {
         let Some(editor) = self.window.rename.take() else {
             return Ok(());
         };
+        let commit = exit.commits();
         // **The file the preview head names** (user ruling 2026-08-19). It
         // leaves through the same two paths a tab's name does — Enter, Escape
         // and blur — because it is the same editor; what differs is only what
@@ -57493,6 +57549,12 @@ impl Runtime<'_> {
         // 「回车什么都不做、原来的页面原地不动」 — and the field goes on saying so
         // where it is being typed, which is the search capsule's own answer to a
         // regex that will not parse.
+        //
+        // **And that is Enter's sentence, not blur's** ([`RenameExit`], user
+        // report 2026-08-24). A blur has already left; re-opening the field it
+        // was leaving is how a `file:` page — refused by the address door on
+        // every attempt, so every `.html` this product opens — became a name
+        // cell nothing could close.
         if let RenameSubject::WebAddress { leaf } = editor.subject {
             // **An empty box is not an address the door refused — it is a draft
             // nobody finished** (§7.7 ⑨). The refusal above keeps the field open
@@ -57514,17 +57576,26 @@ impl Runtime<'_> {
                         .map(|web| web.go_to(&editor.text, engine, &window.compositor))
                 };
                 if let Some((taken, outcomes)) = compositor_outcomes {
-                    if !taken {
+                    if taken {
+                        // The seat has been asked to go somewhere, so it is a
+                        // page whatever comes back — a failure has a card of its
+                        // own to stand on it. Spent before the outcomes are
+                        // applied, because one of them can be the commit that
+                        // would ask again.
+                        self.forget_a_blank_page(leaf);
+                        self.apply_web_outcomes(leaf, outcomes)?;
+                    } else if exit.may_stay_open() {
+                        // Enter, refused: the field stays exactly where the
+                        // typing is, and the page does not move. Nothing else on
+                        // this path runs — a blank page kept for a field that is
+                        // still open is a blank page still being used.
                         self.window.rename = Some(editor);
                         self.refresh_chrome();
                         return self.present_chrome_change();
                     }
-                    // The seat has been asked to go somewhere, so it is a page
-                    // whatever comes back — a failure has a card of its own to
-                    // stand on it. Spent before the outcomes are applied, because
-                    // one of them can be the commit that would ask again.
-                    self.forget_a_blank_page(leaf);
-                    self.apply_web_outcomes(leaf, outcomes)?;
+                    // A blur the door refused falls through: the address was not
+                    // taken, so the page does not move — and the field goes,
+                    // because leaving is what a blur already is.
                 }
             }
             // Escape, a click away, or an empty box: the field is gone, and a
@@ -57814,7 +57885,7 @@ impl Runtime<'_> {
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-in-rename-editor state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
-            self.finish_rename(true)?;
+            self.finish_rename(RenameExit::Blur)?;
         }
         // Blur is every press that is not inside the editor — the same sentence
         // the rename guard above makes, and the same reason: a surface that kept
@@ -61099,8 +61170,8 @@ impl Runtime<'_> {
             let verdict = rename_key(&mut editor, &event.logical_key, self.window.modifiers);
             self.window.rename = Some(editor);
             match verdict {
-                RenameVerdict::Commit => self.finish_rename(true)?,
-                RenameVerdict::Cancel => self.finish_rename(false)?,
+                RenameVerdict::Commit => self.finish_rename(RenameExit::Submit)?,
+                RenameVerdict::Cancel => self.finish_rename(RenameExit::Discard)?,
                 RenameVerdict::Held => {
                     // Typing reveals the caret, exactly as it does in the
                     // terminal — a caret that blinks out from under the letter
@@ -62171,10 +62242,11 @@ impl Runtime<'_> {
     fn sync_web_page(&mut self, now: Instant) {
         if self.window.web.is_empty() {
             self.window.renderer.set_web_holes(Vec::new());
-            // Nothing is covered when there is nothing to cover, and saying so
-            // keeps the edge below honest: a page opened later under a modal
-            // must still see the rising edge that takes the keyboard back.
-            self.window.web_covered = false;
+            // A window with no page has no page holding its keyboard, and the
+            // edge is asked here too: the last page in a window can be closed
+            // while it is the one being typed into, and the keys have to come
+            // back to a window that no longer has anywhere to ask.
+            self.settle_the_web_keyboard();
             return;
         }
         let scale = self.window.renderer.metrics().scale_factor as f32;
@@ -62265,29 +62337,13 @@ impl Runtime<'_> {
                 size,
             });
         }
-        // **Whatever stands over the page takes the keyboard from it** (§7.7 ④,
-        // W2 slice ④). A page keeps every key this window's table does not claim
-        // — Escape included — so a scrim or a sheet that could only be dismissed
-        // with Escape would be a surface with no way out. On the edge, so that a
-        // dialog with a field of its own is not fought for the keys every frame.
-        //
-        // **Any seat**, and not the focused one: the window has one keyboard and
-        // any page in it can be holding it, so the question a per-seat map turns
-        // this into is whether *something* stands over *some* page.
-        //
-        // A fault is the whole of the second half. The five failure states split
-        // into the four that *replace* the seat (a card, `carded` above) and the
-        // one that stands over the page (the download sheet), and both are this
-        // window raising a surface over a page — so "carded, or a sheet" is
-        // "this seat has a fault at all", said once instead of twice.
-        let covered = obstructed || self.window.web.values().any(|web| web.fault().is_some());
-        if covered
-            && !self.window.web_covered
-            && let Ok(hwnd) = window_hwnd(&self.window.window)
-        {
-            let _ = bt_platform::take_keyboard_focus(hwnd);
-        }
-        self.window.web_covered = covered;
+        // **A page holds the keyboard only while it is what typing goes into**
+        // (§7.7 ④, W2 slice ④, generalised 2026-08-24). Asked once a frame
+        // because most of the ways a page stops being it are silent: a scrim
+        // rises, a card replaces the seat, the reader presses the pane next door,
+        // a field opens on the page's own head. The engine reports the focus it
+        // *takes* and nothing at all about the focus it should no longer have.
+        self.settle_the_web_keyboard();
         let window = &mut *self.window;
         let mut holes = Vec::new();
         for placement in placements {
@@ -62302,6 +62358,53 @@ impl Runtime<'_> {
             }
         }
         window.renderer.set_web_holes(holes);
+    }
+
+    /// **Whether this page is what typing goes into right now** — the one
+    /// question [`Runtime::web_keyboard`] is kept against.
+    ///
+    /// [`Self::page_holds_the_keyboard`] asked of one leaf, plus the two
+    /// surfaces that stand over a page without moving the layout focus at all:
+    ///
+    /// * a **name editor** — the address field is drawn on this page's own head
+    ///   and the seat under it never stops being focused, so nothing else in
+    ///   this window would ever notice that the keys had to move;
+    /// * a **modal's scrim**, and this seat's own **fault** — a card that
+    ///   replaced the page, or a download sheet standing over it. Per leaf,
+    ///   because a card in one pane has no business taking the keyboard from the
+    ///   page in the pane beside it.
+    fn page_is_the_typing_target(&self, leaf: LeafId) -> bool {
+        self.window.rename.is_none()
+            && !self.a_modal_covers_the_window()
+            && self
+                .window
+                .web
+                .get(&leaf)
+                .is_some_and(|web| web.fault().is_none())
+            && self.focused_web_seat().map(|seat| self.leaf_here(seat)) == Some(leaf)
+    }
+
+    /// **Take the keyboard back from a page that has stopped being what typing
+    /// goes into** (§7.7 W2 片④ ⑧, extended by the user report of 2026-08-24).
+    ///
+    /// The falling edge, and only the falling edge. Nothing here ever *gives* a
+    /// page the keyboard: that is a press inside it ([`Self::press_web_page`]),
+    /// which is the one door it has ever had, and a rising edge that focused the
+    /// engine on its own account would be this window typing into a document
+    /// nobody clicked on.
+    fn settle_the_web_keyboard(&mut self) {
+        let Some(held) = self.window.web_keyboard else {
+            return;
+        };
+        if self.page_is_the_typing_target(held) {
+            return;
+        }
+        self.window.web_keyboard = None;
+        if let Ok(hwnd) = window_hwnd(&self.window.window)
+            && let Err(error) = bt_platform::take_keyboard_focus(hwnd)
+        {
+            eprintln!("BT_WEB focus return failed: {error}");
+        }
     }
 
     /// Whether a surface that covers the **whole window** stands over the panes.
@@ -62418,7 +62521,31 @@ impl Runtime<'_> {
                     self.window.web_cursor = Some(id);
                     self.apply_pointer_cursor();
                 }
-                webhost::WebOutcome::PageFocus(_) => {}
+                // **The engine took the keyboard; whether it may keep it is this
+                // window's answer, not its own** (§7.7 W2 片④ ⑧, user report
+                // 2026-08-24). A controller focuses itself on its own account —
+                // one made visible again restores the focus it had when it was
+                // hidden — and this event is the only notice of it, arriving a
+                // message pump after whatever caused it. Ignoring it is how a
+                // page came to be holding every key while the surface this window
+                // was drawing the caret in was the address field on that page's
+                // own head: opened, selected, and impossible to type in, escape
+                // from or click away.
+                //
+                // `LostFocus` is the same fact from the other side and is where
+                // the receipt is torn up, because the keyboard leaving a page is
+                // not always this window taking it.
+                webhost::WebOutcome::PageFocus(focused) => {
+                    if focused {
+                        // The receipt is written first either way — it names the
+                        // page that has the keys *right now* — and the one place
+                        // that decides whether it may keep them decides here too.
+                        self.window.web_keyboard = Some(leaf);
+                        self.settle_the_web_keyboard();
+                    } else if self.window.web_keyboard == Some(leaf) {
+                        self.window.web_keyboard = None;
+                    }
+                }
                 // **The page committed, so this seat now has an identity** (slice
                 // ③). One row in the tab's pool, keyed by `webnav::switcher_key`
                 // of the URL the engine actually loaded — which is why a redirect
@@ -62855,7 +62982,7 @@ impl Runtime<'_> {
         // Reading the address afterwards is also simply the more truthful of the
         // two orders: what the box is seeded with is what the seat is showing
         // now.
-        self.finish_rename(true)?;
+        self.finish_rename(RenameExit::Blur)?;
         let Some(url) = self.web_on(seat).map(|web| web.page().url.clone()) else {
             return Ok(());
         };
@@ -62896,7 +63023,7 @@ impl Runtime<'_> {
         // The field that is open leaves first, by its own rules, so the question
         // below is asked of the tab as it stands rather than as it stood: a
         // press that takes back a blank page has to find the tab without one.
-        self.finish_rename(true)?;
+        self.finish_rename(RenameExit::Blur)?;
         match self.web_seat_of_tab() {
             Some(seat) => self.open_web_address_on(seat),
             None => self.mint_a_blank_page_and_open_its_address(),
@@ -63348,6 +63475,23 @@ impl Runtime<'_> {
         position: PhysicalPosition<f64>,
     ) -> Result<()> {
         let down = state == ElementState::Pressed;
+        if down {
+            // **Blur, before the page takes the keyboard** (user report
+            // 2026-08-24). `chrome_mouse_input`'s own guard says "a press
+            // anywhere else — the page below very much included — is a blur that
+            // commits", and it was telling the truth about everything it could
+            // reach: this branch returns two rungs above it, so a press inside a
+            // page ran no blur at all. What that left behind is the worst shape
+            // a keyboard surface can be in — the field still standing on the
+            // head, and every key from here on going into the engine, so the
+            // field could not be typed in, escaped from, or clicked away.
+            //
+            // Before `web_page_at` is asked, not after: closing an address field
+            // can take a blank page back with it (§7.7 ⑨), and a leaf read
+            // before that is a pane this press would then be forwarded into
+            // after it had gone.
+            self.finish_rename(RenameExit::Blur)?;
+        }
         let Some(leaf) = self.web_page_at(position) else {
             return Ok(());
         };
@@ -63367,10 +63511,17 @@ impl Runtime<'_> {
                     self.page_holds_the_keyboard()
                 )
             });
-            if let Some(web) = self.window.web.get(&leaf)
-                && let Err(error) = web.focus_page()
-            {
-                eprintln!("BT_WEB focus failed: {error}");
+            if let Some(web) = self.window.web.get(&leaf) {
+                if let Err(error) = web.focus_page() {
+                    eprintln!("BT_WEB focus failed: {error}");
+                }
+                // **The receipt is written where the keyboard is handed over**,
+                // and this is the only place this window ever hands it over.
+                // `GotFocus` says the same thing again a message pump later; it
+                // is the engine's own account and arrives for focus this window
+                // never gave, which is why both are read — but the press is what
+                // makes the sentence true, so the press is where it is recorded.
+                self.window.web_keyboard = Some(leaf);
             }
         }
         let Some(event) = web_mouse_button(button, down) else {
@@ -64229,7 +64380,7 @@ impl Runtime<'_> {
         // §7.1.4: "未提交的重命名在序列化前提交（blur 语义,输入到一半关窗不丢
         // 新名字）". Before the snapshot below, not after — the name has to be on
         // the tab by the time the tab is written down.
-        self.finish_rename(true)?;
+        self.finish_rename(RenameExit::Blur)?;
         let now = Instant::now();
         if ending {
             self.mark_session_dirty(now);
@@ -67686,7 +67837,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // from the DOM; here it has to be said. A press that was still
                 // being held goes with it — the button-up will arrive to a
                 // window that is no longer listening.
-                let committed = runtime.finish_rename(true);
+                let committed = runtime.finish_rename(RenameExit::Blur);
                 // K129. Losing the window is losing the Win32 mouse capture, and
                 // capture loss is this platform's `pointercancel`: the pointer
                 // stream ends with no button-up to end it. It is the only such
@@ -97832,6 +97983,64 @@ mod tests {
                 && finish.contains("!editor.text.trim().is_empty()"),
             "an address field that closes does not answer for the blank page it \
              was opened over:\n{finish}"
+        );
+    }
+
+    /// PIN (§7.7 W2 片④ ①, user report 2026-08-24) — **an address the door
+    /// refuses is a field you can still leave.**
+    ///
+    /// 「同一组 Enter/Escape/blur、同一种沉默的拒绝」 names four things and the
+    /// refusal is one of them, not all of them: 「回车什么都不做,页面原地不动」
+    /// is a sentence about **Enter**, and blur is not a keystroke — it is having
+    /// left already. A `file:` page's address is refused by `address_bar` on
+    /// every attempt, so an editor that answers a *blur* with the refusal is an
+    /// editor no gesture can close: Enter re-opens it, a press on the chrome
+    /// re-opens it, losing the window re-opens it, and a press on the page —
+    /// which returns above the blur guard and hands the keyboard to the engine —
+    /// leaves it standing with nothing that can reach it. That is the report,
+    /// exactly: 「html 文件改名一旦进入这个状态就出不来」.
+    ///
+    /// Read off the file for this module's standing reason: a `WindowRuntime` is
+    /// a surface, a compositor and a browser, so "Escape closed the field" is not
+    /// a sentence this process can say without a screen. Which exit may keep a
+    /// refused field, and which call stands before the engine takes the keyboard,
+    /// are both claims about the code.
+    ///
+    /// MUTATIONS:
+    /// ① widen the re-open guard back to every committing exit — the first
+    ///    assertion goes red, and a blur on a refused address re-opens the field
+    ///    it was leaving;
+    /// ② drop the `finish_rename` at the top of `press_web_page` — the second
+    ///    goes red, and the field the press blurred is left standing over a page
+    ///    that has just taken every key away from it.
+    #[test]
+    fn a_refused_address_is_a_field_that_can_still_be_left() {
+        const SOURCE: &str = include_str!("main.rs");
+        let body = |signature: &str| {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        };
+
+        let finish = body("    fn finish_rename(");
+        assert!(
+            finish.contains("exit.may_stay_open()")
+                && finish.contains("self.window.rename = Some(editor);"),
+            "the refusal that keeps an address field open is not fenced to \
+             Enter, so blur cannot leave a `file:` page's address:\n{finish}"
+        );
+
+        let press = body("    fn press_web_page(");
+        let blur = press
+            .find("self.finish_rename(RenameExit::Blur)?")
+            .unwrap_or(usize::MAX);
+        let takes = press.find("web.focus_page()").unwrap_or(0);
+        assert!(
+            blur < takes,
+            "a press inside a page takes the keyboard without settling the field \
+             standing over it, which leaves an editor nothing can reach:\n{press}"
         );
     }
 }
