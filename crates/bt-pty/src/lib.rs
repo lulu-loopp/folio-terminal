@@ -159,10 +159,10 @@ static PTY_DUMP_RECORDINGS: AtomicU64 = AtomicU64::new(0);
 
 impl PtyDump {
     fn from_environment() -> Result<Option<Self>, PtyError> {
-        let Some(path) = std::env::var_os(PTY_DUMP_ENV) else {
+        let Some(path) = pty_dump_path(std::env::var_os(PTY_DUMP_ENV)) else {
             return Ok(None);
         };
-        Self::open(&PathBuf::from(path)).map(Some)
+        Self::open(&path).map(Some)
     }
 
     /// Open this run's next recording under `base` — the named path for the first, a name beside
@@ -298,6 +298,27 @@ fn unix_millis() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_millis())
         .unwrap_or_default()
+}
+
+/// What `BT_PTY_DUMP` names, if it names anything.
+///
+/// **An empty value is off, and this is the same word every other diagnostic
+/// variable in this program uses** (user ruling 2026-08-25). `BT_MOUSE_TRACE`,
+/// `BT_ATTENTION_TRACE`, `BT_GIT_TRACE` and `BT_PERF_TRACE` all read an empty
+/// string as "not set"; this one alone used to hand the empty string on as a
+/// path, and a truncating create against `""` fails, so `BT_PTY_DUMP=` did not
+/// turn recording off — it stopped the pane from starting at all. That is the
+/// shape a shell leaves behind when it clears a variable rather than removing
+/// it (`$env:BT_PTY_DUMP = ""`, a `.env` line with nothing after the `=`, a
+/// script that unsets by assigning empty), so the failure landed on exactly the
+/// people who thought they had switched the diagnostic off.
+///
+/// Whitespace is *not* trimmed: a value of `" "` is a real, if strange, relative
+/// filename on Windows' rules as this crate is entitled to read them, and a
+/// diagnostic that silently reinterprets the path it was given is the same
+/// class of surprise in the other direction.
+fn pty_dump_path(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    value.filter(|value| !value.is_empty()).map(PathBuf::from)
 }
 
 /// Which file this process's `ordinal`-th recording writes to.
@@ -2126,6 +2147,34 @@ mod tests {
         assert_eq!(pty_dump_session_path(&base, 0), base);
         assert_eq!(pty_dump_session_path(&base, 1), beside(".2"));
         assert_eq!(pty_dump_session_path(&base, 7), beside(".8"));
+    }
+
+    /// Clearing a diagnostic variable turns the diagnostic off, and never takes the pane with it.
+    ///
+    /// `BT_PTY_DUMP=` used to be handed on as a path; `File::create("")` fails, and the failure was
+    /// spent on the spawn rather than on the recording — so a value that reads as "off" everywhere
+    /// else in this program was the one value that stopped a shell from starting.
+    #[test]
+    fn an_emptied_dump_variable_is_off_and_not_a_nameless_file() {
+        use std::ffi::OsString;
+
+        assert_eq!(pty_dump_path(None), None, "unset is off");
+        assert_eq!(
+            pty_dump_path(Some(OsString::new())),
+            None,
+            "and emptied is off too — the same word BT_MOUSE_TRACE reads"
+        );
+        let named = std::env::temp_dir().join("bt-pty-dump-named.vt");
+        assert_eq!(
+            pty_dump_path(Some(named.as_os_str().to_os_string())),
+            Some(named),
+            "a named file is still that file, byte for byte"
+        );
+        assert_eq!(
+            pty_dump_path(Some(OsString::from(" "))),
+            Some(PathBuf::from(" ")),
+            "and a value that is only strange is not a value that is empty"
+        );
     }
 
     /// The defect this is here for: `BT_PTY_DUMP` is one path, every `PtySession::spawn` opened it

@@ -12,8 +12,16 @@ bt-transcript = { path = "../bt-transcript" }
 bt-doc = { path = "../bt-doc" }
 bt-detect = { path = "../bt-detect" }
 bt-math = { path = "../bt-math" }
+# One call: the priority band this crate's resample pool stands in
+# (`inline_image::resample_pool`). The band is not decoration — it is the whole
+# reason a pass that now spreads over every core cannot take them from the
+# window thread — and Windows gives a new thread `Normal` regardless of who
+# created it, so it has to be said by whoever creates the thread. That is this
+# crate, and this is the crate that knows how to say it.
+bt-platform = { path = "../bt-platform" }
 bt-viewport = { path = "../bt-viewport" }
 image.workspace = true
+rayon.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]

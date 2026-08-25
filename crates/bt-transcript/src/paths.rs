@@ -2440,38 +2440,70 @@ mod tests {
         );
     }
 
-    /// Scenario 65 — **a conflict with a ruling shipped one day earlier.**
+    /// Scenario 65 — **settled, and no longer a conflict** (user ruling 2026-08-25).
     ///
-    /// A name the disk denied is never asked about again, which is what keeps a repainting screen's
-    /// bounded question budget for the names that need it (§7.1.5j, user report 2026-08-23, and the
-    /// test `a_path_the_disk_has_denied_is_never_asked_about_again` directly above). The scenario
-    /// list asks for the opposite: a file that did not exist at first print and is built afterwards
-    /// should become a link when the same text is printed again. Both cannot be true of a ledger
-    /// keyed by `PathBuf` alone; reconciling them needs a generation or an expiry on the negative
-    /// answer, which is a change to the ledger's contract rather than to this pass.
+    /// A name the disk denied is not asked about again *while the command that named it is still
+    /// running*, which is what keeps a repainting screen's bounded question budget for the names
+    /// that need it (§7.1.5j, user report 2026-08-23, and
+    /// `a_path_the_disk_has_denied_is_never_asked_about_again` directly above). The scenario list
+    /// asked for the opposite: a file that did not exist at first print and is built afterwards
+    /// should become a link. Both are now true, because the ruling gave the "no" the one expiry
+    /// that is a fact rather than a guess — **the pane's next `OSC 133 D`**. A command has ended,
+    /// so the disk may have moved; and a command is not a frame, so the budget is untouched. See
+    /// `bt_term::DualPlaneSession::expire_denied_paths`, which is where the expiry lives: this
+    /// layer's contract is unchanged, it answers whichever ledger it is handed.
     ///
-    /// **This conflict is not hypothetical, and 2026-08-25 is the day it was photographed.** The
+    /// **The conflict was not hypothetical, and 2026-08-25 is the day it was photographed.** The
     /// reader reported that `D:\Developer\BetterTerminal\test-assets\folio-pdf-test.pdf` — an
     /// indented, unadorned, drive-rooted path to a file that exists — carried no underline at all.
     /// Reproduced in a fresh pane the same line lights on the first frame, so nothing lexical or
-    /// geometric is refusing it. What refused it is this arm: minutes earlier the same screen had
+    /// geometric was refusing it. What refused it was this arm: minutes earlier the same screen had
     /// printed that exact path inside the command that was about to *create* the file
     /// (`--print-to-pdf="D:\…\test-assets\folio-pdf-test.pdf"`), the pass asked the disk about a
     /// name that was not there yet, and the `no` outlived the file's arrival. Any application that
     /// prints where it is about to write — a build, an installer, a `cp`, an agent's own shell line
     /// — produces this, so the shape is common rather than exotic.
+    ///
+    /// The three states, in the order the photograph went through them.
     #[test]
-    #[ignore = "§7.1.5k conflict: a negative verdict is permanent by the 2026-08-23 budget ruling; \
-                giving it an expiry is a ledger change, not a lexer change"]
     fn a_file_built_after_its_first_mention_can_still_become_a_link() {
-        let links = ledger("D:\\case", &[("D:\\case\\generated\\out.js", false)]);
+        let named = "generated/out.js";
+        let full = PathBuf::from("D:\\case\\generated\\out.js");
+
+        // ① While the command runs: the disk has said no, and it is neither drawn nor re-asked.
+        let during = ledger("D:\\case", &[("D:\\case\\generated\\out.js", false)]);
         let mut unknown = BTreeSet::new();
-        links.links_in("generated/out.js", None, &mut unknown);
+        assert!(during.links_in(named, None, &mut unknown).is_empty());
+        assert!(
+            unknown.is_empty(),
+            "a standing verdict is not re-asked frame by frame — the 2026-08-23 budget ruling, \
+             untouched"
+        );
+
+        // ② The command ends. `expire_denied_paths` takes the denial off the books, so the ledger
+        //    this layer is handed no longer holds it, and the second sighting asks again.
+        let after = ledger("D:\\case", &[]);
+        let mut unknown = BTreeSet::new();
+        assert!(after.links_in(named, None, &mut unknown).is_empty());
         assert_eq!(
             unknown,
-            BTreeSet::from([PathBuf::from("D:\\case\\generated\\out.js")]),
-            "a second sighting is allowed to ask again"
+            BTreeSet::from([full.clone()]),
+            "a sighting after the command that could have created it is worth one question"
         );
+
+        // ③ And the answer this time is yes.
+        let built = ledger("D:\\case", &[("D:\\case\\generated\\out.js", true)]);
+        let mut unknown = BTreeSet::new();
+        assert_eq!(
+            built
+                .links_in(named, None, &mut unknown)
+                .iter()
+                .map(|(_, uri)| uri.as_str())
+                .collect::<Vec<_>>(),
+            ["file:///D:/case/generated/out.js"],
+            "the file that was built is a link"
+        );
+        assert!(unknown.is_empty());
     }
 
     /// §7.1.5k ①, the widest half of the ruling: the gate covers an inferred **URL** as well, or

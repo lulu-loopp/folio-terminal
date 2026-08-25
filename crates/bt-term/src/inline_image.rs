@@ -9,10 +9,8 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bt_transcript::paths::is_local_absolute_path;
-use image::{
-    ImageBuffer, ImageFormat, ImageReader, Limits, Rgba, codecs::png::PngDecoder,
-    imageops::FilterType,
-};
+use image::{ImageFormat, ImageReader, Limits, codecs::png::PngDecoder};
+use rayon::prelude::*;
 
 /// Maximum decoded file payload accepted from OSC 1337. The streaming adapter applies the
 /// corresponding encoded bound before a worker task is allocated.
@@ -103,6 +101,12 @@ pub fn display_texture_key(content_key: &str, width_px: u32, height_px: u32) -> 
 /// Worker-only: a wallpaper-sized downscale costs tens of milliseconds, which is exactly why the
 /// event thread hands this out instead of doing it inline. The native decode stays in the
 /// decoder's cache, so a later display size is one resample and never a second disk read.
+///
+/// **The pass itself runs across the machine's cores** (user ruling 2026-08-25) — see
+/// [`resize_lanczos3_rgba8`]. A single-threaded Lanczos3 over a 4000×3000 decode measured
+/// 0.21–0.78 s on this host, which is the whole of the "a zoom takes half a second to settle"
+/// report; the arithmetic is embarrassingly parallel by output row and was serial only because
+/// that is how `image::imageops::resize` happens to be written.
 pub fn scale_inline_image(task: &InlineImageScaleTask) -> ScaledInlineImage {
     let key = display_texture_key(
         &task.content_key,
@@ -114,20 +118,13 @@ pub fn scale_inline_image(task: &InlineImageScaleTask) -> ScaledInlineImage {
     let rgba = if native == display {
         Arc::clone(&task.rgba)
     } else {
-        // `Arc<[u8]>` derefs to the sample slice, so the source buffer is borrowed rather than
-        // copied; only the resampled result is allocated.
-        let source: ImageBuffer<Rgba<u8>, Arc<[u8]>> =
-            ImageBuffer::from_raw(task.width_px, task.height_px, Arc::clone(&task.rgba))
-                .expect("scale task carries a decoded RGBA buffer of its stated dimensions");
-        Arc::from(
-            image::imageops::resize(
-                &source,
-                task.display_width_px,
-                task.display_height_px,
-                FilterType::Lanczos3,
-            )
-            .into_raw(),
-        )
+        Arc::from(resize_lanczos3_rgba8(
+            &task.rgba,
+            task.width_px,
+            task.height_px,
+            task.display_width_px,
+            task.display_height_px,
+        ))
     };
     ScaledInlineImage {
         occurrence_id: task.occurrence_id,
@@ -137,6 +134,281 @@ pub fn scale_inline_image(task: &InlineImageScaleTask) -> ScaledInlineImage {
         width_px: task.display_width_px,
         height_px: task.display_height_px,
     }
+}
+
+/// The sinc function, and the Lanczos window of 3 built from it.
+///
+/// **Transcribed from `image::imageops::sample` rather than derived**, down to the
+/// order of the multiply — see [`resize_lanczos3_rgba8`] for why every f32 here has
+/// to land on the same bit the serial resampler landed on.
+fn sinc(t: f32) -> f32 {
+    let a = t * std::f32::consts::PI;
+    if t == 0.0 { 1.0 } else { a.sin() / a }
+}
+
+fn lanczos3_kernel(x: f32) -> f32 {
+    const SUPPORT: f32 = 3.0;
+    if x.abs() < SUPPORT {
+        sinc(x) * sinc(x / SUPPORT)
+    } else {
+        0.0
+    }
+}
+
+/// The cores this lane is allowed to spread a pass over, in the band it has
+/// always run in.
+///
+/// **A pool of its own rather than rayon's global one, and the reason is the
+/// band.** The resample lane has run below normal priority since it existed, so
+/// that a wallpaper-sized pass cannot take the window thread's cores; spreading
+/// that pass over every core at *normal* priority would undo the discipline in
+/// the act of speeding the lane up. Windows gives a new thread `Normal`
+/// whatever its creator stands in, so the band has to be said by whoever makes
+/// the threads — and rayon's global pool belongs to the whole process, which in
+/// this program also means typst's layout. A pool this crate owns is a pool this
+/// crate can dress.
+///
+/// It is not a hypothetical. With the pass on the global pool at normal
+/// priority, an existing wall-clock ratio test in this very crate
+/// (`session::tests::a_pathological_dollar_screen_arms_nothing_where_the_site_can_never_answer_yes`,
+/// which times a sub-millisecond window while twenty other tests run) failed one
+/// run in three, against twenty clean runs of the same suite without this
+/// change. A test binary is not a product, but it is a machine with other work
+/// on it, which is exactly what the band is for.
+///
+/// Built once, on the first pass big enough to want it — see
+/// [`worth_the_machine`], which is why a program that never resamples anything
+/// large never starts these threads at all. A pool that cannot be built is not
+/// worth refusing a picture over: the pass then runs on the calling thread,
+/// which is what it did before this ruling.
+fn resample_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .thread_name(|index| format!("bt-image-resample-{index}"))
+            .start_handler(|_| {
+                bt_platform::set_current_thread_priority(bt_platform::ThreadPriority::BelowNormal);
+            })
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
+/// Whether a pass is big enough to be worth waking other cores for.
+///
+/// **"Too small" has to mean *not touching the pool*, not merely *not
+/// splitting*:** every `ParallelIterator` installs into a pool even when it ends
+/// up running as one job, and installing is what starts that pool's threads. So
+/// the decision is a branch, and below it the lane is exactly the code it was
+/// before this ruling — one thread, one pass.
+///
+/// **The size that matters is the work, not the picture that comes out.** A
+/// separable resample reads roughly `src_w × src_h` samples in the vertical pass
+/// and writes roughly `dst_w × dst_h` in the horizontal one, so a 4000×3000
+/// photograph fitted into a 400×300 corner is a *large* pass with a tiny
+/// destination — 74 ms of it, measured. A threshold on the destination alone
+/// would send exactly that case, which is what a pane resize does, down the
+/// slow road.
+///
+/// A quarter of a million samples is the line: about a megabyte of RGBA either
+/// side, which is larger than every favicon, glance thumbnail and inline band
+/// this program draws, and about two milliseconds on one thread here. Below it
+/// there is nothing to win — the lane already runs on a background worker behind
+/// a settle deadline — and something to lose, which is the round trip that hands
+/// the work out.
+fn worth_the_machine(src_width: u32, src_height: u32, dst_width: u32, dst_height: u32) -> bool {
+    const FLOOR_SAMPLES: u64 = 256 * 1024;
+    let samples =
+        u64::from(src_width) * u64::from(src_height) + u64::from(dst_width) * u64::from(dst_height);
+    samples >= FLOOR_SAMPLES
+}
+
+/// Rows per task once a pass *is* being split.
+///
+/// Stated in work and converted to rows, because the lane resamples pictures of
+/// every width and a row count would mean something different for each one. A
+/// task this size is tens of microseconds — comfortably more than the round trip
+/// that hands it out, and small enough that a big pass still reaches every core.
+fn parallel_grain_rows(stride: usize) -> usize {
+    const GRAIN_BYTES: usize = 64 * 1024;
+    GRAIN_BYTES.div_ceil(stride.max(1)).max(1)
+}
+
+/// One output sample's window into one source axis: where its taps begin, and the
+/// normalised weights that run from there.
+struct AxisTaps {
+    left: u32,
+    weights: Vec<f32>,
+}
+
+/// Every output sample's window along one axis, solved once for the whole pass.
+///
+/// The serial resampler recomputes these inside the loop it also accumulates in,
+/// which is exactly what makes that loop unsplittable. Lifting them out is the
+/// whole trick: the weights depend only on the two lengths, so they can be solved
+/// once, up front, and then read — never written — by every worker at once.
+fn lanczos3_axis_taps(src_len: u32, dst_len: u32) -> Vec<AxisTaps> {
+    const SUPPORT: f32 = 3.0;
+    let ratio = src_len as f32 / dst_len as f32;
+    // Upsampling does not widen the kernel: a magnified picture is interpolated at
+    // the source's own scale, not blurred at the destination's.
+    let sratio = if ratio < 1.0 { 1.0 } else { ratio };
+    let src_support = SUPPORT * sratio;
+    (0..dst_len)
+        .map(|out| {
+            // The point in the source that this output sample's *centre* lands on.
+            let centre = (out as f32 + 0.5) * ratio;
+            let left = (centre - src_support).floor() as i64;
+            let left = left.clamp(0, i64::from(src_len) - 1) as u32;
+            let right = (centre + src_support).ceil() as i64;
+            let right = right.clamp(i64::from(left) + 1, i64::from(src_len)) as u32;
+            // Back to the pixel's left edge, because the kernel puts zero at a
+            // pixel's centre and the taps are indexed by edge.
+            let centre = centre - 0.5;
+            let mut weights: Vec<f32> = (left..right)
+                .map(|tap| lanczos3_kernel((tap as f32 - centre) / sratio))
+                .collect();
+            // Normalised, so a window clipped by the picture's edge still sums to
+            // one and the border does not darken.
+            let sum: f32 = weights.iter().sum();
+            for weight in &mut weights {
+                *weight /= sum;
+            }
+            AxisTaps { left, weights }
+        })
+        .collect()
+}
+
+/// Resample one RGBA8 buffer into another size with a Lanczos3 kernel, in parallel.
+///
+/// **Bit-for-bit what `image::imageops::resize(_, _, _, FilterType::Lanczos3)` returns**
+/// — the same two separable passes in the same order (vertical into an f32
+/// intermediate, then horizontal back to 8-bit), the same window arithmetic, the same
+/// normalisation, the same `clamp` and round on the way out, and above all the same
+/// *accumulation order* within each output sample. That last one is not a nicety:
+/// f32 addition is not associative, so a resampler that summed its taps in a
+/// different order would produce a picture that differs from the old one by a unit
+/// here and there, and nothing downstream — a texture key, a golden buffer, a
+/// screenshot — could then be compared across the change. Held by
+/// [`tests::the_parallel_pass_lands_on_the_same_bits_the_serial_one_did`].
+///
+/// **What is parallel is the row, not the tap.** Both passes write each output row
+/// from a read-only source and a read-only tap table, so the rows are independent and
+/// `par_chunks_mut` hands each worker a disjoint slice of the destination. The
+/// arithmetic inside a row is untouched — which is also why the serial branch below
+/// is not a second resampler: it is the same per-row closure, driven by
+/// `chunks_mut` instead.
+///
+/// **A small pass takes the serial branch**, and takes it all the way — see
+/// [`worth_the_machine`]. The cores a big one spreads over, and the band they
+/// stand in, are [`resample_pool`]'s.
+fn resize_lanczos3_rgba8(
+    source: &[u8],
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+) -> Vec<u8> {
+    resize_lanczos3_rgba8_across(
+        source,
+        src_width,
+        src_height,
+        dst_width,
+        dst_height,
+        worth_the_machine(src_width, src_height, dst_width, dst_height),
+    )
+}
+
+/// The pass, with the parallel/serial choice handed in rather than made.
+///
+/// Split out for one reader: the parity test, which runs the *same* sizes down both
+/// branches and demands the same bytes. A threshold that could change the picture
+/// depending on how big it happens to be would be the worst kind of bug — invisible
+/// in every test that stays on one side of it.
+fn resize_lanczos3_rgba8_across(
+    source: &[u8],
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+    across_the_machine: bool,
+) -> Vec<u8> {
+    let dst_len = dst_width as usize * dst_height as usize * 4;
+    if src_width == 0 || src_height == 0 || dst_width == 0 || dst_height == 0 {
+        // Nothing to sample from, or nowhere to put it. `image::imageops::resize`
+        // answers an empty source with a zeroed buffer of the asked size, and a
+        // zero-width chunk would panic `par_chunks_mut` besides.
+        return vec![0; dst_len];
+    }
+
+    // Pass one, vertical: (src_width × src_height) u8 → (src_width × dst_height) f32.
+    // The intermediate is float and full source width, which is what keeps the two
+    // passes from rounding twice.
+    let vertical = lanczos3_axis_taps(src_height, dst_height);
+    let src_stride = src_width as usize * 4;
+    let mut tall = vec![0.0_f32; src_width as usize * dst_height as usize * 4];
+    let down_a_column = |row: &mut [f32], taps: &AxisTaps| {
+        for (x, sample) in row.chunks_exact_mut(4).enumerate() {
+            let mut sum = [0.0_f32; 4];
+            for (tap, weight) in taps.weights.iter().enumerate() {
+                let base = (taps.left as usize + tap) * src_stride + x * 4;
+                for (channel, total) in sum.iter_mut().enumerate() {
+                    *total += f32::from(source[base + channel]) * weight;
+                }
+            }
+            sample.copy_from_slice(&sum);
+        }
+    };
+    match across_the_machine.then(resample_pool).flatten() {
+        Some(pool) => pool.install(|| {
+            tall.par_chunks_mut(src_stride)
+                .zip(vertical.par_iter())
+                .with_min_len(parallel_grain_rows(src_stride))
+                .for_each(|(row, taps)| down_a_column(row, taps));
+        }),
+        None => {
+            for (row, taps) in tall.chunks_mut(src_stride).zip(vertical.iter()) {
+                down_a_column(row, taps);
+            }
+        }
+    }
+
+    // Pass two, horizontal: (src_width × dst_height) f32 → (dst_width × dst_height) u8.
+    let horizontal = lanczos3_axis_taps(src_width, dst_width);
+    let dst_stride = dst_width as usize * 4;
+    let mut out = vec![0_u8; dst_len];
+    let along_a_row = |y: usize, row: &mut [u8]| {
+        let tall_row = &tall[y * src_stride..(y + 1) * src_stride];
+        for (sample, taps) in row.chunks_exact_mut(4).zip(horizontal.iter()) {
+            let mut sum = [0.0_f32; 4];
+            for (tap, weight) in taps.weights.iter().enumerate() {
+                let base = (taps.left as usize + tap) * 4;
+                for (channel, total) in sum.iter_mut().enumerate() {
+                    *total += tall_row[base + channel] * weight;
+                }
+            }
+            for (out, total) in sample.iter_mut().zip(sum) {
+                // A kernel with negative lobes overshoots at an edge, so the
+                // clamp is the picture's own range and not a safety net.
+                *out = total.clamp(0.0, 255.0).round() as u8;
+            }
+        }
+    };
+    match across_the_machine.then(resample_pool).flatten() {
+        Some(pool) => pool.install(|| {
+            out.par_chunks_mut(dst_stride)
+                .enumerate()
+                .with_min_len(parallel_grain_rows(dst_stride))
+                .for_each(|(y, row)| along_a_row(y, row));
+        }),
+        None => {
+            for (y, row) in out.chunks_mut(dst_stride).enumerate() {
+                along_a_row(y, row);
+            }
+        }
+    }
+    out
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1557,6 +1829,72 @@ mod tests {
             }
         }
         !crc
+    }
+
+    /// The parallel pass is a faster spelling of the serial one, not a second resampler.
+    ///
+    /// f32 addition is not associative, so a resampler that summed its taps in another
+    /// order would shift pixels by a unit here and there — enough that no golden buffer,
+    /// no screenshot and no texture comparison could be carried across the change. This
+    /// walks upscales, downscales, the mixed case, the one-pixel edges and a
+    /// non-power-of-two size, and demands the *bytes*.
+    #[test]
+    fn the_parallel_pass_lands_on_the_same_bits_the_serial_one_did() {
+        use image::{ImageBuffer, Rgba, imageops::FilterType};
+
+        // Deterministic, and structured rather than flat: a flat picture would agree
+        // under any kernel at all.
+        let noise = |width: u32, height: u32| -> Vec<u8> {
+            let mut bytes = Vec::with_capacity(width as usize * height as usize * 4);
+            let mut state = 0x2545_f491_4f6c_dd1d_u64;
+            for y in 0..height {
+                for x in 0..width {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    bytes.extend_from_slice(&[
+                        (x * 7) as u8,
+                        (y * 11) as u8,
+                        (state >> 33) as u8,
+                        if (x + y) % 5 == 0 { 40 } else { 255 },
+                    ]);
+                }
+            }
+            bytes
+        };
+
+        for &(sw, sh, dw, dh) in &[
+            (37_u32, 23_u32, 11_u32, 9_u32), // a real downscale
+            (11, 9, 37, 23),                 // and the magnification back
+            (64, 16, 17, 61),                // one axis each way at once
+            (5, 5, 1, 1),                    // down to a single pixel
+            (1, 1, 6, 4),                    // and out from one
+            (40, 40, 39, 41),                // a hair either side of identity
+        ] {
+            let source = noise(sw, sh);
+            let buffer: ImageBuffer<Rgba<u8>, Vec<u8>> =
+                ImageBuffer::from_raw(sw, sh, source.clone()).unwrap();
+            let reference =
+                image::imageops::resize(&buffer, dw, dh, FilterType::Lanczos3).into_raw();
+            // Both sides of `PARALLEL_RESAMPLE_FLOOR_BYTES` at every one of these
+            // sizes: a threshold that could change the picture would be invisible to
+            // any test that stayed on one side of it.
+            for across in [false, true] {
+                let ours = resize_lanczos3_rgba8_across(&source, sw, sh, dw, dh, across);
+                assert_eq!(
+                    ours, reference,
+                    "{sw}x{sh} -> {dw}x{dh} (across={across}) must be the same bytes the \
+                     serial kernel gave"
+                );
+            }
+        }
+
+        // Nothing to sample from, or nowhere to put it: the size asked for, zeroed.
+        assert_eq!(
+            resize_lanczos3_rgba8(&[], 0, 0, 3, 2),
+            vec![0_u8; 3 * 2 * 4]
+        );
+        assert!(resize_lanczos3_rgba8(&noise(4, 4), 4, 4, 0, 5).is_empty());
     }
 
     #[test]

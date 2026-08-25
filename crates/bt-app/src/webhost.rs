@@ -198,6 +198,32 @@ impl WebMachine {
         }
     }
 
+    /// **Build the engine again, after it failed to come up** — the sixth
+    /// failure card's one verb (user ruling 2026-08-25).
+    ///
+    /// A door of its own and not a second [`Self::request`], for that method's
+    /// own stated reason: they are two different sentences. `request` says *go
+    /// here*, and needs a URL — a seat whose engine never started may have none
+    /// to give, and a retry that had to invent one would navigate somewhere
+    /// nobody asked for. This says *try to make the engine again*, keeps the
+    /// wish already recorded in `desired_url` so that a successful rebuild lands
+    /// where the seat was always going, and says so with the effect the browser
+    /// crash path already uses.
+    ///
+    /// **Only from `Failed`.** Pressing the card's button is the only way here,
+    /// and a card is only on screen while the seat is in that state; answering
+    /// anything else would let a stale press restart an engine that had come up
+    /// in the meantime.
+    pub(crate) fn restart(&mut self) -> WebEffect {
+        if self.state != WebState::Failed {
+            return WebEffect::Ignore;
+        }
+        self.generation += 1;
+        self.state = WebState::EnvironmentPending;
+        self.events_installed = false;
+        WebEffect::RebuildFromScratch
+    }
+
     /// The environment callback for `generation` came back.
     pub(crate) fn on_environment(&mut self, generation: u64, ok: bool) -> WebEffect {
         if generation != self.generation || self.state != WebState::EnvironmentPending {
@@ -655,32 +681,62 @@ impl WebBounds {
     }
 }
 
-// ── The five failure cards, and where each one's reason comes from ─────────
+// ── The six failure cards, and where each one's reason comes from ──────────
 
 /// What a web seat is showing instead of a page — or, for the one that stands
 /// **over** a page, as well as it (§7.7 ④).
 ///
-/// # One drawing, five rows, two placements
+/// # One drawing, six rows, two placements
 ///
 /// Every variant answers the same four questions the card asks: a sentence, at
 /// most one line of fact, exactly one verb, and whether it takes the seat or
-/// stands on a scrim over it. There is no sixth question and no second verb —
+/// stands on a scrim over it. There is no fifth question and no second verb —
 /// 「一排按钮是程序把自己的判断交还给读者」.
 ///
 /// # Nothing here decides anything a machine already said
 ///
 /// The reasons are not invented at the card. `RuntimeMissing` is the loader's
 /// own answer (gate 7 proved the registry lies and the loader does not),
-/// `DidNotLoad` is `NavigationCompleted`'s `WebErrorStatus`, `RenderProcessGone`
-/// is `ProcessFailed` with the renderer's kind, `Blocked` carries the
-/// [`Refusal`] the navigation gate produced, and `DownloadRefused` is what is
-/// left when `webnav::address_bar` will not take a download's own URL. The card
-/// spells them; it does not judge them.
+/// `EngineDidNotStart` is the environment or controller callback's own error
+/// string, `DidNotLoad` is `NavigationCompleted`'s `WebErrorStatus`,
+/// `RenderProcessGone` is `ProcessFailed` with the renderer's kind, `Blocked`
+/// carries the [`Refusal`] the navigation gate produced, and `DownloadRefused`
+/// is what is left when `webnav::address_bar` will not take a download's own
+/// URL. The card spells them; it does not judge them.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum WebFault {
     /// There is no WebView2 runtime on this machine.
     RuntimeMissing {
         /// The call that failed and the code it failed with.
+        detail: String,
+    },
+    /// **The runtime is there and the engine still would not come up** — the
+    /// sixth card (user ruling 2026-08-25).
+    ///
+    /// §7.7 ④ named five states and this was not one of them, so for two slices
+    /// it went to `stderr` and the seat showed a rectangle of ground colour: no
+    /// mark, no sentence, no verb, and nothing on screen distinguishing "this
+    /// window cannot start an engine" from "this pane is empty". §7.11 booked it
+    /// twice — once as「第六张卡的那句话得有人裁」and once as the debt ⓑ under
+    /// the ground-colour pane — and this is that sentence.
+    ///
+    /// **One card for one family**, and the family is *the engine did not come
+    /// up*: `CreateCoreWebView2EnvironmentWithOptions` failing while the loader
+    /// says a runtime is installed, the controller callback failing after the
+    /// environment succeeded, and either of those failing again on the rebuild a
+    /// lost rehost (`on_rehost_lost`) or a dead browser asks for. They are one
+    /// card because they are one sentence to a reader and one action: there is
+    /// no page, no address, and nothing to copy — the only thing left to do is
+    /// ask for the engine again.
+    ///
+    /// It is deliberately **not** `RuntimeMissing`: that card's verb sends
+    /// somebody to Microsoft's download page, and sending them there to install
+    /// what is already installed is the window blaming a machine that is fine.
+    /// The loader — never the error string — is what tells the two apart.
+    EngineDidNotStart {
+        /// The call that failed and the code it failed with, in the SDK's own
+        /// spelling, because the fact line exists to be copied into a bug
+        /// report.
         detail: String,
     },
     /// A navigation never committed a document.
@@ -709,6 +765,13 @@ pub(crate) enum WebFault {
 pub(crate) enum WebFaultVerb {
     /// Open Microsoft's download page in the machine's browser.
     DownloadTheRuntime,
+    /// Build the engine again from nothing (user ruling 2026-08-25).
+    ///
+    /// Not [`Self::Reload`]: there is no document to read again and no
+    /// navigation to repeat — what failed is the environment or the controller,
+    /// and asking the host to reload a page it never has would be a button that
+    /// does nothing. This goes back to `CreateCoreWebView2Environment`.
+    RestartTheEngine,
     /// Try the navigation again.
     Reload,
     /// Put the refused address on the clipboard.
@@ -730,6 +793,7 @@ impl WebFault {
     pub(crate) fn say(&self) -> String {
         match self {
             Self::RuntimeMissing { .. } => crate::i18n::Text::WebFailRuntimeSay.text().to_owned(),
+            Self::EngineDidNotStart { .. } => crate::i18n::Text::WebFailEngineSay.text().to_owned(),
             Self::DidNotLoad { host, .. } => crate::i18n::web_fail_did_not_respond(host),
             Self::RenderProcessGone => crate::i18n::Text::WebFailCrashSay.text().to_owned(),
             // The scheme comes from `webnav::scheme_of` and from nowhere else
@@ -748,9 +812,9 @@ impl WebFault {
     /// quoting into a bug report.
     pub(crate) fn detail(&self) -> Option<&str> {
         match self {
-            Self::RuntimeMissing { detail } | Self::DidNotLoad { detail, .. } => {
-                (!detail.is_empty()).then_some(detail.as_str())
-            }
+            Self::RuntimeMissing { detail }
+            | Self::EngineDidNotStart { detail }
+            | Self::DidNotLoad { detail, .. } => (!detail.is_empty()).then_some(detail.as_str()),
             // The crash has none, and that is the mock-up's own answer: there is
             // no code a renderer's exit hands over that a reader could act on.
             Self::RenderProcessGone => None,
@@ -765,6 +829,7 @@ impl WebFault {
     pub(crate) fn verb_text(&self) -> crate::i18n::Text {
         match self {
             Self::RuntimeMissing { .. } => crate::i18n::Text::WebFailRuntimeVerb,
+            Self::EngineDidNotStart { .. } => crate::i18n::Text::WebFailEngineVerb,
             Self::DidNotLoad { .. } | Self::RenderProcessGone => {
                 crate::i18n::Text::PreviewWebReload
             }
@@ -777,6 +842,7 @@ impl WebFault {
     pub(crate) fn verb(&self) -> WebFaultVerb {
         match self {
             Self::RuntimeMissing { .. } => WebFaultVerb::DownloadTheRuntime,
+            Self::EngineDidNotStart { .. } => WebFaultVerb::RestartTheEngine,
             Self::DidNotLoad { .. } | Self::RenderProcessGone => WebFaultVerb::Reload,
             Self::Blocked { url, .. } => WebFaultVerb::CopyAddress(url.clone()),
             Self::DownloadRefused { .. } => WebFaultVerb::OpenPageInBrowser,
@@ -803,7 +869,7 @@ impl WebFault {
     /// One variant answers `true` and the ruling says why: what was cancelled is
     /// the download, and the page that asked for it is still standing and still
     /// scrolled where the reader left it — blanking it would throw away more
-    /// than the failure did. The other four have nothing behind them to keep;
+    /// than the failure did. The other five have nothing behind them to keep;
     /// take one of those away and what is left is the black hole a hidden
     /// WebView leaves (`w0-evidence.md` §2⑨), which is why they have no Escape.
     pub(crate) fn stands_over_the_page(&self) -> bool {
@@ -1487,6 +1553,28 @@ impl WebSeat {
         outcomes
     }
 
+    /// **Try to build the engine again** — the sixth failure card's verb (user
+    /// ruling 2026-08-25).
+    ///
+    /// [`WebMachine::restart`] is the sentence; this is that plus the compositor
+    /// the effect needs, exactly as [`Self::go`] is `request` plus it and
+    /// [`Self::reload`] is `reload` plus it.
+    ///
+    /// The card is **not** taken down here. What the press starts is an attempt,
+    /// and an attempt that fails again in a hundred milliseconds would have
+    /// flashed the seat back to ground colour and then to the same card; the
+    /// card leaves where every other fact about this engine is decided — the
+    /// controller callback in [`Self::digest`].
+    pub(crate) fn restart_engine(
+        &mut self,
+        compositor: &bt_platform::Compositor,
+    ) -> Vec<WebOutcome> {
+        let effect = self.machine.restart();
+        let mut outcomes = Vec::new();
+        self.apply(effect, compositor, &mut outcomes);
+        outcomes
+    }
+
     /// **Read the page again** - the file behind it was saved (W2 slice 5).
     ///
     /// [`WebMachine::reload`] is the sentence; this is that plus the compositor
@@ -1545,24 +1633,60 @@ impl WebSeat {
                 // pattern match on a message.
                 //
                 // **An environment that failed with a runtime installed draws
-                // no card**, and that is a boundary of the ruling rather than a
-                // gap in the code: §7.7 ④ names five states and this is not one
-                // of them, so it goes where slice ① put every fact with nowhere
-                // to be drawn — `stderr`. Recorded as an open item; a sixth card
-                // is a sentence somebody has to rule.
+                // the sixth card** (user ruling 2026-08-25). It used to draw
+                // none — §7.7 ④ named five states and this was not one of them,
+                // so the fact went to `stderr` and the seat showed a rectangle
+                // of ground colour. The ruling made it a card of the same
+                // family, and the loader is still what chooses between the two:
+                // one sends a reader to Microsoft, the other asks the engine
+                // again, and telling somebody to install what is installed is
+                // the worse of the two mistakes.
                 if let Some(error) = error {
-                    if bt_platform::webview2_runtime_version().is_err() {
-                        self.fault = Some(WebFault::RuntimeMissing {
+                    self.fault = Some(if bt_platform::webview2_runtime_version().is_err() {
+                        WebFault::RuntimeMissing {
                             detail: error.clone(),
-                        });
-                    }
+                        }
+                    } else {
+                        WebFault::EngineDidNotStart {
+                            detail: error.clone(),
+                        }
+                    });
                     outcomes.push(WebOutcome::Fault(error.clone()));
                 }
                 self.machine.on_environment(*generation, error.is_none())
             }
             WebEvent::Controller { generation, error } => {
-                if let Some(error) = error {
-                    outcomes.push(WebOutcome::Fault(error.clone()));
+                match error {
+                    // The environment came up and the controller did not: the
+                    // same sentence and the same verb, because to a reader it is
+                    // the same failure — there is no engine on this seat — and
+                    // the runtime question was already asked and answered by the
+                    // half that did work.
+                    Some(error) => {
+                        self.fault = Some(WebFault::EngineDidNotStart {
+                            detail: error.clone(),
+                        });
+                        outcomes.push(WebOutcome::Fault(error.clone()));
+                    }
+                    // **And the card leaves when the engine is up.** Here and
+                    // not at the environment's own success, because half an
+                    // engine is not one: an environment that succeeds into a
+                    // controller that never answers would otherwise take the
+                    // card away and leave the ground-colour rectangle this
+                    // ruling exists to end. Only this family is cleared — a
+                    // `Blocked` card is about an address and survives an engine
+                    // coming up under it.
+                    None => {
+                        if matches!(
+                            self.fault,
+                            Some(
+                                WebFault::EngineDidNotStart { .. }
+                                    | WebFault::RuntimeMissing { .. }
+                            )
+                        ) {
+                            self.fault = None;
+                        }
+                    }
                 }
                 self.machine.on_controller(*generation, error.is_none())
             }
@@ -3646,12 +3770,15 @@ mod fault_tests {
     use super::*;
     use crate::i18n::Text;
 
-    /// The five, so that a sixth cannot arrive without somebody writing its
+    /// The six, so that a seventh cannot arrive without somebody writing its
     /// sentence here.
     fn every_fault() -> Vec<WebFault> {
         vec![
             WebFault::RuntimeMissing {
                 detail: "CreateCoreWebView2Environment failed (0x80070002)".to_owned(),
+            },
+            WebFault::EngineDidNotStart {
+                detail: "CreateCoreWebView2Environment failed (0x8007000e)".to_owned(),
             },
             WebFault::DidNotLoad {
                 host: "127.0.0.1".to_owned(),
@@ -3666,6 +3793,129 @@ mod fault_tests {
                 file_name: "report.pdf".to_owned(),
             },
         ]
+    }
+
+    /// **The sixth card** (user ruling 2026-08-25) — an engine that would not
+    /// come up is a card of this family, and its verb is a way back.
+    ///
+    /// What this replaces is a rectangle of ground colour: the environment and
+    /// the controller could both fail with a runtime installed, and neither drew
+    /// anything at all — the fact went to `stderr` and the seat showed a
+    /// coloured hole that looks exactly like an empty pane. §7.11 booked it
+    /// twice, once as「第六张卡的那句话得有人裁」and once as debt ⓑ.
+    ///
+    /// MUTATION ①: drop the `self.fault = …` from the controller arm and the
+    /// first `is_some` goes red — the seat is back to the ground-colour hole.
+    /// MUTATION ②: give the card `WebFaultVerb::Reload` and the verb assertion
+    /// goes red: reload asks a host that does not exist to read a page it never
+    /// had.
+    /// MUTATION ③: clear the fault on the *environment*'s success rather than
+    /// the controller's and the "half an engine is not one" assertion goes red.
+    #[test]
+    fn an_engine_that_would_not_come_up_is_a_card_and_not_a_coloured_hole() {
+        use super::rehost_address_tests::{detached, hwnd, page};
+
+        let mut seat = detached(SeatAddress {
+            page: page(1, 1),
+            hwnd: hwnd(0x2222),
+        });
+        let mut outcomes = Vec::new();
+        assert_eq!(
+            seat.machine.request("https://example.com/"),
+            WebEffect::Ignore
+        );
+        let generation = seat.machine.generation();
+
+        // The environment comes up; the controller does not.
+        seat.digest(
+            &WebEvent::Environment {
+                generation,
+                error: None,
+            },
+            &mut outcomes,
+        );
+        assert!(seat.fault().is_none(), "nothing has failed yet");
+        seat.digest(
+            &WebEvent::Controller {
+                generation,
+                error: Some("CreateCoreWebView2Controller failed (0x8007000e)".to_owned()),
+            },
+            &mut outcomes,
+        );
+        let fault = seat.fault().cloned().expect("a card, not a coloured hole");
+        assert_eq!(
+            fault,
+            WebFault::EngineDidNotStart {
+                detail: "CreateCoreWebView2Controller failed (0x8007000e)".to_owned(),
+            },
+            "the fact under the sentence is the SDK's own error string"
+        );
+        assert_eq!(
+            fault.verb(),
+            WebFaultVerb::RestartTheEngine,
+            "and the one verb asks for the engine, not for a page there never was"
+        );
+        assert!(
+            !fault.stands_over_the_page(),
+            "there is no page behind it to stand over"
+        );
+        assert_eq!(seat.machine.state, WebState::Failed);
+
+        // The verb: a new generation, and the same effect a browser crash takes.
+        assert_eq!(seat.machine.restart(), WebEffect::RebuildFromScratch);
+        let retry = seat.machine.generation();
+        assert!(retry > generation, "a retry is a new generation");
+        assert_eq!(seat.machine.state, WebState::EnvironmentPending);
+        assert!(
+            seat.fault().is_some(),
+            "and the card stays up while the attempt is in flight — an attempt \
+             that fails again would otherwise have flashed the seat blank"
+        );
+        assert_eq!(
+            seat.machine.restart(),
+            WebEffect::Ignore,
+            "a second press while it is already coming up starts nothing"
+        );
+
+        // Half an engine is not an engine: the card leaves at the controller.
+        seat.digest(
+            &WebEvent::Environment {
+                generation: retry,
+                error: None,
+            },
+            &mut outcomes,
+        );
+        assert!(
+            seat.fault().is_some(),
+            "an environment that succeeds into a controller that never answers \
+             would otherwise take the card away and leave the hole back"
+        );
+        seat.digest(
+            &WebEvent::Controller {
+                generation: retry,
+                error: None,
+            },
+            &mut outcomes,
+        );
+        assert!(seat.fault().is_none(), "the engine is up; the card is gone");
+
+        // A card about an *address* is not this family and survives an engine
+        // coming up under it.
+        seat.fault = Some(WebFault::Blocked {
+            url: "mailto:someone@example.com".to_owned(),
+            refusal: Refusal::ExternalScheme,
+        });
+        seat.digest(
+            &WebEvent::Controller {
+                generation: retry,
+                error: None,
+            },
+            &mut outcomes,
+        );
+        assert!(
+            matches!(seat.fault(), Some(WebFault::Blocked { .. })),
+            "only the engine's own family is cleared by the engine coming up"
+        );
     }
 
     /// PIN (§7.7 ④) — **one sentence, at most one fact, exactly one verb.**
