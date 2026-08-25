@@ -39,12 +39,25 @@ pollster.workspace = true
 syntect.workspace = true
 two-face.workspace = true
 winit.workspace = true
+# **The attention block's two JSON documents, and neither of them is ours**
+# (`attention_hooks`, `attention_wire`). One is the user's own
+# `~/.claude/settings.json`, which this build adds a hook to and must hand back
+# unharmed — a hand-rolled writer that reordered a key or dropped a comment-shaped
+# string would be damaging a file somebody wrote. The other is the line that
+# crosses the attention endpoint, which arrives from outside this process and is
+# therefore the last thing that should meet a parser written here.
+#
+# It was already a dev-dependency and is already in the lock file, so this costs
+# no new package — `docs/DESIGN.md` §8's bar, met by a dependency that was
+# present and is now also compiled into the product.
+serde_json.workspace = true
 
 # Tests only. This crate writes `session.json` through `bt-persist` and never
-# touches JSON itself — which is exactly why one test needs to: the promise that
-# a restored session reads bytes the previous build could have written is a
-# promise about the *file*, and a test that compared two Rust structs would go on
-# passing through a field rename or a serde attribute that changed the shape.
+# touches that file's JSON itself — which is exactly why one test needs to: the
+# promise that a restored session reads bytes the previous build could have
+# written is a promise about the *file*, and a test that compared two Rust
+# structs would go on passing through a field rename or a serde attribute that
+# changed the shape.
 [dev-dependencies]
 serde_json.workspace = true
 

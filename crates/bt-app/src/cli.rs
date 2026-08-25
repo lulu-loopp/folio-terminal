@@ -357,6 +357,98 @@ pub struct CliPlan {
     pub refusals: Vec<CliRefusal>,
 }
 
+/// The verb that makes this program something a hook can call.
+///
+/// `folio attention <family>:<event> [--json <payload>]` — see [`attention`] for the grammar and
+/// `crate::attention_wire` for what it does with it.
+pub const ATTENTION_VERB: &str = "attention";
+
+/// One call of `folio attention`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttentionCall {
+    /// `<family>:<event>`, exactly as the hook's own configuration spelled it.
+    pub event: String,
+    /// The hook's payload, if the caller passed one. **It does not leave this process** — see
+    /// `crate::attention_wire`'s header — and today nothing is ever taken out of it, because no
+    /// row of the mapping table declares an identifier to take.
+    pub payload: Option<String>,
+}
+
+/// Why a call of the verb stops before it says anything.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AttentionFault {
+    /// `folio attention` with no event, or with `--help`.
+    NothingAsked,
+    /// `--json` with nothing after it.
+    MissingValue(&'static str),
+    /// A flag the verb does not know.
+    UnknownFlag(String),
+    /// A second event. One call says one thing.
+    ExtraEvent(String),
+}
+
+/// **The one subcommand, recognised before the flag grammar is entered at all.**
+///
+/// `None` when the first argument is not the verb, which is every ordinary launch — so a window
+/// opening pays one string comparison for the existence of this door.
+///
+/// Separate from [`parse`] rather than folded into it, and the reason is what the two are for. The
+/// flag grammar answers *what should this window open*; a hook is not opening a window, it is
+/// ringing a doorbell and leaving. Folding the two would mean every future flag had to be thought
+/// about twice — once for a window and once for a doorbell — and the second thought is the one that
+/// would be forgotten.
+///
+/// The event is one positional and is **not** validated here: whether a name is one this build has
+/// a mapping for is a question for the tables, and a syntax that had to be kept in step with a data
+/// file would be a syntax that goes stale the day a family is added.
+pub fn attention<I>(args: I) -> Option<Result<AttentionCall, AttentionFault>>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut args = args.into_iter();
+    if args.next()?.to_str()? != ATTENTION_VERB {
+        return None;
+    }
+    Some(attention_arguments(args))
+}
+
+/// `--json`, spelled once.
+const JSON_FLAG: &str = "--json";
+
+fn attention_arguments(
+    mut args: impl Iterator<Item = OsString>,
+) -> Result<AttentionCall, AttentionFault> {
+    let mut event = None;
+    let mut payload = None;
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--help" | "-h" | "/?") => return Err(AttentionFault::NothingAsked),
+            Some(flag) if is_flag(flag, JSON_FLAG) => {
+                if payload.is_some() {
+                    return Err(AttentionFault::UnknownFlag(JSON_FLAG.to_owned()));
+                }
+                let value = value_for(JSON_FLAG, flag, &arg, &mut args)
+                    .map_err(|_| AttentionFault::MissingValue(JSON_FLAG))?;
+                payload = Some(value.to_string_lossy().into_owned());
+            }
+            Some(flag) if flag.starts_with("--") => {
+                return Err(AttentionFault::UnknownFlag(flag.to_owned()));
+            }
+            _ => {
+                let named = arg.to_string_lossy().into_owned();
+                if event.is_some() {
+                    return Err(AttentionFault::ExtraEvent(named));
+                }
+                event = Some(named);
+            }
+        }
+    }
+    match event {
+        Some(event) => Ok(AttentionCall { event, payload }),
+        None => Err(AttentionFault::NothingAsked),
+    }
+}
+
 /// One thing a command line asked for and did not get.
 ///
 /// **Said out loud, never silently substituted** — the rule `LeafSeed`'s

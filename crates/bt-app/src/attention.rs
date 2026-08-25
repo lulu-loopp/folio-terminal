@@ -500,7 +500,7 @@ pub(crate) struct MappingRow {
 }
 
 impl MappingRow {
-    fn is_wait(&self) -> bool {
+    pub(crate) fn is_wait(&self) -> bool {
         matches!(self.action, MappedAction::Wait { .. })
     }
 

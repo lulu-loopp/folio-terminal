@@ -29,7 +29,10 @@ use std::{
 };
 
 mod attention;
+mod attention_hooks;
+mod attention_map;
 mod attention_trace;
+mod attention_wire;
 mod cli;
 mod cmdrail;
 mod context_menu;
@@ -293,6 +296,18 @@ enum AppEvent {
     /// has printed its prompt and gone quiet produces no further frame, so an
     /// answer landing after that frame would sit unread until somebody typed.
     PowerShellProfileProbed,
+    /// **Something spoke into this process's attention endpoint** (`attention_wire`).
+    ///
+    /// The same family again and the same reason for a wake of its own, in its strongest form: the
+    /// pane an agent is running in has been quiet for however long the agent has been thinking, so
+    /// there is nothing at all — no output, no keystroke, no hover — that would otherwise produce
+    /// the turn on which this is read. A signal that could only be collected the next time somebody
+    /// touched the window would be a signal that arrives when it is no longer news.
+    ///
+    /// Carries nothing: the lines are parked in `attention_wire`'s inbox by the listener thread and
+    /// this says only that there are some, which is the shape every other member of the family has
+    /// and for the same reason — one nudge for any number of arrivals.
+    AttentionSpoke,
     /// **The kernel says a file in the schemes folder moved** (§7.1.6c-4c,
     /// `scheme_watch`).
     ///
@@ -4552,6 +4567,28 @@ struct LeafSession {
     /// takes it back. Looking at the tab does not, which is the point of the
     /// whole mechanism: 看一眼阻塞的 agent 不解除阻塞.
     attention_ticket: Option<u64>,
+    /// **A3's ledger, running beside the queue above and owning nothing it owns.**
+    ///
+    /// The double bookkeeping is deliberate and is the plan's ordering, not an accident of it: the
+    /// ledger is what a real producer's signals land in and what `BT_ATTENTION_TRACE` reports, and
+    /// A2 is the slice that takes the field above away and lets this one drive the dot. Until then
+    /// this decides nothing anybody can see — no dot is drawn from it, no toast is raised from it,
+    /// and the place it hands out comes from a serial of its own so that the queue the user
+    /// actually has is untouched.
+    ///
+    /// Landing it now is what makes the wiring provable before it is load-bearing: a real Claude
+    /// Code permission prompt mints an episode and takes a place in the trace on this build, which
+    /// is the evidence A2 needs and cannot produce for itself.
+    attention: attention::AttentionLedger,
+    /// When each of this pane's standing credentials runs out.
+    attention_clock: attention_wire::WaitClock,
+    /// **The name this pane answers to on the process's endpoint** — 128 bits, minted at birth.
+    ///
+    /// Held here rather than in a table beside the window, for the reason the ticket above is:
+    /// a leaf that is torn out carries it, a leaf that closes takes it away, and there is no
+    /// bookkeeping anywhere that could be forgotten. A capability that is gone is a capability
+    /// nothing can present.
+    attention_capability: String,
     projection: ViewportProjection,
     /// **The last moment this pane's scroll bar had a reason to be up** — a
     /// wheel, a keyboard page, a jump, or a pointer in its lane (P2-9 slice 1).
@@ -5335,6 +5372,20 @@ struct App {
     /// entry that opens nothing, and the launch is the only moment this product
     /// has to notice.
     context_menu_installed: bool,
+    /// **Whether the user's own Claude Code configuration calls this program.**
+    ///
+    /// The same shape as the field above and for its reason: the state lives in a file, the row
+    /// that shows it is drawn on every frame the dialog is open, and reading that file sixty times
+    /// a second to draw one tick would be reading it sixty times a second. So it is cached at the
+    /// two moments it can change — the launch, and a press on the row.
+    ///
+    /// **Not repaired at launch, unlike the verb above.** A menu entry pointing at a `folio.exe`
+    /// that has moved opens nothing and the user cannot tell why; a hook command pointing at one
+    /// fails, is retried by nobody, and leaves an agent as silent as it was before anyone installed
+    /// anything. The second is a feature that has stopped working, not a broken thing on somebody's
+    /// desktop — and rewriting a file belonging to another program at every launch, without being
+    /// asked, is not something this build does.
+    claude_hooks_installed: bool,
     /// **This process's voice in the notification centre** (§7.6).
     ///
     /// On `App` and not on `WindowRuntime`, which is the opposite of
@@ -6441,6 +6492,16 @@ struct WindowRuntime {
     /// about a screen. Never reset, never reused — see
     /// [`LeafSession::attention_ticket`] for why it is a serial and not a clock.
     attention_next_ticket: u64,
+    /// **The same serial, for the ledger running beside that queue** (`attention` plan §11.8's A3).
+    ///
+    /// A second counter and not a shared one, and only because the two mechanisms are alive at the
+    /// same time: the queue above is what the user's dots are drawn from today, and a ledger
+    /// drawing places out of the same counter would make the numbers in `session.json` and the
+    /// numbers in the trace two interleaved halves of one sequence, each with gaps the other
+    /// explains. A2 is the slice that removes the first of them, and this becomes the only one.
+    ///
+    /// Per window and never reused, for [`Self::attention_next_ticket`]'s reasons exactly.
+    attention_next_place: u64,
     /// How far the rail is scrolled, in physical pixels.
     ///
     /// Its own field beside [`Self::tab_scroll`] rather than a shared one, because
@@ -14680,6 +14741,162 @@ fn answer_attention_in(tab: &mut TabState, seat: SeatId) -> Option<u64> {
         .and_then(|leaf| leaf.attention_ticket.take())
 }
 
+/// **How far an interruption about this pane could get, from the facts this build has.**
+///
+/// Two of §10.7's three answers, because the third needs a fact nobody has measured yet: telling
+/// "minimised or on another virtual desktop" from "on this screen behind something" is `IsIconic`
+/// and `DWMWA_CLOAKED`, and those are slice C1's. Until they exist the honest answer is the
+/// *weaker* of the two — a window that is really out of reach is reported as merely unwatched,
+/// which under-states rather than over-states how much of the user's attention is being asked for.
+///
+/// Nothing acts on it in this slice. The ledger writes it into the one `toast` line it is allowed
+/// per request, and the `Raised` it hands back is dropped: raising the notification is C3's, and a
+/// slice that raised one from a two-thirds answer would be a slice that had to be found and undone.
+fn ledger_reach(tab_is_active: bool, window_is_focused: bool) -> attention::Reach {
+    if tab_is_active && window_is_focused {
+        attention::Reach::Nothing
+    } else {
+        attention::Reach::Flash
+    }
+}
+
+/// One turn of the ledger's own per-frame pass, and the timers that came due with it.
+///
+/// **Beside `settle_attention` rather than inside it**, for the reason the field is beside the
+/// ticket: the two mechanisms are alive at once and the older one draws what the user sees. Folding
+/// them would make this slice a change to the dots, which is A2's to make and is gated on two
+/// rulings this one does not have.
+///
+/// What it does produce is the trace, and that is the point: on this build a real permission prompt
+/// from a real Claude Code writes `mint` and `admit` into `BT_ATTENTION_TRACE`, which is the
+/// evidence that the producer, the endpoint, the tables and the ledger are one working chain.
+fn settle_attention_ledger(
+    tabs: &mut [TabState],
+    active_tab: usize,
+    window_is_focused: bool,
+    next_place: &mut u64,
+    now: Instant,
+    trace: Option<&attention_trace::Trace>,
+) {
+    for (index, tab) in tabs.iter_mut().enumerate() {
+        let tab_is_active = index == active_tab;
+        let reach = ledger_reach(tab_is_active, window_is_focused);
+        for (seat, leaf) in tab.leaves_mut() {
+            let at = attention::Site {
+                tab: index,
+                seat: *seat,
+            };
+            // The timers first: a credential that ran out this instant is not one the pass should
+            // hand a place to, and doing it the other way round would put a `admit` and a
+            // `withdraw` for the same episode in the file one line apart.
+            for expired in leaf.attention_clock.due(now) {
+                let lines = leaf.attention.apply(at, reach, expired, next_place).lines;
+                emit_attention_lines(trace, lines);
+            }
+            let settle = attention::Event::Settle {
+                active: tab_is_active,
+                focused: window_is_focused,
+            };
+            let lines = leaf.attention.apply(at, reach, settle, next_place).lines;
+            emit_attention_lines(trace, lines);
+        }
+    }
+}
+
+/// The next instant any pane in this window owes the loop a wake-up on the ledger's account.
+///
+/// `None` for a window with nothing standing, which is every window almost always — so an idle
+/// Folio asks for no frames at all because of this.
+fn attention_ledger_deadline(tabs: &[TabState]) -> Option<Instant> {
+    tabs.iter()
+        .flat_map(|tab| tab.leaves())
+        .filter_map(|(_, leaf)| leaf.attention_clock.deadline())
+        .min()
+}
+
+fn emit_attention_lines(trace: Option<&attention_trace::Trace>, lines: Vec<String>) {
+    for line in lines {
+        attention_trace::emit(trace, || line);
+    }
+}
+
+/// **Hand every arrived message to the one pane that can have sent it.**
+///
+/// The lookup is by capability and is a scan, which is the right shape at this size and — more to
+/// the point — the *only* shape that cannot be walked: a table keyed by coordinates would be a
+/// table a caller could ask for a neighbour of. A capability that names no leaf in this window is
+/// silently skipped, because it very likely names one in another window of the same process, and a
+/// capability that names none anywhere is a message from a pane that has since closed.
+///
+/// Both lanes are read for every message. `Stop` is on both, and dropping either half of it would
+/// lose something nothing else produces.
+// Eight, and `create_leaf_session`'s allowance for its own reason: every one of them is a
+// different question about one delivery — where the panes are, which of them the user is looking
+// at, what serial to draw a place from, what arrived, what this machine has installed, when now is,
+// and where the lines go. A struct would move the list rather than shorten it, and would put a
+// name in front of `tabs` that no caller reads back.
+#[allow(clippy::too_many_arguments)]
+fn deliver_attention(
+    tabs: &mut [TabState],
+    active_tab: usize,
+    window_is_focused: bool,
+    next_place: &mut u64,
+    messages: &[attention_wire::Message],
+    installed: &[attention::MappingRow],
+    now: Instant,
+    trace: Option<&attention_trace::Trace>,
+) {
+    for message in messages {
+        let asks = attention_wire::asks_of(installed, message);
+        if asks.is_empty() {
+            continue;
+        }
+        for (index, tab) in tabs.iter_mut().enumerate() {
+            let tab_is_active = index == active_tab;
+            let reach = ledger_reach(tab_is_active, window_is_focused);
+            let Some((seat, leaf)) = tab.leaves_mut().find(|(_, leaf)| {
+                attention_wire::names_this_pane(&message.capability, &leaf.attention_capability)
+            }) else {
+                continue;
+            };
+            let at = attention::Site {
+                tab: index,
+                seat: *seat,
+            };
+            if let Some(event) = asks.ledger.clone() {
+                // The clock mirrors the arrival rather than the ledger's answer, and deliberately:
+                // an event the ledger treats as a restatement changes nothing, and re-arming its
+                // ten minutes is exactly right — the producer has just said it is still waiting.
+                match &event {
+                    attention::Event::StrongWait(slot) => leaf.attention_clock.arm(slot, now),
+                    attention::Event::StrongClear { selector, .. } => {
+                        leaf.attention_clock.forget(selector);
+                    }
+                    _ => {}
+                }
+                let lines = leaf.attention.apply(at, reach, event, next_place).lines;
+                emit_attention_lines(trace, lines);
+            }
+            if let Some(via) = asks.turn_end {
+                // **`enabled` is true because there is no switch yet.** The setting that turns this
+                // lane off is C2's; until it exists, "off" is not a state this build can be in, and
+                // passing `false` would be inventing a preference nobody expressed. Nothing reaches
+                // the desktop from here either way — the `Raised` is dropped, which is why a `true`
+                // here costs a line in a trace file and nothing else.
+                let outcome = leaf.attention.announce_turn_end(
+                    at,
+                    reach,
+                    true,
+                    attention_map::TRANSPORT,
+                    via,
+                );
+                emit_attention_lines(trace, outcome.lines);
+            }
+            break;
+        }
+    }
+}
+
 /// The claim a tab wears: the loudest of the claims its sessions make.
 ///
 /// The mock-up's rule, from a user correction it records at line 1930: "a tab
@@ -21405,6 +21622,12 @@ fn apply_stored_terminal_font(
 fn create_leaf_session(
     renderer: &WindowRenderer,
     body: bt_render::SeatViewport,
+    // **Who this pane is, for the two things a child is told about it.** One of them is a name a
+    // person reads in `env` and nothing routes by; the other is a capability minted here and held
+    // on the leaf. Handed in rather than derived, because a leaf does not know its own address —
+    // and the address it would have to be told is a `TabId`, which this process mints once for
+    // every tab it ever opens, so `<tab>.<seat>` names one pane in this process and no other.
+    pane: LeafId,
     // **The window this shell is born in, not a closure over it** (F1b). The
     // closure the reader thread keeps is minted here, off a [`LeafWake`] this
     // leaf holds the other end of, so that a later transfer has something to
@@ -21462,6 +21685,10 @@ fn create_leaf_session(
     );
     let spawn_place = place.directory.clone();
     let wake = LeafWake::bound_to(wake);
+    // **Minted before the shell, because the shell is what is told it.** One pane, 128 bits, and
+    // the only thing in this program that can name this pane over the endpoint. It dies with the
+    // leaf — there is no table to prune, because the value lives on the thing it names.
+    let capability = attention_wire::mint_capability();
     let mut resolved_program = None;
     let mut pty = if probe_input.is_none() {
         // **The line the picker was missing.** Choosing a profile used to change
@@ -21499,13 +21726,36 @@ fn create_leaf_session(
                 chosen_id
             )
         });
-        let command = shell_integration::shell_command(
+        let mut command = shell_integration::shell_command(
             &row,
             &place.arguments,
             shell_integration::script_path(),
             wsl::facts(),
             &bt_pty::SystemShellEnvironment,
         );
+        // **The two variables that make an agent in this pane able to say something.**
+        //
+        // They are added here, after the profile's own environment, because they are not a property
+        // of the profile: every shell of every kind gets them, and a user who set one by hand in a
+        // profile is setting a capability for a pane that does not exist yet.
+        //
+        // The endpoint may be absent — a machine where it would not open — and then neither is
+        // written. **Half of this pair is worse than none of it**: a child holding a capability and
+        // no endpoint would fail on every call, and a child holding an endpoint and no capability
+        // would be able to connect and say nothing, which is a connection for no reason.
+        if let Some(endpoint) = attention_wire::endpoint_name() {
+            command.environment.push((
+                attention_wire::PANE_VARIABLE.into(),
+                format!("{}.{}", pane.tab.0, pane.seat.0).into(),
+            ));
+            command
+                .environment
+                .push((attention_wire::ENDPOINT_VARIABLE.into(), endpoint.into()));
+            command.environment.push((
+                attention_wire::CAPABILITY_VARIABLE.into(),
+                capability.clone().into(),
+            ));
+        }
         resolved_program = Some(PathBuf::from(&program));
         Some(
             PtySession::spawn_shell_in(
@@ -21621,6 +21871,9 @@ fn create_leaf_session(
         session,
         // Nobody has asked for anything yet.
         attention_ticket: None,
+        attention: attention::AttentionLedger::default(),
+        attention_clock: attention_wire::WaitClock::default(),
+        attention_capability: capability,
         // Aimed at the tail, which is where a card looks until somebody turns a
         // wheel over it — a shell that has just started has no furniture on its
         // floor to be aimed past.
@@ -21739,6 +21992,7 @@ fn create_tab_state(
         let leaf = create_leaf_session(
             renderer,
             body,
+            LeafId { tab: id, seat },
             wake,
             (seat == terminal_seat_id).then_some(probe_input).flatten(),
             &leaves.get(&seat).cloned().unwrap_or(LeafSeed {
@@ -23418,6 +23672,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         // that opens *in* focus mode has not animated into it, it was born there.
         focus_reveal: RevealTween::resting(0.0, RAIL_TRANSITION),
         attention_next_ticket: 0,
+        attention_next_place: 0,
         focus_mini_advance: 0.0,
         focus_mini_face_advance: 0.0,
         focus_thumbs: focus_thumb::FocusThumbnails::default(),
@@ -23676,6 +23931,22 @@ impl Runtime<'_> {
             let proxy = proxy.clone();
             shell_integration::install_wake(move || {
                 let _ = proxy.send_event(AppEvent::PowerShellProfileProbed);
+            });
+        }
+        // **The attention endpoint, before the first shell exists to be told about it.**
+        //
+        // Ordering that has to be this way round: `create_leaf_session` writes the endpoint's name
+        // into the child's environment, so a pane spawned before this returns would be a pane whose
+        // agent has nowhere to speak — and it would stay that way for as long as that agent ran.
+        // The endpoint returns already listening, which is what makes "before" mean something.
+        //
+        // A failure is silent and total: no endpoint means hooks cannot reach this window, which is
+        // where every machine was before this slice, and the terminal is otherwise unaffected. It
+        // is never a reason to open something weaker.
+        {
+            let proxy = proxy.clone();
+            attention_wire::open(move || {
+                let _ = proxy.send_event(AppEvent::AttentionSpoke);
             });
         }
         // **The language, before anything is measured.** Every width in this
@@ -24138,6 +24409,8 @@ impl Runtime<'_> {
             // Reads the registry once and, on a machine whose `folio.exe`
             // has moved since, writes the verb again — see the field.
             context_menu_installed: context_menu::reassert(),
+            // Read once, and *only* read: see the field for why this one is not repaired.
+            claude_hooks_installed: attention_hooks::state() == attention_hooks::State::Installed,
             notifications: NotificationDesk::new(proxy.clone()),
             session_store,
             settings_store,
@@ -29767,6 +30040,8 @@ impl Runtime<'_> {
             // The machine's own answer, cached at the three moments it can
             // change — see `App::context_menu_installed`.
             context_menu: self.app.context_menu_installed,
+            // The same, over a file instead of the registry.
+            claude_hooks: self.app.claude_hooks_installed,
             split_direction: self.app.settings_store.loaded().split_direction,
             search_engine: self.app.settings_store.loaded().search_engine,
             minimum_contrast: self.app.settings_store.loaded().minimum_contrast,
@@ -31324,6 +31599,9 @@ impl Runtime<'_> {
         if let Some(install) = settings::context_menu_requested(target) {
             self.apply_context_menu(install)?;
         }
+        if let Some(install) = settings::claude_hooks_requested(target) {
+            self.apply_claude_hooks(install)?;
+        }
         if let Some(engine) = settings::search_engine_requested(target) {
             self.apply_search_engine(engine)?;
         }
@@ -31573,6 +31851,10 @@ impl Runtime<'_> {
             | Row::LineWrapping
             | Row::Notifications
             | Row::PowerShellOffer
+            // And doubly never again, for `ContextMenu`'s reason over a different store: what a
+            // reset would be putting back is not a value in this file, it is a block in the user's
+            // own `~/.claude/settings.json`.
+            | Row::ClaudeHooks
             // The editor's own advanced rows are put back by the page's own foot
             // verb — `Restore all defaults` on a built-in — which restores the
             // whole profile rather than four of its fields. A second verb that
@@ -35260,6 +35542,59 @@ impl Runtime<'_> {
         }
     }
 
+    /// Write Folio's hooks into the user's own Claude Code configuration, or take them back out.
+    ///
+    /// **The row is redrawn from the file either way**, `apply_context_menu`'s discipline over a
+    /// different kind of store and for the same reason: there is one copy of this truth and it is
+    /// not in `settings.json`, so a refusal leaves the switch standing where the machine actually is
+    /// rather than where the press hoped it would be.
+    ///
+    /// **Nothing is written anywhere but that one file**, and nothing at all is written into a
+    /// working directory or a repository — `attention_hooks`'s header has upstream's own reason for
+    /// that, which is stronger than ours.
+    ///
+    /// A refusal carries a sentence, because on the machine where it fires nobody else can see it.
+    /// The one that matters is a settings file this build cannot read: it is left exactly as it is,
+    /// because it belongs to somebody who wrote it.
+    fn apply_claude_hooks(&mut self, install: bool) -> Result<bool> {
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("folio.exe"));
+        let outcome = attention_hooks::apply(install, &exe);
+        self.app.claude_hooks_installed =
+            attention_hooks::state() == attention_hooks::State::Installed;
+        match outcome {
+            attention_hooks::Outcome::Installed => {
+                self.toast(
+                    toast::ToastKind::Ok,
+                    toast::ToastAnchor::Window,
+                    None,
+                    i18n::Text::ClaudeHooksAddedToast.text().to_owned(),
+                )?;
+                Ok(true)
+            }
+            attention_hooks::Outcome::Removed => {
+                self.toast(
+                    toast::ToastKind::Ok,
+                    toast::ToastAnchor::Window,
+                    None,
+                    i18n::Text::ClaudeHooksRemovedToast.text().to_owned(),
+                )?;
+                Ok(true)
+            }
+            // The file already said what the press asked for. Nothing was written, and a card
+            // saying so would be a card about this build's bookkeeping.
+            attention_hooks::Outcome::Unchanged => Ok(true),
+            attention_hooks::Outcome::Refused(reason) => {
+                self.toast(
+                    toast::ToastKind::Error,
+                    toast::ToastAnchor::Window,
+                    None,
+                    format!("{} — {reason}", i18n::Text::ClaudeHooksFailedToast.text()),
+                )?;
+                Ok(false)
+            }
+        }
+    }
+
     fn record_psreadline_invite(&mut self, state: bt_persist::PsReadLineInviteV1) {
         if self.app.settings_store.loaded().psreadline_invite == state {
             return;
@@ -36071,6 +36406,10 @@ impl Runtime<'_> {
         let leaf = create_leaf_session(
             &self.window.renderer,
             body,
+            LeafId {
+                tab: self.window.tabs[self.window.active_tab].id,
+                seat: arriving,
+            },
             wake,
             None,
             &inherited,
@@ -48671,6 +49010,10 @@ impl Runtime<'_> {
         let spawned = create_leaf_session(
             &self.window.renderer,
             body,
+            LeafId {
+                tab: self.window.tabs[self.window.active_tab].id,
+                seat,
+            },
             wake,
             None,
             &seed,
@@ -53169,6 +53512,10 @@ impl Runtime<'_> {
             let session = create_leaf_session(
                 &self.window.renderer,
                 body,
+                LeafId {
+                    tab: self.window.tabs[self.window.active_tab].id,
+                    seat,
+                },
                 wake,
                 None,
                 &LeafSeed::default(),
@@ -54744,6 +55091,18 @@ impl Runtime<'_> {
             self.window.active_tab,
             self.window.window_focused,
             &mut self.window.attention_next_ticket,
+            attention_trace::global(),
+        );
+        // And the ledger's own turn, beside it. It draws nothing and hands nothing to the queue
+        // above; what it does is take places and let go of them in the trace, which is where the
+        // evidence that a real producer reached a real pane has to be readable before A2 makes it
+        // visible.
+        settle_attention_ledger(
+            &mut self.window.tabs,
+            self.window.active_tab,
+            self.window.window_focused,
+            &mut self.window.attention_next_place,
+            now,
             attention_trace::global(),
         );
         let active = self.window.active_tab;
@@ -66846,6 +67205,10 @@ impl Runtime<'_> {
             resize_finish_deadline,
             synchronized_update_deadline,
             live_stability_deadline,
+            // A standing credential's ten minutes, and only while one is standing. A window whose
+            // panes are asking for nothing reports nothing and costs no wake-ups at all — which is
+            // every window, almost always.
+            attention_ledger_deadline(&self.window.tabs),
             // The tip's 380ms while one is settling, and the fade's own frames
             // until it lands. A window with no tip under the pointer reports
             // nothing and costs no wake-ups at all.
@@ -70394,6 +70757,44 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             AppEvent::PowerShellProfileProbed => {
                 self.for_each_window(|runtime| runtime.settle_pane_notices())
             }
+            // **The lines are already in the inbox; what is owed is reading them.**
+            //
+            // Every window, because a capability names one pane in this *process* and the listener
+            // has no idea which window holds it — and because a message whose pane has closed
+            // matches nothing anywhere, which is the same walk with the same ending.
+            //
+            // The installed rows are read off the user's settings file once per drain rather than
+            // once per message, and off the file rather than out of a cache: the configuration on
+            // disk is the answer to "which rows does this machine have", so a user who edits it by
+            // hand gets a Folio that agrees with them by the next arrival.
+            AppEvent::AttentionSpoke => {
+                let messages = attention_wire::take()
+                    .iter()
+                    .filter_map(|line| attention_wire::Message::decode(line))
+                    .collect::<Vec<_>>();
+                // Not one line understood — every one was rubbish, or from a build whose wire this
+                // one does not know. Reading the settings file for that would be reading it for
+                // nothing.
+                let installed = if messages.is_empty() {
+                    Vec::new()
+                } else {
+                    attention_hooks::installed_rows()
+                };
+                let now = Instant::now();
+                self.for_each_window(|runtime| {
+                    deliver_attention(
+                        &mut runtime.window.tabs,
+                        runtime.window.active_tab,
+                        runtime.window.window_focused,
+                        &mut runtime.window.attention_next_place,
+                        &messages,
+                        &installed,
+                        now,
+                        attention_trace::global(),
+                    );
+                    Ok(())
+                })
+            }
             // The texture is already in the slot; what is owed is the ground
             // put in force around it, which is `apply_window_ground`'s one job.
             // Every window: the picture is the application's setting and each
@@ -73388,6 +73789,18 @@ fn main() -> Result<()> {
     // when a shell launched this window-subsystem process to read its traces.
     bt_platform::adopt_parent_console();
     install_panic_log_hook();
+    // **The doorbell, before anything else this program can do.**
+    //
+    // `folio attention` is this executable being run by an agent's hook, and what it owes that
+    // caller is to be *finished*: the hook that matters most fires while Claude Code is holding an
+    // approval open, so every millisecond here is a millisecond the user is looking at a frozen
+    // prompt. It is answered above the panic log, above the thread priority and above the window,
+    // because none of those is anything a doorbell needs — and because a `folio.exe` that built a
+    // swap chain in order to write forty bytes down a pipe would be measurably the slowest part of
+    // somebody else's program.
+    if let Some(call) = cli::attention(std::env::args_os().skip(1)) {
+        std::process::exit(attention_wire::run_verb(call));
+    }
     // **The command line, before there is anything for it to be wrong about.**
     // `spike-win-landing.md` §8 puts slice 0 exactly here, between the panic hook
     // and the event loop, and the reason is what a refusal costs: a syntax error
@@ -96847,6 +97260,11 @@ mod tests {
             spawn_place: None,
             session,
             attention_ticket: None,
+            attention: attention::AttentionLedger::default(),
+            attention_clock: attention_wire::WaitClock::default(),
+            // A fixture has no shell, so nothing was ever told a capability — and an empty string
+            // is one no arriving message can match, which is the honest shape of that.
+            attention_capability: String::new(),
             projection,
             thumb_awake: Instant::now(),
             column_awake: Instant::now(),

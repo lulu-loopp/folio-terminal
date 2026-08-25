@@ -1415,6 +1415,22 @@ pub enum Text {
     /// Its sentence. Says the two things the row's four words cannot: which
     /// panes are ever asked, and that the asking is all this does.
     DescPowerShellOffer,
+
+    // ── Claude Code's hooks (attention plan §3.3, Terminal page) ────────────
+    /// `Terminal ▸ Claude Code hooks` — the row that lets an agent say it is waiting.
+    RowClaudeHooks,
+    /// Its sentence. Says the two things the row's three words cannot: what is written, and into
+    /// whose file — a terminal editing another program's configuration is worth saying out loud.
+    DescClaudeHooks,
+    /// The card raised when the block lands.
+    ClaudeHooksAddedToast,
+    /// And when it is taken back out.
+    ClaudeHooksRemovedToast,
+    /// The refusal, with the reason appended by the caller.
+    ///
+    /// One string and not four, because the four reasons are all "the file could not be written"
+    /// wearing different hats and a reader takes the same action for every one of them.
+    ClaudeHooksFailedToast,
     // ── the focus card's height (§7.1.6b′, user ruling 2026-08-21) ──────────
     //
     // One contiguous block at the end, per this table's standing rule. **Two
@@ -2871,6 +2887,27 @@ impl Text {
                 "A PowerShell pane whose $PROFILE does not load folio.ps1 shows one line offering to add it. Off stops the offer; a $PROFILE that already loads it is never asked about",
                 "PowerShell 窗格的 $PROFILE 没有加载 folio.ps1 时,在那个窗格里显示一行,提供加入的动作。关闭后不再提示;已经加载的 $PROFILE 本来就不会被问",
             ),
+            Self::RowClaudeHooks => pick(lang, "Claude Code hooks", "Claude Code hooks"),
+            Self::DescClaudeHooks => pick(
+                lang,
+                "Adds hooks to your own ~/.claude/settings.json so Claude Code tells this window when it is waiting for you. Nothing is written into a folder or a repository",
+                "向你自己的 ~/.claude/settings.json 写入 hooks,Claude Code 在等你回答时会告诉这扇窗。不往任何文件夹或仓库里写",
+            ),
+            Self::ClaudeHooksAddedToast => pick(
+                lang,
+                "Added to ~/.claude/settings.json. Takes effect in a new Claude Code session.",
+                "已加进 ~/.claude/settings.json。新开的 Claude Code 会话生效。",
+            ),
+            Self::ClaudeHooksRemovedToast => pick(
+                lang,
+                "Removed from ~/.claude/settings.json",
+                "已从 ~/.claude/settings.json 移除",
+            ),
+            Self::ClaudeHooksFailedToast => pick(
+                lang,
+                "Claude Code's settings were not changed",
+                "Claude Code 的设置没有被改动",
+            ),
             // 「卡片高度」rather than 「卡片身高」: the column's own word for the
             // thing is 卡片 and 高度 is what a settings row measures, which is the
             // pair every other quantity row here is built out of.
@@ -2981,7 +3018,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 473] = [
+    pub const ALL: [Self; 478] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3412,6 +3449,11 @@ impl Text {
         Self::PowerShellNoticeAdded,
         Self::RowPowerShellOffer,
         Self::DescPowerShellOffer,
+        Self::RowClaudeHooks,
+        Self::DescClaudeHooks,
+        Self::ClaudeHooksAddedToast,
+        Self::ClaudeHooksRemovedToast,
+        Self::ClaudeHooksFailedToast,
         Self::RowFocusCardHeight,
         Self::DescFocusCardHeight,
         Self::PreviewOpenInBrowser,
