@@ -2327,6 +2327,27 @@ pub enum SettingsRow {
     /// what one shell is patched with, and this is the only row here whose
     /// answer is visible **outside this window**.
     Notifications,
+    /// **Whether the end of a turn is allowed to reach the desktop**
+    /// (`docs/plans/attention/plan.md` §11.7, ruled 2026-08-25).
+    ///
+    /// **Directly under [`Self::Notifications`]**, and the pairing is the whole
+    /// of why it is a second row rather than a value on the first: the row above
+    /// governs a message a program **wrote**, and this one governs an event a
+    /// program **did not write down** — an agent stopping talking, which the
+    /// terminal learns from a hook, a bell or a sequence and which carries no
+    /// sentence of its own. One is the reader's answer to "may a program
+    /// interrupt me"; the other is their answer to "and may my agent finishing
+    /// count as one of those".
+    ///
+    /// **One row for two arms**, and the ruling names both: a taskbar flash on a
+    /// window that has not got the keyboard, and a toast on one that is
+    /// minimised. Splitting them would make legal two combinations nobody asked
+    /// for — flashing without toasting, and toasting without flashing.
+    ///
+    /// **Not an Advanced row**, on the row above's test: a reader who has just
+    /// been interrupted by their agent finishing is looking for the switch that
+    /// stops it, and a switch behind a disclosure is a switch they do not find.
+    TurnEndNotifications,
     /// **Whether a PowerShell pane with no integration is offered one** — the
     /// notice strip's `Don't show again`, said as a row (§7.1.6j, ruled
     /// 2026-08-21).
@@ -2468,7 +2489,8 @@ impl SettingsRow {
             | Self::ClaudeHooks
             | Self::Scrollback
             | Self::LineWrapping
-            | Self::Notifications => SettingsCategory::Terminal,
+            | Self::Notifications
+            | Self::TurnEndNotifications => SettingsCategory::Terminal,
             // The mock-up files what typesetting does to a block under "Rendered
             // blocks" (2570), beside that page's own Maximum height row.
             Self::Formulas | Self::InlineFormulas | Self::Tables | Self::BlockMaxHeight => {
@@ -2538,6 +2560,7 @@ impl SettingsRow {
             Self::Scrollback => Text::RowScrollback.text(),
             Self::LineWrapping => Text::RowLineWrapping.text(),
             Self::Notifications => Text::RowNotifications.text(),
+            Self::TurnEndNotifications => Text::RowTurnEndNotifications.text(),
             Self::PowerShellOffer => Text::RowPowerShellOffer.text(),
             Self::ClaudeHooks => Text::RowClaudeHooks.text(),
             Self::GitPanel => Text::RowGitPanel.text(),
@@ -2654,6 +2677,7 @@ impl SettingsRow {
             }
             Self::Scrollback => Text::DescScrollback.text(),
             Self::Notifications => Text::DescNotifications.text(),
+            Self::TurnEndNotifications => Text::DescTurnEndNotifications.text(),
             Self::PowerShellOffer => Text::DescPowerShellOffer.text(),
             // Two facts and no opinion, `Explorer context menu`'s shape: what
             // is written, and where. The second is there because a reader who
@@ -2889,6 +2913,7 @@ impl SettingsRow {
             | Self::Scrollback
             | Self::LineWrapping
             | Self::Notifications
+            | Self::TurnEndNotifications
             // The everyday half of the editor, in the order somebody decides a
             // profile: what it is called, what it runs, where it starts, what
             // colour names it.
@@ -2982,6 +3007,7 @@ impl SettingsRow {
             | Self::ContextMenu
             | Self::PsReadLine
             | Self::Notifications
+            | Self::TurnEndNotifications
             | Self::PowerShellOffer
             | Self::ClaudeHooks
             | Self::LineWrapping => FORMULA_OPTIONS.len(),
@@ -3048,6 +3074,7 @@ impl SettingsRow {
             | Self::ContextMenu
             | Self::PsReadLine
             | Self::Notifications
+            | Self::TurnEndNotifications
             | Self::PowerShellOffer
             | Self::ClaudeHooks
             | Self::LineWrapping => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
@@ -3358,6 +3385,9 @@ impl SettingsRow {
             Self::Notifications => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.terminal_notifications),
+            Self::TurnEndNotifications => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.turn_end_notification),
             Self::PowerShellOffer => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.powershell_integration_offer),
@@ -3604,6 +3634,11 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // patched with, and this is the only row here whose answer shows up outside
     // this window.
     rows.push(SettingsRow::Notifications);
+    // **Directly under it**, because the two are one reader's two questions about the same
+    // outside: may a program put a message on my desktop, and does my agent finishing count as
+    // one. The row above is about a sentence a program wrote; this one is about an event nobody
+    // wrote down.
+    rows.push(SettingsRow::TurnEndNotifications);
     rows
 }
 
@@ -3863,6 +3898,10 @@ pub struct SettingsValues {
     pub line_wrapping: bool,
     /// Whether a program may put a message on the desktop (§7.6).
     pub terminal_notifications: bool,
+    /// Whether the end of a turn may reach the desktop — a taskbar flash on a
+    /// window without the keyboard, a toast on one that is minimised
+    /// (`docs/plans/attention/plan.md` §11.7).
+    pub turn_end_notification: bool,
     /// Whether a PowerShell pane with no integration is offered one — the row
     /// the notice strip's `Don't show again` writes (§7.1.6j).
     pub powershell_integration_offer: bool,
@@ -4021,6 +4060,7 @@ impl SettingsValues {
             scrollback_lines: bt_persist::DEFAULT_SCROLLBACK_LINES,
             line_wrapping: true,
             terminal_notifications: true,
+            turn_end_notification: true,
             powershell_integration_offer: true,
             git_panel: true,
             key_hints: true,
@@ -6744,6 +6784,18 @@ pub fn always_on_top_requested(target: SettingsTarget) -> Option<bool> {
 pub fn terminal_notifications_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::Notifications, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// Whether the end of a turn may reach the desktop, as a press on its picker
+/// (`docs/plans/attention/plan.md` §11.7).
+#[must_use]
+pub fn turn_end_notification_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::TurnEndNotifications, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
@@ -16394,7 +16446,8 @@ mod tests {
                 SettingsRow::ClaudeHooks,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
-                SettingsRow::Notifications
+                SettingsRow::Notifications,
+                SettingsRow::TurnEndNotifications
             ],
             "the mock-up's order for this page, with the two PowerShell rows \n             together at the top: the row that reports a fact about the machine, \n             the row that offers what this one is missing, then the pane's two \n             axes — what it keeps of what has gone past, and what it does with a \n             line wider than itself — and last the only row on this page whose \n             answer shows up outside this window"
         );
@@ -16481,7 +16534,8 @@ mod tests {
                 SettingsRow::ClaudeHooks,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
-                SettingsRow::Notifications
+                SettingsRow::Notifications,
+                SettingsRow::TurnEndNotifications
             ],
             "the mock-up's order for this page"
         );
@@ -17444,7 +17498,8 @@ mod tests {
                 SettingsRow::ClaudeHooks,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
-                SettingsRow::Notifications
+                SettingsRow::Notifications,
+                SettingsRow::TurnEndNotifications
             ]
         );
         assert_eq!(
@@ -17483,7 +17538,8 @@ mod tests {
                 SettingsRow::ClaudeHooks,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
-                SettingsRow::Notifications
+                SettingsRow::Notifications,
+                SettingsRow::TurnEndNotifications
             ],
             "Sidebar stands directly under `Tab layout`; the two font rows stay \
              next to each other because they are one decision in two halves, the \

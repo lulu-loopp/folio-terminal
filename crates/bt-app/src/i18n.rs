@@ -1409,6 +1409,40 @@ pub enum Text {
     /// which is the answer to "will this interrupt me while I work".
     DescNotifications,
 
+    // ── the turn-end lane (`attention` plan §11.7, ruled 2026-08-25) ───────
+    //
+    // One contiguous block at the end, per this table's standing rule. **Four
+    // entries**: the row, its sentence, and the two words a turn-end
+    // interruption wears when the program that reported it wrote none of its
+    // own. The last two are the exception the block above declared it would not
+    // make, and the difference is the one that licenses it: an `OSC 9` toast
+    // carries text the *program* wrote, so a default sentence there would be a
+    // table waiting to be used as one — whereas a hook `Stop` and a bare bell
+    // carry no words at all, and something has to be said. What is said is a
+    // statement of the fact and nothing else.
+    /// `Terminal ▸ Turn finished` — the row.
+    RowTurnEndNotifications,
+    /// Its sentence. Says the two things the word does not: **what reaches the
+    /// desktop** (a taskbar flash, or a toast when the window is not on any
+    /// screen), and **what does not change** — the marks inside the window,
+    /// which are not this row's to switch off.
+    DescTurnEndNotifications,
+    /// The body of a turn-end interruption from a source that wrote no sentence
+    /// of its own. States the fact; names nothing to act on.
+    ToastTurnFinished,
+    /// The body of a queued request's one interruption when no program lent it
+    /// words. The queue's own claim, said in the voice the dot says it in.
+    ToastWaitingForYou,
+    /// The heading of the card raised in this window when the desktop refused a
+    /// notification (user ruling 2026-08-25). A refusal that only reached
+    /// `stderr` is a refusal nobody sees, and the one thing worse than not being
+    /// notified is not being notified silently.
+    NotifyRefusedTitle,
+    /// Its sentence — what was lost and what was not. The platform's own words
+    /// are appended after it, because the reason is the platform's to give and
+    /// this table must not paraphrase an error it has not seen.
+    NotifyRefusedBody,
+
     // ── the PowerShell integration notice (§7.1.6j, ruled 2026-08-21) ──────
     //
     // One contiguous block at the end, per this table's standing rule. **Four
@@ -2928,6 +2962,32 @@ impl Text {
                 "Programs that ask can put a message on the desktop. Nothing arrives while the pane is on screen in a focused window",
                 "程序主动要求时,可以在桌面上放一条消息。窗格正在这扇窗里显示、而这扇窗又是聚焦的,就什么都不弹",
             ),
+            // ── the turn-end lane ──────────────────────────────────────────
+            // 「回合结束」and not 「Agent 说完了」: the row is about a moment,
+            // and the moment is the one an agent's own hooks, bells and
+            // sequences all report. English keeps the same shape.
+            Self::RowTurnEndNotifications => pick(lang, "Turn finished", "回合结束"),
+            // Two clauses and no third. The first is what happens, ordered by
+            // how far away the reader is; the second is the boundary — this row
+            // owns the desktop and owns nothing inside the window, which is the
+            // question a reader asks before switching it off.
+            Self::DescTurnEndNotifications => pick(
+                lang,
+                "When an agent stops talking, flash this window's taskbar button, or put a message on the desktop if the window is minimised. The marks inside the window are unaffected",
+                "Agent 说完一个回合时,闪这扇窗的任务栏按钮;窗最小化了就在桌面上放一条消息。窗内的记号不受这一行影响",
+            ),
+            Self::ToastTurnFinished => pick(lang, "Turn finished", "回合结束"),
+            Self::ToastWaitingForYou => pick(lang, "Waiting for you", "正在等你回答"),
+            Self::NotifyRefusedTitle => {
+                pick(lang, "Desktop notification refused", "桌面通知被拒绝")
+            }
+            // What was lost, then what was not. No advice: there is nothing here
+            // a reader can press, and the platform's own sentence follows.
+            Self::NotifyRefusedBody => pick(
+                lang,
+                "Windows would not take it. The marks inside this window are unaffected.",
+                "Windows 没有接收这条通知。窗内的记号不受影响。",
+            ),
             // ── the PowerShell integration notice ──────────────────────────
             // Two sentences and no third: what is missing, and what it is used
             // for. Not why it is opt-in, not what the reader is being asked to
@@ -3102,7 +3162,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 484] = [
+    pub const ALL: [Self; 490] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3530,6 +3590,12 @@ impl Text {
         Self::DescMinimumContrast,
         Self::RowNotifications,
         Self::DescNotifications,
+        Self::RowTurnEndNotifications,
+        Self::DescTurnEndNotifications,
+        Self::ToastTurnFinished,
+        Self::ToastWaitingForYou,
+        Self::NotifyRefusedTitle,
+        Self::NotifyRefusedBody,
         Self::PowerShellNoticeBody,
         Self::PowerShellNoticeAdd,
         Self::PowerShellNoticeNever,

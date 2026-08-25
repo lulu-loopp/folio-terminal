@@ -74,14 +74,14 @@ fn osc_9_4_progress_matrix_accepts_bel_and_st_clamps_and_ignores_malformed_repor
 fn bare_bell_latches_attention_but_osc_bel_terminators_do_not() {
     let mut session = session();
     session.feed(b"\x1b]0;title\x07").unwrap();
-    assert!(!session.status().bell_latched);
+    assert!(!session.status().bell_latched());
 
     session.feed(b"\x07").unwrap();
-    assert!(session.status().bell_latched);
+    assert!(session.status().bell_latched());
 
     session.clear_attention();
     session.feed(b"\x1bPqpayload\x07more\x1b\\").unwrap();
-    assert!(!session.status().bell_latched);
+    assert!(!session.status().bell_latched());
 }
 
 #[test]
@@ -127,7 +127,7 @@ fn clear_attention_clears_only_latches_and_preserves_progress() {
         session.status().progress,
         Some(ProgressState::Paused(Some(63)))
     );
-    assert!(session.status().bell_latched);
+    assert!(session.status().bell_latched());
     assert_eq!(session.status().failure_exit_code, Some(9));
 
     session.clear_attention();
@@ -135,7 +135,7 @@ fn clear_attention_clears_only_latches_and_preserves_progress() {
         session.status().progress,
         Some(ProgressState::Paused(Some(63)))
     );
-    assert!(!session.status().bell_latched);
+    assert!(!session.status().bell_latched());
     assert_eq!(session.status().failure_exit_code, None);
 }
 

@@ -101,8 +101,48 @@ fn request_attention_once_latches_the_bell_and_stays_out_of_the_ledger() {
             .unwrap();
         session.status()
     };
-    assert!(status.bell_latched, "it rang");
+    assert!(status.bell_latched(), "it rang");
     assert_eq!(status.attention_request, None, "and it asserted nothing");
+}
+
+/// PIN (`attention` plan §13.2.2, gate ⑱②) — **the latch remembers which of the two rang it, and
+/// only a literal `0x07` is a bell.**
+///
+/// Taking the bell's *path* is a ruling about implementations (§10.8.4: one sentence, one
+/// implementation); it does not make a sequence a bell. A build that recorded `once` as one would
+/// make "is the far end reaching us over OSC, or has it fallen back to the oldest byte there is?"
+/// a question with no answer in the file that exists to answer it — which is the exact reason the
+/// plan split `src=` from `via=`.
+///
+/// MUTATION: latch a plain `true` for both and the trace records a sequence as a bare bell, which
+/// is what gate ⑱② sweeps for.
+#[test]
+fn the_bell_latch_says_which_of_its_two_producers_rang_it() {
+    let mut by_sequence = session();
+    by_sequence
+        .feed(b"\x1b]1337;RequestAttention=once\x07")
+        .unwrap();
+    assert_eq!(
+        by_sequence.status().bell,
+        Some(bt_term::BellSource::AttentionOnce),
+        "a sequence rang it, and only a literal 0x07 may be recorded as a bell"
+    );
+
+    let mut by_byte = session();
+    by_byte.feed(b"\x07").unwrap();
+    assert_eq!(by_byte.status().bell, Some(bt_term::BellSource::Bel));
+
+    // The last ringer wins, which is the latch's own rule: two rings before anybody looks are one
+    // unspent latch, and its provenance is whatever most recently set it.
+    by_byte
+        .feed(b"\x1b]1337;RequestAttention=once\x07")
+        .unwrap();
+    assert_eq!(
+        by_byte.status().bell,
+        Some(bt_term::BellSource::AttentionOnce)
+    );
+    by_byte.clear_attention();
+    assert_eq!(by_byte.status().bell, None, "a look spends the whole latch");
 }
 
 /// PIN — **`fireworks` and every unknown value change nothing at all.**
@@ -121,7 +161,7 @@ fn unimplemented_request_attention_values_change_nothing() {
         session.feed(payload).unwrap();
         let status = session.status();
         assert_eq!(status.attention_request, None, "{payload:?}");
-        assert!(!status.bell_latched, "{payload:?}");
+        assert!(!status.bell_latched(), "{payload:?}");
     }
 }
 
@@ -143,10 +183,10 @@ fn clearing_the_latches_does_not_withdraw_a_standing_request() {
     session
         .feed(b"\x1b]1337;RequestAttention=yes\x07\x07")
         .unwrap();
-    assert!(session.status().bell_latched);
+    assert!(session.status().bell_latched());
     session.clear_attention();
     let status = session.status();
-    assert!(!status.bell_latched, "the latch is spent by the look");
+    assert!(!status.bell_latched(), "the latch is spent by the look");
     assert_eq!(
         status.attention_request,
         Some(1),

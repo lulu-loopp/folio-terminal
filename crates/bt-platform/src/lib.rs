@@ -1560,8 +1560,9 @@ mod windows_impl {
         },
         Graphics::Dwm::{
             DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE, DWMSBT_AUTO, DWMSBT_NONE,
-            DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
-            DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+            DWMSBT_TRANSIENTWINDOW, DWMWA_CLOAKED, DWMWA_SYSTEMBACKDROP_TYPE,
+            DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+            DwmGetWindowAttribute, DwmSetWindowAttribute,
         },
         Graphics::Dxgi::{
             Common::{DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM},
@@ -1622,7 +1623,8 @@ mod windows_impl {
                 TBPF_NORMAL, TBPF_PAUSED, TaskbarList,
             },
             WindowsAndMessaging::{
-                AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu, GA_ROOT,
+                AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu,
+                FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, GA_ROOT,
                 GCLP_HBRBACKGROUND, GetAncestor, GetClientRect, GetCursorPos, GetSystemMetrics,
                 GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT,
                 HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic,
@@ -4926,6 +4928,94 @@ mod windows_impl {
         unsafe { IsIconic(HWND(hwnd.get() as *mut c_void)) }.as_bool()
     }
 
+    /// **Whether the desktop compositor is holding this window back from the
+    /// screen** (`attention` plan §5.2, slice C1).
+    ///
+    /// `DWMWA_CLOAKED` is the answer to the half of "is this window visible"
+    /// that `IsIconic` does not cover: a window on a virtual desktop the reader
+    /// has switched away from is not minimised, is not hidden, has a perfectly
+    /// ordinary rectangle — and is not on any screen. The shell also cloaks
+    /// windows of suspended applications, which is the same fact for the same
+    /// reason.
+    ///
+    /// **Non-zero is cloaked, whatever the reason**, and the three documented
+    /// reasons (the application cloaked itself, the shell cloaked it, the window
+    /// is on another virtual desktop) are deliberately not told apart: what the
+    /// caller is asking is whether the window can be seen, and all three answer
+    /// no.
+    ///
+    /// **A read that fails answers `false`** — see [`cloaked_from_attribute`]
+    /// for why that direction and not the other.
+    pub fn is_window_cloaked(hwnd: NonZeroIsize) -> bool {
+        let mut cloaked: u32 = 0;
+        // SAFETY: `hwnd` originates from winit's live Win32WindowHandle, and the
+        // out-parameter is a `u32` matching the documented size of
+        // `DWMWA_CLOAKED`. DwmGetWindowAttribute only reads composition state.
+        let read = unsafe {
+            DwmGetWindowAttribute(
+                HWND(hwnd.get() as *mut c_void),
+                DWMWA_CLOAKED,
+                std::ptr::from_mut(&mut cloaked).cast(),
+                u32::try_from(size_of::<u32>()).unwrap_or(4),
+            )
+        };
+        cloaked_from_attribute(read.ok().map(|()| cloaked))
+    }
+
+    /// What one `DWMWA_CLOAKED` reading means, with the failure policy written
+    /// where a test can walk it.
+    ///
+    /// **A window this process cannot get an answer about is reported as
+    /// reachable**, and the direction is the one the attention block already
+    /// committed to: taking the *weaker* of two answers under-states how much of
+    /// the reader's attention is being asked for. Over-stating puts a toast on a
+    /// desktop the reader is looking at; under-stating flashes a taskbar button
+    /// they can see. Only one of those two is an interruption.
+    ///
+    /// The attribute is documented as returning zero when the window is not
+    /// cloaked and a non-zero reason code when it is; the reasons are not told
+    /// apart, because every one of them means the same thing to the caller.
+    #[must_use]
+    pub fn cloaked_from_attribute(read: Option<u32>) -> bool {
+        read.is_some_and(|cloaked| cloaked != 0)
+    }
+
+    /// **Ask the shell to call the reader's eye to this window's taskbar
+    /// button** (`attention` plan §10.7, the middle tier).
+    ///
+    /// `FLASHW_TRAY | FLASHW_TIMERNOFG`: the button and not the caption, and
+    /// flashing until the window comes to the foreground rather than for a count
+    /// this process picked. The second half is what makes it honest — the flash
+    /// ends when the reader deals with it, not when a timer this program set
+    /// says the reader has had long enough.
+    ///
+    /// **It is a no-op on the foreground window**, by Win32's own definition,
+    /// and the caller is written knowing that: the middle tier's visible product
+    /// on a focused window is the in-window marks, and the flash is what the
+    /// same answer turns into the moment the reader looks away. See
+    /// `bt_app::notify::desktop_reach`, whose second row is written under
+    /// exactly this fact.
+    ///
+    /// `FlashWindowEx` has no failure mode a caller could act on — it returns
+    /// the window's previous foreground state, not a status — so this answers
+    /// nothing. A window handle that names nothing simply flashes nothing.
+    pub fn flash_window(hwnd: NonZeroIsize) {
+        let mut flash = FLASHWINFO {
+            cbSize: u32::try_from(size_of::<FLASHWINFO>()).unwrap_or(0),
+            hwnd: HWND(hwnd.get() as *mut c_void),
+            dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
+            uCount: 0,
+            dwTimeout: 0,
+        };
+        // SAFETY: `hwnd` originates from winit's live Win32WindowHandle and the
+        // structure is filled in full, `cbSize` included. FlashWindowEx only
+        // asks the shell to draw attention to a taskbar button.
+        // The answer is the window's *previous* foreground state and not a status, so there is
+        // nothing here a caller could act on: a window that is already in front simply flashes
+        // nothing, which is the documented no-op this arm is written under.
+        let _ = unsafe { FlashWindowEx(std::ptr::from_mut(&mut flash)) };
+    }
+
     /// **Which top-level window the window manager itself puts under this screen
     /// point** (multiwindow slice F2/F4).
     ///
@@ -7197,18 +7287,53 @@ impl TaskbarProgress {
 pub use windows_impl::{
     Compositor, CustomWindowFrame, DirWatch, FilePickKind, FolderPicker, ImagePicker,
     ImeSystemCaret, MathContextMenu, Notifier, PROGRAM_REFUSED, Taskbar, adopt_parent_console,
-    client_area_animation_enabled, clipboard_text, current_thread_priority, detach_console,
-    documents_directory, dpi_at, file_product_version, get_dpi_for_window, get_window_rect,
-    get_work_area, install_console_ctrl_handler, install_context_menu,
-    install_window_class_background, is_window_minimized, message_box, monospace_font_families,
-    open_local_file, open_local_path, open_system_fonts_page, os_ui_language, read_context_menu,
-    recycle, redirect_std_streams_to_file, remove_context_menu, request_window_close,
-    reveal_in_explorer, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
-    set_window_dark_mode, set_window_outer_rect, set_window_topmost, shell_execute,
-    silence_std_streams, spawn_at_priority, std_error_is_console, system_backdrop_available,
-    take_keyboard_focus, thread_mouse_capture, top_level_window_at, virtual_key_for_character,
-    virtual_screen_rect, wheel_scroll_amount, work_area_at, write_to_console,
+    client_area_animation_enabled, clipboard_text, cloaked_from_attribute, current_thread_priority,
+    detach_console, documents_directory, dpi_at, file_product_version, flash_window,
+    get_dpi_for_window, get_window_rect, get_work_area, install_console_ctrl_handler,
+    install_context_menu, install_window_class_background, is_window_cloaked, is_window_minimized,
+    message_box, monospace_font_families, open_local_file, open_local_path, open_system_fonts_page,
+    os_ui_language, read_context_menu, recycle, redirect_std_streams_to_file, remove_context_menu,
+    request_window_close, reveal_in_explorer, set_clipboard_text, set_current_thread_priority,
+    set_system_backdrop, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
+    shell_execute, silence_std_streams, spawn_at_priority, std_error_is_console,
+    system_backdrop_available, take_keyboard_focus, thread_mouse_capture, top_level_window_at,
+    virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount, work_area_at,
+    write_to_console,
 };
+
+/// **The one decision in the cloak reading** (`attention` plan §5.2, slice C1).
+///
+/// Everything else about [`is_window_cloaked`] is a call into DWM; this is the
+/// part that could be got wrong, so it is the part that is a function.
+#[cfg(all(test, windows))]
+mod cloak_reading_tests {
+    use super::cloaked_from_attribute;
+
+    /// PIN — **a window this process cannot get an answer about is reachable.**
+    ///
+    /// The failure this pins is the tolerant reading in the other direction: a
+    /// `DwmGetWindowAttribute` that answered an error on some future edition,
+    /// read as "cloaked", would put a desktop toast in front of a reader who is
+    /// looking straight at the pane it is about — the single loudest way this
+    /// block can be wrong. Under-stating flashes a taskbar button on a window
+    /// nobody can see, which is a flash nobody sees and nothing else.
+    ///
+    /// MUTATIONS: default the failure to `true` and row one goes red; test
+    /// `> 0` against a signed reading, or compare against one named reason
+    /// code, and row four goes red — the attribute's non-zero values are
+    /// *reasons*, and every one of them means the window is not on a screen.
+    #[test]
+    fn only_a_reading_that_arrived_and_said_something_reports_a_cloak() {
+        assert!(!cloaked_from_attribute(None), "a read that failed says no");
+        assert!(!cloaked_from_attribute(Some(0)), "zero is not cloaked");
+        for reason in [1_u32, 2, 4, 8, u32::MAX] {
+            assert!(
+                cloaked_from_attribute(Some(reason)),
+                "every non-zero reason is a window that is not on a screen: {reason}"
+            );
+        }
+    }
+}
 
 /// **Where a diagnostic byte ends up**, asked of the kernel and not of the
 /// source.

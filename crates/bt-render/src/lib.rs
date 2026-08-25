@@ -118,10 +118,10 @@ pub use theme::{
     WINDOW_TAB_RING_SPIN_PERIOD_MS, WINDOW_TAB_RING_STROKE_LOGICAL_PX,
     WINDOW_TAB_RING_SWEEP_TRANSITION_MS, WINDOW_TAB_SQUEEZED_LOGICAL_PX,
     WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_LOGICAL_PX,
-    WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX,
-    WINDOW_TAB_TIGHT_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX, background_rgb, chrome_palette,
-    current_cursor_style, current_theme, foreground_rgb, ink_over, set_cursor_style, set_theme,
-    theme_revision,
+    WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_RING_STROKE_LOGICAL_PX,
+    WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX, WINDOW_TAB_TIGHT_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX,
+    background_rgb, chrome_palette, current_cursor_style, current_theme, foreground_rgb, ink_over,
+    set_cursor_style, set_theme, theme_revision,
 };
 use theme::{
     CURSOR_UNDERLINE_HEIGHT_LOGICAL_PX, DEFAULT_DIM_FOREGROUND_RGB, ansi_16_rgb, cursor_rgb,

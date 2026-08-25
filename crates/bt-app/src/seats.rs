@@ -6680,8 +6680,11 @@ pub struct TabEdit {
 /// without a terminal and the state taxonomy be tested without a window.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TabMarkState {
-    /// The status dot's fill, or `None` when the tab has nothing to claim.
-    pub dot: Option<[u8; 3]>,
+    /// The status dot, or `None` when the tab has nothing to claim.
+    ///
+    /// An ink *and a fill*, because two of the five claims share one ink — see
+    /// [`crate::StatusDot`], which is where the second axis is argued for.
+    pub dot: Option<crate::StatusDot>,
     /// The progress ring that replaces the mark, or `None` to draw the mark.
     pub ring: Option<TabRing>,
     /// The mark's own opacity — the working breath, or a dead session's fade.
@@ -9375,17 +9378,10 @@ fn window_tab_strip(
                         (mark_rect[1] + WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX * scale).round();
                     let dot_rect = [dot_left, dot_top, dot_left + dot, dot_top + dot];
                     if within_strip(viewport, dot_rect) {
-                        sprites.push(ChromeSprite::new(
-                            // `border-radius: 50%` on a square is a circle, and
-                            // `ControlPill` clamps its round to half the short
-                            // side — so the dot is the pill the chrome already
-                            // has, not a second circle to keep in step.
-                            ChromeMark::ControlPill {
-                                radius_px: (dot / 2.0).round().max(1.0) as u32,
-                            },
-                            dot_rect,
-                            dot_color,
-                        ));
+                        // Filled or hollow by the claim's own answer, in one
+                        // place for all four surfaces that draw this badge —
+                        // see `crate::marks::status_dot_sprite`.
+                        sprites.push(crate::marks::status_dot_sprite(dot_color, dot_rect, scale));
                     }
                 }
                 let label_left = mark_left + mark + content_gap;
@@ -10345,12 +10341,10 @@ fn rail_chrome(
                         (row.mark[1] + WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX * scale).round();
                     let dot_rect = [dot_left, dot_top, dot_left + dot, dot_top + dot];
                     if in_list(dot_rect) {
-                        sprites.push(ChromeSprite::new(
-                            ChromeMark::ControlPill {
-                                radius_px: (dot / 2.0).round().max(1.0) as u32,
-                            },
-                            clip_to_list(dot_rect),
+                        sprites.push(crate::marks::status_dot_sprite(
                             dot_color,
+                            clip_to_list(dot_rect),
+                            scale,
                         ));
                     }
                 }
@@ -11288,12 +11282,10 @@ fn focus_rail_chrome(
                 let dot_top = (card.mark[1] + WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX * scale).round();
                 let dot_rect = [dot_left, dot_top, dot_left + dot, dot_top + dot];
                 if in_list(dot_rect) {
-                    sprites.push(ChromeSprite::new(
-                        ChromeMark::ControlPill {
-                            radius_px: (dot / 2.0).round().max(1.0) as u32,
-                        },
-                        clip_to_list(dot_rect),
+                    sprites.push(crate::marks::status_dot_sprite(
                         dot_color,
+                        clip_to_list(dot_rect),
+                        scale,
                     ));
                 }
             }
@@ -25009,7 +25001,10 @@ mod tests {",
     fn the_status_dot_hangs_off_the_marks_top_right_corner() {
         let sprites = mark_slot_sprites(
             TabMarkState {
-                dot: Some([9, 9, 9]),
+                dot: Some(crate::StatusDot {
+                    ink: [9, 9, 9],
+                    hollow: false,
+                }),
                 ..TabMarkState::default()
             },
             960.0,
@@ -25075,7 +25070,10 @@ mod tests {",
     fn the_breath_fades_the_mark_and_leaves_the_dot_alone() {
         let sprites = mark_slot_sprites(
             TabMarkState {
-                dot: Some([9, 9, 9]),
+                dot: Some(crate::StatusDot {
+                    ink: [9, 9, 9],
+                    hollow: false,
+                }),
                 opacity: 0.28,
                 ..TabMarkState::default()
             },
@@ -25127,7 +25125,10 @@ mod tests {",
     #[test]
     fn the_dot_and_ring_survive_every_squeeze_tier() {
         let mark = TabMarkState {
-            dot: Some([9, 9, 9]),
+            dot: Some(crate::StatusDot {
+                ink: [9, 9, 9],
+                hollow: false,
+            }),
             ring: Some(TabRing {
                 arc: [1, 2, 3],
                 start_milliturns: 0,
@@ -33059,13 +33060,19 @@ mod tests {",
     fn a_cards_dot_is_the_strips_dot_and_a_waiting_tab_turns_its_card_warn() {
         let palette = chrome_palette();
         let waiting = TabMarkState {
-            dot: Some(palette.status_warn),
+            dot: Some(crate::StatusDot {
+                ink: palette.status_warn,
+                hollow: false,
+            }),
             pulse: Some(1.0),
             ..TabMarkState::default()
         };
         // Rang, and nothing more: the same warn dot, no place in the queue.
         let rang = TabMarkState {
-            dot: Some(palette.status_warn),
+            dot: Some(crate::StatusDot {
+                ink: palette.status_warn,
+                hollow: false,
+            }),
             ..TabMarkState::default()
         };
         let tabs = vec![
@@ -33158,7 +33165,10 @@ mod tests {",
                 "waiting",
                 1,
                 TabMarkState {
-                    dot: Some(palette.status_warn),
+                    dot: Some(crate::StatusDot {
+                        ink: palette.status_warn,
+                        hollow: false,
+                    }),
                     pulse: Some(phase),
                     ..TabMarkState::default()
                 },
@@ -33415,7 +33425,10 @@ mod tests {",
             "waiting",
             1,
             TabMarkState {
-                dot: Some(palette.status_warn),
+                dot: Some(crate::StatusDot {
+                    ink: palette.status_warn,
+                    hollow: false,
+                }),
                 // What `wait_halo_opacity` answers under `Motion::Reduced`.
                 pulse: Some(0.0),
                 ..TabMarkState::default()
@@ -34768,7 +34781,10 @@ mod tests {",
                 "waiting",
                 2,
                 TabMarkState {
-                    dot: Some(chrome_palette().status_warn),
+                    dot: Some(crate::StatusDot {
+                        ink: chrome_palette().status_warn,
+                        hollow: false,
+                    }),
                     ..TabMarkState::default()
                 },
                 true,

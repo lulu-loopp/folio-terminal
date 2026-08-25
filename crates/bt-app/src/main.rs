@@ -7091,6 +7091,20 @@ struct WindowRuntime {
     /// of [`attention_is_consumed`], and the reason a bell that rings while the
     /// user is away in another application is still waiting when they return.
     window_focused: bool,
+    /// **Whether this window is out of reach of the reader's eyes altogether** —
+    /// minimised, or on a virtual desktop they have switched away from
+    /// (`attention` plan §5.2, slice C1).
+    ///
+    /// The third fact [`notify::desktop_reach`] answers from, and the one that
+    /// separates "on this screen but not in front of you" from "the desktop is
+    /// all that is left". Cached rather than asked per pane, because it is a
+    /// fact about the *window* and the pass that reads it walks every leaf of
+    /// every tab: two syscalls a turn instead of two per shell.
+    ///
+    /// **Sampled where `has_focus` is** (`drain_pty`, the animation tick) and
+    /// never seeded hopefully. A window is born visible and this starts `false`,
+    /// which is the same answer the first sample gives.
+    window_hidden: bool,
     ime_system_caret: bt_platform::ImeSystemCaret,
     pointer_position: Option<PhysicalPosition<f64>>,
     mouse_route: Option<MouseRoute>,
@@ -15456,19 +15470,51 @@ enum StatusClaim {
     Awaiting,
 }
 
+/// **The badge one claim wears** — its ink, and whether the disc is filled.
+///
+/// Two fields because the ladder needs two axes and has only one colour to spend. `Bell` and
+/// `Awaiting` are both `--warn` (mock-up 345-346 writes them on consecutive lines under one
+/// custom property), and until 2026-08-25 the *only* thing separating them was that one of them
+/// breathed — which meant that with the system's animation setting off they were the same pixels.
+/// The taxonomy's own rule is 一点一断言, one dot one assertion, and two assertions that arrive
+/// identically are one assertion wearing two names.
+///
+/// **Filled is a state; hollow is an event.** That is the whole distinction and it is this block's
+/// own thesis said in a shape: `Unread`, `Failed` and `Awaiting` are all things that are *true
+/// right now* and stay true until something ends them, while a bell is a thing that *rang* — a
+/// one-shot a look spends, and the very promotion of which into "it is standing there waiting for
+/// you" is the defect the attention plan spends four recordings establishing. So the bell is the
+/// ring, and it is the only one.
+///
+/// **It costs no colour and no motion**, which is what makes it survive both of the conditions the
+/// old distinction did not: reduced motion, where nothing breathes, and a palette where two claims
+/// share an ink.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StatusDot {
+    /// `--accent`, `--warn` or `--err`. Opaque, and landing on the mark rather than on the tab, so
+    /// it needs none of the palette's compositing treatment.
+    pub ink: [u8; 3],
+    /// Whether the disc is drawn as a ring around its own edge instead of filled.
+    pub hollow: bool,
+}
+
 impl StatusClaim {
-    /// The dot's fill, or `None` when there is no dot to draw.
+    /// The dot this claim wears, or `None` when there is no dot to draw.
     ///
     /// `.unreaddot` is `--accent`, `.fail` is `--err` and `.bell`/`.await` are
-    /// `--warn` (mock-up lines 253-264, 346). All are opaque and land on the
-    /// mark, not on the tab, so none of them needs the palette's compositing
-    /// treatment.
-    fn dot_color(self, palette: &ChromePalette) -> Option<[u8; 3]> {
+    /// `--warn` (mock-up lines 253-264, 346). What the mock-up does not have is
+    /// the fill — see [`StatusDot`] for why the two warn claims needed one.
+    fn dot(self, palette: &ChromePalette) -> Option<StatusDot> {
+        let filled = |ink| Some(StatusDot { ink, hollow: false });
         match self {
             Self::Silent => None,
-            Self::Unread => Some(palette.accent),
-            Self::Bell | Self::Awaiting => Some(palette.status_warn),
-            Self::Failed => Some(palette.status_err),
+            Self::Unread => filled(palette.accent),
+            Self::Bell => Some(StatusDot {
+                ink: palette.status_warn,
+                hollow: true,
+            }),
+            Self::Awaiting => filled(palette.status_warn),
+            Self::Failed => filled(palette.status_err),
         }
     }
 
@@ -15553,7 +15599,7 @@ impl SessionFacts {
             StatusClaim::Awaiting
         } else if unread && self.status.failure_exit_code.is_some() {
             StatusClaim::Failed
-        } else if self.status.bell_latched {
+        } else if self.status.bell_latched() {
             StatusClaim::Bell
         } else if unread {
             StatusClaim::Unread
@@ -15827,26 +15873,22 @@ fn next_attention_stop<T: Copy>(queue: &[(T, u64)], standing_on: Option<u64>) ->
         .map(|(place, _)| *place)
 }
 
-/// **How far an interruption about this pane could get, from the facts this build has.**
+/// **Whether this window is out of the reader's reach altogether** (`attention` plan §5.2, C1).
 ///
-/// Two of §10.7's three answers, because the third needs a fact nobody has measured yet: telling
-/// "minimised or on another virtual desktop" from "on this screen behind something" is `IsIconic`
-/// and `DWMWA_CLOAKED`, and those are slice C1's. Until they exist the honest answer is the
-/// *weaker* of the two — a window that is really out of reach is reported as merely unwatched,
-/// which under-states rather than over-states how much of the user's attention is being asked for.
+/// Two facts and one `||`, and the composition is here rather than in `bt-platform` because it is
+/// a *policy* — "hidden" is the name this product gives to the union of them — while the two calls
+/// underneath are readings. A third condition, "completely covered by another window", is
+/// deliberately absent and its absence is argued at [`attention::Reach::Toast`].
 ///
-/// **What acts on it in this slice is the window, and only the window.** `Reach::Nothing` is
-/// exactly the pane whose request is refused a place at all ([`attention::Event::Settle`]), so the
-/// in-window surface — the dot, its pulse, the card's halo — is this answer's first consumer and
-/// needs no second gate. The `Raised` handed back is still dropped: the taskbar flash is C2's and
-/// the desktop toast is C3's, and a slice that raised one of those from a two-thirds answer would
-/// be a slice that had to be found and undone.
-fn ledger_reach(tab_is_active: bool, window_is_focused: bool) -> attention::Reach {
-    if tab_is_active && window_is_focused {
-        attention::Reach::Nothing
-    } else {
-        attention::Reach::Flash
-    }
+/// A window whose handle cannot be got is reported reachable, on
+/// [`bt_platform::cloaked_from_attribute`]'s reasoning: under-stating flashes a taskbar button
+/// nobody sees, and over-stating puts a toast in front of somebody who is looking straight at the
+/// pane it is about.
+fn window_is_hidden(window: &Window) -> bool {
+    let Ok(hwnd) = window_hwnd(window) else {
+        return false;
+    };
+    bt_platform::is_window_minimized(hwnd) || bt_platform::is_window_cloaked(hwnd)
 }
 
 /// The pane a tab's `Awaiting` is about: **the oldest place it holds.**
@@ -15901,32 +15943,46 @@ fn tab_queue_leader(tab: &TabState) -> Option<SeatId> {
 /// `tab_is_active` squares the tab that arrived and strands the tab that left one revision behind —
 /// a permanent dot on a tab whose shell never spoke. Seeing is painting, and painting is answered
 /// where the painting happens ([`Runtime::redraw`]).
+// Seven, and each is a different question about one pass: where the panes are, which of them the
+// reader is looking at, how far this window is from their eyes, what serial to draw a place from,
+// when now is, where the lines go, and where the interruptions the ledger allows are collected. A
+// struct would move the list rather than shorten it.
+#[allow(clippy::too_many_arguments)]
 fn settle_attention(
     tabs: &mut [TabState],
     active_tab: usize,
     window_is_focused: bool,
+    window_is_hidden: bool,
+    turn_end_enabled: bool,
     next_place: &mut u64,
     now: Instant,
     trace: Option<&attention_trace::Trace>,
+    raised: &mut Vec<AttentionDelivery>,
 ) {
     let traced = trace.is_some();
     for (index, tab) in tabs.iter_mut().enumerate() {
         let tab_is_active = index == active_tab;
         let consumed = attention_is_consumed(tab_is_active, window_is_focused);
-        let reach = ledger_reach(tab_is_active, window_is_focused);
+        let reach = notify::desktop_reach(tab_is_active, window_is_focused, window_is_hidden);
+        let tab_id = tab.id;
         // Only computed when someone is reading: the claim is a fold over every shell in the tab,
         // and this pass runs on every turn of the event loop. The leader is sampled beside it,
         // because a dot that goes *out* this turn is reported by the pane that was holding it.
         let was = traced.then(|| tab.fleet_claim_for(tab_is_active));
         let leader_before = traced.then(|| tab_queue_leader(tab)).flatten();
+        // Collected while the tab is held mutably and turned into deliveries below, because the
+        // title's three-layer chain reads the pane's own name and its profile's — both facts of
+        // this tab, and both out of reach while its leaves are borrowed.
+        let mut allowed: Vec<(SeatId, attention::Raised)> = Vec::new();
         for (seat, leaf) in tab.leaves_mut() {
             let at = attention::Site {
                 tab: index,
                 seat: *seat,
             };
             for expired in leaf.attention_clock.due(now) {
-                let lines = leaf.attention.apply(at, reach, expired, next_place).lines;
-                emit_attention_lines(trace, lines);
+                let outcome = leaf.attention.apply(at, reach, expired, next_place);
+                emit_attention_lines(trace, outcome.lines);
+                allowed.extend(outcome.raised.map(|one| (*seat, one)));
             }
             // **The weak tier, which is a level on a status snapshot and has to become an edge.**
             // `bt-term` mints a generation on the `None → Some` rise of `RequestAttention=yes` and
@@ -15939,35 +15995,48 @@ fn settle_attention(
             // readings of one shell.
             let reported = leaf.session.status();
             if let Some(edge) = leaf.attention.weak_edge(reported.attention_request) {
-                let lines = leaf.attention.apply(at, reach, edge, next_place).lines;
-                emit_attention_lines(trace, lines);
+                let outcome = leaf.attention.apply(at, reach, edge, next_place);
+                emit_attention_lines(trace, outcome.lines);
+                allowed.extend(outcome.raised.map(|one| (*seat, one)));
             }
-            if reported.bell_latched && !leaf.bell_reported {
+            if let Some(rang) = reported.bell.filter(|_| !leaf.bell_reported) {
                 leaf.bell_reported = true;
-                // **`enabled` is true because there is no switch yet.** `turn_end_notification` is
-                // C2's setting; until it exists, "off" is not a state this build can be in, and
-                // passing `false` would be inventing a preference nobody expressed.
+                // **Neither ringer carries a sentence**, which is the whole of what is wrong with
+                // reading a bell as "it is waiting for you" — so the interruption this raises is
+                // worded from the i18n table rather than quoted from anybody. What the two *do*
+                // differ in is how they arrived, and §13.2.2 is emphatic that only a literal
+                // `0x07` may be recorded as a bell: a `RequestAttention=once` written down by a
+                // program that has found this terminal is a different fact from a program that has
+                // fallen back to the oldest byte there is, and recording them alike makes "is the
+                // far end reaching us over OSC?" unanswerable.
+                let (source, via) = attention_map::bell_provenance(rang);
                 let outcome = leaf.attention.announce_turn_end(
                     at,
                     reach,
-                    true,
-                    attention::Transport::Bel,
-                    attention::Via::Bel,
+                    turn_end_enabled,
+                    source,
+                    via,
+                    None,
                 );
                 emit_attention_lines(trace, outcome.lines);
+                allowed.extend(outcome.raised.map(|one| (*seat, one)));
             }
             let settle = attention::Event::Settle {
                 active: tab_is_active,
                 focused: window_is_focused,
             };
-            let lines = leaf.attention.apply(at, reach, settle, next_place).lines;
-            emit_attention_lines(trace, lines);
+            let outcome = leaf.attention.apply(at, reach, settle, next_place);
+            emit_attention_lines(trace, outcome.lines);
+            allowed.extend(outcome.raised.map(|one| (*seat, one)));
             if consumed {
                 leaf.session.clear_attention();
             }
             // Whatever spent the latch — this look, or `mark_seen` on the way in — re-arms the
             // edge, so the next turn that ends is announced instead of being read as this one.
-            leaf.bell_reported = leaf.session.status().bell_latched;
+            leaf.bell_reported = leaf.session.status().bell_latched();
+        }
+        for (seat, one) in allowed {
+            raised.push(attention_delivery(tab, tab_id, seat, None, one));
         }
         if let Some(was) = was {
             let now_claim = tab.fleet_claim_for(tab_is_active);
@@ -16073,6 +16142,37 @@ fn emit_attention_lines(trace: Option<&attention_trace::Trace>, lines: Vec<Strin
     }
 }
 
+/// **One allowed interruption, dressed for the desktop** (`attention` plan §5.4, §11.7's wording
+/// clause).
+///
+/// The title is the three-layer chain and its order is a protocol fact rather than a preference:
+/// a program that filled in `OSC 777`'s title field has named its own message; a request that came
+/// through a pipe or an `OSC 9` has no such field, so the pane it came from is the truest thing
+/// left to call it; and a pane that has announced no name of its own is named by its profile.
+///
+/// `carried` is that first layer and is `None` for every door but the OSC lane's, because it is
+/// the only one whose arrival has a title field at all.
+fn attention_delivery(
+    tab: &TabState,
+    tab_id: TabId,
+    seat: SeatId,
+    carried: Option<&str>,
+    raised: attention::Raised,
+) -> AttentionDelivery {
+    AttentionDelivery {
+        tab: tab_id,
+        seat,
+        reach: raised.reach,
+        why: raised.why,
+        title: notify::toast_title(
+            carried,
+            tab.terminal_name(seat).as_deref(),
+            profiles::title(tab.leaf_profile(seat)),
+        ),
+        body: raised.body,
+    }
+}
+
 /// **The other lane: what a program wrote down its own tty** (`attention` plan §11.6, slice A1).
 ///
 /// Two arrivals and two levels, and the levels are declared in `attention_map`'s own table rather
@@ -16084,9 +16184,21 @@ fn emit_attention_lines(trace: Option<&attention_trace::Trace>, lines: Vec<Strin
 ///   request is a thing that begins. [`attention::AttentionLedger::weak_edge`] is the one
 ///   translation between the two, and it lives beside the mirror it compares against so that no
 ///   call site has to keep a second copy of "what was it last time".
-/// * the **event** level, `OSC 9` and `OSC 777;notify`. It mints nothing and holds nothing (red
-///   line 14); all it may do is lend the words the program actually wrote to the one interruption
-///   this pane's live request is allowed.
+/// * the **event** level, `OSC 9`, `OSC 777;notify` and kitty's `OSC 99`. It mints nothing and
+///   holds nothing (red line 14). What it may do is two things, and which of them happens is
+///   decided by whether this pane already has a request standing: on a pane that is asking, it
+///   **lends its words** to that request's one interruption; on a pane that is asking nothing, it
+///   is an **event of its own** and goes through the event door — where §11.7's three tiers decide
+///   how far it gets and the trace records which sequence carried it.
+///
+/// **One arrival, one interruption**, which is §11.6's pin ② said as an invariant rather than as a
+/// test: the words go to exactly one place, and the place is the request when there is one,
+/// because a standing request is the stronger claim and the one the reader can still act on.
+///
+/// **The transport is `osc` and never `bel`** (§13.2.2). codex reaches us as a bare bell only
+/// because it does not recognise this terminal; recording an `OSC 9` from a codex that *does*
+/// recognise it as a bell would make the one fact the survey is asking about — did the adapter
+/// install — unanswerable from the file that exists to answer it.
 ///
 /// **Here and not in the per-frame pass**, and the order inside is the reason: a program that
 /// writes `RequestAttention=yes` and then `OSC 9;Allow this?` in one burst has said both things
@@ -16094,16 +16206,27 @@ fn emit_attention_lines(trace: Option<&attention_trace::Trace>, lines: Vec<Strin
 /// Run from the animation tick instead, the announcement would arrive at a pane with no live
 /// request and its sentence would be dropped — the program's own words lost to a scheduling
 /// detail.
+// Nine, and `settle_attention`'s allowance for its reason: every one is a different question about
+// one turn of one tab's OSC lane, and a struct would move the list rather than shorten it.
+#[allow(clippy::too_many_arguments)]
 fn deliver_osc_attention(
     tab: &mut TabState,
     index: usize,
     tab_is_active: bool,
     window_is_focused: bool,
+    window_is_hidden: bool,
+    turn_end_enabled: bool,
     next_place: &mut u64,
     announcements: &[(SeatId, bt_term::TerminalNotification)],
     trace: Option<&attention_trace::Trace>,
+    raised: &mut Vec<AttentionDelivery>,
 ) {
-    let reach = ledger_reach(tab_is_active, window_is_focused);
+    let reach = notify::desktop_reach(tab_is_active, window_is_focused, window_is_hidden);
+    let tab_id = tab.id;
+    // Carried out of the mutable walk for `settle_attention`'s reason: the title's three-layer
+    // chain reads facts of the tab that its leaves' borrow is holding. The carried title travels
+    // with each one because it is the announcement's own field and no two arrivals share it.
+    let mut allowed: Vec<(SeatId, Option<String>, attention::Raised)> = Vec::new();
     for (seat, leaf) in tab.leaves_mut() {
         let Some(event) = leaf
             .attention
@@ -16115,8 +16238,9 @@ fn deliver_osc_attention(
             tab: index,
             seat: *seat,
         };
-        let lines = leaf.attention.apply(at, reach, event, next_place).lines;
-        emit_attention_lines(trace, lines);
+        let outcome = leaf.attention.apply(at, reach, event, next_place);
+        emit_attention_lines(trace, outcome.lines);
+        allowed.extend(outcome.raised.map(|one| (*seat, None, one)));
     }
     for (seat, notification) in announcements {
         // The row decides, and its pin is that no sequence on this lane is ever the strong level:
@@ -16131,8 +16255,36 @@ fn deliver_osc_attention(
         let Some(leaf) = tab.sessions.get_mut(seat) else {
             continue;
         };
-        leaf.attention
-            .announce(attention_map::announced_words(notification));
+        let words = attention_map::announced_words(notification);
+        if leaf.attention.announce(words) {
+            continue;
+        }
+        let outcome = leaf.attention.announce_turn_end(
+            attention::Site {
+                tab: index,
+                seat: *seat,
+            },
+            reach,
+            turn_end_enabled,
+            attention_map::OSC_TRANSPORT,
+            attention_map::osc_via(notification.source),
+            words,
+        );
+        emit_attention_lines(trace, outcome.lines);
+        allowed.extend(
+            outcome
+                .raised
+                .map(|one| (*seat, notification.title.clone(), one)),
+        );
+    }
+    for (seat, carried, one) in allowed {
+        raised.push(attention_delivery(
+            tab,
+            tab_id,
+            seat,
+            carried.as_deref(),
+            one,
+        ));
     }
 }
 
@@ -16156,11 +16308,14 @@ fn deliver_attention(
     tabs: &mut [TabState],
     active_tab: usize,
     window_is_focused: bool,
+    window_is_hidden: bool,
+    turn_end_enabled: bool,
     next_place: &mut u64,
     messages: &[attention_wire::Message],
     installed: &[attention::MappingRow],
     now: Instant,
     trace: Option<&attention_trace::Trace>,
+    raised: &mut Vec<AttentionDelivery>,
 ) {
     for message in messages {
         let asks = attention_wire::asks_of(installed, message);
@@ -16169,16 +16324,16 @@ fn deliver_attention(
         }
         for (index, tab) in tabs.iter_mut().enumerate() {
             let tab_is_active = index == active_tab;
-            let reach = ledger_reach(tab_is_active, window_is_focused);
+            let reach = notify::desktop_reach(tab_is_active, window_is_focused, window_is_hidden);
+            let tab_id = tab.id;
+            let mut allowed: Vec<(SeatId, attention::Raised)> = Vec::new();
             let Some((seat, leaf)) = tab.leaves_mut().find(|(_, leaf)| {
                 attention_wire::names_this_pane(&message.capability, &leaf.attention_capability)
             }) else {
                 continue;
             };
-            let at = attention::Site {
-                tab: index,
-                seat: *seat,
-            };
+            let seat = *seat;
+            let at = attention::Site { tab: index, seat };
             if let Some(event) = asks.ledger.clone() {
                 // The clock mirrors the arrival rather than the ledger's answer, and deliberately:
                 // an event the ledger treats as a restatement changes nothing, and re-arming its
@@ -16190,23 +16345,27 @@ fn deliver_attention(
                     }
                     _ => {}
                 }
-                let lines = leaf.attention.apply(at, reach, event, next_place).lines;
-                emit_attention_lines(trace, lines);
+                let outcome = leaf.attention.apply(at, reach, event, next_place);
+                emit_attention_lines(trace, outcome.lines);
+                allowed.extend(outcome.raised.map(|one| (seat, one)));
             }
             if let Some(via) = asks.turn_end {
-                // **`enabled` is true because there is no switch yet.** The setting that turns this
-                // lane off is C2's; until it exists, "off" is not a state this build can be in, and
-                // passing `false` would be inventing a preference nobody expressed. Nothing reaches
-                // the desktop from here either way — the `Raised` is dropped, which is why a `true`
-                // here costs a line in a trace file and nothing else.
+                // **A hook that says a turn ended writes no sentence**, which is exactly why the
+                // sentence this raises comes from the i18n table: `Stop` carries a session id and
+                // a transcript path, and nothing anybody would want read out to them.
                 let outcome = leaf.attention.announce_turn_end(
                     at,
                     reach,
-                    true,
+                    turn_end_enabled,
                     attention_map::PIPE_TRANSPORT,
                     via,
+                    None,
                 );
                 emit_attention_lines(trace, outcome.lines);
+                allowed.extend(outcome.raised.map(|one| (seat, one)));
+            }
+            for (seat, one) in allowed {
+                raised.push(attention_delivery(tab, tab_id, seat, None, one));
             }
             break;
         }
@@ -16714,10 +16873,19 @@ impl NotificationDesk {
         }
     }
 
-    /// Raise one toast, building the platform side if this is the first.
-    fn show(&mut self, title: &str, body: &str, launch: &str) {
+    /// Raise one toast, building the platform side if this is the first, or say why not.
+    ///
+    /// **The refusal is answered rather than only logged** (user ruling 2026-08-25). A desk that
+    /// swallowed a platform error into `stderr` left the one failure mode nobody can detect: the
+    /// reader is not notified, and is not notified that they were not notified. The `Err` is what
+    /// the caller turns into a card in the window — see [`Runtime::raise_attention`].
+    ///
+    /// `Ok(())` on an already-refused desk, and it is not a lie: the sentence being reported is
+    /// "this machine cannot raise notifications", it has been said once, and saying it again on
+    /// every later message would be the flood the one-card rule exists to prevent.
+    fn show(&mut self, title: &str, body: &str, launch: &str) -> Result<(), String> {
         if self.refused {
-            return;
+            return Ok(());
         }
         if self.voice.is_none() {
             let proxy = self.proxy.clone();
@@ -16732,7 +16900,7 @@ impl NotificationDesk {
                 Err(error) => {
                     eprintln!("desktop notifications unavailable: {error}");
                     self.refused = true;
-                    return;
+                    return Err(error);
                 }
             }
         }
@@ -16741,7 +16909,9 @@ impl NotificationDesk {
         {
             eprintln!("desktop notification refused: {error}");
             self.refused = true;
+            return Err(error);
         }
+        Ok(())
     }
 
     /// Every clicked toast's launch string since the last call.
@@ -16753,18 +16923,36 @@ impl NotificationDesk {
     }
 }
 
-/// One notification on its way from a pane to the desktop.
+/// **One interruption the ledger has allowed, on its way out of the window** (`attention` plan
+/// §11.2 and §11.7).
 ///
-/// Assembled during the drain, where the tab and the seat are in hand, and spent after it —
-/// because raising reaches `App` while the drain holds every tab. The title is resolved here
-/// rather than carried as a `TerminalNotification`, since the pane's own name and its profile's
-/// are both facts of the tab and neither survives the loop.
-struct NotificationRequest {
+/// Assembled wherever a door said yes — the queue's, or the event lane's — because that is where
+/// the tab and the seat are in hand, and spent afterwards, because acting on it reaches `App`
+/// while those passes hold every tab.
+///
+/// **The decision is already made when one of these exists.** Both doors evaluate the single gate
+/// they are allowed (red line 12) and hand back a [`attention::Raised`]; this carries the answer
+/// out, and [`Runtime::raise_attention`] does what the answer says. Nothing here re-asks whether
+/// the interruption was owed, and a second gate on this side is the thing red line 12 forbids.
+///
+/// The title is resolved at the door rather than carried as a `TerminalNotification`: the pane's
+/// own name and its profile's are both facts of the tab, and neither survives the pass.
+struct AttentionDelivery {
     tab: TabId,
-    tab_is_active: bool,
     seat: SeatId,
+    /// How far this one is allowed to go — [`notify::desktop_reach`]'s answer, sampled when the
+    /// door opened and never recomputed. Recomputing it here would be a second reading of the
+    /// window taken after the fact, which is how a decision about one moment becomes a decision
+    /// about a later one.
+    reach: attention::Reach,
+    /// Which door — the queue's, or the event lane's. It decides the sentence when the program
+    /// wrote none, and nothing else.
+    why: attention::Why,
     title: String,
-    body: String,
+    /// **The program's own words, when it wrote any** (`attention` plan §11.6 rule 2, §11.7).
+    /// `None` is the ordinary case and is answered from the i18n table by the consumer, where the
+    /// language is read once.
+    body: Option<String>,
 }
 
 /// The window's one taskbar reading, and the gate that keeps it off the wire
@@ -21109,7 +21297,7 @@ impl TabState {
             }
         });
         seats::TabMarkState {
-            dot: claim.dot_color(palette),
+            dot: claim.dot(palette),
             ring,
             opacity: mark_opacity(
                 self.fleet_working(),
@@ -25141,6 +25329,11 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         // the same assumption — the two must agree or the strip and the
         // caret would disagree about whether anyone is home.
         window_focused: true,
+        // And a window that has just been created is on a screen. Unlike the
+        // line above this needs no hopeful reading: the first pass corrects it
+        // from `IsIconic` and `DWMWA_CLOAKED`, and both answer the same `false`
+        // for a window that has just opened.
+        window_hidden: false,
         ime_system_caret,
         pointer_position: None,
         mouse_route: None,
@@ -27015,7 +27208,11 @@ impl Runtime<'_> {
                 let mut removed = self.window.tabs.remove(index);
                 // Every place this tab's panes held, given up before its shells are — the same
                 // door `close_pane` uses, asked of every leaf because a tab closes all of them.
-                let reach = ledger_reach(was_active, self.window.window_focused);
+                let reach = notify::desktop_reach(
+                    was_active,
+                    self.window.window_focused,
+                    self.window.window_hidden,
+                );
                 for (seat, leaf) in removed.leaves_mut() {
                     expire_leaf_attention(
                         attention::Site {
@@ -30979,7 +31176,7 @@ impl Runtime<'_> {
                     dot: session
                         .map(|leaf| leaf.session_facts(tab_is_active).claim())
                         .unwrap_or_default()
-                        .dot_color(&palette),
+                        .dot(&palette),
                     ring,
                 }
             })
@@ -31552,6 +31749,7 @@ impl Runtime<'_> {
             scrollback_lines: self.app.settings_store.loaded().scrollback_lines,
             line_wrapping: self.app.settings_store.loaded().line_wrapping,
             terminal_notifications: self.app.settings_store.loaded().terminal_notifications,
+            turn_end_notification: self.app.settings_store.loaded().turn_end_notification,
             powershell_integration_offer: self
                 .app
                 .settings_store
@@ -33223,6 +33421,9 @@ impl Runtime<'_> {
         if let Some(enabled) = settings::terminal_notifications_requested(target) {
             self.apply_terminal_notifications(enabled);
         }
+        if let Some(enabled) = settings::turn_end_notification_requested(target) {
+            self.apply_turn_end_notification(enabled);
+        }
         if let Some(enabled) = settings::powershell_integration_offer_requested(target) {
             self.apply_powershell_integration_offer(enabled)?;
         }
@@ -33480,6 +33681,7 @@ impl Runtime<'_> {
             | Row::Scrollback
             | Row::LineWrapping
             | Row::Notifications
+            | Row::TurnEndNotifications
             | Row::PowerShellOffer
             // And doubly never again, for `ContextMenu`'s reason over a different store: what a
             // reset would be putting back is not a value in this file, it is a block in the user's
@@ -37605,6 +37807,27 @@ impl Runtime<'_> {
         self.app.settings_store.store(settings);
     }
 
+    /// Whether the end of a turn may reach the desktop (`attention` plan §11.7).
+    ///
+    /// [`Self::apply_terminal_notifications`]'s shape and every one of its three reasons, on the
+    /// row beneath it — with one difference worth stating because it is where the two rows part.
+    /// That switch is read **where a toast would be raised**; this one is read **at the door**,
+    /// before the ledger evaluates anything, because §11.7 requires that with it off the lane is
+    /// not walked at all: no evaluation, no trace line, and no bit set. A switch that only
+    /// suppressed the delivery would leave the ledger having decided this turn's ending was dealt
+    /// with, so switching the row back on mid-turn would find a turn already marked answered —
+    /// half a state left behind by a preference being turned off and on again.
+    ///
+    /// **Nothing inside the window moves either way.** The bell dot, the unread dot and the
+    /// queue's own badge are the ledger's, and this row is about the desktop outside — which is
+    /// the same division the row above is filed under and the one the ledger's predicate is kept
+    /// clear of.
+    fn apply_turn_end_notification(&mut self, enabled: bool) {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.turn_end_notification = enabled;
+        self.app.settings_store.store(settings);
+    }
+
     /// Whether a PowerShell pane with no integration is offered one (§7.1.6j).
     ///
     /// **It reaches the panes that are already open**, which is what separates it from
@@ -38132,7 +38355,8 @@ impl Runtime<'_> {
             // (`attention` plan §4 B4): the program never withdrew and nobody answered, so the
             // ledger says `expire … reason=leaf-gone` and the serial stands where it is.
             let index = self.window.active_tab;
-            let reach = ledger_reach(true, self.window.window_focused);
+            let reach =
+                notify::desktop_reach(true, self.window.window_focused, self.window.window_hidden);
             expire_leaf_attention(
                 attention::Site { tab: index, seat },
                 reach,
@@ -57904,38 +58128,103 @@ impl Runtime<'_> {
         }
     }
 
-    /// Put on the desktop whatever passes the gate, and drop the rest without a trace.
+    /// **Do what the ledger's answer says**, for every interruption it allowed this turn
+    /// (`attention` plan §11.7, slice C3).
     ///
-    /// **The dropping is the ordinary case and it is silent by design.** A request that does not
-    /// reach the desktop has not failed and is not deferred — the pane is on screen in a focused
-    /// window, so the person has already been told by the only medium that can say more than a
-    /// toast can. Nothing is queued for later, because "later" would mean interrupting somebody
-    /// about output they read half an hour ago.
+    /// **Not a gate, and that is red line 12.** Both doors have already evaluated the one
+    /// condition either of them is allowed to; what arrives here is a decision with a
+    /// [`attention::Reach`] attached, and this is the three-armed consumer of it. Nothing here asks
+    /// again whether the interruption was owed — a second opinion on this side is exactly the
+    /// second gate the red line forbids, and it would be one taken from a reading of the window
+    /// made after the decision rather than at it.
     ///
-    /// Nothing is written to the ledger on either branch. §7.6's whole relationship to §7.1.5b is
-    /// that a notification is an *outlet* for facts the ledger is already keeping: the pane went
-    /// unread when its bytes arrived, which happened in `drain_leaf_pty` above and would have
-    /// happened identically had the program printed a letter instead of an escape sequence.
-    fn raise_notifications(&mut self, requests: Vec<NotificationRequest>) {
-        if requests.is_empty() {
-            return;
+    /// * **`Nothing`** — the reader is looking at the pane. It is not deferred and not queued; a
+    ///   notification held for later is a notification about something they finished doing.
+    /// * **`Flash`** — the shell is asked to call the eye to this window's taskbar button. **Once
+    ///   per turn however many panes spoke**, because the button is the window's and flashing it
+    ///   twice is not twice as much of anything. On a window that has the keyboard this is a
+    ///   documented no-op and the arm is written knowing it — see [`notify::desktop_reach`].
+    /// * **`Toast`** — the window is not on any screen, so the desktop is what is left.
+    ///
+    /// **`terminal_notifications` gates the toast and not the flash**, and the split is the row's
+    /// own sentence: it governs whether a program may *put a message on the desktop*. A taskbar
+    /// button calling for attention is not a message and leaves nothing behind; the switch that
+    /// governs whether the end of a turn may do even that is `turn_end_notification`, and it is
+    /// read at the door rather than here, because with it off §11.7 requires that the lane not be
+    /// evaluated at all.
+    fn raise_attention(&mut self, raised: Vec<AttentionDelivery>) -> Result<()> {
+        if raised.is_empty() {
+            return Ok(());
         }
         let enabled = self.app.settings_store.loaded().terminal_notifications;
-        let window_is_focused = self.window.window_focused;
         let window = u64::from(self.window.window.id());
-        for request in requests {
-            if !notify::reaches_the_desktop(enabled, request.tab_is_active, window_is_focused) {
-                continue;
+        let mut flashed = false;
+        let mut refusal = None;
+        for delivery in raised {
+            match delivery.reach {
+                attention::Reach::Nothing => {}
+                attention::Reach::Flash => {
+                    if !flashed && let Ok(hwnd) = window_hwnd(&self.window.window) {
+                        flashed = true;
+                        bt_platform::flash_window(hwnd);
+                    }
+                }
+                attention::Reach::Toast => {
+                    if !enabled {
+                        continue;
+                    }
+                    let route = notify::NotificationRoute {
+                        window,
+                        tab: delivery.tab.0,
+                        seat: delivery.seat.0,
+                    };
+                    let body = delivery.body.unwrap_or_else(|| {
+                        match delivery.why {
+                            attention::Why::Awaiting => i18n::Text::ToastWaitingForYou,
+                            attention::Why::TurnEnd => i18n::Text::ToastTurnFinished,
+                        }
+                        .text()
+                        .to_owned()
+                    });
+                    if let Err(error) =
+                        self.app
+                            .notifications
+                            .show(&delivery.title, &body, &route.launch())
+                    {
+                        refusal = Some(error);
+                    }
+                }
             }
-            let route = notify::NotificationRoute {
-                window,
-                tab: request.tab.0,
-                seat: request.seat.0,
-            };
-            self.app
-                .notifications
-                .show(&request.title, &request.body, &route.launch());
         }
+        match refusal {
+            Some(error) => self.raise_notification_refusal(&error),
+            None => Ok(()),
+        }
+    }
+
+    /// **Say in the window that the desktop would not take it** (user ruling 2026-08-25).
+    ///
+    /// The one failure this block could otherwise have and nobody could detect: the reader is not
+    /// notified, and is not notified that they were not notified. A line of `stderr` goes to a log
+    /// file the reader has no reason to open, so the refusal is said where they are — as a card of
+    /// the family every other refusal in this window already wears.
+    ///
+    /// **Once per session**, and it costs nothing to arrange: [`NotificationDesk`] latches its own
+    /// refusal, so every later message answers `Ok(())` and no second card is raised. That is the
+    /// right number — the sentence is "this machine cannot raise notifications", which is true once
+    /// and does not become truer.
+    ///
+    /// **In the corner and not on a pane.** The window that could not raise a toast is by
+    /// definition one the reader was not looking at, so there is no pane under their eye for the
+    /// card to hang off; and what the card is about is the *channel*, which belongs to the window
+    /// rather than to whichever shell happened to speak first.
+    fn raise_notification_refusal(&mut self, error: &str) -> Result<()> {
+        self.toast(
+            toast::ToastKind::Error,
+            toast::ToastAnchor::Window,
+            Some(i18n::Text::NotifyRefusedTitle.text().to_owned()),
+            format!("{} {error}", i18n::Text::NotifyRefusedBody.text()),
+        )
     }
 
     /// Answer a clicked toast: this window forward, that tab on screen, that pane holding the
@@ -57995,7 +58284,7 @@ impl Runtime<'_> {
         let mut chrome_changed = false;
         let mut moved = false;
         let mut command_ends: Vec<PathBuf> = Vec::new();
-        let mut notifications: Vec<NotificationRequest> = Vec::new();
+        let mut raised: Vec<AttentionDelivery> = Vec::new();
         let mut pending = false;
         // **The two window-wide bits of [`seat_holds_the_keyboard`], read once**
         // — this window has the desktop's keyboard, and what has it here is a
@@ -58030,6 +58319,12 @@ impl Runtime<'_> {
         // is winit's own answer, which is kept from `WM_SETFOCUS`/`WM_KILLFOCUS`
         // and starts out false rather than hopeful.
         let window_focused = self.window.window.has_focus();
+        // **Asked of the window on the same turn and for the same reason** (`attention` plan §5.2):
+        // it is a fact about where this window is, and a cached answer taken at the last
+        // transition is a cached answer about a window that has since been minimised.
+        self.window.window_hidden = window_is_hidden(&self.window.window);
+        let window_hidden = self.window.window_hidden;
+        let turn_end_enabled = self.app.settings_store.loaded().turn_end_notification;
         let owner_is_a_shell = self.keyboard_owner_is_a_shell();
         let active_tab = self.window.active_tab;
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
@@ -58037,34 +58332,22 @@ impl Runtime<'_> {
                 drain_tab_pty(tab, window_focused, index == active_tab, owner_is_a_shell)?;
             pending |= outcome.pending;
             // **The OSC lane's turn, on the turn the bytes arrived.** A standing request a program
-            // wrote down its own tty becomes an episode here, and a message it wrote beside one
-            // lends that request its words — see the function for why both belong on this turn and
-            // in this order rather than on the animation tick.
+            // wrote down its own tty becomes an episode here, a message it wrote beside one lends
+            // that request its words, and a message on a pane with nothing standing is an event of
+            // its own — see the function for why all of it belongs on this turn and in this order
+            // rather than on the animation tick.
             deliver_osc_attention(
                 tab,
                 index,
                 index == active_tab,
                 window_focused,
+                window_hidden,
+                turn_end_enabled,
                 &mut self.window.attention_next_place,
                 &outcome.notifications,
                 attention_trace::global(),
+                &mut raised,
             );
-            // Resolved here and spent below: the pane's name and its profile's are
-            // facts of this tab, and raising reaches a field of `App` that this
-            // loop's borrow of `self.window.tabs` cannot be holding at the time.
-            for (seat, notification) in outcome.notifications {
-                notifications.push(NotificationRequest {
-                    tab: tab.id,
-                    tab_is_active: index == self.window.active_tab,
-                    seat,
-                    title: notify::toast_title(
-                        notification.title.as_deref(),
-                        tab.terminal_name(seat).as_deref(),
-                        profiles::title(tab.leaf_profile(seat)),
-                    ),
-                    body: notification.body,
-                });
-            }
             if index == self.window.active_tab {
                 active_changed = outcome.arrived;
                 active_changed_off_focus = outcome.arrived_off_focus;
@@ -58093,7 +58376,7 @@ impl Runtime<'_> {
         if pending {
             self.window.pty_wake.raise();
         }
-        self.raise_notifications(notifications);
+        self.raise_attention(raised)?;
         // Raised before anything below can publish, because it is what that
         // publish's own gate reads. Only the tab on screen: a pane of a tab
         // nobody is looking at is not painted by any pass, and its backlog is
@@ -58298,14 +58581,23 @@ impl Runtime<'_> {
         // Every door of the attention queue, in one pass over one leaf at a time
         // — see `settle_attention` for why they stopped being two passes whose
         // order was the mechanism, and for the order the four that are left run in.
+        // Sampled here beside the pass that reads it, and on the same turn: the fact that separates
+        // "not in front of you" from "not on any screen" is a fact about *now*, and this pass is
+        // the one that decides what the reader is owed.
+        self.window.window_hidden = window_is_hidden(&self.window.window);
+        let mut raised: Vec<AttentionDelivery> = Vec::new();
         settle_attention(
             &mut self.window.tabs,
             self.window.active_tab,
             self.window.window_focused,
+            self.window.window_hidden,
+            self.app.settings_store.loaded().turn_end_notification,
             &mut self.window.attention_next_place,
             now,
             attention_trace::global(),
+            &mut raised,
         );
+        self.raise_attention(raised)?;
         let active = self.window.active_tab;
         let motion = self.app.motion;
         let palette = bt_render::chrome_palette();
@@ -65724,7 +66016,8 @@ impl Runtime<'_> {
     /// every shell comes through here, and almost none of them is answering anything.
     fn answer_attention(&mut self, seat: SeatId, by: UserInputKind) {
         let index = self.window.active_tab;
-        let reach = ledger_reach(true, self.window.window_focused);
+        let reach =
+            notify::desktop_reach(true, self.window.window_focused, self.window.window_hidden);
         // Split rather than reached through `self`: the place is drawn from the window's own serial
         // while the account it lands in is a field of one of that window's tabs.
         let WindowRuntime {
@@ -65750,7 +66043,8 @@ impl Runtime<'_> {
     /// able to see that the standing requests were *offered the same event and kept*. A rule that
     /// held only because nobody had written the call is a rule one edit away from not holding.
     fn mark_attention_seen(&mut self, index: usize) {
-        let reach = ledger_reach(true, self.window.window_focused);
+        let reach =
+            notify::desktop_reach(true, self.window.window_focused, self.window.window_hidden);
         let WindowRuntime {
             tabs,
             attention_next_place,
@@ -74816,17 +75110,22 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 };
                 let now = Instant::now();
                 self.for_each_window(|runtime| {
+                    runtime.window.window_hidden = window_is_hidden(&runtime.window.window);
+                    let mut raised: Vec<AttentionDelivery> = Vec::new();
                     deliver_attention(
                         &mut runtime.window.tabs,
                         runtime.window.active_tab,
                         runtime.window.window_focused,
+                        runtime.window.window_hidden,
+                        runtime.app.settings_store.loaded().turn_end_notification,
                         &mut runtime.window.attention_next_place,
                         &messages,
                         &installed,
                         now,
                         attention_trace::global(),
+                        &mut raised,
                     );
-                    Ok(())
+                    runtime.raise_attention(raised)
                 })
             }
             // The texture is already in the slot; what is owed is the ground
@@ -81790,7 +82089,7 @@ mod tests {
     fn quiet() -> SessionStatus {
         SessionStatus {
             progress: None,
-            bell_latched: false,
+            bell: None,
             failure_exit_code: None,
             working: false,
             alternate_screen: false,
@@ -81971,7 +82270,7 @@ mod tests {
     /// latches [`DualPlaneSession::clear_attention`] retires together.
     fn latched() -> SessionStatus {
         SessionStatus {
-            bell_latched: true,
+            bell: Some(bt_term::BellSource::Bel),
             failure_exit_code: Some(1),
             ..quiet()
         }
@@ -81989,7 +82288,7 @@ mod tests {
         window_is_focused: bool,
     ) -> StatusClaim {
         if attention_is_consumed(tab_is_active, window_is_focused) {
-            status.bell_latched = false;
+            status.bell = None;
             status.failure_exit_code = None;
         }
         // Behind by a mile, so nothing here is hidden by the ledger being up to
@@ -82039,7 +82338,7 @@ mod tests {
         // merely the loudest surviving claim here — it is the only one this
         // ruling can be about, which is why the ruling is about the bell.
         let mut bell_only = quiet();
-        bell_only.bell_latched = true;
+        bell_only.bell = Some(bt_term::BellSource::Bel);
         for status in [latched(), bell_only] {
             assert_eq!(
                 claim_after_a_look(status, true, false),
@@ -82215,7 +82514,7 @@ mod tests {
         );
         feed(&mut tab, b"\x1b]9;4;0\x07\x07");
         assert!(
-            tab.sessions[&seat].session.status().bell_latched,
+            tab.sessions[&seat].session.status().bell_latched(),
             "and a bell rung from the alternate screen is still a bell"
         );
 
@@ -82364,7 +82663,7 @@ mod tests {
         //    on a background tab. Nothing animates, so nothing asked to draw.
         let quiet_tab = seats::TabMarkState::default();
         let ringing = seats::TabMarkState {
-            dot: Some(palette.status_warn),
+            dot: StatusClaim::Bell.dot(&palette),
             ..seats::TabMarkState::default()
         };
         assert!(
@@ -82523,7 +82822,7 @@ mod tests {
     #[test]
     fn a_tab_wears_the_loudest_claim_its_fleet_makes() {
         let mut rang = quiet();
-        rang.bell_latched = true;
+        rang.bell = Some(bt_term::BellSource::Bel);
         let mut failed = quiet();
         failed.failure_exit_code = Some(1);
 
@@ -82655,7 +82954,7 @@ mod tests {
     #[test]
     fn the_bell_outlives_the_work_that_followed_it() {
         let mut ringing = quiet();
-        ringing.bell_latched = true;
+        ringing.bell = Some(bt_term::BellSource::Bel);
         ringing.working = true;
         ringing.progress = Some(ProgressState::Indeterminate);
         assert_eq!(facts_with(ringing, 9, 9, false).claim(), StatusClaim::Bell);
@@ -82779,10 +83078,25 @@ mod tests {
             "and `max` over that order is the tab's own aggregation"
         );
 
+        let standing = StatusClaim::Awaiting.dot(&palette).expect("a warn dot");
+        let rang = StatusClaim::Bell.dot(&palette).expect("a warn dot");
         assert_eq!(
-            StatusClaim::Awaiting.dot_color(&palette),
-            StatusClaim::Bell.dot_color(&palette),
+            standing.ink, rang.ink,
             "one warn, two claims — the mock-up writes `--warn` for both"
+        );
+        // **And the ink is where the sameness stops** (`attention` plan red line 3, ruled
+        // 2026-08-25). Until this line the two differed only in that one of them breathed, which
+        // meant that with the system's animation setting off they arrived as the same pixels —
+        // one dot, two assertions, which is the taxonomy's own rule broken from the inside. The
+        // second axis is a *fill*, so it survives reduced motion, a repaint and a screenshot.
+        assert_ne!(
+            standing.hollow, rang.hollow,
+            "two claims that share an ink must not also share a shape"
+        );
+        assert!(
+            rang.hollow && !standing.hollow,
+            "filled is a state that is standing, hollow is an event that rang — and the bell is \
+             the one event in the ladder"
         );
         assert!(StatusClaim::Awaiting.pulses());
         assert!(
@@ -82926,7 +83240,7 @@ mod tests {
             .feed(b"\x07")
             .expect("a bell parses");
         assert!(
-            tab.sessions[&seat].session.status().bell_latched,
+            tab.sessions[&seat].session.status().bell_latched(),
             "the fixture's own precondition: the bell really latched"
         );
     }
@@ -82951,8 +83265,117 @@ mod tests {
     }
 
     /// One turn of the event loop's attention pass over one window's tabs.
+    ///
+    /// A window that is on a screen and a turn-end lane that is switched on, which is what a fresh
+    /// install is. The deliveries are collected and dropped: what these tests are about is the
+    /// ledger's own bookkeeping, and `raise_attention` is the window's.
     fn one_turn(tabs: &mut [TabState], active: usize, focused: bool, next: &mut u64) {
-        settle_attention(tabs, active, focused, next, Instant::now(), None);
+        settle_attention(
+            tabs,
+            active,
+            focused,
+            false,
+            true,
+            next,
+            Instant::now(),
+            None,
+            &mut Vec::new(),
+        );
+    }
+
+    /// One turn, with the window's three facts spelled out and the deliveries handed back.
+    fn one_turn_reaching(
+        tabs: &mut [TabState],
+        active: usize,
+        focused: bool,
+        hidden: bool,
+        turn_end_enabled: bool,
+        next: &mut u64,
+    ) -> Vec<AttentionDelivery> {
+        let mut raised = Vec::new();
+        settle_attention(
+            tabs,
+            active,
+            focused,
+            hidden,
+            turn_end_enabled,
+            next,
+            Instant::now(),
+            None,
+            &mut raised,
+        );
+        raised
+    }
+
+    /// PIN (`attention` plan §10.7's three tiers and §11.7's switch, gate ⑯) — **the end of a
+    /// turn reaches exactly as far as the reader is away, and the row switches the whole lane
+    /// off.**
+    ///
+    /// The three cells the ruling names, walked through the window's own pass rather than through
+    /// the ledger directly, because the thing being pinned is that the *facts of the window* reach
+    /// the ledger's door: which tab is on screen, whether the window has the keyboard, and whether
+    /// it is on a screen at all. Before slice C the third of those did not exist and the pass
+    /// answered the weaker of two tiers for every window in the world.
+    ///
+    /// MUTATIONS: drop `window_is_hidden` from the pass and the minimised cell answers `Flash` —
+    /// a reader whose window is not on any screen gets a taskbar flash they cannot see, and never
+    /// the toast. Pass `true` for the switch unconditionally and the last block goes red in both
+    /// halves: the lane runs, and the bit it sets means turning the row back on mid-turn finds the
+    /// turn already dealt with.
+    #[test]
+    fn a_turn_ending_reaches_as_far_as_the_reader_is_away_and_the_row_shuts_the_lane() {
+        let cells = [
+            (true, true, false, attention::Reach::Nothing),
+            (false, true, false, attention::Reach::Flash),
+            (true, false, false, attention::Reach::Flash),
+            (true, false, true, attention::Reach::Toast),
+            (false, true, true, attention::Reach::Toast),
+        ];
+        for (active, focused, hidden, expected) in cells {
+            let mut tabs = vec![ringing_tab(1, 1), ringing_tab(2, 1)];
+            let index = usize::from(!active);
+            let seat = tabs[0].seats.terminals()[0];
+            ring(&mut tabs[0], seat);
+            let mut next = 0;
+            let raised = one_turn_reaching(&mut tabs, index, focused, hidden, true, &mut next);
+            assert_eq!(
+                raised.len(),
+                1,
+                "one turn ended and one interruption was decided \
+                 (active={active} focused={focused} hidden={hidden})"
+            );
+            assert_eq!(raised[0].why, attention::Why::TurnEnd);
+            assert_eq!(
+                raised[0].reach, expected,
+                "active={active} focused={focused} hidden={hidden}"
+            );
+            assert_eq!(
+                next, 0,
+                "and not one place was handed out: a turn ending is not a request (red line 14)"
+            );
+        }
+
+        // The row, off: the lane is not walked, so nothing is decided and nothing is remembered.
+        let mut tabs = vec![ringing_tab(1, 1)];
+        let seat = tabs[0].seats.terminals()[0];
+        ring(&mut tabs[0], seat);
+        let mut next = 0;
+        assert!(
+            one_turn_reaching(&mut tabs, 0, false, true, false, &mut next).is_empty(),
+            "with the row off a minimised window hears nothing"
+        );
+        // And the bit was not set behind the shut door, so the very next turn of the pass with the
+        // row back on still has a turn end to decide about.
+        tabs[0]
+            .sessions
+            .get_mut(&seat)
+            .expect("the fixture's seat")
+            .bell_reported = false;
+        assert_eq!(
+            one_turn_reaching(&mut tabs, 0, false, true, true, &mut next).len(),
+            1,
+            "a row turned off and on again left no half state behind"
+        );
     }
 
     /// The out door, over a bare tab — **the runtime's own function**, so a fixture cannot drift
@@ -83009,7 +83432,7 @@ mod tests {
                 assert_eq!(next, 0, "and spent no serial");
                 let watched = tab_is_active && window_is_focused;
                 assert_eq!(
-                    tabs[0].sessions[&seat].session.status().bell_latched,
+                    tabs[0].sessions[&seat].session.status().bell_latched(),
                     !watched,
                     "the latch is spent by a look and by nothing else"
                 );
@@ -83218,12 +83641,12 @@ mod tests {
             .feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07x\x1b]133;C\x07\x1b]133;D;1\x07\x07")
             .expect("the fixture's bytes parse");
         let rang = tabs[0].sessions[&seat].session.status();
-        assert!(rang.bell_latched && rang.failure_exit_code == Some(1));
+        assert!(rang.bell_latched() && rang.failure_exit_code == Some(1));
 
         one_turn(&mut tabs, 0, true, &mut next);
 
         let looked = tabs[0].sessions[&seat].session.status();
-        assert!(!looked.bell_latched);
+        assert!(!looked.bell_latched());
         assert_eq!(looked.failure_exit_code, None);
         // The fixture, handed the same two facts, says the same thing.
         assert_eq!(
@@ -83267,7 +83690,17 @@ mod tests {
                 .collect()
         };
         let turn = |tabs: &mut [TabState], active: usize, next: &mut u64| {
-            settle_attention(tabs, active, true, next, Instant::now(), Some(&trace));
+            settle_attention(
+                tabs,
+                active,
+                true,
+                false,
+                true,
+                next,
+                Instant::now(),
+                Some(&trace),
+                &mut Vec::new(),
+            );
         };
 
         let mut tabs = vec![ringing_tab(1, 1), ringing_tab(2, 2)];
@@ -83562,30 +83995,24 @@ mod tests {
     #[test]
     fn each_claim_wears_its_own_colour_and_silence_draws_nothing() {
         for palette in [LIGHT_CHROME, DARK_CHROME] {
-            assert_eq!(StatusClaim::Silent.dot_color(&palette), None);
-            assert_eq!(
-                StatusClaim::Unread.dot_color(&palette),
-                Some(palette.accent)
-            );
-            assert_eq!(
-                StatusClaim::Bell.dot_color(&palette),
-                Some(palette.status_warn)
-            );
-            assert_eq!(
-                StatusClaim::Failed.dot_color(&palette),
-                Some(palette.status_err)
-            );
-            // The three speaking claims are three different colours — a
-            // taxonomy that collapses is not a taxonomy.
-            let colors =
-                [StatusClaim::Unread, StatusClaim::Bell, StatusClaim::Failed].map(|claim| {
-                    claim
-                        .dot_color(&palette)
-                        .expect("a speaking claim has a colour")
-                });
-            for (index, color) in colors.iter().enumerate() {
-                for other in &colors[index + 1..] {
-                    assert_ne!(color, other, "two claims cannot share one colour");
+            assert_eq!(StatusClaim::Silent.dot(&palette), None);
+            let ink = |claim: StatusClaim| claim.dot(&palette).map(|dot| dot.ink);
+            assert_eq!(ink(StatusClaim::Unread), Some(palette.accent));
+            assert_eq!(ink(StatusClaim::Bell), Some(palette.status_warn));
+            assert_eq!(ink(StatusClaim::Failed), Some(palette.status_err));
+            // Every speaking claim differs from every other in at least one of the two axes —
+            // a taxonomy that collapses is not a taxonomy. Three of the four differ in ink;
+            // the fourth pair shares `--warn` and is told apart by its fill (red line 3).
+            let drawn = [
+                StatusClaim::Unread,
+                StatusClaim::Bell,
+                StatusClaim::Failed,
+                StatusClaim::Awaiting,
+            ]
+            .map(|claim| claim.dot(&palette).expect("a speaking claim has a dot"));
+            for (index, dot) in drawn.iter().enumerate() {
+                for other in &drawn[index + 1..] {
+                    assert_ne!(dot, other, "two claims cannot arrive as the same badge");
                 }
             }
         }
@@ -104322,7 +104749,7 @@ mod tests {
                 leaf.output_revision, 0,
                 "the shell has spoken since it was last seen"
             );
-            assert!(leaf.session.status().bell_latched);
+            assert!(leaf.session.status().bell_latched());
         }
         let mut target = cross_tab(2, &["TGTA", "TGTB"]);
         let arrived = cross_merge(
@@ -104346,7 +104773,7 @@ mod tests {
                 "{seat:?} arrived still claiming to be unread"
             );
             assert!(
-                !leaf.session.status().bell_latched,
+                !leaf.session.status().bell_latched(),
                 "{seat:?} arrived still ringing"
             );
         }

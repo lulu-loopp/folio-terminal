@@ -2198,6 +2198,21 @@ pub const WINDOW_TAB_STATUS_DOT_LOGICAL_PX: f32 = 6.0;
 /// reads as part of the artwork.
 pub const WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX: f32 = -2.0;
 pub const WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX: f32 = -4.0;
+/// How thick the ring is on the one claim whose dot is drawn hollow rather than
+/// filled (`docs/plans/attention/plan.md` red line 3, ruled 2026-08-25).
+///
+/// **A third of the diameter**, which is the largest stroke that still leaves a
+/// hole a reader can see at 6px and the smallest that still reads as a stroke
+/// rather than as an anti-aliasing artefact. The mark rounds it to whole device
+/// pixels, so at 100% it is two pixels of ring around two of hole and at 200% it
+/// is four around four — the proportion holds at every scale this window is
+/// drawn at, which a constant in device pixels would not.
+///
+/// Why any claim is hollow at all is [`crate::WINDOW_TAB_STATUS_DOT_LOGICAL_PX`]'s
+/// consumer's question, and it is answered at `bt_app::StatusDot`: two of the
+/// five claims share one ink, and the thing that used to separate them was
+/// motion, which the system's accessibility setting is entitled to take away.
+pub const WINDOW_TAB_STATUS_DOT_RING_STROKE_LOGICAL_PX: f32 = 2.0;
 
 /// `.pring circle { stroke-width: 2 }`, read as logical pixels.
 ///

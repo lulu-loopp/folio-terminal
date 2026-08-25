@@ -57,6 +57,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (19, migrate_settings_v19_to_v20),
     (20, migrate_settings_v20_to_v21),
     (21, migrate_settings_v21_to_v22),
+    (22, migrate_settings_v22_to_v23),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -471,6 +472,30 @@ fn migrate_settings_v21_to_v22(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(22));
         object.insert("key_hints".to_owned(), Value::from(true));
+    }
+    value
+}
+
+/// v22 -> v23: whether the end of a turn may reach the desktop, defaulted **on**
+/// (`docs/plans/attention/plan.md` §11.7, user ruling 2026-08-25).
+///
+/// One key a thirteenth time, and it lands the way `migrate_settings_v21_to_v22` did rather than
+/// the way `migrate_settings_v20_to_v21` did. The distinction those steps are written under is
+/// whether there is a habit to carry or only a default to choose, and here there is no habit: no
+/// build that could write a v23 file ever flashed a taskbar button or raised a toast when an agent
+/// stopped talking, because until this slice nothing in the product knew a turn had ended. `false`
+/// would freeze an absence rather than preserve a status quo.
+///
+/// What is being defaulted on is the *quietest* of the three answers the lane can give — a flash
+/// on a taskbar button of a window the reader is not looking at, and nothing at all while they
+/// are. The loud one, a desktop toast, is reached only by a window that is minimised or on another
+/// virtual desktop, which is the one case where nothing inside the window can be seen.
+///
+/// See `SettingsV1::turn_end_notification`.
+fn migrate_settings_v22_to_v23(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(23));
+        object.insert("turn_end_notification".to_owned(), Value::from(true));
     }
     value
 }

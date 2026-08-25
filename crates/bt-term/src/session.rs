@@ -764,6 +764,27 @@ pub enum NotificationSource {
     Osc99,
 }
 
+/// **What rang the bell** (`attention` plan §13.2.2).
+///
+/// Two producers reach one latch and that is deliberate: `OSC 1337;RequestAttention=once` is by
+/// its own definition a one-shot request for attention, which is what a bell *is*, and giving it a
+/// second parallel implementation would be this terminal saying one thing in two voices
+/// (`attention` plan §10.8.4). What the layer above still needs is to be able to tell them apart —
+/// a fact that arrived as a sequence and is recorded as a bare bell makes "is the adapter on the
+/// far end actually reaching us over OSC, or has it been downgraded?" a question with no answer —
+/// so the latch remembers which one rang it.
+///
+/// **The last ringer wins**, which is the same rule the latch itself follows: a bell that rings
+/// twice before anybody looks is one unspent latch, and the provenance of an unspent latch is
+/// whatever most recently set it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BellSource {
+    /// A literal `0x07` in the stream.
+    Bel,
+    /// `OSC 1337;RequestAttention=once`.
+    AttentionOnce,
+}
+
 /// One `OSC 1337;RequestAttention=` exactly as it arrived (iTerm2's sequence, its spelling).
 ///
 /// **Three values and they are not three of a kind.** `Yes` and `No` are the two ends of a
@@ -805,7 +826,12 @@ pub enum ProgressState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionStatus {
     pub progress: Option<ProgressState>,
-    pub bell_latched: bool,
+    /// **The bell latch, and what rang it** (`attention` plan §13.2.2).
+    ///
+    /// `Option` rather than a `bool` beside a source, because the two would be one fact in two
+    /// fields and a latch that said `false` while naming a ringer is a state nothing should have
+    /// to consider. [`Self::bell_latched`] is the bit, derived.
+    pub bell: Option<BellSource>,
     pub failure_exit_code: Option<i32>,
     pub working: bool,
     /// **Whether a full-screen program owns the grid right now** (DECSET 1049).
@@ -838,6 +864,18 @@ pub struct SessionStatus {
     /// clears the live value and *does not* wind the counter back, which is what makes the next
     /// request's number strictly larger than every number the last one was compared against.
     pub attention_request: Option<u64>,
+}
+
+impl SessionStatus {
+    /// Whether an unspent bell is standing, whatever rang it.
+    ///
+    /// Derived rather than stored, so that the latch and its provenance can never disagree. Most
+    /// readers want only this: a tab's dot does not care which sequence rang, and neither does the
+    /// look that spends the latch.
+    #[must_use]
+    pub fn bell_latched(&self) -> bool {
+        self.bell.is_some()
+    }
 }
 
 /// Per-session actor core. It is the serialized owner required by DESIGN.md §1.3 and composes
@@ -894,7 +932,8 @@ pub struct DualPlaneSession {
     /// titles are shared by the primary and alternate grids. `None` selects the profile fallback.
     window_title: Option<String>,
     progress: Option<ProgressState>,
-    bell_latched: bool,
+    /// The unspent bell latch and what rang it — see [`BellSource`].
+    bell: Option<BellSource>,
     /// Notifications this session has been asked for and nobody has collected yet.
     ///
     /// Deliberately **not** on [`SessionStatus`]: a status is a state that can be read twice and
@@ -1322,7 +1361,7 @@ impl DualPlaneSession {
             working_directory: None,
             window_title: None,
             progress: None,
-            bell_latched: false,
+            bell: None,
             notifications: Vec::new(),
             attention_request: None,
             next_attention_generation: 1,
@@ -1390,7 +1429,7 @@ impl DualPlaneSession {
     pub fn status(&self) -> SessionStatus {
         SessionStatus {
             progress: self.progress,
-            bell_latched: self.bell_latched,
+            bell: self.bell,
             failure_exit_code: self.failure_exit_code,
             working: self.working,
             alternate_screen: self.terminal.modes().alternate_screen,
@@ -1432,7 +1471,7 @@ impl DualPlaneSession {
     /// recorded a layer up as a watermark rather than as an erasure here (`attention` plan §10.9,
     /// pin 2).
     pub fn clear_attention(&mut self) {
-        self.bell_latched = false;
+        self.bell = None;
         self.failure_exit_code = None;
     }
 
@@ -1462,7 +1501,7 @@ impl DualPlaneSession {
                 }
             }
             AttentionRequest::No => self.attention_request = None,
-            AttentionRequest::Once => self.bell_latched = true,
+            AttentionRequest::Once => self.bell = Some(BellSource::AttentionOnce),
         }
     }
 
@@ -8172,7 +8211,7 @@ impl DualPlaneSession {
                     self.window_title = None;
                 }
                 LifecycleDirective::Bell => {
-                    self.bell_latched = true;
+                    self.bell = Some(BellSource::Bel);
                 }
                 LifecycleDirective::Progress(progress) => {
                     self.progress = progress;

@@ -855,7 +855,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 22,
+        SETTINGS_SCHEMA_VERSION, 23,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -879,7 +879,15 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          and the Appearance page's own Focus card height the v18-to-v19, and the \
          General page's own Search engine the v19-to-v20, and the Terminal page's \
          own Line wrapping the v20-to-v21, and the General page's own Shortcut \
-         hints the v21-to-v22 — one key on one day, twelve times running"
+         hints the v21-to-v22, and the Terminal page's own Turn finished the \
+         v22-to-v23 — one key on one day, thirteen times running"
+    );
+    assert!(
+        defaults.turn_end_notification,
+        "the end of a turn reaches the desktop by default, and the quietest of \
+         its three answers is the one that runs most of the time: nothing at all \
+         while the reader is looking at the pane, a flash on a taskbar button \
+         they are not, and a toast only when the window is not on any screen"
     );
     assert!(
         defaults.key_hints,
@@ -2268,5 +2276,72 @@ fn settings_v20_migrates_still_wrapping_and_v21_keeps_a_flattened_pane() {
     let (round_tripped, report) = read_settings(&path);
     assert_eq!(report, ReadReport::Loaded);
     assert_eq!(round_tripped, chosen);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// PIN (`docs/plans/attention/plan.md` §11.7, 2026-08-25) — a v22 settings file migrates to v23
+/// with the turn-end lane **on**, and every older file crosses the whole ladder to the same
+/// answer.
+///
+/// The thirteenth one-key step, landing where the twelfth landed and not where the eleventh did.
+/// The distinction is the one every step in this table is written under: `v20→v21` carried a habit
+/// forward, because every terminal this product ever drew wrapped; this step has no habit to
+/// carry, because until the attention block landed nothing in the product knew a turn had ended.
+/// `false` would freeze an absence rather than preserve a choice, which is
+/// `migrate_settings_v16_to_v17`'s sentence said a fourth time.
+///
+/// The second half is the switch being a switch, and it is the half that would bite. A reader who
+/// turns this off is asking not to be interrupted by a program stopping talking; a `false` that
+/// did not survive the file would flash their taskbar again at the next launch, and they would
+/// find out the way notification settings are always found out to be broken — by being
+/// interrupted.
+///
+/// MUTATION: leave the key out of the migration and **every settings file on every machine that
+/// has ever run this product** falls back to defaults whole (`missing field
+/// turn_end_notification`), which is the same failure the two pins above describe one and two
+/// versions down.
+#[test]
+fn settings_v22_migrates_with_the_turn_end_lane_on_and_v23_keeps_the_silence_it_was_asked_for() {
+    let (migrated, report) = read_settings(&fixture_path("settings_v22_key_hints_off.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(migrated.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(
+        migrated.turn_end_notification,
+        "no build that could write a v22 file had a turn-end lane, so `false` would freeze an \
+         absence rather than preserve a choice"
+    );
+    assert!(
+        !migrated.key_hints,
+        "one key crosses; every sibling crosses untouched"
+    );
+    assert!(!migrated.line_wrapping);
+    assert!(!migrated.terminal_notifications);
+
+    // And the whole ladder, from a file eleven steps down: a step that only worked from its own
+    // immediate predecessor would leave every reader who skipped a release behind.
+    let (from_v11, report) = read_settings(&fixture_path("settings_v11_advanced_open.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(from_v11.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(from_v11.turn_end_notification);
+
+    let quiet = SettingsV1 {
+        turn_end_notification: false,
+        ..SettingsV1::default()
+    };
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-settings-v23-turn-end-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    write_settings_atomic(&path, &quiet).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains(r#""turn_end_notification": false"#),
+        "the answer is written as its own key: {on_disk}"
+    );
+    let (round_tripped, report) = read_settings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, quiet);
     std::fs::remove_dir_all(&dir).unwrap();
 }
