@@ -3535,6 +3535,14 @@ struct PaneMenuState {
     point: [f32; 2],
     /// The pane it is about.
     seat: SeatId,
+    /// **Whether that pane was on the stage alone when the menu came up**
+    /// (§7.1.6l), which is the face the zoom row wears.
+    ///
+    /// A snapshot for `TermMenuState::lone`'s reason (§7.1.6i): a menu that
+    /// re-asked every frame would rewrite its own first row under a hand that is
+    /// already moving toward it. Nothing inside this menu can change the answer
+    /// anyway — the verb that would shuts the menu on its way through.
+    zoomed: bool,
     hover: Option<profiles::PaneMenuHover>,
     /// Whether the `Split with` submenu is up — the house's first child menu.
     submenu_open: bool,
@@ -6336,6 +6344,15 @@ struct WindowRuntime {
     /// preview name is two presses on two things. Sharing one chain would have
     /// made those two open an editor.
     preview_name_clicks: MultiClicks<SeatId>,
+    /// **The pane head's own click pairing** (§7.1.6l), keyed by the seat whose
+    /// head is being pressed.
+    ///
+    /// A fourth chain, on [`Self::preview_name_clicks`]'s argument: a press on a
+    /// tab and then on a pane head is two presses on two things, and a shared
+    /// chain would make that pair zoom a pane. Keyed by the seat and not by a
+    /// pixel neighbourhood, which is this window's rule everywhere — the head a
+    /// divider drag moved between the two clicks is still the same head.
+    pane_head_clicks: MultiClicks<SeatId>,
     /// Which files column has its root menu up (E53-E61).
     root_menu: profiles::RootMenu,
     /// The dirty-buffer gate, when one of the three doors has stopped to ask
@@ -22706,6 +22723,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         tab_clicks: TabClicks::default(),
         files_row_clicks: FilesRowClicks::default(),
         preview_name_clicks: MultiClicks::default(),
+        pane_head_clicks: MultiClicks::default(),
         root_menu: profiles::RootMenu::default(),
         dirty_gate: restore::DirtyGate::default(),
         psreadline_invite: psreadline::Invite::default(),
@@ -46755,7 +46773,7 @@ impl Runtime<'_> {
     /// no re-layout can move or destroy.
     fn pane_menu_layout(&mut self) -> Option<profiles::PaneMenuLayout> {
         let menu = self.window.pane_menu.as_ref()?;
-        let (point, submenu_open) = (menu.point, menu.submenu_open);
+        let (point, submenu_open, zoomed) = (menu.point, menu.submenu_open, menu.zoomed);
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
@@ -46765,6 +46783,7 @@ impl Runtime<'_> {
             (width as f32, height as f32),
             scale,
             submenu_open,
+            zoomed,
             &mut measure,
         ))
     }
@@ -46786,6 +46805,7 @@ impl Runtime<'_> {
         self.window.pane_menu = Some(PaneMenuState {
             point,
             seat,
+            zoomed: self.seats.seat_is_zoomed(seat),
             hover: None,
             submenu_open: false,
             pointer_was: None,
@@ -48103,6 +48123,9 @@ impl Runtime<'_> {
                 // so the match is exhaustive over a closed set rather than over
                 // a wildcard that would silently swallow a row added later.
                 profiles::PaneMenuRow::Picker | profiles::PaneMenuRow::SplitWith => Ok(()),
+                // §7.1.6l — the row and the double-click on the head are one
+                // verb behind two doors, which is what `run_pane_verb` is for.
+                profiles::PaneMenuRow::ZoomPane => self.toggle_pane_zoom(seat),
                 profiles::PaneMenuRow::NewInFolder => {
                     self.browse_for_split_root(seat);
                     Ok(())
@@ -48133,6 +48156,42 @@ impl Runtime<'_> {
             // which `press_pane_menu` already decided; nothing to run.
             profiles::PaneMenuHit::Surface => Ok(()),
         }
+    }
+
+    /// **§7.1.6l — this pane alone on the stage, or back to the tiling.**
+    ///
+    /// One implementation behind both doors, which is §7.1.6e's rule and the
+    /// reason the double-click and the menu row both land here rather than each
+    /// doing their own version of it.
+    ///
+    /// The whole verb is a field and a re-solve. There is no restore path
+    /// because nothing was taken apart: `Seats::solve` asks the solver for
+    /// `LayoutMode::Focus` while the field is set, red line L13 leaves the tree
+    /// alone, and clearing the field puts the tiling back because the tiling
+    /// never went anywhere.
+    ///
+    /// `commit_seat_geometry` is the same one every layout-mutating path in this
+    /// file converges on, so the panes that are no longer presented stop being
+    /// asked for rectangles, the one that is gets ConPTY's resize, and the FLIP
+    /// stays out of it — a zoom bumps no structure revision, and a posture
+    /// changing is not a pane arriving.
+    ///
+    /// The window minimum is re-asked for the ordinary reason: it is the
+    /// technical floor and the same for every tree (user ruling 2026-08-08), so
+    /// this call cannot change it — and it is made anyway, beside its two
+    /// siblings in the collapsed-bar arm and in `set_focus`'s, because a caller
+    /// that skips it because it happens to know the answer is a caller that will
+    /// be wrong the day the answer changes.
+    fn toggle_pane_zoom(&mut self, seat: SeatId) -> Result<()> {
+        if !self.seats.toggle_zoom(seat) {
+            return Ok(());
+        }
+        self.apply_window_min_inner_size()?;
+        self.commit_seat_geometry()?;
+        // The posture is not on disk (§7.1.6l) and nothing else about this tab
+        // moved, so there is deliberately no `mark_session_dirty` here: a zoom
+        // is not a change to the layout the session remembers.
+        Ok(())
     }
 
     /// **The axis a split with no direction of its own takes** (user ruling,
@@ -55701,6 +55760,27 @@ impl Runtime<'_> {
         position: PhysicalPosition<f64>,
         home: Option<[f32; 4]>,
     ) -> Result<()> {
+        // **A zoomed tab lets the zoom go the moment anything is picked up**
+        // (§7.1.6l), before the first landing is offered.
+        //
+        // The rule zoom lives under is that any verb which changes the tree lets
+        // it go, and a drag is the gesture that *aims* at the tree before it
+        // changes it: every landing this window offers — an edge of a pane, a
+        // rim, a centre to swap with, a preview to open a file into — is a place
+        // on a picture a zoomed stage is not showing. Beginning a drag over one
+        // pane would ask the hand to aim at panes it cannot see, and the drop
+        // preview is computed by the very `solve` the frame ran (M155/D4), so it
+        // would be drawn from a tiling nobody is looking at.
+        //
+        // Here rather than in `begin_pane_drag`, because it is true of every
+        // source alike — a tab, a files row and a pane all land in this tree —
+        // and this is the one function all of them pass through. A drag that
+        // arrives from *another* window needs no counterpart: §7.1.6k lands a
+        // foreign pane on this window's tab strip, not in this tab's tree, so
+        // there is nothing to aim at here for it to be unable to see.
+        if let Some(stage) = self.seats.zoom() {
+            self.toggle_pane_zoom(stage)?;
+        }
         // `hidePeek()` is the first line of `startDrag` (6482), and L135 is why:
         // a schematic left hanging under a thing that is now moving would be
         // describing where that thing used to be.
@@ -57587,6 +57667,10 @@ impl Runtime<'_> {
             // Ahead of the press: a gesture that has become a drag answers with
             // its drop, and the press that started it is no longer a click.
             if self.release_drag()? {
+                // A press that travelled is not half of a double click, and a
+                // pane drag starts on the very head the zoom gesture lives on
+                // (J99's rule, at this window's other double-click surface).
+                self.window.pane_head_clicks.interrupt();
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-drag-drop state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
             }
@@ -57606,24 +57690,43 @@ impl Runtime<'_> {
             // A pane press that never travelled has nothing to settle: D40 moved
             // the focus on the way down and that is all a press on a head has
             // ever meant. Dropping it is the whole of letting go.
-            let held_pane =
-                self.window.pane_press.take().is_some() | self.window.row_press.take().is_some();
-            // **A double-click on a pane head does nothing, and that is a
-            // decision** (user ruling 2026-08-19, withdrawing §7.1.6b′ ③).
+            let pane_press = self.window.pane_press.take();
+            let held_pane = pane_press.is_some() | self.window.row_press.take().is_some();
+            // **A double-click on a pane head zooms it, and lets it go again**
+            // (§7.1.6l, 2026-08-24). This is the seat §7.1.6b′ kept warm.
             //
-            // It carried focus mode for one day. The argument against it: the
-            // gesture reads as "make this pane bigger" — that is what a
-            // double-click on a title bar means everywhere in this operating
-            // system — while focus mode makes the pane *smaller* and puts a
-            // column of tabs beside it. A gesture that does the opposite of what
-            // its shape promises is worse than no gesture, and worse still when
-            // nothing on screen says it exists.
+            // The gesture carried focus mode for one day and was withdrawn on
+            // 2026-08-19, on an argument that named its rightful owner in the
+            // same breath: a double-click on a title bar means "make this thing
+            // bigger" everywhere in this operating system, focus mode made the
+            // pane *smaller*, and single-pane zoom is the verb whose shape this
+            // is. So the gesture was left empty rather than repurposed, and the
+            // layout primitives it needed (`bt-layout`'s `LayoutMode::Focus` /
+            // `solve_focused`) were kept unused for exactly this.
             //
-            // **The gesture is left free on purpose**: single-pane zoom is the
-            // verb whose shape it is, and that feature already has its layout
-            // primitives waiting for it (`bt-layout`'s `LayoutMode::Focus` /
-            // `solve_focused`, kept unused for exactly this). When it lands, this
-            // is where it goes.
+            // **Both clicks must land on the same pane's head**, and the pairing
+            // is keyed by the seat rather than by a pixel neighbourhood, which is
+            // this window's rule at its three other double-click surfaces: the
+            // head a re-solve moved between the two clicks is still the same
+            // head. A release on anything else breaks the chain (J99), which is
+            // the `else` below and not a list of interrupts sprinkled through
+            // the press arms — one place decides, so one place can be wrong.
+            let doubled = match (pane_press, target) {
+                (Some(press), Some(seats::ChromeTarget::PaneHeader(seat)))
+                    if seat == press.seat =>
+                {
+                    self.window.pane_head_clicks.register(seat, Instant::now()) == TabClick::Double
+                }
+                _ => {
+                    self.window.pane_head_clicks.interrupt();
+                    false
+                }
+            };
+            if doubled && let Some(press) = pane_press {
+                self.toggle_pane_zoom(press.seat)?;
+                self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-pane-head-zoom state={state:?} button={button:?} target={traced_target:?}"));
+                return Ok(true);
+            }
             if let Some(press) = self.window.tab_press.take() {
                 self.release_tab_press(press, target)?;
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=release-tab-press state={state:?} button={button:?} target={traced_target:?}"));
@@ -64494,7 +64597,9 @@ mod mouse_trace_station_tests {
     /// names a place to look.
     #[test]
     fn every_chrome_exit_that_takes_the_event_writes_a_line() {
-        assert_every_return_is_traced("    fn chrome_mouse_input(", "return Ok(true);", 20);
+        // 20 → 21 on 2026-08-24: §7.1.6l gave the pane head's double click a verb
+        // and therefore an exit of its own (`at=release-pane-head-zoom`).
+        assert_every_return_is_traced("    fn chrome_mouse_input(", "return Ok(true);", 21);
     }
 
     /// Both `None`s here are silent by construction — the callers turn them into
@@ -69757,10 +69862,27 @@ fn solve_seats(
         Ok(layout) => (layout, None),
         Err(_) => seats::fit_what_fits(seats, viewport, &metrics),
     };
+    // **The focused seat's body, which is what the renderer keeps this for.**
+    //
+    // `bt_render`'s own `self.seat` says so twice — "outside this function
+    // `self.seat` names the focused seat" — and every seat-relative helper
+    // reached from outside a frame means that one by it: the IME candidate
+    // window's exclusion rectangle, a band's right edge, the pane bottom the
+    // search capsule and the command rail stand on.
+    //
+    // **It was `identity()` until §7.1.6l**, which is a different question — the
+    // seat this *tab* is named and reopened by — and the two came apart the day
+    // a tab could hold two shells. Zoom is what made the gap impossible to leave
+    // alone: a tab whose identity pane is off the stage has no rectangle for it
+    // at all, so the answer fell through to the whole window and the candidate
+    // list would have opened at the window's own corner. The focus is always
+    // presented — `Seats::toggle_zoom` takes it to the stage for exactly this
+    // reason — so this arm is total in the posture that exposed it, and it is
+    // the right answer in the tiled one too.
     let terminal = seats::pane_body_viewport(
         seats,
         &layout,
-        seats.identity(),
+        seats.focus(),
         renderer.metrics().scale_factor as f32,
     )
     .unwrap_or(SeatViewport::whole(

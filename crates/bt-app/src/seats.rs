@@ -342,6 +342,24 @@ pub struct Seats {
     /// reason `focus` is: it is bt-app's answer about bt-app's panes, and L1
     /// keeps the *tree* ignorant of what runs inside a seat, not this struct.
     notices: std::collections::BTreeSet<SeatId>,
+    /// **Which seat is on the stage alone** (§7.1.6l, single-pane zoom), or
+    /// `None` for the ordinary tiled posture.
+    ///
+    /// A *viewport* posture and not a fact about the tree: it is the argument
+    /// [`bt_layout::LayoutMode::Focus`] takes, and the solver's red line L13
+    /// keeps the tree untouched while it is set. So there is no "restore the
+    /// layout" code anywhere — clearing this field is the whole of leaving,
+    /// because entering moved nothing.
+    ///
+    /// It lives here rather than beside `focus_mode` on the window for the
+    /// reason `focus` does: a zoom belongs to one tab's tree, travels with that
+    /// tab between windows, and two tabs may not share one answer.
+    ///
+    /// **Not persisted** (§7.1.6l): a temporary posture of the eye, not a
+    /// layout the user built. A session restored zoomed would reopen hiding
+    /// panes nobody asked it to hide, and the tree it hid them from is on disk
+    /// intact — so the honest restore is the tiling.
+    zoom: Option<SeatId>,
 }
 
 impl Seats {
@@ -400,6 +418,9 @@ impl Seats {
                 // laid out for; a tree that has just been stood up has no leaf
                 // that has spoken yet.
                 notices: std::collections::BTreeSet::new(),
+                // A tree of one seat has nothing to put away: the pane is the
+                // stage already (§7.1.6l).
+                zoom: None,
             },
             id,
         )
@@ -441,6 +462,84 @@ impl Seats {
     /// in this universe is not a case anyone has to write.
     pub fn structure_revision(&self) -> u64 {
         self.structure_revision
+    }
+
+    /// **A leaf arrived, left or changed places** — the one seam every verb in
+    /// this file that changes the shape goes through.
+    ///
+    /// Two things ride on it, and they ride on it *together* on purpose. The
+    /// counter is [`Self::structure_revision`], the pane FLIP's gate. The
+    /// release is §7.1.6l's ruling: **any verb that changes the tree lets the
+    /// zoom go.** Both answer the same question — "are these the same panes in
+    /// the same places?" — and asking it once is what stops a verb from arriving
+    /// that bumps the counter and forgets the posture, which on screen is a tab
+    /// still hiding panes that are no longer the panes it hid.
+    ///
+    /// A divider drag, a focus move, a DPI change and a window resize are
+    /// deliberately not here: none of them changes which panes exist, so none of
+    /// them animates and none of them ends a zoom.
+    fn note_structure_change(&mut self) {
+        self.structure_revision += 1;
+        self.zoom = None;
+    }
+
+    /// **Which seat is alone on the stage** (§7.1.6l), or `None` when this tab
+    /// is tiled.
+    ///
+    /// Read by the pins that hold the posture; the window itself only ever has
+    /// one seat in hand and asks [`Self::seat_is_zoomed`] about that one. It is
+    /// [`crate::profiles::PaneMenuLayout::item`]'s arrangement and it is here
+    /// for that function's reason: the question "which one" has exactly one
+    /// honest answer and it is this field, so a test that reached for
+    /// `seat_is_zoomed` in a loop would be re-deriving it.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn zoom(&self) -> Option<SeatId> {
+        self.zoom
+    }
+
+    /// Whether this one seat is the zoomed one — the question the head, the menu
+    /// and the double-click each ask about the pane in front of them.
+    #[must_use]
+    pub fn seat_is_zoomed(&self, seat: SeatId) -> bool {
+        self.zoom == Some(seat)
+    }
+
+    /// **Zoom this pane, or let it go if it is already the one on the stage**
+    /// (§7.1.6l). Answers whether anything changed.
+    ///
+    /// One verb for both directions, because the gesture is one: the second
+    /// double-click on a head is the same double-click as the first, and a
+    /// caller that had to know which way it was going would be a second place
+    /// holding the state this field already holds.
+    ///
+    /// **Refused on a tab with one pane**, and that is the honest answer rather
+    /// than a guard: a lone pane already owns the whole stage, so there is
+    /// nothing for the verb to put away and nothing on screen would change. The
+    /// two doors are shut in front of it for the same reason — a lone pane wears
+    /// no head to double-click (§7.1.6i) and its right-click segment carries no
+    /// zoom row — so this is the floor under those, not a duplicate of them.
+    ///
+    /// It never touches the tree. That is not restraint, it is the whole
+    /// mechanism: `bt-layout`'s red line L13 says the stage owns the viewport
+    /// and the tree is left exactly as it was, so leaving the zoom is a field
+    /// going back to `None` and the tiling that returns is the one that was
+    /// never taken apart.
+    /// **Zooming takes the focus with it**, and that is not a courtesy: the
+    /// focus is where typing goes, and a window with one pane on screen and the
+    /// focus on a pane nobody can see is a window eating keystrokes. Leaving
+    /// gives nothing back — the pane you were looking at is the pane you were
+    /// looking at — so there is no remembered focus anywhere and nothing to
+    /// restore.
+    pub fn toggle_zoom(&mut self, seat: SeatId) -> bool {
+        if self.pane_count() < 2 || self.tree.find_seat(seat).is_none() {
+            return false;
+        }
+        self.zoom = (self.zoom != Some(seat)).then_some(seat);
+        if self.zoom.is_some() {
+            self.focus = seat;
+        }
+        true
     }
 
     /// **The seat this tab is named and reopened by** (§7.1.6h).
@@ -537,7 +636,7 @@ impl Seats {
                 self.next_seat += 1;
                 self.next_split += 1;
                 // A leaf arrived: the shape changed (U8).
-                self.structure_revision += 1;
+                self.note_structure_change();
                 Some(arriving)
             }
             Err(_) => None,
@@ -803,7 +902,7 @@ impl Seats {
         self.next_split += 1;
         // A leaf arrived — the preview is a pane like any other, and the terminal
         // beside it narrows to make room (U8).
-        self.structure_revision += 1;
+        self.note_structure_change();
         Some(id)
     }
 
@@ -856,7 +955,7 @@ impl Seats {
                 self.next_seat += 1;
                 self.next_split += 1;
                 // A leaf arrived and every pane beside it narrowed (U8).
-                self.structure_revision += 1;
+                self.note_structure_change();
                 Some(id)
             }
             Err(_) => None,
@@ -999,7 +1098,7 @@ impl Seats {
         // One leaf for another: no rectangle moved, and the same argument
         // `CenterSwap` is counted under applies — the *set* of panes changed, and
         // everything keyed on which seats exist has to be re-asked.
-        self.structure_revision += 1;
+        self.note_structure_change();
         Some(id)
     }
 
@@ -1018,7 +1117,7 @@ impl Seats {
                 // This is also the tear-out's own bump: `tear_out` computes the
                 // staying tree without mutating anything, and the gesture's
                 // commit installs it by calling exactly this verb.
-                self.structure_revision += 1;
+                self.note_structure_change();
                 // `identity` names a seat that has to still exist: it is what
                 // focus falls back to, and what a caller with no seat in hand
                 // asks for. Closing the one it named re-asks [`identity_seat`] of
@@ -1076,6 +1175,19 @@ impl Seats {
     /// the user is dragging *and* into a hypothetical rectangle a drop is being
     /// judged against, sometimes in the same frame, and those two want opposite
     /// answers.
+    /// **§7.1.6l — the zoom is a mode this call is made in, and nothing else.**
+    ///
+    /// The whole of single-pane zoom on this side of the seam: the field picks
+    /// which attention the one solver is asked for. There is no second geometry,
+    /// no branch in the painter and no restore path, because [`LayoutMode`] is a
+    /// *constraint* on the same formulas rather than a second set of them
+    /// (`M2-layout-solver-spec.md` §3.5, user ruling 2026-08-03).
+    ///
+    /// `focus` travels even in `Focus` mode. The solver takes both and uses the
+    /// one its mode calls for — the stage for the rectangles, the focus for the
+    /// concession ladder it does not run here — and handing it a `focus` that
+    /// meant something else while zoomed would be this window telling the solver
+    /// a different story in each posture.
     pub fn solve(
         &self,
         viewport: LogicalRect,
@@ -1087,7 +1199,10 @@ impl Seats {
             viewport,
             metrics,
             self.focus,
-            LayoutMode::Parallel,
+            match self.zoom {
+                Some(stage) => LayoutMode::Focus { stage },
+                None => LayoutMode::Parallel,
+            },
             policy,
         )
     }
@@ -1388,7 +1503,7 @@ impl Seats {
         // The last of those moves no rectangle, and it is counted anyway — see
         // [`Self::structure_revision`] for why that is the rule working rather
         // than the rule being wrong.
-        self.structure_revision += 1;
+        self.note_structure_change();
         Some(focus)
     }
 
@@ -5210,6 +5325,58 @@ pub fn pane_ghost_geometry(rect: [f32; 4], scale: f32) -> Option<[f32; 4]> {
     (left > rect[0] && bottom <= rect[3]).then_some([left, top, right, bottom])
 }
 
+/// The zoom state mark's own box, in physical pixels — 13 logical, the size the
+/// seat marks beside it are cut at.
+pub const PANE_ZOOM_MARK_LOGICAL_PX: f32 = 13.0;
+
+/// Where the zoom mark stands in a head, or `None` when the head has no room for
+/// it (§7.1.6l).
+///
+/// **Second in the leading run**, taking its box off the seat's own mark and
+/// leaving the head's `gap: 7px` between the two, so the run reads left to right
+/// as *this kind of pane, zoomed, called this*. It is derived from
+/// [`PaneHeadGeometry`] rather than recomputed from the rectangle for
+/// [`pane_ghost_geometry`]'s reason: the mark the painter draws and the box the
+/// title has to start after are one derivation, so the name cannot come to
+/// overlap the mark at the one fractional scale nobody tested.
+///
+/// `None` when it would run into the trailing run's own space, on the rule every
+/// control in this head keeps: a mark half under the `×` is worse than no mark,
+/// and the pane is still legibly zoomed from the fact that it is the only pane
+/// on the stage plus the menu row that says `Restore pane`.
+#[must_use]
+pub fn pane_zoom_mark_box(head: &PaneHeadGeometry, scale: f32) -> Option<[f32; 4]> {
+    let size = (PANE_ZOOM_MARK_LOGICAL_PX * scale).round().max(1.0);
+    let left = (head.mark[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale).round();
+    let top = ((head.mark[1] + head.mark[3] - size) / 2.0).round();
+    let right = left + size;
+    (right <= head.title[2]).then_some([left, top, right, top + size])
+}
+
+/// Where the name starts in a head that may be wearing the zoom mark.
+///
+/// One function so the mark's box and the title's left edge are one number: a
+/// label laid out as if the mark were not there would print the pane's name
+/// through it.
+#[must_use]
+pub fn pane_title_box(
+    head: &PaneHeadGeometry,
+    zoom_mark: Option<[f32; 4]>,
+    scale: f32,
+) -> [f32; 4] {
+    match zoom_mark {
+        None => head.title,
+        Some(mark) => [
+            (mark[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale)
+                .round()
+                .min(head.title[2]),
+            head.title[1],
+            head.title[2],
+            head.title[3],
+        ],
+    }
+}
+
 /// Where everything inside one pane head stands, in physical pixels.
 ///
 /// One function answers this for the hit test and for the drawing both, which is
@@ -7084,6 +7251,38 @@ pub fn build_chrome_for_tabs(
                         PANE_MARK_UNFOCUSED_OPACITY
                     },
                 ));
+                // **§7.1.6l — the head says the pane is on the stage alone.**
+                //
+                // A zoom hides panes, and a state that hides things without
+                // saying so is the one thing this window is not allowed to do:
+                // the reader has to be able to tell a zoomed split from a tab
+                // that only ever had one pane in it, and off the glass those two
+                // are the same picture.
+                //
+                // **In the leading run, not the trailing one**, which is this
+                // head's own grammar: the left of a head is what the pane *is*
+                // (its kind's mark, its name) and the right is what can be *done*
+                // to it (`⌄ 🗀 ×`). This is a state, so it stands with the
+                // identity — and it is deliberately not a button, because the
+                // verb already has its two doors (the double-click on this head
+                // and the row in the menu that `⌄` opens) and a third would be a
+                // third place to keep in step.
+                //
+                // In `accent` and at full ink in both focus states: it is not
+                // furniture, it is the answer to "why can I only see one pane",
+                // and D38's rule that focus must not move a hue is about the
+                // *kind* mark beside it, which goes on obeying it.
+                let zoom_mark = seats
+                    .seat_is_zoomed(placement.id)
+                    .then(|| pane_zoom_mark_box(&head, scale))
+                    .flatten();
+                if let Some(box_) = zoom_mark {
+                    pane_sprites.push(ChromeSprite::new(
+                        ChromeMark::PaneZoom { zoomed: true },
+                        box_,
+                        palette.accent,
+                    ));
+                }
                 // B15/B16 — a files head's name is a button, and the chevron
                 // beside it is the whole of what says so. The fill only appears
                 // under the pointer or while the menu it opens is up, so a head
@@ -7180,18 +7379,25 @@ pub fn build_chrome_for_tabs(
                         // around it: the label starts where it always did, and
                         // what changed is that it now has to stop before the
                         // chevron rather than before the `×`.
-                        rect: match root_button {
-                            Some(button) => [
-                                head.title[0],
-                                head.title[1],
-                                (button[2]
-                                    - FILES_ROOT_BUTTON_INSET_LOGICAL_PX * scale
-                                    - (FILES_ROOT_CHEVRON_WIDTH_LOGICAL_PX * scale).round()
-                                    - FILES_ROOT_BUTTON_GAP_LOGICAL_PX * scale)
-                                    .max(head.title[0]),
-                                head.title[3],
-                            ],
-                            None => head.title,
+                        rect: {
+                            // The name starts after the zoom mark when there is
+                            // one (§7.1.6l) and where it always did when there
+                            // is not, and *then* the files head's own button
+                            // takes its bite out of the right end.
+                            let title = pane_title_box(&head, zoom_mark, scale);
+                            match root_button {
+                                Some(button) => [
+                                    title[0],
+                                    title[1],
+                                    (button[2]
+                                        - FILES_ROOT_BUTTON_INSET_LOGICAL_PX * scale
+                                        - (FILES_ROOT_CHEVRON_WIDTH_LOGICAL_PX * scale).round()
+                                        - FILES_ROOT_BUTTON_GAP_LOGICAL_PX * scale)
+                                        .max(title[0]),
+                                    title[3],
+                                ],
+                                None => title,
+                            }
                         },
                         font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
                         // `.pane.focused .panehead { color: var(--ink); font-weight: 500 }`
@@ -15700,6 +15906,8 @@ impl Seats {
             next_split,
             structure_revision: 0,
             notices: std::collections::BTreeSet::new(),
+            // §7.1.6l: the posture is not on disk, so a restored tab is tiled.
+            zoom: None,
         }
     }
 }
@@ -18223,6 +18431,152 @@ mod tests {",
             seats
                 .solve(hopeless, &metrics, SizePolicy::Sovereign)
                 .is_ok()
+        );
+    }
+
+    /// **§7.1.6l — zoom is a viewport posture, not tree surgery.**
+    ///
+    /// The stage owns the whole viewport, every sibling keeps its place in the
+    /// tree and is simply not presented, and the ratios come back bit-identical
+    /// on the way out. That last equality is the whole ruling stated as a test:
+    /// leaving the parallel layout exactly as it was is not a feature that had
+    /// to be written, it is what happens when nothing is done (red line L13).
+    ///
+    /// Red gate: make `Seats::zoom_pane` touch the tree — a `close_seat` of the
+    /// siblings, say — and the `assert_eq!(after, before)` at the end goes red
+    /// while every rectangle above it still looks right.
+    #[test]
+    fn a_zoomed_pane_owns_the_stage_and_lets_it_go_without_rewriting_a_ratio() {
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1600, 900, 1_000);
+        let mut seats = Seats::lone_terminal();
+        let first = seats.identity();
+        let second = seats
+            .split_terminal(&metrics, first, Axis::Row, false)
+            .expect("a terminal leaf splits");
+        let before = solved(&seats, viewport, &metrics);
+        let tree_before = seats.tree().clone();
+
+        assert!(seats.toggle_zoom(second), "a pane with a sibling zooms");
+        assert_eq!(seats.zoom(), Some(second));
+        assert_eq!(
+            seats.focus(),
+            second,
+            "the stage takes the focus, or typing goes to a pane nobody can see"
+        );
+        let staged = solved(&seats, viewport, &metrics);
+        assert_eq!(
+            staged.get(second).unwrap().rect,
+            Some(viewport),
+            "the stage is the whole viewport"
+        );
+        assert!(
+            staged.get(first).unwrap().rect.is_none(),
+            "a sibling off the stage is not presented"
+        );
+        assert_eq!(
+            staged.rects.len(),
+            2,
+            "every seat keeps its place in the tree"
+        );
+        assert_eq!(
+            seats.tree(),
+            &tree_before,
+            "zoom is a viewport posture and touches no node"
+        );
+
+        assert!(seats.toggle_zoom(second), "the same gesture lets it go");
+        assert_eq!(seats.zoom(), None);
+        let after = solved(&seats, viewport, &metrics);
+        assert_eq!(after, before, "the parallel layout comes back untouched");
+    }
+
+    /// **A zoomed pane keeps its head**, which is what makes both of the verb's
+    /// doors survive the zoom: the double-click lands on the head, and the `⌄`
+    /// in it opens the menu that carries the way out.
+    ///
+    /// The head is a fact about the *tree* (`pane_count() > 1`), and zoom does
+    /// not touch the tree — so this holds by construction rather than by a
+    /// branch. Red gate: make `seat_wears_head` count presented seats instead of
+    /// leaves and a zoomed pane loses its head, its menu and its way back.
+    #[test]
+    fn a_zoomed_pane_still_wears_the_head_both_of_its_doors_hang_off() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        let first = seats.identity();
+        let second = seats
+            .split_terminal(&metrics, first, Axis::Row, false)
+            .expect("a terminal leaf splits");
+        assert!(seats.toggle_zoom(second));
+        assert!(
+            seats.seat_wears_head(SeatKind::Terminal),
+            "the stage still has a head to double-click"
+        );
+        assert!(
+            !seats.seat_wears_ghost(SeatKind::Terminal, second, None),
+            "and therefore no corner ghost — the `⌄` is in the head"
+        );
+    }
+
+    /// **Any verb that changes the tree lets the zoom go** (§7.1.6l), and it is
+    /// one rule in one place: the release rides on the same structural bump the
+    /// pane FLIP rides on, so a verb cannot arrive that changes the shape and
+    /// forgets to say so.
+    ///
+    /// Red gate: bump `structure_revision` by hand in any of those verbs instead
+    /// of going through `note_structure_change`, and the arm that verb belongs
+    /// to goes red.
+    #[test]
+    fn every_verb_that_changes_the_tree_lets_the_zoom_go() {
+        let metrics = seat_metrics(1_000);
+        let fresh = || {
+            let mut seats = Seats::lone_terminal();
+            let first = seats.identity();
+            let second = seats
+                .split_terminal(&metrics, first, Axis::Row, false)
+                .expect("a terminal leaf splits");
+            assert!(seats.toggle_zoom(second));
+            (seats, first, second)
+        };
+
+        let (mut seats, _, stage) = fresh();
+        seats
+            .split_terminal(&metrics, stage, Axis::Row, false)
+            .expect("the stage splits");
+        assert_eq!(seats.zoom(), None, "a split let the zoom go");
+
+        let (mut seats, sibling, _) = fresh();
+        assert!(seats.close_seat(&metrics, sibling));
+        assert_eq!(seats.zoom(), None, "a close let the zoom go");
+
+        let (mut seats, _, _) = fresh();
+        seats.add_preview(&metrics).expect("the preview seat lands");
+        assert_eq!(seats.zoom(), None, "an arriving preview let the zoom go");
+
+        // A divider drag is *not* in that set, and must not be: it steers a ratio
+        // and changes no pane's existence. It is also the one verb a zoomed tab
+        // cannot be asked for from the glass — there is no divider on screen —
+        // which is why it is asked for here directly.
+        let (mut seats, _, stage) = fresh();
+        let viewport = viewport_of(1600, 900, 1_000);
+        let tiled = solve(
+            seats.tree(),
+            viewport,
+            &metrics,
+            seats.focus(),
+            LayoutMode::Parallel,
+            SizePolicy::Lawful,
+        )
+        .expect("the tiled tree fits");
+        let slot = seats.split_slots(&tiled)[0];
+        let (requested, usable) = requested_ratio(slot, 1_000_000, 120.0).unwrap();
+        seats
+            .drag_divider(&metrics, slot.id, requested, usable)
+            .expect("the drag is feasible");
+        assert_eq!(
+            seats.zoom(),
+            Some(stage),
+            "steering a ratio is not a change of shape"
         );
     }
 
@@ -26486,6 +26840,7 @@ mod tests {",
             next_split: count,
             structure_revision: 0,
             notices: std::collections::BTreeSet::new(),
+            zoom: None,
         }
     }
 
@@ -27194,6 +27549,7 @@ mod tests {",
             next_split: 1,
             structure_revision: 0,
             notices: std::collections::BTreeSet::new(),
+            zoom: None,
         };
         let lone_layout = solved(&lone, viewport_of(1600, 900, 1_000), &metrics);
         let lone_parts = chrome_of(&lone, &lone_layout, None);
@@ -34636,6 +34992,7 @@ mod drop_plan_tests {
         Seats {
             structure_revision: 0,
             notices: std::collections::BTreeSet::new(),
+            zoom: None,
             identity: SeatId(1),
             focus: SeatId(1),
             tree,

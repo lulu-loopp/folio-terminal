@@ -4244,6 +4244,28 @@
     <rect x="3.1" y="7.2" width="9.8" height="6.6" rx="1.6" fill="currentColor"/>
   </symbol>
 
+  <!-- SINGLE-PANE ZOOM (§7.1.6l). The pair every media player and every code
+       editor on this desktop already teaches: four corner brackets thrown OUT
+       to the frame is "fill it", the same four pulled IN is "come back".
+       WHY A PAIR AND NOT ONE GLYPH TURNED: the difference has to be a
+       DIRECTION, not an angle — §7.1.6e's own rule about three triangles
+       differing by where a line falls. Where the corner points is the whole
+       drawing here, and it points opposite ways in the two.
+       ONE ARM LENGTH AND ONE STROKE IN BOTH, so the pair reads as one
+       instrument in two states rather than as two marks that mean nearby
+       things. Stroke 1.25, the lock's own weight, because these are read in
+       the same menu column at the same size. -->
+  <symbol id="i-zoom-in" viewBox="0 0 16 16">
+    <path d="M2.2 6.6V2.2h4.4M9.4 2.2h4.4v4.4M13.8 9.4v4.4H9.4M6.6 13.8H2.2V9.4"
+          fill="none" stroke="currentColor" stroke-width="1.25"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-zoom-out" viewBox="0 0 16 16">
+    <path d="M6.2 2.6v3.6H2.6M9.8 2.6v3.6h3.6M13.4 9.8H9.8v3.6M2.6 9.8h3.6v3.6"
+          fill="none" stroke="currentColor" stroke-width="1.25"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+
   <!-- App mark. 【未决】placeholder, and the tension is worth stating rather
        than burying: the chevron-and-line is THE terminal idiom, instantly read,
        and every terminal on the taskbar wears some version of it — but §1.0

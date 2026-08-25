@@ -1549,6 +1549,21 @@ pub enum Text {
     /// on the glass, and this one is answerable for there being a field at all.
     /// The verb is the difference, so the verb is the word that separates them.
     ShortcutWindowAddress,
+    // ── single-pane zoom (§7.1.6l, Claude 定 2026-08-24) ────────────────────
+    //
+    // One contiguous block at the end, per this table's standing rule. Two
+    // entries, and two rather than one for `PreviewLock`/`PreviewUnlock`'s
+    // reason: the row is a toggle, so it says one thing over a tiled pane and
+    // another over the one on the stage, and a single string would be the menu
+    // describing what the pane was a press ago.
+    /// **The pane menu's zoom row while this tab is tiled** — the action.
+    PaneMenuZoom,
+    /// **The same row while this pane is the stage** — the state's way out.
+    ///
+    /// `Restore` and not `Unzoom`: the word names what comes back, which is the
+    /// other panes, and it is the word this operating system has used for the
+    /// window button that undoes a maximize for thirty years.
+    PaneMenuRestore,
 }
 
 impl Text {
@@ -2584,6 +2599,15 @@ impl Text {
             // `ShortcutWebAddress` two lines above it on the same page.
             Self::ShortcutWindowAddress => pick(lang, "Open address", "打开地址"),
 
+            // ── single-pane zoom (§7.1.6l) ─────────────────────────────────
+            //
+            // Both say what the press does and stop, per the copy ruling of
+            // 2026-08-17: no first person, no advice, no explaining that the
+            // other panes are still there — the tree is not a thing this window
+            // has to reassure anybody about.
+            Self::PaneMenuZoom => pick(lang, "Zoom pane", "放大窗格"),
+            Self::PaneMenuRestore => pick(lang, "Restore pane", "还原窗格"),
+
             Self::GitDocumentEmpty => pick(lang, "No changes to show", "没有可显示的改动"),
 
             // ── a drag's landing caption ───────────────────────────────────
@@ -2802,7 +2826,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 457] = [
+    pub const ALL: [Self; 459] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3260,6 +3284,8 @@ impl Text {
         Self::MoveRefusedAlreadyThere,
         Self::MoveRefusedPaneIsNowATab,
         Self::ShortcutWindowAddress,
+        Self::PaneMenuZoom,
+        Self::PaneMenuRestore,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
