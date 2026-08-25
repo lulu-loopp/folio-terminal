@@ -1946,6 +1946,52 @@ impl DualPlaneSession {
         self.path_verdicts.get(path) == Some(&true)
     }
 
+    /// **Forget every "no" in this pane's ledger** (user ruling 2026-08-25, §7.1.5k 丙).
+    ///
+    /// A "no" used to be permanent, and that was the 2026-08-23 budget ruling doing exactly what it
+    /// was for: a name the disk denied is never asked about again, which is what keeps a repainting
+    /// screen's bounded question budget for the names that need it. The cost was photographed two
+    /// days later. Any program that prints where it is **about** to write — a build, an installer,
+    /// a `cp`, `--print-to-pdf="D:\…\folio-pdf-test.pdf"` — gets its own path asked about while the
+    /// file is still being made, and the `no` then outlives the file's arrival: the finished file
+    /// sits on screen, real on disk, and permanently unlinked in the pane that watched it appear.
+    ///
+    /// **The boundary is a command, not a clock and not a frame.** What has to be true for a "no"
+    /// to have gone stale is that the disk may have changed, and the one thing this window knows
+    /// about that is which of its commands have ended: `OSC 133 D` on the primary screen is the
+    /// shell saying *the thing you were running is over*. So a verdict is re-asked once per
+    /// command rather than once per frame — which is the difference between one question per
+    /// printed name per command and one per name per 16 milliseconds, and is why the three budgets
+    /// (256 a pass, 512 queued, 4096 remembered) are untouched by this: the steady state of a
+    /// screen nobody is running anything in is still free.
+    ///
+    /// **Only the "no"s.** A "yes" is not re-asked, because a file that has been seen once is
+    /// linked and a link that turns out to be gone is answered by the click's own re-check (that
+    /// is 丁, and it lives in the five-armed router). Re-asking the yeses would double the traffic
+    /// to buy nothing.
+    ///
+    /// **A pane with no shell integration keeps its "no"s for ever, and that is on purpose**
+    /// (§7.1.5b's degraded path). A root process that does not report its commands never tells this
+    /// window a command ended, and the honest substitutes are all worse than the limitation: a
+    /// timer would re-ask a screenful of dead names on a pane nobody is touching, and inferring a
+    /// boundary from the shape of the output is a guess that fires in the middle of a build as
+    /// readily as at the end of one. So such a pane behaves exactly as every pane did before this
+    /// ruling, and the way out of it is shell integration — which is the same answer §7.1.5b gives
+    /// for busy detection, for the same reason.
+    ///
+    /// Answers `true` when something actually left, so the caller can skip the rebuild on the
+    /// commands — the great majority — that denied nothing.
+    fn expire_denied_paths(&mut self) -> bool {
+        if !self.path_verdicts.values().any(|exists| !exists) {
+            return false;
+        }
+        self.path_verdicts.retain(|_, exists| *exists);
+        self.path_verdict_order
+            .retain(|path| self.path_verdicts.contains_key(path));
+        self.rebuild_printed_path_links();
+        true
+    }
+
     fn rebuild_printed_path_links(&mut self) {
         // The whole ledger travels, both answers in it: a "no" is what stops the projection from
         // asking about the same dead name on every frame it draws (§7.1.5j).
@@ -3378,6 +3424,14 @@ impl DualPlaneSession {
                 // command boundary this session listens to.
                 if screen == ScreenId::Primary {
                     self.working = false;
+                    // **And the printed-path ledger drops its "no"s** (user ruling 2026-08-25,
+                    // §7.1.5k 丙). A command just ended, so the disk may have moved under every
+                    // name this pane has already been told does not exist — including the ones the
+                    // command itself printed on its way to creating them. The same screen, the
+                    // same primary-screen-only rule: a full-screen program's own `D` is not this
+                    // shell's command boundary, and it is not this ledger's either.
+                    // See `Session::expire_denied_paths`.
+                    self.expire_denied_paths();
                 }
                 if let Some(exit_code) = exit_code.filter(|code| *code != 0) {
                     self.failure_exit_code = Some(exit_code);
@@ -19789,6 +19843,200 @@ mod tests {
             .unwrap();
         std::fs::write(&path, png).unwrap();
         (directory, path)
+    }
+
+    /// One frame's worth of the app's own loop: project, collect the names, answer them off the
+    /// real disk. The same four lines every printed-path test above spells inline.
+    fn settle_printed_paths(session: &mut DualPlaneSession, projection: &mut ViewportProjection) {
+        session.viewport_frame(projection).unwrap();
+        session.absorb_printed_path_probes(projection);
+        while let Some(task) = session.take_decoration_worker_task() {
+            if let SessionDecorationTask::VerifyPath(path) = task {
+                let exists = path_exists(&path);
+                session.complete_path_verification(path, exists);
+            }
+        }
+    }
+
+    /// **A file built after the command that named it lights when that command ends**
+    /// (user ruling 2026-08-25, §7.1.5k 丙 — the conflict this promotes out of `#[ignore]`).
+    ///
+    /// The photographed shape, replayed: a command prints where it is *about* to write, the pass
+    /// asks the disk about a name that is not there yet, the file arrives, and — before this ruling
+    /// — the `no` outlived it for the rest of the pane's life. Any build, installer, `cp` or agent
+    /// shell line produces it.
+    ///
+    /// The boundary is `OSC 133 D` and not a clock: the "no" is re-asked once per command, which is
+    /// why the three budgets are untouched.
+    ///
+    /// MUTATION ①: drop the `expire_denied_paths` call from the `D` arm and the last assertion goes
+    /// red — the finished file sits on screen, real on disk, and permanently unlinked.
+    /// MUTATION ②: expire on every frame instead and the middle assertion goes red — the link
+    /// appears without any command having ended, which is the per-frame disk traffic the budget
+    /// ruling exists to prevent.
+    #[test]
+    fn a_no_is_asked_again_once_the_command_that_could_have_created_the_file_ends() {
+        let (directory, _) = temporary_ordinary_file();
+        let built = directory.join("built.js");
+
+        let mut session = DualPlaneSession::new(nz(200), nz(60));
+        enable_path_detection(&mut session);
+        session
+            .feed(
+                format!(
+                    "\x1b]7;file:///{}\x07",
+                    directory.to_string_lossy().replace('\\', "/")
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+
+        // A command that prints where it is about to write, and has not finished.
+        session
+            .feed(
+                format!(
+                    "\x1b]133;A\x07PS> \x1b]133;B\x07build\x1b]133;C\x07\r\nwriting {}\r\n",
+                    built.display()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        settle_printed_paths(&mut session, &mut projection);
+        assert!(
+            !session.path_is_verified(&built),
+            "the file is not there yet, and the disk said so"
+        );
+
+        // The command creates it — and the answer on the books is still "no".
+        std::fs::write(&built, b"console.log(1)\n").unwrap();
+        settle_printed_paths(&mut session, &mut projection);
+        assert!(
+            !session.path_is_verified(&built),
+            "a standing verdict is not re-asked frame by frame: that is the 2026-08-23 budget \
+             ruling and it is untouched"
+        );
+
+        // The command ends. One boundary, one re-ask.
+        session.feed(b"\x1b]133;D;0\x07").unwrap();
+        settle_printed_paths(&mut session, &mut projection);
+        assert!(
+            session.path_is_verified(&built),
+            "the command that could have created the file has ended, so the name is worth one \
+             more question — and this time the disk says yes"
+        );
+
+        std::fs::remove_file(&built).unwrap();
+        std::fs::remove_file(directory.join("notes.md")).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// The other half of the same ruling: **only the "no"s leave, and only on the primary screen.**
+    ///
+    /// A "yes" is not re-asked — a file seen once is linked, and a link that has since gone is
+    /// answered by the click's own re-check (§7.1.5k 丁), so re-asking the yeses would double the
+    /// traffic to buy nothing. And a full-screen program's own `D` is not this shell's command
+    /// boundary, which is the same rule the `working` flag beside it already follows.
+    ///
+    /// MUTATION: `retain(|_, _| false)` in `expire_denied_paths` and the first assertion goes red.
+    #[test]
+    fn expiring_the_noes_keeps_the_yeses_and_ignores_an_alt_screens_own_command() {
+        let (directory, real) = temporary_ordinary_file();
+        let absent = directory.join("never.md");
+
+        let mut session = DualPlaneSession::new(nz(200), nz(60));
+        enable_path_detection(&mut session);
+        session
+            .feed(
+                format!(
+                    "\x1b]7;file:///{}\x07",
+                    directory.to_string_lossy().replace('\\', "/")
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session
+            .feed(format!("{} {}\r\n", real.display(), absent.display()).as_bytes())
+            .unwrap();
+        settle_printed_paths(&mut session, &mut projection);
+        assert!(session.path_is_verified(&real));
+        assert!(!session.path_is_verified(&absent));
+
+        // A `D` from a full-screen program is not this shell's command boundary.
+        session
+            .feed(b"\x1b[?1049h\x1b]133;D;0\x07\x1b[?1049l")
+            .unwrap();
+        assert_eq!(
+            session.path_verdicts.get(&absent),
+            Some(&false),
+            "a TUI does not get to close a command it did not open, and it does not get to \
+             empty this ledger either"
+        );
+
+        // The shell's own does, and the "yes" stays on the books through it.
+        session.feed(b"\x1b]133;D;0\x07").unwrap();
+        assert!(
+            session.path_is_verified(&real),
+            "a file that has been seen is still a link; the click's own re-check is what \
+             answers a file that has since gone"
+        );
+        assert_eq!(
+            session.path_verdicts.get(&absent),
+            None,
+            "and the denial is off the books, to be asked once more"
+        );
+
+        std::fs::remove_file(directory.join("notes.md")).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// **A pane with no shell integration keeps its "no"s, and that is the ruling and not a gap**
+    /// (user ruling 2026-08-25; §7.1.5b's degraded path).
+    ///
+    /// A root process that does not report its commands never tells this window a command ended.
+    /// The honest substitutes are all worse than the limitation — a timer re-asks a screenful of
+    /// dead names on a pane nobody is touching, and inferring a boundary from the shape of the
+    /// output fires in the middle of a build as readily as at the end of one — so such a pane
+    /// behaves exactly as every pane did before this ruling, and the way out is shell integration.
+    /// That is the same answer §7.1.5b gives for busy detection, for the same reason.
+    #[test]
+    fn a_pane_without_shell_integration_keeps_every_verdict_it_has() {
+        let (directory, _) = temporary_ordinary_file();
+        let built = directory.join("built.js");
+
+        let mut session = DualPlaneSession::new(nz(200), nz(60));
+        enable_path_detection(&mut session);
+        session
+            .feed(
+                format!(
+                    "\x1b]7;file:///{}\x07",
+                    directory.to_string_lossy().replace('\\', "/")
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session
+            .feed(format!("writing {}\r\n", built.display()).as_bytes())
+            .unwrap();
+        settle_printed_paths(&mut session, &mut projection);
+        assert!(!session.path_is_verified(&built));
+
+        std::fs::write(&built, b"console.log(1)\n").unwrap();
+        // Ten more screens' worth of output, and not one `OSC 133` among them.
+        for _ in 0..10u32 {
+            session.feed(b"still working\r\n").unwrap();
+            settle_printed_paths(&mut session, &mut projection);
+        }
+        assert!(
+            !session.path_is_verified(&built),
+            "with no command boundary reported there is nothing honest to hang an expiry on"
+        );
+
+        std::fs::remove_file(&built).unwrap();
+        std::fs::remove_file(directory.join("notes.md")).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
     }
 
     fn enable_path_detection(session: &mut DualPlaneSession) {
