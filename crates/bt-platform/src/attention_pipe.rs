@@ -847,10 +847,13 @@ fn open_client(wide_name: &[u16]) -> io::Result<OwnedHandle> {
             Err(error) => {
                 let code = win32_of(&error);
                 if attempt == 0 && code == ERROR_PIPE_BUSY.0 {
+                    // The answer is deliberately ignored: a wait that timed out and a wait that
+                    // succeeded lead to the same next move, which is to try the open once more and
+                    // let *that* say whether the endpoint is free. Branching here would put the
+                    // decision in two places.
                     // SAFETY: `wide_name` is NUL-terminated and outlives the call.
-                    unsafe { WaitNamedPipeW(PCWSTR(wide_name.as_ptr()), CLIENT_BUSY_WAIT_MS) }
-                        .ok()
-                        .ok();
+                    let _free =
+                        unsafe { WaitNamedPipeW(PCWSTR(wide_name.as_ptr()), CLIENT_BUSY_WAIT_MS) };
                     continue;
                 }
                 return Err(win32_io_error(error));

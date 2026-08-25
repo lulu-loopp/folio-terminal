@@ -1,0 +1,164 @@
+{
+  "hooks": {
+    "Elicitation": [
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Elicitation",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "ElicitationResult": [
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "\"C:\\folio\\folio.exe\" attention claude-code:ElicitationResult",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Notification.agent_needs_input",
+            "type": "command"
+          }
+        ],
+        "matcher": "agent_needs_input"
+      },
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Notification.quota_auto_resume_stale",
+            "type": "command"
+          }
+        ],
+        "matcher": "quota_auto_resume_stale"
+      },
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Notification.elicitation_complete",
+            "type": "command"
+          }
+        ],
+        "matcher": "elicitation_complete"
+      },
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Notification.elicitation_response",
+            "type": "command"
+          }
+        ],
+        "matcher": "elicitation_response"
+      },
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Notification.agent_completed",
+            "type": "command"
+          }
+        ],
+        "matcher": "agent_completed"
+      },
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Notification.quota_auto_resume_fired",
+            "type": "command"
+          }
+        ],
+        "matcher": "quota_auto_resume_fired"
+      },
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Notification.quota_auto_resume_disabled",
+            "type": "command"
+          }
+        ],
+        "matcher": "quota_auto_resume_disabled"
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "\"C:\\folio\\folio.exe\" attention claude-code:PermissionRequest",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "\"C:\\folio\\folio.exe\" attention claude-code:PostToolUse",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "\"C:\\folio\\folio.exe\" attention claude-code:SessionEnd",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "\"C:\\folio\\folio.exe\" attention claude-code:Stop",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "\"C:\\folio\\folio.exe\" attention claude-code:StopFailure",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "\"C:\\folio\\folio.exe\" attention claude-code:UserPromptSubmit",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

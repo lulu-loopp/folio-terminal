@@ -655,6 +655,33 @@ mod tests {
         }
     }
 
+    /// **The block this writes into somebody's own file, spelled out.**
+    ///
+    /// Every other test here asserts a property — one tier per kind, every hook asynchronous, a
+    /// matcher where a matcher belongs. This one asserts the **bytes**, and it is worth having for
+    /// the reason a golden file usually is not: what is being written is *not ours*. It lands in a
+    /// document the user owns, that another program reads, and that nobody will look at again. A
+    /// change to any of it — an event renamed, a matcher dropped, `async` lost in a refactor — is a
+    /// change to something out in the world, and it should have to be typed here on purpose.
+    ///
+    /// It is also the text a real-machine run hands to `claude --settings`, so the thing exercised
+    /// against the real hook runner is the thing this build actually installs.
+    #[test]
+    fn the_block_this_installs_is_this() {
+        let mut settings = Value::Object(Map::new());
+        assert!(install_into(
+            &mut settings,
+            Path::new(r"C:\folio\folio.exe")
+        ));
+        assert_eq!(
+            serde_json::to_string_pretty(&settings).expect("render"),
+            EXPECTED_BLOCK.trim_end()
+        );
+    }
+
+    /// See [`the_block_this_installs_is_this`].
+    const EXPECTED_BLOCK: &str = include_str!("../../../docs/plans/attention/claude-hooks.json");
+
     /// The date the backup is named after is a real one.
     #[test]
     fn the_backup_name_is_a_date() {
