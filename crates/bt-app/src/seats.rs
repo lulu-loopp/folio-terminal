@@ -1147,6 +1147,56 @@ impl Seats {
         Some(id)
     }
 
+    /// **The far half of a centre trade that crosses tabs** (B4, user ruling
+    /// 2026-08-25). Put `arriving` where this seat stands, and answer with the id
+    /// it now has in *this* tree.
+    ///
+    /// [`Self::stand_in_terminal`]'s machine with the seat handed in rather than
+    /// minted, and the two are deliberately not folded into one: a stand-in is
+    /// this tree deciding what should be there, and a trade is another tree's
+    /// pane arriving with everything durable about it already decided (§5 — its
+    /// kind, its fixed extent, its pin). What they share is the reason they are
+    /// a *replace* rather than a close and an insert: no rectangle moves, no
+    /// ratio is rewritten, and the tab does not have to survive being briefly
+    /// empty — which G84 says it could not.
+    ///
+    /// **The id is re-minted, and it has to be.** A `SeatId` is one tab's
+    /// counter, so the number the pane answered to in the tab it left means
+    /// something else here or nothing at all; the caller re-keys the content
+    /// plane onto the id this returns, exactly as an arriving subtree's
+    /// renumbering is read out of [`DropPlan::arrived`].
+    pub fn stand_in_pane(
+        &mut self,
+        metrics: &SeatMetrics,
+        seat: SeatId,
+        arriving: &Seat,
+    ) -> Option<SeatId> {
+        let id = SeatId(self.next_seat);
+        let mut arriving = arriving.clone();
+        arriving.id = id;
+        let outcome = apply(
+            &self.tree,
+            metrics,
+            &Edit::ReplaceSeat {
+                target: seat,
+                arriving: LayoutNode::seat(arriving),
+            },
+        )
+        .ok()?;
+        self.tree = outcome.tree;
+        self.next_seat += 1;
+        if !self.tree.contains(self.identity) {
+            self.identity = identity_seat(&self.tree);
+        }
+        if self.focus == seat {
+            self.focus = id;
+        }
+        // One leaf for another, `stand_in_terminal`'s own note: the *set* of
+        // panes changed, so everything keyed on which seats exist is re-asked.
+        self.note_structure_change();
+        Some(id)
+    }
+
     /// Close one seat, promoting its sibling. Refused for the last seat: an
     /// empty tree is not a state the solver can represent, and the last pane
     /// closing is the *tab* closing (§7.1.4), which this slice does not host.
@@ -15480,12 +15530,18 @@ fn push_preview_rail(
                 let Some(text) = content.segments.get(crumb.depth) else {
                     continue;
                 };
+                // **The box is on the tail and only on the tail** (B5, user
+                // ruling 2026-08-25). `content.edit` is the rail's one open
+                // editor, and on a crumb rail there is one segment it can belong
+                // to: the file. A folder in the run has nothing on this row for a
+                // box to change.
+                let editing = crumb.tail && content.edit.is_some();
                 let lit = pointer.hover
                     == Some(ChromeTarget::PreviewCrumb {
                         seat,
                         depth: crumb.depth,
                     });
-                if lit {
+                if lit || editing {
                     sprites.push(ChromeSprite::new(
                         ChromeMark::ControlPill {
                             radius_px: (PREVIEW_CRUMB_RADIUS_LOGICAL_PX * scale).round().max(1.0)
@@ -15494,6 +15550,35 @@ fn push_preview_rail(
                         crumb.rect,
                         palette.pane_close_pill,
                     ));
+                }
+                // The editor's own furniture, from the same call the tab strip,
+                // the preview head and the address field all make: one selection
+                // band and one caret, laid into the box the segment already has.
+                if editing && let Some(edit) = content.edit {
+                    let marks = inline_rename_marks(
+                        crumb.rect,
+                        &TabEdit {
+                            text: edit.text.to_owned(),
+                            placeholder: String::new(),
+                            caret_px: edit.caret_px,
+                            selection_px: edit.selection_px,
+                            caret_lit: edit.caret_lit,
+                        },
+                        scale,
+                    );
+                    if let Some(band) = marks.selection {
+                        sprites.push(
+                            ChromeSprite::new(ChromeMark::Fill, band, palette.accent)
+                                .with_opacity(INLINE_RENAME_SELECTION_ALPHA),
+                        );
+                    }
+                    if let Some(caret) = marks.caret {
+                        sprites.push(ChromeSprite::new(
+                            ChromeMark::Fill,
+                            caret,
+                            palette.pane_title_focus,
+                        ));
+                    }
                 }
                 labels.push(ChromeLabel {
                     mono: false,
@@ -19947,9 +20032,10 @@ mod tests {",
             .expect("a split always yields a first piece");
         assert_eq!(
             source.matches("inline_rename_marks(").count(),
-            5,
-            "one definition and four callers — the strip, the rail, the preview \
-             head, and the address row that took the head's field on 2026-08-24"
+            6,
+            "one definition and five callers — the strip, the rail, the preview \
+             head, the address row that took the head's field on 2026-08-24, \
+             and the breadcrumb's last segment since B5"
         );
         // The hairline's width and the line it stands on are named in exactly
         // one place each, and that place is the shared function.

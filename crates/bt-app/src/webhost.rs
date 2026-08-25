@@ -3336,6 +3336,11 @@ mod keyboard_tests {
         ("split-horizontal", "Alt+Shift+-"),
         ("split-vertical", "Alt+Shift+="),
         ("duplicate-pane-split", "Ctrl+Shift+d"),
+        // **One more on 2026-08-25** (B7). A page must hand this one back for
+        // the reason every window row is on this list: a chord the window owns
+        // that a focused page keeps is a chord that stops working exactly where
+        // a reader is most likely to want the pane bigger.
+        ("zoom-pane", "Ctrl+Shift+Enter"),
         ("files-pane", "Ctrl+Shift+b"),
         ("git-page", "Ctrl+Shift+g"),
         ("open-settings", "Ctrl+,"),
@@ -3390,7 +3395,7 @@ mod keyboard_tests {
             .map(|(id, chord)| (*id, (*chord).to_owned()))
             .collect();
         assert_eq!(spelled, expected);
-        assert_eq!(spelled.len(), 35);
+        assert_eq!(spelled.len(), 36);
     }
 
     /// RED — and every one of them reaches a virtual key, because
@@ -3400,7 +3405,7 @@ mod keyboard_tests {
         let claims = claimable_chords(&Shortcuts::defaults(), every_focus());
         assert_eq!(
             claims.len(),
-            35,
+            36,
             "a chord this window owns that the web host cannot name in Win32 is \
              a chord that silently stops working while a page has the focus"
         );

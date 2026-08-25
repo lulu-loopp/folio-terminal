@@ -1705,6 +1705,32 @@ pub enum Text {
     /// it. Keeping the three dots here would be a promise of a chooser that
     /// never comes.
     FolderMenuNewTerminal,
+
+    // ── the file menu's rename row (B5, user ruling 2026-08-25) ────────────
+    //
+    // One contiguous block at the end, per this table's standing rule. **One
+    // entry, and only one**: the two faces that offer it — a file row and a
+    // folder row — say the same word, because what the row does is the same on
+    // both and a menu that said `Rename file` over one and `Rename folder` over
+    // the other would be naming the subject the row above it already named. The
+    // breadcrumb's tail has no string of its own either: it is a double click on
+    // a name, and a gesture is not a word.
+    /// **`Rename`** — a tree row's name, changed where it stands.
+    FileMenuRename,
+    /// **`Discard all`** — the exit card's destructive answer (B1, user ruling
+    /// 2026-08-25).
+    ///
+    /// A second entry beside [`Self::GateDiscard`] and not a replacement for it:
+    /// the other gates ask about **one** thing — a branch, a tag, a pane's
+    /// transcript — and `Discard all` over a single subject would be a plural
+    /// with nothing to be plural about.
+    GateDiscardAll,
+    /// **`Move to window`** — the pane menu's third exit (B9, user ruling
+    /// 2026-08-25).
+    ///
+    /// No ellipsis and no plural: the row opens a list rather than a chooser,
+    /// and the list is what says which windows there are.
+    PaneMenuMoveToWindow,
 }
 
 impl Text {
@@ -2704,7 +2730,11 @@ impl Text {
                 "Save changes before quitting?",
                 "退出前保存这些改动？",
             ),
-            Self::QuitSave => pick(lang, "Save", "保存"),
+            // **`all`, on both of the exit card's affirmative buttons** (user
+            // ruling 2026-08-25, B1). The card lists files, one per line; a
+            // button reading `Save` over four of them leaves a reader to work
+            // out whether it means all four or the one they are looking at.
+            Self::QuitSave => pick(lang, "Save all", "全部保存"),
             Self::QuitSessionNotWritten => pick(
                 lang,
                 "session.json could not be written. Nothing was closed.",
@@ -2845,7 +2875,19 @@ impl Text {
             // attention is pointed, which is the same sense the pane head's
             // focus already carries in this product, and 「专注」would read as a
             // do-not-disturb mode this is not.
-            Self::RowFocusMode => pick(lang, "Focus mode", "聚焦模式"),
+            // **`Cards`, and not `Focus mode`** (user ruling 2026-08-25). The
+            // old name described an intention — that the window was for
+            // concentrating on one thing — and the surface it turns on describes
+            // itself: a column of cards, one per tab. A reader who has seen the
+            // column once knows what `Cards` means, and a reader who has not is
+            // told by the sentence below. 「卡片」is the word the column's own
+            // sentence already uses for the things in it, so the row and what it
+            // makes are now one word in both languages.
+            //
+            // The rename is of the name only. `LayoutMode::Focus`,
+            // `solve_focused` and the `focus-mode` binding id are identifiers,
+            // and an identifier is not something a reader meets.
+            Self::RowFocusMode => pick(lang, "Cards", "卡片"),
             // Three clauses, in the order a reader meets them: what replaces the
             // tab strip, what happens to the tab you pick, and the other door.
             // It states facts and names the chord — no persuasion, and no "we".
@@ -2940,7 +2982,11 @@ impl Text {
             // 「卡片高度」rather than 「卡片身高」: the column's own word for the
             // thing is 卡片 and 高度 is what a settings row measures, which is the
             // pair every other quantity row here is built out of.
-            Self::RowFocusCardHeight => pick(lang, "Focus card height", "聚焦卡片高度"),
+            // Named after the mode, so it moved when the mode's name did (user
+            // ruling 2026-08-25): a row still saying `Focus card height`
+            // directly under a row saying `Cards` would be this dialog holding
+            // two names for one feature.
+            Self::RowFocusCardHeight => pick(lang, "Card height", "卡片高度"),
             // Three clauses: what the number is spent on, how many rows each
             // rung buys at the default face, and where in a seat those rows are
             // taken from. The second earns its place because the reader is
@@ -3022,6 +3068,15 @@ impl Text {
                 "Open this page in your browser",
                 "在浏览器中打开这个页面",
             ),
+            // 「重命名」and not 「改名」: it is the word Explorer's own Chinese
+            // uses on this exact row, so a reader meets it here already knowing
+            // what it does.
+            Self::FileMenuRename => pick(lang, "Rename", "重命名"),
+            Self::GateDiscardAll => pick(lang, "Discard all", "全部放弃"),
+            // 「移到窗口」and not 「移动到窗口」: the two rows above it read
+            // 「移到新标签」/「移到新窗口」, and a third exit spelling the same
+            // verb differently would read as a different verb.
+            Self::PaneMenuMoveToWindow => pick(lang, "Move to window", "移到窗口"),
             Self::RowSearchEngine => pick(lang, "Search engine", "搜索引擎"),
             // Names the field rather than the feature, because that is where a
             // reader meets it: they typed a word into the place an address goes
@@ -3047,7 +3102,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 481] = [
+    pub const ALL: [Self; 484] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3529,6 +3584,9 @@ impl Text {
         Self::FolderMenuExpand,
         Self::FolderMenuCollapse,
         Self::FolderMenuNewTerminal,
+        Self::FileMenuRename,
+        Self::GateDiscardAll,
+        Self::PaneMenuMoveToWindow,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
@@ -4072,25 +4130,13 @@ pub fn not_saved(reason: &str) -> String {
     }
 }
 
-/// **The summary card's list, on the way out of the process** (multiwindow slice
-/// E2, §2.9).
-///
-/// By name, always — §7.1.3's rule read for a question that spans every window.
-/// A card that said "some windows have unsaved changes" would be asking a reader
-/// to go and look, which is the one thing a summary is for.
-///
-/// It states rather than asks, because the question is on the line above it.
-#[must_use]
-pub fn quit_unsaved_message(names: &str) -> String {
-    quit_unsaved_message_in(current(), names)
-}
-
-fn quit_unsaved_message_in(lang: Lang, names: &str) -> String {
-    match lang {
-        Lang::English => format!("Unsaved: {names}"),
-        Lang::Chinese => format!("未保存：{names}"),
-    }
-}
+// `quit_unsaved_message` — `Unsaved: a.txt, b.md`, the summary card's one
+// sentence — **left this file on 2026-08-25** (B1). The card lists the files one
+// per line now, and a line that is a file name is not a sentence: what it needed
+// from this table was a preposition it no longer has anywhere to put. The lines
+// themselves are built by `restore::unsaved_lines` and `unsaved_line`, which are
+// a *name* and a *tab's own title* joined by an em dash — two strings this table
+// never owned.
 
 /// **What the save branch could not save** (slice E2 phase ①, v3 复审 ④-a).
 ///
@@ -4107,6 +4153,34 @@ fn quit_not_saved_in(lang: Lang, names: &str) -> String {
     match lang {
         Lang::English => format!("Not saved: {names}"),
         Lang::Chinese => format!("未能保存：{names}"),
+    }
+}
+
+/// **One row of `Move to window ▸`** (B9, user ruling 2026-08-25).
+///
+/// A window in this product has no name of its own — the title bar borrows the
+/// active tab's — so the row names it the two ways a reader can actually tell
+/// two windows apart from a menu: **where it stands in the run**, which is the
+/// order they were opened in and the order this list is drawn in, and **how much
+/// is in it**. The ruling wrote the shape out: 「Window 1 · 3 tabs」.
+///
+/// The active tab's title is deliberately not borrowed here. It is the one
+/// string about a window that changes while the menu is open — a shell prints a
+/// new title, a tab is renamed — and a row that renamed itself under a hand
+/// already moving toward it is the failure `text_when`'s snapshot exists to
+/// avoid one surface up.
+#[must_use]
+pub fn window_row(ordinal: usize, tabs: usize) -> String {
+    window_row_in(current(), ordinal, tabs)
+}
+
+fn window_row_in(lang: Lang, ordinal: usize, tabs: usize) -> String {
+    match lang {
+        // English counts its nouns, so the row does too: `1 tab` and `2 tabs`.
+        // A row reading `1 tabs` is a sentence written by a program.
+        Lang::English if tabs == 1 => format!("Window {ordinal} · 1 tab"),
+        Lang::English => format!("Window {ordinal} · {tabs} tabs"),
+        Lang::Chinese => format!("窗口 {ordinal} · {tabs} 个标签"),
     }
 }
 
@@ -5265,6 +5339,46 @@ mod tests {
         }
     }
 
+    /// PIN (user ruling 2026-08-25) — **the mode is called `Cards` everywhere a
+    /// reader can read it, and `Focus mode` nowhere.**
+    ///
+    /// The rename is of the *name*, not of the machine: `LayoutMode::Focus`,
+    /// `solve_focused` and the `focus-mode` binding id are identifiers and stay
+    /// exactly as they are — an identifier is a thing this table has no opinion
+    /// about. What the ruling moved is the word on the `Appearance` row, and
+    /// therefore the word on the shortcut card as well, because that card titles
+    /// its row out of this table.
+    ///
+    /// The height row moves with it. `Focus card height` was named after the
+    /// mode; a row still calling itself that, sitting directly under a row that
+    /// now says `Cards`, would be this dialog holding two names for one feature
+    /// — which is the exact failure §7.1.6b′ names when it forbids inventing a
+    /// second vocabulary for one object.
+    ///
+    /// Red gate: leave either row's old words in place and this goes red in
+    /// whichever language kept them.
+    #[test]
+    fn the_card_column_is_called_cards_on_every_surface_that_names_it() {
+        assert_eq!(Text::RowFocusMode.in_lang(Lang::English), "Cards");
+        assert_eq!(Text::RowFocusMode.in_lang(Lang::Chinese), "卡片");
+        assert_eq!(
+            Text::RowFocusCardHeight.in_lang(Lang::English),
+            "Card height"
+        );
+        assert_eq!(Text::RowFocusCardHeight.in_lang(Lang::Chinese), "卡片高度");
+        for entry in Text::ALL {
+            for lang in [Lang::English, Lang::Chinese] {
+                let text = entry.in_lang(lang);
+                for withdrawn in ["Focus mode", "聚焦模式", "Focus card", "聚焦卡片"] {
+                    assert!(
+                        !text.contains(withdrawn),
+                        "{entry:?} in {lang:?} still calls the mode `{withdrawn}`"
+                    );
+                }
+            }
+        }
+    }
+
     /// PIN — **the front door's table has two columns too**, and the same three
     /// properties hold on it as on `Text`.
     ///
@@ -5848,11 +5962,9 @@ mod tests {
                     "gate_unsaved_message",
                     gate_unsaved_message_in(lang, "a.txt, b.md"),
                 ),
-                (
-                    "quit_unsaved_message",
-                    quit_unsaved_message_in(lang, "a.txt, b.md"),
-                ),
                 ("quit_not_saved", quit_not_saved_in(lang, "b.md")),
+                ("window_row", window_row_in(lang, 2, 3)),
+                ("window_row_one", window_row_in(lang, 2, 1)),
                 (
                     "gate_git_discard_message",
                     gate_git_discard_message_in(lang, "a.txt"),

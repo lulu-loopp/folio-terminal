@@ -3642,8 +3642,14 @@ struct PaneMenuState {
     /// anyway — the verb that would shuts the menu on its way through.
     zoomed: bool,
     hover: Option<profiles::PaneMenuHover>,
-    /// Whether the `Split with` submenu is up — the house's first child menu.
-    submenu_open: bool,
+    /// **Which of this menu's rows has its list open** (B9), or `None` when
+    /// none has.
+    ///
+    /// A `bool` while `Split with` was the only row that could open one, and the
+    /// bit was the right answer written down for the wrong reason: what the
+    /// geometry, the paint and the press all need is not *whether* a child is up
+    /// but *whose* it is.
+    submenu: Option<profiles::PaneMenuRow>,
     /// **The safety triangle's two facts** (#53): where the pointer last was,
     /// and how long the submenu is entitled to survive the rows the pointer is
     /// crossing on its way to it.
@@ -5798,6 +5804,47 @@ struct App {
     /// for why it is a state machine the loop advances rather than a function the
     /// chord calls.
     quit: Option<quit::Quit>,
+    /// **Every window this process has open, as a menu can name it** (B9, user
+    /// ruling 2026-08-25).
+    ///
+    /// Published by [`FolioApp`] each turn and read by whichever `Runtime` is
+    /// drawing `Move to window ▸`. It is here for [`Self::drag_broker`]'s reason
+    /// and it is the same shape of fact: a `Runtime` is one window by
+    /// construction, and a list of the others is knowledge only the layer above
+    /// it has.
+    ///
+    /// **Refreshed rather than maintained.** Windows open and close through four
+    /// doors and a directory kept up to date by each of them is four places one
+    /// invariant lives; walking a handful of windows once a turn costs nothing
+    /// and cannot go stale.
+    windows_open: Vec<OpenWindow>,
+    /// **The window a `Move to window ▸` row is pointing at**, if a hand is on
+    /// one (B9).
+    ///
+    /// The mark it earns is drawn by *that* window, which is why the aim cannot
+    /// live on the window the pointer is in. Written by the hovering window's
+    /// `Runtime` and spent by [`FolioApp::settle_window_ring`], which is the
+    /// same errand-and-door shape [`Self::pending_handover`] has.
+    window_ring: Option<WindowId>,
+    /// What [`Self::window_ring`] was when the windows were last told, so that
+    /// the two that changed are the two that repaint.
+    window_ring_shown: Option<WindowId>,
+}
+
+/// **One row of `Move to window ▸`**, before it is words (B9).
+///
+/// The ordinal and the count and not a title: a window in this product has no
+/// name of its own, and the active tab's — which the title bar borrows — is the
+/// one string about a window that can change while the menu naming it is open.
+/// See [`i18n::window_row`], which is where these two numbers become a sentence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OpenWindow {
+    id: WindowId,
+    /// Its place in the run, counting from 1 — the order the windows were
+    /// opened in, which is the order [`Windows`] keeps and the order the
+    /// submenu draws.
+    ordinal: usize,
+    tabs: usize,
 }
 
 /// **What a window that has been asked for should open as** (multiwindow slice
@@ -6946,6 +6993,17 @@ struct WindowRuntime {
     /// preview name is two presses on two things. Sharing one chain would have
     /// made those two open an editor.
     preview_name_clicks: MultiClicks<SeatId>,
+    /// **The crumb rail's tail, keyed by its seat** (B5, user ruling
+    /// 2026-08-25).
+    ///
+    /// Its own chain on [`Self::preview_name_clicks`]'s argument, one row down:
+    /// the head's name and the rail's last segment are the same file, but they
+    /// are two *things* on the glass, and one press on each is two presses on
+    /// two things rather than the double click that opens a box.
+    ///
+    /// Keyed by the seat and not by the depth because only one segment is ever
+    /// armed — every folder in the run breaks the chain on its way past.
+    preview_crumb_clicks: MultiClicks<SeatId>,
     /// **The pane head's own click pairing** (§7.1.6l), keyed by the seat whose
     /// head is being pressed.
     ///
@@ -8778,9 +8836,17 @@ struct {name} {{
     /// tab ask the application for its number.**
     ///
     /// The ruling's own list: restore, a new window, a new tab, and a pane
-    /// promoted into one. The last is three doors in this file rather than one,
-    /// because a pane becomes a tab by being torn out, by being ejected from a
-    /// merge, and by being ejected from a cross-tab move.
+    /// promoted into one. The last is two doors in this file rather than one,
+    /// because a pane becomes a tab by being torn out and by being ejected from
+    /// a merge.
+    ///
+    /// **`move_pane_across_tabs` left this list on 2026-08-25** (B4). It was on
+    /// it for one reason — a centre evicted the pane it landed on and the window
+    /// had to name the tab that pane became — and the ruling makes the centre a
+    /// trade: the displaced pane goes into the tree the traveller came out of, so
+    /// no tab is opened and there is no number to ask for. A door that no longer
+    /// opens a tab does not owe this, and leaving it listed would have this test
+    /// demanding a mint nobody spends.
     ///
     /// MUTATION: mint one of them from a literal or from `tabs.len() + 1` and the
     /// door is named here.
@@ -8800,8 +8866,6 @@ struct {name} {{
             "answer_restore",
             // A merge that pushed a pane out.
             "absorb_tab",
-            // A cross-tab pane move that pushed a pane out.
-            "move_pane_across_tabs",
             // A pane torn out over the strip.
             "extract_pane_into_new_tab",
         ] {
@@ -12483,6 +12547,57 @@ enum RenameSubject {
     /// would name a different pane the moment another tab came to the front with
     /// the field still open.
     WebAddress { leaf: LeafId },
+    /// **The file the breadcrumb's last segment names** (B5, user ruling
+    /// 2026-08-25).
+    ///
+    /// The same subject [`Self::PreviewName`] is, and the same commit — it is a
+    /// separate variant only because the two are drawn in different *rows*, and
+    /// the dressing pass has to be able to ask "is the open editor mine" of one
+    /// row without the other answering yes. A crumb's tail and a head's name are
+    /// the same file, so both seed the same way and both leave by the same exit.
+    PreviewCrumb {
+        surface: PreviewSurface,
+        source: preview::PreviewSource,
+    },
+    /// **A row of a files column** (B5, user ruling 2026-08-25).
+    ///
+    /// The tree has no buffer and no `PreviewSource` — a row is a *place on the
+    /// disk*, named by the stable key the tree walks by — so this is the one
+    /// rename subject that carries a key rather than a document. The column it
+    /// belongs to is a whole [`LeafId`] for [`Self::WebAddress`]'s reason: the
+    /// editor lives on the window and the tree lives on a tab, so a bare seat
+    /// number would name a different column the moment another tab came forward
+    /// with the box still open.
+    FilesRow { leaf: LeafId, key: String },
+}
+
+/// **One row of an exit card: a file, and the tab it is in** (B1, user ruling
+/// 2026-08-25).
+///
+/// A free function because both collectors need it and neither owns the other:
+/// the shut gate reads one window's tabs and the quit card reads every window's,
+/// and a card whose rows were built two ways would be two cards.
+///
+/// A tab with nothing to call itself contributes no dash and no empty room —
+/// `display_title` can be a blank string on a tab whose shell has said nothing
+/// yet, and `notes.md — ` is a sentence with a hole in it.
+fn unsaved_line(name: &str, tab: &str) -> String {
+    let tab = tab.trim();
+    if tab.is_empty() {
+        return name.to_owned();
+    }
+    format!("{name} \u{2014} {tab}")
+}
+
+/// **Where a file name's stem ends** — the one place this window decides that,
+/// read by all three doors onto a rename (B5, 2026-08-25).
+///
+/// `.gitignore` is the case that makes it a rule rather than a `rfind('.')`: a
+/// leading dot is part of the name, not the start of a suffix, so the stem is
+/// the whole of it. A name with no dot at all is its own stem for the same
+/// reason.
+fn stem_end(name: &str) -> usize {
+    name.rfind('.').filter(|at| *at > 0).unwrap_or(name.len())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -12597,9 +12712,42 @@ impl TabRename {
     ///
     /// [`seed`]: TabRename::seed
     fn open_file(surface: PreviewSurface, source: preview::PreviewSource, name: &str) -> Self {
-        let text = name.to_owned();
-        let dot = text.rfind('.').filter(|at| *at > 0).unwrap_or(text.len());
-        Self::seed(RenameSubject::PreviewName { surface, source }, text, dot)
+        Self::seed(
+            RenameSubject::PreviewName { surface, source },
+            name.to_owned(),
+            stem_end(name),
+        )
+    }
+
+    /// **Open on the file the breadcrumb's last segment names** (B5, user ruling
+    /// 2026-08-25).
+    ///
+    /// [`Self::open_file`] with one subject substituted for the other, and it
+    /// shares the arithmetic rather than repeating it: this is the same name, on
+    /// the same disk, being changed by the same commit — a second `rfind('.')`
+    /// here would be a second place `.gitignore` has to be got right.
+    fn open_crumb(surface: PreviewSurface, source: preview::PreviewSource, name: &str) -> Self {
+        Self::seed(
+            RenameSubject::PreviewCrumb { surface, source },
+            name.to_owned(),
+            stem_end(name),
+        )
+    }
+
+    /// **Open on a row of a files column** (B5, user ruling 2026-08-25).
+    ///
+    /// Seeded exactly as the two above, folder rows included: a folder with a dot
+    /// in its name is a folder whose stem is what a reader means to replace, and
+    /// this window has no second opinion about where a name's stem ends.
+    fn open_files_row(leaf: LeafId, key: &str, name: &str) -> Self {
+        Self::seed(
+            RenameSubject::FilesRow {
+                leaf,
+                key: key.to_owned(),
+            },
+            name.to_owned(),
+            stem_end(name),
+        )
     }
 
     /// **Open on the address a page's head names** (§7.7 ②).
@@ -12620,7 +12768,10 @@ impl TabRename {
     fn tab(&self) -> Option<TabId> {
         match self.subject {
             RenameSubject::Tab(tab) => Some(tab),
-            RenameSubject::PreviewName { .. } | RenameSubject::WebAddress { .. } => None,
+            RenameSubject::PreviewName { .. }
+            | RenameSubject::PreviewCrumb { .. }
+            | RenameSubject::WebAddress { .. }
+            | RenameSubject::FilesRow { .. } => None,
         }
     }
 
@@ -17559,6 +17710,16 @@ struct OverlayStack {
     /// pointer *is* the ghost; in practice the two never meet, because a drag
     /// empties the tip's anchor list (J117).
     drag_ghost: Vec<marks::OverlayLayer>,
+    /// **The ring another window's menu is pointing at** (B9, user ruling
+    /// 2026-08-25) — the topmost thing this window draws, and the only one that
+    /// is not about anything inside it.
+    ///
+    /// Above even the ghost, and for the ghost's own reason read backwards: what
+    /// is being said is *this whole window*, so there is nothing on the glass it
+    /// would be honest to let cover it. It costs nothing to put on top, because
+    /// like the peek card it takes no input at all — it is a mark, not a
+    /// surface, and the pointer is in another window entirely.
+    window_ring: Vec<marks::OverlayLayer>,
 }
 
 impl OverlayStack {
@@ -17610,6 +17771,7 @@ impl OverlayStack {
             tooltip,
             file_peek,
             drag_ghost,
+            window_ring,
         } = self;
         [
             preview_bars,
@@ -17633,6 +17795,7 @@ impl OverlayStack {
             tooltip,
             file_peek,
             drag_ghost,
+            window_ring,
         ]
         .into_iter()
         .flatten()
@@ -18410,21 +18573,17 @@ impl DropLanding {
     /// Every other zone answers with nothing, and that is a rule rather than an
     /// omission: a word on a box whose shape already said it is a second voice
     /// saying the same thing, and the first one to be believed when they drift.
-    /// `arrives_whole` is whether the hand is carrying a **subtree** rather than
-    /// a seat of the tree being aimed at — [`PlanInputs::cargo`], asked here for
-    /// the reason it is asked in [`Runtime::plan_for`]: which of the centre's
-    /// two sentences this is, is a fact about what arrives and not about which
-    /// gesture started it. It read `DragSource::Tab(_)` while a tab was the only
-    /// subtree a hand could hold, and §7.1.6k′ made a foreign pane the second —
-    /// its centre evicts the target exactly as a tab's does, so it must say so.
-    fn caption(self, source: &DragSource, arrives_whole: bool) -> &'static str {
+    /// **B4 (user ruling 2026-08-25) — which sentence it is now depends only on
+    /// what is in the hand.** It used to depend on whether that thing arrived as
+    /// a *subtree*, which is why a pane the spring had left in another tab said
+    /// `Replace` while the same pane at home said `Swap`: one word for one
+    /// gesture, chosen by an implementation detail the reader cannot see. The
+    /// ruling makes every pane's centre a trade, so the question the caption asks
+    /// is the one a reader would ask — a pane, or a tab.
+    fn caption(self, source: &DragSource) -> &'static str {
         match (self, source) {
-            (Self::SeatCentre { .. }, DragSource::Pane(_)) if !arrives_whole => {
-                i18n::Text::DragSwapPanes.text()
-            }
-            (Self::SeatCentre { .. }, DragSource::Pane(_) | DragSource::Tab(_)) => {
-                i18n::Text::DragReplacePane.text()
-            }
+            (Self::SeatCentre { .. }, DragSource::Pane(_)) => i18n::Text::DragSwapPanes.text(),
+            (Self::SeatCentre { .. }, DragSource::Tab(_)) => i18n::Text::DragReplacePane.text(),
             // L141/L142 — a row's centre verbs say their names for exactly the
             // reason a pane's and a tab's do: the box is the same rectangle and
             // the outcome is not. "Open in this preview" changes what a page is
@@ -23070,33 +23229,37 @@ fn pane_into_tab(
     into: &mut TabState,
     seat: SeatId,
     arrival: &PaneArrival<'_>,
-    watched: bool,
+    watching: Option<TabId>,
     solve: impl Fn(&seats::Seats) -> (SeatLayout, Option<seats::FitOverflow>),
 ) -> Option<PaneMove> {
     let metrics = arrival.metrics;
+    // **Which of the two tabs is the one on screen** — asked of the window's own
+    // answer rather than handed in as a bare `bool`, because since B4 there are
+    // two journeys here and not one: a pane leaves and a pane arrives, and each
+    // of them owes `move_seat_content` the honest answer about the tab it is
+    // going *to*. One boolean could only ever be right about one of them.
+    let watched = watching == Some(into.id);
+    let source_watched = watching == Some(from.id);
     // Cloned before any edit, because after `close_seat` the tree no longer has
     // it to be asked about and everything durable about the pane — its kind, its
     // fixed extent — lives on the `Seat` (§5).
     let travelling = LayoutNode::seat(from.seats.tree().find_seat(seat)?.clone());
-    // **N161 — read before the adoption installs a tree that no longer has it.**
-    // A centre seats the arriving subtree where the target pane stood, so the
+    // **B4 — read before the adoption installs a tree that no longer has it.**
+    // A centre seats the arriving pane where the target pane stood, so the
     // target pane is the one leaving, and everything durable about it lives on
     // its `Seat` (§5). Every other aim displaces nobody, which is why this is a
     // match on the aim rather than a search of the plan.
+    //
+    // Since the 2026-08-25 ruling this pane is not *evicted* — it is traded. It
+    // goes into the slot the traveller is about to vacate, and there is
+    // therefore nothing here to ask `pane_can_become_a_tab` about: it is not
+    // becoming a tab, it is standing in a tree that already exists. The question
+    // survives one aim further up, in [`Runtime::plan_for`], where a whole *tab*
+    // dropped on a centre still evicts.
     let displaced = match arrival.aim {
         seats::LayoutAim::SeatCentre(target) => Some(into.seats.tree().find_seat(target)?.clone()),
         seats::LayoutAim::SeatEdge(..) | seats::LayoutAim::Rim(_) => None,
     };
-    // M147's one answer, asked where the refusal still costs nothing. The
-    // preview asked it too ([`Runtime::plan_for`]) and got the same answer from
-    // the same function, which is what keeps the dashed box and the release
-    // saying one thing.
-    if displaced
-        .as_ref()
-        .is_some_and(|seat| !pane_can_become_a_tab(seat.kind))
-    {
-        return None;
-    }
     let plan = into.seats.plan_drop(
         metrics,
         arrival.viewport,
@@ -23113,46 +23276,61 @@ fn pane_into_tab(
     // single pair in it is the identity it now answers to, derived from the plan
     // rather than re-found in the new tree (N159's argument).
     let &(_, landed) = plan.arrived.first()?;
-    // Asked before the tree edit so that both shapes give the same answer: in
-    // the emptied case the departing seat is still in the tree, and
-    // §7.1.3's "若是原 tab 最后一个预览 pane 则整池随行" is about what is left
-    // *reachable*, which is every preview seat that is not this one.
-    let strands_the_pool = from
-        .seats
-        .preview_seats()
-        .into_iter()
-        .all(|other| other == seat);
-    let source_emptied = closing_this_pane_closes_the_tab(from.seats.pane_count());
-    if !source_emptied && !from.seats.close_seat(metrics, seat) {
-        return None;
-    }
-    into.seats.adopt_drop(plan)?;
-    move_seat_content(from, into, seat, landed, watched);
-    // **N161's eviction, after the arrival and before the focus** — the order
-    // [`absorb_tab_into_layout`] already uses, and it matters twice. The
-    // arriving pane's content has to be filed under `landed` before the target's
-    // is taken out from under `displaced.id`, so that no table is ever holding
-    // two entries for one surface; and `pane_into_new_tab` decides whether the
-    // preview pool follows by asking what preview seats are *left*, which is
-    // only the right question once the arrival is in the tree.
+    // **The traveller leaves its tree, and what happens to the slot it leaves is
+    // the whole of B4.**
     //
-    // N160② — the ejected pane inherits the **host's** pin, because it was
-    // displaced rather than aimed. `absorb_tab_into_layout` says the same
-    // sentence for a merging tab, and this is the same event with one leaf in
-    // the hand instead of a whole layout.
-    let host_pinned = into.pinned;
-    let ejected = displaced
-        .and_then(|seat| pane_into_new_tab(into, &seat, arrival.ejected_id, host_pinned, &solve));
-    if strands_the_pool {
-        // The rest of the history goes with it when nothing is left to reach it
-        // from — the same `take` [`pane_into_new_tab`] performs, and for the same
-        // reason: an orphaned dirty buffer must stay findable somewhere, and a
-        // second copy left behind is the fork the one-buffer-per-file law exists
-        // to forbid.
+    // A trade puts the displaced pane straight into that slot, which is why it
+    // is a *replace* and not a close followed by an insert: no rectangle moves,
+    // no ratio is rewritten, and the tree is never briefly empty — which for a
+    // lone pane is the difference between the ruling and G84's refusal. Every
+    // other aim displaces nobody, so the slot has nothing to hold and the seat
+    // is closed exactly as it always was.
+    let source_emptied =
+        displaced.is_none() && closing_this_pane_closes_the_tab(from.seats.pane_count());
+    let traded = match displaced.as_ref() {
+        Some(other) => Some(from.seats.stand_in_pane(metrics, seat, other)?),
+        None => {
+            if !source_emptied && !from.seats.close_seat(metrics, seat) {
+                return None;
+            }
+            None
+        }
+    };
+    into.seats.adopt_drop(plan)?;
+    // **The traveller's content first, and the trade's second.** The order is
+    // [`absorb_tab_into_layout`]'s and it matters for the same reason: the
+    // arriving pane has to be filed under `landed` before the displaced pane's
+    // is taken out from under its old id, so no table is ever holding two
+    // entries for one surface.
+    move_seat_content(from, into, seat, landed, watched);
+    if let (Some(other), Some(stood_in)) = (displaced.as_ref(), traded) {
+        move_seat_content(into, from, other.id, stood_in, source_watched);
+    }
+    // **§7.1.3 「若是原 tab 最后一个预览 pane 则整池随行」, asked of both tabs
+    // and asked *after* the trade.**
+    //
+    // It used to be read off the source alone and computed before the edit,
+    // because before B4 only the source could lose its last preview seat. A
+    // trade can strand either pool or neither: swap a terminal for a preview and
+    // the history has to follow the preview pane into the tab it now lives in,
+    // in whichever direction that is. The condition is the same one
+    // [`pane_into_new_tab`] asks — nothing is left to reach the pool from — and
+    // the destination is the tab that still has a preview pane to reach it with,
+    // because a pool with no door onto it is a set of unsaved buffers nobody can
+    // find. Both stranded at once means neither tab has a door, and the pool
+    // stays where it is rather than being moved somewhere equally unreachable.
+    let source_stranded = from.seats.preview_seats().is_empty();
+    let target_stranded = into.seats.preview_seats().is_empty();
+    if source_stranded && !target_stranded {
         into.preview_pool
             .merge_from(std::mem::take(&mut from.preview_pool));
         into.preview_views
             .absorb(std::mem::take(&mut from.preview_views));
+    } else if target_stranded && !source_stranded {
+        from.preview_pool
+            .merge_from(std::mem::take(&mut into.preview_pool));
+        from.preview_views
+            .absorb(std::mem::take(&mut into.preview_views));
     }
     // D43 in the target: `adopt_drop` has already put layout focus on the leaf
     // that landed. The *keyboard* only follows it if a shell came with it —
@@ -23160,6 +23338,19 @@ fn pane_into_tab(
     // and only when that tab is the one being typed into.
     if watched && into.sessions.contains_key(&landed) {
         into.focused_leaf = landed;
+    }
+    // And the same sentence for the pane that came the other way, on the same
+    // two conditions. Layout focus is already settled — [`Seats::stand_in_pane`]
+    // moves it onto the arriving seat exactly when the traveller had it, which
+    // is the honest reading of a trade: the slot keeps the focus, whoever is
+    // standing in it. The keyboard follows only if that tab is the one being
+    // typed into and a shell came with the pane (I106).
+    if let Some(stood_in) = traded
+        && source_watched
+        && from.seats.focus() == stood_in
+        && from.sessions.contains_key(&stood_in)
+    {
+        from.focused_leaf = stood_in;
     }
     if source_emptied {
         debug_assert!(
@@ -23196,8 +23387,8 @@ fn pane_into_tab(
     );
     Some(PaneMove {
         landed,
+        traded,
         source_emptied,
-        ejected,
     })
 }
 
@@ -23217,33 +23408,30 @@ struct PaneArrival<'a> {
     /// `Rim(`[`trailing_edge`]`)` and means "beside all of it"; the stage's door
     /// says whichever zone the pointer was in (§7.1.6k′).
     aim: seats::LayoutAim,
-    /// The name a pane evicted by a centre would take (N161).
-    ///
-    /// Handed in rather than minted here because a `TabId` is the *window's*
-    /// counter and a free function has no business spending one. It is spent
-    /// only when [`PaneMove::ejected`] comes back `Some`, exactly as
-    /// [`Runtime::absorb_tab`] spends its own.
-    ejected_id: TabId,
 }
 
 /// What [`pane_into_tab`] did, for the window to finish.
 ///
-/// Not `Copy` and not `Debug` since §7.1.6k′, because [`Self::ejected`] is a
-/// whole `TabState` — a tab in transit, on its way from one tree into the run —
-/// and a tab is neither.
+/// **A plain record again since B4** (2026-08-25). It carried a whole `TabState`
+/// while a centre evicted the pane it landed on; the ruling made the centre a
+/// trade, and a trade leaves nothing in transit — the displaced pane went
+/// straight into the tree the traveller came out of, so there is no tab for the
+/// window to find a slot for and no `TabId` for it to spend.
+#[derive(Clone, Copy, Debug)]
 struct PaneMove {
     /// The id the pane answers to in the tab it arrived in.
     landed: SeatId,
+    /// **B4 — the id the pane it traded places with now answers to**, in the tab
+    /// the traveller left. `None` at every aim but a centre, which is the only
+    /// one that displaces anybody.
+    traded: Option<SeatId>,
     /// The tab it left held nothing else, so that tab is now an empty tree with
     /// no content: its strip entry has to go. See [`pane_into_tab`] for why this
     /// is not `close_tab`.
-    source_emptied: bool,
-    /// **N161 — the pane a centre turned out of the target tree, already a tab**
-    /// and waiting for a slot in the run.
     ///
-    /// `None` for every other aim, and for a centre it is the whole of what the
-    /// window still owes: a slot, and the tab id counter moving on.
-    ejected: Option<TabState>,
+    /// Never true of a trade: the tab the traveller left is holding the pane it
+    /// traded with, which is the whole of B4's boundary case.
+    source_emptied: bool,
 }
 
 /// **N159/K124 — a tab merged into a pane's layout hands its fleet over.**
@@ -24170,6 +24358,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         tab_clicks: TabClicks::default(),
         files_row_clicks: FilesRowClicks::default(),
         preview_name_clicks: MultiClicks::default(),
+        preview_crumb_clicks: MultiClicks::default(),
         pane_head_clicks: MultiClicks::default(),
         root_menu: profiles::RootMenu::default(),
         dirty_gate: restore::DirtyGate::default(),
@@ -24794,6 +24983,9 @@ impl Runtime<'_> {
             pending_handover: None,
             quit_requested: false,
             quit: None,
+            windows_open: Vec::new(),
+            window_ring: None,
+            window_ring_shown: None,
         };
         // **The rest of the file's windows, queued at the door.** A window that
         // held a pinned tab opens straight away, through the very same door
@@ -25462,6 +25654,16 @@ impl Runtime<'_> {
         self.window.renderer.set_peek_overlay(None);
         self.window.hover_pane = None;
         self.window.underlined_image_reference = None;
+        // **A tab switch takes every menu with it** (user ruling 2026-08-25,
+        // B10). A popup is a question about the surface it was raised over, and
+        // this line is that surface leaving the glass.
+        //
+        // It had to be said out loud because §7.1.5a′ had already made the
+        // symptom invisible: each of the eight folds to `None` off screen, so a
+        // `⌄` left open on the tab you stepped away from drew nothing, took no
+        // key, and was still open when you came back. The state outlived the
+        // gesture that raised it and there was no frame in between that said so.
+        self.close_every_popup();
         // **A tab switch closes the capsule and keeps what was typed** (D-8,
         // user ruling 2026-08-16, which is the prototype's behaviour said out
         // loud rather than a change to it).
@@ -30838,10 +31040,59 @@ impl Runtime<'_> {
         stack.tooltip = self.tooltip_layer();
         stack.file_peek = self.file_peek_layer();
         stack.drag_ghost = self.drag_ghost_layer();
+        stack.window_ring = self.window_ring_layer();
         let flattened = stack.flattened();
         dump_overlay_frame(&flattened);
         let layers = self.window.settings_marks.resolve_overlay(flattened);
         self.window.renderer.set_modal_overlay(layers)
+    }
+
+    /// **The accent ring another window's menu is pointing at** (B9, user
+    /// ruling 2026-08-25), or nothing when no menu is pointing here.
+    ///
+    /// A window with no name of its own cannot be picked out of a list by its
+    /// words alone, so the list says which one it means by marking the window
+    /// itself — the same answer the drop overlay gives about a rectangle, in the
+    /// same accent and drawn by the same halo, one container up.
+    ///
+    /// **Inside the frame and not around it.** The ring this window can draw is
+    /// the one it owns pixels for; a mark outside the client area would be a
+    /// mark the compositor never asked for. So it stands on the inner edge,
+    /// which is where every other ring in this build stands (a selected tree
+    /// row, a focused card).
+    fn window_ring_layer(&self) -> Vec<marks::OverlayLayer> {
+        if self.app.window_ring != Some(self.window_id()) {
+            return Vec::new();
+        }
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let (width, height) = (width as f32, height as f32);
+        if width <= 0.0 || height <= 0.0 {
+            return Vec::new();
+        }
+        let stroke = (bt_render::DOCK_PREVIEW_BORDER_LOGICAL_PX * scale)
+            .round()
+            .max(1.0);
+        let radius = bt_render::DOCK_PREVIEW_RADIUS_LOGICAL_PX * scale;
+        let inner = [stroke, stroke, width - stroke, height - stroke];
+        if inner[2] <= inner[0] || inner[3] <= inner[1] {
+            return Vec::new();
+        }
+        let alpha = f32::from(bt_render::DOCK_SHIFT_BORDER_ALPHA) / 255.0;
+        let quads = bt_render::rounded_overlay_halo(
+            inner,
+            (radius - stroke).max(0.0),
+            stroke,
+            bt_render::chrome_palette().accent,
+            alpha,
+        );
+        if quads.is_empty() {
+            return Vec::new();
+        }
+        vec![marks::OverlayLayer {
+            quads,
+            ..Default::default()
+        }]
     }
 
     /// The rail's own level of the stack — [`rail_overlay_layer`] with this
@@ -31170,16 +31421,15 @@ impl Runtime<'_> {
         // landing here moves panes only inside one tree and asks nothing of the
         // strip.
         //
-        // **Asked of the cargo and not of the source** (§7.1.6k′). It read
-        // `DragSource::Tab(_)` while a tab was the only thing that could arrive
-        // as a subtree, and that was the right rule written down by its only
-        // instance: what evicts the target is `Edit::ReplaceSeat`, and what asks
-        // for a replace is a centre with **a whole layout** in the hand — a
-        // foreign pane included, since 2026-08-23. A pane of this tree is the
-        // one centre that evicts nobody (`Edit::CenterSwap`, L138), and it is
-        // `inputs.cargo == None` that says so.
+        // **Asked of the source again since B4** (user ruling 2026-08-25). It
+        // was asked of the cargo while "arrives as a subtree" and "evicts the
+        // target" were the same fact; the ruling separates them. A pane's centre
+        // now trades wherever the pane came from — the displaced pane goes into
+        // the slot the traveller vacated and never becomes a tab — so the only
+        // hand left that turns a pane out into the strip is a whole tab's, and
+        // that is what this asks about.
         if let DropLanding::SeatCentre { target } = inputs.landing
-            && inputs.cargo.is_some()
+            && matches!(inputs.source, DragSource::Tab(_))
             && !self
                 .seats
                 .tree()
@@ -31231,10 +31481,7 @@ impl Runtime<'_> {
             // dashed and empty, and "Swap panes" printed inside an outline that
             // means "this will not happen" is the box arguing with itself.
             if shown.plan.fits() {
-                shown
-                    .inputs
-                    .landing
-                    .caption(&shown.inputs.source, shown.inputs.cargo.is_some())
+                shown.inputs.landing.caption(&shown.inputs.source)
             } else {
                 ""
             },
@@ -31725,26 +31972,7 @@ impl Runtime<'_> {
     /// would re-open a menu the press had just put away.
     fn close_popups_except(&mut self, keep: Popup) {
         for popup in keep.others() {
-            match popup {
-                Popup::Profile => {
-                    // P133's rule, owed by every closer and paid by only one of
-                    // them until now: the arrow turns back when the list goes.
-                    if self.window.profile_menu.close() {
-                        self.start_chevron_turn();
-                    }
-                }
-                Popup::Root => {
-                    self.window.root_menu.close();
-                }
-                Popup::File => self.window.file_menu = None,
-                Popup::Pane => self.window.pane_menu = None,
-                Popup::GraphFilter => self.window.graph_filter_menu = None,
-                Popup::GitMenu => self.window.git_menu = None,
-                Popup::TermMenu => self.window.term_menu = None,
-                Popup::Preview => {
-                    self.window.preview_menu.close();
-                }
-            }
+            self.close_popup(popup);
         }
         self.window.chevrons.clear();
         // **And every hover panel with them** (user report, 2026-08-19). A menu
@@ -31754,6 +31982,55 @@ impl Runtime<'_> {
         // put a menu away — that is this function's own loop, above — so a hover
         // surface can never take one down, which is the other half of the
         // ordering and the reason `keep` is not a parameter.
+        self.close_hover_floats_except(HoverFloat::Menu);
+    }
+
+    /// **Put one popup away.** The single arm every closer walks, so that
+    /// "closing the pane menu" is one piece of knowledge and not one per caller
+    /// — E61's whole finding, which was six hand-copied runs of `self.x = None`
+    /// and no two of them alike.
+    ///
+    /// Exhaustive on [`Popup`] on purpose: a ninth popup does not compile until
+    /// it says here how it goes away.
+    fn close_popup(&mut self, popup: Popup) {
+        match popup {
+            Popup::Profile => {
+                // P133's rule, owed by every closer and paid by only one of
+                // them until now: the arrow turns back when the list goes.
+                if self.window.profile_menu.close() {
+                    self.start_chevron_turn();
+                }
+            }
+            Popup::Root => {
+                self.window.root_menu.close();
+            }
+            Popup::File => self.window.file_menu = None,
+            Popup::Pane => self.window.pane_menu = None,
+            Popup::GraphFilter => self.window.graph_filter_menu = None,
+            Popup::GitMenu => self.window.git_menu = None,
+            Popup::TermMenu => self.window.term_menu = None,
+            Popup::Preview => {
+                self.window.preview_menu.close();
+            }
+        }
+    }
+
+    /// **Every popup, with nothing kept** (user ruling 2026-08-25, B10).
+    ///
+    /// [`Self::close_popups_except`] is what an *opener* owes: it spares the one
+    /// it is raising, because a toggle has to reach its own popup through the
+    /// same door as an open. This is what a *departure* owes, and there is
+    /// nothing to spare — the surface every one of them was raised over has just
+    /// stopped being on the glass.
+    ///
+    /// The hover panels go with them for `close_popups_except`'s own reason, and
+    /// the `⌄` clocks are cleared so that a rest maturing a frame later cannot
+    /// re-open a menu onto the tab that has just arrived.
+    fn close_every_popup(&mut self) {
+        for popup in Popup::ALL {
+            self.close_popup(popup);
+        }
+        self.window.chevrons.clear();
         self.close_hover_floats_except(HoverFloat::Menu);
     }
 
@@ -34699,6 +34976,40 @@ impl Runtime<'_> {
         self.present_chrome_change()
     }
 
+    /// **Put a box on the breadcrumb's last segment** (B5, user ruling
+    /// 2026-08-25).
+    ///
+    /// [`Self::open_preview_rename`] with the rail's subject instead of the
+    /// head's, and everything after it is shared: the same seed, the same keys,
+    /// the same commit onto the same disk. The tail of a path *is* the file the
+    /// head names, so the two boxes could not be allowed to disagree about what
+    /// happens when Enter is pressed in them.
+    ///
+    /// **The name is taken off the buffer and not off the crumb**, even though
+    /// the crumb is what was double-clicked: `crumb_segments` draws the last
+    /// segment from the path, and a path's last component and a buffer's name
+    /// are the same string by construction — but only one of the two is the
+    /// thing the commit will move.
+    fn open_preview_crumb_rename(&mut self, seat: SeatId) -> Result<()> {
+        // A page's rail is an address and has no crumbs to double-click; a rail
+        // that is not showing a document has nothing to rename.
+        if self.seat_holds_a_page(seat) {
+            return Ok(());
+        }
+        let surface = self.preview_here(seat);
+        let Some(buffer) = self.preview_buffer_on(surface) else {
+            return Ok(());
+        };
+        if buffer.source.file_path().is_none() {
+            return Ok(());
+        }
+        let (source, name) = (buffer.source.clone(), buffer.name.clone());
+        self.window.rename = Some(TabRename::open_crumb(surface, source, &name));
+        self.window.rename_blink.reset(Instant::now());
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
     /// **The open editor, measured into the head it is drawn in** (user ruling
     /// 2026-08-19).
     ///
@@ -34949,6 +35260,92 @@ impl Runtime<'_> {
         (measure_in, Some(edit))
     }
 
+    /// The draft in the box open on **this seat's** crumb tail, if one is (B5).
+    ///
+    /// Read twice a frame — once to measure the row and once to draw it — so it
+    /// is a question about the window rather than a value carried between the
+    /// two: a copy passed along would be a second place the answer lives, and
+    /// the two readers run either side of a geometry pass.
+    fn open_crumb_draft(&self, seat: SeatId) -> Option<String> {
+        let surface = self.preview_here(seat);
+        self.window.rename.as_ref().and_then(|editor| {
+            matches!(&editor.subject, RenameSubject::PreviewCrumb { surface: at, .. } if *at == surface)
+                .then(|| editor.text.clone())
+        })
+    }
+
+    /// **The open crumb editor, measured into the segment it is drawn in** (B5,
+    /// user ruling 2026-08-25).
+    ///
+    /// [`Self::dress_preview_address_editor`] with the tail crumb's box
+    /// substituted for the address field's, and it is a third function rather
+    /// than a branch inside either for that one's stated reason: these lay out
+    /// into different boxes, and a box is the whole of what a caret's position
+    /// is measured against.
+    ///
+    /// **There is no `first_visible` walk here, and that is a property of the
+    /// box rather than an omission.** An address field has a fixed run and a URL
+    /// longer than it, so it scrolls; a crumb's box was measured *from this very
+    /// draft* one pass ago, so the draft always fits it exactly. What clamps a
+    /// very long name is `preview_rail_geometry`'s own fold, which takes the
+    /// middle of the path away before it takes room from the file.
+    fn dress_preview_crumb_editor(
+        &mut self,
+        seat: SeatId,
+        scale: f32,
+        measure_in: &seats::PreviewRailMeasure,
+    ) -> Option<seats::TabEdit> {
+        self.open_crumb_draft(seat)?;
+        let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
+        let geometry = seats::preview_rail_geometry(rect, scale, measure_in);
+        let box_ = geometry
+            .crumbs
+            .iter()
+            .find(|crumb| crumb.tail)
+            .map(|crumb| crumb.rect)?;
+        let box_width = box_[2] - box_[0];
+        let font = seats::PREVIEW_RAIL_FONT_LOGICAL_PX * scale;
+        let caret_width = (seats::TAB_RENAME_CARET_LOGICAL_PX * scale)
+            .round()
+            .max(1.0);
+        // Disjoint fields, split by hand, for `measure_open_rename`'s reason: the
+        // editor owns its draft and the renderer owns how wide a string is, and
+        // this is the one place the two have to meet.
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let editor = self.window.rename.as_mut()?;
+        let mut measure = |text: &str| {
+            if text.is_empty() {
+                0.0
+            } else {
+                renderer.measure_chrome_text(gpu, text, font)
+            }
+        };
+        // The window never leaves the start of the draft, so the walk the other
+        // two editors run is one assignment here — said out loud rather than
+        // left implicit, because `first_visible` is what every offset below is
+        // taken from.
+        editor.first_visible = 0;
+        let caret_px = measure(&editor.text[..editor.caret]);
+        let selection_px = if editor.selected > 0 {
+            measure(&editor.text[..editor.selected]).min(box_width)
+        } else {
+            0.0
+        };
+        let edit = seats::TabEdit {
+            text: editor.text.clone(),
+            // A file has no name under its name, so there is no layer to reveal.
+            placeholder: String::new(),
+            caret_px,
+            selection_px,
+            caret_lit: self.window.rename_blink.visible(),
+        };
+        // **Written here because here is the only place the box exists** — the
+        // IME's candidate list has to stand under what is being typed.
+        let x = (box_[0] + caret_px).min(box_[2] - caret_width);
+        self.window.rename_caret_line = Some([x, box_[1], x + caret_width, box_[3]]);
+        Some(edit)
+    }
+
     /// **Commit a preview head's draft to the filesystem** (user ruling
     /// 2026-08-19).
     ///
@@ -35057,6 +35454,112 @@ impl Runtime<'_> {
         // path opens on `No preview — file not found`, which is this window
         // telling the reader their own rename did not happen. The tab editor
         // marks the session for the same reason one function up.
+        self.mark_session_dirty(Instant::now());
+        Ok(())
+    }
+
+    /// **Put a box on one row of a files column** (B5, user ruling 2026-08-25).
+    ///
+    /// [`Self::open_preview_rename`] one surface over, and the same editor: the
+    /// whole name in the box, the stem selected, the suffix left standing. A
+    /// folder is renamed by the same door as a file, because on the disk they
+    /// are the same act.
+    ///
+    /// **Only a docked column**, and that is geometry rather than policy — a
+    /// [`RowHost::Git`] draws a repository's report and not a tree, and a
+    /// [`RowHost::Float`] draws its rows through `float`'s own body, which has
+    /// no box for an editor to be measured into. Neither refusal is a guard
+    /// against a caller: the row is offered from `file_menu`, and a host that
+    /// cannot draw the box declines here rather than opening an editor nobody
+    /// can see.
+    fn open_files_row_rename(&mut self, host: RowHost, key: &str) -> Result<()> {
+        let RowHost::Column(seat) = host else {
+            return Ok(());
+        };
+        let now = Instant::now();
+        // Asked of the live tree rather than of the painted list, on
+        // [`Self::fold_files_row`]'s reason: the menu can stand open while a
+        // directory lands underneath it, and a key that no longer names a row
+        // renames nothing.
+        let Some(name) = self
+            .files_trees(now)
+            .get(&seat)
+            .and_then(|tree| tree.rows.iter().find(|row| row.key == key))
+            .map(|row| row.name.clone())
+        else {
+            return Ok(());
+        };
+        let leaf = self.leaf_here(seat);
+        self.window.rename = Some(TabRename::open_files_row(leaf, key, &name));
+        // A caret that arrives mid-blink arrives invisible half the time.
+        self.window.rename_blink.reset(now);
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
+    /// **Commit a tree row's draft to the filesystem** (B5, user ruling
+    /// 2026-08-25).
+    ///
+    /// [`Self::rename_preview_file`]'s four silent refusals and its one card,
+    /// for that function's own stated reasons — an empty name, an unchanged
+    /// name, a name Windows will not take and a name a *different* entry already
+    /// has all leave the row as it was and say nothing, because the reader can
+    /// see whether it worked; a handle another program is holding is a fact
+    /// about the machine that no box can show, so it raises a card.
+    ///
+    /// **The collision check is this window's and not `MoveFileExW`'s**, again
+    /// for that function's reason: `std::fs::rename` carries
+    /// `MOVEFILE_REPLACE_EXISTING` on this platform, and a rename that eats
+    /// somebody's file is not a rename. Case is ignored against the old path so
+    /// that `notes.md` → `Notes.md` is the legitimate rename of one entry into
+    /// its own name rather than a collision with itself.
+    ///
+    /// What follows the row is the *folder*, not a buffer: the tree re-reads the
+    /// directory the entry lives in, which is the same call a rename made in the
+    /// preview head already makes and the same one an Explorer rename would be
+    /// noticed by if the column had a watcher. A document open on that path is
+    /// re-pointed too, because a file may be open in a preview and listed in a
+    /// column at the same time and a window that renamed it in one place and not
+    /// the other would be holding two names for one file.
+    fn rename_files_row(&mut self, leaf: LeafId, key: &str, draft: &str) -> Result<()> {
+        let Some(tab) = self.tab_slot_of(leaf.tab) else {
+            return Ok(());
+        };
+        let root = self.window.tabs[tab].files_state(leaf.seat).root;
+        if root.is_empty() {
+            return Ok(());
+        }
+        let old = files::full_path(&root, key);
+        let Some(directory) = old.parent().map(std::path::Path::to_path_buf) else {
+            return Ok(());
+        };
+        let name = draft.trim();
+        let was = old
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        if name.is_empty() || name == was || !name_is_writable(name) {
+            return Ok(());
+        }
+        let new = directory.join(name);
+        if new.exists() && !same_path_ignoring_case(&old, &new) {
+            return Ok(());
+        }
+        if let Err(error) = std::fs::rename(&old, &new) {
+            return self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::FilesColumn(leaf.seat),
+                Some(was),
+                i18n::not_renamed(&error.to_string()),
+            );
+        }
+        // A file that is also open in a preview keeps one identity across the
+        // window, which is the one-buffer-per-file law read from the other end:
+        // the column moved it, and the pool has to be told by whoever moved it.
+        let source = preview::PreviewSource::file(&old);
+        if self.preview_pool.get(&source).is_some() {
+            self.follow_renamed_preview(&source, &new, name);
+        }
+        self.refresh_files_dirs_at(&directory);
         self.mark_session_dirty(Instant::now());
         Ok(())
     }
@@ -36840,6 +37343,15 @@ impl Runtime<'_> {
             shortcuts::Action::DuplicatePaneSplit => {
                 self.split_focused_terminal(self.duplicate_split_axis())
             }
+            // **The keyboard's door onto §7.1.6l** (user ruling 2026-08-25, B7),
+            // and it is the same door the head's double-click and the `⌄` menu's
+            // row already walk through — `toggle_pane_zoom`, once, so the three
+            // gestures cannot drift into meaning three things.
+            //
+            // The subject is the focused pane and not the hovered one: a chord
+            // answers for wherever the keyboard is, which is the same rule
+            // `close-pane` one arm up already follows.
+            shortcuts::Action::ZoomPane => self.toggle_pane_zoom(self.focused_leaf),
             // The keyboard door onto the files column, and the `˅` menu's
             // `Files pane` row is the mouse one. Both are `toggle_files_pane`,
             // so neither can drift into meaning something the other does not.
@@ -38332,7 +38844,20 @@ impl Runtime<'_> {
             }
             seats::PreviewRailKind::Crumbs => {
                 let path = self.preview_rail_path(seat)?;
-                for (name, target) in crumb_segments(&path) {
+                // **The draft stands in for the tail while a box is open on it**
+                // (B5, user ruling 2026-08-25). The whole row is laid out to the
+                // widths measured here, so substituting the draft *before* the
+                // measurement is what makes the box grow and shrink under the
+                // typing instead of the letters running out of a rectangle cut
+                // for the old name. Every other segment is untouched: the
+                // folders above the file have not moved.
+                let drafted = self.open_crumb_draft(seat);
+                let last = crumb_segments(&path).len().saturating_sub(1);
+                for (at, (name, target)) in crumb_segments(&path).into_iter().enumerate() {
+                    let name = match &drafted {
+                        Some(draft) if at == last => draft.clone(),
+                        _ => name,
+                    };
                     frame
                         .measure
                         .segments
@@ -38362,6 +38887,14 @@ impl Runtime<'_> {
         let (tools, edit) = self.dress_preview_address_editor(seat, scale, frame.measure.clone());
         frame.measure = tools;
         frame.edit = edit;
+        // **And the tail's box, when this rail is the one holding it** (B5). The
+        // two are mutually exclusive by construction — an `Address` rail has no
+        // crumbs and a `Crumbs` rail has no address — so this cannot overwrite an
+        // open address field; it is written second because the measurement it
+        // reads is the one the line above settled.
+        if frame.edit.is_none() {
+            frame.edit = self.dress_preview_crumb_editor(seat, scale, &frame.measure);
+        }
         // The same door the commit goes through, asked without knocking — an
         // empty field is unfinished rather than wrong, so it does not light up.
         // **The engine the search would be composed for is handed over** so that
@@ -38672,6 +39205,18 @@ impl Runtime<'_> {
     /// so the tail hands over its parent. That is not a special case bolted on:
     /// every segment hands over the place it *names*, and the place a file names
     /// is the folder it is in.
+    /// Whether this depth is the crumb rail's **last** segment — the file
+    /// itself, and the only one a second press opens a box on (B5).
+    ///
+    /// Asked of the path rather than of the drawn geometry, because the drawn
+    /// run is folded: `PreviewCrumbBox::depth` is an index into the whole path
+    /// and the tail is its last component whether or not the middle survived the
+    /// fold.
+    fn preview_crumb_is_the_tail(&self, seat: SeatId, depth: usize) -> bool {
+        self.preview_rail_path(seat)
+            .is_some_and(|path| depth + 1 == crumb_segments(&path).len())
+    }
+
     fn press_preview_crumb(&mut self, seat: SeatId, depth: usize) -> Result<()> {
         let Some(path) = self.preview_rail_path(seat) else {
             return Ok(());
@@ -47202,10 +47747,20 @@ impl Runtime<'_> {
     /// puts every tab's — and the mock-up's own `state.tabs.flatMap(poolDirtyNames)`
     /// says the third in as many words (P125).
     fn gate_dirty_names(&self, request: &restore::GateRequest) -> Vec<String> {
+        // **Each name says which tab it is in** (B1, user ruling 2026-08-25),
+        // and it is added here because here is the only place that can see a
+        // tab: the card is handed a list of lines and has no window to ask.
+        //
+        // A shut is the one request whose list can span more than one tab, so it
+        // is the one that needs saying — but the sentence is added by every one
+        // of the three, because a reader looking at a card does not know which
+        // question raised it and a name that carries its room in one card and
+        // not in another is two cards.
         let one_tab = |tab: &TabState| {
+            let where_ = tab.display_title();
             tab.preview_pool
                 .dirty_names(None)
-                .map(str::to_owned)
+                .map(|name| unsaved_line(name, &where_))
                 .collect::<Vec<_>>()
         };
         match request {
@@ -47313,6 +47868,24 @@ impl Runtime<'_> {
             // gate must be able to give.
             return Ok(());
         }
+        // **`Save all` writes first and closes only if all of it landed** (B1,
+        // user ruling 2026-08-25), which is [`quit::Quit::saved`]'s own rule one
+        // surface down and for its reason: a shut that closed the window after a
+        // half-finished save would take the half that is still only in memory
+        // with it. The failures are already named on their own pane by
+        // `quit_save`; the window stays, so the reader can see them there.
+        //
+        // Only the shut can be answered this way (`GateRequest::offers_save`),
+        // so there is no per-request branch here — the button that would send
+        // any other request down this path is not drawn.
+        if answer == restore::GateAnswer::Save {
+            let report = self.quit_save()?;
+            if !report.is_complete() {
+                return Ok(());
+            }
+            self.window.window_close_requested = true;
+            return Ok(());
+        }
         match request {
             restore::GateRequest::ClosePane(seat) => {
                 // The pool is the tab's, so emptying it leaves *every* surface
@@ -47415,19 +47988,35 @@ impl Runtime<'_> {
         if names.is_empty() {
             return None;
         }
-        let message = request.message(&names);
+        let lines = request.lines(&names);
         let title = request.title();
-        let discard_text = request.answer_text();
+        // **`Discard all` when the card is a list, `Discard` when it names one
+        // thing** (B1). The word is a fact about the subject, and the subject is
+        // what `offers_save` is deciding about too.
+        let discard_text = if request.offers_save() {
+            restore::gate_discard_all_text()
+        } else {
+            request.answer_text()
+        };
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let room = restore::content_width(width, scale);
+        let offers_save = request.offers_save();
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let content = restore::GateContent {
             title,
-            message_lines: restore::wrap(&message, room, |line| {
-                renderer.measure_chrome_text(gpu, line, restore::SUB_FONT_LOGICAL_PX * scale)
-            }),
+            // Each line is wrapped on its own, so a file name too long for the
+            // dialog runs onto a second line of its own row rather than being
+            // run together with the name below it.
+            message_lines: lines
+                .iter()
+                .flat_map(|line| {
+                    restore::wrap(line, room, |run| {
+                        renderer.measure_chrome_text(gpu, run, restore::SUB_FONT_LOGICAL_PX * scale)
+                    })
+                })
+                .collect(),
             discard_text,
             cancel_text_width: renderer.measure_chrome_text(
                 gpu,
@@ -47439,6 +48028,13 @@ impl Runtime<'_> {
                 discard_text,
                 restore::BUTTON_FONT_LOGICAL_PX * scale,
             ),
+            save_text_width: offers_save.then(|| {
+                renderer.measure_chrome_text(
+                    gpu,
+                    restore::quit_save_text(),
+                    restore::BUTTON_FONT_LOGICAL_PX * scale,
+                )
+            }),
         };
         Some(restore::gate_layout(&content, width, height, scale))
     }
@@ -47464,8 +48060,13 @@ impl Runtime<'_> {
         self.window
             .tabs
             .iter()
-            .flat_map(|tab| tab.preview_pool.dirty_names(None))
-            .map(str::to_owned)
+            .flat_map(|tab| {
+                let where_ = tab.display_title();
+                tab.preview_pool
+                    .dirty_names(None)
+                    .map(|name| unsaved_line(name, &where_))
+                    .collect::<Vec<_>>()
+            })
             .chain(self.uncommitted_edit_name())
             .collect()
     }
@@ -47513,6 +48114,27 @@ impl Runtime<'_> {
                     .map(|name| name.to_string_lossy().into_owned());
                 let draft = editor.text.trim().to_owned();
                 (!draft.is_empty() && Some(&draft) != was.as_ref()).then_some(draft)
+            }
+            // **B5's two new doors, and the crumb is the same loss the head
+            // is.** A draft open on the last segment is the same file, not
+            // committed, so a quit that discarded it would lose exactly what the
+            // head's own draft loses.
+            RenameSubject::PreviewCrumb { source, .. } => {
+                let was = source
+                    .file_path()
+                    .and_then(std::path::Path::file_name)
+                    .map(|name| name.to_string_lossy().into_owned());
+                let draft = editor.text.trim().to_owned();
+                (!draft.is_empty() && Some(&draft) != was.as_ref()).then_some(draft)
+            }
+            // A tree row's draft cannot be compared against a committed name
+            // without walking a live tree, and the card is built where there is
+            // no tree to walk — so it names the draft whenever there is one,
+            // which is the honest over-report: a card that lists a name nobody
+            // changed costs one line, and a card that omits one loses a rename.
+            RenameSubject::FilesRow { .. } => {
+                let draft = editor.text.trim().to_owned();
+                (!draft.is_empty()).then_some(draft)
             }
             RenameSubject::WebAddress { .. } => None,
         }
@@ -47668,15 +48290,23 @@ impl Runtime<'_> {
         if !quit.is_asking() {
             return None;
         }
-        let message = i18n::quit_unsaved_message(&quit.names().join(", "));
+        // **One line per file** (B1), through the same maker the gate uses: the
+        // card is about a list, and a list drawn as a wrapped sentence is a list
+        // nobody can count.
+        let lines = restore::unsaved_lines(quit.names());
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let room = restore::content_width(width, scale);
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
-        let message_lines = restore::wrap(&message, room, |line| {
-            renderer.measure_chrome_text(gpu, line, restore::SUB_FONT_LOGICAL_PX * scale)
-        });
+        let message_lines = lines
+            .iter()
+            .flat_map(|line| {
+                restore::wrap(line, room, |run| {
+                    renderer.measure_chrome_text(gpu, run, restore::SUB_FONT_LOGICAL_PX * scale)
+                })
+            })
+            .collect();
         let content = restore::QuitContent {
             message_lines,
             save_text_width: renderer.measure_chrome_text(
@@ -47691,7 +48321,7 @@ impl Runtime<'_> {
             ),
             discard_text_width: renderer.measure_chrome_text(
                 gpu,
-                restore::gate_discard_text(),
+                restore::gate_discard_all_text(),
                 restore::BUTTON_FONT_LOGICAL_PX * scale,
             ),
         };
@@ -49472,6 +50102,18 @@ impl Runtime<'_> {
         if hit == profiles::TermMenuHit::Surface {
             return Ok(());
         }
+        // Resolved while the child still exists — see the `Submenu` arm below,
+        // and [`Runtime::run_pane_menu_row`], which does the same thing for the
+        // same reason one menu over.
+        let submenu = match hit {
+            profiles::TermMenuHit::Submenu(at) => {
+                match self.term_menu_layout().and_then(|l| l.submenu_row(at)) {
+                    Some(of) => Some(of),
+                    None => return Ok(()),
+                }
+            }
+            _ => None,
+        };
         let Some(menu) = self.window.term_menu.take() else {
             return Ok(());
         };
@@ -49484,7 +50126,14 @@ impl Runtime<'_> {
             profiles::TermMenuHit::Row(profiles::TermMenuEntry::Pane(row)) => {
                 return self.run_pane_verb(seat, profiles::PaneMenuHit::Row(row));
             }
-            profiles::TermMenuHit::Submenu(profile) => {
+            // The child's row counts rows on the glass since B9, so the profile
+            // it is about is asked of the layout — and asked *before* the take
+            // above, which is why `submenu` is resolved at the top of this
+            // function rather than here.
+            profiles::TermMenuHit::Submenu(_) => {
+                let Some(profile) = submenu else {
+                    return Ok(());
+                };
                 return self.run_pane_verb(seat, profiles::PaneMenuHit::Submenu(profile));
             }
             profiles::TermMenuHit::Surface => return Ok(()),
@@ -49896,17 +50545,19 @@ impl Runtime<'_> {
     /// no re-layout can move or destroy.
     fn pane_menu_layout(&mut self) -> Option<profiles::PaneMenuLayout> {
         let menu = self.window.pane_menu.as_ref()?;
-        let (point, submenu_open, zoomed) = (menu.point, menu.submenu_open, menu.zoomed);
+        let (point, submenu, zoomed) = (menu.point, menu.submenu, menu.zoomed);
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let windows = self.other_window_rows();
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
         Some(profiles::pane_menu_layout(
             point,
             (width as f32, height as f32),
             scale,
-            submenu_open,
+            submenu,
             zoomed,
+            &windows,
             &mut measure,
         ))
     }
@@ -49930,7 +50581,7 @@ impl Runtime<'_> {
             seat,
             zoomed: self.seats.seat_is_zoomed(seat),
             hover: None,
-            submenu_open: false,
+            submenu: None,
             pointer_was: None,
             submenu_hold_until: None,
         });
@@ -50093,10 +50744,43 @@ impl Runtime<'_> {
         // Bash, and a submenu that ticked PowerShell on it would be telling you
         // about the window rather than about the pane the menu was raised on.
         let current = self.sessions.get(&seat).map(|leaf| leaf.profile);
+        let windows = self.other_window_rows();
         let programs = &self.app.profile_programs;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
-        profiles::pane_menu_build(&layout, hover, current, programs, &mut measure)
+        profiles::pane_menu_build(&layout, hover, current, programs, &windows, &mut measure)
+    }
+
+    /// **The other windows, as the submenu names them** (B9, user ruling
+    /// 2026-08-25) — in the order they were opened, which is the order the
+    /// ordinals count in.
+    ///
+    /// Read off [`App::windows_open`], which is the directory `FolioApp`
+    /// publishes each turn: a `Runtime` is one window by construction and can
+    /// see no other, so the list has to be handed down rather than walked here.
+    ///
+    /// **This window is not in it.** A pane already in this window has nothing
+    /// to move, and a row that did nothing would be a row.
+    fn other_window_rows(&self) -> Vec<String> {
+        let here = self.window.window.id();
+        self.app
+            .windows_open
+            .iter()
+            .filter(|open| open.id != here)
+            .map(|open| i18n::window_row(open.ordinal, open.tabs))
+            .collect()
+    }
+
+    /// The same list as ids, in the same order — what a press on row `n` is
+    /// about.
+    fn other_window_ids(&self) -> Vec<WindowId> {
+        let here = self.window.window.id();
+        self.app
+            .windows_open
+            .iter()
+            .filter(|open| open.id != here)
+            .map(|open| open.id)
+            .collect()
     }
 
     fn close_pane_menu(&mut self) -> Result<bool> {
@@ -50113,30 +50797,48 @@ impl Runtime<'_> {
     ///
     /// The hold is cleared on both edges: an opening submenu has nothing to
     /// survive yet, and a closing one has nothing left to survive for.
-    fn set_pane_submenu(&mut self, open: bool) -> Result<bool> {
+    fn set_pane_submenu(&mut self, open: Option<profiles::PaneMenuRow>) -> Result<bool> {
         let Some(menu) = self.window.pane_menu.as_mut() else {
             return Ok(false);
         };
-        if menu.submenu_open == open {
+        if menu.submenu == open {
             return Ok(false);
         }
-        menu.submenu_open = open;
+        // **The heading is the row that was open, not a name written down here**
+        // (B9). It said `SplitWith` while that was the only row with a list, and
+        // a closing `Move to window` would have handed the keyboard to a row two
+        // above the one it was standing on.
+        let was = menu.submenu;
+        menu.submenu = open;
         menu.submenu_hold_until = None;
         // The highlight follows the surface it is on. Opening lands on the first
-        // profile, which is what `→` and a click both mean; closing takes the
+        // row, which is what `→` and a click both mean; closing takes the
         // highlight back to the heading it came from, so `←` leaves the keyboard
         // somewhere rather than nowhere.
-        menu.hover = if open {
-            Some(profiles::PaneMenuHover::Submenu(0))
-        } else {
-            Some(profiles::PaneMenuHover::Row(
-                profiles::PaneMenuRow::SplitWith,
-            ))
+        menu.hover = match (open, was) {
+            (Some(_), _) => Some(profiles::PaneMenuHover::Submenu(0)),
+            (None, Some(heading)) => Some(profiles::PaneMenuHover::Row(heading)),
+            (None, None) => menu.hover,
         };
+        // **The ring goes out with the list** (B9): a highlighted window with no
+        // menu naming it is a window wearing a mark nobody can explain. Armed
+        // again by the first hover inside the list that has just opened.
+        self.aim_at_window(None);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
         Ok(true)
+    }
+
+    /// **Ring the window this menu row is pointing at** (B9, user ruling
+    /// 2026-08-25), or take the ring off.
+    ///
+    /// Written on the application because the window that draws it is not the
+    /// window the pointer is in — the whole point of the mark. `FolioApp` spends
+    /// it in the same turn (`settle_window_ring`), which is
+    /// [`App::pending_new_windows`]'s standing shape and its standing reason.
+    fn aim_at_window(&mut self, window: Option<WindowId>) {
+        self.app.window_ring = window;
     }
 
     /// **The pane menu's hover, with the safety triangle in it** (#53).
@@ -50179,9 +50881,10 @@ impl Runtime<'_> {
         // past its base, and the child shut under the hand that had just reached
         // it. The heading keeps its place beside it: a hand back on the row the
         // child hangs from has not left the child either.
+        let heading = menu.submenu;
         let hovering_child = layout.on_submenu(to[0], to[1])
-            || hit == Some(profiles::PaneMenuHit::Row(profiles::PaneMenuRow::SplitWith));
-        let was_open = menu.submenu_open;
+            || matches!(hit, Some(profiles::PaneMenuHit::Row(row)) if Some(row) == heading);
+        let was_open = menu.submenu;
         let mut held = false;
         if let Some(submenu) = submenu
             && !hovering_child
@@ -50198,7 +50901,7 @@ impl Runtime<'_> {
                 held = now < until;
             }
             if !held {
-                menu.submenu_open = false;
+                menu.submenu = None;
                 menu.submenu_hold_until = None;
             }
         } else {
@@ -50226,21 +50929,36 @@ impl Runtime<'_> {
         // a hold that expires over the row it was already on takes a whole
         // window off the screen, and a repaint skipped because "the hover is the
         // same" would leave that window drawn over nothing.
-        let mut changed = menu.submenu_open != was_open;
+        let mut changed = menu.submenu != was_open;
         if !held && menu.hover != hovered {
             menu.hover = hovered;
             changed = true;
         }
+        // **The ring is the hover, seen from the other window** (B9). Read off
+        // the highlight rather than off the hit, so the keyboard's walk lights
+        // the same window the pointer's would.
+        let ring = match (layout.submenu_kind(), menu.hover) {
+            (
+                Some(profiles::PaneMenuRow::MoveToWindow),
+                Some(profiles::PaneMenuHover::Submenu(at)),
+            ) => Some(at),
+            _ => None,
+        };
         // Resting on the heading opens the child, on the same 250ms the chevrons
         // themselves take (user ruling, 2026-08-16) — one number for "a hand has
         // settled on something that has more behind it". It is armed here and
         // matured in `advance_pane_menu`.
-        let on_heading = hit == Some(profiles::PaneMenuHit::Row(profiles::PaneMenuRow::SplitWith));
-        if on_heading && !menu.submenu_open {
+        let resting_on = match hit {
+            Some(profiles::PaneMenuHit::Row(row)) if row.has_submenu() => Some(row),
+            _ => None,
+        };
+        if resting_on.is_some() && menu.submenu != resting_on {
             menu.submenu_hold_until
                 .get_or_insert(now + profiles::CHEVRON_HOVER_OPEN);
         }
         let inside = hit.is_some();
+        let aim = ring.and_then(|at| self.other_window_ids().get(at).copied());
+        self.aim_at_window(aim);
         if changed && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -50264,22 +50982,43 @@ impl Runtime<'_> {
         if now < due {
             return Ok(());
         }
-        if menu.submenu_open {
+        if menu.submenu.is_some() {
             // The cap ran out with the hand still short of the child. The
             // submenu goes, and the highlight is owed to whatever the pointer is
             // actually over — which is asked of the geometry rather than
             // remembered, because the rows have not moved but the hold was
             // deliberately keeping the answer stale.
-            self.set_pane_submenu(false)?;
+            self.set_pane_submenu(None)?;
             if let Some(position) = self.window.pointer_position {
                 self.drive_pane_menu_hover(position)?;
             }
             return Ok(());
         }
         // The rest on the heading matured: the child opens, exactly as a rest on
-        // a chevron opens its own menu.
-        self.set_pane_submenu(true)?;
+        // a chevron opens its own menu. **Which child is a fact about where the
+        // hand is resting** (B9), asked of the same hit test the hover reads.
+        let Some(row) = self
+            .pane_menu_row_under_pointer()
+            .filter(|row| row.has_submenu())
+        else {
+            return Ok(());
+        };
+        self.set_pane_submenu(Some(row))?;
         Ok(())
+    }
+
+    /// Which row of the pane menu the pointer is on, if it is on one.
+    ///
+    /// Its own reader because two callers want it at moments when neither has a
+    /// layout in hand — a matured rest and a press — and re-deriving it beside
+    /// each of them is how one menu grows two hit tests.
+    fn pane_menu_row_under_pointer(&mut self) -> Option<profiles::PaneMenuRow> {
+        let position = self.window.pointer_position?;
+        let layout = self.pane_menu_layout()?;
+        match profiles::pane_menu_hit(&layout, position.x, position.y) {
+            Some(profiles::PaneMenuHit::Row(row)) => Some(row),
+            _ => None,
+        }
     }
 
     /// The pane menu's next wake-up, for the loop's set.
@@ -51228,15 +51967,105 @@ impl Runtime<'_> {
     /// that raised this and the one that ran it, the pointer has travelled —
     /// down the menu, which is drawn over some *other* pane as often as not.
     fn run_pane_menu_row(&mut self, hit: profiles::PaneMenuHit) -> Result<()> {
+        // **The child's row is resolved while the child still exists** (B9). A
+        // `Submenu` hit counts rows on the glass, and what those rows are about
+        // is a fact about the layout — which is built out of the menu state the
+        // very next line takes away.
+        let submenu = match hit {
+            profiles::PaneMenuHit::Submenu(at) => {
+                let layout = self.pane_menu_layout();
+                let kind = layout
+                    .as_ref()
+                    .and_then(profiles::PaneMenuLayout::submenu_kind);
+                let of = layout.as_ref().and_then(|layout| layout.submenu_row(at));
+                match (kind, of) {
+                    (Some(kind), Some(of)) => Some((kind, of)),
+                    // A press on a child that is no longer there. The ordinary
+                    // case rather than a fault: a menu can be taken down by
+                    // anything between the press and this line.
+                    _ => return Ok(()),
+                }
+            }
+            _ => None,
+        };
+        // Resolved *before* the take, so `other_window_ids` reads the same
+        // directory the list was drawn from.
+        let bound_for = match submenu {
+            Some((profiles::PaneMenuRow::MoveToWindow, of)) => {
+                Some(self.other_window_ids().get(of).copied())
+            }
+            _ => None,
+        };
         let Some(menu) = self.window.pane_menu.take() else {
             return Ok(());
         };
         let seat = menu.seat;
         self.window.chevrons.clear();
+        // **The ring goes with the menu**, wherever the press lands: a window
+        // still wearing the mark after the list that put it there has gone is a
+        // window claiming to be a destination nobody is choosing.
+        self.aim_at_window(None);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
+        if let Some(window) = bound_for {
+            let Some(window) = window else {
+                return Ok(());
+            };
+            return self.move_pane_to_window(seat, window);
+        }
+        // Every other child row is the profile list's, and `run_pane_verb` has
+        // taken a `PROFILES` index there since the day the submenu existed.
+        let hit = match submenu {
+            Some((_, of)) => profiles::PaneMenuHit::Submenu(of),
+            None => hit,
+        };
         self.run_pane_verb(seat, hit)
+    }
+
+    /// **Move this pane into a window that is already open** (B9, user ruling
+    /// 2026-08-25).
+    ///
+    /// [`Runtime::move_pane_to_new_window`] with the destination named instead
+    /// of made, and it walks the same road F2's cross-window *drag* already
+    /// walks — the pane is promoted to a tab where it stands and the tab is
+    /// handed over by [`FolioApp::transfer_tab`]. That road is a
+    /// [`DragHandover`] because only `FolioApp` can see two windows at once, and
+    /// a menu row arrives at one `Runtime` that can see neither: so the row
+    /// records the errand and `about_to_wait` spends it, in the same turn and
+    /// before any frame.
+    ///
+    /// **It is the drag's errand and not a second one**, which is what keeps the
+    /// promotion, the transfer, the refusal card and the emptied source tab from
+    /// growing a menu-shaped copy of themselves.
+    ///
+    /// The landing is the end of the target's strip. A drag lands where the hand
+    /// let go and this row has no hand over that window at all — so the honest
+    /// answer is the one every append in this program gives, which is "after
+    /// everything that is already there".
+    fn move_pane_to_window(&mut self, seat: SeatId, window: WindowId) -> Result<()> {
+        if window == self.window_id() {
+            return Ok(());
+        }
+        let slot = self
+            .app
+            .windows_open
+            .iter()
+            .find(|open| open.id == window)
+            .map_or(0, |open| open.tabs);
+        let leaf = LeafId {
+            tab: self.window.tabs[self.window.active_tab].id,
+            seat,
+        };
+        self.app.pending_handover = Some(DragHandover {
+            cargo: DragSource::Pane(leaf),
+            from: self.window_id(),
+            into: HandoverInto::Window {
+                window,
+                landing: DropLanding::StripExtract { slot },
+            },
+        });
+        Ok(())
     }
 
     /// **One pane verb, wherever it was asked for** (§7.1.6e's rule: one verb,
@@ -51275,7 +52104,9 @@ impl Runtime<'_> {
                 // that press never reaches here (see `press_pane_menu`). Listed
                 // so the match is exhaustive over a closed set rather than over
                 // a wildcard that would silently swallow a row added later.
-                profiles::PaneMenuRow::Picker | profiles::PaneMenuRow::SplitWith => Ok(()),
+                profiles::PaneMenuRow::Picker
+                | profiles::PaneMenuRow::SplitWith
+                | profiles::PaneMenuRow::MoveToWindow => Ok(()),
                 // §7.1.6l — the row and the double-click on the head are one
                 // verb behind two doors, which is what `run_pane_verb` is for.
                 profiles::PaneMenuRow::ZoomPane => self.toggle_pane_zoom(seat),
@@ -51635,6 +52466,22 @@ impl Runtime<'_> {
                 }
             }
             profiles::FileMenuRow::NewTerminal => self.new_terminal_in_folder(&path)?,
+            // **B5 — the row opens the editor rather than asking a dialog for a
+            // name** (user ruling 2026-08-25). The name is typed where the name
+            // is, which is the answer this window already gives on a tab, on a
+            // preview head and on an address; a modal that asked for a string
+            // would be the one surface in the product that renamed something
+            // somewhere other than where it is written.
+            //
+            // Only a tree row has a row to put a box on, and only a tree row
+            // carries the host and key that box is keyed by — `file_menu`'s
+            // `Document` and `FoldedPath` arms do not offer this row at all, so
+            // the absence is the honest answer rather than a guard.
+            profiles::FileMenuRow::Rename => {
+                if let Some(tree_row) = tree_row {
+                    self.open_files_row_rename(tree_row.host, &tree_row.key)?;
+                }
+            }
             profiles::FileMenuRow::CopyPath => self.copy_path_to_clipboard(&path)?,
             profiles::FileMenuRow::InsertPath => self.insert_path_into_terminal(&path)?,
             // **The same audited door the three feet go through**
@@ -60794,14 +61641,10 @@ impl Runtime<'_> {
             return Ok(false);
         }
         let metrics = self.seat_metrics();
-        // Spent whether or not the arrival pushes a pane out — [`Runtime::absorb_tab`]'s
-        // reason, and the same allocator.
-        let ejected_id = self.app.tab_ids.mint();
         let arrival = PaneArrival {
             metrics: &metrics,
             viewport: self.window.seat_viewport,
             aim,
-            ejected_id,
         };
         let watching = self.window.tabs[self.window.active_tab].id;
         let render_physical =
@@ -60810,18 +61653,11 @@ impl Runtime<'_> {
         let policy = self.window.size_policy;
         let rail = self.rail_posture();
         let (source, host) = two_tabs_mut(&mut self.window.tabs, from, into);
-        let moved = pane_into_tab(
-            source,
-            host,
-            leaf.seat,
-            &arrival,
-            target == watching,
-            |seats| {
-                let (layout, overflow, _, _) =
-                    solve_seats(seats, renderer, render_physical, policy, rail);
-                (layout, overflow)
-            },
-        );
+        let moved = pane_into_tab(source, host, leaf.seat, &arrival, Some(watching), |seats| {
+            let (layout, overflow, _, _) =
+                solve_seats(seats, renderer, render_physical, policy, rail);
+            (layout, overflow)
+        });
         let Some(moved) = moved else {
             return Ok(false);
         };
@@ -60829,16 +61665,23 @@ impl Runtime<'_> {
             self.window.tabs[into].seats.tree().contains(moved.landed),
             "§7.1.6k: the pane landed under an id its new tree does not have"
         );
+        debug_assert!(
+            moved
+                .traded
+                .is_none_or(|stood_in| self.window.tabs[from].seats.tree().contains(stood_in)),
+            "B4: the pane traded for is not in the tree the traveller left"
+        );
         if moved.source_emptied {
             // The tab did not close — it was emptied by a move, and `close_tab`
             // would file a still-running shell into Recent and shut it down. This
             // is [`Runtime::absorb_tab`]'s door, for [`absorb_tab_into_strip`]'s
             // stated reason.
             //
-            // **L139's slot, when there is something to put in it.** A centre
-            // pushed a pane of the target out, and the tab it became takes the
-            // slot the emptied source is vacating — exactly the trade
-            // [`Runtime::absorb_tab`] makes, and the same call makes it.
+            // **Nothing takes the vacated slot any more** (B4). The one thing
+            // that ever did was a pane a centre had evicted, and a centre now
+            // trades instead — which also means this branch and a centre are
+            // mutually exclusive, because a trade never empties the tab it
+            // traded out of.
             let follow = if watching == leaf.tab {
                 target
             } else {
@@ -60848,7 +61691,7 @@ impl Runtime<'_> {
                 &mut self.window.tabs,
                 &mut self.window.active_tab,
                 from,
-                moved.ejected,
+                None,
             );
             if let Some(index) = self.tab_slot_of(follow) {
                 // Forced: the removal may already have left `active_tab` naming
@@ -60856,27 +61699,6 @@ impl Runtime<'_> {
                 // grid for the shells, a title — rather than the index alone.
                 self.activate_tab(index, true)?;
             }
-        } else if let Some(ejected) = moved.ejected {
-            // **Nobody vacated a slot, so the evicted pane takes the one next to
-            // the room it was pushed out of.** L139's own sentence is "the
-            // displaced pane takes the slot the source tab is vacating", and it
-            // is a sentence about a *trade*: one tab left the run and one arrives
-            // in its place. Here no tab left, so the nearest true reading of it
-            // is the neighbouring slot — the pane is still where it was, one step
-            // over. Through [`strip_insert_slot`] like every other insertion,
-            // because the run it is joining has a pinned partition to respect.
-            let pinned = self
-                .window
-                .tabs
-                .iter()
-                .map(|tab| tab.pinned)
-                .collect::<Vec<_>>();
-            let slot = strip_insert_slot(into + 1, &pinned);
-            self.window.tabs.insert(slot, ejected);
-            if slot <= self.window.active_tab {
-                self.window.active_tab += 1;
-            }
-            settle_pin_partition(&mut self.window.tabs, &mut self.window.active_tab);
         }
         self.settle_seat_set_change()?;
         Ok(true)
@@ -61108,9 +61930,26 @@ impl Runtime<'_> {
         // leaves through the same two paths a tab's name does — Enter, Escape
         // and blur — because it is the same editor; what differs is only what
         // committing writes, which here is a file moving on disk.
-        if let RenameSubject::PreviewName { surface, source } = &editor.subject {
+        // **B5 puts a second row on the same subject** (user ruling 2026-08-25):
+        // the breadcrumb's last segment is that very file, so it commits through
+        // this arm rather than growing one of its own. Two arms would be two
+        // chances for a name to be moved on disk by different rules.
+        if let RenameSubject::PreviewName { surface, source }
+        | RenameSubject::PreviewCrumb { surface, source } = &editor.subject
+        {
             if commit {
                 self.rename_preview_file(*surface, source, &editor.text)?;
+            }
+            self.refresh_chrome();
+            return self.present_chrome_change();
+        }
+        // **A row of a files column** (B5). Not the arm above, because a row is a
+        // *place on the disk* and not a document: there is no buffer to re-key,
+        // no preview to follow, and the thing being renamed may be a folder.
+        if let RenameSubject::FilesRow { leaf, key } = &editor.subject {
+            if commit {
+                let (leaf, key) = (*leaf, key.clone());
+                self.rename_files_row(leaf, &key, &editor.text)?;
             }
             self.refresh_chrome();
             return self.present_chrome_change();
@@ -61461,6 +62300,39 @@ impl Runtime<'_> {
                 // this tab's chrome, which is the sentence the file name's own
                 // arm makes two lines up.
                 RenameSubject::WebAddress { .. } => None,
+                // **B5 — the crumb's box is a segment of the rail** (user ruling
+                // 2026-08-25). The same sentence the two above make: a press
+                // inside it puts a caret, a press anywhere else is a blur that
+                // commits, and a draft left open on another tab's pane names no
+                // target in this tab's chrome.
+                RenameSubject::PreviewCrumb {
+                    surface: PreviewSurface::Seat(leaf),
+                    ..
+                } if leaf.tab == self.id => self.window.rename.as_ref().and_then(|_| {
+                    let depth = self
+                        .preview_rail_path(leaf.seat)
+                        .map(|path| crumb_segments(&path).len())?
+                        .checked_sub(1)?;
+                    Some(seats::ChromeTarget::PreviewCrumb {
+                        seat: leaf.seat,
+                        depth,
+                    })
+                }),
+                RenameSubject::PreviewCrumb { .. } => None,
+                // **A tree row's box is the row** (B5). `ChromeTarget::FilesRow`
+                // is keyed by the row's *index*, and the editor is keyed by the
+                // row's stable key, so the two are matched by asking the live
+                // tree where that key currently is — the tree can grow under an
+                // open box, and an index remembered from the press would be a
+                // different row by the time the next press lands.
+                RenameSubject::FilesRow { leaf, key } if leaf.tab == self.id => {
+                    let (seat, key) = (leaf.seat, key.clone());
+                    self.files_trees(Instant::now())
+                        .get(&seat)
+                        .and_then(|tree| tree.rows.iter().position(|row| row.key == key))
+                        .map(|index| seats::ChromeTarget::FilesRow { seat, index })
+                }
+                RenameSubject::FilesRow { .. } => None,
             };
             if editing.is_some() && target == editing {
                 // "编辑器内的按下/双击不触发拖拽或再次进入编辑" (J103): the press
@@ -61867,10 +62739,37 @@ impl Runtime<'_> {
                     self.copy_path_to_clipboard(&path)?;
                 }
             }
+            // **A single press locates, a double press on the *last* segment
+            // renames** (B5, user ruling 2026-08-25).
+            //
+            // The chain is keyed by the seat and not by the depth, and the tail
+            // is the one segment it is armed on: every other segment is a folder
+            // this pane is not showing, and there is nothing about a folder for
+            // a box on this row to change. Two presses on a folder are two
+            // locates — which is what they already were, and it costs the tail
+            // nothing to say so, because a folder never enters the chain at all.
+            //
+            // The single press still runs on the way past. That is the head's
+            // own arrangement (`PreviewName`): the first half of a double click
+            // is a real click, and locating the folder a file lives in is a move
+            // the box being opened over it does not undo.
             seats::ChromeTarget::PreviewCrumb { seat, depth } => {
                 self.window.tab_clicks.interrupt();
                 self.window.files_row_clicks.interrupt();
+                let tail = self.preview_crumb_is_the_tail(seat, depth);
+                if !tail {
+                    self.window.preview_crumb_clicks.interrupt();
+                }
                 self.press_preview_crumb(seat, depth)?;
+                if tail
+                    && self
+                        .window
+                        .preview_crumb_clicks
+                        .register(seat, Instant::now())
+                        == TabClick::Double
+                {
+                    self.open_preview_crumb_rename(seat)?;
+                }
             }
             seats::ChromeTarget::PreviewCrumbFold(seat) => {
                 self.window.tab_clicks.interrupt();
@@ -62296,13 +63195,17 @@ impl Runtime<'_> {
                         // The submenu heading is the one entry whose press is not
                         // a verb: it opens the child menu, which is the `→` key's
                         // job through the same door.
-                        if matches!(hit, profiles::PaneMenuHit::Row(row) if row.has_submenu()) {
-                            let open = self
-                                .window
-                                .pane_menu
-                                .as_ref()
-                                .is_some_and(|menu| menu.submenu_open);
-                            self.set_pane_submenu(!open)?;
+                        if let profiles::PaneMenuHit::Row(row) = hit
+                            && row.has_submenu()
+                        {
+                            // **A press on a heading toggles that heading's own
+                            // list** (B9), which is the same sentence it always
+                            // made and no longer the same as "toggle the child":
+                            // pressing `Move to window` while `Split with` is
+                            // open opens the one you pressed rather than closing
+                            // the one you did not.
+                            let open = self.window.pane_menu.as_ref().and_then(|menu| menu.submenu);
+                            self.set_pane_submenu((open != Some(row)).then_some(row))?;
                         } else {
                             self.run_pane_menu_row(hit)?;
                         }
@@ -65044,7 +65947,7 @@ impl Runtime<'_> {
                         // key that closed both would make the child unclosable
                         // without also losing the parent.
                         self.window.chevrons.clear();
-                        if !self.set_pane_submenu(false)? {
+                        if !self.set_pane_submenu(None)? {
                             self.close_pane_menu()?;
                         }
                     }
@@ -65059,7 +65962,11 @@ impl Runtime<'_> {
                         Some(profiles::PaneMenuHover::Row(row)) if row.has_submenu()
                     ) =>
                 {
-                    self.set_pane_submenu(true)?;
+                    let row = match self.window.pane_menu.as_ref().and_then(|menu| menu.hover) {
+                        Some(profiles::PaneMenuHover::Row(row)) => Some(row),
+                        _ => None,
+                    };
+                    self.set_pane_submenu(row)?;
                 }
                 Key::Named(NamedKey::ArrowLeft)
                     if matches!(
@@ -65067,7 +65974,7 @@ impl Runtime<'_> {
                         Some(profiles::PaneMenuHover::Submenu(_))
                     ) =>
                 {
-                    self.set_pane_submenu(false)?;
+                    self.set_pane_submenu(None)?;
                 }
                 Key::Named(NamedKey::ArrowDown)
                 | Key::Named(NamedKey::ArrowUp)
@@ -65079,12 +65986,35 @@ impl Runtime<'_> {
                         Key::Named(NamedKey::ArrowLeft) => profiles::MenuStep::Left,
                         _ => profiles::MenuStep::Right,
                     };
+                    // **How long the child is, and not how many profiles
+                    // there are** (B9). The two were the same number while the
+                    // profile list was the only child; a walk that clamped a
+                    // window list against `profiles::count()` would step past
+                    // its own last row.
+                    let rows = self
+                        .pane_menu_layout()
+                        .and_then(|layout| layout.submenu_rows().map(<[[f32; 4]]>::len))
+                        .unwrap_or(0);
                     if let Some(menu) = self.window.pane_menu.as_mut()
-                        && let Some(moved) =
-                            profiles::PaneMenuHover::step(menu.hover, step, profiles::count())
+                        && let Some(moved) = profiles::PaneMenuHover::step(menu.hover, step, rows)
                     {
                         menu.hover = Some(moved);
                     }
+                    // The keyboard's walk lights the same window the pointer's
+                    // would (B9) — one aim, read off the highlight either hand
+                    // moved.
+                    let aim = match (
+                        self.pane_menu_layout()
+                            .and_then(|layout| layout.submenu_kind()),
+                        self.window.pane_menu.as_ref().and_then(|menu| menu.hover),
+                    ) {
+                        (
+                            Some(profiles::PaneMenuRow::MoveToWindow),
+                            Some(profiles::PaneMenuHover::Submenu(at)),
+                        ) => self.other_window_ids().get(at).copied(),
+                        _ => None,
+                    };
+                    self.aim_at_window(aim);
                     if self.refresh_overlay() {
                         self.present_chrome_change()?;
                     }
@@ -65098,7 +66028,7 @@ impl Runtime<'_> {
                             // The heading opens its child rather than running,
                             // which is what `→` does and what a click does.
                             profiles::PaneMenuHover::Row(row) if row.has_submenu() => {
-                                self.set_pane_submenu(true)?;
+                                self.set_pane_submenu(Some(row))?;
                             }
                             profiles::PaneMenuHover::Row(row) => {
                                 self.run_pane_menu_row(profiles::PaneMenuHit::Row(row))?;
@@ -69852,7 +70782,7 @@ mod quit_transaction_tests {
     /// `Discard` hard right where the gate puts it, `Cancel` to its left where
     /// the gate puts it, and `Save` to the left of both.
     #[test]
-    fn the_three_buttons_stand_in_the_order_the_gate_taught() {
+    fn the_three_buttons_stand_in_the_order_windows_taught() {
         let content = restore::QuitContent {
             message_lines: vec!["Unsaved: a.txt, b.md".to_owned()],
             save_text_width: 30.0,
@@ -69868,17 +70798,55 @@ mod quit_transaction_tests {
                 f64::from((rect[1] + rect[3]) / 2.0),
             )
         };
-        let (save, cancel, discard) = restore::quit_button_rects(&layout);
-        assert!(save[2] <= cancel[0], "Save is left of Cancel");
-        assert!(cancel[2] <= discard[0], "Cancel is left of Discard");
+        let (save, discard, cancel) = restore::quit_button_rects(&layout);
+        assert!(save[2] <= discard[0], "Save all is left of Discard all");
+        assert!(discard[2] <= cancel[0], "and Discard all is left of Cancel");
         for (rect, target) in [
             (save, quit::QuitTarget::Save),
-            (cancel, quit::QuitTarget::Cancel),
             (discard, quit::QuitTarget::Discard),
+            (cancel, quit::QuitTarget::Cancel),
         ] {
             let (x, y) = centre(rect);
             assert_eq!(restore::quit_hit(&layout, x, y), target);
         }
+        // **And the words are `all`** (B1). The card is about a list, and a
+        // button saying `Save` over four file names leaves a reader to guess
+        // whether it meant all four or the one at the top.
+        assert_eq!(restore::quit_save_text(), "Save all");
+        assert_eq!(restore::gate_discard_all_text(), "Discard all");
+    }
+
+    /// PIN (user ruling 2026-08-25, B1) — **the exit card gives every unsaved
+    /// file a line of its own, and says which tab it is in.**
+    ///
+    /// It used to be one sentence — `Unsaved: a.txt, b.md` — wrapped to the
+    /// dialog's width, which is the shape a `confirm()` string has and not the
+    /// shape a list has: four names ran together into a paragraph, and which of
+    /// them came from which tab was not said at all. A reader deciding whether
+    /// to press `Discard all` is reading a list, so the card draws one.
+    ///
+    /// Red gate: join the names with a comma again and the second assertion
+    /// finds two names on one line.
+    #[test]
+    fn the_exit_card_gives_every_unsaved_file_a_line_of_its_own() {
+        let lines =
+            restore::unsaved_lines(&["a.txt IN build".to_owned(), "b.md IN notes".to_owned()]);
+        assert_eq!(
+            lines.len(),
+            2,
+            "one line per file, and no heading: the title above the list is the \
+             question and the list is the answer"
+        );
+        assert!(lines[0].contains("a.txt") && !lines[0].contains("b.md"));
+        assert!(lines[1].contains("b.md"));
+        assert!(
+            lines[0].contains("build"),
+            "and each line says which tab the file is in"
+        );
+        assert!(
+            restore::unsaved_lines(&[]).is_empty(),
+            "a card with nothing to list is a card that is never raised"
+        );
     }
 
     /// PIN — **a tab whose seeds round-trip is what these fixtures rely on.**
@@ -71171,6 +72139,64 @@ impl FolioApp {
         Ok(())
     }
 
+    /// **Write down every window this process has open** (B9, user ruling
+    /// 2026-08-25), for the menu that names them.
+    ///
+    /// Once a turn, before any window takes its own: the row a menu draws has to
+    /// be true of the run as it stands this frame, and a directory each of the
+    /// four window doors kept up to date would be one invariant living in four
+    /// places. A handful of windows walked once a turn is cheaper than that
+    /// bookkeeping and cannot go stale.
+    fn publish_window_directory(&mut self) {
+        let open: Vec<OpenWindow> = (0..self.windows.len())
+            .filter_map(|index| {
+                let id = self.windows.key_at(index)?;
+                let tabs = self.windows.get_mut(id)?.tabs.len();
+                Some(OpenWindow {
+                    id,
+                    // Counting from 1, because the row is read by a person and
+                    // `Window 0` is a sentence written by a program.
+                    ordinal: index + 1,
+                    tabs,
+                })
+            })
+            .collect();
+        if let Some(app) = self.app.as_mut() {
+            app.windows_open = open;
+        }
+    }
+
+    /// **Tell the two windows the ring moved between** (B9).
+    ///
+    /// A menu row in one window lights a mark in another, so the frame it earns
+    /// is owed to a window that has heard nothing at all — no pointer, no key,
+    /// no clock. Two repaints and not every window's: the one that has just
+    /// stopped wearing the ring and the one that has just started.
+    ///
+    /// A window that has closed since the aim was written is skipped, which is
+    /// the ordinary case rather than a fault — the run can change under an open
+    /// menu, and the next turn's directory says so.
+    fn settle_window_ring(&mut self) -> Result<()> {
+        let (was, now) = match self.app.as_ref() {
+            Some(app) => (app.window_ring_shown, app.window_ring),
+            None => return Ok(()),
+        };
+        if was == now {
+            return Ok(());
+        }
+        if let Some(app) = self.app.as_mut() {
+            app.window_ring_shown = now;
+        }
+        for id in [was, now].into_iter().flatten() {
+            if let Some(mut runtime) = self.runtime(id)
+                && runtime.refresh_overlay()
+            {
+                runtime.present_chrome_change()?;
+            }
+        }
+        Ok(())
+    }
+
     fn open_pending_window(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
         let plans = match self.app.as_mut() {
             Some(app) => std::mem::take(&mut app.pending_new_windows),
@@ -71895,8 +72921,14 @@ impl FolioApp {
             );
             return;
         }
+        // **The directory before anything reads it** (B9): a menu drawn this
+        // turn names the windows this turn has, and the doors below can open one
+        // or close one — which the next turn's walk will say, exactly as it says
+        // every other change to the run.
+        self.publish_window_directory();
         if let Err(error) = self
-            .settle_application_change()
+            .settle_window_ring()
+            .and_then(|()| self.settle_application_change())
             .and_then(|()| self.settle_restore_answer())
             // **F2 — before the window door and after everything that could have
             // closed a window.** A release that asked for a window of its own
@@ -74395,6 +75427,7 @@ mod floated_page_tests {
             tooltip: mark(0.19),
             file_peek: mark(0.20),
             drag_ghost: mark(0.21),
+            window_ring: mark(0.22),
         };
         let below = stack.below_the_floats();
         let layers = stack.flattened();
@@ -75821,6 +76854,7 @@ mod tests {
             tooltip: mark(9),
             file_peek: mark(10),
             drag_ghost: mark(11),
+            window_ring: mark(21),
         };
         let order: Vec<u8> = stack
             .flattened()
@@ -75830,7 +76864,7 @@ mod tests {
         assert_eq!(
             order,
             vec![
-                0, 16, 13, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 8, 20, 9, 10, 11
+                0, 16, 13, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 8, 20, 9, 10, 11, 21
             ],
             "bottom to top: pane bars, terminal thumbs, command rails, rail, flight, ground, \
              search capsule, integration strips, download sheet, schematic, float, modal, file \
@@ -76476,6 +77510,66 @@ mod tests {
             interrupted.register(A, now + Duration::from_millis(10)),
             TabClick::Single,
             "a click on the × between them is not the first half of anything"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-25, B5) — **the breadcrumb's last segment is the
+    /// same editor the head's name is, and the files column grows a `Rename` row
+    /// that is a third door onto it.**
+    ///
+    /// One machine and three doors, which is this window's standing rule for any
+    /// verb that gains a second way in: the crumb rail and the tree row seed
+    /// [`TabRename`] exactly as the head does — the whole name in the box, the
+    /// stem selected, the suffix left standing — and all of them commit through
+    /// the one function that calls `std::fs::rename`. Three seeds would be three
+    /// chances for a name to be moved on disk by a rule nobody wrote down twice.
+    ///
+    /// Red gate: seed either new door by hand and the stem assertions go red;
+    /// give either its own commit and the routing assertions name the door that
+    /// went its own way.
+    #[test]
+    fn the_crumb_and_the_tree_row_open_the_head_s_own_rename() {
+        const SOURCE: &str = include_str!("main.rs");
+        let body = |signature: &str| -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        };
+        let surface = seat_of(TAB_ONE, SeatId(7));
+        let source = preview::PreviewSource::file(r"C:\notes\notes.md");
+        let crumb = TabRename::open_crumb(surface, source.clone(), "notes.md");
+        assert_eq!(crumb.text, "notes.md", "the whole name is in the box");
+        assert_eq!(crumb.selected, 5, "the selection stops before the dot");
+        assert_eq!(
+            crumb.caret, crumb.selected,
+            "and the caret stands at the end of the selection"
+        );
+
+        let row = TabRename::open_files_row(
+            LeafId {
+                tab: TAB_ONE,
+                seat: SeatId(3),
+            },
+            "/notes/notes.md",
+            "notes.md",
+        );
+        assert_eq!(row.text, "notes.md");
+        assert_eq!(row.selected, 5, "a tree row is seeded the same way");
+        assert_eq!(row.caret, row.selected);
+
+        assert!(
+            body("    fn finish_rename(").contains("RenameSubject::PreviewCrumb"),
+            "the crumb's draft is committed by the one exit every draft leaves by"
+        );
+        assert!(
+            body("    fn finish_rename(").contains("RenameSubject::FilesRow"),
+            "and so is a tree row's"
+        );
+        assert!(
+            body("    fn run_file_menu_row(").contains("self.open_files_row_rename("),
+            "the menu row opens the editor rather than asking a dialog for a name"
         );
     }
 
@@ -92832,7 +93926,7 @@ mod tests {
         );
         assert_eq!(DropLanding::StripAdopt { tab: TabId(4) }.aimed_at(), None);
         assert_eq!(
-            DropLanding::StripAdopt { tab: TabId(4) }.caption(&held_pane(1), true),
+            DropLanding::StripAdopt { tab: TabId(4) }.caption(&held_pane(1)),
             "",
             "and the tab it lights up has already said where"
         );
@@ -99801,6 +100895,11 @@ mod tests {
         watched: bool,
     ) -> Option<PaneMove> {
         let metrics = cross_metrics();
+        // Which tab the window is showing. `watched` here has always meant "the
+        // tab the pane is going to is the one on screen", so the tab it names is
+        // the target's — and since B4 the function works both halves out for
+        // itself from the two tabs it was handed.
+        let watching = watched.then_some(into.id);
         pane_into_tab(
             from,
             into,
@@ -99809,12 +100908,8 @@ mod tests {
                 metrics: &metrics,
                 viewport: cross_view(),
                 aim,
-                // The name the window would have spent on an eviction. Only a
-                // centre ever takes it, and a test that gets one back can say so
-                // by this number.
-                ejected_id: TabId(900),
             },
-            watched,
+            watching,
             cross_solve,
         )
     }
@@ -100043,8 +101138,8 @@ mod tests {
             "and it is not in two tabs at once"
         );
         assert!(
-            moved.ejected.is_none(),
-            "an edge cuts a new slot, so it turns nobody out"
+            moved.traded.is_none(),
+            "an edge cuts a new slot, so it displaces nobody"
         );
         assert!(!moved.source_emptied);
         assert!(from.sessions_match_terminals());
@@ -100061,22 +101156,22 @@ mod tests {
         );
     }
 
-    /// **§7.1.6k′ — a foreign pane let go on a *centre* takes the target's place
-    /// and the target leaves for the strip** (L139/N161).
+    /// **B4 (user ruling 2026-08-25) — a centre is a trade, and it is a trade
+    /// across tabs too.**
     ///
-    /// The ruling's word for the centre is *"既有语义"*, and the centre's existing
-    /// semantics are decided by **what arrives** rather than by which gesture
-    /// started it: a seat of this tree trades payloads (`Edit::CenterSwap`, L138),
-    /// a whole subtree replaces (`Edit::ReplaceSeat`, L139). A pane from another
-    /// tab is a one-leaf subtree — that is the whole of how it got in — so it
-    /// replaces, and the pane it replaced becomes a tab of its own carrying its
-    /// own shell, exactly as it does when a tab is what arrived.
+    /// The centre used to mean two different things depending on where the pane
+    /// in the hand happened to live: a seat of *this* tree traded payloads
+    /// (`Edit::CenterSwap`, L138) while a pane from another tab replaced the
+    /// target and turned it out into a tab of its own (L139/N161). That was the
+    /// implementation's shape showing through — a foreign pane arrives as a
+    /// one-leaf subtree, and a subtree replaces — and the ruling ends it: **the
+    /// centre trades, always.** The pane that was standing there goes to the slot
+    /// the arriving pane vacated, which is the only place a trade can put it.
     ///
-    /// Red gate: keep the eviction out of `pane_into_tab` and `GAMMA`'s shell is
-    /// dropped on the floor — `ejected` is `None` and the word is gone from the
-    /// window.
+    /// Red gate: leave the eviction in and `GAMMA` comes back as a third tab
+    /// instead of standing where `BETA` stood.
     #[test]
-    fn a_foreign_pane_on_a_centre_replaces_and_the_pane_it_replaced_becomes_a_tab() {
+    fn a_foreign_pane_on_a_centre_trades_places_with_the_one_it_landed_on() {
         let mut from = cross_tab(1, &["ALPHA", "BETA"]);
         let mut into = cross_tab(2, &["GAMMA", "DELTA"]);
         let travelling = from.seats.terminals()[1];
@@ -100096,27 +101191,63 @@ mod tests {
             vec!["BETA".to_string(), "DELTA".to_string()],
             "the arriving pane took the slot GAMMA stood in"
         );
-        let ejected = moved.ejected.expect("N161: GAMMA was turned out");
-        assert_eq!(
-            ejected.id,
-            TabId(900),
-            "and it took the name the window had ready for it, rather than \
-             minting one inside a free function"
-        );
-        assert_eq!(
-            tab_texts(&ejected),
-            vec!["GAMMA".to_string()],
-            "carrying the very shell it was running: a replace moves a pane out, \
-             it does not close one"
-        );
         assert_eq!(
             tab_texts(&from),
-            vec!["ALPHA".to_string()],
-            "and the tab the arrival came from is one pane lighter"
+            vec!["ALPHA".to_string(), "GAMMA".to_string()],
+            "and GAMMA took the slot BETA vacated, carrying its own shell — a \
+             trade moves two panes and turns nobody out"
+        );
+        assert!(
+            !moved.source_emptied,
+            "nothing was emptied: one pane left and one arrived"
         );
         assert!(from.sessions_match_terminals());
         assert!(into.sessions_match_terminals());
-        assert!(ejected.sessions_match_terminals());
+    }
+
+    /// **B4's boundary — a pane that is its tab's only child trades all the same,
+    /// and the tab it leaves is the one the other pane arrives in.**
+    ///
+    /// The ruling states it as a case because the old machine had a special one
+    /// here: moving the last pane out emptied the tab and took its entry out of
+    /// the strip (`source_emptied`). A trade has nothing to empty — the tab is
+    /// holding a pane the whole time, it is just a different one — so the tab
+    /// keeps its slot, its name and its place in the run.
+    ///
+    /// Red gate: reach the trade through `close_seat` and G84 refuses to empty
+    /// the tree, or the tab leaves the strip with a live shell still in it.
+    #[test]
+    fn a_lone_pane_that_trades_places_leaves_its_tab_holding_the_other_one() {
+        let mut from = cross_tab(1, &["ALPHA"]);
+        let mut into = cross_tab(2, &["GAMMA", "DELTA"]);
+        let travelling = from.seats.terminals()[0];
+        let target = into.seats.terminals()[0];
+
+        let moved = cross_move_at(
+            &mut from,
+            &mut into,
+            travelling,
+            seats::LayoutAim::SeatCentre(target),
+            true,
+        )
+        .expect("the last pane of a tab may trade places");
+
+        assert!(
+            !moved.source_emptied,
+            "the tab is not emptied — GAMMA is standing in it"
+        );
+        assert_eq!(
+            tab_texts(&from),
+            vec!["GAMMA".to_string()],
+            "the pane that was displaced took over the tab the traveller left"
+        );
+        assert_eq!(
+            tab_texts(&into),
+            vec!["ALPHA".to_string(), "DELTA".to_string()],
+            "and the traveller is standing where it landed"
+        );
+        assert!(from.sessions_match_terminals());
+        assert!(into.sessions_match_terminals());
     }
 
     /// **§7.1.6k′ — the emptied source tab is still emptied, whichever zone the
@@ -100505,6 +101636,99 @@ mod tests {
             !arming.contains("focus"),
             "and asks nothing else: a second author here is a peek the retiring \
              path can no longer take down"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-25, B9) — **`Move to window` walks the drag's
+    /// road, and the ring is drawn by the window it is about.**
+    ///
+    /// Two claims, both about *where* a thing is decided rather than about what
+    /// it does:
+    ///
+    /// * the row records a [`DragHandover`] and lets `about_to_wait` spend it,
+    ///   which is the errand F2 already wrote for a pane let go over another
+    ///   window — so the promotion, the transfer, the refusal card and the
+    ///   emptied source tab are one implementation and not two;
+    /// * the hovered window's mark is written on the *application* and drawn by
+    ///   the window it names, because a window cannot draw a ring on its
+    ///   neighbour and the pointer is never in the window being marked.
+    ///
+    /// Red gate: give the row its own transfer and the first assertion names the
+    /// door that went its own way; draw the ring from the hovering window and
+    /// the third finds the mark on the wrong glass.
+    #[test]
+    fn the_third_exit_is_the_drags_own_errand_and_the_ring_is_the_targets_own_mark() {
+        const SOURCE: &str = include_str!("main.rs");
+        let body = |signature: &str| -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        };
+        let row = body("    fn move_pane_to_window(");
+        assert!(
+            row.contains("self.app.pending_handover = Some(DragHandover {"),
+            "the row writes the drag's errand rather than moving a tab itself"
+        );
+        assert!(
+            !row.contains("transfer_tab"),
+            "and it never reaches for the transfer directly: only `FolioApp` can \
+             see two windows, and `settle_drag_handover` is where it does"
+        );
+        let ring = body("    fn window_ring_layer(");
+        assert!(
+            ring.contains("self.app.window_ring != Some(self.window_id())"),
+            "the ring is drawn by the window it is about, off the application's \
+             own aim"
+        );
+        assert!(
+            body("    fn aim_at_window(").contains("self.app.window_ring = window;"),
+            "and the aim is written on the application, because the window that \
+             draws it is not the window the pointer is in"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-25, B10) — **a tab switch leaves no menu
+    /// standing.**
+    ///
+    /// `Ctrl+Tab` was already immediate — [`stepped_tab`] answers on the key
+    /// down, there is no held-modifier overlay to linger, and the preview's own
+    /// switcher shuts itself on every row it answers. What did linger was
+    /// everything E61 calls a [`Popup`]: `activate_tab` cleared eleven kinds of
+    /// per-tab transient and not one of the eight menus, so a `⌄` left open on
+    /// the tab you stepped away from was still open when you came back — drawn
+    /// nowhere in between, because §7.1.5a′ had already taught each of them to
+    /// fold to `None` off screen, which is exactly what let the state survive
+    /// unnoticed.
+    ///
+    /// A menu is a question about the surface it was raised over, and stepping
+    /// to another tab is that question being dropped. So the switch takes them,
+    /// all eight, through the one function that knows what "all of them" means.
+    ///
+    /// Red gate: take the call out of `activate_tab` and this names the line
+    /// that is missing.
+    #[test]
+    fn a_tab_switch_leaves_no_menu_standing() {
+        const SOURCE: &str = include_str!("main.rs");
+        let body = |signature: &str| -> &'static str {
+            let start = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &SOURCE[start + signature.len()..];
+            &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+        };
+        assert!(
+            body("    fn activate_tab(").contains("self.close_every_popup();"),
+            "the tab that arrives finds no popup left over from the one that left"
+        );
+        // And the closer is the one that answers for the whole list, not a hand
+        // written run: `close_every_popup` walks `Popup::ALL` through the same
+        // `close_popup` arm `close_popups_except` walks, so a ninth popup is
+        // closed here the day it compiles.
+        assert!(
+            body("    fn close_every_popup(").contains("for popup in Popup::ALL"),
+            "the switch closes the list, not a copy of it"
         );
     }
 
@@ -101541,43 +102765,50 @@ mod tests {
         );
     }
 
-    /// **L137 — the centre says its name, and the name is a fact about what
-    /// arrives.**
+    /// **L137, as B4 leaves it — the centre says its name, and the name is a
+    /// fact about what is in the hand.**
     ///
-    /// The centre's box is the same rectangle an edge's is; a payload swaps with
-    /// the target and a subtree takes its place outright, and the geometry cannot
-    /// tell you which. Every other zone answers with nothing, because its shape
-    /// has already spoken.
+    /// The centre's box is the same rectangle an edge's is; a pane trades places
+    /// with the target and a whole tab takes its place outright, and the geometry
+    /// cannot tell you which. Every other zone answers with nothing, because its
+    /// shape has already spoken.
     ///
-    /// **§7.1.6k′ added the third row.** A pane the spring left behind in another
-    /// tab arrives as a subtree — it is not a seat of the tree being aimed at —
-    /// so its centre *replaces* and has to say so. Reading the source kind alone
-    /// would print "Swap panes" over a box that is about to evict somebody.
+    /// **The third row is gone** (user ruling 2026-08-25). Between 2026-08-23 and
+    /// this ruling a pane the spring had left in another tab said `Replace pane`
+    /// — it arrived as a subtree, and a subtree at a centre evicted. The ruling
+    /// makes every pane's centre a trade, so the word no longer turns on a
+    /// distinction a reader cannot see: **a pane swaps, a tab replaces**, at home
+    /// and away alike.
     ///
-    /// Red gate: key the first arm on `DragSource::Pane` alone, which is what
-    /// this file did until 2026-08-23, and the third row prints "Swap panes".
+    /// Red gate: reintroduce the subtree test and a foreign pane's box goes back
+    /// to promising an eviction the commit no longer performs.
     #[test]
-    fn only_the_centre_says_a_word_and_it_depends_on_what_arrives() {
+    fn only_the_centre_says_a_word_and_it_depends_on_what_is_in_the_hand() {
         let target = bt_layout::SeatId(2);
         let pane = DragSource::Pane(LeafId {
             tab: TabId(1),
             seat: bt_layout::SeatId(1),
         });
+        let elsewhere = DragSource::Pane(LeafId {
+            tab: TabId(9),
+            seat: bt_layout::SeatId(1),
+        });
         let tab = DragSource::Tab(TabId(1));
         assert_eq!(
-            DropLanding::SeatCentre { target }.caption(&pane, false),
+            DropLanding::SeatCentre { target }.caption(&pane),
             "Swap panes",
-            "a seat of this tree trades places with the target (L138)"
+            "a pane trades places with the target (L138)"
         );
         assert_eq!(
-            DropLanding::SeatCentre { target }.caption(&pane, true),
+            DropLanding::SeatCentre { target }.caption(&elsewhere),
+            "Swap panes",
+            "B4: and so does a pane whose tab is not the one on screen — where it \
+             came from is not something the box may say two different words about"
+        );
+        assert_eq!(
+            DropLanding::SeatCentre { target }.caption(&tab),
             "Replace pane",
-            "§7.1.6k′: a pane from another tab arrives as a subtree, and a \
-             subtree at a centre evicts (L139/N161)"
-        );
-        assert_eq!(
-            DropLanding::SeatCentre { target }.caption(&tab, true),
-            "Replace pane"
+            "a whole tab still takes the target's place outright (L139)"
         );
         for landing in [
             DropLanding::SeatEdge {
@@ -101590,14 +102821,12 @@ mod tests {
             DropLanding::StripExtract { slot: 0 },
             DropLanding::StripReorder { slot: 0 },
         ] {
-            for whole in [false, true] {
-                assert_eq!(
-                    landing.caption(&pane, whole),
-                    "",
-                    "{landing:?} draws its own meaning"
-                );
-                assert_eq!(landing.caption(&tab, whole), "");
-            }
+            assert_eq!(
+                landing.caption(&pane),
+                "",
+                "{landing:?} draws its own meaning"
+            );
+            assert_eq!(landing.caption(&tab), "");
         }
     }
 
@@ -102000,8 +103229,8 @@ mod tests {
         // A row's cargo is neither shape the flag is about — it has no tree of
         // its own and it is not a seat of this one — so its two verbs are read
         // off the payload and the flag says nothing here either way.
-        assert_eq!(centre().caption(&file, false), "Open in this preview");
-        assert_eq!(centre().caption(&folder, false), "Root this tree here");
+        assert_eq!(centre().caption(&file), "Open in this preview");
+        assert_eq!(centre().caption(&folder), "Root this tree here");
         for landing in [
             DropLanding::SeatEdge {
                 target: TARGET,
@@ -102013,7 +103242,7 @@ mod tests {
             DropLanding::StripExtract { slot: 0 },
         ] {
             assert_eq!(
-                landing.caption(&file, false),
+                landing.caption(&file),
                 "",
                 "{landing:?} draws its own meaning"
             );
