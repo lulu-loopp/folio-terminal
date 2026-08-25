@@ -37409,6 +37409,12 @@ impl Runtime<'_> {
         frame.edit = edit;
         // The same door the commit goes through, asked without knocking — an
         // empty field is unfinished rather than wrong, so it does not light up.
+        // **The engine the search would be composed for is handed over** so that
+        // this is not merely the same rule as the commit but the same call: a
+        // predicate that judged a phrase against a different engine's template
+        // than the one Enter would use is a second door wearing the first one's
+        // name.
+        let engine = self.app.settings_store.loaded().search_engine;
         frame.refused = matches!(
             self.window.rename.as_ref().map(|editor| &editor.subject),
             Some(RenameSubject::WebAddress { .. })
@@ -37416,7 +37422,7 @@ impl Runtime<'_> {
             .window
             .rename
             .as_ref()
-            .is_some_and(|editor| webhost::WebSeat::would_go_to(&editor.text));
+            .is_some_and(|editor| webhost::WebSeat::would_go_to(&editor.text, engine));
         let here = self.leaf_here(seat);
         self.window
             .preview_rail_measures
