@@ -7201,6 +7201,93 @@ mod tests {
         }
     }
 
+    /// PIN (user report 2026-08-25) — **the same wrapped `file:` link with the application's own
+    /// gutter standing in front of every fragment is still one link**, and the span it lights is
+    /// the path and neither column beside it.
+    ///
+    /// The two pins above have the fragments starting at column 0, so the only foreign ink they
+    /// ever put in a seam is *behind* a fragment. Claude Code's `[file]` chip puts ink on both
+    /// sides: a marker column (`>`, `[file]`) in front of each row and the size column
+    /// (`(58.2K`, `B)`) behind the ones with room for it. The reader's complaint was about the
+    /// second — the underline appearing to run onto the `B` — so this pins where the promise
+    /// actually stops.
+    ///
+    /// MUTATIONS: make [`ViewportFrame::run_across_break`] require the next run to open at column
+    /// 0 and rows 1 and 2 fall out of the link; let [`ViewportFrame::run_label`] read every cell of
+    /// a run rather than only its link cells and the gutter joins the label, which then spells
+    /// something the target is not and the whole thing comes apart into three.
+    #[test]
+    fn a_wrapped_file_link_behind_the_applications_own_gutter_is_still_one_link() {
+        const URI: &str = "file:///C:/Users/Weiyi/AppData/Local/Temp/claude/\
+            D--Developer-BetterTerminal/ccea9546-63d0-4a20-ba77-75caa4e8533c/scratchpad/\
+            folio-pdf-test.pdf";
+        const COLUMNS: usize = 71;
+        // (gutter, path fragment, the size column's share of this row).
+        let fragments = [
+            (
+                ">      ",
+                "C:\\Users\\Weiyi\\AppData\\Local\\Temp\\claude\\D--Developer-Bett",
+                "(58.2K",
+            ),
+            (
+                "[file] ",
+                "erTerminal\\ccea9546-63d0-4a20-ba77-75caa4e8533c\\scratchpad",
+                "B)",
+            ),
+            ("       ", "\\folio-pdf-test.pdf", ""),
+        ];
+        let rows = fragments
+            .iter()
+            .enumerate()
+            .map(|(index, (gutter, label, tail))| {
+                let text = format!("{gutter}{label}{tail}");
+                let mut row = CapturedRow::plain(&format!("{text:<COLUMNS$}"), false);
+                for cell in &mut row.cells[gutter.len()..gutter.len() + label.len()] {
+                    row_link(cell, index, URI);
+                }
+                row
+            })
+            .collect();
+        let mut frame = live_frame_of(rows);
+
+        let hit = frame
+            .hyperlink_at(2, 8)
+            .expect("the last fragment is a link");
+        assert_eq!(
+            hit.uri, URI,
+            "the fragment under the pointer carries the whole declared target"
+        );
+        for (row, column) in [(0u32, 10u32), (1, 12)] {
+            assert_eq!(
+                frame.hyperlink_at(row, column).unwrap(),
+                hit,
+                "the fragment on row {row} is the same link as the one below it"
+            );
+        }
+
+        assert!(frame.underline_hyperlink(&hit));
+        for (row, (gutter, label, _)) in fragments.iter().enumerate() {
+            let path = gutter.len()..gutter.len() + label.len();
+            for column in 0..COLUMNS {
+                assert_eq!(
+                    solid_at(&frame, row, column),
+                    path.contains(&column),
+                    "row {row}, column {column}: the promise covers the path column and neither \
+                     the gutter in front of it nor the size column behind it"
+                );
+            }
+        }
+    }
+
+    /// One OSC 8 emission's worth of link on one cell, with the fresh per-emission id the vendor
+    /// mints for it.
+    fn row_link(cell: &mut CapturedCell, emission: usize, uri: &str) {
+        cell.hyperlink = Some(CellHyperlink {
+            id: Some(format!("{}_alacritty", 40 + emission)),
+            uri: uri.to_owned(),
+        });
+    }
+
     /// A live frame of one `file:` link an application wrapped itself: each row carries one
     /// printed fragment of the path, in its own OSC 8 emission with its own id, followed by
     /// whatever else that row of the application's layout prints.
@@ -7216,11 +7303,7 @@ mod tests {
                 let text = format!("{label}{tail}");
                 let mut row = CapturedRow::plain(&format!("{text:<columns$}"), false);
                 for cell in &mut row.cells[..label.len()] {
-                    // A fresh id per emission, which is what the vendor mints.
-                    cell.hyperlink = Some(CellHyperlink {
-                        id: Some(format!("{}_alacritty", 40 + index)),
-                        uri: uri.to_owned(),
-                    });
+                    row_link(cell, index, uri);
                 }
                 row
             })
