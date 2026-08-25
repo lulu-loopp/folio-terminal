@@ -120,6 +120,8 @@
 
 §1.3 里那两条窗口线程挂死（`drain_leaf_pty` 的循环唯一出口是「环此刻是空的」、写侧无界）都是**有人正好在机器前、手里握着 `hangprobe.ps1`** 才抓到的。修完之后用户在 `dist\folio-next5.exe`（`fa547ec`）上**仍然偶发** Not Responding 白框——间歇、难复现。结论只能是：剩下那个故障还没有名字，而它出现的时刻**没有人在看**。所以让程序自己看着自己。**不是调试开关**：一个必须先打开才生效的开关，在 bug 每一次发生时都是关着的。
 
+> **判据已被 §1.5a 取代(2026-08-25)。** 下面「只问两件事:轮次动了没有、停了多久」是这套facility 上线当天的判据,它把事件驱动 GUI 的合法空闲读成了挂死,头 205 份报告里有 200 份是这么来的。机制的其余部分——心跳、站点、suspend 两次内核调用抄栈、只报案不干预、启动宽限、报告封顶——原样有效,读的时候把「轮次动了没有」换成 §1.5a 的「该醒没醒 + 答不答话」。
+
 **机制三句话。** 窗口线程在 `about_to_wait` 每轮打一次心跳（时间戳 + **轮次计数**），并在它会做的每一段长调用门口留一个**站点标签**（一个字节、一次 relaxed store）。看门狗线程每 2s 醒一次，只问两件事：轮次动了没有；没动的话停了多久。越过阈值时它把窗口线程 suspend **恰好两次内核调用**的时间，抄走寄存器与裸栈（`bt_platform::hang`），resume，然后把**站点、静默时长、栈、本次运行的计数器**写进 `%APPDATA%\Folio\hang-reports\<UTC 时间戳>.txt`。
 
 **只报案，不干预。** 不杀、不重启、不解锁、不弹窗。一个会动手的看门狗一定会在某天对一个只是慢了的进程动手，而代价是别人的 scrollback。寄存器抄完立刻 resume；如果泵后来活了，**同一个文件**尾部补一行 `healed: the pump came back after Ns`。**一份没有 healed 行的报告就是一次再没醒过来的挂死**——那个缺席本身就是结论。
@@ -163,6 +165,82 @@ healed         : the pump came back after 11.679s at BT_HANG_SELFTEST
 `ntdll+0x160404` 就是 `NtDelayExecution`——那次 sleep 本身，站点直指那一行。**对照组**：同一个 debug 二进制、不设 `BT_HANG_SELFTEST`、活 30 秒——`no hang-reports directory: clean`，30 秒 CPU 2.27s（全是 debug 构建的窗口/GPU 初始化，看门狗在其中量不出来）。
 
 **明账**：`folio.exe+0x…` 是偏移不是函数名，要读得对着同一次构建的 PDB 反查；报告不打包符号，因为模块名这一级已经回答了「是谁」。栈扫描一次只取 rsp 往上能读到的那一段（实测 8 KiB，再往上是未提交页），足以穿过消息泵。
+
+### 1.5a 活性是「该醒没醒」与「答不答话」,不是「忙不忙」(泊车语义修正,2026-08-25,已落地;`crates/bt-app/src/hang_watch.rs`、`crates/bt-app/src/main.rs`、`crates/bt-platform/src/hang.rs`)
+
+**§1.5 的判据是错的,而且错得很响。** 用户在 Folio 的 pane 里跑 Claude Code,输入框里每隔约八秒闪出一行 `Folio's window thread has not answered for 5.748s; last station flush_pending_pty_resize`。把攒下的 205 份报告符号化之后,**200 份的 `rip` 是同一个地址**——`win32u!NtUserMsgWaitForMultipleObjectsEx+0x14`,也就是窗口线程**合法地泊在** `ControlFlow::Wait` 里;静默时长全部聚集在 5.700–5.702s(5s 阈值 + 2s 轮询)。被点名的 `flush_pending_pty_resize` 在那一圈早就正常返回了,它只是**那圈最后一个挂过牌的函数**。
+
+病根一句话:**「循环转圈」不是活性的地面真值。** 事件驱动的 GUI 没事做的时候本来就不转圈,而一个把「不转圈」读成「停了」的看门狗,会在程序工作得最正常的时候稳定量产报告。
+
+**改成两个双方都可被追责的事实。**
+
+**① 它该回来了吗。** 窗口线程把控制权交还平台**之前**,除心跳外还记下**它打算泊到什么时候**:`ControlFlow::Wait` 记「无限期」,`ControlFlow::WaitUntil(t)` 记 `t`(换算到心跳自己的时钟),`ControlFlow::Poll` 记「没泊」。**无限期泊车里的静默永远不是 hang**——什么都没欠。**过了 deadline 还不醒**才是:那是平台答应过的一次唤醒。而且怀疑是**从 deadline 起算**而不是从上一圈起算——一扇窗要睡一分钟然后真睡了一分钟,若把整段静默都算到故障头上,报告会说它挂了五十五秒。
+
+**② 它还答话吗。** **怀疑不是定罪。** 写报告之前先问一句:`SendMessageTimeout(hwnd, WM_NULL, …, SMTO_ABORTIFHUNG|SMTO_BLOCK, 1s)`(`bt_platform::hang::ask_thread_to_answer`,窗口用 `EnumThreadWindows` 现找,因为线程的窗口是会生灭的)。**答了就是活的**,不管它自己的循环在干什么——这同时把 USER32 模态循环(拖窗口边、跟踪菜单)从「勉强容忍」变成「本来就对」:那时应用真的没在转 winit 的圈,也真的没挂。`WM_NULL` 是「什么也不做」的那条消息,所以这一问不会改变它测量的东西;`SendMessageTimeout` 而不是 `SendMessage`,因为界限就是全部价值——一条被卡死线程拖住的看门狗是看门狗唯一不许犯的错。三种答案分开记:`Answered` / `Silent` / `NoWindow`,而**「问不出去」不等于「答了」**——一扇永远不出现的窗正是最响的那种挂死,也正是没有 `HWND` 可问的那一种。
+
+**新增两个站点。** `Parked`(把控制权交还平台)与 `Woken`(平台送来唤醒、还没走到任何具名调用)。`Parked` 是那 200 份误报的直接解药:空闲报告从此说 `parked`,再也不会把安静栽给上一圈最后一个长调用。不变式是**「到了任何具名站点就等于握着控制权」**——`at()` 与 `beat()` 都清泊车状态,否则一次唤醒走到 `window_event` 里卡住,身上还挂着上一圈的 deadline,会被一个跟它无关的承诺赦免。`park()` 打在 `about_to_wait` 的**包装层最后一行**,取的是 `event_loop.control_flow()`,因为那个方法体有六条提前返回的路,任何一条都会留下一个平台马上要执行的 `ControlFlow`;泊车记在体内就只记在其中一条路上。
+
+**真卡还是抓得到,而且站点是真站点。** 一次真 wedge 两问都答错的方向:它根本没走到交还控制权那一步(所以「没泊车」、站点是它卡住的那个调用),而且它不 pump(所以不答话)。实测原文(debug、隔离 `APPDATA`、`BT_PTY_DUMP`、`BT_HANG_SELFTEST=12`):
+
+```
+pump silent for: 5.627s (threshold 5.000s)
+parking        : it was holding control, not parked
+when asked     : the window was asked and did not answer
+last station   : BT_HANG_SELFTEST (the last one entered, not necessarily the one it is in)
+loop turns     : 1
+…
+healed         : the pump came back after 13.120s at BT_HANG_SELFTEST
+```
+
+**对照组**:同一个二进制、不设 `BT_HANG_SELFTEST`、开着窗空转 95 秒——**`hang-reports` 目录根本没被创建**。改之前,这 95 秒该出十一二份。
+
+**`healed` 的语义随之收紧**:它只会跟在一份真写出去的报告后面。从泊车里被消息唤醒不叫痊愈,那从来就不是病。
+
+**空转的账多了一条。** 每圈多一次 relaxed `u64` store(泊车),每 2 秒多读一个原子。**那一问只在算术已经用尽全部无辜解释之后才发生**,所以一扇空闲的窗永远不会给自己发消息。
+
+### 1.5b 通道分界:同步回答归控制台,常驻诊断归日志(2026-08-25,已落地;`crates/bt-app/src/diagnostics.rs`(新)、`crates/bt-app/src/main.rs`、`crates/bt-platform/src/lib.rs`)
+
+上面那行看门狗误报**为什么会出现在别人的输入框里**,是另一个独立的缺陷。`folio.exe` 是 windows-subsystem 二进制(`main.rs` 第一行),`main()` 第一句 `bt_platform::adopt_parent_console()` 借来启动它的那个控制台,把空的 `stdout`/`stderr` 槽指过去。动机是对的、现在也仍然对:`--help` 得回到敲命令的人那里,参数拒绝得说明理由,从 shell 里设了 `BT_STARTUP_TRACE` 的开发者得在那个 shell 里看见(用户报告 2026-08-18)。
+
+**错的是生命期。** 那次借用是**终身**的,而一个 Folio 借到的控制台**非常经常就是另一个 Folio 里的一个 pane**。于是全仓库两百四十多处 `eprintln!` 全都落进了别人的 shell 会话中间。
+
+**这条线**:
+
+> **对刚敲的那条命令的同步回答归控制台;常驻的异步诊断归日志文件。**
+
+这是关于**什么时候**而不是关于**什么**的判断——同一句 `eprintln!` 在前门是对的,一秒之后落在同一个地方就是错的。所以控制台留给前门(cli 解析、拒绝、`--help`),`diagnostics::enter_resident_run` 在进程决定要跑下去的那一刻把 `stdout`/`stderr` 搬到 `%APPDATA%\Folio\diagnostics.log`,并把控制台还回去。
+
+**落点是通道而不是调用点。** `SetStdHandle` 而不是包一层 Rust writer:Windows 上 Rust 的 `Stdout`/`Stderr` **每次写都重新 `GetStdHandle`**,所以搬一次槽就把两百四十处一起搬走,没有一处调用点需要知道它被搬了。文件用 `FILE_APPEND_DATA`(不带 `FILE_WRITE_DATA`),那是内核替你做的追加:哪条线程写都落在末尾,没有自己的 seek 可竞争;句柄故意永不关闭,它就是这个进程的诊断流。
+
+**打不开就落空,绝不回控制台。** `redirect_std_streams_to_file` 失败时走 `silence_std_streams()`——把两个槽置成 NULL 句柄,也就是 windows-subsystem 进程出生时的状态。实测过这条退路是丢弃而不是 panic(一个把 `STD_ERROR_HANDLE` 置 NULL 再 `eprintln!` 的程序退出码 0)。**「文件打不开」不是「开始往别人屏幕上写」的理由。**
+
+**上限策略:启动时按大小轮替一次。** 日志到 4 MiB 就改名成 `diagnostics.prev.log`(先删旧的再 rename),然后追加。磁盘占用是两个文件;**明账**:单次运行内部的增长不设界——要设就得在 `eprintln!` 和句柄之间插一个计数的 writer,而「中间什么都没有」正是这套设计的全部。保留上一代而不是启动即截断,因为你在查的那次崩溃,证据往往在**上一次**运行里。
+
+**例外是运行自己点名要控制台的时候**,那就是 trace 家族:`BT_STARTUP_TRACE`、`BT_MOUSE_TRACE`、`BT_WEB_TRACE_V` 等等,存在的意义就是被人从 shell 里盯着看。判据写成**形状而不是清单**——环境里任何 `BT_…TRACE…`——因为清单是下一个 trace 变量会被漏掉的地方。**`BT_PTY_DUMP` 故意不算**:它自带文件、不要求任何屏幕输出,而且它是本项目测试窗口**必带**的那一个(见 memory `测试窗口必带录制`),把它算进去等于在报告这个缺陷的那个场景里原样复活缺陷。
+
+**顺带修掉的第二件事:CTRL 事件。** `AttachConsole` 不只是开了块屏幕,它把本进程放进那个控制台的**进程组**——`CTRL_C_EVENT` 和 `CTRL_CLOSE_EVENT` 就是投给这个组的,而两者的默认处理都是终止。**一个因为别人关掉了启动它的 shell 就死掉的终端模拟器,和自己的父进程有一种致命关系。** 根治是 `FreeConsole`(不再是组员),`SetConsoleCtrlHandler` 覆盖它之前的那个窗口、以及整段刻意留着控制台的运行:`CTRL_C`/`CTRL_BREAK` 一律吃掉(Folio 自己的 pane 通过自己的 pseudoconsole 给自己的子进程送中断,投给借来那个控制台的那一下是冲着别的东西去的),`CTRL_CLOSE` 也认领(至少不走默认的立即 `ExitProcess`,虽然认领只买到系统的关闭超时——所以真正的答案是 `FreeConsole` 而不是它),注销和关机放行:一台正在关的机器不是终端该跟它争的东西。
+
+**实机验证原文**(两条路各一次,`cmd /k folio.exe` 起窗,外部 helper `AttachConsole` 到那个控制台后念 `GetConsoleProcessList`):
+
+```
+=== A: 默认通道(控制台已还回去) ===
+folio pid         : 124864
+  attached pids: 129228, 124900          # helper 与 cmd,没有 folio
+folio is in that console's process group : False
+folio alive at the end                   : True
+A: diagnostics.log 1419 bytes, 没有 hang-reports
+
+=== B: BT_STARTUP_TRACE 留着控制台,并对该组发一次真的 CTRL_C_EVENT ===
+folio pid         : 103092
+  attached pids: 117104, 103092, 129300  # folio 在组里,因为这次运行点名要
+  CTRL_C_EVENT sent to the group: True
+  after ctrl+c, attached pids: 117104, 103092, 129300
+folio alive at the end                   : True
+B: 根本没建 diagnostics.log——这次运行要的就是控制台
+```
+
+A 那一路的意义是**根治**:folio 压根不在那个组里,`CTRL_CLOSE_EVENT` 送不到它。B 那一路的意义是**兜底**:它在组里(因为运行自己要求的),收到了一次真的 Ctrl+C,而它活着——没有 `SetConsoleCtrlHandler`,默认处理会把它终止。
+
 
 ## 2. 渲染管线
 

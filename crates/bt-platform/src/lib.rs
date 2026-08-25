@@ -6883,6 +6883,164 @@ mod windows_impl {
         }
     }
 
+    /// **Point this process's `stdout` and `stderr` at a file, for good.**
+    ///
+    /// The other half of [`adopt_parent_console`], and the reason that one has
+    /// to have an end. Adopting the parent's console is right for the *front
+    /// door* — a refusal, a `--help`, a trace somebody asked for by name — and
+    /// wrong for everything after it, because the console a windows-subsystem
+    /// `folio.exe` adopts is very often a pane inside a *running* Folio, and a
+    /// resident diagnostic printed there lands in the middle of somebody's
+    /// shell session. The stream itself is not the problem; where it points
+    /// after the front door has closed is.
+    ///
+    /// `SetStdHandle` and not a Rust-side writer, because the point is the
+    /// **channel** and not the call sites: several hundred `eprintln!` are
+    /// spread across this workspace and none of them should have to know where
+    /// diagnostics go. On Windows, Rust's `Stdout`/`Stderr` resolve
+    /// `GetStdHandle` on every write, so moving the slot moves all of them at
+    /// once and for the rest of the run.
+    ///
+    /// `FILE_APPEND_DATA` without `FILE_WRITE_DATA` is the append that the
+    /// kernel performs: every write goes to the end of the file, whichever
+    /// thread issues it, with no seek of its own to race. The handle is
+    /// deliberately never closed — it is the process's diagnostic stream and it
+    /// lives exactly as long as the process.
+    ///
+    /// Answers whether the file took the streams. A `false` leaves them
+    /// untouched, and the caller owes them somewhere that is **not** the
+    /// console — see [`silence_std_streams`].
+    pub fn redirect_std_streams_to_file(path: &Path) -> bool {
+        use windows::Win32::Storage::FileSystem::{FILE_APPEND_DATA, OPEN_ALWAYS};
+        use windows::Win32::System::Console::{STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle};
+
+        let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let Ok(file) = (unsafe {
+            CreateFileW(
+                PCWSTR(name.as_ptr()),
+                FILE_APPEND_DATA.0,
+                // Shared for reading, so a person can tail the log of a running
+                // Folio, and for writing, so a second Folio can append to the
+                // same file rather than being refused a diagnostic stream.
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_ALWAYS,
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                None,
+            )
+        }) else {
+            return false;
+        };
+        for slot in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            if unsafe { SetStdHandle(slot, HANDLE(file.0)) }.is_err() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// **Send `stdout` and `stderr` nowhere at all.**
+    ///
+    /// The floor under [`redirect_std_streams_to_file`]: a run whose log file
+    /// cannot be opened must not fall back to the console, because the console
+    /// is the one destination that belongs to somebody else. A null standard
+    /// handle is the platform's own spelling of "this process has no such
+    /// stream" — the state a windows-subsystem process is born in — and Rust's
+    /// Windows stdio answers it by reporting the bytes written and discarding
+    /// them, so `eprintln!` stays a no-op rather than becoming a panic.
+    /// (Verified against this toolchain: a program that nulls `STD_ERROR_HANDLE`
+    /// and then calls `eprintln!` exits `0`.)
+    pub fn silence_std_streams() {
+        use windows::Win32::System::Console::{STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle};
+
+        for slot in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            let _ = unsafe { SetStdHandle(slot, HANDLE(std::ptr::null_mut())) };
+        }
+    }
+
+    /// Whether `stderr` currently lands on a console screen.
+    ///
+    /// Not "did we mean to redirect" but "is the byte a diagnostic writes going
+    /// to appear on somebody's terminal", which is the only form of the question
+    /// worth asking after the fault this was written for.
+    ///
+    /// Two questions, because one is not enough. `GetConsoleMode` is decisive
+    /// when it succeeds — nothing but a console answers it — but it **requires
+    /// `GENERIC_READ` on the handle**, and the `CONOUT$` that
+    /// [`adopt_parent_console`] installs is opened for writing only. So a
+    /// refusal falls through to the handle's *type*: a console screen buffer is
+    /// a character device, while the log this product redirects to is a disk
+    /// file and a captured stream is a pipe, which is the distinction being
+    /// drawn. A null handle — the silenced state — is neither and answers
+    /// `false` before either call.
+    #[must_use]
+    pub fn std_error_is_console() -> bool {
+        use windows::Win32::Storage::FileSystem::{FILE_TYPE_CHAR, GetFileType};
+        use windows::Win32::System::Console::{
+            CONSOLE_MODE, GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE,
+        };
+
+        let Ok(handle) = (unsafe { GetStdHandle(STD_ERROR_HANDLE) }) else {
+            return false;
+        };
+        if handle.is_invalid() {
+            return false;
+        }
+        let mut mode = CONSOLE_MODE::default();
+        unsafe { GetConsoleMode(handle, &raw mut mode) }.is_ok()
+            || unsafe { GetFileType(handle) } == FILE_TYPE_CHAR
+    }
+
+    /// **Leave the console this process borrowed.**
+    ///
+    /// Attaching to the parent's console does more than open a screen: it puts
+    /// this process in that console's **process group**, which is the list
+    /// `CTRL_C_EVENT` and `CTRL_CLOSE_EVENT` are delivered to. A terminal
+    /// emulator that dies because somebody closed the shell it happened to be
+    /// launched from is a terminal emulator with a fatal relationship to its own
+    /// parent, and the fix is not to catch the event but to stop being in the
+    /// group. So the console is left as soon as the front door has closed.
+    ///
+    /// Answers whether a console was actually let go; `false` for a process that
+    /// never had one, which is the double-click case and is not a failure.
+    pub fn detach_console() -> bool {
+        use windows::Win32::System::Console::FreeConsole;
+
+        unsafe { FreeConsole() }.is_ok()
+    }
+
+    /// The one console control handler this process installs.
+    ///
+    /// It exists for the window in which the process *is* still attached: the
+    /// front door, and the whole of a run somebody asked for traces on. In that
+    /// window a `Ctrl+C` typed at the parent shell is delivered here, and the
+    /// default handler for it is `ExitProcess` — which would close a terminal
+    /// full of somebody's work because they interrupted something else.
+    ///
+    /// `TRUE` means handled and therefore not defaulted. `Ctrl+C` and
+    /// `Ctrl+Break` are simply not this program's business: Folio's own panes
+    /// deliver an interrupt to their own children through their own pseudo
+    /// consoles, and one aimed at the console this process borrowed is aimed at
+    /// whatever else is running there.
+    ///
+    /// `CTRL_CLOSE_EVENT` is claimed too, so that the console going away is not
+    /// an immediate `ExitProcess` — but claiming it only buys the system's
+    /// close timeout, not immunity, which is why [`detach_console`] and not this
+    /// is the actual answer to that event. Logoff and shutdown are left to
+    /// default: a machine that is going down is not something a terminal argues
+    /// with.
+    pub fn install_console_ctrl_handler() -> bool {
+        use windows::Win32::System::Console::{
+            CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, SetConsoleCtrlHandler,
+        };
+
+        unsafe extern "system" fn handle(event: u32) -> windows::core::BOOL {
+            matches!(event, CTRL_C_EVENT | CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT).into()
+        }
+
+        unsafe { SetConsoleCtrlHandler(Some(handle), true) }.is_ok()
+    }
+
     pub fn write_to_console(text: &str) -> bool {
         let attached = unsafe { !GetConsoleWindow().is_invalid() }
             || unsafe { AttachConsole(ATTACH_PARENT_PROCESS) }.is_ok();
@@ -7039,17 +7197,204 @@ impl TaskbarProgress {
 pub use windows_impl::{
     Compositor, CustomWindowFrame, DirWatch, FilePickKind, FolderPicker, ImagePicker,
     ImeSystemCaret, MathContextMenu, Notifier, PROGRAM_REFUSED, Taskbar, adopt_parent_console,
-    client_area_animation_enabled, clipboard_text, current_thread_priority, documents_directory,
-    dpi_at, file_product_version, get_dpi_for_window, get_window_rect, get_work_area,
-    install_context_menu, install_window_class_background, is_window_minimized, message_box,
-    monospace_font_families, open_local_file, open_local_path, open_system_fonts_page,
-    os_ui_language, read_context_menu, recycle, remove_context_menu, request_window_close,
+    client_area_animation_enabled, clipboard_text, current_thread_priority, detach_console,
+    documents_directory, dpi_at, file_product_version, get_dpi_for_window, get_window_rect,
+    get_work_area, install_console_ctrl_handler, install_context_menu,
+    install_window_class_background, is_window_minimized, message_box, monospace_font_families,
+    open_local_file, open_local_path, open_system_fonts_page, os_ui_language, read_context_menu,
+    recycle, redirect_std_streams_to_file, remove_context_menu, request_window_close,
     reveal_in_explorer, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
     set_window_dark_mode, set_window_outer_rect, set_window_topmost, shell_execute,
-    spawn_at_priority, system_backdrop_available, take_keyboard_focus, thread_mouse_capture,
-    top_level_window_at, virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount,
-    work_area_at, write_to_console,
+    silence_std_streams, spawn_at_priority, std_error_is_console, system_backdrop_available,
+    take_keyboard_focus, thread_mouse_capture, top_level_window_at, virtual_key_for_character,
+    virtual_screen_rect, wheel_scroll_amount, work_area_at, write_to_console,
 };
+
+/// **Where a diagnostic byte ends up**, asked of the kernel and not of the
+/// source.
+///
+/// The fault these pin is not a wrong string: it is a right string on the wrong
+/// screen. `folio.exe` is a windows-subsystem binary that adopts its parent's
+/// console at the front door, and its parent is very often a pane inside a
+/// *running* Folio — so every resident `eprintln!` in this workspace was landing
+/// in the middle of somebody's shell session. What has to be provable is the
+/// channel: that after the redirect the stream is a file, that the bytes reach
+/// it, and that the fallback when the file cannot be opened is silence rather
+/// than a return to somebody else's terminal.
+#[cfg(all(test, windows))]
+mod console_channel_tests {
+    use std::io::Write as _;
+    use std::sync::{Mutex, MutexGuard};
+
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+    };
+
+    use super::{
+        install_console_ctrl_handler, redirect_std_streams_to_file, silence_std_streams,
+        std_error_is_console,
+    };
+
+    /// These tests move a **process-global** pair of handles, so they take turns
+    /// and put back what they found.
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+    /// The two standard slots, saved and restored around a test.
+    struct Slots {
+        _turn: MutexGuard<'static, ()>,
+        saved: [HANDLE; 2],
+    }
+
+    impl Slots {
+        fn take() -> Self {
+            let turn = ONE_AT_A_TIME
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let saved = [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
+                .map(|slot| unsafe { GetStdHandle(slot) }.unwrap_or_default());
+            Self { _turn: turn, saved }
+        }
+    }
+
+    impl Drop for Slots {
+        fn drop(&mut self) {
+            for (slot, handle) in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
+                .into_iter()
+                .zip(self.saved)
+            {
+                let _ = unsafe { SetStdHandle(slot, handle) };
+            }
+        }
+    }
+
+    /// Put `stderr` on this process's console screen, if it has one, so that
+    /// the claim "and afterwards it is not a console" is about a slot that was.
+    ///
+    /// Answers `false` on a runner with no console, where the fault could not
+    /// be staged in the first place.
+    fn put_std_error_on_the_console() -> bool {
+        use windows::Win32::Foundation::{GENERIC_WRITE, HANDLE};
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            OPEN_EXISTING,
+        };
+        use windows::core::PCWSTR;
+
+        let name: Vec<u16> = "CONOUT$".encode_utf16().chain(Some(0)).collect();
+        let Ok(console) = (unsafe {
+            CreateFileW(
+                PCWSTR(name.as_ptr()),
+                GENERIC_WRITE.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                None,
+            )
+        }) else {
+            return false;
+        };
+        unsafe { SetStdHandle(STD_ERROR_HANDLE, HANDLE(console.0)) }.is_ok()
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "bt-console-channel-{}-{name}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a private directory for this test");
+        directory
+    }
+
+    /// PIN (console channel, 2026-08-25) — **once the streams are handed to the
+    /// log, `stderr` is a file and the bytes are in it.**
+    ///
+    /// Red gate: leave `adopt_parent_console`'s `CONOUT$` in the `stderr` slot
+    /// for the resident run — which is what shipped — and `std_error_is_console`
+    /// answers `true` here, which is the exact shape of a watchdog line printed
+    /// into somebody's shell.
+    #[test]
+    fn the_resident_stream_is_a_file_and_not_a_console() {
+        let _slots = Slots::take();
+        let directory = scratch("landed");
+        let log = directory.join("diagnostics.log");
+        // Start from the state the fault was in: `stderr` on a console screen.
+        // A test runner without a console cannot be put there, and then the
+        // second half of the claim is all there is to check.
+        let started_on_a_console = put_std_error_on_the_console();
+        assert_eq!(
+            std_error_is_console(),
+            started_on_a_console,
+            "the question answers what was actually done to the slot"
+        );
+        assert!(
+            redirect_std_streams_to_file(&log),
+            "a writable path takes the streams"
+        );
+        assert!(
+            !std_error_is_console(),
+            "and having taken them, nothing this process prints reaches a console screen"
+        );
+        // Through `io::stderr` rather than `eprintln!`, because the test harness
+        // captures the macro thread-locally and the claim here is about the
+        // handle underneath it.
+        std::io::stderr()
+            .write_all(b"a resident diagnostic\n")
+            .expect("the log takes a write");
+        let written = std::fs::read_to_string(&log).expect("read the log back");
+        assert!(
+            written.contains("a resident diagnostic"),
+            "the bytes went to the file the streams were handed to, {written:?}"
+        );
+        drop(_slots);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// PIN — **a log that cannot be opened silences the stream; it never returns
+    /// it to the console.**
+    ///
+    /// The failure this forecloses is the tempting one: `if !redirect { keep
+    /// what we had }`, which on the machine where `%APPDATA%` is unwritable puts
+    /// every resident diagnostic straight back on the pane that launched Folio —
+    /// the very fault, arriving through the error path instead of the happy one.
+    #[test]
+    fn a_log_that_cannot_be_opened_falls_back_to_nowhere() {
+        let _slots = Slots::take();
+        let directory = scratch("refused");
+        let impossible = directory.join("no-such-folder").join("diagnostics.log");
+        assert!(
+            !redirect_std_streams_to_file(&impossible),
+            "a path whose parent does not exist cannot take the streams"
+        );
+        silence_std_streams();
+        assert!(
+            !std_error_is_console(),
+            "and the fallback is nowhere, not the console"
+        );
+        assert!(
+            unsafe { GetStdHandle(STD_ERROR_HANDLE) }
+                .unwrap_or_default()
+                .is_invalid(),
+            "the slot is the null handle a windows-subsystem process is born with"
+        );
+        // And that null slot is a discard rather than a panic — the property the
+        // whole fallback rests on.
+        let _ = std::io::stderr().write_all(b"discarded\n");
+        drop(_slots);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// PIN — **the console control handler installs.** A `Ctrl+C` typed at the
+    /// shell that launched `folio.exe` is delivered to this process while it is
+    /// attached, and the default for it is `ExitProcess`.
+    #[test]
+    fn the_console_control_handler_installs() {
+        assert!(install_console_ctrl_handler());
+    }
+}
 
 /// The bands, asked of the kernel rather than of the source.
 ///

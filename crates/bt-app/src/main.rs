@@ -7,6 +7,13 @@
 // `bt_platform::write_to_console`, which attaches to the parent on demand —
 // and diagnostics launched with redirected handles keep them: the subsystem
 // decides only what happens when nobody asked for output anywhere.
+//
+// **For the front door, and only the front door** (`diagnostics`, 2026-08-25).
+// The console this process borrows is very often a pane inside a *running*
+// Folio, so the borrow ends when the command line has been answered:
+// `diagnostics::enter_resident_run` moves the streams to a log file under
+// `%APPDATA%\Folio\` and lets the console go, unless the run named the console
+// itself by setting one of the `BT_…TRACE…` switches.
 #![windows_subsystem = "windows"]
 
 use std::{
@@ -36,6 +43,7 @@ mod attention_wire;
 mod cli;
 mod cmdrail;
 mod context_menu;
+mod diagnostics;
 mod dir_news;
 mod favicon;
 mod file_peek;
@@ -129,7 +137,7 @@ use bt_viewport::{
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
-    event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
+    event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
     // Windows reports what a key means with Shift and what it means without, and a shortcut table
@@ -70530,7 +70538,9 @@ mod application_change_tests {
     /// reaches the second window one wake-up late.
     #[test]
     fn no_window_is_left_holding_yesterday_when_the_loop_goes_to_sleep() {
-        let door = fn_body("about_to_wait");
+        // `about_to_wait_inner` and not `about_to_wait`: the outer one is the
+        // heartbeat's three lines, and the turn itself is the body inside it.
+        let door = fn_body("about_to_wait_inner");
         let settled = door
             .find("settle_application_change")
             .expect("the loop settles what the application changed");
@@ -71843,6 +71853,297 @@ impl FolioApp {
         }
         event_loop.exit();
     }
+
+    fn about_to_wait_inner(&mut self, event_loop: &ActiveEventLoop) {
+        if self.app.is_none() {
+            return;
+        }
+        // **The retirement's own turn, and nothing else's** (multiwindow slice
+        // E2 phase ④). Past this point every window is hidden, its shells are
+        // shut and its picture is on the disk; the only thing the loop is still
+        // running for is the wait for the browsers to let go, so that is the only
+        // clock it turns. Falling through to the sweep below would drain shut
+        // shells and publish frames for windows nobody can see.
+        if self
+            .app
+            .as_ref()
+            .and_then(|app| app.quit.as_ref())
+            .is_some_and(quit::Quit::is_retiring)
+        {
+            let now = Instant::now();
+            let waking = match self.advance_retirement(now) {
+                Ok(deadline) => deadline,
+                Err(error) => {
+                    self.fail(event_loop, error);
+                    return;
+                }
+            };
+            let gone = self.every_page_has_gone();
+            self.report_to_quit(|quit| quit.pages(gone, now));
+            if let Err(error) = self.settle_quit(event_loop) {
+                self.fail(event_loop, error);
+                return;
+            }
+            let bound = self
+                .app
+                .as_ref()
+                .and_then(|app| app.quit.as_ref())
+                .and_then(quit::Quit::deadline);
+            event_loop.set_control_flow(
+                earliest_deadline([waking, bound])
+                    .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
+            );
+            return;
+        }
+        if let Err(error) = self
+            .settle_application_change()
+            .and_then(|()| self.settle_restore_answer())
+            // **F2 — before the window door and after everything that could have
+            // closed a window.** A release that asked for a window of its own
+            // queues the plan the very next line spends, so the whole journey —
+            // promote, transfer, open, place — lands in one turn and no frame is
+            // ever drawn of a window half way through it.
+            .and_then(|()| self.settle_drag_handover())
+            .and_then(|()| self.open_pending_window(event_loop))
+            .and_then(|()| self.settle_quit(event_loop))
+        {
+            self.fail(event_loop, error);
+            return;
+        }
+        let now = Instant::now();
+        // **The application's own pointer, turned before the windows are**
+        // (multiwindow slice F2/F4). It writes what a target window draws, so it
+        // has to have written it before that window takes its turn — and its
+        // deadline joins the same fold every window's clocks reach through, which
+        // is what lets a spring come due over a window that will hear nothing
+        // else at all.
+        let mut wake_deadline = match self.drive_drag_broker(now) {
+            Ok(deadline) => deadline,
+            Err(error) => {
+                self.fail(event_loop, error);
+                return;
+            }
+        };
+        // **Every window's own turn, and the earliest wake-up any of them asked
+        // for.** A loop that woke for the first window's clocks and not the
+        // second's would be a second window whose caret blinks only when the
+        // first one's does.
+        for index in 0..self.windows.len() {
+            let Some(mut runtime) = self.runtime_at(index) else {
+                continue;
+            };
+            // The window that opened first turns the application's clocks. See
+            // `Runtime::turn`.
+            match runtime.turn(now, index == 0) {
+                Ok(deadline) => wake_deadline = earliest_deadline([wake_deadline, deadline]),
+                Err(error) => {
+                    self.fail(event_loop, error);
+                    return;
+                }
+            }
+        }
+        event_loop
+            .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+    }
+}
+
+/// **What a `ControlFlow` means to the thread that is about to obey it** (§1.5).
+///
+/// The one translation between winit's vocabulary and the watchdog's, and the
+/// reason the watchdog can tell an idle terminal from a wedged one at all: the
+/// loop is the only place that knows whether anything is owed to this thread
+/// between now and its next turn.
+///
+/// * `Wait` — nothing is owed. The thread parks until somebody types, and no
+///   amount of silence there is a fault.
+/// * `WaitUntil` — a wake is owed at that instant, on the platform's word.
+///   Silence well past it is a promise that was not kept.
+/// * `Poll` — nothing is handed over at all; the loop comes straight back
+///   round, so it is judged as a thread holding control.
+fn parking(control_flow: ControlFlow, heart: &hang_watch::Heartbeat) -> hang_watch::Park {
+    match control_flow {
+        ControlFlow::Poll => hang_watch::Park::Running,
+        ControlFlow::Wait => hang_watch::Park::Indefinite,
+        ControlFlow::WaitUntil(deadline) => hang_watch::Park::Until(heart.ms_at(deadline)),
+    }
+}
+
+/// **The two orderings the watchdog and the console channel are made of.**
+///
+/// Both are facts about `main` and `about_to_wait` that no value in the program
+/// carries — where a line sits relative to another line — so they are held
+/// against the source itself, the way this file's other structural promises are.
+#[cfg(test)]
+mod resident_run_tests {
+    use std::time::{Duration, Instant};
+
+    use winit::event_loop::ControlFlow;
+
+    use super::{hang_watch, parking};
+
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The body of a free function declared at column zero.
+    fn free_fn_body(name: &str) -> &'static str {
+        let head = format!("\nfn {name}(");
+        let start = SOURCE
+            .find(&head)
+            .unwrap_or_else(|| panic!("`fn {name}` is declared at the top level"))
+            + head.len();
+        let end = start
+            + SOURCE[start..]
+                .find("\n}\n")
+                .expect("a top-level function is closed by a `}` at column zero");
+        &SOURCE[start..end]
+    }
+
+    /// The body of a method declared at an `impl`'s own indentation.
+    fn fn_body(name: &str) -> &'static str {
+        let head = format!("\n    fn {name}(");
+        let start = SOURCE
+            .find(&head)
+            .unwrap_or_else(|| panic!("`fn {name}` is declared as a method"))
+            + head.len();
+        let end = start
+            + SOURCE[start..]
+                .find("\n    }\n")
+                .expect("a method is closed by a `}` at its `impl`'s indentation");
+        &SOURCE[start..end]
+    }
+
+    /// PIN (§1.5, parking) — **each `ControlFlow` is translated into what it
+    /// owes this thread**, and the two that owe nothing are not the same as the
+    /// one that owes a wake.
+    #[test]
+    fn every_control_flow_says_what_it_owes_the_window_thread() {
+        let heart = hang_watch::Heartbeat::new();
+        assert_eq!(
+            parking(ControlFlow::Wait, &heart),
+            hang_watch::Park::Indefinite,
+            "an idle window is owed nothing at all, and that is what stops the \
+             watchdog reading its silence as a fault"
+        );
+        assert_eq!(
+            parking(ControlFlow::Poll, &heart),
+            hang_watch::Park::Running,
+            "a loop that hands nothing over is judged as one holding control"
+        );
+        let hang_watch::Park::Until(deadline) = parking(
+            ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(5)),
+            &heart,
+        ) else {
+            panic!("a deadline is a deadline");
+        };
+        assert!(
+            (4_000..=6_000).contains(&deadline),
+            "five seconds from now, on the heartbeat's own clock, and not \
+             something in another epoch: {deadline}"
+        );
+        let past = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+        let hang_watch::Park::Until(already) = parking(ControlFlow::WaitUntil(past), &heart) else {
+            panic!("a deadline is a deadline");
+        };
+        assert!(
+            already <= 1,
+            "a deadline already in the past reads as overdue rather than as a \
+             number from before the run started: {already}"
+        );
+    }
+
+    /// PIN — **the turn records where it is parking on every path out of
+    /// itself.**
+    ///
+    /// `about_to_wait` has six early returns in its body — two states that owe
+    /// nothing, and four failures — and every one of them leaves a `ControlFlow`
+    /// standing that the platform is about to obey. A parking recorded inside
+    /// the body would be recorded on one of those paths and not the others, and
+    /// the watchdog would be judging a wait it had the wrong facts about. So the
+    /// body is a separate method and the parking is the wrapper's last line.
+    #[test]
+    fn the_turn_notes_its_parking_on_every_path_out() {
+        let door = fn_body("about_to_wait");
+        assert!(
+            door.contains("hang_watch::beat()"),
+            "the pulse is still the first thing in the turn:\n{door}"
+        );
+        assert!(
+            door.contains("self.about_to_wait_inner(event_loop)"),
+            "the turn itself is the body, called once:\n{door}"
+        );
+        assert!(
+            door.contains("hang_watch::park(parking(event_loop.control_flow()"),
+            "and the parking is taken from what the platform will actually \
+             obey, not from what one branch computed:\n{door}"
+        );
+        assert!(
+            !door.contains("return;") && !door.contains('?'),
+            "nothing may leave this method early, or the parking line is \
+             conditional and the whole promise is void:\n{door}"
+        );
+        assert!(
+            fn_body("about_to_wait_inner").contains("return;"),
+            "which is only worth saying because the body it wraps does leave \
+             early, in several places"
+        );
+        assert!(
+            fn_body("new_events").contains("hang_watch::woke()"),
+            "and the park ends at the wake, not at the next turn — an event \
+             that wedges is a thread holding control"
+        );
+    }
+
+    /// PIN (console channel, 2026-08-25) — **the front door answers on the
+    /// console; everything resident answers in the log.**
+    ///
+    /// The ordering *is* the fix. `adopt_parent_console` is right where it is —
+    /// a refusal and a `--help` have to reach whoever typed the command — and
+    /// was wrong only in lasting for the life of the process. So: adopt, answer
+    /// the command line, and only then hand the streams to the file, before
+    /// anything that will still be talking in ten minutes has started.
+    ///
+    /// Red gate: move `enter_resident_run` after `hang_watch::start` and the
+    /// watchdog's own line goes back to the pane that launched Folio, which is
+    /// the exact sentence this slice was opened by.
+    #[test]
+    fn the_front_door_is_answered_on_the_console_and_the_run_moves_to_the_log() {
+        let door = free_fn_body("main");
+        let at = |needle: &str| {
+            door.find(needle)
+                .unwrap_or_else(|| panic!("`main` still does `{needle}`:\n{door}"))
+        };
+        let adopted = at("bt_platform::adopt_parent_console()");
+        let guarded = at("bt_platform::install_console_ctrl_handler()");
+        let parsed = at("cli::parse(");
+        let handed_over = at("diagnostics::enter_resident_run(");
+        let watchdog = at("hang_watch::start(");
+        let loop_built = at("EventLoop::<AppEvent>::with_user_event()");
+        assert!(
+            adopted < guarded,
+            "the console is guarded as soon as it is joined: a `Ctrl+C` at that \
+             shell defaults to terminating this process"
+        );
+        assert!(
+            guarded < parsed,
+            "and the command line is answered while the console is still ours \
+             to answer on"
+        );
+        assert!(
+            parsed < handed_over,
+            "the front door closes after the last thing it owed an answer to"
+        );
+        assert!(
+            handed_over < watchdog,
+            "before the watchdog starts, so its own line lands in the log — \
+             this is the report that opened the slice"
+        );
+        assert!(
+            handed_over < loop_built,
+            "and before the event loop, which is where every resident \
+             diagnostic in this process comes from"
+        );
+    }
 }
 
 impl ApplicationHandler<AppEvent> for FolioApp {
@@ -72275,103 +72576,40 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         }
     }
 
+    /// **The pulse, the turn, and the note of where this thread is going.**
+    ///
+    /// A wrapper around the turn's actual body (§1.5) so that the parking is
+    /// recorded on **every** path out of it, including the early returns and the
+    /// failures — a turn that left without saying where it was going would leave
+    /// the previous turn's answer standing, and the watchdog would be judging a
+    /// wait it has the wrong facts about.
+    ///
+    /// `event_loop.control_flow()` rather than the value the body computed,
+    /// because the paths that return early do not compute one: what they leave
+    /// standing is what the platform is about to act on, and that is exactly
+    /// what has to be written down.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // **The pulse, and it is the very first statement in the turn** (§1.5).
-        // Before the two early returns below, because a loop that is retiring or
-        // has no application yet is still a loop that came round, and a watchdog
-        // that took either of those states for a stopped pump would file a
-        // report on a program that is working.
+        // The pulse is the very first statement in the turn, and it is here
+        // rather than inside the body because the body leaves early in six
+        // places: a loop that is retiring, or has no application yet, or has
+        // just failed, is still a loop that came round, and a watchdog that
+        // took any of those states for a stopped pump would file a report on a
+        // program that is working.
         hang_watch::beat();
         hang_watch::run_selftest_if_due();
-        if self.app.is_none() {
-            return;
-        }
-        // **The retirement's own turn, and nothing else's** (multiwindow slice
-        // E2 phase ④). Past this point every window is hidden, its shells are
-        // shut and its picture is on the disk; the only thing the loop is still
-        // running for is the wait for the browsers to let go, so that is the only
-        // clock it turns. Falling through to the sweep below would drain shut
-        // shells and publish frames for windows nobody can see.
-        if self
-            .app
-            .as_ref()
-            .and_then(|app| app.quit.as_ref())
-            .is_some_and(quit::Quit::is_retiring)
-        {
-            let now = Instant::now();
-            let waking = match self.advance_retirement(now) {
-                Ok(deadline) => deadline,
-                Err(error) => {
-                    self.fail(event_loop, error);
-                    return;
-                }
-            };
-            let gone = self.every_page_has_gone();
-            self.report_to_quit(|quit| quit.pages(gone, now));
-            if let Err(error) = self.settle_quit(event_loop) {
-                self.fail(event_loop, error);
-                return;
-            }
-            let bound = self
-                .app
-                .as_ref()
-                .and_then(|app| app.quit.as_ref())
-                .and_then(quit::Quit::deadline);
-            event_loop.set_control_flow(
-                earliest_deadline([waking, bound])
-                    .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
-            );
-            return;
-        }
-        if let Err(error) = self
-            .settle_application_change()
-            .and_then(|()| self.settle_restore_answer())
-            // **F2 — before the window door and after everything that could have
-            // closed a window.** A release that asked for a window of its own
-            // queues the plan the very next line spends, so the whole journey —
-            // promote, transfer, open, place — lands in one turn and no frame is
-            // ever drawn of a window half way through it.
-            .and_then(|()| self.settle_drag_handover())
-            .and_then(|()| self.open_pending_window(event_loop))
-            .and_then(|()| self.settle_quit(event_loop))
-        {
-            self.fail(event_loop, error);
-            return;
-        }
-        let now = Instant::now();
-        // **The application's own pointer, turned before the windows are**
-        // (multiwindow slice F2/F4). It writes what a target window draws, so it
-        // has to have written it before that window takes its turn — and its
-        // deadline joins the same fold every window's clocks reach through, which
-        // is what lets a spring come due over a window that will hear nothing
-        // else at all.
-        let mut wake_deadline = match self.drive_drag_broker(now) {
-            Ok(deadline) => deadline,
-            Err(error) => {
-                self.fail(event_loop, error);
-                return;
-            }
-        };
-        // **Every window's own turn, and the earliest wake-up any of them asked
-        // for.** A loop that woke for the first window's clocks and not the
-        // second's would be a second window whose caret blinks only when the
-        // first one's does.
-        for index in 0..self.windows.len() {
-            let Some(mut runtime) = self.runtime_at(index) else {
-                continue;
-            };
-            // The window that opened first turns the application's clocks. See
-            // `Runtime::turn`.
-            match runtime.turn(now, index == 0) {
-                Ok(deadline) => wake_deadline = earliest_deadline([wake_deadline, deadline]),
-                Err(error) => {
-                    self.fail(event_loop, error);
-                    return;
-                }
-            }
-        }
-        event_loop
-            .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+        self.about_to_wait_inner(event_loop);
+        hang_watch::park(parking(event_loop.control_flow(), hang_watch::heartbeat()));
+    }
+
+    /// **The platform woke this thread.** See [`hang_watch::Heartbeat::woke`].
+    ///
+    /// The park ends here and not at the next `about_to_wait`, because a wake
+    /// does not always reach one: the event is delivered first, and a thread
+    /// that wedges inside that event is a thread holding control — which is a
+    /// hang, and would be excused by the deadline it was parked with if the
+    /// parking outlived the park.
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: StartCause) {
+        hang_watch::woke();
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
@@ -75225,7 +75463,12 @@ fn append_panic_report(path: &std::path::Path, report: &str) -> std::io::Result<
 fn main() -> Result<()> {
     // First, so that even the panic hook's own words have somewhere to land
     // when a shell launched this window-subsystem process to read its traces.
+    // **For the front door only** — see `diagnostics::enter_resident_run`, which
+    // is where the borrow ends.
     bt_platform::adopt_parent_console();
+    // And immediately: adopting a console joins its process group, and the
+    // default answer to a `Ctrl+C` typed at that shell is to terminate this one.
+    bt_platform::install_console_ctrl_handler();
     install_panic_log_hook();
     // **The doorbell, before anything else this program can do.**
     //
@@ -75259,12 +75502,26 @@ fn main() -> Result<()> {
     // process does get goes to the frame first. See `bt_platform::ThreadPriority`
     // for why one step and not a multimedia scheduling class.
     bt_platform::set_current_thread_priority(bt_platform::ThreadPriority::AboveNormal);
+    // **The front door closes here** (`diagnostics`). Everything above answers
+    // the command somebody just typed and belongs on their console; everything
+    // below is a resident run whose diagnostics belong in a file, because the
+    // console this process borrowed is very often a pane inside another Folio.
+    // Before `hang_watch::start`, so the watchdog's own line lands in the log
+    // and never in somebody's shell — which is the report that opened this.
+    let storage = persist::storage_dir();
+    let channel = diagnostics::enter_resident_run(&storage);
+    if std::env::var_os("BT_STARTUP_TRACE").is_some() {
+        eprintln!(
+            "BT_STARTUP_TRACE: from here Folio talks to {}",
+            channel.label()
+        );
+    }
     // **And the witness to the day this thread stops answering** (§1.5).
     // Started from here, on the window thread, before the loop exists: it needs
     // this thread's id, and it needs `%APPDATA%` resolved by the thread that is
     // allowed to pay for the one-time relocation `storage_dir` performs. A
     // healthy run never writes a byte — see `hang_watch` for the whole bill.
-    hang_watch::start(persist::storage_dir().join(hang_watch::REPORTS_DIRECTORY));
+    hang_watch::start(storage.join(hang_watch::REPORTS_DIRECTORY));
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
         .context("create winit event loop")?;
@@ -103757,7 +104014,7 @@ mod cross_window_drag_tests {
         // nothing folds into `ControlFlow::WaitUntil` is a clock that fires on
         // the next thing to twitch, which over a window that will hear nothing at
         // all is never.
-        let wait = fn_body("about_to_wait");
+        let wait = fn_body("about_to_wait_inner");
         let (before, after) = wait
             .split_once("let mut wake_deadline = match self.drive_drag_broker(now)")
             .expect(
