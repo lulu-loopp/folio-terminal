@@ -652,6 +652,27 @@ pub(crate) fn web_presence(body: Option<[f32; 4]>, obstructed: bool) -> WebPrese
     })
 }
 
+/// **The rasterization scale a page is owed**, or `None` when the engine is
+/// already holding it.
+///
+/// `wanted` is the window's device scale factor and `told` is what this seat's
+/// controller has been told, `None` meaning nothing yet — which is the state a
+/// controller is born in and the state a rebuilt one comes back in. So a page
+/// born on a 1.5 display is owed 1.5 at birth rather than left on whatever the
+/// engine defaults to, and a window carried to a 2.0 display owes every page it
+/// holds the new number exactly once.
+///
+/// Compared the way this program compares scale factors everywhere else
+/// (`bt_app::scale_factors_match`): both sides are the same `f64` travelling
+/// from the same source, so an epsilon is what says "this is the number I
+/// already sent" without a redundant COM call sixty times a second.
+pub(crate) fn rasterization_owed(wanted: f64, told: Option<f64>) -> Option<f64> {
+    match told {
+        Some(told) if (told - wanted).abs() <= f64::EPSILON => None,
+        _ => Some(wanted),
+    }
+}
+
 impl WebPresence {
     /// The rectangle, when there is one on the glass.
     ///
@@ -1422,6 +1443,23 @@ pub(crate) struct WebSeat {
     wanted_bounds: Option<WebBounds>,
     /// And what the engine has actually been told about it.
     bounded: Option<WebBounds>,
+    /// **The device scale of the window this page stands in**, which is the
+    /// page's `devicePixelRatio` and nothing else's.
+    ///
+    /// Kept beside the rectangle for the same reason the rectangle is kept: the
+    /// window knows it before there is an engine to tell, and a controller born
+    /// afterwards has to be told at birth rather than left on a default. It is
+    /// the *window's* number — [`crate::Runtime::reconcile_authoritative_dpi`]
+    /// settles it from Win32 and hands it down — because a composition-hosted
+    /// controller has no window of its own to be told about a display through,
+    /// and what it can watch instead, the parent this host lends it, it watches
+    /// late (`bt_platform::WebHost::set_rasterization_scale`).
+    scale: f64,
+    /// And what the engine has actually been told about that.
+    ///
+    /// Forgotten wherever the controller is, because this records what a
+    /// *controller* was told and a new one has been told nothing.
+    rastered: Option<f64>,
     /// **The rectangle the compositor was last given for this page's pair** —
     /// its floor and, once there is one, its visual.
     ///
@@ -1524,11 +1562,17 @@ pub(crate) struct WebSeat {
 
 impl WebSeat {
     /// Open a web seat on this pane and start the engine towards `url`.
+    ///
+    /// `scale` is the window's device scale factor at this moment. It is taken
+    /// here rather than read off a default because the first thing a controller
+    /// does is lay a page out, and a page laid out at 2.0 on a 1.5 display is
+    /// wrong from its first frame — see [`Self::scale`].
     pub(crate) fn open(
         page: bt_platform::PageVisual,
         hwnd: std::num::NonZeroIsize,
         url: &str,
         minted: Mint,
+        scale: f64,
         wake: Box<dyn Fn()>,
     ) -> Result<Self, String> {
         let folder = user_data_folder().ok_or_else(|| {
@@ -1591,6 +1635,8 @@ impl WebSeat {
             presence: None,
             wanted_bounds: None,
             bounded: None,
+            scale,
+            rastered: None,
             placed: None,
             buttons: bt_platform::web_mouse_buttons::NONE,
             last_left_press: None,
@@ -2159,7 +2205,7 @@ impl WebSeat {
                 // so there is nothing to wait for. Its folder is free the moment
                 // its process tree ended.
                 self.host.close();
-                self.presence = None;
+                self.the_controller_has_been_told_nothing();
                 bt_platform::forget_web_environment();
                 self.start_environment()?;
                 Ok(None)
@@ -2169,7 +2215,7 @@ impl WebSeat {
                 // has gone may a new environment be made — see [`BrowserWait::Rebuild`].
                 if self.waiting.is_none() {
                     self.host.close();
-                    self.presence = None;
+                    self.the_controller_has_been_told_nothing();
                     self.waiting =
                         Some((BrowserWait::Rebuild, Instant::now() + BROWSER_EXIT_DEADLINE));
                     return Ok(None);
@@ -2181,7 +2227,7 @@ impl WebSeat {
             }
             WebEffect::AwaitBrowserExitBeforeCleanup => {
                 self.host.close();
-                self.presence = None;
+                self.the_controller_has_been_told_nothing();
                 self.waiting = Some((
                     BrowserWait::Teardown,
                     Instant::now() + BROWSER_EXIT_DEADLINE,
@@ -2308,6 +2354,43 @@ impl WebSeat {
         Ok(floored)
     }
 
+    /// **The window this page stands in is at this scale factor now.**
+    ///
+    /// Recorded whether or not there is a controller to tell, for
+    /// [`Self::wanted_bounds`]'s reason: the engine is told at the first moment
+    /// there is one, and never left to find out.
+    ///
+    /// Told *here* and not on the next frame, because the fact has already
+    /// happened: the window has been carried onto another display, and a page
+    /// that waited for a frame would be a page rastered for the display it left
+    /// for as long as nothing asked this window to draw.
+    pub(crate) fn set_device_scale(&mut self, scale: f64) -> Result<(), String> {
+        self.scale = scale;
+        self.apply_rasterization()
+    }
+
+    /// Tell the engine how many device pixels one CSS pixel is, if there is an
+    /// engine and it does not know already.
+    ///
+    /// The rule is [`rasterization_owed`]'s and the reason the host says it at
+    /// all is [`Self::scale`]'s. Two callers: the window's own DPI reconciliation
+    /// through [`Self::set_device_scale`], and [`Self::apply_presence`], which
+    /// is what covers the controller that did not exist when the display
+    /// changed.
+    fn apply_rasterization(&mut self) -> Result<(), String> {
+        if !self.host.has_controller() {
+            return Ok(());
+        }
+        let Some(scale) = rasterization_owed(self.scale, self.rastered) else {
+            return Ok(());
+        };
+        self.host.set_rasterization_scale(scale)?;
+        // Only once the call has returned, as everywhere else here: the cache
+        // says "the engine was told this", and a refusal told it nothing.
+        self.rastered = Some(scale);
+        Ok(())
+    }
+
     /// What the window last asked of this page — read by the placement's own
     /// trace station so that a line is written when the answer *moves* and not
     /// sixty times a second while it stands still.
@@ -2333,6 +2416,13 @@ impl WebSeat {
         if !self.host.has_controller() {
             return Ok(());
         }
+        // **The scale before the size, on every path including the first.** The
+        // rectangle is physical (`USE_RAW_PIXELS`) and the scale is what divides
+        // it into the CSS pixels the page lays out in, so a controller given the
+        // second without the first lays out once against a ratio nobody chose,
+        // and nothing here corrects it afterwards: the engine's own detection is
+        // off, because this window is the authority. See [`Self::scale`].
+        self.apply_rasterization()?;
         // **A page is given its size even while it is hidden**, and this is slice
         // ①'s own sentence — "the engine has to be given its size before it is
         // given a URL" — meeting the case slice ③ created. A page can now be born
@@ -2498,16 +2588,42 @@ impl WebSeat {
     /// **This seat is now that seat, in that window** — the whole of the model
     /// commit, and the half that needs no compositor.
     ///
-    /// The three caches go with the address, because they record what *the old
-    /// window* had already been told. Left standing, the next frame would decide
-    /// it had nothing to say and the page would sit at the old window's
-    /// rectangle inside the new one — and, since 2026-08-25, its floor would be
-    /// a floor in a window it has left.
+    /// Every cache goes with the address, because each of them records what
+    /// *the old window* had already been told. Left standing, the next frame
+    /// would decide it had nothing to say and the page would sit at the old
+    /// window's rectangle inside the new one — and, since 2026-08-25, its floor
+    /// would be a floor in a window it has left and its raster would be sized
+    /// for a display it may not be on.
     fn take_address(&mut self, address: SeatAddress) {
         self.address = address;
+        self.the_controller_has_been_told_nothing();
+        // And the floor, which answers for a visual rather than for a
+        // controller: this seat's pair is in another window's tree now.
+        self.placed = None;
+    }
+
+    /// **Whatever this seat's controller had been told, it is not true of the
+    /// next one.**
+    ///
+    /// Three caches exist so that a frame which changed nothing issues no calls,
+    /// and all three answer for a *controller*: the rectangle it was given, the
+    /// visibility it was given, and the device scale it was given. A controller
+    /// that has gone — closed for a rebuild, taken down with its browser, or
+    /// left behind in another window — takes all three with it, and a cache that
+    /// outlived it would decide there was nothing to say to an engine that has
+    /// been told nothing. That is the zero-by-zero page
+    /// [`Self::apply_presence`] describes from the other end, and since the DPI
+    /// authority landed it is also a page rastered for a display this window may
+    /// no longer be on.
+    ///
+    /// [`Self::placed`] is deliberately not here: it answers for the
+    /// compositor's visual, which a rebuild does not touch. The one place the
+    /// pair changes clears it — see `InstallEvents` — and so does the one place
+    /// the window changes.
+    fn the_controller_has_been_told_nothing(&mut self) {
         self.presence = None;
         self.bounded = None;
-        self.placed = None;
+        self.rastered = None;
     }
 
     /// Give the window being left a page that believes nothing is pressed and
@@ -3639,6 +3755,8 @@ mod rehost_address_tests {
             presence: None,
             wanted_bounds: None,
             bounded: None,
+            scale: 1.0,
+            rastered: None,
             placed: None,
             buttons: bt_platform::web_mouse_buttons::NONE,
             last_left_press: None,
@@ -3788,6 +3906,8 @@ mod rehost_address_tests {
         seat.wanted_bounds = Some(rectangle);
         seat.bounded = Some(rectangle);
         seat.presence = Some(WebPresence::Shown(rectangle));
+        seat.scale = 2.0;
+        seat.rastered = Some(2.0);
 
         seat.take_address(SeatAddress {
             page: page(4, 9),
@@ -3801,6 +3921,11 @@ mod rehost_address_tests {
         assert_eq!(
             seat.presence, None,
             "the new engine has been told no presence"
+        );
+        assert_eq!(
+            seat.rastered, None,
+            "and no device scale — the window it moved into may be on another \
+             display, and what was said was said about the one it left"
         );
         assert_eq!(
             seat.wanted_bounds,
@@ -3828,6 +3953,127 @@ mod rehost_address_tests {
 
         assert_eq!(seat.buttons, bt_platform::web_mouse_buttons::NONE);
         assert_eq!(seat.last_left_press, None);
+    }
+}
+
+/// **Who owns a hosted page's device pixel ratio** (§7.8 ⑨).
+///
+/// The engine is not left to notice. A composition-hosted controller has no
+/// window of its own, and what `SetShouldDetectMonitorScaleChanges` can watch
+/// instead — the parent window this host lends it — it watches late: measured
+/// before this landed, a window carried from a 192-dpi display to a 144-dpi one
+/// showed its page still at `devicePixelRatio` 2 on arrival, laid out 305×330
+/// CSS pixels inside a 610×660 device-pixel seat, and reached 1.5 only on a
+/// later disturbance. The window knows at the moment the scale factor moves, so
+/// the window says it and the detection is switched off.
+#[cfg(test)]
+mod rasterization_tests {
+    use super::rehost_address_tests::{detached, hwnd, page};
+    use super::*;
+
+    fn seat_at(scale: f64) -> WebSeat {
+        let mut seat = detached(SeatAddress {
+            page: page(1, 1),
+            hwnd: hwnd(0x1111),
+        });
+        seat.scale = scale;
+        seat
+    }
+
+    /// RED — **a controller is owed the window's scale at birth**, not left on
+    /// whatever the engine defaults to.
+    ///
+    /// MUTATION: answer `None` when nothing has been told yet and a page opened
+    /// on a 1.5 display lays itself out at the default ratio, which is the
+    /// 2.0-on-a-144-dpi-screen report from the other direction.
+    #[test]
+    fn an_engine_that_has_been_told_nothing_is_owed_the_window_it_was_born_in() {
+        assert_eq!(rasterization_owed(1.5, None), Some(1.5));
+        assert_eq!(rasterization_owed(2.0, None), Some(2.0));
+    }
+
+    /// RED — **a scale that moved is owed once, and a scale that did not is not
+    /// owed at all.**
+    ///
+    /// The second half is what makes this cheap enough to sit on the frame path
+    /// beside the rectangle: sixty COM calls a second saying the same number is
+    /// what a missing cache looks like.
+    #[test]
+    fn a_moved_scale_is_owed_once_and_a_still_one_is_never_owed() {
+        assert_eq!(rasterization_owed(1.5, Some(2.0)), Some(1.5));
+        assert_eq!(rasterization_owed(2.0, Some(1.5)), Some(2.0));
+        assert_eq!(rasterization_owed(2.0, Some(2.0)), None);
+        assert_eq!(rasterization_owed(1.0, Some(1.0)), None);
+    }
+
+    /// RED — **the window's scale is recorded even when there is no engine to
+    /// tell**, and paid the moment there is one.
+    ///
+    /// A page can be asked for on a window that is already on the second display
+    /// and take the better part of a second to get a controller. A build that
+    /// only pushed the number when a controller happened to be there would push
+    /// it never, because the display stopped changing before the engine existed.
+    #[test]
+    fn a_seat_with_no_engine_still_knows_which_display_it_is_on() {
+        let mut seat = seat_at(2.0);
+        seat.set_device_scale(1.5)
+            .expect("a seat with no controller says nothing and fails at nothing");
+        assert_eq!(
+            seat.rastered, None,
+            "there was no engine, so nothing was told"
+        );
+        assert_eq!(
+            rasterization_owed(seat.scale, seat.rastered),
+            Some(1.5),
+            "and the first controller to arrive is owed the new display's number"
+        );
+    }
+
+    /// RED — **a rebuilt engine has been told nothing**, and that is true of all
+    /// three of the things a controller gets told.
+    ///
+    /// A browser that crashed takes its controller with it, and the one built to
+    /// replace it starts at the engine's own defaults — zero by zero, invisible,
+    /// and at whatever ratio it rasters by. A cache left standing over that
+    /// rebuild decides each number has already been sent, to an object that no
+    /// longer exists.
+    ///
+    /// MUTATION: leave any one of the three behind and the page that comes back
+    /// after a crash is wrong in exactly that one way — the rectangle was the
+    /// zero-by-zero page `apply_presence` documents, and the scale is this
+    /// section's own report one window later.
+    #[test]
+    fn an_engine_that_was_rebuilt_is_owed_all_three_numbers_again() {
+        let rectangle = WebBounds {
+            x: 10,
+            y: 20,
+            width: 800,
+            height: 600,
+        };
+        let mut seat = seat_at(1.5);
+        seat.rastered = Some(1.5);
+        seat.wanted_bounds = Some(rectangle);
+        seat.bounded = Some(rectangle);
+        seat.presence = Some(WebPresence::Shown(rectangle));
+        assert_eq!(rasterization_owed(seat.scale, seat.rastered), None);
+
+        seat.the_controller_has_been_told_nothing();
+
+        assert_eq!(
+            seat.rastered, None,
+            "the controller that knew the number has gone"
+        );
+        assert_eq!(rasterization_owed(seat.scale, seat.rastered), Some(1.5));
+        assert_eq!(
+            seat.bounded, None,
+            "and the rectangle, which the next controller was never given"
+        );
+        assert_eq!(seat.presence, None);
+        assert_eq!(
+            seat.wanted_bounds,
+            Some(rectangle),
+            "what the window wants is untouched; only what was said is forgotten"
+        );
     }
 }
 

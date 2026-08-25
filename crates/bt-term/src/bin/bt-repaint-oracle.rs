@@ -1046,11 +1046,16 @@ impl HeadlessOracle {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // Set-but-empty names nothing, here as everywhere else in this program: a
+    // cleared `BT_PROBE_INPUT=` is a probe that was not asked for, and it says
+    // so rather than failing to open a file called the empty string.
     let input_path = env::var_os("BT_PROBE_INPUT")
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "BT_PROBE_INPUT is required"))?;
     let input = fs::read(&input_path)?;
     let chunks_path = env::var_os("BT_PROBE_CHUNKS")
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| append_suffix(&input_path, ".chunks"));
     let chunks = if chunks_path.is_file() {
@@ -1069,7 +1074,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // byte-damaged source rows so the containment gate tolerates exactly those orphans. Absent =
     // no annotations (every orphan reds). One record per line: `history <id> <note>` or
     // `grid <row> <note>`; `#` comments and blank lines ignored.
-    if let Some(path) = env::var_os("BT_PROBE_ANNOTATIONS") {
+    if let Some(path) = env::var_os("BT_PROBE_ANNOTATIONS").filter(|value| !value.is_empty()) {
         oracle.annotations = load_source_integrity_annotations(Path::new(&path))?;
     }
     let delayed = oracle.math_latency.is_some();

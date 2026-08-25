@@ -833,7 +833,10 @@ fn matrix_chunk_name(chunk_size: Option<usize>) -> &'static str {
 }
 
 fn smoke_private_corpus() -> Result<()> {
-    let Some(path) = env::var_os("BT_REPLAY_PRIVATE_CORPUS") else {
+    // Set-but-empty is unset: a cleared variable asks for no private corpus, and
+    // saying so is the answer rather than failing to open a nameless file.
+    let Some(path) = env::var_os("BT_REPLAY_PRIVATE_CORPUS").filter(|value| !value.is_empty())
+    else {
         eprintln!("BT_REPLAY_PRIVATE_CORPUS status=skipped reason=environment_not_set");
         return Ok(());
     };

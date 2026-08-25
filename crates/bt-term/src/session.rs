@@ -80,6 +80,16 @@ pub fn path_exists(path: &Path) -> bool {
     std::fs::metadata(path).is_ok()
 }
 
+/// Whether a `BT_…` diagnostic variable is switched on.
+///
+/// **Set-but-empty is off**, which is the word every environment variable in
+/// this program is read with: a shell that writes `BT_PERF_TRACE=` has said "not
+/// this run", and a build that answered presence alone would turn a profiling
+/// session into a measurement of its own `eprintln!`s.
+fn switched_on(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| !value.is_empty())
+}
+
 const INLINE_IMAGE_WORKER_QUEUE_CAP: usize = 4;
 /// How many printed-path verdicts one pane remembers (§7.1.5j).
 ///
@@ -1189,7 +1199,7 @@ fn semantic_witness_rematch(
             })
             .collect::<Vec<_>>();
         let ordered = ordered_semantic_matches(&regions, &candidates);
-        if std::env::var_os("BT_SEMANTIC_TRACE").is_some() {
+        if switched_on("BT_SEMANTIC_TRACE") {
             eprintln!(
                 "SEMANTIC_ORDERED witness={witness:?} regions={regions:?} candidates={candidates:?} matched={ordered:?}"
             );
@@ -1365,7 +1375,9 @@ impl DualPlaneSession {
             math_failure_validate_count: 0,
             math_failure_convert_count: 0,
             math_failure_compile_count: 0,
-            decor_trace: std::env::var_os("BT_DECOR_TRACE").map(PathBuf::from),
+            decor_trace: std::env::var_os("BT_DECOR_TRACE")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
             decor_trace_frame: 0,
         }
     }
@@ -3109,7 +3121,7 @@ impl DualPlaneSession {
             self.enqueue_live_task(task);
         }
         self.live_detection_count = self.live_detection_count.saturating_add(scheduled as u64);
-        if scheduled != 0 && std::env::var_os("BT_PERF_TRACE").is_some() {
+        if scheduled != 0 && switched_on("BT_PERF_TRACE") {
             eprintln!(
                 "BT_PERF_TRACE live_math_detect={} live_math_invalidations={}",
                 self.live_detection_count, self.live_invalidation_count
@@ -5665,7 +5677,7 @@ impl DualPlaneSession {
             }
         }
         self.live_invalidation_count = self.live_invalidation_count.saturating_add(invalidated);
-        if invalidated != 0 && std::env::var_os("BT_PERF_TRACE").is_some() {
+        if invalidated != 0 && switched_on("BT_PERF_TRACE") {
             eprintln!(
                 "BT_PERF_TRACE live_math_event=invalidate live_math_detect={} live_math_invalidations={}",
                 self.live_detection_count, self.live_invalidation_count
@@ -5688,7 +5700,7 @@ impl DualPlaneSession {
         if !(self.live_screen == ScreenId::Alternate && self.alternate_repaint_in_progress) {
             self.offscreen_decorations.clear();
         }
-        if removed != 0 && std::env::var_os("BT_PERF_TRACE").is_some() {
+        if removed != 0 && switched_on("BT_PERF_TRACE") {
             eprintln!(
                 "BT_PERF_TRACE live_math_event=invalidate-all live_math_detect={} live_math_invalidations={}",
                 self.live_detection_count, self.live_invalidation_count
@@ -5967,7 +5979,7 @@ impl DualPlaneSession {
         if !accepted {
             self.stale_results += 1;
             self.account_stranded_pending(task.candidate_id, task.versions);
-        } else if std::env::var_os("BT_PERF_TRACE").is_some() {
+        } else if switched_on("BT_PERF_TRACE") {
             if let Some(elapsed) = render_time {
                 eprintln!(
                     "BT_PERF_TRACE math_render_us={} source={} resident_bytes={}",
@@ -6010,7 +6022,7 @@ impl DualPlaneSession {
         let accepted = self.apply_live_worker_completion(task.clone(), artifact, failure_reason);
         if !accepted {
             self.stale_results = self.stale_results.saturating_add(1);
-        } else if std::env::var_os("BT_PERF_TRACE").is_some()
+        } else if switched_on("BT_PERF_TRACE")
             && let Some(elapsed) = render_time
         {
             eprintln!(
@@ -6040,7 +6052,7 @@ impl DualPlaneSession {
             }
             None => return,
         }
-        if std::env::var_os("BT_PERF_TRACE").is_some() {
+        if switched_on("BT_PERF_TRACE") {
             eprintln!(
                 "BT_PERF_TRACE math_failures_validate={} math_failures_convert={} math_failures_compile={}",
                 self.math_failure_validate_count,

@@ -4270,7 +4270,10 @@ impl WindowRenderer {
             wgpu::MultisampleState::default(),
             None,
         );
-        let trace_perf = std::env::var_os("BT_PERF_TRACE").is_some();
+        // Set-but-empty is off: a shell that wrote `BT_PERF_TRACE=` said "not
+        // this run", and every reader of this family in this program says the
+        // same word back.
+        let trace_perf = std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty());
         // A window that draws into a texture is an instrument by construction —
         // `HeadlessRenderProbe` is the only thing that builds one — so its
         // shaping caches count hits, misses and evictions whether or not the

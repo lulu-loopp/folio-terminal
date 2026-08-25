@@ -102,6 +102,39 @@ impl Channel {
     }
 }
 
+/// **What a `BT_…` variable names, when it names a file.**
+///
+/// An emptied variable is **off**, not a file called the empty string. That is
+/// the standing rule for every environment variable this program reads, and it
+/// is written here as one function rather than as a `filter` remembered at each
+/// call site, because the failure it prevents is silent at the site that forgets
+/// it: `BT_PROBE_INPUT=` stopped the whole program before its window with `read
+/// BT_PROBE_INPUT : The system cannot find the path specified. (os error 3)`,
+/// and `BT_PTY_DUMP=` did the same to a pane before it. That is the shape a
+/// shell leaves behind when it *clears* a variable rather than removing it, so
+/// the failure lands on exactly the people who believed they had switched the
+/// diagnostic off.
+///
+/// Whitespace is deliberately **not** trimmed: `" "` is a strange but real
+/// relative filename on Windows' rules, and a diagnostic that quietly rewrites
+/// the path it was handed is the same class of surprise in the other direction.
+#[must_use]
+pub fn named_file(value: Option<OsString>) -> Option<PathBuf> {
+    value.filter(|value| !value.is_empty()).map(PathBuf::from)
+}
+
+/// **Whether a `BT_…` switch is on**, read from its value rather than from its
+/// presence.
+///
+/// The other half of [`named_file`]'s rule, for the variables that carry no
+/// path. Presence alone would make `BT_PERF_TRACE=` mean *on*, and a shell that
+/// wrote that meant the opposite — with a per-frame trace that dominates the
+/// very profile it was set to read.
+#[must_use]
+pub fn switched_on(value: Option<OsString>) -> bool {
+    value.is_some_and(|value| !value.is_empty())
+}
+
 /// **Did this run name the console as the place diagnostics go?**
 ///
 /// The whole family of trace switches and nothing else: a variable whose name
@@ -183,11 +216,47 @@ pub fn enter_resident_run(storage: &Path) -> Channel {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+    use std::path::PathBuf;
 
-    use super::{Channel, LOG_ROTATE_AT, console_was_asked_for, rotate_if_oversized};
+    use super::{
+        Channel, LOG_ROTATE_AT, console_was_asked_for, named_file, rotate_if_oversized, switched_on,
+    };
 
     fn names(list: &[&str]) -> Vec<OsString> {
         list.iter().map(|name| OsString::from(*name)).collect()
+    }
+
+    /// PIN (user report, 2026-08-25: `Folio stopped: read BT_PROBE_INPUT : The
+    /// system cannot find the path specified. (os error 3)`) — **an emptied
+    /// variable is off, and never a file named the empty string.**
+    ///
+    /// Red gate: hand the empty string on as a path and the program dies at
+    /// startup on a variable its owner believed they had switched off.
+    #[test]
+    fn an_emptied_variable_names_no_file() {
+        assert_eq!(named_file(None), None);
+        assert_eq!(named_file(Some(OsString::new())), None);
+        assert_eq!(
+            named_file(Some(OsString::from("probe.vt"))),
+            Some(PathBuf::from("probe.vt")),
+            "a variable that names something still names it"
+        );
+        assert_eq!(
+            named_file(Some(OsString::from(" "))),
+            Some(PathBuf::from(" ")),
+            "and whitespace is a filename, not an emptiness this program \
+             decides to see through"
+        );
+    }
+
+    /// PIN — **the same word for the switches that carry no path.** Set-but-empty
+    /// is off; a value of any kind is on.
+    #[test]
+    fn an_emptied_switch_is_off() {
+        assert!(!switched_on(None));
+        assert!(!switched_on(Some(OsString::new())));
+        assert!(switched_on(Some(OsString::from("1"))));
+        assert!(switched_on(Some(OsString::from("0"))), "any value is on");
     }
 
     /// PIN (console channel, 2026-08-25) — **the trace family keeps the console
