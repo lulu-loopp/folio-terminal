@@ -2828,7 +2828,16 @@ fn live_temporary_id(index: usize) -> Option<TranscriptId> {
     u64::try_from(index).ok()?.checked_add(1).map(TranscriptId)
 }
 
-fn delimiter_is_escaped(text: &str, byte: usize) -> bool {
+/// Is the delimiter at `byte` escaped by the backslashes in front of it?
+///
+/// **One definition, because two surfaces ask it.** The terminal's detector asks
+/// it of a printed line and the markdown preview asks it of a document's own
+/// bytes ([`crate::preview`]'s inline pass in `bt-app`), and `\$` has to mean the
+/// same thing in both: a literal dollar, never a delimiter. An even run of
+/// backslashes escapes itself and leaves the dollar free, which is why this
+/// counts parity rather than looking at the one byte before.
+#[must_use]
+pub fn delimiter_is_escaped(text: &str, byte: usize) -> bool {
     text[..byte]
         .bytes()
         .rev()

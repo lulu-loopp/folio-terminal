@@ -264,6 +264,7 @@ impl Highlighting {
             mono: true,
             bold: false,
             font_scale: 1.0,
+            inline_box_px: None,
         };
         let spans = self.lines.get(line).filter(|spans| !spans.is_empty());
         let Some(spans) = spans else {

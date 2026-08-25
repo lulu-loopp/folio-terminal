@@ -545,6 +545,15 @@ pub enum SpanStyle {
     /// URL is never *printed* — that was wrong under every future ruling and it
     /// is still wrong under this one.
     Link,
+    /// `$…$` — one inline formula, **stored with its delimiters**.
+    ///
+    /// The delimiters stay in [`Span::text`] because they are what the run draws
+    /// while it has no picture yet, and because they are what it goes back to
+    /// when the engine refuses the source: a formula that cannot be set is the
+    /// author's literal text and must come back byte for byte. The LaTeX handed
+    /// to the engine is [`Span::math_source`], which is the same string without
+    /// the two dollars.
+    Math,
 }
 
 /// One run of inline text inside a markdown block.
@@ -590,6 +599,27 @@ impl Span {
             style: SpanStyle::Link,
             target: Some(target.to_owned()),
         }
+    }
+
+    /// One inline formula, `text` **including** the `$` at each end.
+    pub fn math(text: &str) -> Self {
+        Self::styled(text, SpanStyle::Math)
+    }
+
+    /// The LaTeX between this run's delimiters, or `None` if it is not a formula.
+    ///
+    /// One accessor rather than a second copy of the source on the span, because
+    /// the delimited text and the source are the same bytes read two ways, and a
+    /// pair of fields is a pair that can disagree.
+    #[must_use]
+    pub fn math_source(&self) -> Option<&str> {
+        (self.style == SpanStyle::Math)
+            .then(|| {
+                self.text
+                    .strip_prefix('$')
+                    .and_then(|rest| rest.strip_suffix('$'))
+            })
+            .flatten()
     }
 }
 
@@ -655,15 +685,39 @@ pub enum MarkdownBlock {
     /// `---` or `***` alone on a line.
     Rule,
     Paragraph(Vec<Span>),
+    /// `$$…$$` — one display formula, the LaTeX **without** its delimiters and
+    /// with its own line breaks intact.
+    ///
+    /// A block of its own rather than a paragraph carrying a wide run, because
+    /// display mathematics is a block in every dialect that has it: it takes the
+    /// page's own margins, it is set on its own baseline rather than the
+    /// paragraph's, and — the part the type has to carry — it is measured from a
+    /// picture whose height nothing else on the page can predict.
+    ///
+    /// The delimiters are dropped here and kept on [`SpanStyle::Math`] for the
+    /// asymmetric reason that a display block draws its source over several
+    /// lines while it waits for its picture, and reprinting `$$` around those
+    /// lines is the renderer restating what it already knows; an inline run
+    /// draws inside a sentence, where the dollars are the only thing that tells
+    /// a reader the words beside them are not prose.
+    Math {
+        source: String,
+    },
 }
 
 /// Split one line into its inline runs.
 ///
-/// **Three passes, and the order is the ruling.** Backticks first, which is the
+/// **Four passes, and the order is the ruling.** Backticks first, which is the
 /// mock-up's order (4915-4917) and the one that makes `` `**not bold**` `` come
-/// out as literal code rather than as a bold run inside a code span; then links,
-/// so a `**[bold link](url)**`'s brackets are gone before the asterisks are
-/// read; then asterisks over whatever is still plain.
+/// out as literal code rather than as a bold run inside a code span; then
+/// dollars, so that a formula's own `*`, `_` and `[` are the formula's and not
+/// this renderer's; then links, so a `**[bold link](url)**`'s brackets are gone
+/// before the asterisks are read; then asterisks over whatever is still plain.
+///
+/// **The backtick pass standing in front of the dollar pass is the whole of
+/// "a dollar inside code is a dollar."** There is no second rule and no list of
+/// things that look like shell: a code span has already been claimed by the time
+/// the dollars are read, and a fenced block never reaches this function at all.
 ///
 /// **One door for every block that has text in it.** A table cell, a list item,
 /// a quote line and a paragraph all come through here, which is the whole of why
@@ -677,12 +731,112 @@ pub fn parse_inline(line: &str) -> Vec<Span> {
         let Some(close) = rest[open + 1..].find('`') else {
             break;
         };
-        push_link_runs(&rest[..open], &mut spans);
+        push_math_runs(&rest[..open], &mut spans);
         spans.push(Span::code(&rest[open + 1..open + 1 + close]));
         rest = &rest[open + 1 + close + 1..];
     }
-    push_link_runs(rest, &mut spans);
+    push_math_runs(rest, &mut spans);
     spans
+}
+
+/// The second pass: `$…$` inside whatever the backtick pass left plain.
+///
+/// **The rule is Pandoc's `tex_math_dollars`**, which is the written-down
+/// standard for mathematics in a markdown document and is therefore something
+/// this file can cite rather than something it had to guess:
+///
+/// * `\$` is a literal dollar and never a delimiter
+///   ([`bt_detect::delimiter_is_escaped`], the same parity the terminal's
+///   detector reads it with);
+/// * an opener may **not** be followed by whitespace;
+/// * a closer may **not** be preceded by whitespace, and may **not** be followed
+///   by an ASCII digit;
+/// * `$$` is display mathematics and is never read here as two inline
+///   delimiters;
+/// * and the span between them must not be empty.
+///
+/// The digit rule is the one that earns its keep on ordinary prose: `$5 and $10`
+/// has a closer that passes every other test and is followed by a `1`, which is
+/// what a second price looks like and what the end of a formula never does.
+///
+/// **Deliberately not the terminal's rule** ([`bt_detect::detect_inline_math`]),
+/// and the difference is a difference of authority rather than of taste. There a
+/// lone `$` is an accident of somebody else's output and the gates ask whether
+/// the bytes *read* as mathematics — site, completeness, prose. Here the `$` is
+/// markup the author of this file typed, in a file this window was asked to
+/// render as markdown, and asking whether the author meant it would be this
+/// renderer overruling the document about its own contents. What the two do
+/// share is the escape and the refusal to read `$$` as two delimiters, and those
+/// are shared by calling the same function rather than by writing it twice.
+fn push_math_runs(text: &str, spans: &mut Vec<Span>) {
+    let mut rest = text;
+    while let Some((open, close)) = next_inline_math(rest) {
+        push_link_runs(&rest[..open], spans);
+        spans.push(Span::math(&rest[open..=close]));
+        rest = &rest[close + 1..];
+    }
+    push_link_runs(rest, spans);
+}
+
+/// The byte offsets of the next inline formula's two delimiters, if there is one.
+fn next_inline_math(text: &str) -> Option<(usize, usize)> {
+    let dollars: Vec<usize> = text
+        .char_indices()
+        .filter_map(|(byte, character)| (character == '$').then_some(byte))
+        .collect();
+    let mut index = 0usize;
+    while index < dollars.len() {
+        let open = dollars[index];
+        if !opens_inline_math(text, open) {
+            index += 1;
+            continue;
+        }
+        // Nothing here rules out an empty span, and nothing needs to: a closer
+        // one byte after the opener is the second half of a `$$`, and a `$$`
+        // was already refused as an opener.
+        if let Some(close) = dollars[index + 1..]
+            .iter()
+            .copied()
+            .find(|close| closes_inline_math(text, *close))
+        {
+            return Some((open, close));
+        }
+        index += 1;
+    }
+    None
+}
+
+/// A `$` opens a formula when it is not escaped, is not half of a `$$`, and has
+/// something other than a space after it.
+fn opens_inline_math(text: &str, byte: usize) -> bool {
+    if bt_detect::delimiter_is_escaped(text, byte) || is_paired_dollar(text, byte) {
+        return false;
+    }
+    text[byte + 1..]
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+}
+
+/// A `$` closes a formula when it is not escaped, is not half of a `$$`, has
+/// something other than a space in front of it, and is not the sigil of the
+/// price that follows it.
+fn closes_inline_math(text: &str, byte: usize) -> bool {
+    if bt_detect::delimiter_is_escaped(text, byte) || is_paired_dollar(text, byte) {
+        return false;
+    }
+    let before = text[..byte].chars().next_back();
+    let after = text[byte + 1..].chars().next();
+    before.is_some_and(|character| !character.is_whitespace())
+        && !after.is_some_and(|character| character.is_ascii_digit())
+}
+
+/// Is this `$` one half of a `$$`, on either side?
+fn is_paired_dollar(text: &str, byte: usize) -> bool {
+    text.as_bytes().get(byte + 1) == Some(&b'$')
+        || byte
+            .checked_sub(1)
+            .is_some_and(|before| text.as_bytes().get(before) == Some(&b'$'))
 }
 
 /// The second pass: `[text](url)` inside whatever the code pass left plain.
@@ -819,6 +973,52 @@ pub fn parse_markdown(src: &str) -> Vec<MarkdownBlock> {
             blocks.push(MarkdownBlock::Code {
                 lang,
                 text: body.join("\n"),
+            });
+            continue;
+        }
+
+        // ── display mathematics, which swallows its lines as a fence does ───
+        //
+        // **After the fence and before everything else.** A `$$` inside a fence
+        // is a fence's business and the branch above has already taken it; a
+        // `$$` anywhere else is the author opening a formula, and nothing below
+        // may see those lines as prose, as a rule or as a table.
+        if let Some(rest) = line.strip_prefix("$$") {
+            flush_paragraph(&mut paragraph, &mut blocks);
+            flush_list(&mut list, &mut ordered, &mut blocks);
+            index += 1;
+            let mut body: Vec<&str> = Vec::new();
+            // `$$E = mc^2$$` — opened and closed on one line. Asked of the line
+            // with its trailing space gone, because a delimiter followed by
+            // nothing but blanks is still the last thing on the line.
+            match rest.trim_end().strip_suffix("$$") {
+                Some(inner) if !inner.trim().is_empty() => body.push(inner.trim()),
+                _ => {
+                    // Whatever the opener carried after its delimiter is the
+                    // formula's first line: `$$\begin{aligned}` is one way to
+                    // write what `$$` on a line of its own writes in two.
+                    if !rest.trim().is_empty() {
+                        body.push(rest.trim());
+                    }
+                    while index < lines.len() {
+                        let line = lines[index];
+                        index += 1;
+                        let Some(head) = line.trim_end().strip_suffix("$$") else {
+                            body.push(line);
+                            continue;
+                        };
+                        if !head.trim().is_empty() {
+                            body.push(head.trim());
+                        }
+                        break;
+                    }
+                    // A formula nobody closed still renders, rather than
+                    // swallowing the rest of the document in silence — the same
+                    // ruling the unterminated fence above is decided by.
+                }
+            }
+            blocks.push(MarkdownBlock::Math {
+                source: body.join("\n"),
             });
             continue;
         }
@@ -1420,7 +1620,12 @@ pub fn markdown_block_margins(
         MarkdownBlock::List { .. }
         | MarkdownBlock::Paragraph(_)
         | MarkdownBlock::Quote(_)
-        | MarkdownBlock::Table { .. } => (metrics.paragraph_gap, metrics.paragraph_gap),
+        | MarkdownBlock::Table { .. }
+        // Display mathematics is a block sibling and asks for a sibling's air.
+        // github.css has no rule for it because github.css predates it; every
+        // renderer that draws one — Typora, KaTeX's own `.katex-display` — sets
+        // it in the same `1em` a paragraph stands in.
+        | MarkdownBlock::Math { .. } => (metrics.paragraph_gap, metrics.paragraph_gap),
     };
     (if previous.is_none() { 0.0 } else { top }, bottom)
 }
@@ -4799,6 +5004,149 @@ mod tests {
         );
         // A blank line is a separator, not a paragraph.
         assert_eq!(parse_markdown("\n\n"), vec![]);
+    }
+
+    /// PIN (user report, 2026-08-25: formulas in a `.md` file stood as literal
+    /// text in the preview) — **`$$…$$` is a block of mathematics**, on its own
+    /// line or spread over several, and the delimiters are not part of it.
+    ///
+    /// MUTATIONS: emit the delimiters inside `source`; accept a `$$` that opens
+    /// mid-word; let the multi-line arm run past a closing `$$`.
+    #[test]
+    fn display_dollars_open_a_block_of_mathematics() {
+        assert_eq!(
+            parse_markdown("$$E = mc^2$$\n"),
+            vec![MarkdownBlock::Math {
+                source: "E = mc^2".to_owned(),
+            }]
+        );
+        assert_eq!(
+            parse_markdown("$$\n\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}\n$$\n"),
+            vec![MarkdownBlock::Math {
+                source: "\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}".to_owned(),
+            }]
+        );
+        // Prose either side of it keeps its own blocks, and the formula does not
+        // swallow them.
+        assert_eq!(
+            parse_markdown("before\n\n$$x^2$$\n\nafter\n"),
+            vec![
+                MarkdownBlock::Paragraph(vec![Span::plain("before")]),
+                MarkdownBlock::Math {
+                    source: "x^2".to_owned(),
+                },
+                MarkdownBlock::Paragraph(vec![Span::plain("after")]),
+            ]
+        );
+        // A block nobody closed still renders, on the same terms an unclosed
+        // fence does.
+        assert_eq!(
+            parse_markdown("$$\nx^2\n"),
+            vec![MarkdownBlock::Math {
+                source: "x^2".to_owned(),
+            }]
+        );
+    }
+
+    /// PIN (same report) — **a fence is not mathematics**, and neither is a code
+    /// span. The structural protection markdown already has is the whole of the
+    /// rule: no dollar inside either is ever a delimiter.
+    ///
+    /// MUTATION: run the math pass over the raw line before the backtick pass.
+    #[test]
+    fn a_dollar_inside_code_is_a_dollar() {
+        assert_eq!(
+            parse_markdown("```text\n$$x^2 + y^2$$\n```\n"),
+            vec![MarkdownBlock::Code {
+                lang: Some("text".to_owned()),
+                text: "$$x^2 + y^2$$".to_owned(),
+            }]
+        );
+        assert_eq!(
+            parse_inline("run `echo $HOME` and `$x$` twice"),
+            vec![
+                Span::plain("run "),
+                Span::code("echo $HOME"),
+                Span::plain(" and "),
+                Span::code("$x$"),
+                Span::plain(" twice"),
+            ]
+        );
+    }
+
+    /// PIN (same report) — **inline `$…$` is mathematics inside prose**, and the
+    /// span keeps the delimiters it was written with so that a formula that never
+    /// renders can still be printed back exactly as the author typed it.
+    ///
+    /// MUTATIONS: strip the delimiters into `text`; drop the "no space after the
+    /// opener" rule; drop the "no space before the closer" rule.
+    #[test]
+    fn inline_dollars_delimit_mathematics_inside_prose() {
+        assert_eq!(
+            parse_inline("energy $E = mc^2$ rules"),
+            vec![
+                Span::plain("energy "),
+                Span::math("$E = mc^2$"),
+                Span::plain(" rules"),
+            ]
+        );
+        assert_eq!(
+            Span::math("$E = mc^2$").math_source(),
+            Some("E = mc^2"),
+            "the LaTeX a run renders is the text between its delimiters",
+        );
+        // The Chinese habit of writing a formula with no space around it keeps
+        // both delimiters, exactly as `bt_detect` already rules for the terminal.
+        assert_eq!(
+            parse_inline("能量$E$的值"),
+            vec![Span::plain("能量"), Span::math("$E$"), Span::plain("的值"),]
+        );
+        // Two runs on one line are two runs.
+        assert_eq!(
+            parse_inline("$a^2$ and $b^2$"),
+            vec![
+                Span::math("$a^2$"),
+                Span::plain(" and "),
+                Span::math("$b^2$"),
+            ]
+        );
+        // Emphasis inside a formula is the formula's, not the renderer's: the
+        // math pass claims the run before the asterisk pass ever sees it.
+        assert_eq!(parse_inline("$a * b * c$"), vec![Span::math("$a * b * c$")]);
+    }
+
+    /// PIN (same report) — **the three things a lone dollar is not**: an escaped
+    /// dollar, a price, and an opener with nothing to close it.
+    ///
+    /// The rule is Pandoc's `tex_math_dollars`, which is the written-down
+    /// standard for dollars in a markdown document and therefore not a guess:
+    /// `\$` is a literal, an opener may not be followed by whitespace, a closer
+    /// may be neither preceded by whitespace nor followed by a digit.
+    ///
+    /// MUTATIONS, one per assertion: honour `\$` as a delimiter; drop the digit
+    /// rule; drop the whitespace rules.
+    #[test]
+    fn a_price_and_an_escaped_dollar_are_not_mathematics() {
+        assert_eq!(
+            parse_inline("costs \\$5 today"),
+            vec![Span::plain("costs \\$5 today")]
+        );
+        // The closer is followed by a digit, which is what a second price looks
+        // like and what a formula never does.
+        assert_eq!(
+            parse_inline("this $5 and that $10"),
+            vec![Span::plain("this $5 and that $10")]
+        );
+        assert_eq!(
+            parse_inline("这件 $5 那件 $10 一共 $15"),
+            vec![Span::plain("这件 $5 那件 $10 一共 $15")]
+        );
+        // An opener with no partner is a dollar sign.
+        assert_eq!(parse_inline("echo $PATH"), vec![Span::plain("echo $PATH")]);
+        // `$ x $` is not a formula: the opener is followed by a space.
+        assert_eq!(parse_inline("a $ x $ b"), vec![Span::plain("a $ x $ b")]);
+        // Nothing between the delimiters is nothing, not an empty formula.
+        assert_eq!(parse_inline("a $$ b"), vec![Span::plain("a $$ b")]);
     }
 
     /// PIN (user report, 2026-08-13: "做得不太好") — **the five block kinds the

@@ -105,7 +105,7 @@ use bt_layout::{
     Axis, LayoutNode, LogicalRect, MIN_PANE_H, MIN_PANE_W, SeatId, SeatKind, SeatLayout,
     SeatMetrics, SizePolicy, SplitId, WorkAreaHint,
 };
-use bt_math::{MathEngine, MathRaster, MathRenderError};
+use bt_math::{MathEngine, MathMode, MathRaster, MathRenderError};
 use bt_persist::{
     LayoutNodeV1, LeafNodeV1, SESSION_SCHEMA_VERSION, SessionCursorStyleV1, SessionSidebarModeV1,
     SessionTabLayoutV1, SessionThemeV1, SessionV1, SessionWindowV1, TabV1, TermLeafV1, ThemeModeV1,
@@ -562,7 +562,11 @@ impl MathWorkerResult {
     fn owner(&self) -> AnswerOwner {
         match self.completion {
             DecorationWorkerCompletion::PeekImage { .. }
-            | DecorationWorkerCompletion::PeekScaledImage { .. } => {
+            | DecorationWorkerCompletion::PeekScaledImage { .. }
+            // A preview's formula is the window's on exactly the terms the two
+            // hover completions are: it is filed in one map per window, keyed by
+            // its own content, and no pane owns it.
+            | DecorationWorkerCompletion::PreviewMath { .. } => {
                 AnswerOwner::Window(self.leaf.window)
             }
             DecorationWorkerCompletion::Math { .. }
@@ -594,6 +598,17 @@ enum MathWorkerRequest {
     /// worker is ever handed, and it is here rather than on the event thread for the reason every
     /// other read is: the answer costs a syscall and the frame is being drawn.
     VerifyPath { leaf: ShellAddress, path: PathBuf },
+    /// Set one formula a markdown preview is showing.
+    ///
+    /// The same engine, the same thread and the same channel the terminal's formulas already use,
+    /// because it is the same work: MiTeX to Typst to SVG to pixels is tens of milliseconds and a
+    /// document can hold dozens of them. What differs is only who asked and how the answer is
+    /// addressed — a preview's formula belongs to the *window's* cache, keyed by its own content,
+    /// so it does not travel to a pane and cannot be lost when one closes.
+    PreviewMath {
+        leaf: ShellAddress,
+        key: Box<PreviewMathKey>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -761,6 +776,15 @@ enum DecorationWorkerCompletion {
         path: PathBuf,
         exists: bool,
     },
+    /// One markdown preview's formula, set or refused.
+    ///
+    /// The key travels back with the answer because the window's cache is keyed by it and
+    /// nothing else: an answer that arrived saying only "here is a picture" could not be
+    /// filed, and one addressed by a pane would be filed against a pane that may be gone.
+    PreviewMath {
+        key: Box<PreviewMathKey>,
+        result: std::result::Result<MathRaster, MathRenderError>,
+    },
 }
 
 struct MathWorker {
@@ -854,6 +878,19 @@ impl MathWorker {
                             (
                                 leaf,
                                 DecorationWorkerCompletion::InlineImage { task, result },
+                            )
+                        }
+                        MathWorkerRequest::PreviewMath { leaf, key } => {
+                            let result = bt_math::key_for_em_px(
+                                key.em_milli_px as f32 / 1000.0,
+                                key.foreground_rgb,
+                                key.mode,
+                            )
+                            .ok_or(MathRenderError::InvalidDimensions)
+                            .and_then(|render_key| engine.render(&key.source, render_key));
+                            (
+                                leaf,
+                                DecorationWorkerCompletion::PreviewMath { key, result },
                             )
                         }
                         MathWorkerRequest::VerifyPath { leaf, path } => {
@@ -983,6 +1020,16 @@ enum PreviewDocument {
         intrinsic: Vec<MarkdownBlockIntrinsic>,
         /// One entry per block, measured against the pane it will wrap in.
         layout: Vec<MarkdownBlockLayout>,
+        /// The formulas that were in hand when this layout was made.
+        ///
+        /// **Carried rather than re-asked at paint time, and that is the point:
+        /// the pass that reserved the space and the pass that fills it must be
+        /// looking at the same answer.** A picture that arrived between the two
+        /// would be drawn into a gap nobody left for it. What makes the two
+        /// agree is that the arrival itself re-keys the document
+        /// ([`PreviewDocumentKey::math_generation`]), so the next layout is the
+        /// one that knows about it.
+        math: DocumentMath,
     },
 }
 
@@ -1021,6 +1068,236 @@ struct MarkdownBlockIntrinsic {
     /// putting the highlighting anywhere on the *layout* side would have
     /// re-created it in a new place.
     highlight: highlight::Highlighting,
+}
+
+/// **Everything that decides what one formula's picture looks like.**
+///
+/// Content, mode, size and ink, and nothing else — no path, no pane, no tab. Two
+/// panes showing the same `$E = mc^2$` at the same size in the same theme are
+/// looking at one picture, and a key carrying where it was asked from would mint
+/// a second copy of it for no reason a reader could see.
+///
+/// The size is quantised to a thousandth of a pixel so that it is a key at all:
+/// the em arrives as a float from a scale factor, and a `HashMap` cannot be
+/// asked about a float.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct PreviewMathKey {
+    source: String,
+    mode: MathMode,
+    em_milli_px: u32,
+    foreground_rgb: [u8; 3],
+}
+
+impl PreviewMathKey {
+    /// The identity the GPU's texture cache knows this picture by.
+    ///
+    /// Prefixed, because that cache is one LRU shared by the terminal's formulas,
+    /// the chrome's marks and the preview's picture, and a bare source string
+    /// could collide with whatever another lane happens to name its own entries.
+    fn texture_key(&self) -> String {
+        let [r, g, b] = self.foreground_rgb;
+        let mode = match self.mode {
+            MathMode::Display => 'd',
+            MathMode::Inline => 'i',
+        };
+        format!(
+            "preview-math:{mode}:{}:{r},{g},{b}:{}",
+            self.em_milli_px, self.source
+        )
+    }
+}
+
+/// One formula's picture, in the shape the page draws it from.
+#[derive(Clone, Debug)]
+struct PreviewMathPicture {
+    key: String,
+    rgba: Arc<[u8]>,
+    width_px: u32,
+    height_px: u32,
+    /// Where the mathematics' own baseline is, measured down from the top of
+    /// these pixels. What an inline picture is aligned by; a display block
+    /// ignores it, because a block sits on no line.
+    baseline_px: f32,
+}
+
+/// What became of one formula the window asked the engine for.
+#[derive(Clone, Debug)]
+enum PreviewMathArtifact {
+    /// Asked for, not yet answered. The source text stands meanwhile.
+    Pending,
+    /// The engine could not set it. **The source stands for good** — which is
+    /// the honest outcome and not a failure state to draw a marker for: what the
+    /// author wrote is what the author wrote, and a document that cannot be
+    /// typeset is still a document that can be read.
+    Refused,
+    Ready(PreviewMathPicture),
+}
+
+/// The formulas one document needs, resolved for the size and ink it is being
+/// drawn at.
+///
+/// **Looked up by content and not carried on the block.** A formula's picture
+/// depends on three things the parsed document knows nothing about — the pane's
+/// scale, the theme's ink, and whether the engine has answered yet — and any of
+/// the three can change without a byte of the file changing. Hanging the picture
+/// off [`MarkdownBlockIntrinsic`] would mean inventing an invalidation rule for
+/// each of them; asking by content at the moment of drawing means there is
+/// nothing to invalidate, because a miss is simply a miss.
+#[derive(Clone, Debug, Default)]
+struct DocumentMath {
+    /// Mode, then size, then source — three levels rather than one key, because
+    /// a lookup happens per span per frame and a `HashMap` keyed by a tuple
+    /// containing a `String` cannot be asked about a `&str` without minting a
+    /// `String` to ask with. Nested maps keyed by the source alone can.
+    ///
+    /// The same LaTeX at two of the three is genuinely two pictures: display
+    /// style sets its limits over its operators and its fractions full size, and
+    /// **a formula inside an `h2` is set at the `h2`'s size** like every letter
+    /// around it.
+    inline: SizedMath,
+    display: SizedMath,
+}
+
+/// One mode's pictures: size in device thousandths, then LaTeX.
+type SizedMath =
+    std::collections::HashMap<u32, std::collections::HashMap<String, PreviewMathPicture>>;
+
+impl DocumentMath {
+    fn picture(&self, source: &str, mode: MathMode, em_px: f32) -> Option<&PreviewMathPicture> {
+        self.of(mode).get(&math_em_milli(em_px))?.get(source)
+    }
+
+    fn of(&self, mode: MathMode) -> &SizedMath {
+        match mode {
+            MathMode::Display => &self.display,
+            MathMode::Inline => &self.inline,
+        }
+    }
+
+    fn insert(&mut self, key: &PreviewMathKey, picture: PreviewMathPicture) {
+        let map = match key.mode {
+            MathMode::Display => &mut self.display,
+            MathMode::Inline => &mut self.inline,
+        };
+        map.entry(key.em_milli_px)
+            .or_default()
+            .insert(key.source.clone(), picture);
+    }
+}
+
+/// A formula's size as a key: device pixels, in thousandths.
+///
+/// One definition, because the size arrives as a float from a scale factor and
+/// two roundings of the same float are two different cache entries for the same
+/// picture.
+fn math_em_milli(em_px: f32) -> u32 {
+    (em_px * 1000.0).round().max(1.0) as u32
+}
+
+/// How many bytes of decoded formulas one window keeps.
+///
+/// The pictures have to be held on this side because the page hands them out
+/// again on every frame, and the GPU's own LRU can evict a texture at any time
+/// and expect to be handed the bytes back. Sized against the same order the
+/// renderer's math texture budget is: a page of forty formulas at reading size
+/// is a few megabytes, and the ceiling is there for the pathological document
+/// rather than for the ordinary one.
+const PREVIEW_MATH_CACHE_BUDGET_BYTES: usize = 48 * 1024 * 1024;
+
+/// The window's formulas: what it has asked for, what came back, and what it is
+/// still holding.
+///
+/// **Bounded by bytes and evicted by last use**, because the two things that
+/// could bound it instead are both wrong. A count is wrong because one wide
+/// `\begin{aligned}` at 200% is worth a hundred `$x$`. "Only what is on screen"
+/// is wrong because scrolling a formula off the top and back would re-typeset
+/// it, and typesetting is tens of milliseconds — the scroll would stutter at
+/// every formula in the file.
+///
+/// A pending entry is **never** evicted: its answer is already in flight and
+/// there is nobody to ask again. It costs nothing to hold, since it holds no
+/// pixels.
+#[derive(Debug, Default)]
+struct PreviewMathCache {
+    entries: std::collections::HashMap<PreviewMathKey, (PreviewMathArtifact, u64)>,
+    resident_bytes: usize,
+    /// Ticks once per resolution, which is what "least recently used" is counted
+    /// in. Not a clock: two documents resolved in one frame are equally recent,
+    /// and that is exactly right.
+    tick: u64,
+    /// Ticks once per **picture** that lands. See
+    /// [`PreviewDocumentKey::math_generation`]: this is what tells a page that
+    /// has already been laid out that one of its blocks is now a different
+    /// height. A refusal does not tick it, because a refused formula draws
+    /// exactly what it was drawing before.
+    generation: u64,
+}
+
+impl PreviewMathCache {
+    fn get(&mut self, key: &PreviewMathKey) -> Option<&PreviewMathArtifact> {
+        let tick = self.tick;
+        let (artifact, used) = self.entries.get_mut(key)?;
+        *used = tick;
+        Some(artifact)
+    }
+
+    fn mark_pending(&mut self, key: PreviewMathKey) {
+        let tick = self.tick;
+        self.entries
+            .insert(key, (PreviewMathArtifact::Pending, tick));
+    }
+
+    fn land(&mut self, key: PreviewMathKey, artifact: PreviewMathArtifact) {
+        let tick = self.tick;
+        if let Some((PreviewMathArtifact::Ready(old), _)) = self.entries.get(&key) {
+            self.resident_bytes = self.resident_bytes.saturating_sub(old.rgba.len());
+        }
+        if let PreviewMathArtifact::Ready(picture) = &artifact {
+            self.resident_bytes = self.resident_bytes.saturating_add(picture.rgba.len());
+            self.generation = self.generation.saturating_add(1);
+        }
+        self.entries.insert(key, (artifact, tick));
+        self.evict_to_budget();
+    }
+
+    /// Drop the least recently used pictures until the budget is met.
+    ///
+    /// A picture just landed is the most recent thing here, so a single artifact
+    /// larger than the whole budget is kept rather than dropped on arrival: the
+    /// alternative is a formula that is re-typeset on every frame and never
+    /// drawn, which is worse than one page exceeding its ceiling.
+    fn evict_to_budget(&mut self) {
+        while self.resident_bytes > PREVIEW_MATH_CACHE_BUDGET_BYTES {
+            let mut held = self
+                .entries
+                .iter()
+                .filter_map(|(key, (artifact, used))| match artifact {
+                    PreviewMathArtifact::Ready(picture) => {
+                        Some((*used, key.clone(), picture.rgba.len()))
+                    }
+                    // A pending entry holds no pixels and there is nobody left
+                    // to ask for it a second time, so it is neither worth
+                    // evicting nor safe to.
+                    PreviewMathArtifact::Pending | PreviewMathArtifact::Refused => None,
+                })
+                .collect::<Vec<_>>();
+            // The last picture stays however large it is. Evicting it would
+            // re-typeset it on the next frame, find it too large again, and
+            // evict it again — a formula that is never drawn and never stops
+            // costing, which is worse than one page over its ceiling.
+            if held.len() <= 1 {
+                return;
+            }
+            held.sort_unstable_by_key(|(used, _, _)| *used);
+            let (_, key, bytes) = held.remove(0);
+            self.entries.remove(&key);
+            self.resident_bytes = self.resident_bytes.saturating_sub(bytes);
+            // An eviction changes a page's heights exactly as an arrival does,
+            // in the other direction: the block goes back to standing on its
+            // source text until the engine has been asked again.
+            self.generation = self.generation.saturating_add(1);
+        }
+    }
 }
 
 /// Everything measuring one markdown block worked out that **drawing it must
@@ -1130,6 +1407,34 @@ struct DiffRow {
 struct PreviewDocumentKey {
     parse: PreviewParseKey,
     body_width_px: u32,
+    /// **How many formulas this window has been handed since**, which is what
+    /// makes a formula landing owe a re-flow.
+    ///
+    /// A rendered formula is as tall as its picture and the picture arrives
+    /// tens of milliseconds after the page was laid out. Without this the page
+    /// keeps the height it reserved for the source text it was standing on,
+    /// draws the picture into it, and every block below stands in the wrong
+    /// place — the same shape of defect a list measured one way and drawn
+    /// another already cost this file once ([`MarkdownBlockLayout`]).
+    ///
+    /// On the width's side of the split rather than the parse's, because that is
+    /// exactly what it is: nothing about the document changed, only how tall one
+    /// of its blocks now is. So an arrival re-flows and does not re-parse.
+    ///
+    /// A counter and not the pictures themselves, because what is being asked is
+    /// "is this the same layout question as last time"; the answer no longer
+    /// being the same is enough, and the arrival that changed it is already
+    /// filed where the next resolution will find it.
+    math_generation: u64,
+    /// The ink the body is set in, because a formula's picture is **drawn in
+    /// it** rather than tinted at draw time.
+    ///
+    /// Every other run on the page recolours for free — the palette is read
+    /// fresh on every frame and a glyph is drawn in whatever colour it is handed.
+    /// A raster is not: its pixels came out of the engine already coloured, so a
+    /// theme change is a different picture, and a page that did not notice would
+    /// keep yesterday's ink in the middle of today's paragraph.
+    body_ink: [u8; 3],
 }
 
 /// The half of [`PreviewDocumentKey`] that has **nothing to do with the pane's
@@ -1523,6 +1828,8 @@ fn preview_document_key(
     md_source: bool,
     body_width_px: f32,
     scale: f32,
+    math_generation: u64,
+    body_ink: [u8; 3],
 ) -> PreviewDocumentKey {
     PreviewDocumentKey {
         parse: PreviewParseKey {
@@ -1532,6 +1839,8 @@ fn preview_document_key(
             scale_ppm: (scale * 1_000_000.0).round() as u32,
         },
         body_width_px: body_width_px.max(0.0).round() as u32,
+        math_generation,
+        body_ink,
     }
 }
 
@@ -1566,6 +1875,8 @@ pub(crate) fn markdown_runs(
     spans: &[preview::Span],
     palette: &bt_render::ChromePalette,
     heading: bool,
+    math: &DocumentMath,
+    em_px: f32,
 ) -> Vec<bt_render::PreviewRun> {
     spans
         .iter()
@@ -1577,6 +1888,7 @@ pub(crate) fn markdown_runs(
                 mono: false,
                 bold: true,
                 font_scale: 1.0,
+                inline_box_px: None,
             },
             preview::SpanStyle::Plain => bt_render::PreviewRun {
                 text: span.text.clone(),
@@ -1584,6 +1896,7 @@ pub(crate) fn markdown_runs(
                 mono: false,
                 bold: false,
                 font_scale: 1.0,
+                inline_box_px: None,
             },
             preview::SpanStyle::Bold => bt_render::PreviewRun {
                 text: span.text.clone(),
@@ -1591,6 +1904,7 @@ pub(crate) fn markdown_runs(
                 mono: false,
                 bold: true,
                 font_scale: 1.0,
+                inline_box_px: None,
             },
             // github.css `code { font-size: 85% }` — the one run in a markdown
             // document that is not set at its paragraph's own size. See
@@ -1602,6 +1916,7 @@ pub(crate) fn markdown_runs(
                 mono: true,
                 bold: heading,
                 font_scale: preview::PREVIEW_MD_CODE_FONT_RATIO,
+                inline_box_px: None,
             },
             // The accent, and no underline: the accent alone is what every
             // reader already reads as a link, and an underline under text that
@@ -1612,6 +1927,40 @@ pub(crate) fn markdown_runs(
                 mono: false,
                 bold: heading,
                 font_scale: 1.0,
+                inline_box_px: None,
+            },
+            // **A formula with no picture yet is the author's literal text**, set
+            // in the page's own voice — not in the code face, because it is not
+            // code and dressing it as code would be this renderer telling the
+            // reader something about the document that the document did not say.
+            // The delimiters are part of the run (see [`preview::SpanStyle::Math`]),
+            // so what stands here while the engine works, and what stands here
+            // for good if the engine refuses, is exactly the bytes that were
+            // written.
+            // A formula whose picture has arrived stops being text and becomes a
+            // box the width of that picture: the words either side of it flow
+            // around a gap, and the picture is laid into the gap once the shaper
+            // has said where the gap ended up.
+            preview::SpanStyle::Math => match span
+                .math_source()
+                .and_then(|source| math.picture(source, MathMode::Inline, em_px))
+            {
+                Some(picture) => bt_render::PreviewRun {
+                    text: String::new(),
+                    color: palette.preview_body_text,
+                    mono: false,
+                    bold: false,
+                    font_scale: 1.0,
+                    inline_box_px: Some(picture.width_px as f32),
+                },
+                None => bt_render::PreviewRun {
+                    text: span.text.clone(),
+                    color: palette.files_row_text,
+                    mono: false,
+                    bold: heading,
+                    font_scale: 1.0,
+                    inline_box_px: None,
+                },
             },
         })
         .collect()
@@ -1637,6 +1986,7 @@ fn markdown_list_marker(
         mono: false,
         bold: false,
         font_scale: 1.0,
+        inline_box_px: None,
     }
 }
 
@@ -1671,6 +2021,80 @@ struct PreviewLink {
 struct BuiltMarkdown {
     body: bt_render::PreviewBody,
     links: Vec<PreviewLinkSite>,
+    /// The inline formulas whose pictures still need a place to stand.
+    ///
+    /// Beside the body for the same reason the links are, and it is the same
+    /// reason twice: where a run inside wrapped prose came to rest is a question
+    /// only the shaper can answer, and this builder does not hold one. A display
+    /// formula is *not* here — a block stands where its block stands, and the
+    /// builder already knows that.
+    math: Vec<PreviewMathSite>,
+}
+
+/// One inline formula the builder laid a gap for, before anyone has measured
+/// where the gap went.
+#[derive(Clone, Debug)]
+struct PreviewMathSite {
+    /// Which scrolling block it is inside, or `None` for the page itself.
+    block: Option<usize>,
+    paragraph: usize,
+    run: usize,
+    picture: PreviewMathPicture,
+}
+
+/// Every formula one parsed document holds, in the order the page meets them.
+///
+/// **One walk, read by the one place that asks.** Duplicates are left in: the
+/// cache is keyed by content, so a document that writes `$n$` forty times asks
+/// once and finds it already in flight thirty-nine times, and de-duplicating
+/// here would be a second answer to a question the cache has already answered.
+fn document_formulas(
+    blocks: &[preview::MarkdownBlock],
+    metrics: seats::PreviewMarkdownMetrics,
+) -> Vec<(String, MathMode, f32)> {
+    fn inline(spans: &[preview::Span], em_px: f32, found: &mut Vec<(String, MathMode, f32)>) {
+        found.extend(
+            spans
+                .iter()
+                .filter_map(|span| span.math_source())
+                .map(|source| (source.to_owned(), MathMode::Inline, em_px)),
+        );
+    }
+    let mut found = Vec::new();
+    for block in blocks {
+        match block {
+            preview::MarkdownBlock::Math { source } => {
+                found.push((source.clone(), MathMode::Display, metrics.font_size));
+            }
+            // **A heading's formula is set at the heading's size.** Every letter
+            // beside it is, and one that stayed at body size in a masthead would
+            // read as a footnote that had wandered into it.
+            preview::MarkdownBlock::Heading { level, spans } => {
+                inline(spans, metrics.heading_font(*level), &mut found);
+            }
+            preview::MarkdownBlock::Paragraph(spans) => {
+                inline(spans, metrics.font_size, &mut found);
+            }
+            preview::MarkdownBlock::List { items, .. } => {
+                for spans in items {
+                    inline(spans, metrics.font_size, &mut found);
+                }
+            }
+            preview::MarkdownBlock::Quote(lines) => {
+                for spans in lines {
+                    inline(spans, metrics.font_size, &mut found);
+                }
+            }
+            preview::MarkdownBlock::Table { rows, .. } => {
+                for cell in rows.iter().flatten() {
+                    inline(cell, metrics.font_size, &mut found);
+                }
+            }
+            // A fence's dollars are a fence's, and a rule has none.
+            preview::MarkdownBlock::Code { .. } | preview::MarkdownBlock::Rule => {}
+        }
+    }
+    found
 }
 
 /// Note every link in `spans` against the paragraph about to be pushed.
@@ -1693,18 +2117,47 @@ fn note_link_sites(
     }));
 }
 
+/// Note every inline formula that has a picture, against the paragraph about to
+/// be pushed.
+///
+/// The twin of [`note_link_sites`], down to the `first_run` offset, and for the
+/// identical reason: a run's index inside the paragraph is what the shaper will
+/// answer about, and a list item's marker rides in front of the spans as a run
+/// of its own. A formula with no picture yet is *not* noted — it is text on that
+/// line, not a gap, and the run it produced is the source the reader is looking
+/// at.
+fn note_math_sites(
+    sites: &mut Vec<PreviewMathSite>,
+    spans: &[preview::Span],
+    math: &DocumentMath,
+    em_px: f32,
+    (block, paragraph, first_run): (Option<usize>, usize, usize),
+) {
+    sites.extend(spans.iter().enumerate().filter_map(|(index, span)| {
+        let picture = math.picture(span.math_source()?, MathMode::Inline, em_px)?;
+        Some(PreviewMathSite {
+            block,
+            paragraph,
+            run: first_run + index,
+            picture: picture.clone(),
+        })
+    }));
+}
+
 /// One list item's runs, marker included.
 fn markdown_item_runs(
     spans: &[preview::Span],
     ordered: Option<u64>,
     index: usize,
     palette: &bt_render::ChromePalette,
+    math: &DocumentMath,
+    em_px: f32,
 ) -> Vec<bt_render::PreviewRun> {
     // The marker rides the item's own first run rather than being a paragraph
     // of its own, which is what lets the shaper wrap the item as one line of
     // text instead of two boxes that have to be butted together by hand.
     let mut runs = vec![markdown_list_marker(ordered, index, palette)];
-    runs.extend(markdown_runs(spans, palette, false));
+    runs.extend(markdown_runs(spans, palette, false, math, em_px));
     runs
 }
 
@@ -1723,6 +2176,7 @@ fn mono_paragraph(
             mono: true,
             bold: false,
             font_scale: 1.0,
+            inline_box_px: None,
         }],
         rect,
         font_size_px,
@@ -2062,6 +2516,7 @@ fn build_preview_text_body(
         quads,
         paragraphs,
         blocks: Vec::new(),
+        rasters: Vec::new(),
     }
 }
 
@@ -2107,6 +2562,7 @@ fn build_preview_diff_body(
         quads,
         paragraphs,
         blocks: Vec::new(),
+        rasters: Vec::new(),
     }
 }
 
@@ -2192,6 +2648,7 @@ fn build_preview_table_body(
                     mono: true,
                     bold: index == 0,
                     font_scale: 1.0,
+                    inline_box_px: None,
                 }],
                 rect: text_box,
                 font_size_px: geometry.font_size,
@@ -2208,6 +2665,7 @@ fn build_preview_table_body(
         quads,
         paragraphs,
         blocks: Vec::new(),
+        rasters: Vec::new(),
     }
 }
 
@@ -2248,6 +2706,7 @@ fn build_preview_markdown_body(
         &[MarkdownBlockLayout],
     ),
     palette: &bt_render::ChromePalette,
+    math: &DocumentMath,
 ) -> BuiltMarkdown {
     let BlockScrollPaint {
         offsets: block_scroll,
@@ -2255,6 +2714,7 @@ fn build_preview_markdown_body(
         scale,
     } = bars;
     let mut links: Vec<PreviewLinkSite> = Vec::new();
+    let mut math_sites: Vec<PreviewMathSite> = Vec::new();
     // The intrinsics travel with the blocks now, and for one reason: a fence's
     // syntax highlighting is width-free, so it was measured with the rest of
     // what a block is worth whatever the pane does (#49).
@@ -2280,6 +2740,7 @@ fn build_preview_markdown_body(
     let origin = body[1] + metrics.padding_y - scroll[1];
     let mut quads = Vec::new();
     let mut paragraphs = Vec::new();
+    let mut rasters: Vec<bt_render::ChromeIcon> = Vec::new();
     // Each region carries the offset and the content width its indicator is
     // drawn from, taken at the moment it is pushed. Recomputing the list a second
     // time and zipping the two would be one list of *visible* wide blocks against
@@ -2306,12 +2767,22 @@ fn build_preview_markdown_body(
         } else {
             0.0
         };
+        // The box whatever this block draws is seen through: its own, when it
+        // scrolls inside itself, and the page's otherwise. Taken before the
+        // shadowing below, because a scrolling block's *frame* moves with its
+        // offset and its *window* does not.
+        let window = if overflow > 0.0 {
+            [left, top, right, top + height]
+        } else {
+            body
+        };
         let (left, right, into) = if overflow > 0.0 {
             scrollers.push((
                 bt_render::PreviewBlock {
                     clip: [left, top, right, top + height],
                     quads: Vec::new(),
                     paragraphs: Vec::new(),
+                    rasters: Vec::new(),
                 },
                 (index, offset, placed.width),
             ));
@@ -2339,11 +2810,11 @@ fn build_preview_markdown_body(
         };
         // `into` is one-based so that zero can mean "the page itself", which is
         // the common case and must not pay for the rare one.
-        let (quads, paragraphs) = match into {
-            0 => (&mut quads, &mut paragraphs),
+        let (quads, paragraphs, rasters) = match into {
+            0 => (&mut quads, &mut paragraphs, &mut rasters),
             index => {
                 let (block, _) = &mut scrollers[index - 1];
-                (&mut block.quads, &mut block.paragraphs)
+                (&mut block.quads, &mut block.paragraphs, &mut block.rasters)
             }
         };
         // Which list of paragraphs the sites below are counting into.
@@ -2351,6 +2822,13 @@ fn build_preview_markdown_body(
         match block {
             preview::MarkdownBlock::Heading { level, spans } => {
                 note_link_sites(&mut links, spans, (region, paragraphs.len(), 0));
+                note_math_sites(
+                    &mut math_sites,
+                    spans,
+                    math,
+                    metrics.heading_font(*level),
+                    (region, paragraphs.len(), 0),
+                );
                 // `h1, h2 { border-bottom: 1px solid }` — the hairline sits at
                 // the very bottom of the block's box, `.3em` of the heading's own
                 // size below its last line. The extent is asked of the metrics
@@ -2369,7 +2847,7 @@ fn build_preview_markdown_body(
                     });
                 }
                 paragraphs.push(bt_render::PreviewParagraph {
-                    runs: markdown_runs(spans, palette, true),
+                    runs: markdown_runs(spans, palette, true, math, metrics.heading_font(*level)),
                     rect: [left, top, right, top + height - rule],
                     font_size_px: metrics.heading_font(*level),
                     line_height_px: metrics.heading_line_height(*level),
@@ -2381,8 +2859,15 @@ fn build_preview_markdown_body(
             }
             preview::MarkdownBlock::Paragraph(spans) => {
                 note_link_sites(&mut links, spans, (region, paragraphs.len(), 0));
+                note_math_sites(
+                    &mut math_sites,
+                    spans,
+                    math,
+                    metrics.font_size,
+                    (region, paragraphs.len(), 0),
+                );
                 paragraphs.push(bt_render::PreviewParagraph {
-                    runs: markdown_runs(spans, palette, false),
+                    runs: markdown_runs(spans, palette, false, math, metrics.font_size),
                     rect: [left, top, right, top + height],
                     font_size_px: metrics.font_size,
                     line_height_px: metrics.line_height,
@@ -2406,6 +2891,13 @@ fn build_preview_markdown_body(
                     // The marker rides in front of the spans as a run of its
                     // own, so the first span is the paragraph's *second* run.
                     note_link_sites(&mut links, spans, (region, paragraphs.len(), 1));
+                    note_math_sites(
+                        &mut math_sites,
+                        spans,
+                        math,
+                        metrics.font_size,
+                        (region, paragraphs.len(), 1),
+                    );
                     // `li + li { margin-top: .25em }`: the gap the measuring
                     // pass put in the *top* of every row after the first is
                     // spent here, so the text starts below it rather than the
@@ -2416,7 +2908,14 @@ fn build_preview_markdown_body(
                         metrics.list_item_gap
                     };
                     paragraphs.push(bt_render::PreviewParagraph {
-                        runs: markdown_item_runs(spans, *ordered, index, palette),
+                        runs: markdown_item_runs(
+                            spans,
+                            *ordered,
+                            index,
+                            palette,
+                            math,
+                            metrics.font_size,
+                        ),
                         rect: [
                             left + metrics.list_indent,
                             item_top + gap,
@@ -2449,6 +2948,13 @@ fn build_preview_markdown_body(
                         .copied()
                         .unwrap_or(metrics.line_height);
                     note_link_sites(&mut links, spans, (region, paragraphs.len(), 0));
+                    note_math_sites(
+                        &mut math_sites,
+                        spans,
+                        math,
+                        metrics.font_size,
+                        (region, paragraphs.len(), 0),
+                    );
                     // `blockquote { color: var(--ink3) }` — a quote is somebody
                     // else talking and is set a shade back from the page's own
                     // voice, which is github.css's rule and the reason the bar
@@ -2459,7 +2965,7 @@ fn build_preview_markdown_body(
                     // off the colour already there — a code span keeps the
                     // fence's ink and a link keeps the accent, exactly as `th`
                     // recolours its own row one arm further down.
-                    let mut runs = markdown_runs(spans, palette, false);
+                    let mut runs = markdown_runs(spans, palette, false, math, metrics.font_size);
                     for (run, span) in runs.iter_mut().zip(spans) {
                         if matches!(
                             span.style,
@@ -2498,14 +3004,18 @@ fn build_preview_markdown_body(
                         quads,
                         paragraphs,
                         links: &mut links,
+                        math_sites: &mut math_sites,
                         region,
                     },
                     rows,
                     alignments,
                     placed,
                     [left, top],
-                    metrics,
-                    palette,
+                    MarkdownStyle {
+                        metrics,
+                        palette,
+                        math,
+                    },
                 );
             }
             preview::MarkdownBlock::Code { lang, text } => {
@@ -2566,6 +3076,7 @@ fn build_preview_markdown_body(
                             mono: false,
                             bold: false,
                             font_scale: 1.0,
+                            inline_box_px: None,
                         }],
                         rect: [
                             fence[0],
@@ -2582,6 +3093,63 @@ fn build_preview_markdown_body(
                     });
                 }
             }
+            preview::MarkdownBlock::Math { source } => {
+                // **Centred, which is what display mathematics is.** Every
+                // renderer that sets a `$$` block — Typora, KaTeX's own
+                // `.katex-display`, every journal this notation came from —
+                // centres it on the measure, and it is the one block on a
+                // markdown page that is not set flush left.
+                //
+                // A picture wider than the measure is placed flush left instead
+                // and scrolls inside its own block, on exactly the terms a wide
+                // table does: centring something that does not fit would put its
+                // beginning off the left edge, and the beginning is where a
+                // formula is read from.
+                match math.picture(source, MathMode::Display, metrics.font_size) {
+                    Some(picture) => {
+                        let width = picture.width_px as f32;
+                        let inset = ((right - left - width) / 2.0).max(0.0).round();
+                        let rect = [
+                            left + inset,
+                            top,
+                            left + inset + width,
+                            top + picture.height_px as f32,
+                        ];
+                        rasters.push(bt_render::ChromeIcon {
+                            key: picture.key.clone(),
+                            rect,
+                            rgba: Arc::clone(&picture.rgba),
+                            width_px: picture.width_px,
+                            height_px: picture.height_px,
+                            opacity: 1.0,
+                            clip: Some(window),
+                        });
+                    }
+                    None => {
+                        let mut line_top = top;
+                        for line in source.lines() {
+                            paragraphs.push(bt_render::PreviewParagraph {
+                                runs: vec![bt_render::PreviewRun {
+                                    text: line.to_owned(),
+                                    color: palette.files_row_text,
+                                    mono: false,
+                                    bold: false,
+                                    font_scale: 1.0,
+                                    inline_box_px: None,
+                                }],
+                                rect: [left, line_top, right, line_top + metrics.line_height],
+                                font_size_px: metrics.font_size,
+                                line_height_px: metrics.line_height,
+                                wrap: false,
+                                letter_spacing_em: 0.0,
+                                align_right: false,
+                                align_center: true,
+                            });
+                            line_top += metrics.line_height;
+                        }
+                    }
+                }
+            }
         }
     }
     // The bars, after the blocks so they stand over their own contents.
@@ -2594,8 +3162,10 @@ fn build_preview_markdown_body(
             quads,
             paragraphs,
             blocks: scrollers.into_iter().map(|(block, _)| block).collect(),
+            rasters,
         },
         links,
+        math: math_sites,
     }
 }
 
@@ -2644,6 +3214,85 @@ fn measure_preview_links(
         );
     }
     links
+}
+
+/// Lay each inline formula's picture into the gap its paragraph left for it.
+///
+/// **The twin of [`measure_preview_links`], and the same shaper answers both.**
+/// A gap inside wrapped prose is at a position no caller can add up, so the box
+/// went through the shaper as a run and comes back with the rectangle it
+/// occupies and the baseline of the line it landed on.
+///
+/// The picture is placed **on that baseline**, not centred in the line box: a
+/// formula standing in a sentence sits on the sentence's baseline exactly as its
+/// letters do, and a picture centred in the leading would ride high beside a
+/// line of descenders and low beside one without any.
+///
+/// A run that wrapped is reported once per visual line, and only the first is
+/// used: an inline box is one glyph, so it cannot really be split — the second
+/// report would be the shaper describing the same indivisible thing twice.
+fn place_preview_math(
+    gpu: &mut GpuContext,
+    renderer: &mut WindowRenderer,
+    body: &mut bt_render::PreviewBody,
+    sites: &[PreviewMathSite],
+) {
+    let mut placed: Vec<(Option<usize>, bt_render::ChromeIcon)> = Vec::new();
+    let mut at: usize = 0;
+    while at < sites.len() {
+        // Every formula in one paragraph, together. A paragraph with three
+        // formulas in it is one shaping pass, not three: the sites are pushed in
+        // the order the builder walked the page, so a paragraph's own are
+        // already adjacent.
+        let here = (sites[at].block, sites[at].paragraph);
+        let end = sites[at..]
+            .iter()
+            .position(|site| (site.block, site.paragraph) != here)
+            .map_or(sites.len(), |offset| at + offset);
+        let group = &sites[at..end];
+        at = end;
+        let (paragraphs, window) = match here.0 {
+            Some(block) => match body.blocks.get(block) {
+                Some(block) => (&block.paragraphs, block.clip),
+                None => continue,
+            },
+            None => (&body.paragraphs, body.clip),
+        };
+        let Some(paragraph) = paragraphs.get(here.1) else {
+            continue;
+        };
+        let boxes = renderer.measure_preview_run_boxes(gpu, paragraph);
+        for site in group {
+            let Some(boxed) = boxes.iter().find(|boxed| boxed.run == site.run) else {
+                continue;
+            };
+            let picture = &site.picture;
+            let top = boxed.baseline_px - picture.baseline_px;
+            placed.push((
+                here.0,
+                bt_render::ChromeIcon {
+                    key: picture.key.clone(),
+                    rect: [
+                        boxed.rect[0],
+                        top,
+                        boxed.rect[0] + picture.width_px as f32,
+                        top + picture.height_px as f32,
+                    ],
+                    rgba: Arc::clone(&picture.rgba),
+                    width_px: picture.width_px,
+                    height_px: picture.height_px,
+                    opacity: 1.0,
+                    clip: Some(window),
+                },
+            ));
+        }
+    }
+    for (block, icon) in placed {
+        match block {
+            Some(block) => body.blocks[block].rasters.push(icon),
+            None => body.rasters.push(icon),
+        }
+    }
 }
 
 /// `.md-block::-webkit-scrollbar` in the only shape this window has for one: a
@@ -2935,6 +3584,7 @@ fn markdown_fence_width(
                 mono: true,
                 bold: false,
                 font_scale: 1.0,
+                inline_box_px: None,
             }];
             measure(&runs)
         })
@@ -2984,8 +3634,26 @@ pub(crate) struct MarkdownSink<'a> {
     pub(crate) quads: &'a mut Vec<bt_render::PreviewQuad>,
     pub(crate) paragraphs: &'a mut Vec<bt_render::PreviewParagraph>,
     pub(crate) links: &'a mut Vec<PreviewLinkSite>,
+    /// A cell's formulas land here on the terms a paragraph's do — a table cell
+    /// comes through the one inline parser like every other run of text, so it
+    /// can hold a formula and there is no second rule to teach.
+    pub(crate) math_sites: &'a mut Vec<PreviewMathSite>,
     /// The scrolling block being filled, or `None` for the page itself.
     pub(crate) region: Option<usize>,
+}
+
+/// **How a run of markdown text is set**, as opposed to where it goes.
+///
+/// The three travel together because they are asked together at every place
+/// text becomes runs: the size it is set at, the inks it is set in, and the
+/// pictures that stand in for the formulas among it. Named rather than passed
+/// side by side so that the one function taking both halves takes two things
+/// instead of eight.
+#[derive(Clone, Copy)]
+pub(crate) struct MarkdownStyle<'a> {
+    pub(crate) metrics: seats::PreviewMarkdownMetrics,
+    pub(crate) palette: &'a bt_render::ChromePalette,
+    pub(crate) math: &'a DocumentMath,
 }
 
 /// One markdown table, drawn in the csv grid's own chrome.
@@ -3000,13 +3668,18 @@ pub(crate) fn push_markdown_table(
     alignments: &[bt_detect::table::ColumnAlignment],
     placed: &MarkdownBlockLayout,
     origin: [f32; 2],
-    metrics: seats::PreviewMarkdownMetrics,
-    palette: &bt_render::ChromePalette,
+    style: MarkdownStyle<'_>,
 ) {
+    let MarkdownStyle {
+        metrics,
+        palette,
+        math,
+    } = style;
     let MarkdownSink {
         quads,
         paragraphs,
         links,
+        math_sites,
         region,
     } = sink;
     let border = metrics.table_border;
@@ -3059,7 +3732,14 @@ pub(crate) fn push_markdown_table(
             }
             if let Some(cell) = row.get(column) {
                 note_link_sites(links, cell, (region, paragraphs.len(), 0));
-                let mut runs = markdown_runs(cell, palette, index == 0);
+                note_math_sites(
+                    math_sites,
+                    cell,
+                    math,
+                    metrics.font_size,
+                    (region, paragraphs.len(), 0),
+                );
+                let mut runs = markdown_runs(cell, palette, index == 0, math, metrics.font_size);
                 if index == 0 {
                     // A heading cell is set in the heading ink whatever its own
                     // spans said, which is `th`'s own rule and the reason the
@@ -6457,6 +7137,12 @@ struct WindowRuntime {
     underlined_image_reference: Option<(SeatId, bt_term::FrameImageReference)>,
     peek_hover: PeekHover,
     peek_cache: std::collections::HashMap<String, PeekCacheEntry>,
+    /// Every formula this window's markdown previews have asked the engine for.
+    ///
+    /// **The window's and not a tab's**, for the same reason `peek_cache` is:
+    /// the thing it is keyed by is content, and the same formula in two tabs is
+    /// one picture. See [`PreviewMathCache`].
+    preview_math: PreviewMathCache,
     /// The one display-sized thumbnail the flyout can draw, and the one resample in flight. See
     /// `PeekThumbnail` for why a single entry is the whole policy.
     peek_thumbnail: Option<PeekThumbnail>,
@@ -24286,6 +24972,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         underlined_image_reference: None,
         peek_hover: PeekHover::default(),
         peek_cache: std::collections::HashMap::new(),
+        preview_math: PreviewMathCache::default(),
         peek_thumbnail: None,
         peek_thumbnail_pending: None,
         math_hover_anchor: None,
@@ -31715,6 +32402,7 @@ impl Runtime<'_> {
                             mono: true,
                             bold: false,
                             font_scale: 1.0,
+                            inline_box_px: None,
                         }],
                         font_px,
                         line_height,
@@ -34110,7 +34798,15 @@ impl Runtime<'_> {
             metrics,
             &palette,
             |cell, heading| {
-                let runs = markdown_runs(cell, &palette, heading);
+                // See `table_block::build`: a printed table's dollars are not
+                // this window's markup to read.
+                let runs = markdown_runs(
+                    cell,
+                    &palette,
+                    heading,
+                    &DocumentMath::default(),
+                    metrics.font_size,
+                );
                 renderer.measure_preview_paragraph_width(
                     gpu,
                     &runs,
@@ -41871,9 +42567,18 @@ impl Runtime<'_> {
         // faces of one markdown file are two documents — and now that the flip
         // is the view's, two surfaces on one file can be caching both at once.
         let md_source = self.preview_md_source(surface);
-        let key = self
-            .preview_buffer_on(surface)
-            .map(|buffer| preview_document_key(buffer, md_source, body[2] - body[0], scale));
+        let math_generation = self.window.preview_math.generation;
+        let body_ink = bt_render::chrome_palette().files_row_text;
+        let key = self.preview_buffer_on(surface).map(|buffer| {
+            preview_document_key(
+                buffer,
+                md_source,
+                body[2] - body[0],
+                scale,
+                math_generation,
+                body_ink,
+            )
+        });
         if key == self.preview_pane_mut(surface).doc_key {
             return;
         }
@@ -41886,12 +42591,26 @@ impl Runtime<'_> {
         let pane = self.preview_pane_mut(surface);
         let reflow_only =
             key.as_ref().map(|key| &key.parse) == pane.doc_key.as_ref().map(|key| &key.parse);
+        // **A formula arriving is not a resize**, and the one intrinsic that
+        // notices is a table's columns: a cell holding a formula is as wide as
+        // that formula's picture, and a column measured before the picture
+        // existed reserved the width of the LaTeX instead. Re-measured here and
+        // nowhere else, because this is the only moment the answer can have
+        // changed with the parse standing still — and it is rare (once per
+        // picture, not once per pixel of a drag), which is exactly why it can
+        // afford the pass a resize cannot.
+        let math_changed = key.as_ref().map(|key| (key.math_generation, key.body_ink))
+            != pane
+                .doc_key
+                .as_ref()
+                .map(|key| (key.math_generation, key.body_ink));
         pane.doc_key = key;
         if reflow_only
             && let PreviewDocument::Markdown {
                 blocks,
                 intrinsic,
                 layout,
+                math: _,
             } = std::mem::take(&mut pane.doc)
         {
             let metrics = seats::preview_markdown_metrics(scale);
@@ -41902,11 +42621,18 @@ impl Runtime<'_> {
             let (measure_left, measure_right) = preview::markdown_measure_box(body, metrics);
             let width = (measure_right - measure_left).max(1.0);
             let _ = layout;
-            let layout = self.lay_markdown_out(&blocks, &intrinsic, width, metrics);
+            let math = self.resolve_document_math(&blocks, metrics, &bt_render::chrome_palette());
+            let intrinsic = if math_changed {
+                self.measure_markdown_intrinsics(&blocks, metrics, &math)
+            } else {
+                intrinsic
+            };
+            let layout = self.lay_markdown_out(&blocks, &intrinsic, width, metrics, &math);
             self.preview_pane_mut(surface).doc = PreviewDocument::Markdown {
                 blocks,
                 intrinsic,
                 layout,
+                math,
             };
             return;
         }
@@ -41999,12 +42725,15 @@ impl Runtime<'_> {
                 let blocks = preview::parse_markdown(&content);
                 let (measure_left, measure_right) = preview::markdown_measure_box(body, metrics);
                 let width = (measure_right - measure_left).max(1.0);
-                let intrinsic = self.measure_markdown_intrinsics(&blocks, metrics);
-                let layout = self.lay_markdown_out(&blocks, &intrinsic, width, metrics);
+                let math =
+                    self.resolve_document_math(&blocks, metrics, &bt_render::chrome_palette());
+                let intrinsic = self.measure_markdown_intrinsics(&blocks, metrics, &math);
+                let layout = self.lay_markdown_out(&blocks, &intrinsic, width, metrics, &math);
                 PreviewDocument::Markdown {
                     blocks,
                     intrinsic,
                     layout,
+                    math,
                 }
             }
             // **The graph's body is empty on purpose**, and it is the one place
@@ -42031,10 +42760,82 @@ impl Runtime<'_> {
     /// here is a fact about the document — a table column is its own widest cell,
     /// a fence is its longest line — and running it per width is what the resize
     /// report was about.
+    /// Ask the engine for every formula this document needs, and hand back the
+    /// ones that have already arrived.
+    ///
+    /// **Both halves in one pass, and neither is a side effect of the other.**
+    /// The question "what does this page need" is answered by walking the page,
+    /// and every answer is either in hand or has to be asked for — so the walk
+    /// that collects the pictures is the same walk that discovers the gaps. A
+    /// separate "request" pass run at some other moment would need a rule for
+    /// when to run it, and there is no such rule that is right: a formula's
+    /// picture depends on the pane's scale and the theme's ink as well as on the
+    /// file, and any of those three can change with nothing else changing.
+    ///
+    /// Asking is idempotent: a gap becomes [`PreviewMathArtifact::Pending`] the
+    /// moment it is sent, so the second page showing the same formula finds it
+    /// already in flight and the hundredth frame does not send it again.
+    fn resolve_document_math(
+        &mut self,
+        blocks: &[preview::MarkdownBlock],
+        metrics: seats::PreviewMarkdownMetrics,
+        palette: &bt_render::ChromePalette,
+    ) -> DocumentMath {
+        // **The prose's own ink, which on this page is `files_row_text` and not
+        // `preview_body_text`** — the second is the heavier ink a heading and a
+        // bold run are set in. A formula standing in a sentence is set in the
+        // sentence's colour; one standing on its own is set in the page's.
+        let foreground_rgb = palette.files_row_text;
+        self.window.preview_math.tick = self.window.preview_math.tick.saturating_add(1);
+        let mut document = DocumentMath::default();
+        for (source, mode, em_px) in document_formulas(blocks, metrics) {
+            let key = PreviewMathKey {
+                source,
+                mode,
+                em_milli_px: math_em_milli(em_px),
+                foreground_rgb,
+            };
+            // Cloned out before the arm runs: the artifact is a handle to shared
+            // pixels, and holding a borrow of the cache across a call that may
+            // add to it is the one thing this map cannot do.
+            match self.window.preview_math.get(&key).cloned() {
+                Some(PreviewMathArtifact::Ready(picture)) => document.insert(&key, picture),
+                Some(PreviewMathArtifact::Pending | PreviewMathArtifact::Refused) => {}
+                None => self.request_preview_math(key),
+            }
+        }
+        document
+    }
+
+    /// Send one formula to the engine, and write down that it is in flight.
+    ///
+    /// The two happen together or not at all: a key marked pending against a
+    /// request that was never sent is a formula that stands on its source text
+    /// for the life of the window with nobody left to ask.
+    fn request_preview_math(&mut self, key: PreviewMathKey) {
+        if !self.app.math_worker_running {
+            return;
+        }
+        let leaf = self.focused_shell_address();
+        if self
+            .app
+            .math_worker
+            .tasks
+            .send(MathWorkerRequest::PreviewMath {
+                leaf,
+                key: Box::new(key.clone()),
+            })
+            .is_ok()
+        {
+            self.window.preview_math.mark_pending(key);
+        }
+    }
+
     fn measure_markdown_intrinsics(
         &mut self,
         blocks: &[preview::MarkdownBlock],
         metrics: seats::PreviewMarkdownMetrics,
+        math: &DocumentMath,
     ) -> Vec<MarkdownBlockIntrinsic> {
         let palette = bt_render::chrome_palette();
         blocks
@@ -42046,7 +42847,7 @@ impl Runtime<'_> {
                         return MarkdownBlockIntrinsic::default();
                     }
                     let columns = markdown_table_columns(rows, metrics, |cell, heading| {
-                        let runs = markdown_runs(cell, &palette, heading);
+                        let runs = markdown_runs(cell, &palette, heading, math, metrics.font_size);
                         self.window.renderer.measure_preview_paragraph_width(
                             &mut self.app.gpu,
                             &runs,
@@ -42097,12 +42898,13 @@ impl Runtime<'_> {
         intrinsic: &[MarkdownBlockIntrinsic],
         width: f32,
         metrics: seats::PreviewMarkdownMetrics,
+        math: &DocumentMath,
     ) -> Vec<MarkdownBlockLayout> {
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut wrapped = |runs: &[bt_render::PreviewRun], width: f32, font: f32, line: f32| {
             renderer.measure_preview_paragraph(gpu, runs, width, font, line)
         };
-        lay_markdown_out(blocks, intrinsic, width, metrics, &mut wrapped)
+        lay_markdown_out(blocks, intrinsic, width, metrics, math, &mut wrapped)
     }
 }
 
@@ -42125,6 +42927,7 @@ fn lay_markdown_out(
     intrinsic: &[MarkdownBlockIntrinsic],
     width: f32,
     metrics: seats::PreviewMarkdownMetrics,
+    math: &DocumentMath,
     measure: &mut WrapMeasure<'_>,
 ) -> Vec<MarkdownBlockLayout> {
     {
@@ -42133,7 +42936,8 @@ fn lay_markdown_out(
         let mut previous_bottom = 0.0_f32;
         let mut previous: Option<&preview::MarkdownBlock> = None;
         for (block, intrinsic) in blocks.iter().zip(intrinsic) {
-            let mut measured = measure_markdown_block(block, intrinsic, width, metrics, measure);
+            let mut measured =
+                measure_markdown_block(block, intrinsic, width, metrics, math, measure);
             // **Asymmetric since 2026-08-16**: github.css gives a heading more
             // air above it than below (`margin: 24px 0 16px`), which is what
             // binds a heading to the paragraph it introduces instead of to the
@@ -42170,13 +42974,14 @@ fn measure_markdown_block(
     intrinsic: &MarkdownBlockIntrinsic,
     width: f32,
     metrics: seats::PreviewMarkdownMetrics,
+    math: &DocumentMath,
     measure: &mut WrapMeasure<'_>,
 ) -> MarkdownBlockLayout {
     {
         let palette = bt_render::chrome_palette();
         match block {
             preview::MarkdownBlock::Heading { level, spans } => {
-                let runs = markdown_runs(spans, &palette, true);
+                let runs = markdown_runs(spans, &palette, true, math, metrics.heading_font(*level));
                 let font = metrics.heading_font(*level);
                 let line = metrics.heading_line_height(*level);
                 // `h1, h2 { padding-bottom: .3em; border-bottom: 1px solid }` —
@@ -42192,7 +42997,14 @@ fn measure_markdown_block(
                     .iter()
                     .enumerate()
                     .map(|(index, spans)| {
-                        let runs = markdown_item_runs(spans, *ordered, index, &palette);
+                        let runs = markdown_item_runs(
+                            spans,
+                            *ordered,
+                            index,
+                            &palette,
+                            math,
+                            metrics.font_size,
+                        );
                         let gap = if index == 0 {
                             0.0
                         } else {
@@ -42212,7 +43024,7 @@ fn measure_markdown_block(
                 let rows: Vec<f32> = lines
                     .iter()
                     .map(|spans| {
-                        let runs = markdown_runs(spans, &palette, false);
+                        let runs = markdown_runs(spans, &palette, false, math, metrics.font_size);
                         measure(&runs, inner, metrics.font_size, metrics.line_height)
                     })
                     .collect();
@@ -42261,13 +43073,34 @@ fn measure_markdown_block(
                 }
             }
             preview::MarkdownBlock::Paragraph(spans) => {
-                let runs = markdown_runs(spans, &palette, false);
+                let runs = markdown_runs(spans, &palette, false, math, metrics.font_size);
                 MarkdownBlockLayout::solid(measure(
                     &runs,
                     width,
                     metrics.font_size,
                     metrics.line_height,
                 ))
+            }
+            // **A display formula is as tall as its picture, and as wide.** The
+            // width is what makes a formula too wide for the measure scroll
+            // inside itself instead of being cropped, on exactly the terms a
+            // table and a fence already do — the block is the scrolling region,
+            // and this is the third block that has a size of its own rather than
+            // the pane's.
+            //
+            // Until the picture arrives the block is as tall as the source it is
+            // standing on, and it reflows the moment it lands: see
+            // [`PreviewDocumentKey::math_generation`].
+            preview::MarkdownBlock::Math { source } => {
+                match math.picture(source, MathMode::Display, metrics.font_size) {
+                    Some(picture) => MarkdownBlockLayout {
+                        width: picture.width_px as f32,
+                        ..MarkdownBlockLayout::solid(picture.height_px as f32)
+                    },
+                    None => MarkdownBlockLayout::solid(
+                        metrics.line_height * source.lines().count().max(1) as f32,
+                    ),
+                }
             }
         }
     }
@@ -42433,6 +43266,7 @@ impl Runtime<'_> {
         let lit = self.preview_block_lit(surface);
         let (rows_height, columns) = self.preview_content_extent(surface, scale);
         let mut sites = Vec::new();
+        let mut math_sites: Vec<PreviewMathSite> = Vec::new();
         let mut built = match &self.preview_pane(surface)?.doc {
             PreviewDocument::Text {
                 lines,
@@ -42486,6 +43320,7 @@ impl Runtime<'_> {
                 blocks,
                 intrinsic,
                 layout,
+                math,
             } => {
                 let rendered = build_preview_markdown_body(
                     body,
@@ -42498,8 +43333,10 @@ impl Runtime<'_> {
                     },
                     (blocks, intrinsic, layout),
                     &palette,
+                    math,
                 );
                 sites = rendered.links;
+                math_sites = rendered.math;
                 rendered.body
             }
             PreviewDocument::Empty => bt_render::PreviewBody {
@@ -42507,6 +43344,7 @@ impl Runtime<'_> {
                 quads: Vec::new(),
                 paragraphs: Vec::new(),
                 blocks: Vec::new(),
+                rasters: Vec::new(),
             },
         };
         // **Every notice, one home** (user ruling, 2026-08-15).
@@ -42529,6 +43367,15 @@ impl Runtime<'_> {
         // paragraph landed and that answer is only true of the body as it now
         // stands. The hover's rule is drawn from the same boxes, so the line
         // under a link cannot be anywhere but under it.
+        // The formulas ride with the links, and for the identical reason: both
+        // are answers about where a run of an already-built body came to rest,
+        // and both stop being true the moment the body is rebuilt.
+        place_preview_math(
+            &mut self.app.gpu,
+            &mut self.window.renderer,
+            &mut built,
+            &math_sites,
+        );
         let links =
             measure_preview_links(&mut self.app.gpu, &mut self.window.renderer, &built, &sites);
         if let Some((hovered_surface, hovered)) = self.preview_link_hover
@@ -42699,6 +43546,7 @@ impl Runtime<'_> {
             clip: body,
             quads: Vec::new(),
             blocks: Vec::new(),
+            rasters: Vec::new(),
             paragraphs: vec![bt_render::PreviewParagraph {
                 runs: vec![bt_render::PreviewRun {
                     text: sentence,
@@ -42706,6 +43554,7 @@ impl Runtime<'_> {
                     mono: false,
                     bold: false,
                     font_scale: 1.0,
+                    inline_box_px: None,
                 }],
                 rect: [body[0], top, body[2], top + line_height],
                 font_size_px: font_size,
@@ -56331,6 +57180,27 @@ impl Runtime<'_> {
                     self.complete_peek_image(path, result)?;
                     // Peek state never enters frames, so no republish is needed.
                     false
+                }
+                // **Not gated on the asking tab either, and for the stronger
+                // reason**: the answer is not addressed to a tab at all. It is
+                // filed against its own content, and the pages that were waiting
+                // for it — however many, in whichever tabs — pick it up the next
+                // time they resolve. `true`, because a page that has been
+                // standing on its source text now has a picture to draw and
+                // nothing else will ask for a frame.
+                DecorationWorkerCompletion::PreviewMath { key, result } => {
+                    let artifact = match result {
+                        Ok(raster) => PreviewMathArtifact::Ready(PreviewMathPicture {
+                            key: key.texture_key(),
+                            rgba: Arc::from(raster.rgba.into_boxed_slice()),
+                            width_px: raster.width_px,
+                            height_px: raster.height_px,
+                            baseline_px: raster.baseline_px,
+                        }),
+                        Err(_) => PreviewMathArtifact::Refused,
+                    };
+                    self.window.preview_math.land(*key, artifact);
+                    true
                 }
                 DecorationWorkerCompletion::PeekScaledImage { scaled } => {
                     if target_active {
@@ -95205,6 +96075,7 @@ mod tests {
             intrinsic: Vec::new(),
             blocks: Vec::new(),
             layout: prose_only,
+            math: DocumentMath::default(),
         };
         let max = preview_document_max_scroll(&document, pane, 1.0, 8.0, 0.0, 0);
         assert_eq!(
@@ -95230,6 +96101,7 @@ mod tests {
                     ..MarkdownBlockLayout::solid(metrics.line_height * 4.0)
                 },
             ],
+            math: DocumentMath::default(),
         };
         let max = preview_document_max_scroll(&with_a_fence, pane, 1.0, 8.0, 0.0, 0);
         assert_eq!(
@@ -95465,6 +96337,312 @@ mod tests {
         );
     }
 
+    /// One formula's picture, without an engine.
+    ///
+    /// The pixels are never looked at — every assertion about a formula is about
+    /// the *box*: how much room the page gave it and where it put it. A test that
+    /// needed real pixels would be a test of Typst.
+    fn one_picture(
+        source: &str,
+        mode: MathMode,
+        em_px: f32,
+        (width_px, height_px, baseline_px): (u32, u32, f32),
+    ) -> DocumentMath {
+        let mut math = DocumentMath::default();
+        math.insert(
+            &PreviewMathKey {
+                source: source.to_owned(),
+                mode,
+                em_milli_px: math_em_milli(em_px),
+                foreground_rgb: [0, 0, 0],
+            },
+            PreviewMathPicture {
+                key: format!("test:{source}"),
+                rgba: Arc::from(vec![0_u8; (width_px * height_px * 4) as usize].into_boxed_slice()),
+                width_px,
+                height_px,
+                baseline_px,
+            },
+        );
+        math
+    }
+
+    /// PIN (user report, 2026-08-25) — **a display formula is as tall as its
+    /// picture, and stands on its source until that picture arrives.**
+    ///
+    /// The two halves are one rule seen at two moments, and getting either wrong
+    /// is the hole a list once left in the middle of `DESIGN.md`: the pass that
+    /// reserves the room and the pass that fills it must agree. Before the
+    /// engine answers there is nothing to draw but the LaTeX the author wrote,
+    /// and it takes as many lines as it has.
+    ///
+    /// The width matters as much as the height: it is what makes a formula wider
+    /// than the measure scroll inside its own block instead of being cropped, on
+    /// the terms a table and a fence already have.
+    ///
+    /// MUTATIONS: return `solid(picture.height_px)` without the width and the
+    /// third assertion goes red; keep the source-lines height when a picture is
+    /// in hand and the first goes red.
+    #[test]
+    fn a_display_formula_is_as_tall_as_its_picture_and_stands_on_its_source_until_it_comes() {
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let block = preview::MarkdownBlock::Math {
+            source: "\\begin{aligned}\na &= b\n\\end{aligned}".to_owned(),
+        };
+        let mut never_measured = |_: &[bt_render::PreviewRun], _: f32, _: f32, _: f32| {
+            unreachable!("a formula's block never asks the shaper anything")
+        };
+        let waiting = measure_markdown_block(
+            &block,
+            &MarkdownBlockIntrinsic::default(),
+            400.0,
+            metrics,
+            &DocumentMath::default(),
+            &mut never_measured,
+        );
+        assert_eq!(
+            waiting.height,
+            metrics.line_height * 3.0,
+            "three lines of source, three lines of room",
+        );
+        assert_eq!(
+            waiting.width, 0.0,
+            "and nothing to scroll: the source folds to the page like any prose",
+        );
+        let math = one_picture(
+            "\\begin{aligned}\na &= b\n\\end{aligned}",
+            MathMode::Display,
+            metrics.font_size,
+            (900, 64, 40.0),
+        );
+        let set = measure_markdown_block(
+            &block,
+            &MarkdownBlockIntrinsic::default(),
+            400.0,
+            metrics,
+            &math,
+            &mut never_measured,
+        );
+        assert_eq!(
+            (set.height, set.width),
+            (64.0, 900.0),
+            "once the picture is in hand the block is exactly the picture",
+        );
+    }
+
+    /// PIN (same report) — **the page draws the picture where it reserved the
+    /// room, centred on the measure, and nothing else.**
+    ///
+    /// Centring is what display mathematics is in every dialect that has it. The
+    /// second half is the one a reader would notice first if it were wrong: the
+    /// source text must be *gone* once the picture is there, or the LaTeX prints
+    /// underneath its own rendering.
+    ///
+    /// MUTATIONS: push the source paragraphs on both arms and the last assertion
+    /// goes red; left-align the picture and the first does.
+    #[test]
+    fn a_display_formula_draws_centred_and_stops_printing_its_own_source() {
+        let palette = bt_render::chrome_palette();
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let body = [0.0, 0.0, 400.0, 400.0];
+        let blocks = [preview::MarkdownBlock::Math {
+            source: "E = mc^2".to_owned(),
+        }];
+        let math = one_picture(
+            "E = mc^2",
+            MathMode::Display,
+            metrics.font_size,
+            (120, 30, 20.0),
+        );
+        let layout = [MarkdownBlockLayout {
+            width: 120.0,
+            ..MarkdownBlockLayout::solid(30.0)
+        }];
+        let rendered = build_preview_markdown_body(
+            body,
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            (&blocks, &[], &layout),
+            &palette,
+            &math,
+        );
+        let (left, right) = preview::markdown_measure_box(body, metrics);
+        assert_eq!(rendered.body.rasters.len(), 1, "one formula, one picture");
+        let drawn = &rendered.body.rasters[0];
+        assert_eq!(
+            drawn.rect[0] - left,
+            right - drawn.rect[2],
+            "the air either side of it is equal, which is what centred means",
+        );
+        assert_eq!(
+            (drawn.rect[2] - drawn.rect[0], drawn.rect[3] - drawn.rect[1]),
+            (120.0, 30.0),
+            "drawn at its own size, never stretched to the column",
+        );
+        assert!(
+            rendered.body.paragraphs.is_empty(),
+            "and the LaTeX is not printed under its own picture: {:?}",
+            rendered.body.paragraphs,
+        );
+        // The other moment: no picture, and the source is all there is.
+        let waiting = build_preview_markdown_body(
+            body,
+            metrics,
+            [0.0, 0.0],
+            rested_bars(&[]),
+            (&blocks, &[], &layout),
+            &palette,
+            &DocumentMath::default(),
+        );
+        assert!(waiting.body.rasters.is_empty());
+        assert_eq!(
+            waiting
+                .body
+                .paragraphs
+                .iter()
+                .flat_map(|paragraph| paragraph.runs.iter().map(|run| run.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec!["E = mc^2"],
+            "what the author wrote, until there is something better to show",
+        );
+    }
+
+    /// PIN (same report) — **an inline formula becomes a gap the width of its
+    /// picture, and goes back to being text when there is none.**
+    ///
+    /// The gap is the whole mechanism: prose reflows to the pane, so the only
+    /// honest way to put a picture inside a sentence is to make the sentence
+    /// leave room for it and then ask where the room ended up
+    /// ([`bt_render::PreviewRun::inline_box_px`]).
+    ///
+    /// The delimiters in the fallback are not decoration. They are what tells a
+    /// reader that the letters beside them are a formula this window could not
+    /// set, rather than a typo in the prose — and they are the author's own
+    /// bytes, which is the standard this whole lane is held to.
+    ///
+    /// MUTATIONS: emit the source text alongside the box and the first
+    /// assertion's `text` goes red; strip the dollars in the fallback and the
+    /// second does.
+    #[test]
+    fn an_inline_formula_is_a_gap_the_width_of_its_picture_or_the_text_it_was() {
+        let palette = bt_render::chrome_palette();
+        let spans = vec![
+            preview::Span::plain("energy "),
+            preview::Span::math("$E = mc^2$"),
+            preview::Span::plain(" rules"),
+        ];
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let math = one_picture(
+            "E = mc^2",
+            MathMode::Inline,
+            metrics.font_size,
+            (57, 18, 13.0),
+        );
+        let set = markdown_runs(&spans, &palette, false, &math, metrics.font_size);
+        assert_eq!(
+            set.iter()
+                .map(|run| (run.text.as_str(), run.inline_box_px))
+                .collect::<Vec<_>>(),
+            vec![("energy ", None), ("", Some(57.0)), (" rules", None),],
+            "the formula is a box of its picture's width and no text at all",
+        );
+        let waiting = markdown_runs(
+            &spans,
+            &palette,
+            false,
+            &DocumentMath::default(),
+            metrics.font_size,
+        );
+        assert_eq!(
+            waiting
+                .iter()
+                .map(|run| (run.text.as_str(), run.inline_box_px))
+                .collect::<Vec<_>>(),
+            vec![("energy ", None), ("$E = mc^2$", None), (" rules", None),],
+            "and with no picture it is the delimited source, exactly as written",
+        );
+        // **And a picture set for one size is not a picture for another.** A
+        // heading's formula is asked for at the heading's size, so the body-size
+        // entry above must not answer for it — otherwise a `# ` would draw a
+        // formula a third the height of the letters beside it.
+        let in_a_masthead = markdown_runs(&spans, &palette, true, &math, metrics.heading_font(1));
+        assert_eq!(
+            in_a_masthead
+                .iter()
+                .map(|run| (run.text.as_str(), run.inline_box_px))
+                .collect::<Vec<_>>(),
+            vec![("energy ", None), ("$E = mc^2$", None), (" rules", None),],
+            "the body-size picture does not answer for a heading",
+        );
+    }
+
+    /// PIN (same report) — **every formula on a page reaches the engine, from
+    /// wherever on the page it stands.**
+    ///
+    /// A formula is a run of inline text, and a run of inline text can be in a
+    /// heading, a list item, a quoted line or a table cell as easily as in a
+    /// paragraph — there is one inline parser and it serves all of them. A walk
+    /// that only looked at paragraphs would leave every other one standing on its
+    /// source for good, with nobody ever asking for it. A fence is the one place
+    /// a dollar is never markup, and it is excluded here as well as by the parser.
+    ///
+    /// MUTATION: drop any arm of `document_formulas` and its member goes missing.
+    #[test]
+    fn every_formula_on_the_page_is_asked_for_wherever_it_stands() {
+        let blocks = preview::parse_markdown(
+            "# The $\\alpha$ chapter\n\
+             \n\
+             Prose with $x^2$ in it.\n\
+             \n\
+             - an item with $y^2$\n\
+             \n\
+             > a quote with $z^2$\n\
+             \n\
+             | a | b |\n\
+             |---|---|\n\
+             | $c^2$ | plain |\n\
+             \n\
+             $$\n\
+             \\int_0^1 f\n\
+             $$\n\
+             \n\
+             ```text\n\
+             $not^2$\n\
+             ```\n",
+        );
+        let metrics = seats::preview_markdown_metrics(1.0);
+        let mut found = document_formulas(&blocks, metrics)
+            .into_iter()
+            .map(|(source, mode, em_px)| {
+                (
+                    source,
+                    matches!(mode, MathMode::Display),
+                    math_em_milli(em_px),
+                )
+            })
+            .collect::<Vec<_>>();
+        found.sort();
+        let body = math_em_milli(metrics.font_size);
+        assert_eq!(
+            found,
+            vec![
+                (
+                    "\\alpha".to_owned(),
+                    false,
+                    math_em_milli(metrics.heading_font(1))
+                ),
+                ("\\int_0^1 f".to_owned(), true, body),
+                ("c^2".to_owned(), false, body),
+                ("x^2".to_owned(), false, body),
+                ("y^2".to_owned(), false, body),
+                ("z^2".to_owned(), false, body),
+            ],
+            "five inline formulas, one display block, nothing from the fence — and \
+             the one in the masthead asked for at the masthead's size",
+        );
+    }
+
     /// The document hands out every link it drew, addressed by the run it drew
     /// it as (user ruling, 2026-08-13).
     ///
@@ -95509,6 +96687,7 @@ mod tests {
             rested_bars(&[]),
             (&blocks, &[], &layout),
             &palette,
+            &DocumentMath::default(),
         );
         let sites: Vec<_> = rendered
             .links
@@ -95811,6 +96990,7 @@ mod tests {
             intrinsic: Vec::new(),
             blocks: blocks.clone(),
             layout: layout.clone(),
+            math: DocumentMath::default(),
         };
         let max = preview_document_max_scroll(&document, body, 1.0, cell, 0.0, 0);
         assert_eq!(max[0], 0.0, "the page has no horizontal axis of its own");
@@ -95957,8 +97137,8 @@ mod tests {
             truncated: false,
             mtime: None,
         });
-        let wide = preview_document_key(&buffer, false, 1200.0, 1.0);
-        let narrow = preview_document_key(&buffer, false, 400.0, 1.0);
+        let wide = preview_document_key(&buffer, false, 1200.0, 1.0, 0, [0, 0, 0]);
+        let narrow = preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0]);
         assert_ne!(wide, narrow, "a width change is still a layout change");
         assert_eq!(
             wide.parse, narrow.parse,
@@ -95970,7 +97150,7 @@ mod tests {
             true
         });
         assert_ne!(
-            preview_document_key(&buffer, false, 1200.0, 1.0).parse,
+            preview_document_key(&buffer, false, 1200.0, 1.0, 0, [0, 0, 0]).parse,
             wide.parse,
             "an edit re-parses"
         );
@@ -96057,7 +97237,14 @@ mod tests {
             "the fixture carries enough of them to matter"
         );
         let before = reflow_calls.get();
-        let heavy_layout = lay_markdown_out(&heavy, &heavy_intrinsic, 400.0, metrics, &mut measure);
+        let heavy_layout = lay_markdown_out(
+            &heavy,
+            &heavy_intrinsic,
+            400.0,
+            metrics,
+            &DocumentMath::default(),
+            &mut measure,
+        );
         assert_eq!(
             reflow_calls.get(),
             before,
@@ -96072,7 +97259,14 @@ mod tests {
         // taller page, at a cost that does not grow with the document's tables.
         let mut heights = Vec::new();
         for width in [1200.0, 900.0, 700.0, 500.0, 380.0] {
-            let layout = lay_markdown_out(&blocks, &intrinsic, width, metrics, &mut measure);
+            let layout = lay_markdown_out(
+                &blocks,
+                &intrinsic,
+                width,
+                metrics,
+                &DocumentMath::default(),
+                &mut measure,
+            );
             heights.push(layout.last().map_or(0.0, |last| last.top + last.height));
         }
         for pair in heights.windows(2) {
@@ -96638,7 +97832,16 @@ mod tests {
         // The intrinsics are the fences' highlighting and nothing else here, so
         // a test about pixels can pass none and get the ink it always got.
         let document = (document.0, [].as_slice(), document.1);
-        build_preview_markdown_body(body, metrics, scroll, bars, document, palette).body
+        build_preview_markdown_body(
+            body,
+            metrics,
+            scroll,
+            bars,
+            document,
+            palette,
+            &DocumentMath::default(),
+        )
+        .body
     }
 
     /// The bars at rest: the offsets under test, nothing lit, one device pixel
@@ -97328,8 +98531,8 @@ mod tests {
             "the source face has a caret and the rendered page has not"
         );
         assert_ne!(
-            preview_document_key(buffer, true, 400.0, 1.0),
-            preview_document_key(buffer, false, 400.0, 1.0),
+            preview_document_key(buffer, true, 400.0, 1.0, 0, [0, 0, 0]),
+            preview_document_key(buffer, false, 400.0, 1.0, 0, [0, 0, 0]),
             "so the two faces cannot share one cached document"
         );
 
@@ -97364,23 +98567,35 @@ mod tests {
     #[test]
     fn a_same_length_edit_rebuilds_the_cached_document() {
         let mut buffer = text_buffer("a.rs", "let x = 1;\n");
-        let before = preview_document_key(&buffer, false, 400.0, 2.0);
+        let before = preview_document_key(&buffer, false, 400.0, 2.0, 0, [0, 0, 0]);
         buffer.edit_content(|content| {
             content.replace_range(8..9, "2");
             true
         });
         assert_eq!(buffer.content.as_deref(), Some("let x = 2;\n"));
-        let after = preview_document_key(&buffer, false, 400.0, 2.0);
+        let after = preview_document_key(&buffer, false, 400.0, 2.0, 0, [0, 0, 0]);
         assert_ne!(
             before, after,
             "one letter for another is still a different document"
         );
         // And nothing else moved: the same buffer at the same width and scale is
         // the same key, or every wheel notch would re-parse the file.
-        assert_eq!(after, preview_document_key(&buffer, false, 400.0, 2.0));
-        assert_ne!(after, preview_document_key(&buffer, true, 400.0, 2.0));
-        assert_ne!(after, preview_document_key(&buffer, false, 401.0, 2.0));
-        assert_ne!(after, preview_document_key(&buffer, false, 400.0, 1.0));
+        assert_eq!(
+            after,
+            preview_document_key(&buffer, false, 400.0, 2.0, 0, [0, 0, 0])
+        );
+        assert_ne!(
+            after,
+            preview_document_key(&buffer, true, 400.0, 2.0, 0, [0, 0, 0])
+        );
+        assert_ne!(
+            after,
+            preview_document_key(&buffer, false, 401.0, 2.0, 0, [0, 0, 0])
+        );
+        assert_ne!(
+            after,
+            preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0])
+        );
     }
 
     /// ⑤ A caret, a selection and a scroll survive a switch to another buffer
@@ -97475,6 +98690,7 @@ mod tests {
             blocks,
             intrinsic: Vec::new(),
             layout,
+            math: DocumentMath::default(),
         };
         let max = preview_document_max_scroll(&markdown, body, scale, 8.0, 0.0, 0);
         assert!(max[1] > 0.0, "a document taller than its pane can scroll");
@@ -100480,6 +101696,7 @@ mod tests {
                 MathWorkerRequest::Math { leaf, .. }
                 | MathWorkerRequest::InlineImage { leaf, .. }
                 | MathWorkerRequest::PeekImage { leaf, .. }
+                | MathWorkerRequest::PreviewMath { leaf, .. }
                 | MathWorkerRequest::VerifyPath { leaf, .. } => leaf,
             })
             .collect::<std::collections::BTreeSet<_>>();
@@ -103618,6 +104835,7 @@ mod tests {
             rested_bars(&[]),
             (&blocks, &intrinsic, &layout),
             &palette,
+            &DocumentMath::default(),
         );
         // The two fences' lines, in the order they were pushed. The `lang` chip
         // is a proportional paragraph and rides after them, so the two mono
@@ -103845,8 +105063,8 @@ mod tests {
     #[test]
     fn a_resize_cannot_re_walk_a_grammar_and_an_edit_must() {
         let mut buffer = text_buffer("main.rs", "fn main() {}\n");
-        let narrow = preview_document_key(&buffer, false, 400.0, 1.0);
-        let wide = preview_document_key(&buffer, false, 1200.0, 1.0);
+        let narrow = preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0]);
+        let wide = preview_document_key(&buffer, false, 1200.0, 1.0, 0, [0, 0, 0]);
         assert_ne!(narrow, wide, "the two widths are two documents");
         assert_eq!(
             narrow.parse, wide.parse,
@@ -103857,7 +105075,7 @@ mod tests {
             true
         });
         assert_ne!(
-            preview_document_key(&buffer, false, 400.0, 1.0).parse,
+            preview_document_key(&buffer, false, 400.0, 1.0, 0, [0, 0, 0]).parse,
             narrow.parse,
             "and an edit re-walks it"
         );

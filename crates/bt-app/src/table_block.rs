@@ -91,19 +91,32 @@ pub fn build(
     let mut quads = Vec::new();
     let mut paragraphs = Vec::new();
     let mut links = Vec::new();
+    // **A terminal table has no formulas of its own**, and that is a statement
+    // about authority rather than a shortcut. The dollars in a printed table
+    // cell are somebody else's output, and what a terminal may do with those is
+    // settled by `bt_detect`'s own gates — not by the markdown preview's rule
+    // that an author's `$` is markup. An empty document therefore means exactly
+    // what it says here: nothing in this table has a picture, so every cell
+    // draws the text it printed.
+    let math = crate::DocumentMath::default();
+    let mut math_sites = Vec::new();
     push_markdown_table(
         MarkdownSink {
             quads: &mut quads,
             paragraphs: &mut paragraphs,
             links: &mut links,
+            math_sites: &mut math_sites,
             region: None,
         },
         &rows,
         &alignments,
         &placed,
         [0.0, 0.0],
-        metrics,
-        palette,
+        crate::MarkdownStyle {
+            metrics,
+            palette,
+            math: &math,
+        },
     );
     TableBlock {
         paint: bt_render::TableBlockPaint { quads, paragraphs },
