@@ -1,0 +1,8 @@
+# MS:HEX -- codex plan A: settle, one real turn, idle, quit. No focus events injected.
+20000:7265706c792077697468206f6e6c792074686520776f7264206f6b
+20400:0d
+110000:2f71756974
+110400:0d
+118000:04
+124000:03
+125000:03
