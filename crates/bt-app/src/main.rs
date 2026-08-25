@@ -3525,6 +3525,22 @@ struct FileMenuTarget {
     row: Option<FileMenuTreeRow>,
     activation: RowActivation,
     subject: profiles::FileMenuSubject,
+    /// The folded levels this menu is a list of, **deepest first** — empty on
+    /// every face but the `…` chip's (user ruling 2026-08-25).
+    crumbs: Vec<FoldedLevel>,
+}
+
+/// **One level a folded breadcrumb is standing in for** — a row of the `…`
+/// chip's menu (user ruling 2026-08-25).
+///
+/// The name is what the row says and the folder is where pressing it goes, and
+/// they travel together for [`FileMenuTarget`]'s own reason: a menu that took
+/// its caption from one list and its destination from another is a menu whose
+/// rows can point somewhere they do not name.
+#[derive(Clone, Debug)]
+struct FoldedLevel {
+    name: String,
+    folder: PathBuf,
 }
 
 /// **Which tree the row is in, and which row.**
@@ -3564,6 +3580,14 @@ struct FileMenuState {
     /// Which verbs it holds — snapshotted for [`profiles::FileMenuSubject`]'s
     /// own reason.
     subject: profiles::FileMenuSubject,
+    /// The folded levels it is a list of, deepest first, or empty on the three
+    /// faces whose rows are verbs.
+    ///
+    /// A **snapshot**, on the subject's own rule and for a sharper reason: the
+    /// fold is a fact about how wide the pane was when the chip was pressed, and
+    /// a divider dragged while the menu is up would otherwise rewrite the list
+    /// under a hand already moving down it.
+    crumbs: Vec<FoldedLevel>,
     hover: Option<profiles::FileMenuRow>,
 }
 
@@ -3766,6 +3790,139 @@ fn crumb_segments(path: &Path) -> Vec<(String, PathBuf)> {
         }
     }
     segments
+}
+
+/// **What one preview-rail control's tip says** (user ruling 2026-08-25).
+///
+/// A free function of the facts rather than a method, because that is what makes
+/// it answerable: three of the five wordings are a *state* — which face the flip
+/// would turn to, which kind of address the `⧉` copies — and two are a **path**,
+/// which is the whole reason these controls needed tips rather than captions.
+///
+/// - **`</>`** names the destination, not the state, on the reload/stop
+///   precedent: the button changes, so one word for both would describe what it
+///   was a press ago.
+/// - **`⧉`** says `Copy address` over a page and `Copy path` over a file. One
+///   verb, two kinds of address, and this is the one place the difference is
+///   spoken — the glyph is the same on both rows deliberately.
+/// - **`Open ⌄`** names the first row of its list and says there is more, which
+///   is [`i18n::Text::PaneChevronTip`]'s own shape.
+/// - **A segment** says the whole place it names, because the word drawn in it
+///   is only that place's last piece — `RootMenuRow`'s tip is the same sentence
+///   about the same kind of caption.
+/// - **`…`** says the run of levels it is standing in for, **root first**: it is
+///   a stretch of a path being read left to right, and the reader's eye is
+///   already travelling that way along the row it sits in. (The *menu* behind it
+///   is deepest-first, which is a list of destinations rather than a piece of a
+///   path — Explorer draws the same two orders for the same two things.)
+fn preview_rail_tip_text(
+    tip: seats::PreviewRailTip,
+    kind: seats::PreviewRailKind,
+    segments: &[(String, PathBuf)],
+    folded: &[usize],
+    flip_to_source: bool,
+) -> String {
+    match tip {
+        seats::PreviewRailTip::Flip => if flip_to_source {
+            i18n::Text::PreviewFlipToSource
+        } else {
+            i18n::Text::PreviewFlipToRendered
+        }
+        .text()
+        .to_owned(),
+        seats::PreviewRailTip::Copy => match kind {
+            seats::PreviewRailKind::Address => i18n::Text::PreviewCopyAddress.text().to_owned(),
+            seats::PreviewRailKind::Crumbs => i18n::Text::FileMenuCopyPath.text().to_owned(),
+        },
+        seats::PreviewRailTip::Open => i18n::Text::PreviewRailOpenTip.text().to_owned(),
+        seats::PreviewRailTip::Fold => folded
+            .iter()
+            .filter_map(|depth| segments.get(*depth).map(|(name, _)| name.as_str()))
+            .collect::<Vec<&str>>()
+            .join(&format!(" {} ", seats::PREVIEW_CRUMB_SEPARATOR)),
+        seats::PreviewRailTip::Crumb(depth) => segments
+            .get(depth)
+            .map(|(_, target)| target.display().to_string())
+            .unwrap_or_default(),
+    }
+}
+
+/// **This folder's node id inside a column rooted at `root`, or `None` when it
+/// is not inside it at all** (user ruling 2026-08-25).
+///
+/// The question 「目标目录在当前树的可见范围内吗」 asked exactly once, and it is
+/// [`files::full_path`] run backwards: that function pushes a key's `/`-separated
+/// segments onto the root one at a time, so this takes the components the folder
+/// has beyond the root and joins them back with [`files::child_key`]. The root
+/// itself answers `Some("")`, which is the tree's own id for it.
+///
+/// **`Path::strip_prefix` and not a string prefix**, because a string prefix is
+/// how `D:\dev` comes to contain `D:\development`. It compares whole components,
+/// which is the same unit the key is built in.
+///
+/// A column with no root (a fresh pane, a session restored onto a missing drive)
+/// contains nothing: there is no tree to be inside of, so the caller falls
+/// through to the verb that makes one.
+fn files_key_within(root: &str, folder: &Path) -> Option<String> {
+    if root.is_empty() {
+        return None;
+    }
+    let tail = folder.strip_prefix(Path::new(root)).ok()?;
+    Some(tail.components().fold(String::new(), |key, component| {
+        files::child_key(&key, &component.as_os_str().to_string_lossy())
+    }))
+}
+
+/// Every folder that has to be open for one node id to be a drawn row — **the
+/// node itself included** — root first.
+///
+/// Root first because that is the order the tree reads them in, so a column that
+/// has read nothing asks the worker for its directories in the order it will
+/// draw them rather than from the bottom up.
+///
+/// The root's own id is `""`, and it is in the list: a tree draws its root's
+/// children whether or not anything ever "opened" it, and asking for it here is
+/// what makes the refresh reach the top level too.
+fn files_open_chain(key: &str) -> Vec<String> {
+    let mut chain = vec![String::new()];
+    let mut built = String::new();
+    for segment in key.split('/').filter(|segment| !segment.is_empty()) {
+        built = files::child_key(&built, segment);
+        chain.push(built.clone());
+    }
+    chain
+}
+
+/// **The levels a folded breadcrumb is standing in for, deepest first** (user
+/// ruling 2026-08-25).
+///
+/// `folded` is [`seats::PreviewRailGeometry::folded`], which is the order the
+/// *fold* happened in — nearest the root first, because that is the end the
+/// geometry takes segments from. The chip's menu reads the other way: 「由深到
+/// 浅排,最近的隐藏级在最上,一路到根方向」, which is Windows Explorer's own
+/// breadcrumb `…` and the reference the ruling handed over.
+///
+/// **The turn happens here and once**, rather than at the paint or at the press,
+/// for the reason [`FoldedLevel`] pairs its two fields: a list built one way up
+/// and read another is a menu whose rows point somewhere they do not name, and a
+/// fixture with two levels would never show it.
+///
+/// A depth the path does not have is skipped rather than guessed at — the two
+/// come from one derivation and cannot disagree today, and dropping is what
+/// keeps the rows and the names the same length if they ever do.
+fn folded_levels(path: &Path, folded: &[usize]) -> Vec<FoldedLevel> {
+    let segments = crumb_segments(path);
+    folded
+        .iter()
+        .rev()
+        .filter_map(|depth| {
+            let (name, folder) = segments.get(*depth)?;
+            Some(FoldedLevel {
+                name: name.clone(),
+                folder: folder.clone(),
+            })
+        })
+        .collect()
 }
 
 /// **How this window spells an address it is showing you** (user ruling
@@ -5293,16 +5450,12 @@ struct App {
     /// pointer already travelling toward it — is worse than the staleness it
     /// would fix.
     profile_programs: profiles::ProfilePrograms,
-    /// **Where this machine's editor is, or `None`** (user ruling 2026-08-24) —
-    /// [`profiles::find_vscode`]'s answer, probed once beside
-    /// [`Self::profile_programs`] and held for its stated reasons.
-    ///
-    /// It decides whether the file menu draws its editor row at all, so the
-    /// staleness argument above applies to it word for word: installing an
-    /// editor while a menu is on screen is not worth a filesystem call per
-    /// frame, and a row appearing under a pointer already moving toward another
-    /// one is worse than the staleness it would fix.
-    editor: Option<PathBuf>,
+    // `editor` is **retired** (user ruling 2026-08-25: 「既然有 default app 了,
+    // 就把 VS Code 去掉」). It held `profiles::find_vscode`'s answer for one row
+    // of one menu, and the row is gone — the door above it hands the path to
+    // whatever this machine has registered for it, which is very often that same
+    // editor. A start-up probe kept for a row nobody draws is a filesystem walk
+    // answering a question the product no longer asks.
     /// This user's Documents folder, asked of Windows once.
     ///
     /// Once because it cannot move under a running process, and stored rather
@@ -6709,6 +6862,21 @@ struct WindowRuntime {
     /// key for the same reason — this one menu serves both trees (K146), and
     /// there are two of them drawing the same names.
     file_menu: Option<FileMenuState>,
+    /// **Which row each column has been asked to bring into view, and has not
+    /// been able to yet** (user ruling 2026-08-25).
+    ///
+    /// `Runtime::locate_folder_in_files_column` opens the way down to a folder
+    /// and then wants to scroll it into view, and on the frame it runs that row
+    /// very often does not exist: its parent's listing is a worker answer away.
+    /// So the intent is written down here and spent by
+    /// [`Runtime::settle_files_locate`] on the first frame the row is really in
+    /// the tree — `PreviewPane::goto_line`'s arrangement, one surface over, and
+    /// for its exact reason.
+    ///
+    /// **Not durable.** A locate is a gesture, and a session restored still
+    /// scrolled to where somebody once pointed would be this window remembering
+    /// a hand movement.
+    files_locate: BTreeMap<SeatId, String>,
     /// The pane head's own menu, and the head it was raised on (user rulings,
     /// 2026-08-15 and 2026-08-16).
     pane_menu: Option<PaneMenuState>,
@@ -23575,6 +23743,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         preview_head_measures: BTreeMap::new(),
         preview_rail_measures: BTreeMap::new(),
         file_menu: None,
+        files_locate: BTreeMap::new(),
         git_menu: None,
         term_menu: None,
         restarting: None,
@@ -24132,7 +24301,6 @@ impl Runtime<'_> {
             scheme_fault: None,
             scheme_source: [None, None],
             profile_programs,
-            editor: profiles::find_vscode(&bt_pty::SystemShellEnvironment),
             psreadline_documents: psreadline::documents_directory(),
             psreadline_installed: psreadline::InstalledCopy::default(),
             // Reads the registry once and, on a machine whose `folio.exe`
@@ -26236,6 +26404,7 @@ impl Runtime<'_> {
                     *seat,
                     seats::FootStrip {
                         path: &words.lead,
+                        path_width: words.lead_width,
                         revealed: words.flashing,
                         notice: &words.notice,
                         notice_width: words.notice_width,
@@ -26541,6 +26710,38 @@ impl Runtime<'_> {
                     },
                 );
             }
+            // **The source flip that stayed on the head**, in the same pass and
+            // inside the same guard (user ruling 2026-08-25). The 2026-08-24
+            // ruling moved this button down to the breadcrumb row and left it
+            // here for the one markdown that grows no breadcrumb — a composed
+            // document, whose bytes are in the repository rather than on a disk
+            // — because 「一个动词不该跟着一行一起消失」. A button that survives
+            // its row keeps its tip too, and it is the same two words the row's
+            // own flip says, from the same function.
+            let previews: Vec<SeatId> = self.seats.preview_seats();
+            for seat in previews {
+                let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
+                    continue;
+                };
+                let head = seats::pane_head_geometry(rect, bt_layout::SeatKind::Preview, scale);
+                let Some(box_) =
+                    seats::preview_head_geometry(&head, scale, self.preview_head_tools(seat)).flip
+                else {
+                    continue;
+                };
+                let to_source = !self.preview_md_source(self.preview_here(seat));
+                anchors.push(
+                    tooltip::TooltipAnchorId::PreviewRail(seat, seats::PreviewRailTip::Flip),
+                    box_,
+                    preview_rail_tip_text(
+                        seats::PreviewRailTip::Flip,
+                        seats::PreviewRailKind::Crumbs,
+                        &[],
+                        &[],
+                        to_source,
+                    ),
+                );
+            }
             // **A page's four**, in the same pass and inside the same guard
             // (§7.7 ②). Only the seats whose head actually draws them register:
             // `preview_head_tools` answers `web: false` for every other seat, so
@@ -26588,6 +26789,13 @@ impl Runtime<'_> {
                     );
                 }
             }
+            // **The row under each head** (user ruling 2026-08-25). In the same
+            // pass and inside the same guard as the head's own controls above,
+            // because it is the same kind of surface one band lower — and after
+            // them, which is this list's innermost-first order read literally:
+            // the two rows do not overlap, so the order between them is only the
+            // order they were built in.
+            self.preview_rail_tip_anchors(&mut anchors);
             // The search capsule's own controls, pushed after the heads and
             // before the Git page's rows for this list's own innermost-first
             // rule: the capsule stands over one pane's body, so it is inside
@@ -35662,6 +35870,169 @@ impl Runtime<'_> {
     /// somewhere else on the screen, so "the click did nothing" and "the click
     /// re-rooted the column you were not looking at" are the same picture from
     /// the outside.
+    /// **Stand the files column *on* this folder, moving the tree as little as
+    /// it can** (user ruling 2026-08-25) — what every "locate" in this window
+    /// means.
+    ///
+    /// The soft half of [`Self::show_folder_in_files_column`], and the ruling is
+    /// about the difference. That verb re-roots, always, which is right for the
+    /// door it was written for — a folder printed in a shell's output is very
+    /// often somewhere else entirely — and wrong for every door that has since
+    /// started calling it: `Show in files column`, a press on a breadcrumb
+    /// segment, and now a row of the `…` chip's list. The report was a screenshot
+    /// of a column that had been showing a whole repository and was suddenly
+    /// showing one folder of it, with no way back but the root menu:
+    /// 「打开文件不许重根文件树」.
+    ///
+    /// **The rule is a question about range, not about which door asked.** If
+    /// the folder is *inside the tree the column is already rooted at* — the root
+    /// itself included — then it is reachable, so the column keeps its root and
+    /// **opens the way down to it, scrolls it into view, and selects it**. Only a
+    /// folder outside that tree re-roots, because for that folder there is
+    /// nothing to open the way down *to*.
+    ///
+    /// **Selecting rather than merely scrolling**, because the tree already has
+    /// exactly one way of saying "this row is the one you asked about" and it is
+    /// the selection every other arrival uses ([`Self::reveal_files_row`] is the
+    /// scroll half of the keyboard's own move). A second kind of highlight would
+    /// be a second thing for the reader to learn.
+    ///
+    /// **A column that has not read those folders yet** answers the same way it
+    /// answers a keyboard walking into them: the expansions are recorded and the
+    /// reads are asked for, and the row is revealed when the disk comes back —
+    /// see [`WindowRuntime::files_locate`].
+    fn locate_folder_in_files_column(&mut self, folder: &Path) -> Result<()> {
+        let existing = self.seats.files_seat();
+        self.mouse_trace(|| {
+            format!(
+                "locate_folder_in_files_column enter path={} column={existing:?}",
+                folder.display()
+            )
+        });
+        let Some(seat) = existing else {
+            // No column at all: there is no tree to move gently, so the only
+            // thing "locate" can mean is the one `show_folder_in_files_column`
+            // already means — open one, rooted here.
+            self.mouse_trace(|| "locate_folder_in_files_column leave=no-column".to_owned());
+            return self.show_folder_in_files_column(folder);
+        };
+        let root = self.window.tabs[self.window.active_tab]
+            .files_state(seat)
+            .root;
+        let Some(key) = files_key_within(&root, folder) else {
+            self.mouse_trace(|| "locate_folder_in_files_column leave=outside-the-tree".to_owned());
+            return self.show_folder_in_files_column(folder);
+        };
+        self.mouse_trace(|| format!("locate_folder_in_files_column leave=inside key={key}"));
+        self.open_files_path_to(seat, &key)
+    }
+
+    /// Open every folder between a column's root and one node of it, select that
+    /// node, and bring it into view.
+    ///
+    /// The three steps [`Self::locate_folder_in_files_column`]'s inside arm is,
+    /// written once because the pending half calls it again when the disk lands.
+    ///
+    /// **Every folder on the way down is opened and re-asked**, the target
+    /// included — which is exactly what a press on each of their triangles would
+    /// have done, and it is the target's own press that makes this the same verb
+    /// a press on a *visible* breadcrumb segment is. The re-ask is not
+    /// bookkeeping: unfolding *is* this product's refresh gesture (Q3 is
+    /// deferred), so a locate that recorded the expansions without asking would
+    /// show a folder's children as of whenever it was last looked at.
+    ///
+    /// The toggle is deliberately **not** [`press_files_node`]: that one is a
+    /// toggle, and half of these folders are already open — running it would
+    /// shut them on the way past.
+    ///
+    /// **And the triangles do not turn, they arrive turned**
+    /// ([`files::DirCache::settle_row`]). A turn is a picture of your hand doing
+    /// something, and this is not your hand on these triangles: it is a run of
+    /// folders being put into a state so that one row below them can be shown
+    /// to you. Found on a real window (2026-08-25): an easing tween here left
+    /// `.android` drawn with a *shut* triangle over its own open children,
+    /// because nothing woke the loop again for a turn nobody had clicked.
+    ///
+    /// The intent is filed **before** the reveal rather than after: the row is
+    /// very often not in the tree yet — its parent's listing is a worker answer
+    /// away — and a reveal that found nothing would otherwise be the whole of
+    /// what this verb did.
+    fn open_files_path_to(&mut self, seat: SeatId, key: &str) -> Result<()> {
+        let now = Instant::now();
+        let active = self.window.active_tab;
+        // Root first, so a tree that has read nothing asks for its folders in
+        // the order it will draw them.
+        for ancestor in files_open_chain(key) {
+            let Some(state) = self.window.tabs[active].files.get_mut(&seat) else {
+                return Ok(());
+            };
+            state.open.insert(ancestor.clone());
+            self.window.tabs[active]
+                .file_trees
+                .entry(seat)
+                .or_default()
+                .settle_row(&ancestor);
+            self.refresh_files_dir(seat, &ancestor);
+        }
+        // **The root has no row of its own**, and asking for one is what a tree
+        // rooted here already answers: the whole list is that folder's contents.
+        // So the column's own root scrolls nothing and selects nothing — it is
+        // already the thing you asked to see — and filing an intent for a row
+        // that will never exist would leave one owed for the rest of the
+        // session.
+        if !key.is_empty() {
+            if let Some(state) = self.window.tabs[active].files.get_mut(&seat) {
+                state.sel = Some(key.to_owned());
+            }
+            self.window.files_locate.insert(seat, key.to_owned());
+            self.settle_files_locate();
+        }
+        self.mark_session_dirty(now);
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Spend a filed locate as soon as the row it names is in the tree.
+    ///
+    /// [`Runtime::settle_preview_goto`]'s shape and its reason: the intent is
+    /// recorded where it is formed and spent where there is something to measure,
+    /// which is this frame when the directories were already read and a later one
+    /// when they were not. Called from the locate itself and from the worker's
+    /// own door, so no frame goes by with a row on screen and a reveal owed to
+    /// it.
+    ///
+    /// **Spent on the first frame the row exists**, and dropped with it: a locate
+    /// that has scrolled is finished, and one whose folder turned out not to be
+    /// there is dropped by the same reader that drops a dead selection
+    /// ([`Self::heal_files_selection`]), because it names the same key.
+    fn settle_files_locate(&mut self) {
+        let owed: Vec<(SeatId, String)> = self
+            .window
+            .files_locate
+            .iter()
+            .map(|(seat, key)| (*seat, key.clone()))
+            .collect();
+        if owed.is_empty() {
+            return;
+        }
+        // One walk for every column that is owed one, on `files_tree_walk`'s own
+        // cost argument: deriving a tree's rows is not free, and this is asked
+        // once per worker answer.
+        let trees = self.files_tree_contents();
+        for (seat, key) in owed {
+            let has_row = trees
+                .get(&seat)
+                .is_some_and(|tree| tree.rows.iter().any(|row| row.key == key));
+            if !has_row {
+                continue;
+            }
+            self.reveal_files_row(seat, &key);
+            self.window.files_locate.remove(&seat);
+        }
+    }
+
     fn show_folder_in_files_column(&mut self, folder: &Path) -> Result<()> {
         let existing = self.seats.files_seat();
         self.mouse_trace(|| {
@@ -37439,6 +37810,44 @@ impl Runtime<'_> {
             .cloned()
     }
 
+    /// **Every control of every preview rail, registered for a tip** (user
+    /// ruling 2026-08-25).
+    ///
+    /// The head's own pass one band lower, and built the same way: the boxes are
+    /// the paint's own ([`seats::preview_rail_tip_boxes`] off the very geometry
+    /// the hit test reads), and the words are this window's, because two of the
+    /// five are a *path* rather than a phrase.
+    fn preview_rail_tip_anchors(&mut self, anchors: &mut tooltip::TooltipAnchors) {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        for seat in self.seats.preview_seats() {
+            let Some(measure) = self.preview_rail_measure(seat) else {
+                continue;
+            };
+            let Some(rect) = seats::full_pane_rect(&self.seat_layout, seat) else {
+                continue;
+            };
+            let geometry = seats::preview_rail_geometry(rect, scale, &measure);
+            let segments = self
+                .preview_rail_path(seat)
+                .map(|path| crumb_segments(&path))
+                .unwrap_or_default();
+            // The glyph names the *destination*, which is the rail's own rule
+            // read back: the button turns the pane to whichever face it is not
+            // showing.
+            let to_source = !self.preview_md_source(self.preview_here(seat));
+            for (tip, box_) in seats::preview_rail_tip_boxes(&geometry) {
+                let text = preview_rail_tip_text(
+                    tip,
+                    measure.kind,
+                    &segments,
+                    &geometry.folded,
+                    to_source,
+                );
+                anchors.push(tooltip::TooltipAnchorId::PreviewRail(seat, tip), box_, text);
+            }
+        }
+    }
+
     /// The tools **this seat's** head must be laid out with — this frame's, off
     /// the widths the paint stored for that seat.
     /// How many rows the switcher would put in front of you — **the list's own
@@ -37509,21 +37918,33 @@ impl Runtime<'_> {
         now: Instant,
     ) -> Option<seats::FootWords> {
         let surface = self.preview_here(seat);
-        // **A page's foot is the hover line, and since 2026-08-25 nothing else**
-        // (§7.7 ③ as amended). It was a landing band as well until the page got
-        // an address row of its own; a band that reprinted that row two lines
-        // below it was one address said twice in one pane, which is the debt
-        // §7.7 booked and this ruling settles. See [`page_foot_lead`] — the
-        // whole of what this band says now lives there, so that "the page's foot
-        // is empty at rest" is a fact a test can hold rather than a shape only a
-        // screenshot could catch.
+        // **A page's foot is the hover line, and since 2026-08-25 nothing else —
+        // and it is not a foot any more** (§7.7 ③ as twice amended). It was a
+        // landing band as well until the page got an address row of its own; a
+        // band that reprinted that row two lines below it was one address said
+        // twice in one pane, which is the debt §7.7 booked and the first of the
+        // two rulings settled. The second retired the band itself: what is left
+        // is drawn as the bubble every browser puts in a page's bottom-left
+        // corner (`seats::page_hover_tag_box`), so the words are dressed here
+        // exactly as before and the *shape* they land in is the paint's.
         let page = self.web_on(seat).map(|web| web.page().clone());
         if let Some(page) = page {
             let lead = page_foot_lead(&page.url, &page.hover);
             let revealed = self.foot_reveal_is_fresh(RevealedFoot::Preview(seat), now);
             let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
-            let run =
-                seats::pane_foot_geometry(rect, bt_layout::SeatKind::Preview, scale).foot_path;
+            // **The tag's run and not the retired band's**: the cut has to be to
+            // the room the thing that is drawn actually has, and a bubble
+            // floating inside the body has a little less of it than a strip
+            // spanning the pane did.
+            let body = seats::preview_pane_geometry(rect, scale, self.seats.seat_rail(seat)).body;
+            let margin = (seats::PAGE_HOVER_TAG_MARGIN_LOGICAL_PX * scale).round();
+            let pad = (seats::PAGE_HOVER_TAG_PAD_X_LOGICAL_PX * scale).round();
+            let run = [
+                body[0] + margin + pad,
+                body[1],
+                (body[2] - margin - pad).max(body[0] + margin + pad),
+                body[3],
+            ];
             let font = seats::FILES_FOOT_FONT_LOGICAL_PX * scale;
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
@@ -37635,11 +38056,17 @@ impl Runtime<'_> {
     /// **Stand the files column where this segment of the path is** (user ruling
     /// 2026-08-24) — a press on one breadcrumb.
     ///
-    /// [`Self::show_folder_in_files_column`] and nothing else, which is the
+    /// [`Self::locate_folder_in_files_column`] and nothing else, which is the
     /// whole of the ruling's 「查 files 列的既有跳转动词复用」: that verb already
-    /// re-roots the column a tab has, opens one for a tab that has none, and
-    /// leaves the keyboard where it was. A second implementation here would be a
-    /// second answer to "what does pointing the column somewhere mean".
+    /// opens the way down inside the tree a tab has, re-roots when the folder is
+    /// outside it, opens a column for a tab that has none, and leaves the
+    /// keyboard where it was. A second implementation here would be a second
+    /// answer to "what does pointing the column somewhere mean".
+    ///
+    /// **It was the hard verb until 2026-08-25**, and the ruling that softened
+    /// it is why: a breadcrumb segment is by construction an ancestor of a file
+    /// this window is already showing, so re-rooting on it threw away a tree the
+    /// reader had built up in order to show them a subtree of it.
     ///
     /// **The last segment is this file, and a column is rooted at a directory**,
     /// so the tail hands over its parent. That is not a special case bolted on:
@@ -37661,20 +38088,31 @@ impl Runtime<'_> {
         let Some(folder) = folder else {
             return Ok(());
         };
-        self.show_folder_in_files_column(&folder)
+        self.locate_folder_in_files_column(&folder)
     }
 
-    /// **The `…` a folded path is drawn as** (the ruling's ③): the menu of the
-    /// segments standing behind it.
+    /// **The `…` a folded path is drawn as** (the ruling's ③, re-judged by the
+    /// user on 2026-08-25): the list of the levels standing behind it.
     ///
-    /// The file menu, raised on the *deepest* folder the fold is hiding. One
-    /// list of verbs about one place, rather than a second popup whose only job
-    /// would be to re-offer the row a wider pane would have drawn — and the
-    /// reader gets the whole path in it, because `Copy path` is one of its rows.
+    /// **What it was, and why that was wrong.** It used to raise the ordinary
+    /// file menu — `Open in default app`, `Show in files column`, `Copy path`,
+    /// `Insert path` — on the *deepest* folder the fold was hiding, on the
+    /// argument that the reader gets the whole path in it because `Copy path` is
+    /// one of its rows. Two things are wrong with that and the ruling names
+    /// both: the verbs are about **one** of several hidden folders and nothing
+    /// on screen says which, and a control whose whole meaning is *there are
+    /// folders here you cannot see* was answered by a menu that never says what
+    /// they are.
     ///
-    /// **A tooltip would not have been enough** and a menu is not overkill: the
-    /// ruling asks for 「点开弹全路径菜单或至少 tooltip」, and the menu is the
-    /// half of that which is also a way of *reaching* what it names.
+    /// **What it is.** Windows Explorer's own breadcrumb `…`, which is the
+    /// reference the ruling handed over: the hidden levels, one per row, each
+    /// wearing a folder; **deepest first**, so the nearest hidden level is the
+    /// top row and the list walks towards the root. A press on a row is
+    /// [`Self::locate_folder_in_files_column`] — the same verb a press on a
+    /// *visible* segment is, which is the whole of 「语义与点可见段一致」.
+    ///
+    /// The file verbs are not lost; they belong to `Open ⌄`, which is the
+    /// control that is about this document.
     fn open_preview_crumb_menu(&mut self, seat: SeatId) -> Result<()> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let Some(measure) = self.preview_rail_measure(seat) else {
@@ -37684,13 +38122,17 @@ impl Runtime<'_> {
             return Ok(());
         };
         let geometry = seats::preview_rail_geometry(rect, scale, &measure);
-        let (Some(chip), Some(deepest)) = (geometry.fold, geometry.folded.last().copied()) else {
+        let Some(chip) = geometry.fold else {
             return Ok(());
         };
         let Some(path) = self.preview_rail_path(seat) else {
             return Ok(());
         };
-        let Some((_, folder)) = crumb_segments(&path).into_iter().nth(deepest) else {
+        let crumbs = folded_levels(&path, &geometry.folded);
+        // The deepest hidden level is what a press with no row on it would have
+        // been about, and it is what the menu is hung *from*: an empty list is
+        // an unfolded rail, which this door is not reached from.
+        let Some(deepest) = crumbs.first().map(|level| level.folder.clone()) else {
             return Ok(());
         };
         // Under the chip, where a menu belonging to a control belongs when no
@@ -37699,8 +38141,14 @@ impl Runtime<'_> {
         self.open_file_menu(
             FileMenuTarget {
                 row: None,
-                activation: RowActivation::DefaultApp(folder),
-                subject: profiles::FileMenuSubject::Document,
+                // Every row of this face carries its own destination, so the
+                // target's own path is only what [`Self::open_file_menu`]'s
+                // "this menu is about something" gate reads.
+                activation: RowActivation::DefaultApp(deepest),
+                subject: profiles::FileMenuSubject::FoldedPath {
+                    levels: crumbs.len(),
+                },
+                crumbs,
             },
             [chip[0], chip[3]],
         )
@@ -37711,13 +38159,19 @@ impl Runtime<'_> {
     /// The file menu again, raised on the document this seat is showing and hung
     /// under the pill. **The same menu machine a right press on a file row
     /// raises, and its own list of rows** — which is the composition the two
-    /// rulings landed on: 「系统默认程序 / VS Code / 在 files 列中定位」 are
-    /// verbs about a path, so a window that grew a second popup for them here
-    /// would be a window where the two could come to disagree; but a surface
-    /// that *is* the preview must not offer `Open preview`, and a menu hung a
-    /// band under the pane's own `Reveal in Explorer` must not offer that
-    /// either. [`profiles::FileMenuSubject::Document`] is where the difference
-    /// is written down.
+    /// rulings landed on: 「系统默认程序 / 在 files 列中定位」 are verbs about a
+    /// path, so a window that grew a second popup for them here would be a
+    /// window where the two could come to disagree; but a surface that *is* the
+    /// preview must not offer `Open preview`, and a menu hung a band under the
+    /// pane's own `Reveal in Explorer` must not offer that either.
+    /// [`profiles::FileMenuSubject::Document`] is where the difference is
+    /// written down.
+    ///
+    /// **The file verbs live here and only here** since 2026-08-25: the `…`
+    /// chip beside this pill used to raise the same list on a folder nobody had
+    /// named, and it lists its own hidden levels now
+    /// ([`Self::open_preview_crumb_menu`]). One control about this document, one
+    /// control about the path behind the fold.
     fn open_preview_rail_menu(&mut self, seat: SeatId) -> Result<()> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let Some(measure) = self.preview_rail_measure(seat) else {
@@ -37737,6 +38191,7 @@ impl Runtime<'_> {
                 row: None,
                 activation: RowActivation::DefaultApp(path),
                 subject: profiles::FileMenuSubject::Document,
+                crumbs: Vec::new(),
             },
             [pill[0], pill[3]],
         )
@@ -44466,6 +44921,11 @@ impl Runtime<'_> {
         }
         if changed {
             self.heal_files_selections();
+            // A directory that has just landed is very often the one a locate
+            // was waiting on — see [`WindowRuntime::files_locate`]. Asked before
+            // the repaint, so the frame that first draws the row is the frame it
+            // is already scrolled into.
+            self.settle_files_locate();
             if self.refresh_chrome() {
                 self.present_chrome_change()?;
             }
@@ -45760,17 +46220,35 @@ impl Runtime<'_> {
     /// is the only place in the window that can answer. The same numbers reach
     /// the painter and [`seats::hit_files_root`], so the two cannot disagree
     /// about where the button ends.
+    ///
+    /// **In the face the caption is drawn in** (user report, 2026-08-25), which
+    /// is [`seats::seat_title_face`]'s whole subject: the head that holds the
+    /// keyboard draws its caption `Medium`, and this used to ask
+    /// `measure_chrome_text` — the face's regular weight by definition — for
+    /// every head alike. The shortfall is about 2%, it lands on the last glyph,
+    /// and the report was a column headed `BetterTermina|`. So the focus is asked
+    /// per seat rather than once: it is the same question the paint asks
+    /// (`placement.id == seats.focus()`), and the two must give one answer.
     fn measure_files_names(&mut self, names: &BTreeMap<SeatId, String>) -> BTreeMap<SeatId, f32> {
-        let size = bt_render::SEAT_TITLE_FONT_LOGICAL_PX
-            * self.window.renderer.metrics().scale_factor as f32;
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        let focus = self.seats.focus();
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32, face: git_panel::MeasureFace| {
+            renderer.measure_chrome_label(
+                gpu,
+                text,
+                size,
+                face.weight,
+                face.letter_spacing_em,
+                face.tabular_numerals,
+            )
+        };
         names
             .iter()
             .map(|(seat, name)| {
                 (
                     *seat,
-                    self.window
-                        .renderer
-                        .measure_chrome_text(&mut self.app.gpu, name, size),
+                    seats::files_root_name_width(name, scale, *seat == focus, &mut measure),
                 )
             })
             .collect()
@@ -46799,8 +47277,8 @@ impl Runtime<'_> {
     fn file_menu_layout(&mut self) -> Option<profiles::FileMenuLayout> {
         let menu = self.window.file_menu.as_ref()?;
         let point = menu.point;
-        let subject = menu.subject;
-        let editor = self.file_menu_editor();
+        let crumbs: Vec<String> = menu.crumbs.iter().map(|level| level.name.clone()).collect();
+        let look = self.file_menu_look(menu.subject, &crumbs);
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
@@ -46809,54 +47287,29 @@ impl Runtime<'_> {
             point,
             (width as f32, height as f32),
             scale,
-            subject,
-            editor,
+            &look,
             &mut measure,
         ))
     }
 
-    /// **The editor row's caption, or the empty string when this machine has no
-    /// editor** (user ruling 2026-08-24).
+    /// **Everything one file menu draws that its subject cannot carry** — the
+    /// folded levels' names, and the mark a `New terminal here` wears.
     ///
-    /// One string carries both the wording and the availability, which is the
-    /// shape [`profiles::file_menu_layout`] asks for and the reason it asks:
-    /// a caller that passed a name and a separate flag could pass a name with
-    /// the flag off, and the menu would then be sized for a row it does not draw.
-    ///
-    /// The probe is the application's, done once at start-up beside every other
-    /// "is this installed" question — a menu that shelled out to look for an
-    /// editor while it was being laid out would be a filesystem walk on the
-    /// pointer's path.
-    fn file_menu_editor(&self) -> &'static str {
-        // A proper noun in both languages: this row names the program, and a
-        // translated program name is a program the reader cannot find in their
-        // Start menu.
-        if self.app.editor.is_some() {
-            "VS Code"
-        } else {
-            ""
+    /// The names are the caller's because they belong to the *menu that is up*
+    /// (`FileMenuState::crumbs`) and this is asked from three places that each
+    /// already hold them; the mark is read here because "which profile is the
+    /// default" is a setting and [`Self::default_profile`] is the one reader of
+    /// it this window has (user ruling 2026-08-25).
+    fn file_menu_look<'a>(
+        &self,
+        subject: profiles::FileMenuSubject,
+        crumbs: &'a [String],
+    ) -> profiles::FileMenuLook<'a> {
+        profiles::FileMenuLook {
+            subject,
+            crumbs,
+            terminal: profiles::mark(self.default_profile()),
         }
-    }
-
-    /// Hand a file to the editor this machine has (user ruling 2026-08-24).
-    ///
-    /// **Spawned rather than handed to the shell**, which is the whole reason
-    /// [`profiles::find_vscode`] resolves `Code.exe` and not the `code.cmd` shim
-    /// beside it: `.cmd` means a command interpreter, and starting one to open
-    /// an editor would put a console window on screen and a quoting rule between
-    /// this window and a path with a space in it.
-    ///
-    /// A machine with no editor never reaches here — the row it would be reached
-    /// from is not drawn — and a spawn that fails is reported the way every
-    /// other recoverable failure in this file is.
-    fn open_in_editor(&mut self, path: &Path) -> Result<()> {
-        let Some(editor) = self.app.editor.clone() else {
-            return Ok(());
-        };
-        if let Err(error) = std::process::Command::new(&editor).arg(path).spawn() {
-            eprintln!("recoverable editor launch failure: {error}");
-        }
-        Ok(())
     }
 
     /// Raise the menu on one tree row.
@@ -46878,6 +47331,16 @@ impl Runtime<'_> {
         if target.activation.path().is_none() {
             return Ok(());
         }
+        // **A menu with no rows is not a menu** (user ruling 2026-08-25). The
+        // one subject that can be empty is the `…` chip's, and it can only be
+        // empty by arriving from a rail that is not folded — which is a bug
+        // upstream rather than a state to draw. Refusing here rather than
+        // drawing an empty frame is also what lets `profiles::file_menu_step`
+        // index its own list: the keyboard cannot be handed a menu with nothing
+        // in it.
+        if profiles::file_menu(target.subject).rows.is_empty() {
+            return Ok(());
+        }
         // E61: the opener closes the others. Not the float — that is a place, not
         // a popup, and this menu is very often *about a row inside it*.
         self.close_popups_except(Popup::File);
@@ -46886,6 +47349,7 @@ impl Runtime<'_> {
             row: target.row,
             activation: target.activation,
             subject: target.subject,
+            crumbs: target.crumbs,
             hover: None,
         });
         if self.refresh_chrome() {
@@ -46939,6 +47403,7 @@ impl Runtime<'_> {
                 }),
                 activation: files_row_activation(&root, key),
                 subject,
+                crumbs: Vec::new(),
             },
             [rect[0], rect[3]],
         )
@@ -46965,6 +47430,7 @@ impl Runtime<'_> {
                 }),
                 activation: files_row_activation(&files.files.root, &row.key),
                 subject,
+                crumbs: Vec::new(),
             });
         }
         let Some(seats::ChromeTarget::FilesRow { seat, index }) = self.chrome_target_at(position)
@@ -46988,6 +47454,7 @@ impl Runtime<'_> {
                 key,
             }),
             subject,
+            crumbs: Vec::new(),
         })
     }
 
@@ -47031,11 +47498,13 @@ impl Runtime<'_> {
         let Some(layout) = self.file_menu_layout() else {
             return Vec::new();
         };
-        let editor = self.file_menu_editor();
         let Some(menu) = self.window.file_menu.as_ref() else {
             return Vec::new();
         };
-        profiles::file_menu_build(&layout, menu.subject, editor, menu.hover)
+        let (subject, hover) = (menu.subject, menu.hover);
+        let crumbs: Vec<String> = menu.crumbs.iter().map(|level| level.name.clone()).collect();
+        let look = self.file_menu_look(subject, &crumbs);
+        profiles::file_menu_build(&layout, &look, hover)
     }
 
     fn close_file_menu(&mut self) -> Result<bool> {
@@ -50367,9 +50836,22 @@ impl Runtime<'_> {
         let Some(menu) = self.window.file_menu.take() else {
             return Ok(());
         };
-        let (activation, tree_row) = (menu.activation, menu.row);
+        let (activation, tree_row, crumbs) = (menu.activation, menu.row, menu.crumbs);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
+        }
+        // **A folded level is answered from the menu's own list and not from the
+        // target's path** (user ruling 2026-08-25). Every other row here acts on
+        // one path, which is what `activation` carries; this face has as many
+        // paths as it has rows, and each row carries its own — see
+        // [`FoldedLevel`]. Taken before the single-path gate below, because a
+        // row of this face is not about that path at all.
+        if let profiles::FileMenuRow::Crumb(at) = row {
+            let Some(level) = crumbs.get(at) else {
+                return Ok(());
+            };
+            let folder = level.folder.clone();
+            return self.locate_folder_in_files_column(&folder);
         }
         let Some(path) = activation.path().map(Path::to_path_buf) else {
             return Ok(());
@@ -50407,11 +50889,6 @@ impl Runtime<'_> {
             profiles::FileMenuRow::OpenWith => {
                 self.open_local_path(&path);
             }
-            // **The editor, and it is not the default-program door.** The row
-            // above asks Windows what a `.md` is for and may well get a browser;
-            // this asks for the program a reader said they edit with, which is
-            // why it is a second row rather than a second wording.
-            profiles::FileMenuRow::OpenWithEditor => self.open_in_editor(&path)?,
             // Only a tree row has a fold, and only a tree row carries the host
             // and key a fold needs. A breadcrumb's menu has neither and does not
             // offer the row — `file_menu`'s `Document` arm — so the absence is
@@ -50422,14 +50899,6 @@ impl Runtime<'_> {
                 }
             }
             profiles::FileMenuRow::NewTerminal => self.new_terminal_in_folder(&path)?,
-            profiles::FileMenuRow::ShowInFiles => {
-                // The file's folder, because a column is rooted at a directory:
-                // `show_folder_in_files_column` is the verb, unchanged, and the
-                // parent is the only thing a file can hand it.
-                if let Some(folder) = path.parent() {
-                    self.show_folder_in_files_column(folder)?;
-                }
-            }
             profiles::FileMenuRow::CopyPath => self.copy_path_to_clipboard(&path)?,
             profiles::FileMenuRow::InsertPath => self.insert_path_into_terminal(&path)?,
             // **The same audited door the three feet go through**
@@ -50441,6 +50910,11 @@ impl Runtime<'_> {
             profiles::FileMenuRow::Reveal => {
                 self.reveal_in_explorer(&path);
             }
+            // Answered above, before the single-path gate, because a row of this
+            // face is about its own folder and not about the menu's path. The
+            // arm is written out rather than wildcarded so that a fifth face
+            // reaching here is a compiler error and not a silence.
+            profiles::FileMenuRow::Crumb(_) => {}
         }
         Ok(())
     }
@@ -56230,7 +56704,14 @@ impl Runtime<'_> {
             // The folder's own road, and the one that stays in this window: the
             // column this tab already has is pointed at it, and a tab without one
             // gets the column `Ctrl+Shift+B` would have opened.
-            HyperlinkActivation::FilesColumn(path) => self.show_folder_in_files_column(&path)?,
+            // **The soft verb since 2026-08-25**, which is not a change to this
+            // arm's meaning but to what "point the column at this folder" means
+            // everywhere: a folder printed by a program is very often inside the
+            // tree the column is already rooted at — a prompt's own cwd always
+            // is — and re-rooting on it threw a whole repository away to show a
+            // subtree of it. Outside the tree, `locate_folder_in_files_column`
+            // is the old verb exactly.
+            HyperlinkActivation::FilesColumn(path) => self.locate_folder_in_files_column(&path)?,
             HyperlinkActivation::Blocked => {
                 self.window.hyperlink_hover.show_blocked(hyperlink);
                 self.publish_interaction_frame()?;
@@ -63671,18 +64152,13 @@ impl Runtime<'_> {
                 Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowUp) => {
                     let forwards = matches!(event.logical_key, Key::Named(NamedKey::ArrowDown));
                     // **The rows this menu is actually showing** (user rulings
-                    // 2026-08-24 and 2026-08-25): a folder's menu has no `Open`
-                    // and the editor row exists only on a machine that has an
-                    // editor, so a walk over the vocabulary rather than over the
-                    // subject's own list would offer a row nobody drew.
-                    let editor = !self.file_menu_editor().is_empty();
+                    // 2026-08-24 and 2026-08-25): a folder's menu has no `Open`,
+                    // a breadcrumb's has no `Reveal`, and the `…` chip's has
+                    // nothing but places — so a walk over the vocabulary rather
+                    // than over the subject's own list would offer a row nobody
+                    // drew.
                     if let Some(menu) = self.window.file_menu.as_mut() {
-                        menu.hover = Some(profiles::file_menu_step(
-                            menu.subject,
-                            editor,
-                            menu.hover,
-                            forwards,
-                        ));
+                        menu.hover = profiles::file_menu_step(menu.subject, menu.hover, forwards);
                     }
                     if self.refresh_overlay() {
                         self.present_chrome_change()?;
@@ -67451,6 +67927,113 @@ mod mouse_trace_station_tests {
                 "the folder door has an outcome that does not say `{label}`"
             );
         }
+    }
+}
+
+/// **Re-rooting a files column is one door, and every road to it goes through
+/// the range question first** (user ruling 2026-08-25).
+///
+/// 「打开文件不许重根文件树」, and the shape of that promise is not a value any
+/// assertion can read: it is *which functions call which*. A door added later is
+/// one more call to one method, and nothing about it would fail. So this reads
+/// the file as text, for [`mouse_trace_station_tests`]' reason exactly.
+///
+/// Both halves are needed. The first says opening a file touches nothing about
+/// the tree — that is the report's own sentence, and the reason the report
+/// blamed the open is that the reroot happened one gesture later, so the pin has
+/// to hold the open *and* the doors the report actually came through. The second
+/// says the hard verb has exactly one caller and it is the soft one, which is
+/// what makes "only a folder outside the tree re-roots" true rather than nearly
+/// true.
+#[cfg(test)]
+mod files_locate_door_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's —
+    /// [`super::mouse_trace_station_tests`]' own reader.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// **Every function on the road from a double click to a document, and not
+    /// one of them says anything about a root.**
+    ///
+    /// RED EVIDENCE (2026-08-25): green before the change and green after, and
+    /// that is the finding rather than a weakness — the report blamed the open,
+    /// and reading these six bodies is what showed the open was innocent. What
+    /// was guilty is the pin below.
+    ///
+    /// MUTATIONS: make any of these six re-root, which is the shape of every
+    /// "helpfully follow the file" change somebody will one day want to make.
+    #[test]
+    fn opening_a_file_never_moves_the_files_tree() {
+        // Assembled rather than written out, so a pin that scans the file it
+        // lives in cannot match its own text.
+        let verbs = [
+            ["reroot", "_files_column"].concat(),
+            ["show_folder", "_in_files_column"].concat(),
+            ["locate_folder", "_in_files_column"].concat(),
+        ];
+        for signature in [
+            "    fn open_preview(",
+            "    fn open_preview_at(",
+            "    fn open_preview_file(",
+            "    fn open_preview_file_on(",
+            "    fn open_preview_source_on(",
+            "    fn activate_files_row(",
+        ] {
+            let text = body(signature);
+            for verb in &verbs {
+                assert!(
+                    !text.contains(verb.as_str()),
+                    "{signature} moves the files tree by calling `{verb}` — \
+                     opening a file has no side effect on the tree"
+                );
+            }
+        }
+    }
+
+    /// **The hard verb has one caller, and it is the soft one.**
+    ///
+    /// RED EVIDENCE (2026-08-25): before the change `show_folder_in_files_column`
+    /// had four callers — the file menu's `Show in files column`, a breadcrumb
+    /// segment, the `…` chip's menu row and a printed folder's plain click — and
+    /// every one of them re-rooted whatever the column was already showing. That
+    /// is the screenshot: a column that had been a whole repository showing one
+    /// folder of it.
+    ///
+    /// MUTATIONS: call the hard verb from anywhere else; call `reroot_files_
+    /// column` from a fifth place (the three it has are the root menu's rows,
+    /// the folder chooser, a folder dropped on a column, and a folder row's
+    /// double click — each of which *names a root* rather than a place to go).
+    #[test]
+    fn re_rooting_is_reached_only_after_the_question_about_range() {
+        let hard = ["self.show_folder", "_in_files_column("].concat();
+        let soft = ["    fn locate_folder", "_in_files_column("].concat();
+        let calls: Vec<&str> = SOURCE
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains(hard.as_str()))
+            .collect();
+        assert_eq!(
+            calls.len(),
+            2,
+            "the hard verb is called from two places — the soft verb's two arms \
+             — and here it is called from {}:\n{calls:#?}",
+            calls.len()
+        );
+        assert_eq!(
+            body(soft.as_str()).matches(hard.as_str()).count(),
+            2,
+            "and both of them are inside the verb that asks whether the folder \
+             is inside the tree first"
+        );
     }
 }
 
@@ -95023,6 +95606,218 @@ mod tests {
         );
     }
 
+    /// PIN (user ruling 2026-08-25) — **"inside this tree" is a question about
+    /// whole path components, and the root is inside itself.**
+    ///
+    /// The predicate the whole soft locate turns on: a folder inside the
+    /// column's tree is opened down to, and only one outside it re-roots. Two
+    /// answers are load-bearing and neither is obvious. The **root itself**
+    /// answers `Some("")` — a breadcrumb segment naming the column's own root
+    /// must scroll to the top of the tree rather than re-root onto the tree it
+    /// is already showing. And a **sibling whose name starts with the root's**
+    /// answers `None`: `D:\development` is not inside `D:\dev`, which is exactly
+    /// the trap a string prefix falls into and the reason this is component-wise.
+    ///
+    /// RED EVIDENCE (2026-08-25): the function did not exist — every one of
+    /// these doors re-rooted unconditionally, which is the report
+    /// (「打开文件不许重根文件树」).
+    ///
+    /// MUTATIONS: compare with `str::starts_with` and the sibling arm goes red;
+    /// answer `None` for the root and a press on the first crumb throws the tree
+    /// away.
+    #[test]
+    fn a_folder_is_inside_a_tree_by_whole_components_and_the_root_is_inside_itself() {
+        let root = r"D:\dev";
+        assert_eq!(
+            files_key_within(root, Path::new(r"D:\dev")),
+            Some(String::new())
+        );
+        assert_eq!(
+            files_key_within(root, Path::new(r"D:\dev\crates\bt-app")),
+            Some("/crates/bt-app".to_owned()),
+            "and the id is the one `files::full_path` would spend to get back"
+        );
+        assert_eq!(
+            files::full_path(root, "/crates/bt-app"),
+            PathBuf::from(r"D:\dev\crates\bt-app"),
+            "which is the round trip that makes the id worth minting"
+        );
+        assert_eq!(
+            files_key_within(root, Path::new(r"D:\development\crates")),
+            None,
+            "a sibling whose name begins with the root's is not inside it"
+        );
+        assert_eq!(files_key_within(root, Path::new(r"D:\")), None);
+        assert_eq!(
+            files_key_within("", Path::new(r"D:\dev")),
+            None,
+            "a column with no root contains nothing"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-25) — **the way down is opened root first, and
+    /// the folder asked for is opened too.**
+    ///
+    /// Root first because that is the order the tree reads them in, so a column
+    /// that has read nothing asks the worker for its directories in the order it
+    /// will draw them. The target's own id is on the list because "locate this
+    /// level" means the same thing a press on that row means, and a press on a
+    /// folder row opens it.
+    ///
+    /// RED GATE: drop the root's `""`, and a locate into a tree that has read
+    /// nothing never asks for the top level; drop the last entry and the folder
+    /// you asked for stays shut.
+    #[test]
+    fn the_way_down_to_a_row_is_opened_from_the_root_and_includes_it() {
+        assert_eq!(
+            files_open_chain("/crates/bt-app/src"),
+            vec![
+                String::new(),
+                "/crates".to_owned(),
+                "/crates/bt-app".to_owned(),
+                "/crates/bt-app/src".to_owned(),
+            ]
+        );
+        assert_eq!(files_open_chain(""), vec![String::new()]);
+    }
+
+    /// PIN (user ruling 2026-08-25) — **the `…` chip's list runs deepest first,
+    /// and its rows point where they say.**
+    ///
+    /// Windows Explorer's own breadcrumb `…` is the reference the ruling handed
+    /// over: 「由深到浅排,最近的隐藏级在最上,一路到根方向」. The geometry hands
+    /// over the *fold* order, which is the other way round, so the turn has to
+    /// happen somewhere and this is where.
+    ///
+    /// **Asked with three levels**, because a fixture with two is symmetrical
+    /// under the very mistake this pin exists to catch.
+    ///
+    /// RED EVIDENCE (2026-08-25): the chip did not build a list at all — it
+    /// raised the file menu on `folded.last()`, one folder, unnamed.
+    ///
+    /// MUTATIONS: drop the `.rev()`; take the name from one segment and the
+    /// folder from another.
+    #[test]
+    fn the_folded_levels_read_from_the_deepest_towards_the_root() {
+        let path = Path::new(r"D:\Developer\BetterTerminal\test-assets\huge.txt");
+        // What `preview_rail_geometry` folds: the middle, nearest the root
+        // first.
+        let levels = folded_levels(path, &[1, 2, 3]);
+        assert_eq!(
+            levels
+                .iter()
+                .map(|level| level.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["test-assets", "BetterTerminal", "Developer"],
+        );
+        assert_eq!(
+            levels
+                .iter()
+                .map(|level| level.folder.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                PathBuf::from(r"D:\Developer\BetterTerminal\test-assets"),
+                PathBuf::from(r"D:\Developer\BetterTerminal"),
+                PathBuf::from(r"D:\Developer"),
+            ],
+            "every row goes to the place it names"
+        );
+        assert!(folded_levels(path, &[]).is_empty());
+    }
+
+    /// PIN (user ruling 2026-08-25) — **every control the breadcrumb row grew
+    /// says what it is, and the two that name a place say the whole place.**
+    ///
+    /// 「预览头与地址行/面包屑行的新控件全部无 tooltip」 was the report. The two
+    /// interesting halves are the ones a static string could not have covered:
+    /// a segment's tip is the **whole path** it stands for, because the word
+    /// drawn in it is only that path's last piece; and the `…`'s is the run of
+    /// levels it is hiding, **root first**, because it is a stretch of a path
+    /// being read left to right — the opposite order from the *menu* behind it,
+    /// which is a list of destinations.
+    ///
+    /// RED EVIDENCE (2026-08-25): none of these anchors existed, so hovering any
+    /// of the five produced nothing at all.
+    ///
+    /// MUTATIONS: give the flip one wording for both faces; give `⧉` one
+    /// wording for both rows; turn the fold's tip round.
+    #[test]
+    fn the_breadcrumb_rows_controls_each_say_what_they_are() {
+        let path = PathBuf::from(r"D:\Developer\BetterTerminal\test-assets\huge.txt");
+        let segments = crumb_segments(&path);
+        let folded = [1, 2, 3];
+        let tip =
+            |tip, kind, to_source| preview_rail_tip_text(tip, kind, &segments, &folded, to_source);
+        assert_eq!(
+            tip(
+                seats::PreviewRailTip::Crumb(2),
+                seats::PreviewRailKind::Crumbs,
+                false
+            ),
+            r"D:\Developer\BetterTerminal",
+            "a segment names the whole place, not the word drawn in it"
+        );
+        assert_eq!(
+            tip(
+                seats::PreviewRailTip::Fold,
+                seats::PreviewRailKind::Crumbs,
+                false
+            ),
+            format!(
+                "Developer {sep} BetterTerminal {sep} test-assets",
+                sep = seats::PREVIEW_CRUMB_SEPARATOR
+            ),
+            "and the chip names the run it stands for, the way the row reads"
+        );
+        // `⧉` is one glyph on both rows and two sentences, which is the whole
+        // reason it needed a tip.
+        assert_ne!(
+            tip(
+                seats::PreviewRailTip::Copy,
+                seats::PreviewRailKind::Crumbs,
+                false
+            ),
+            tip(
+                seats::PreviewRailTip::Copy,
+                seats::PreviewRailKind::Address,
+                false
+            ),
+        );
+        // And `</>` names the destination rather than the state, because the
+        // button changes.
+        assert_ne!(
+            tip(
+                seats::PreviewRailTip::Flip,
+                seats::PreviewRailKind::Crumbs,
+                true
+            ),
+            tip(
+                seats::PreviewRailTip::Flip,
+                seats::PreviewRailKind::Crumbs,
+                false
+            ),
+        );
+        for text in [
+            tip(
+                seats::PreviewRailTip::Open,
+                seats::PreviewRailKind::Crumbs,
+                false,
+            ),
+            tip(
+                seats::PreviewRailTip::Flip,
+                seats::PreviewRailKind::Crumbs,
+                true,
+            ),
+            tip(
+                seats::PreviewRailTip::Copy,
+                seats::PreviewRailKind::Address,
+                false,
+            ),
+        ] {
+            assert!(!text.is_empty(), "a control that registers has words");
+        }
+    }
+
     /// PIN — K143, collapsed. **The menu's first row is one word.**
     ///
     /// While there were two doors this row had to be named after whichever one
@@ -95041,7 +95836,11 @@ mod tests {
     fn the_menus_first_row_says_one_thing_now_that_there_is_one_door() {
         let root = r"C:\work";
         assert_eq!(
-            profiles::FileMenuRow::Open.text(profiles::FileMenuSubject::File, ""),
+            profiles::FileMenuRow::Open.text(&profiles::FileMenuLook {
+                subject: profiles::FileMenuSubject::File,
+                crumbs: &[],
+                terminal: marks::ChromeMark::ProfilePowerShell,
+            }),
             "Open preview"
         );
         for name in ["/shot.png", "/notes.md", "/setup.exe"] {

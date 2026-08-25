@@ -497,8 +497,10 @@ pub enum Text {
     /// 2026-08-24) — the breadcrumb row's `Open ⌄` names the door rather than
     /// the destination, so this row is the one that says which door.
     FileMenuOpenDefaultApp,
-    /// Stand the files column in this file's folder.
-    FileMenuShowInFiles,
+    // `FileMenuShowInFiles` is **retired** (user ruling 2026-08-25) with the row
+    // it captioned: every segment of the breadcrumb above the menu now stands
+    // the column on that level without leaving the tree, so a row saying the
+    // same thing was the surface repeating itself.
     FileMenuCopyPath,
     /// The widest row, and therefore the one that decides the menu's width.
     FileMenuInsertPath,
@@ -508,6 +510,30 @@ pub enum Text {
     /// the destinations are named — a caption that said "Open with…" would be a
     /// button restating the list it opens.
     PreviewRailOpen,
+    /// That pill's **tip** (user ruling 2026-08-25 — 「新控件全部挂 tooltip」).
+    ///
+    /// [`Self::PaneChevronTip`]'s shape and its reason: a chevron says only
+    /// "there is a list here" and never what is on it, so the tip names the
+    /// first thing on the list and says there is more. The pill's own caption is
+    /// one word, so the tip is not a repetition of it.
+    PreviewRailOpenTip,
+    /// `⧉` on a **page's** address row — the tip on the button that copies the
+    /// address (user ruling 2026-08-25).
+    ///
+    /// Its own entry beside [`Self::FileMenuCopyPath`], which is the tip the
+    /// same glyph carries on a breadcrumb: one verb, two kinds of address, and
+    /// the tip is where the difference is said. A single string for both would
+    /// call a URL a path.
+    PreviewCopyAddress,
+    /// `</>` while the pane is showing a rendered document — press it for the
+    /// source (user ruling 2026-08-25).
+    PreviewFlipToSource,
+    /// `</>` while the pane is showing the source — press it for the rendering.
+    ///
+    /// Two entries and not one, on [`Self::PreviewWebReload`]'s precedent: the
+    /// button changes, so a single word for both would be the row describing
+    /// what it was a press ago.
+    PreviewFlipToRendered,
 
     // ── the files tree ─────────────────────────────────────────────────────
     FilesLoading,
@@ -2000,8 +2026,11 @@ impl Text {
             // ── a file row's menu ──────────────────────────────────────────
             Self::FileMenuOpenPreview => pick(lang, "Open preview", "打开预览"),
             Self::FileMenuOpenDefaultApp => pick(lang, "Open in default app", "用系统默认程序打开"),
-            Self::FileMenuShowInFiles => pick(lang, "Show in files column", "在 files 列中定位"),
             Self::PreviewRailOpen => pick(lang, "Open", "打开"),
+            Self::PreviewRailOpenTip => pick(lang, "Open and more", "打开等操作"),
+            Self::PreviewCopyAddress => pick(lang, "Copy address", "复制地址"),
+            Self::PreviewFlipToSource => pick(lang, "View source", "查看源码"),
+            Self::PreviewFlipToRendered => pick(lang, "View rendered", "查看渲染结果"),
             Self::FileMenuCopyPath => pick(lang, "Copy path", "复制路径"),
             Self::FileMenuInsertPath => pick(lang, "Insert path into terminal", "把路径插入终端"),
 
@@ -2981,7 +3010,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 473] = [
+    pub const ALL: [Self; 476] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3079,8 +3108,11 @@ impl Text {
         Self::PinnedSection,
         Self::FileMenuOpenPreview,
         Self::FileMenuOpenDefaultApp,
-        Self::FileMenuShowInFiles,
         Self::PreviewRailOpen,
+        Self::PreviewRailOpenTip,
+        Self::PreviewCopyAddress,
+        Self::PreviewFlipToSource,
+        Self::PreviewFlipToRendered,
         Self::FileMenuCopyPath,
         Self::FileMenuInsertPath,
         Self::FilesLoading,
