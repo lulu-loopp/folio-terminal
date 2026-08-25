@@ -265,9 +265,8 @@ mod tests {
     use bt_transcript::CapturedCell;
     use bt_transcript::TranscriptId;
     use bt_viewport::{
-        FrameViewportOrigin, GridCursor, HorizontalOverflowOwner, LiveMathOccurrenceId,
-        MathBlockAnchor, MathBlockDisplay, MathBlockPlacement, ProjectedMathArtifact,
-        ViewportFrame,
+        BlockOverflowOwner, FrameViewportOrigin, GridCursor, LiveMathOccurrenceId, MathBlockAnchor,
+        MathBlockDisplay, MathBlockPlacement, ProjectedMathArtifact, ViewportFrame,
     };
 
     fn source_frame(text: &str) -> ViewportFrame {
@@ -377,7 +376,7 @@ mod tests {
             content_offset_subpixels: 0,
             clip_height_subpixels: 1,
             display: MathBlockDisplay::Rendered,
-            horizontal_overflow: HorizontalOverflowOwner::Block,
+            horizontal_overflow: BlockOverflowOwner::Block,
             horizontal_scroll_px: 0,
             vertical_scroll_px: 0,
             toolbar_visible: false,

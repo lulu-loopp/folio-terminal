@@ -1,6 +1,7 @@
 //! Per-viewport projection, layout cache and scroll anchoring.
 
 mod height_tree;
+pub mod horizontal;
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -388,8 +389,16 @@ pub enum MathBlockDisplay {
     Source,
 }
 
+/// Who scrolls a **math block** that is wider than the pane: the block, inside its own frame, or
+/// the pane.
+///
+/// The name says `Block` because this has never had anything to do with terminal line wrapping,
+/// and while it was called `HorizontalOverflowOwner` it read like the half-built terminal setting
+/// it is not (`docs/plans/horizontal-scroll/plan.md` §0 fact 2). Two different "line wrapping"
+/// under one vocabulary is how a reader — or an implementer — comes to believe the terminal
+/// already has the switch this plan is proposing to add.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HorizontalOverflowOwner {
+pub enum BlockOverflowOwner {
     Block,
     Pane,
 }
@@ -411,7 +420,7 @@ pub struct MathBlockPlacement {
     /// clip remains an independent outer bound in the renderer.
     pub clip_height_subpixels: i64,
     pub display: MathBlockDisplay,
-    pub horizontal_overflow: HorizontalOverflowOwner,
+    pub horizontal_overflow: BlockOverflowOwner,
     pub horizontal_scroll_px: u32,
     pub vertical_scroll_px: u32,
     pub toolbar_visible: bool,
@@ -2364,7 +2373,7 @@ impl ViewportProjection {
                             content_offset_subpixels: artifact.vertical_padding_subpixels,
                             clip_height_subpixels: artifact.height_subpixels,
                             display: MathBlockDisplay::Rendered,
-                            horizontal_overflow: HorizontalOverflowOwner::Block,
+                            horizontal_overflow: BlockOverflowOwner::Block,
                             horizontal_scroll_px: 0,
                             vertical_scroll_px: 0,
                             toolbar_visible: false,
@@ -2464,7 +2473,7 @@ impl ViewportProjection {
                                 content_offset_subpixels: 0,
                                 clip_height_subpixels: artifact.height_subpixels,
                                 display: MathBlockDisplay::Rendered,
-                                horizontal_overflow: HorizontalOverflowOwner::Block,
+                                horizontal_overflow: BlockOverflowOwner::Block,
                                 horizontal_scroll_px: 0,
                                 vertical_scroll_px: 0,
                                 toolbar_visible: false,
@@ -2697,7 +2706,7 @@ impl ViewportProjection {
                     // logical rows. It never paints into a neighbour's fixed terminal row.
                     clip_height_subpixels,
                     display: MathBlockDisplay::Rendered,
-                    horizontal_overflow: HorizontalOverflowOwner::Block,
+                    horizontal_overflow: BlockOverflowOwner::Block,
                     horizontal_scroll_px: 0,
                     vertical_scroll_px: 0,
                     toolbar_visible: false,
@@ -3875,10 +3884,10 @@ struct ImplicitCellLink {
 /// same string: the reader sees `D:\src\a.md` and the link points at `file:///D:/src/a.md`. That is
 /// exactly the relationship an OSC 8 `file:` link has between its label and its target, which is why
 /// [`ViewportFrame::rejoined_across_break`] can already read it.
-struct InferredLink {
-    range: HyperlinkRange,
-    uri: String,
-    resting_dotted: bool,
+pub struct InferredLink {
+    pub range: HyperlinkRange,
+    pub uri: String,
+    pub resting_dotted: bool,
 }
 
 /// Find the bare URLs in a run of captured rows, **one logical line at a time**, and report them
@@ -4291,37 +4300,62 @@ fn word_class(cell: &CapturedCell) -> WordClass {
     }
 }
 
-/// The last visual cell of a frozen line's **final** row, when that row is exactly full.
+/// The last visual cell of a frozen line's **final** fragment, when that fragment exactly fills
+/// the grid it was captured on.
 ///
-/// A frozen logical line ends where the application ended it, so its final row is the one physical
-/// row §7.1.5k ①'s truncation gate is about; every row above it is a soft wrap this plane already
-/// rejoined and which the gate must never see. The wrap is replayed by exactly the rule
-/// [`layout_frozen_line`] lays cells by — one cluster at a time, a new row when the next cluster
-/// would not fit — because a second opinion about where a row breaks is a second opinion about
-/// which references are suspect.
-fn frozen_line_end_cell(line: &FrozenLine, columns: usize) -> Option<LineEndCell> {
-    let mut used = 0usize;
+/// A frozen logical line ends where the application ended it, so its final fragment is the one
+/// physical row §7.1.5k ①'s truncation gate is about; every fragment above it is a soft wrap this
+/// plane already rejoined and which the gate must never see. A `wrap_split` line's final fragment
+/// is soft-wrapped and is still the one the gate reads — nothing was rejoined onto it, which is
+/// precisely what `wrap_split` records.
+///
+/// # The ruler is the capture, not the pane
+///
+/// The width compared against is `PhysicalFragment::captured_columns`, the grid this fragment came
+/// off. Replaying the wrap at the pane's current width — what this did until 2026-08-24 — made the
+/// verdict move when the reader dragged the window: a reference that filled an eighty-column row
+/// stopped being suspect at a hundred columns, and started again on the way back. The application
+/// wrote at one width and only that width can say whether it ran out of row
+/// (`docs/plans/horizontal-scroll/plan.md` §5.4).
+///
+/// A fragment with no capture geometry (`captured_columns == 0`) cannot answer the gate's question
+/// at all, so it declines rather than inventing a width.
+///
+/// This is a **suppression on a necessary condition** and never a claim that anything was
+/// truncated: a reference that exactly fills its row and the front half of one the application cut
+/// are the same picture within one row, so the gate refuses to promise either. Asserting that a
+/// truncation happened would need the other two proofs as well — a payload budget actually
+/// exhausted, and source that actually remains — and this build makes no such assertion anywhere
+/// (plan §5.4 clause 4).
+fn frozen_line_end_cell(line: &FrozenLine) -> Option<LineEndCell> {
+    let fragment = line.fragments.last()?;
+    if fragment.captured_columns == 0 {
+        return None;
+    }
+    let start = fragment.byte_start as usize;
+    let end = (fragment.byte_end as usize).min(line.text.len());
+    let mut used = 0u32;
+    let mut byte_start = start;
     let mut last: Option<LineEndCell> = None;
-    for (index, cluster) in graphemes(&line.text).enumerate() {
-        let byte_start = line.grapheme_boundaries[index] as usize;
-        let width = cluster_width(cluster).min(columns);
+    for cluster in graphemes(line.text.get(start..end)?) {
+        let width = cluster_width(cluster) as u32;
         if width == 0 {
             // A zero-width cluster joins the cell in front of it and widens nothing.
             if let Some(cell) = last.as_mut() {
                 cell.byte_end = byte_start + cluster.len();
             }
-            continue;
+        } else {
+            used = used.saturating_add(width);
+            last = Some(LineEndCell {
+                byte_start,
+                byte_end: byte_start + cluster.len(),
+            });
         }
-        if used != 0 && used + width > columns {
-            used = 0;
-        }
-        used += width;
-        last = Some(LineEndCell {
-            byte_start,
-            byte_end: byte_start + cluster.len(),
-        });
+        byte_start += cluster.len();
     }
-    (used == columns).then_some(last).flatten()
+    (used == fragment.captured_columns)
+        .then_some(last)
+        .flatten()
 }
 
 fn layout_frozen_line(
@@ -4332,7 +4366,7 @@ fn layout_frozen_line(
     // `None` is a caller that only wants to know how many rows this line takes, and an inferred
     // link never changes that. Asking the ledger there would run the path lexer once per line of a
     // hundred-thousand-line transcript to produce an answer nobody reads.
-    let implicit_links = inferred_links_in(&line.text, frozen_line_end_cell(line, columns), paths)
+    let implicit_links = inferred_links_in(&line.text, frozen_line_end_cell(line), paths)
         .into_iter()
         .filter(|inferred| {
             !line.styles.iter().any(|span| {
@@ -4350,6 +4384,9 @@ fn layout_frozen_line(
         anchors: Vec::with_capacity(columns),
         continues: true,
     }];
+    // Byte queries arrive in ascending order, one per cluster, so the span list is walked once
+    // per line instead of once per cell of it.
+    let mut styles = horizontal::StyleCursor::new(&line.styles);
     for (grapheme_index, cluster) in graphemes(&line.text).enumerate() {
         let width = cluster_width(cluster).min(columns);
         if width == 0 {
@@ -4370,10 +4407,7 @@ fn layout_frozen_line(
             });
         }
         let byte_start = line.grapheme_boundaries[grapheme_index];
-        let span = line
-            .styles
-            .iter()
-            .find(|span| span.byte_start <= byte_start && byte_start < span.byte_end);
+        let span = styles.at(byte_start);
         let mut cell = CapturedCell::plain(cluster);
         if let Some(span) = span {
             cell.style = span.style.clone();
@@ -4686,6 +4720,7 @@ mod tests {
         let staged = StagedRow {
             id: StagingId(1),
             row: CapturedRow {
+                captured_columns: cells.len() as u32,
                 cells,
                 continues: false,
                 shell_mark: None,
@@ -5173,6 +5208,7 @@ mod tests {
             .live_frame(
                 nz32(13),
                 vec![CapturedRow {
+                    captured_columns: cells.len() as u32,
                     cells,
                     continues: false,
                     shell_mark: None,
@@ -5236,11 +5272,13 @@ mod tests {
                 nz32(9),
                 vec![
                     CapturedRow {
+                        captured_columns: first_row.len() as u32,
                         cells: first_row,
                         continues: true,
                         shell_mark: None,
                     },
                     CapturedRow {
+                        captured_columns: second_row.len() as u32,
                         cells: second_row,
                         continues: false,
                         shell_mark: None,
@@ -5315,6 +5353,7 @@ mod tests {
                 cell.hyperlink = Some(link.clone());
             }
             CapturedRow {
+                captured_columns: cells.len() as u32,
                 cells,
                 // Two printed lines, not one wrapped one — which is the whole
                 // difference between this fixture and the pin above it.
@@ -5419,11 +5458,13 @@ mod tests {
                 nz32(9),
                 vec![
                     CapturedRow {
+                        captured_columns: first_row.len() as u32,
                         cells: first_row,
                         continues: true,
                         shell_mark: None,
                     },
                     CapturedRow {
+                        captured_columns: second_row.len() as u32,
                         cells: second_row,
                         continues: false,
                         shell_mark: None,
@@ -5548,8 +5589,16 @@ mod tests {
         grid
     }
 
-    /// One frozen logical line of `text`, with no styles and no OSC 8 of its own.
+    /// One frozen logical line of `text`, with no styles and no OSC 8 of its own, captured on a
+    /// grid one column wider than the text needs — so it stops short of the row's last cell and
+    /// §7.1.5k ①'s gate has nothing to say about it.
     fn frozen_line_of(text: &str) -> FrozenLine {
+        frozen_line_captured_on(text, bt_unicode::text_width(text) as u32 + 1)
+    }
+
+    /// The same line, captured on a grid of a stated width — the one fact the truncation gate
+    /// reads, and the reason it no longer moves when the pane does.
+    fn frozen_line_captured_on(text: &str, captured_columns: u32) -> FrozenLine {
         FrozenLine {
             id: TranscriptId(7),
             source_generation: SourceGeneration(3),
@@ -5561,12 +5610,40 @@ mod tests {
                 })
                 .chain(std::iter::once(text.len() as u32))
                 .collect(),
+            fragments: vec![bt_transcript::PhysicalFragment {
+                byte_start: 0,
+                byte_end: text.len() as u32,
+                soft_wrapped: false,
+                captured_columns,
+            }],
             text: text.to_owned(),
             styles: Vec::new(),
-            fragments: Vec::new(),
             shell_marks: Vec::new(),
             wrap_split: false,
         }
+    }
+
+    /// One frozen logical line built the way the store builds them, from physical rows captured
+    /// on a grid `captured_columns` wide — the only fixture with real fragment provenance.
+    fn frozen_line_from_rows(rows: &[(&str, bool)], captured_columns: u32) -> FrozenLine {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(64).unwrap());
+        let mut finalized = Vec::new();
+        for (text, continues) in rows {
+            finalized.extend(
+                store
+                    .capture(CapturedRow::plain_on_grid(
+                        text,
+                        *continues,
+                        captured_columns,
+                    ))
+                    .finalized,
+            );
+        }
+        finalized
+            .pop()
+            .expect("the last row ends the line")
+            .line
+            .clone()
     }
 
     /// The distinct link targets one frozen line's cells carry, in reading order.
@@ -5603,10 +5680,15 @@ mod tests {
     /// a closing bracket and a full-width stop sitting on the last cell — are the other half of
     /// the rule: the *candidate* never reached the end, so nothing is suspect.
     ///
-    /// It is scenario 63 as well, read at the frozen plane: the two widths below are asked of
+    /// It is scenario 63 as well, read at the frozen plane: the two lines below are asked of
     /// **one** ledger that already answers yes, and they answer differently. A stale `yes` cannot
-    /// light a span, because the span and its suspicion are re-derived from the current geometry on
-    /// every pass rather than remembered from the width the probe was sent at.
+    /// light a span, because the span and its suspicion are re-derived on every pass rather than
+    /// remembered from the width the probe was sent at.
+    ///
+    /// What they are re-derived *from* changed on 2026-08-24: the frozen plane now asks the grid
+    /// each fragment was captured on rather than the width the pane happens to be, so the two
+    /// lines below differ in their **capture** and the same line answers alike at every pane width
+    /// (`docs/plans/horizontal-scroll/plan.md` §5.4).
     #[test]
     fn a_printed_reference_that_fills_its_row_is_pressed_down_on_both_planes() {
         const PATH: &str = "D:\\src\\a.md";
@@ -5644,17 +5726,23 @@ mod tests {
         );
         assert_eq!(frame.hyperlink_at(0, 0).expect("a link").uri, uri);
 
-        // Frozen plane, the same three placements — the wrap is replayed by the layout's own rule.
-        let line = frozen_line_of(PATH);
-        assert_eq!(
-            frozen_link_targets(&line, PATH.len(), &ledger),
-            Vec::<String>::new(),
-            "scenario 68: the final frozen row is exactly full"
-        );
-        assert_eq!(
-            frozen_link_targets(&line, PATH.len() + 1, &ledger),
-            std::slice::from_ref(&uri)
-        );
+        // Frozen plane, the same three placements — judged by the grid each was captured on.
+        let filled = frozen_line_captured_on(PATH, PATH.len() as u32);
+        for columns in [PATH.len(), PATH.len() + 1, PATH.len() * 3] {
+            assert_eq!(
+                frozen_link_targets(&filled, columns, &ledger),
+                Vec::<String>::new(),
+                "scenario 68 laid out at {columns} columns: the row it was written on was full"
+            );
+        }
+        let roomy = frozen_line_captured_on(PATH, PATH.len() as u32 + 1);
+        for columns in [PATH.len(), PATH.len() + 1, PATH.len() * 3] {
+            assert_eq!(
+                frozen_link_targets(&roomy, columns, &ledger),
+                std::slice::from_ref(&uri),
+                "one blank column past it at {columns} columns: an ordinary link"
+            );
+        }
         assert_eq!(
             frozen_link_targets(
                 &frozen_line_of(&format!("({PATH})")),
@@ -5696,14 +5784,17 @@ mod tests {
         roomy.cells.push(CapturedCell::plain(" "));
         let (frame, _) = live_frame_of_paths(vec![roomy], ledger.clone());
         assert_eq!(frame.hyperlink_at(0, 0).expect("a link").uri, uri);
-        // The frozen plane measures the same wrap: `D:\src\` is seven columns and `文` is two.
-        let line = frozen_line_of("D:\\src\\文");
+        // The frozen plane counts the same cells: `D:\src\` is seven columns and `文` is two.
         assert_eq!(
-            frozen_link_targets(&line, 9, &ledger),
+            frozen_link_targets(&frozen_line_captured_on("D:\\src\\文", 9), 9, &ledger),
             Vec::<String>::new(),
-            "nine columns is exactly full"
+            "a nine-column grid is exactly full"
         );
-        assert_eq!(frozen_link_targets(&line, 10, &ledger), [uri]);
+        assert_eq!(
+            frozen_link_targets(&frozen_line_captured_on("D:\\src\\文", 10), 9, &ledger),
+            [uri],
+            "captured with a column to spare, and laid out narrower — still an ordinary link"
+        );
     }
 
     /// §7.1.5k ② at the cells (scenarios 56 and 57): two **physical** lines the application cut a
@@ -5781,10 +5872,141 @@ mod tests {
                 .uri,
             uri
         );
-        // And the frozen plane, where every row but the last is a wrap by construction.
+        // And the frozen plane, from real fragments: three physical rows on a nine-column grid,
+        // two of them soft wraps that this layer already rejoined. The gate reads the last
+        // fragment only, and that one holds a single cell.
+        let frozen = frozen_line_from_rows(
+            &[
+                ("D:\\src\\de", true),
+                ("ep\\file.r", true),
+                ("s        ", false),
+            ],
+            9,
+        );
+        assert_eq!(frozen.fragments.len(), 3);
+        assert!(
+            frozen
+                .fragments
+                .iter()
+                .all(|fragment| fragment.captured_columns == 9)
+        );
+        assert_eq!(frozen_link_targets(&frozen, 9, &ledger), [uri]);
+    }
+
+    /// §7.1.5k ① after 2026-08-24: **the ruler is the capture, not the pane.**
+    ///
+    /// The gate asks whether the application ran out of row, and the application wrote at the
+    /// width it was writing at. Replaying the wrap at whatever the pane is now made the verdict a
+    /// property of the window: a reference that filled an eighty-column row stopped being suspect
+    /// the moment the reader widened the pane, and became suspect again on the way back — the
+    /// same frozen bytes, two answers, neither of them about the application. `captured_columns`
+    /// is immutable provenance, so the line answers alike at every width there is
+    /// (`docs/plans/horizontal-scroll/plan.md` §5.4).
+    #[test]
+    fn a_frozen_lines_edge_verdict_is_its_captures_and_never_the_panes() {
+        const PATH: &str = "D:\\src\\a.md";
+        let ledger = verified(&["D:\\src\\a.md"]);
+        let uri = "file:///D:/src/a.md".to_owned();
+        let filled = frozen_line_from_rows(&[(PATH, false)], PATH.len() as u32);
+        let spare = frozen_line_from_rows(&[(PATH, false)], PATH.len() as u32 + 1);
+
+        for columns in [4usize, PATH.len() - 1, PATH.len(), PATH.len() + 1, 200] {
+            assert_eq!(
+                frozen_link_targets(&filled, columns, &ledger),
+                Vec::<String>::new(),
+                "it filled the row it was written on, and a pane of {columns} does not change that"
+            );
+            assert_eq!(
+                frozen_link_targets(&spare, columns, &ledger),
+                std::slice::from_ref(&uri),
+                "it stopped a column short, and a pane of {columns} does not change that either"
+            );
+        }
+    }
+
+    /// §7.1.5k ①'s gate is a **suppression on a necessary condition**, and never a claim that
+    /// anything was cut.
+    ///
+    /// The counterexample the 2026-08-24 ruling asks for: a reference that exactly fills its row
+    /// with no next character is an ordinary complete reference, and the gate declining to promise
+    /// it must not be read anywhere as "this was truncated". Nothing was — the transcript holds
+    /// every byte of the row, the fragment covers all of it, and this build makes no truncation
+    /// claim about any line. Asserting a truncation would need the other two proofs as well: a
+    /// payload budget actually exhausted, and source that actually remains (plan §5.4 clause 4).
+    #[test]
+    fn an_exact_fit_row_is_pressed_down_and_is_still_never_called_truncated() {
+        const PATH: &str = "D:\\src\\a.md";
+        let ledger = verified(&["D:\\src\\a.md"]);
+        let line = frozen_line_from_rows(&[(PATH, false)], PATH.len() as u32);
         assert_eq!(
-            frozen_link_targets(&frozen_line_of("D:\\src\\deep\\file.rs "), 10, &ledger),
-            [uri]
+            frozen_link_targets(&line, PATH.len(), &ledger),
+            Vec::<String>::new(),
+            "the gate declines to promise"
+        );
+        assert_eq!(line.text, PATH, "and the row is here in full");
+        let fragment = line.fragments.last().expect("one fragment");
+        assert_eq!(
+            (fragment.byte_start as usize, fragment.byte_end as usize),
+            (0, PATH.len()),
+            "the fragment covers every byte the application wrote"
+        );
+        assert!(!fragment.soft_wrapped, "nothing was pending a wrap");
+        assert_eq!(fragment.captured_columns, PATH.len() as u32);
+    }
+
+    /// §7.1.5k ① per fragment: a resize in the middle of a wrapped line leaves one logical line
+    /// holding fragments captured at two different widths, and each is measured against its own.
+    ///
+    /// The gate reads the **final** fragment, because it is by definition the one nothing was
+    /// rejoined onto. Here that one is nine columns wide and holds four, so it stopped short —
+    /// even though the fragment above it exactly filled the twenty-column grid it was captured
+    /// on, which the gate must never see (that boundary is a soft wrap this layer already
+    /// rejoined).
+    #[test]
+    fn fragments_captured_at_two_widths_are_each_judged_by_their_own() {
+        let ledger = verified(&["D:\\src\\deep\\nested\\dir\\a.md"]);
+        let uri = "file:///D:/src/deep/nested/dir/a.md".to_owned();
+        let line = {
+            let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
+            store.capture(CapturedRow::plain_on_grid(
+                "D:\\src\\deep\\nested\\",
+                true,
+                20,
+            ));
+            store
+                .capture(CapturedRow::plain_on_grid("dir\\a.md", false, 9))
+                .finalized
+                .pop()
+                .expect("the second row ends the line")
+                .line
+        };
+        assert_eq!(line.fragments.len(), 2);
+        assert_eq!(line.fragments[0].captured_columns, 20);
+        assert_eq!(line.fragments[1].captured_columns, 9);
+        assert_eq!(
+            frozen_link_targets(&line, 20, &ledger),
+            [uri],
+            "the last fragment holds eight of nine columns, so nothing is suspect"
+        );
+
+        // The same two rows with the tail exactly filling its own grid, and the gate fires.
+        let filled = {
+            let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
+            store.capture(CapturedRow::plain_on_grid(
+                "D:\\src\\deep\\nested\\",
+                true,
+                20,
+            ));
+            store
+                .capture(CapturedRow::plain_on_grid("dir\\a.md", false, 8))
+                .finalized
+                .pop()
+                .expect("the second row ends the line")
+                .line
+        };
+        assert_eq!(
+            frozen_link_targets(&filled, 20, &ledger),
+            Vec::<String>::new()
         );
     }
 
@@ -6491,11 +6713,13 @@ mod tests {
         assert_eq!((first.len(), second.len()), (15, 15));
         let mut frame = live_frame_of(vec![
             CapturedRow {
+                captured_columns: first.len() as u32,
                 cells: first,
                 continues: true,
                 shell_mark: None,
             },
             CapturedRow {
+                captured_columns: second.len() as u32,
                 cells: second,
                 continues: false,
                 shell_mark: None,
@@ -6557,6 +6781,7 @@ mod tests {
         }
         assert_eq!(cells.len(), URI.len() + 8);
         let mut frame = live_frame_of(vec![CapturedRow {
+            captured_columns: cells.len() as u32,
             cells,
             continues: false,
             shell_mark: None,
@@ -9562,6 +9787,7 @@ mod tests {
             ],
             continues: false,
             shell_mark: None,
+            captured_columns: 4,
         };
         let document = HistoryDocument::default();
         let mut projection = ViewportProjection::new(
@@ -9593,6 +9819,7 @@ mod tests {
                 &document,
                 &[],
                 vec![CapturedRow {
+                    captured_columns: frame.columns.get(),
                     cells: frame.cells[..frame.columns.get() as usize].to_vec(),
                     continues: false,
                     shell_mark: None,
@@ -9642,6 +9869,7 @@ mod tests {
             cells: vec![wide, live_spacer],
             continues: false,
             shell_mark: None,
+            captured_columns: 2,
         });
         let frozen = &result.finalized[0].line;
         let rows = layout_frozen_line(frozen, 4, None);

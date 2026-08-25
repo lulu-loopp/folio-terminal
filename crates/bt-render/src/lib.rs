@@ -10748,7 +10748,7 @@ mod tests {
             content_offset_subpixels: 0,
             clip_height_subpixels,
             display: MathBlockDisplay::Rendered,
-            horizontal_overflow: bt_viewport::HorizontalOverflowOwner::Block,
+            horizontal_overflow: bt_viewport::BlockOverflowOwner::Block,
             horizontal_scroll_px: 0,
             vertical_scroll_px: 0,
             toolbar_visible: false,

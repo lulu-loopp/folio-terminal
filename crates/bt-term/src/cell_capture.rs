@@ -172,6 +172,9 @@ pub(crate) fn to_captured_row(row: &[Cell]) -> CapturedRow {
         cells,
         continues,
         shell_mark: None,
+        // The grid row's own length: every vendor row is dense to the terminal's width, so this
+        // is the width the application was writing at when it ended this row.
+        captured_columns: row.len() as u32,
     }
 }
 

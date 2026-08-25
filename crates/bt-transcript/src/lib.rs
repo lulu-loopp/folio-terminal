@@ -704,14 +704,39 @@ pub struct CapturedRow {
     /// True when this physical row soft-wraps into the next physical row.
     pub continues: bool,
     pub shell_mark: Option<String>,
+    /// How wide the terminal grid was when this row was taken off it.
+    ///
+    /// Capture geometry, and nothing else. It is what [`PhysicalFragment::captured_columns`] is
+    /// made of, and the reason it has to be recorded rather than recomputed is that the pane is
+    /// resized and the frozen line is not: after a resize there is no longer anything on the
+    /// screen that remembers how wide the row was when the application chose to end it.
+    ///
+    /// Zero means a row with no capture geometry — a synthetic row, a fixture — and the truncation
+    /// gate declines to run on such a row rather than guessing a width for it.
+    pub captured_columns: u32,
 }
 
 impl CapturedRow {
+    /// One row of narrow characters, captured on a grid exactly as wide as the text.
     pub fn plain(text: &str, continues: bool) -> Self {
+        let cells: Vec<CapturedCell> = text.chars().map(CapturedCell::plain).collect();
         Self {
-            cells: text.chars().map(CapturedCell::plain).collect(),
+            captured_columns: cells.len() as u32,
+            cells,
             continues,
             shell_mark: None,
+        }
+    }
+
+    /// One row of narrow characters, captured on a grid of a stated width.
+    ///
+    /// For the case the truncation gate is entirely about: text that stops short of the row's
+    /// last column, and text that fills it, are the same string and differ only in the grid they
+    /// were written on.
+    pub fn plain_on_grid(text: &str, continues: bool, captured_columns: u32) -> Self {
+        Self {
+            captured_columns,
+            ..Self::plain(text, continues)
         }
     }
 }
@@ -724,11 +749,32 @@ pub struct StyleSpan {
     pub hyperlink: Option<CellHyperlink>,
 }
 
+/// One physical row's share of a rejoined logical line, and the grid geometry it was taken on.
+///
+/// # Why the width is stored and not recomputed
+///
+/// §7.1.5k ①'s truncation gate asks one question — did the printed reference reach the last cell
+/// of the row the application wrote it on — and until 2026-08-24 the only way to answer it was to
+/// replay the wrap at whatever width the pane happens to be **now**. That answer changes when the
+/// reader drags the window: a reference that filled an eighty-column row stops being suspect the
+/// moment the pane is a hundred columns wide, though nothing about what the application did has
+/// changed. `captured_columns` is immutable provenance, so the gate has a fixed ruler
+/// (`docs/plans/horizontal-scroll/plan.md` §5.4).
+///
+/// One logical line may hold fragments captured at different widths — a resize in the middle of
+/// a wrapped line is ordinary — so the gate reads each fragment's own number and never spreads
+/// one across the line.
+///
+/// It is **not** the line's content width. What can be presented is a question about the retained
+/// payload and is answered by the flattened column count; this is a question about the grid.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PhysicalFragment {
     pub byte_start: u32,
     pub byte_end: u32,
     pub soft_wrapped: bool,
+    /// The physical grid width this fragment was captured at; zero when the row carried no
+    /// capture geometry at all.
+    pub captured_columns: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1261,6 +1307,7 @@ fn normalize(
             mut cells,
             continues,
             shell_mark,
+            captured_columns,
         } = staged.row;
         if let Some(mark) = shell_mark {
             shell_marks.push((fragment_start, mark));
@@ -1303,6 +1350,7 @@ fn normalize(
             byte_start: fragment_start,
             byte_end: text.len() as u32,
             soft_wrapped: continues,
+            captured_columns,
         });
     }
 
@@ -1362,6 +1410,32 @@ mod tests {
         let second = store.capture(CapturedRow::plain("c", false));
         assert_eq!(second.finalized[0].line.text, "ab  c");
         assert_eq!(second.finalized[0].line.fragments.len(), 2);
+    }
+
+    /// Every fragment carries the grid it came off, and a resize in the middle of a wrapped line
+    /// leaves one logical line holding two different ones.
+    ///
+    /// It has to be recorded here because there is nowhere later to recover it from: the pane is
+    /// resized and the frozen line is not, so once the row is off the grid nothing on the screen
+    /// remembers how wide it was when the application chose to end it. §7.1.5k ①'s gate is the
+    /// consumer (`docs/plans/horizontal-scroll/plan.md` §5.4), and it reads each fragment's own
+    /// number rather than spreading one across the line.
+    #[test]
+    fn every_fragment_remembers_the_grid_it_was_captured_on() {
+        let mut store = TranscriptStore::new(nz(8));
+        store.capture(CapturedRow::plain_on_grid("first half ", true, 20));
+        let finalized = store.capture(CapturedRow::plain_on_grid("tail", false, 9));
+        let line = &finalized.finalized[0].line;
+        assert_eq!(line.text, "first half tail");
+        assert_eq!(
+            line.fragments
+                .iter()
+                .map(|fragment| (fragment.soft_wrapped, fragment.captured_columns))
+                .collect::<Vec<_>>(),
+            vec![(true, 20), (false, 9)]
+        );
+        // `plain` states its own width, so an ordinary fixture is honest without being told.
+        assert_eq!(CapturedRow::plain("abc", false).captured_columns, 3);
     }
 
     #[test]
@@ -1462,6 +1536,7 @@ mod tests {
             cells: vec![linked, spacer, CapturedCell::plain(" ")],
             continues: false,
             shell_mark: Some("prompt".into()),
+            captured_columns: 3,
         });
         let line = &result.finalized[0].line;
         assert_eq!(line.text, "e\u{301}");
@@ -1645,6 +1720,7 @@ mod tests {
                 .collect(),
             continues: false,
             shell_mark: None,
+            captured_columns: 80,
         });
         let rainbow_80 = store.frozen()[0].resident_bytes();
 
@@ -1786,6 +1862,7 @@ mod tests {
                 cells: cells.clone(),
                 continues: false,
                 shell_mark: None,
+                captured_columns: 80,
             });
         }
 
@@ -2021,6 +2098,7 @@ mod tests {
             ],
             continues: false,
             shell_mark: None,
+            captured_columns: 4,
         });
         let line = &result.finalized[0].line;
         assert_eq!(
