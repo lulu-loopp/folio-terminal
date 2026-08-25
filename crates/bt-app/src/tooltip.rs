@@ -1226,6 +1226,7 @@ pub fn build(
                     mono: true,
                     bold: false,
                     font_scale: 1.0,
+                    inline_box_px: None,
                 }],
                 rect: *rect,
                 font_size_px,
@@ -1246,6 +1247,7 @@ pub fn build(
                 quads: Vec::new(),
                 paragraphs,
                 blocks: Vec::new(),
+                rasters: Vec::new(),
             }),
             opacity,
             ..OverlayLayer::default()

@@ -35,6 +35,59 @@ const TYPST_TEMPLATE: &str = r#"
 #eval(source, scope: mitex-scope)
 "#;
 
+/// CSS pixels one typographic point is worth. Both of this crate's two scale
+/// factors are this number, which is why it is named once.
+const PX_PER_PT: f32 = 96.0 / 72.0;
+
+/// The factor `resvg` rasterizes the Typst page's own SVG by.
+///
+/// Typst reports the page in points and writes them into the SVG unitless, where
+/// usvg reads them as CSS pixels — so this converts once, and
+/// [`device_px_per_pt`] converts the second time.
+fn svg_scale(dpi_milli: NonZeroU32) -> f32 {
+    dpi_milli.get() as f32 / 1000.0 * PX_PER_PT
+}
+
+/// Device pixels one typographic point becomes at this DPI.
+///
+/// **The one definition of this scale**, because two callers need the same
+/// answer: [`rasterize_svg`] places the baseline with it, and a caller sizing a
+/// formula to match text it already has on screen inverts it
+/// ([`key_for_em_px`]). A second copy of `96/72` squared living in a caller is
+/// the shape of defect this file has already paid for once — the baseline was
+/// undercounted by exactly one of these two factors for as long as only one of
+/// them was written down.
+#[must_use]
+pub fn device_px_per_pt(dpi_milli: NonZeroU32) -> f32 {
+    svg_scale(dpi_milli) * PX_PER_PT
+}
+
+/// A key that sets its mathematics at `em_device_px` **device pixels**.
+///
+/// The terminal asks for a point size because its cells come from a point size.
+/// A document does not: the markdown preview knows only that its prose is being
+/// drawn at so many device pixels and that a formula standing in that prose must
+/// match it. Rather than have that caller carry this crate's two conversions
+/// around, it says the size it means and this inverts [`device_px_per_pt`].
+///
+/// `None` when the requested size rounds to nothing, which is the only way the
+/// point size can fail to be positive.
+#[must_use]
+pub fn key_for_em_px(
+    em_device_px: f32,
+    foreground_rgb: [u8; 3],
+    mode: MathMode,
+) -> Option<MathRenderKey> {
+    let dpi_milli = NonZeroU32::new(1000).expect("1000 is non-zero");
+    let milli_pt = (em_device_px / device_px_per_pt(dpi_milli) * 1000.0).round();
+    Some(MathRenderKey {
+        dpi_milli,
+        font_milli_pt: NonZeroU32::new(milli_pt.max(0.0) as u32)?,
+        foreground_rgb,
+        mode,
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct MathRenderKey {
     pub dpi_milli: NonZeroU32,
@@ -321,7 +374,7 @@ fn rasterize_svg(
     let options = OPTIONS.get_or_init(resvg::usvg::Options::default);
     let tree = resvg::usvg::Tree::from_str(svg, options)
         .map_err(|error| MathRenderError::Svg(error.to_string()))?;
-    let scale = key.dpi_milli.get() as f32 / 1000.0 * 96.0 / 72.0;
+    let scale = svg_scale(key.dpi_milli);
     let source_size = tree.size();
     let width_px = (source_size.width() * scale).ceil().max(1.0) as u32;
     let source_height_px = (source_size.height() * scale).ceil().max(1.0) as u32;
@@ -358,7 +411,7 @@ fn rasterize_svg(
     // could only ever be described as coincidental: it placed the baseline a third of the way up
     // from where it belonged, and went unnoticed because the zero-margin page had already clipped
     // away every pixel below the baseline that could have shown the mistake.
-    let device_px_per_pt = scale * 96.0 / 72.0;
+    let device_px_per_pt = device_px_per_pt(key.dpi_milli);
     let baseline_px = (metrics.baseline_from_page_top_pt as f32 * device_px_per_pt
         - content_top_px as f32)
         .clamp(0.0, content_height_px as f32);
@@ -481,6 +534,45 @@ mod tests {
             foreground_rgb: [224, 224, 224],
             mode: MathMode::Display,
         }
+    }
+
+    /// PIN — **a caller that asks in device pixels gets device pixels.**
+    ///
+    /// The identity half would go red the moment [`key_for_em_px`] inverted only
+    /// one of this crate's two `96/72` factors — the exact mistake the baseline
+    /// carried for as long as those factors were written down in one place and
+    /// used in two. The proportional half is what proves the key reaches the
+    /// raster at all: a key that were ignored would give two identical pictures.
+    #[test]
+    fn a_key_asked_for_an_em_in_device_pixels_sets_that_em() {
+        for em in [12.0_f32, 20.0, 33.5] {
+            let key = key_for_em_px(em, [0, 0, 0], MathMode::Inline).expect("a positive em");
+            let back = key.font_milli_pt.get() as f32 / 1000.0 * device_px_per_pt(key.dpi_milli);
+            assert!(
+                (back - em).abs() < 0.5,
+                "asked for {em} device px, the key means {back}",
+            );
+        }
+        let engine = MathEngine::with_system_fonts(false);
+        let single = engine
+            .render(
+                "x^2 + y^2",
+                key_for_em_px(16.0, [0, 0, 0], MathMode::Inline).expect("a positive em"),
+            )
+            .expect("a formula this simple compiles");
+        let double = engine
+            .render(
+                "x^2 + y^2",
+                key_for_em_px(32.0, [0, 0, 0], MathMode::Inline).expect("a positive em"),
+            )
+            .expect("a formula this simple compiles");
+        let ratio = double.width_px as f32 / single.width_px as f32;
+        assert!(
+            (ratio - 2.0).abs() < 0.1,
+            "twice the em is twice the picture: {}px against {}px",
+            double.width_px,
+            single.width_px,
+        );
     }
 
     fn ink_row_runs(raster: &MathRaster, left: u32, right: u32) -> usize {

@@ -1190,6 +1190,32 @@ pub struct PreviewRun {
     /// the row it landed on taller than its neighbours, and prose whose leading
     /// changes line by line is exactly the density this metric exists to undo.
     pub font_scale: f32,
+    /// This run is an **inline box** of exactly this many pixels: it reserves
+    /// the width, it never breaks inside itself, and it draws nothing.
+    ///
+    /// CSS's inline replaced element, and it has one tenant — a rendered formula
+    /// standing inside a markdown paragraph. The picture is not the shaper's to
+    /// draw (it is a raster, and it goes out with the body's own rasters), but
+    /// *where the line puts it* is nobody else's to decide: prose reflows to the
+    /// pane, and a caller that measured a place for the picture itself would be
+    /// a second line-breaker disagreeing with the first one the moment the pane
+    /// changed width. So the box travels through the shaper and the caller asks
+    /// afterwards where it came to rest ([`PreviewRunBox`]).
+    ///
+    /// [`Self::text`] is ignored for a box run and is empty by construction: a
+    /// box is a width, not words, and a run carrying both would be a run with
+    /// two answers about how wide it is.
+    ///
+    /// **How it is realised.** The shaper has no inline-object API, so the box
+    /// is one `U+00A0` — non-breaking, and inkless in every face — carrying a
+    /// per-run tracking that makes its advance come out at exactly the requested
+    /// width. Tracking rather than a font size, because tracking is the one
+    /// knob that moves a glyph's advance and touches nothing vertical: a
+    /// placeholder scaled to width instead would drag the line's own ascent up
+    /// with it and make the line carrying a formula taller than its neighbours.
+    /// The placeholder's own advance is measured in the same face at the same
+    /// weight rather than assumed, so the arithmetic is exact rather than close.
+    pub inline_box_px: Option<f32>,
 }
 
 /// One paragraph of a preview body: styled text with a box to sit in.
@@ -1235,6 +1261,15 @@ pub struct PreviewRunBox {
     /// Which entry of [`PreviewParagraph::runs`] this belongs to.
     pub run: usize,
     pub rect: [f32; 4],
+    /// The y of the **baseline** of the visual line this box landed on.
+    ///
+    /// [`Self::rect`] is a line box and a line box has no typography in it: two
+    /// runs of different sizes on one line share it exactly. What an inline
+    /// picture has to be aligned on is the baseline the glyphs beside it sit on,
+    /// and only the shaper knows where that is — which is the same argument that
+    /// makes the rest of this struct the shaper's answer rather than the
+    /// caller's arithmetic.
+    pub baseline_px: f32,
 }
 
 /// One flat fill under a preview body's text.
@@ -1284,6 +1319,22 @@ pub struct PreviewBody {
     /// is "these rectangles are one scrolling region", which is what makes the
     /// crop, the offset and the indicator one fact instead of three.
     pub blocks: Vec<PreviewBlock>,
+    /// Pictures that belong to the document rather than to the seat: a rendered
+    /// formula, standing where the page put it.
+    ///
+    /// **[`ChromeIcon`] and not a struct of its own**, because a textured quad
+    /// placed in whole-surface pixels and cropped to a box is exactly what that
+    /// type already is, and it is what
+    /// [`WindowRenderer::prepare_chrome_icon_draws`] already knows how to upload
+    /// and evict. A second identical struct would be a second place for the same
+    /// LRU bookkeeping to drift — the reason that function takes a list instead
+    /// of reading a field, said once more by a third caller.
+    ///
+    /// The difference from [`PreviewImage`] is which question is being answered:
+    /// that is *the seat's* picture, one per seat, sized to the body. These are
+    /// the *document's*, however many the page has, at the sizes the page gave
+    /// them, moving with its scroll.
+    pub rasters: Vec<ChromeIcon>,
 }
 
 impl PreviewBody {
@@ -1371,6 +1422,11 @@ pub struct PreviewBlock {
     pub clip: [f32; 4],
     pub quads: Vec<PreviewQuad>,
     pub paragraphs: Vec<PreviewParagraph>,
+    /// The block's own pictures — see [`PreviewBody::rasters`]. A formula wide
+    /// enough to scroll inside itself carries its picture in here for the same
+    /// reason its text is in `paragraphs`: the offset and the crop are the
+    /// block's, not the page's.
+    pub rasters: Vec<ChromeIcon>,
 }
 
 /// Fit an image inside a preview body while preserving aspect ratio and never enlarging it beyond
@@ -4602,6 +4658,7 @@ impl WindowRenderer {
         buffer.set_wrap(Wrap::WordOrGlyph);
         buffer.set_size(Some(width_px.max(1.0)), None);
         set_preview_runs(
+            &mut gpu.font_system,
             &mut buffer,
             runs,
             0.0,
@@ -4638,6 +4695,7 @@ impl WindowRenderer {
         buffer.set_wrap(Wrap::None);
         buffer.set_size(None, Some(line_height_px));
         set_preview_runs(
+            &mut gpu.font_system,
             &mut buffer,
             runs,
             0.0,
@@ -4668,59 +4726,7 @@ impl WindowRenderer {
         gpu: &mut GpuContext,
         paragraph: &PreviewParagraph,
     ) -> Vec<PreviewRunBox> {
-        let mut buffer = Buffer::new(
-            &mut gpu.font_system,
-            Metrics::new(paragraph.font_size_px, paragraph.line_height_px),
-        );
-        if paragraph.wrap {
-            buffer.set_wrap(Wrap::WordOrGlyph);
-            buffer.set_size(Some((paragraph.rect[2] - paragraph.rect[0]).max(1.0)), None);
-        } else {
-            buffer.set_wrap(Wrap::None);
-            buffer.set_size(None, Some(paragraph.line_height_px));
-        }
-        set_preview_runs(
-            &mut buffer,
-            &paragraph.runs,
-            paragraph.letter_spacing_em,
-            Metrics::new(paragraph.font_size_px, paragraph.line_height_px),
-        );
-        buffer.shape_until_scroll(&mut gpu.font_system, false);
-        let left = preview_paragraph_left(paragraph, &buffer);
-        let top = paragraph.rect[1];
-        // The runs are concatenated into one line before shaping, so a glyph
-        // says which run it came from by where its cluster starts.
-        let mut ends = Vec::with_capacity(paragraph.runs.len());
-        let mut total = 0usize;
-        for run in &paragraph.runs {
-            total += run.text.len();
-            ends.push(total);
-        }
-        let mut boxes: Vec<PreviewRunBox> = Vec::new();
-        for line in buffer.layout_runs() {
-            for glyph in line.glyphs {
-                let Some(run) = ends.iter().position(|end| glyph.start < *end) else {
-                    continue;
-                };
-                let rect = [
-                    left + glyph.x,
-                    top + line.line_top,
-                    left + glyph.x + glyph.w,
-                    top + line.line_top + paragraph.line_height_px,
-                ];
-                // Glyphs arrive in visual order, so one run broken across a
-                // line — or across a bidi boundary — comes back as the several
-                // boxes it is drawn as.
-                match boxes.last_mut() {
-                    Some(last) if last.run == run && (last.rect[1] - rect[1]).abs() < 0.5 => {
-                        last.rect[0] = last.rect[0].min(rect[0]);
-                        last.rect[2] = last.rect[2].max(rect[2]);
-                    }
-                    _ => boxes.push(PreviewRunBox { run, rect }),
-                }
-            }
-        }
-        boxes
+        preview_run_boxes(&mut gpu.font_system, paragraph)
     }
 
     /// How wide one cell of the monospace face is at `font_size_px`.
@@ -5470,6 +5476,33 @@ impl WindowRenderer {
         let (chrome_icon_draws, chrome_icon_vertices) =
             self.prepare_chrome_icon_draws(gpu, &chrome_icons);
         self.chrome_icons = chrome_icons;
+        // The documents' own pictures — a rendered formula and nothing else
+        // today. Down the same textured-quad path the marks above just went, and
+        // through the same LRU, because a picture placed in whole-surface pixels
+        // and cropped to a box is the same thing however it got there. They are
+        // *drawn* with the preview text rather than with the chrome, which is
+        // the reason they are prepared here and issued three hundred lines below.
+        let preview_rasters: Vec<ChromeIcon> = self
+            .preview_bodies
+            .iter()
+            .chain(table_block_bodies.iter())
+            .flat_map(|body| {
+                body.rasters
+                    .iter()
+                    .chain(body.blocks.iter().flat_map(|block| block.rasters.iter()))
+            })
+            .cloned()
+            .collect();
+        let (preview_raster_draws, preview_raster_vertices) =
+            self.prepare_chrome_icon_draws(gpu, &preview_rasters);
+        let preview_raster_buffer = (!preview_raster_vertices.is_empty()).then(|| {
+            gpu.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("preview document raster vertices"),
+                    contents: bytemuck::cast_slice(preview_raster_vertices.as_slice()),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
         let chrome_icon_buffer = (!chrome_icon_vertices.is_empty()).then(|| {
             gpu.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -5990,7 +6023,14 @@ impl WindowRenderer {
             // seat-local one: these coordinates are already the window's, and
             // every line carries its own clip box, so a pane FLIP crops them
             // without the pass having to.
-            if preview_text_prepared || preview_body_rect_buffer.is_some() {
+            // `preview_raster_buffer` is part of the guard and not only of the
+            // body below it: a page that is one formula and nothing else has no
+            // text and no fills, and a guard that asked only about those two
+            // would draw that page as an empty pane.
+            if preview_text_prepared
+                || preview_body_rect_buffer.is_some()
+                || preview_raster_buffer.is_some()
+            {
                 pass.set_viewport(
                     0.0,
                     0.0,
@@ -6013,6 +6053,23 @@ impl WindowRenderer {
                     self.preview_text_renderer
                         .render(&gpu.atlas, &self.chrome_viewport, &mut pass)
                         .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+                }
+                // The document's own pictures, over its fills and beside its
+                // text — a formula is neither under the page's ground nor over
+                // its furniture, it *is* the page. Each quad arrives already
+                // cropped to the body or to the block it scrolls inside, which
+                // is what lets one whole-surface scissor serve all of them.
+                if let Some(buffer) = preview_raster_buffer.as_ref() {
+                    pass.set_pipeline(&gpu.math_pipeline);
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    for draw in &preview_raster_draws {
+                        if let Some(texture) = gpu.math_textures.get(&draw.key)
+                            && let Some(tile) = texture.tiles.get(draw.tile_index)
+                        {
+                            pass.set_bind_group(0, &tile.bind_group, &[]);
+                            pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+                        }
+                    }
                 }
             }
             // The web preview's holes, over everything the seats themselves drew
@@ -6823,6 +6880,10 @@ impl WindowRenderer {
                         })
                         .collect(),
                     blocks: Vec::new(),
+                    // A rendered table is fills and text and nothing else: the
+                    // one picture in this projection is the raster the *caller*
+                    // draws, and it is not part of the body.
+                    rasters: Vec::new(),
                 })
             })
             .collect()
@@ -8020,28 +8081,161 @@ fn preview_run_attrs(mono: bool, bold: bool, letter_spacing_em: f32) -> Attrs<'s
 /// One buffer per paragraph and not per run, which is what lets the shaper wrap
 /// a mixed line: `a **bold** word` may break between any two of its words, and
 /// three buffers butted together could only ever break between the three.
+/// Where each of a paragraph's runs landed once the shaper had it.
+///
+/// A free function so that the shaper is the only thing it needs. Nothing here
+/// is a window's business — it is one buffer, built exactly as
+/// [`shape_preview_body`] builds it, with the pen origin from the same
+/// [`preview_paragraph_left`], because a box measured any other way is a box in
+/// a different place than the glyphs.
+fn preview_run_boxes(
+    font_system: &mut FontSystem,
+    paragraph: &PreviewParagraph,
+) -> Vec<PreviewRunBox> {
+    let mut buffer = Buffer::new(
+        font_system,
+        Metrics::new(paragraph.font_size_px, paragraph.line_height_px),
+    );
+    if paragraph.wrap {
+        buffer.set_wrap(Wrap::WordOrGlyph);
+        buffer.set_size(Some((paragraph.rect[2] - paragraph.rect[0]).max(1.0)), None);
+    } else {
+        buffer.set_wrap(Wrap::None);
+        buffer.set_size(None, Some(paragraph.line_height_px));
+    }
+    set_preview_runs(
+        font_system,
+        &mut buffer,
+        &paragraph.runs,
+        paragraph.letter_spacing_em,
+        Metrics::new(paragraph.font_size_px, paragraph.line_height_px),
+    );
+    buffer.shape_until_scroll(font_system, false);
+    let left = preview_paragraph_left(paragraph, &buffer);
+    let top = paragraph.rect[1];
+    // The runs are concatenated into one line before shaping, so a glyph
+    // says which run it came from by where its cluster starts.
+    let mut ends = Vec::with_capacity(paragraph.runs.len());
+    let mut total = 0usize;
+    for run in &paragraph.runs {
+        total += preview_run_text(run).len();
+        ends.push(total);
+    }
+    let mut boxes: Vec<PreviewRunBox> = Vec::new();
+    for line in buffer.layout_runs() {
+        for glyph in line.glyphs {
+            let Some(run) = ends.iter().position(|end| glyph.start < *end) else {
+                continue;
+            };
+            let rect = [
+                left + glyph.x,
+                top + line.line_top,
+                left + glyph.x + glyph.w,
+                top + line.line_top + paragraph.line_height_px,
+            ];
+            let baseline_px = top + line.line_y;
+            // Glyphs arrive in visual order, so one run broken across a
+            // line — or across a bidi boundary — comes back as the several
+            // boxes it is drawn as.
+            match boxes.last_mut() {
+                Some(last) if last.run == run && (last.rect[1] - rect[1]).abs() < 0.5 => {
+                    last.rect[0] = last.rect[0].min(rect[0]);
+                    last.rect[2] = last.rect[2].max(rect[2]);
+                }
+                _ => boxes.push(PreviewRunBox {
+                    run,
+                    rect,
+                    baseline_px,
+                }),
+            }
+        }
+    }
+    boxes
+}
+
+/// The one glyph an inline box is made of: non-breaking, and inkless in every
+/// face that has it. See [`PreviewRun::inline_box_px`].
+const INLINE_BOX_PLACEHOLDER: &str = "\u{00A0}";
+
+/// The text one run actually contributes to the shaped line.
+///
+/// **One door**, because two passes read it: the pass that shapes the paragraph
+/// and the pass that maps glyphs back to the run they came from by counting
+/// bytes ([`preview_run_boxes`]). A box run whose byte count were taken from
+/// [`PreviewRun::text`] in one pass and from the placeholder in the other would
+/// report every run after it against the wrong run.
+fn preview_run_text(run: &PreviewRun) -> &str {
+    if run.inline_box_px.is_some() {
+        INLINE_BOX_PLACEHOLDER
+    } else {
+        run.text.as_str()
+    }
+}
+
+/// What one [`INLINE_BOX_PLACEHOLDER`] advances by, in em, in this face.
+///
+/// Measured rather than assumed: the placeholder's advance is a property of
+/// whichever face the fallback chain lands on, and an assumed number would make
+/// every inline box off by whatever that face happens to differ by. Asked at a
+/// large probe size and divided back, for the reason
+/// [`WindowRenderer::preview_mono_advance`] measures over thirty-two cells: one
+/// advance at reading size carries its own rounding.
+fn inline_box_placeholder_em(font_system: &mut FontSystem, mono: bool, bold: bool) -> f32 {
+    const PROBE_PX: f32 = 512.0;
+    let mut buffer = Buffer::new(font_system, Metrics::new(PROBE_PX, PROBE_PX));
+    buffer.set_wrap(Wrap::None);
+    buffer.set_text(
+        INLINE_BOX_PLACEHOLDER,
+        &preview_run_attrs(mono, bold, 0.0),
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(font_system, false);
+    let width = buffer
+        .layout_runs()
+        .map(|run| run.line_w)
+        .fold(0.0_f32, f32::max);
+    width / PROBE_PX
+}
+
 fn set_preview_runs(
+    font_system: &mut FontSystem,
     buffer: &mut Buffer,
     runs: &[PreviewRun],
     letter_spacing_em: f32,
     metrics: Metrics,
 ) {
+    // Measured before the borrow of the buffer, and only for the paragraphs that
+    // carry a box: a document of a thousand paragraphs pays for none of them.
+    let boxes: Vec<Option<f32>> = runs
+        .iter()
+        .map(|run| {
+            let width = run.inline_box_px?;
+            let placeholder = inline_box_placeholder_em(font_system, run.mono, run.bold);
+            // Tracking is added to the one glyph's own advance, so the tracking
+            // that lands the box on its requested width is the difference.
+            Some(width / metrics.font_size.max(1.0) - placeholder)
+        })
+        .collect();
     let default = preview_run_attrs(false, false, letter_spacing_em);
     buffer.set_rich_text(
-        runs.iter().map(|run| {
+        runs.iter().zip(&boxes).map(|(run, tracking)| {
             let [r, g, b] = run.color;
             let mut attrs = preview_run_attrs(run.mono, run.bold, letter_spacing_em)
                 .color(Color::rgba(r, g, b, 255));
             // The size is the run's own; the *leading* stays the paragraph's,
             // so a line carrying a code span is exactly as tall as the line
             // above it. See [`PreviewRun::font_scale`].
-            if run.font_scale != 1.0 {
+            if run.font_scale != 1.0 && tracking.is_none() {
                 attrs = attrs.metrics(Metrics::new(
                     (metrics.font_size * run.font_scale).max(1.0),
                     metrics.line_height,
                 ));
             }
-            (run.text.as_str(), attrs)
+            if let Some(tracking) = tracking {
+                attrs = attrs.letter_spacing(*tracking);
+            }
+            (preview_run_text(run), attrs)
         }),
         &default,
         Shaping::Advanced,
@@ -8163,6 +8357,7 @@ fn shape_preview_body(font_system: &mut FontSystem, body: &PreviewBody) -> Vec<C
                 buffer.set_size(None, Some(paragraph.line_height_px));
             }
             set_preview_runs(
+                font_system,
                 &mut buffer,
                 &paragraph.runs,
                 paragraph.letter_spacing_em,
@@ -16084,6 +16279,7 @@ mod tests {
             buffer.set_wrap(Wrap::None);
             buffer.set_size(None, Some(metrics.line_height));
             set_preview_runs(
+                &mut font_system,
                 &mut buffer,
                 &[PreviewRun {
                     text: "monospaced_identifier".to_owned(),
@@ -16091,6 +16287,7 @@ mod tests {
                     mono: true,
                     bold: false,
                     font_scale: scale,
+                    inline_box_px: None,
                 }],
                 0.0,
                 metrics,
@@ -16115,6 +16312,67 @@ mod tests {
             small_line, full_line,
             "the line box is the paragraph's, whatever the run is set at"
         );
+    }
+
+    /// PIN — **an inline box advances exactly the width it asked for**, and it
+    /// does it without touching the line it stands on.
+    ///
+    /// The width half is the whole contract of [`PreviewRun::inline_box_px`]: a
+    /// rendered formula is drawn as a raster at its own size, and the gap the
+    /// prose leaves for it has to be that size and not approximately it, or the
+    /// picture overprints the words beside it. The line-height half is why the
+    /// box is realised with tracking rather than with a font size — a
+    /// placeholder scaled to width instead would drag the line's ascent with it.
+    ///
+    /// MUTATIONS: assume the placeholder's advance instead of measuring it (the
+    /// width goes off by whatever the face's no-break space happens to be);
+    /// realise the box by setting the run's metrics instead of its tracking (the
+    /// line height goes red).
+    #[test]
+    fn an_inline_box_advances_exactly_the_width_it_asked_for() {
+        let mut font_system = terminal_font_system();
+        let metrics = Metrics::new(15.0, 24.0);
+        let mut line = |runs: &[PreviewRun]| {
+            let mut buffer = Buffer::new(&mut font_system, metrics);
+            buffer.set_wrap(Wrap::None);
+            buffer.set_size(None, Some(metrics.line_height));
+            set_preview_runs(&mut font_system, &mut buffer, runs, 0.0, metrics);
+            buffer.shape_until_scroll(&mut font_system, false);
+            let runs: Vec<_> = buffer.layout_runs().collect();
+            assert_eq!(runs.len(), 1, "one unwrapped line");
+            (runs[0].line_w, runs[0].line_height)
+        };
+        let word = |text: &str| PreviewRun {
+            text: text.to_owned(),
+            color: [0, 0, 0],
+            mono: false,
+            bold: false,
+            font_scale: 1.0,
+            inline_box_px: None,
+        };
+        let (prose, prose_line) = line(&[word("energy "), word(" rules")]);
+        for width in [7.5_f32, 40.0, 137.25] {
+            let (with_box, box_line) = line(&[
+                word("energy "),
+                PreviewRun {
+                    text: String::new(),
+                    color: [0, 0, 0],
+                    mono: false,
+                    bold: false,
+                    font_scale: 1.0,
+                    inline_box_px: Some(width),
+                },
+                word(" rules"),
+            ]);
+            assert!(
+                (with_box - prose - width).abs() < 0.5,
+                "a {width}px box adds {width}px to the line: {with_box} against {prose}",
+            );
+            assert_eq!(
+                box_line, prose_line,
+                "and the line it stands on is exactly as tall as it was without it"
+            );
+        }
     }
 
     /// The multiwindow block's slice A2 (= the web preview block's slice 1).
