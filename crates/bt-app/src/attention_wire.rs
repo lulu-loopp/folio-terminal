@@ -835,7 +835,7 @@ mod tests {
                     at,
                     Reach::Flash,
                     true,
-                    attention_map::TRANSPORT,
+                    attention_map::PIPE_TRANSPORT,
                     stop.turn_end.expect("an announcement"),
                 )
                 .lines,

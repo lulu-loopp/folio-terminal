@@ -25,6 +25,15 @@
 //! * **`clear-class`** is [`ClearClass`], and its three values are the answer to "how badly could
 //!   this remove the wrong thing" rather than to "is it a receipt".
 //!
+//! # The other lane (§11.6)
+//!
+//! [`OSC_ROWS`] is the second table, and it is about the programs that need no adapter at all: a
+//! build script, a shell function, anything holding its own tty writes a few bytes and is heard.
+//! Its rows declare two columns rather than four, because the questions the other two answer cannot
+//! be asked of a wire that carries no identity — and the one thing they do declare is the level,
+//! which is the only genuine decision on that lane. `bt-term` reads the bytes and stops; **what a
+//! sequence is worth is data here, not a branch there.**
+//!
 //! # What is not here, and why
 //!
 //! **The end of a turn.** `Stop`, codex's `agent-turn-complete`, pi's `agent_settled` — none of
@@ -48,9 +57,11 @@
 //! nothing else changes — which is the claim [`a_family_is_rows_and_nothing_else`] exists to keep
 //! honest.
 
+use bt_term::{AttentionRequest, NotificationSource, TerminalNotification};
+
 use crate::attention::{
-    ClearClass, ClearReason, ClearScope, ClearSelector, Event, IdSource, MappedAction, MappingRow,
-    Mode, Tier, Transport, Via, WaitKind, WaitSlot, kind_mode,
+    ClearClass, ClearReason, ClearScope, ClearSelector, Credential, Event, IdSource, MappedAction,
+    MappingRow, Mode, Tier, Transport, Via, WaitKind, WaitSlot, kind_mode,
 };
 
 /// Anthropic's Claude Code.
@@ -452,12 +463,120 @@ fn selector(row: &MappingRow, mode: Mode, scope: ClearScope, id: Option<&str>) -
     }
 }
 
-/// The transport every row in this file arrives over.
+/// The transport every row of [`ROWS`] and [`TURN_END`] arrives over.
 ///
-/// A constant rather than a column, because it is a property of *this* table: these are hook
-/// events and a hook event reaches us one way. The weak tier's rows, if there were a table of them,
-/// would be `Osc` — and the day one exists it will be a different table, not a column here.
-pub(crate) const TRANSPORT: Transport = Transport::Pipe;
+/// A constant rather than a column, because it is a property of *those* tables: they are hook
+/// events and a hook event reaches us one way. The other lane is [`OSC_ROWS`] below, and it is a
+/// second table rather than a column here for exactly the reason this comment predicted before it
+/// existed — a sequence a program writes down its own tty and a message an upstream hook posts
+/// through a pipe have no field in common but the level they are worth.
+pub(crate) const PIPE_TRANSPORT: Transport = Transport::Pipe;
+
+// ---------------------------------------------------------------------------
+// The other lane: what a program writes down its own tty
+// ---------------------------------------------------------------------------
+
+/// **One arrival on the OSC lane, spelled the way `bt-term` reports it.**
+///
+/// Deliberately the two upstream types themselves rather than a third spelling of them: this is
+/// the seam where *the bytes* meet *the ledger*, and a private copy of "which sequence was it"
+/// would be a copy that could fall behind the parser without anything failing to compile.
+///
+/// **The parser has no opinion about any of this.** `bt-term` says `Yes`, or `Osc777`, and stops
+/// there; what a `Yes` is *worth* is the row below, which is data — so a family whose level is
+/// argued over is a row somebody edits, not a `match` somebody adds a branch to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OscArrival {
+    /// `OSC 1337;RequestAttention=`, iTerm2's sequence and its spelling.
+    Request(AttentionRequest),
+    /// A desktop notification: `OSC 9`, `OSC 777;notify`, or kitty's `OSC 99`.
+    Notification(NotificationSource),
+}
+
+/// One row of the OSC lane: an arrival, and the level it is worth.
+///
+/// Two columns and not four. The pipe lane's other two — an identifier and a tier — answer
+/// questions this lane cannot ask: nothing on the wire says *which* request a sequence is about
+/// (§11.4's association key is an endpoint's, and red line 13 keeps it there), and there is no
+/// second layer of the same event to displace. A row here declares the one thing that is genuinely
+/// a decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct OscRow {
+    pub arrival: OscArrival,
+    pub credential: Credential,
+}
+
+/// **Every arrival this lane can carry, and what each is worth** (`attention` plan §11.6).
+///
+/// The table is total over both upstream enums and the pin below says so: an arrival with no row
+/// is a sequence the ledger has no level for, and *silently having no level* is how `OSC 9` spent
+/// this plan's first three drafts — recognised by the parser, raising a toast, and absent from
+/// every discussion of what counts as evidence because it had no name in the table.
+///
+/// **No row here is [`Credential::Strong`], and none ever can be.** "A program is blocked on your
+/// input" is a sentence no OSC sequence in existence can say — iTerm2's `RequestAttention` says a
+/// program *wants* you, which is a weaker thing, and promoting it would be the exact substitution
+/// this whole block was opened to undo (the bell, read as "it is waiting for you"). The strong tier
+/// has one producer and it is the pane's own endpoint.
+pub(crate) const OSC_ROWS: &[OscRow] = &[
+    // The weak tier, and the only two members it will ever have: a standing request, and the
+    // program taking it back. `yes`/`no` being a *pair* is the whole reason this sequence was
+    // chosen over the four alternatives — a sentence that can be unsaid.
+    OscRow {
+        arrival: OscArrival::Request(AttentionRequest::Yes),
+        credential: Credential::Weak,
+    },
+    OscRow {
+        arrival: OscArrival::Request(AttentionRequest::No),
+        credential: Credential::Weak,
+    },
+    // iTerm2's own third value, and by its own definition a one-shot. It takes the bell's path
+    // inside `bt-term` and never reaches the ledger; the row exists so that "it is an event" is
+    // written where the other two are, rather than inferred from an absence.
+    OscRow {
+        arrival: OscArrival::Request(AttentionRequest::Once),
+        credential: Credential::Announced,
+    },
+    // The three notification sequences. Each is a *message* — it has words and no "off" — which is
+    // what the event level means, and it is why a survey found codex reaching us over `OSC 9` and
+    // pi over `OSC 777` without either of them ever being able to say "I am waiting".
+    OscRow {
+        arrival: OscArrival::Notification(NotificationSource::Osc9),
+        credential: Credential::Announced,
+    },
+    OscRow {
+        arrival: OscArrival::Notification(NotificationSource::Osc777),
+        credential: Credential::Announced,
+    },
+    OscRow {
+        arrival: OscArrival::Notification(NotificationSource::Osc99),
+        credential: Credential::Announced,
+    },
+];
+
+/// What one arrival on the OSC lane is worth, or `None` for one this build has no level for.
+#[must_use]
+pub(crate) fn osc_credential(arrival: OscArrival) -> Option<Credential> {
+    OSC_ROWS
+        .iter()
+        .find(|row| row.arrival == arrival)
+        .map(|row| row.credential)
+}
+
+/// **The program's own words**, for the one place they may be borrowed (§11.6 rule 2).
+///
+/// The body, unless the whole message was the title: `OSC 777;notify;<title>` with no body is a
+/// message and its words are that title. Nothing is composed here and nothing can be — a
+/// notification carrying neither field is never built, because `bt-term` refuses to call one a
+/// message, so this answers `None` only for the empty-bodied `OSC 9` that cannot exist.
+#[must_use]
+pub(crate) fn announced_words(notification: &TerminalNotification) -> Option<&str> {
+    if notification.body.is_empty() {
+        notification.title.as_deref()
+    } else {
+        Some(&notification.body)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -700,6 +819,173 @@ mod tests {
         // answer, not an unfinished one.
         assert_eq!(installed_rows(ROWS, PI, |_| true), Vec::new());
         assert_eq!(turn_end(PI, "agent_settled"), Some(Via::AgentSettled));
+    }
+
+    // -- the OSC lane (§11.6) ------------------------------------------------
+
+    /// Every value `bt-term` can report for `OSC 1337;RequestAttention=`.
+    ///
+    /// The `match` is the point of the function: adding a fourth value upstream stops this
+    /// compiling, which is the only way "the table is total" stays true without anybody rereading
+    /// it. A list alone would go quietly out of date, and the failure it hides — a sequence with no
+    /// level — is exactly how `OSC 9` spent three drafts outside the vocabulary.
+    fn every_request() -> [AttentionRequest; 3] {
+        let all = [
+            AttentionRequest::Yes,
+            AttentionRequest::No,
+            AttentionRequest::Once,
+        ];
+        for value in all {
+            match value {
+                AttentionRequest::Yes | AttentionRequest::No | AttentionRequest::Once => {}
+            }
+        }
+        all
+    }
+
+    /// Every sequence a [`TerminalNotification`] can arrive over. See [`every_request`].
+    fn every_source() -> [NotificationSource; 3] {
+        let all = [
+            NotificationSource::Osc9,
+            NotificationSource::Osc777,
+            NotificationSource::Osc99,
+        ];
+        for value in all {
+            match value {
+                NotificationSource::Osc9
+                | NotificationSource::Osc777
+                | NotificationSource::Osc99 => {}
+            }
+        }
+        all
+    }
+
+    fn every_arrival() -> Vec<OscArrival> {
+        every_request()
+            .into_iter()
+            .map(OscArrival::Request)
+            .chain(every_source().into_iter().map(OscArrival::Notification))
+            .collect()
+    }
+
+    /// **The OSC table is total, and no arrival is named twice.**
+    #[test]
+    fn every_arrival_the_wire_can_carry_names_exactly_one_row() {
+        for arrival in every_arrival() {
+            let named = OSC_ROWS.iter().filter(|row| row.arrival == arrival).count();
+            assert_eq!(
+                named, 1,
+                "{arrival:?} is named {named} times; a sequence with no level is one that gets \
+                 argued about from scratch every time it comes up, and one with two is a lookup \
+                 whose answer depends on typing order"
+            );
+        }
+        assert_eq!(OSC_ROWS.len(), every_arrival().len(), "and nothing else");
+    }
+
+    /// **No sequence a program writes down its own tty can say "I am blocked on you"** (red line
+    /// 14's other half, and §11.6's three-level table).
+    ///
+    /// iTerm2's `RequestAttention=yes` says a program *wants* you. Reading that as *waiting for
+    /// you* is the same substitution this whole block was opened to undo — it is what the bell was
+    /// read as — and the fact that this one arrives over a documented sequence rather than as a
+    /// `0x07` makes the substitution more tempting, not less wrong. The strong level has one
+    /// producer and it is the pane's own endpoint.
+    #[test]
+    fn nothing_on_the_wire_is_the_strong_level() {
+        let weak = OSC_ROWS
+            .iter()
+            .filter(|row| row.credential == Credential::Weak)
+            .map(|row| row.arrival)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            weak,
+            [
+                OscArrival::Request(AttentionRequest::Yes),
+                OscArrival::Request(AttentionRequest::No),
+            ],
+            "the weak level is the pair that can be unsaid, and only that pair"
+        );
+        for arrival in every_arrival() {
+            assert_ne!(
+                osc_credential(arrival),
+                Some(Credential::Strong),
+                "{arrival:?}"
+            );
+        }
+    }
+
+    /// **A notification is worth its words and nothing else** — the bytes, end to end.
+    ///
+    /// Fed the way a child writes them, read back the way the ledger will ask. Both sequences and
+    /// both of `OSC 777`'s shapes, because the one that carries only a title is the case where the
+    /// message is not in the field called `body`, and answering `None` there would drop the whole
+    /// of what a program said.
+    #[test]
+    fn the_two_old_world_sequences_arrive_as_words_at_the_event_level() {
+        for (bytes, source, words) in [
+            (
+                &b"\x1b]9;the build finished\x07"[..],
+                NotificationSource::Osc9,
+                "the build finished",
+            ),
+            (
+                &b"\x1b]777;notify;Build;finished in 4s\x07"[..],
+                NotificationSource::Osc777,
+                "finished in 4s",
+            ),
+            (
+                &b"\x1b]777;notify;the build finished\x07"[..],
+                NotificationSource::Osc777,
+                "the build finished",
+            ),
+        ] {
+            let mut session = bt_term::DualPlaneSession::new(
+                std::num::NonZeroU32::new(80).expect("a width"),
+                std::num::NonZeroU32::new(8).expect("a height"),
+            );
+            session.feed(bytes).expect("the session accepts bytes");
+            let arrived = session.take_notifications();
+            let [notification] = arrived.as_slice() else {
+                panic!("one message, not {}: {bytes:?}", arrived.len());
+            };
+            assert_eq!(notification.source, source, "{bytes:?}");
+            assert_eq!(
+                osc_credential(OscArrival::Notification(notification.source)),
+                Some(Credential::Announced),
+                "{bytes:?}"
+            );
+            assert_eq!(announced_words(notification), Some(words), "{bytes:?}");
+        }
+    }
+
+    /// PIN (`attention` plan §11.6 rule 3) — **`OSC 9;4` is the progress ring, not an
+    /// announcement.**
+    ///
+    /// ConEmu hung a numbered subcommand slot on `OSC 9` and iTerm2 hung a free-text notification
+    /// on the same number, so one sequence carries two protocols and this build reads both. The
+    /// failure this pin forbids is the cheap one: reading `9;4;3` as a message would put the text
+    /// `4;3` in front of a person as something a program said, on every keep-alive tick of every
+    /// progress bar.
+    #[test]
+    fn the_progress_arm_of_osc_nine_is_not_a_message() {
+        let mut session = bt_term::DualPlaneSession::new(
+            std::num::NonZeroU32::new(80).expect("a width"),
+            std::num::NonZeroU32::new(8).expect("a height"),
+        );
+        session
+            .feed(b"\x1b]9;4;3\x07")
+            .expect("the session accepts bytes");
+        assert_eq!(
+            session.take_notifications(),
+            Vec::new(),
+            "the ring is not a sentence"
+        );
+        assert_eq!(
+            session.status().progress,
+            Some(bt_term::ProgressState::Indeterminate),
+            "and it is still the ring"
+        );
     }
 
     /// No `<family>:<event>` names two rows — a lookup that could answer twice is a lookup whose

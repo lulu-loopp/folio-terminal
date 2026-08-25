@@ -15274,6 +15274,69 @@ fn emit_attention_lines(trace: Option<&attention_trace::Trace>, lines: Vec<Strin
     }
 }
 
+/// **The other lane: what a program wrote down its own tty** (`attention` plan §11.6, slice A1).
+///
+/// Two arrivals and two levels, and the levels are declared in `attention_map`'s own table rather
+/// than decided here — a sequence's worth is data, so a family whose level is argued over is a row
+/// somebody edits.
+///
+/// * the **weak** level, `OSC 1337;RequestAttention=`. `bt-term` keeps it as a *level* on the
+///   status snapshot, because that is what the bytes are; the ledger takes *edges*, because a
+///   request is a thing that begins. [`attention::AttentionLedger::weak_edge`] is the one
+///   translation between the two, and it lives beside the mirror it compares against so that no
+///   call site has to keep a second copy of "what was it last time".
+/// * the **event** level, `OSC 9` and `OSC 777;notify`. It mints nothing and holds nothing (red
+///   line 14); all it may do is lend the words the program actually wrote to the one interruption
+///   this pane's live request is allowed.
+///
+/// **Here and not in the per-frame pass**, and the order inside is the reason: a program that
+/// writes `RequestAttention=yes` and then `OSC 9;Allow this?` in one burst has said both things
+/// before this function is called, so the request is minted and *then* the words are offered to it.
+/// Run from the animation tick instead, the announcement would arrive at a pane with no live
+/// request and its sentence would be dropped — the program's own words lost to a scheduling
+/// detail.
+fn deliver_osc_attention(
+    tab: &mut TabState,
+    index: usize,
+    tab_is_active: bool,
+    window_is_focused: bool,
+    next_place: &mut u64,
+    announcements: &[(SeatId, bt_term::TerminalNotification)],
+    trace: Option<&attention_trace::Trace>,
+) {
+    let reach = ledger_reach(tab_is_active, window_is_focused);
+    for (seat, leaf) in tab.leaves_mut() {
+        let Some(event) = leaf
+            .attention
+            .weak_edge(leaf.session.status().attention_request)
+        else {
+            continue;
+        };
+        let at = attention::Site {
+            tab: index,
+            seat: *seat,
+        };
+        let lines = leaf.attention.apply(at, reach, event, next_place).lines;
+        emit_attention_lines(trace, lines);
+    }
+    for (seat, notification) in announcements {
+        // The row decides, and its pin is that no sequence on this lane is ever the strong level:
+        // "a program is blocked on your input" is a sentence no OSC in existence can say, and
+        // reading one as if it could is the substitution this whole block was opened to undo.
+        if attention_map::osc_credential(attention_map::OscArrival::Notification(
+            notification.source,
+        )) != Some(attention::Credential::Announced)
+        {
+            continue;
+        }
+        let Some(leaf) = tab.sessions.get_mut(seat) else {
+            continue;
+        };
+        leaf.attention
+            .announce(attention_map::announced_words(notification));
+    }
+}
+
 /// **Hand every arrived message to the one pane that can have sent it.**
 ///
 /// The lookup is by capability and is a scan, which is the right shape at this size and — more to
@@ -15341,7 +15404,7 @@ fn deliver_attention(
                     at,
                     reach,
                     true,
-                    attention_map::TRANSPORT,
+                    attention_map::PIPE_TRANSPORT,
                     via,
                 );
                 emit_attention_lines(trace, outcome.lines);
@@ -56634,6 +56697,19 @@ impl Runtime<'_> {
             let outcome =
                 drain_tab_pty(tab, window_focused, index == active_tab, owner_is_a_shell)?;
             pending |= outcome.pending;
+            // **The OSC lane's turn, on the turn the bytes arrived.** A standing request a program
+            // wrote down its own tty becomes an episode here, and a message it wrote beside one
+            // lends that request its words — see the function for why both belong on this turn and
+            // in this order rather than on the animation tick.
+            deliver_osc_attention(
+                tab,
+                index,
+                index == active_tab,
+                window_focused,
+                &mut self.window.attention_next_place,
+                &outcome.notifications,
+                attention_trace::global(),
+            );
             // Resolved here and spent below: the pane's name and its profile's are
             // facts of this tab, and raising reaches a field of `App` that this
             // loop's borrow of `self.window.tabs` cannot be holding at the time.
