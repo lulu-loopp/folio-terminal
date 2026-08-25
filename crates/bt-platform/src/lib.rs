@@ -142,6 +142,207 @@ pub fn composition_visual_offset(x: i32, y: i32) -> (f32, f32) {
     (x as f32, y as f32)
 }
 
+/// One rectangle of the window's own ground, in physical pixels. See
+/// [`window_skirt`].
+///
+/// A band of zero width or zero height is a band that is not there — the shape
+/// a skirt takes whenever the swapchain has caught up with the window — and it
+/// is spelled that way rather than as an `Option` because the two bands are
+/// **two permanent visuals**, not two visuals that come and go. A visual added
+/// and removed on every resize is a tree that changes shape sixty times a
+/// second; a visual scaled to nothing draws nothing and costs one matrix.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GroundBand {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl GroundBand {
+    /// Nothing is drawn for a band with no area.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.width <= 0 || self.height <= 0
+    }
+}
+
+/// **The part of the window the swapchain does not cover**, as two bands.
+///
+/// # Why the window's ground cannot simply be laid under the whole window
+///
+/// The one thing that must never happen here is the ground being counted
+/// twice. A window at 60% ground draws its clear at `a = 0.6` over its whole
+/// surface; a second sheet of the same 0.6 underneath it composites to 0.84,
+/// and a person who asked for a see-through window gets a window that is
+/// visibly less see-through than the one they asked for. §7.1.6c-4b calls that
+/// out by name and §7.14 paid it once already, which is why a page's floor is
+/// under the *pane* — the one place the clear writes `a = 0` — and not under
+/// the window.
+///
+/// The band a resize opens has no such hole to hide in: Folio's clear covers
+/// every pixel the swapchain has, at the ground's own alpha. So the ground goes
+/// exactly, and only, where **nothing else paints at all** — the window minus
+/// the swapchain's rectangle. That region is an L, and an L is two rectangles;
+/// DirectComposition has no region primitive, and it does not need one.
+///
+/// # Why the L is on the right and the bottom, always
+///
+/// The swapchain hangs at the client area's origin and a client area's origin
+/// is `(0, 0)` however the window was dragged. Growing a window by its *left*
+/// edge moves the window on the desktop and still grows the client rectangle to
+/// the right of `(0, 0)`, so the uncovered part is on the right and the bottom
+/// in every direction of drag. (What moves on screen is the whole picture, which
+/// is the same jump DirectComposition has always made and is not this
+/// function's business.)
+///
+/// Empty in both bands whenever the swapchain is at least as large as the
+/// window — the steady state, and also every frame of a window being made
+/// *smaller*, where the swapchain overhangs and is cropped by the window itself.
+#[must_use]
+pub fn window_skirt(window: (u32, u32), covered: (u32, u32)) -> [GroundBand; 2] {
+    // Saturating rather than wrapping, and `min` before the cast: a window is
+    // never near `i32::MAX` on any desktop, and the arithmetic below must be
+    // total anyway because both numbers arrive from outside this crate.
+    let clamp = |value: u32| i32::try_from(value).unwrap_or(i32::MAX);
+    let (width, height) = (clamp(window.0), clamp(window.1));
+    let covered_width = clamp(covered.0).min(width);
+    let covered_height = clamp(covered.1).min(height);
+    [
+        // The right band takes the window's full height, so the two meet along
+        // one edge and overlap on none of it.
+        GroundBand {
+            x: covered_width,
+            y: 0,
+            width: width - covered_width,
+            height,
+        },
+        // The bottom band stops where the right band starts.
+        GroundBand {
+            x: 0,
+            y: covered_height,
+            width: covered_width,
+            height: height - covered_height,
+        },
+    ]
+}
+
+#[cfg(test)]
+mod window_skirt_tests {
+    use super::{GroundBand, window_skirt};
+
+    fn area(band: GroundBand) -> i64 {
+        i64::from(band.width.max(0)) * i64::from(band.height.max(0))
+    }
+
+    fn overlap(left: GroundBand, right: GroundBand) -> i64 {
+        let x = (left.x + left.width).min(right.x + right.width) - left.x.max(right.x);
+        let y = (left.y + left.height).min(right.y + right.height) - left.y.max(right.y);
+        i64::from(x.max(0)) * i64::from(y.max(0))
+    }
+
+    /// **RED — the skirt is exactly what the swapchain is not.**
+    ///
+    /// Both halves are the claim, and the second one is the one that would
+    /// otherwise be got wrong: the bands must tile the uncovered region
+    /// *without* touching the covered one. A skirt that overlapped the
+    /// swapchain by even a row would composite the window's ground under a
+    /// clear that already carries it, and a 60% window would read at 84% along
+    /// that row — the exact defect §7.1.6c-4b forbids and §7.14 was shaped to
+    /// avoid.
+    ///
+    /// Red gate: return one full-window band (`x: 0, y: 0, width, height`) —
+    /// the obvious "just put the ground under everything" fix — and the overlap
+    /// assertion goes red at 836 000 px. Drop the `min(width)` clamp on the
+    /// covered size and the shrinking case goes red with a negative band.
+    #[test]
+    fn the_skirt_is_exactly_the_window_the_swapchain_does_not_cover() {
+        let window = (1900_u32, 1150_u32);
+        let covered = (1100_u32, 760_u32);
+        let [right, bottom] = window_skirt(window, covered);
+
+        // The claim, before its spelling.
+        let swapchain = GroundBand {
+            x: 0,
+            y: 0,
+            width: 1100,
+            height: 760,
+        };
+        assert_eq!(
+            overlap(right, swapchain) + overlap(bottom, swapchain),
+            0,
+            "a ground composited under a clear that already carries the same \
+             alpha counts the window's translucency twice"
+        );
+        assert_eq!(
+            overlap(right, bottom),
+            0,
+            "and two bands over each other count it twice as well"
+        );
+        let whole = i64::from(window.0) * i64::from(window.1);
+        let under_swapchain = i64::from(covered.0) * i64::from(covered.1);
+        assert_eq!(
+            area(right) + area(bottom),
+            whole - under_swapchain,
+            "while together they are the whole of what the swapchain leaves \
+             uncovered, with nothing left transparent"
+        );
+
+        // And the spelling, so that a rewrite that satisfies the three claims
+        // by some other geometry has to say so out loud.
+        assert_eq!(
+            right,
+            GroundBand {
+                x: 1100,
+                y: 0,
+                width: 800,
+                height: 1150
+            }
+        );
+        assert_eq!(
+            bottom,
+            GroundBand {
+                x: 0,
+                y: 760,
+                width: 1100,
+                height: 390
+            }
+        );
+    }
+
+    /// **RED — a swapchain that has caught up wears no skirt at all**, which is
+    /// the steady state of every window in the product and the state a
+    /// *shrinking* window is in for the whole of its drag.
+    ///
+    /// Red gate: drop either `min` in the body and the shrinking case hands
+    /// back a band with negative width, which places a visual inside out.
+    #[test]
+    fn a_swapchain_at_least_as_big_as_the_window_leaves_nothing_uncovered() {
+        for covered in [(1900_u32, 1150_u32), (2600, 1420), (1900, 1420)] {
+            for band in window_skirt((1900, 1150), covered) {
+                assert!(
+                    band.is_empty(),
+                    "nothing is uncovered, so nothing is drawn: {band:?} for {covered:?}"
+                );
+                assert!(band.width >= 0 && band.height >= 0);
+            }
+        }
+    }
+
+    /// **RED — a window that has never been sized wears no skirt either.**
+    ///
+    /// The state a compositor is born in, and the one a window with a
+    /// zero-sized client area (minimized) reports. `0 - 0` has to be nothing
+    /// rather than the whole window, or a minimized window would commit a
+    /// full-window band every time it was told its own size.
+    #[test]
+    fn a_window_with_no_size_has_no_bands() {
+        for band in window_skirt((0, 0), (0, 0)) {
+            assert!(band.is_empty());
+        }
+    }
+}
+
 /// **The name of one page's visual** inside one window's composition tree.
 ///
 /// Two numbers and not one, and the second one is the whole of this type. A
@@ -438,6 +639,90 @@ mod visual_layer_tests {
         assert!(
             teardown_body.contains(concat!("web_ground", ".borrow_mut().remove(&page)")),
             "a page's floor leaves with the page"
+        );
+    }
+
+    /// **The skirt does not wait for a frame, and the frame does not wait for
+    /// the skirt** (§7.1.6c-4b re-judged; user ruling 2026-08-24).
+    ///
+    /// A source pin, for the reason every pin in this module is one:
+    /// DirectComposition cannot be asked what is in a tree or when a commit
+    /// reached the glass, so what a machine can hold is the shape of the calls.
+    /// And the shape *is* the fix. The band a resize opens is transparent
+    /// because the swapchain is behind the window, so a skirt published on the
+    /// swapchain's own clock — the present funnel — arrives on exactly the
+    /// frame that no longer needs it. `set_window_size` therefore commits by
+    /// itself; `set_covered_size` must not, because the strip closing and the
+    /// picture growing have to be one commit or the ground is composited under
+    /// a clear that already carries it for a frame.
+    ///
+    /// Red gate: take the `self.commit()` out of `set_window_size` and the
+    /// first assertion goes red — that is the shipped-build behaviour this
+    /// slice was photographed against, desktop and all. Add a commit to
+    /// `set_covered_size` and the second goes red. Give either setter its own
+    /// copy of the geometry instead of calling `place_skirt` and the last one
+    /// does.
+    #[test]
+    fn the_skirt_commits_on_the_window_clock_and_not_on_the_frames() {
+        let source: String = include_str!("lib.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        let body = |signature: &str| -> String {
+            let start = source
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+            let rest = &source[start + signature.len()..];
+            let end = rest.find("///").unwrap_or(rest.len());
+            rest[..end].to_owned()
+        };
+
+        let window = body(concat!(
+            "pubfnset_window",
+            "_size(&self,width:u32,height:u32)"
+        ));
+        assert!(
+            window.contains("self.place_skirt()?;self.commit()"),
+            "the window's own clock places the skirt and publishes it in the \
+             same breath, or the strip is transparent until the next frame: {window}"
+        );
+
+        let covered = body(concat!(
+            "pubfnset_covered",
+            "_size(&self,width:u32,height:u32)"
+        ));
+        assert!(
+            covered.contains("self.place_skirt()"),
+            "the swapchain's clock places the skirt too: {covered}"
+        );
+        assert!(
+            !covered.contains(concat!("self.", "commit()")),
+            "but it does not publish it — its caller's commit is the one that \
+             has to carry both halves: {covered}"
+        );
+
+        assert!(
+            covered.contains(concat!(
+                "letlanded=self.presented_size.replace((width,height));",
+                "ifself.covered_size.get()==landed{returnOk(());}",
+                "self.covered_size.set(landed);"
+            )),
+            "**and it is believed one present late.** A present queues an image; \
+             it does not show one. The composition commit lands at the next \
+             composition pass and the swapchain's new buffer flips on its own \
+             schedule — measured 26ms apart on the real window — so a skirt \
+             sized against the frame being presented is withdrawn while the \
+             strip is still showing the older, smaller picture, which is the \
+             hole this slice exists to close: {covered}"
+        );
+
+        assert_eq!(
+            source
+                .matches(concat!("window_", "skirt(self.window_size.get()"))
+                .count(),
+            2,
+            "one expression turns the two sizes into two bands; both setters and \
+             the question the funnel asks go through it"
         );
     }
 
@@ -1247,10 +1532,10 @@ mod windows_impl {
     };
 
     use super::{
-        CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, INSERT_ABOVE_REFERENCE,
-        NonZeroIsize, PageVisual, TaskbarProgress, TaskbarProgressState, ThreadPriority,
-        VisualLayer, WheelScrollAmount, WindowRect, composition_visual_offset,
-        custom_frame_hit_test, logical_px_for_dpi,
+        CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, GroundBand,
+        INSERT_ABOVE_REFERENCE, NonZeroIsize, PageVisual, TaskbarProgress, TaskbarProgressState,
+        ThreadPriority, VisualLayer, WheelScrollAmount, WindowRect, composition_visual_offset,
+        custom_frame_hit_test, logical_px_for_dpi, window_skirt,
     };
 
     /// GDI brush currently owned by this process and installed on winit's shared window class.
@@ -1320,15 +1605,21 @@ mod windows_impl {
     /// ```text
     /// target  ← CreateTargetForHwnd(hwnd, topmost = true)
     ///  └─ root                    ← IDCompositionTarget::SetRoot
+    ///      ├─ skirt[0], skirt[1]   ← the window's own ground, where nothing else paints
     ///      └─ gpu                 ← the swapchain wgpu hangs here
     /// ```
     ///
     /// `topmost = true` is load-bearing rather than decorative: the whole tree
-    /// is composed **above** the window's own painting, so anywhere the visuals
-    /// do not cover shows the window class background brush
-    /// ([`install_window_class_background`]) and not the desktop behind it.
-    /// That is the same brush that has always been under the swapchain, so a
-    /// frame that has not been presented yet looks exactly as it did before.
+    /// is composed **above** the window's own painting. That used to mean the
+    /// window class background brush ([`install_window_class_background`])
+    /// showed wherever the visuals did not cover — and it no longer does. Since
+    /// §7.1.6c-4d the window is created `.with_transparent(true)`
+    /// unconditionally, which is one `DwmEnableBlurBehindWindow` asking DWM to
+    /// honour the window's own per-pixel alpha; GDI writes no alpha at all, so
+    /// the brush lands in the redirection bitmap at `a = 0` and DWM shows the
+    /// desktop straight through it. Photographed 2026-08-24 (below). What
+    /// answers that question now is [`Compositor::set_window_size`] and the
+    /// skirt it places.
     ///
     /// The web preview's own visual becomes a second child of `root` in a later
     /// slice; the shape above is already the shape that takes it.
@@ -1383,22 +1674,75 @@ mod windows_impl {
         /// **The floor under each page** — one [`PageGround`] per entry in
         /// [`Self::web`], created and destroyed with it. See [`PageGround`].
         web_ground: RefCell<BTreeMap<PageVisual, PageGround>>,
-        /// The one surface every page ground is scaled out of, minted on the
-        /// first [`Compositor::attach_web_visual`] and never again.
+        /// **The window's own ground, wherever nothing else paints**: the two
+        /// bands [`window_skirt`] cuts the uncovered L into.
         ///
-        /// `None` until then, and that is the whole of what a window with no
-        /// page pays: no D3D11 device, no surface factory, no surface. The
-        /// composition device itself is still built on a null rendering device
-        /// — this is the one thing in the tree that is rasterized, and it is
-        /// rasterized through a factory of its own.
-        ground_surface: RefCell<Option<GroundSurface>>,
+        /// Permanent visuals, scaled to nothing whenever the swapchain has
+        /// caught up — see [`SkirtBand`].
+        skirt: [SkirtBand; 2],
+        /// How big this window's client area is, as last reported by whoever
+        /// was told first.
+        ///
+        /// One of the skirt's two clocks. See [`Compositor::set_window_size`].
+        window_size: Cell<(u32, u32)>,
+        /// How much of the window the swapchain's picture is covering **on the
+        /// glass**.
+        ///
+        /// The skirt's other clock, and the whole reason there are two: a
+        /// window learns its new size inside `WM_SIZE` and the swapchain
+        /// reaches that size several milliseconds later, at the next present.
+        /// The gap between them is the defect this exists for.
+        ///
+        /// One present behind [`Self::presented_size`], and that lag is the
+        /// second half of the fix rather than slack — see
+        /// [`Compositor::set_covered_size`]. Measured 2026-08-24: a resize
+        /// commits at +2 ms, the frame that fills the strip is presented at
+        /// +35 ms, and the picture reaches the screen at +61 ms. Without the
+        /// lag the ground was withdrawn at +35 and the strip showed the
+        /// desktop for the 26 ms in between — the original defect, a third as
+        /// long.
+        covered_size: Cell<(u32, u32)>,
+        /// The size of the swapchain image the **last** present handed to the
+        /// glass, which is not yet the image on it.
+        presented_size: Cell<(u32, u32)>,
+        /// The one surface every ground in this window is scaled out of — the
+        /// two skirt bands and every page's floor.
+        ///
+        /// Minted with the window rather than with the first page: a page is
+        /// optional and a resize is not, so there is no window that does not
+        /// need it. The composition device itself is still built on a null
+        /// rendering device — this is the one thing in the tree that is
+        /// rasterized, and it is rasterized through a factory of its own.
+        ground_surface: GroundSurface,
         /// The colour last put on that surface, premultiplied and sRGB-encoded.
         ///
-        /// Kept because the two events that need it arrive in either order: a
-        /// page can be attached before the app has said what the ground is, and
-        /// the ground can change while no page exists. Whichever happens first
-        /// leaves the answer here for the other one.
+        /// Kept so that a repaint can be skipped when a settings write did not
+        /// move it, and so that the answer given before the first page exists
+        /// is still the answer when one does.
         ground_color: Cell<[f32; 4]>,
+    }
+
+    /// One band of the window's own ground, as a visual.
+    ///
+    /// **One visual and not the two a [`PageGround`] takes**, because a band
+    /// has no clip: a page's floor is cropped to the same box as the page above
+    /// it and therefore needs a holder to carry that crop, while a band is
+    /// already exactly the rectangle it is allowed to be. So the whole
+    /// placement — where the band is and how far the one texel is stretched —
+    /// is the single matrix below, which is also why the offset is left at
+    /// zero: a visual's offset is applied *inside* its transform, and an origin
+    /// written in both places would be scaled by the size.
+    struct SkirtBand {
+        /// Held rather than dropped after `AddVisual`, exactly as
+        /// [`PageGround::fill`] is: the tree owns a reference of its own, so
+        /// this handle is the *record* that the band was built, and a band that
+        /// carried only a matrix would not say what the matrix is on.
+        #[allow(dead_code, reason = "the tree owns it; this is the record of it")]
+        visual: IDCompositionVisual,
+        /// Scale on the diagonal, origin in the last row — the 3×2 convention
+        /// `IDCompositionMatrixTransform` shares with Direct2D. Mutated in
+        /// place, four floats, rather than rebuilt per resize.
+        placement: IDCompositionMatrixTransform,
     }
 
     /// The two visuals one page's ground is.
@@ -1481,6 +1825,16 @@ mod windows_impl {
                 .map_err(|error| compositor_failure("IDCompositionVisual::AddVisual", &error))?;
             unsafe { target.SetRoot(&root) }
                 .map_err(|error| compositor_failure("IDCompositionTarget::SetRoot", &error))?;
+            // Opaque black until the app says otherwise, which it does before
+            // the window is ever shown. A ground that somehow reached the glass
+            // ahead of that answer is still a floor and not a hole, which is
+            // the property this whole slice is about.
+            let ground_color = [0.0_f32, 0.0, 0.0, 1.0];
+            let ground_surface = Self::mint_ground_surface(&device, ground_color)?;
+            let skirt = [
+                Self::create_skirt_band(&device, &root, &ground_surface, "skirt right")?,
+                Self::create_skirt_band(&device, &root, &ground_surface, "skirt bottom")?,
+            ];
             let compositor = Self {
                 device,
                 device3,
@@ -1489,12 +1843,17 @@ mod windows_impl {
                 gpu,
                 web: RefCell::new(BTreeMap::new()),
                 web_ground: RefCell::new(BTreeMap::new()),
-                ground_surface: RefCell::new(None),
-                // Opaque black until the app says otherwise, which it does
-                // before the first page can exist. A page ground that somehow
-                // reached the glass ahead of that answer is still a floor and
-                // not a hole, which is the property this whole slice is about.
-                ground_color: Cell::new([0.0, 0.0, 0.0, 1.0]),
+                skirt,
+                // Two zeroes and not the window's real size: a skirt is placed
+                // by whoever moves one of these, and being born believing the
+                // window is empty is what makes the first `set_window_size`
+                // place it. The window is not visible until the first frame, so
+                // there is nothing on screen to be wrong in the meantime.
+                window_size: Cell::new((0, 0)),
+                covered_size: Cell::new((0, 0)),
+                presented_size: Cell::new((0, 0)),
+                ground_surface,
+                ground_color: Cell::new(ground_color),
             };
             // The tree exists on screen only once it is committed, and this one
             // is empty until wgpu sets the swapchain on `gpu` — so what this
@@ -1523,6 +1882,190 @@ mod windows_impl {
             visual.cast::<IDCompositionVisual>().map_err(|error| {
                 compositor_failure(&format!("IDCompositionVisual2::cast({role})"), &error)
             })
+        }
+
+        /// Build one band of the skirt and put it at the bottom of the tree.
+        ///
+        /// At the bottom, and it never has to fight anything for that place:
+        /// a band is by construction the part of the window the swapchain is
+        /// not on, and every pane rectangle in this window was solved against
+        /// the swapchain — so a band overlaps nothing above it whatever order
+        /// the list ends up in. The bottom is where it belongs anyway, because
+        /// what it is is the floor.
+        fn create_skirt_band(
+            device: &IDCompositionDesktopDevice,
+            root: &IDCompositionVisual,
+            ground: &GroundSurface,
+            role: &str,
+        ) -> Result<SkirtBand, String> {
+            let visual = Self::create_visual(device, role)?;
+            unsafe { visual.SetContent(&ground.surface) }.map_err(|error| {
+                compositor_failure(&format!("IDCompositionVisual::SetContent({role})"), &error)
+            })?;
+            let placement = unsafe { device.CreateMatrixTransform() }.map_err(|error| {
+                compositor_failure("IDCompositionDevice2::CreateMatrixTransform(skirt)", &error)
+            })?;
+            // The shear terms are written once and never again — the same
+            // discipline `create_page_ground` keeps, and for the same reason: a
+            // matrix left at whatever the factory started it with is a band
+            // that could arrive skewed.
+            unsafe {
+                placement
+                    .SetMatrixElement2(0, 1, 0.0)
+                    .and_then(|()| placement.SetMatrixElement2(1, 0, 0.0))
+            }
+            .map_err(|error| {
+                compositor_failure(
+                    "IDCompositionMatrixTransform::SetMatrixElement(skirt)",
+                    &error,
+                )
+            })?;
+            // Born scaled to nothing. A band whose matrix has never been
+            // written would stretch its one texel by whatever the identity
+            // says — one pixel — and one stray pixel of theme colour in the
+            // window's top-left corner is exactly the kind of thing nobody
+            // finds for a month.
+            unsafe {
+                placement
+                    .SetMatrixElement2(0, 0, 0.0)
+                    .and_then(|()| placement.SetMatrixElement2(1, 1, 0.0))
+            }
+            .map_err(|error| {
+                compositor_failure(
+                    "IDCompositionMatrixTransform::SetMatrixElement(skirt)",
+                    &error,
+                )
+            })?;
+            unsafe { visual.SetTransform(&placement) }.map_err(|error| {
+                compositor_failure(
+                    &format!("IDCompositionVisual::SetTransform({role})"),
+                    &error,
+                )
+            })?;
+            unsafe {
+                root.AddVisual(
+                    &visual,
+                    VisualLayer::Bottom.insert_above_with_null_reference(),
+                    None::<&IDCompositionVisual>,
+                )
+            }
+            .map_err(|error| {
+                compositor_failure(&format!("IDCompositionVisual::AddVisual({role})"), &error)
+            })?;
+            Ok(SkirtBand { visual, placement })
+        }
+
+        /// **Tell the window's ground how big the window is — and publish it
+        /// now, without waiting for a frame** (user ruling 2026-08-24).
+        ///
+        /// # What is being fixed
+        ///
+        /// A window grows inside `WM_SIZE`. The swapchain does not: wgpu is
+        /// handed the new size, records it, and only calls `ResizeBuffers` at
+        /// the next present — which is behind a solve, a re-layout, every
+        /// pane's ConPTY, and a full frame of drawing. Photographed 2026-08-24
+        /// on the shipped build (1100×760 → 1900×1150, `SWP_NOZORDER |
+        /// SWP_NOACTIVATE`, frames 30 ms apart): at +30 ms the L outside the
+        /// old rectangle read `#1B4651` — the window standing *behind* Folio,
+        /// straight through Folio's own frame — and at +89 ms it read
+        /// `#1B1B1B`, the ground. Nothing in the tree was painting there, and a
+        /// tree bound `topmost = true` over a per-pixel-alpha HWND shows the
+        /// desktop wherever it paints nothing.
+        ///
+        /// # Why this one commits
+        ///
+        /// Because that is the entire mechanism. [`Compositor::commit`] is
+        /// otherwise called once per presented frame and from one funnel, and
+        /// a skirt published on that clock would arrive on exactly the frame
+        /// that no longer needs it. A DirectComposition commit owes nothing to
+        /// a swapchain: it takes effect at the next composition pass, which is
+        /// the pass that would otherwise have shown the desktop. So the ground
+        /// is on the glass in the same DWM frame that made the window bigger,
+        /// and the swapchain arrives whenever it arrives.
+        ///
+        /// Cheap when nothing moved, which is what makes it safe to call from a
+        /// handler that fires all through a drag: a `WM_SIZE` that settles back
+        /// on the same numbers costs one comparison and commits nothing.
+        pub fn set_window_size(&self, width: u32, height: u32) -> Result<(), String> {
+            if self.window_size.get() == (width, height) {
+                return Ok(());
+            }
+            self.window_size.set((width, height));
+            self.place_skirt()?;
+            self.commit()
+        }
+
+        /// **Tell the window's ground how much of it the swapchain covers, and
+        /// believe it one present later.**
+        ///
+        /// The other half of [`Compositor::set_window_size`], and deliberately
+        /// not the same call: the two facts arrive from two clocks. This one
+        /// belongs to the present funnel — after `ResizeBuffers` has happened
+        /// and before the commit that publishes the frame — and it does not
+        /// commit, because the caller is about to.
+        ///
+        /// # Why the answer is applied a frame late
+        ///
+        /// A present does not put an image on the screen; it queues one. The
+        /// composition device's commit is published at the next composition
+        /// pass, but the *swapchain's* newly presented buffer flips on its own
+        /// schedule, and DirectComposition goes on showing the previous, older
+        /// and smaller image until it does. Measured on the real window
+        /// (2026-08-24, 1100×760 → 2600×1700): the resize commits its skirt at
+        /// +2 ms, the frame that fills the strip is presented and committed at
+        /// +35 ms, and the strip does not actually show that picture until
+        /// +61 ms. A skirt withdrawn on the *presenting* frame therefore leaves
+        /// exactly the hole this slice exists to close, 26 ms of it — which is
+        /// what the first cut of this fix measured, and why there are two cells
+        /// here instead of one.
+        ///
+        /// So what the skirt is sized against is the picture of the present
+        /// *before* this one, which has had a flip to arrive. The cost is
+        /// stated rather than hidden: for one frame the skirt and the swapchain
+        /// both cover the sliver grown since the last frame, and on a
+        /// translucent ground that sliver composites at `2g - g²` instead of
+        /// `g` (§7.1.6c-4b). It is a few pixels for one frame against the whole
+        /// strip for two, and it is the *same* currency — which is the only
+        /// reason it is the right way round.
+        ///
+        /// It follows that the skirt is only withdrawn by a **later** present,
+        /// so the window has to ask for one while
+        /// [`Compositor::skirt_covers_anything`] is still true. That is the
+        /// caller's half, and without it a window that fell idle straight after
+        /// a resize would keep its skirt.
+        pub fn set_covered_size(&self, width: u32, height: u32) -> Result<(), String> {
+            let landed = self.presented_size.replace((width, height));
+            if self.covered_size.get() == landed {
+                return Ok(());
+            }
+            self.covered_size.set(landed);
+            self.place_skirt()
+        }
+
+        /// Whether either band is drawing anything.
+        ///
+        /// Read by the present funnel to ask for one more frame: the skirt is
+        /// withdrawn a present late (see [`Compositor::set_covered_size`]), so
+        /// something has to guarantee the present that withdraws it. `false`
+        /// ends that chain, which is why this is a question about the *bands*
+        /// and not about whether a resize happened.
+        #[must_use]
+        pub fn skirt_covers_anything(&self) -> bool {
+            window_skirt(self.window_size.get(), self.covered_size.get())
+                .iter()
+                .any(|band| !band.is_empty())
+        }
+
+        /// Put both bands where [`window_skirt`] says they are.
+        ///
+        /// One place, reached by both setters, because the skirt is a function
+        /// of the two numbers and not a thing either setter owns.
+        fn place_skirt(&self) -> Result<(), String> {
+            let bands = window_skirt(self.window_size.get(), self.covered_size.get());
+            for (band, geometry) in self.skirt.iter().zip(bands) {
+                Self::place_ground_band(band, geometry)?;
+            }
+            Ok(())
         }
 
         /// The raw `IDCompositionVisual` wgpu builds its surface upon.
@@ -1637,7 +2180,7 @@ mod windows_impl {
         fn create_page_ground(&self) -> Result<PageGround, String> {
             let holder = Self::create_visual(&self.device, "web ground")?;
             let fill = Self::create_visual(&self.device, "web ground fill")?;
-            let surface = self.ground_surface()?;
+            let surface = self.ground_surface.surface.clone();
             unsafe { fill.SetContent(&surface) }.map_err(|error| {
                 compositor_failure("IDCompositionVisual::SetContent(web ground)", &error)
             })?;
@@ -1687,18 +2230,48 @@ mod windows_impl {
             })
         }
 
-        /// The shared 1×1 surface, minting it on first use.
+        /// **Put the window's ground colour where nothing else paints.**
         ///
-        /// **One texel for every ground in the window**, and one for every size
-        /// each of them is ever drawn at: a surface of a single colour is the
-        /// one picture a bilinear sampler cannot get wrong however far it is
-        /// stretched, so the floor never has to be redrawn when a pane resizes.
-        /// That is the whole of "常驻，不按帧重建" — the only thing that ever
-        /// touches these texels again is the theme changing.
-        fn ground_surface(&self) -> Result<IDCompositionSurface, String> {
-            if let Some(existing) = self.ground_surface.borrow().as_ref() {
-                return Ok(existing.surface.clone());
+        /// Both answers at once, because they are one answer: the skirt and
+        /// every page's floor show the *same* one-texel surface, so the colour
+        /// is written once and every band and every pane in the window follows.
+        /// That is why neither hot theme switching nor a resize needs a list of
+        /// anything anywhere.
+        ///
+        /// Takes it *premultiplied and sRGB-encoded* — four numbers in
+        /// `0.0..=1.0` — because that is what the swapchain leaves in its own
+        /// bytes and the two have to match to the byte or the band reads as a
+        /// slightly different shade of the same window. The arithmetic that
+        /// produces them belongs to the renderer, which owns both the palette
+        /// and the linear/sRGB boundary; this crate must not learn either.
+        ///
+        /// Idempotent, and cheap when nothing moved: a settings write that did
+        /// not touch the ground costs one comparison.
+        pub fn set_page_ground_color(&self, premultiplied_srgb: [f32; 4]) -> Result<(), String> {
+            if self.ground_color.get() == premultiplied_srgb {
+                return Ok(());
             }
+            self.ground_color.set(premultiplied_srgb);
+            paint_ground_surface(&self.ground_surface, premultiplied_srgb)
+        }
+
+        /// The one 1×1 surface every ground in one window is scaled out of.
+        ///
+        /// **One texel for every band and every floor**, and one for every size
+        /// each of them is ever drawn at: a picture of a single colour is the one
+        /// picture a bilinear sampler cannot get wrong however far it is stretched,
+        /// so nothing here is ever redrawn when a window or a pane resizes. That is
+        /// the whole of "常驻，不按帧重建" — the only thing that ever touches these
+        /// texels again is the theme changing.
+        ///
+        /// An associated function rather than a method because it is called while
+        /// the [`Compositor`] is still being built: the skirt is content this
+        /// surface carries, and the skirt is part of the tree from the first
+        /// commit.
+        fn mint_ground_surface(
+            composition: &IDCompositionDesktopDevice,
+            premultiplied_srgb: [f32; 4],
+        ) -> Result<GroundSurface, String> {
             let mut device: Option<ID3D11Device> = None;
             let mut context = None;
             // SAFETY: every out-parameter is a fresh `Option`, and the two the
@@ -1728,7 +2301,7 @@ mod windows_impl {
             let dxgi: IDXGIDevice = device
                 .cast()
                 .map_err(|error| compositor_failure("ID3D11Device::cast(IDXGIDevice)", &error))?;
-            let factory = unsafe { self.device.CreateSurfaceFactory(&dxgi) }.map_err(|error| {
+            let factory = unsafe { composition.CreateSurfaceFactory(&dxgi) }.map_err(|error| {
                 compositor_failure("IDCompositionDevice2::CreateSurfaceFactory", &error)
             })?;
             let surface = unsafe {
@@ -1746,40 +2319,45 @@ mod windows_impl {
                 _device: device,
                 context,
                 _factory: factory,
-                surface: surface.clone(),
+                surface,
             };
-            paint_ground_surface(&held, self.ground_color.get())?;
-            *self.ground_surface.borrow_mut() = Some(held);
-            Ok(surface)
+            paint_ground_surface(&held, premultiplied_srgb)?;
+            Ok(held)
         }
 
-        /// **Put the window's ground colour under every page in this window.**
+        /// Stretch the one texel over one band, or over nothing.
         ///
-        /// Takes it *premultiplied and sRGB-encoded* — four numbers in
-        /// `0.0..=1.0` — because that is what the swapchain leaves in its own
-        /// bytes and the two have to match to the byte or the pane reads as a
-        /// slightly different shade of the same window. The arithmetic that
-        /// produces them belongs to the renderer, which owns both the palette
-        /// and the linear/sRGB boundary; this crate must not learn either.
+        /// Rows 0 and 1 are the linear part and row 2 is the translation, the 3×2
+        /// convention `IDCompositionMatrixTransform` shares with Direct2D. Only the
+        /// four numbers that ever change are written; the shear terms were set once
+        /// when the band was built.
         ///
-        /// Idempotent, and cheap when nothing moved: a settings write that did
-        /// not touch the ground costs one comparison. When it did move, one
-        /// texel is redrawn and **every** page ground in the window follows,
-        /// because they all show the same surface — which is why hot theme
-        /// switching needs no list of pages anywhere.
-        pub fn set_page_ground_color(&self, premultiplied_srgb: [f32; 4]) -> Result<(), String> {
-            if self.ground_color.get() == premultiplied_srgb {
-                return Ok(());
-            }
-            self.ground_color.set(premultiplied_srgb);
-            let borrowed = self.ground_surface.borrow();
-            let Some(surface) = borrowed.as_ref() else {
-                // No page has ever opened in this window, so there is nothing
-                // to repaint and the colour above is what the first one will
-                // be born with.
-                return Ok(());
+        /// A band with no area is written as a zero scale rather than skipped: the
+        /// number on the glass has to be *this* placement's, and a band left at the
+        /// previous resize's numbers is a rectangle of theme colour standing over a
+        /// swapchain that has caught up — the doubled translucency
+        /// [`window_skirt`] exists to prevent, arriving one frame late instead of
+        /// everywhere.
+        fn place_ground_band(band: &SkirtBand, geometry: GroundBand) -> Result<(), String> {
+            let (width, height) = if geometry.is_empty() {
+                (0.0, 0.0)
+            } else {
+                (geometry.width as f32, geometry.height as f32)
             };
-            paint_ground_surface(surface, premultiplied_srgb)
+            let (x, y) = composition_visual_offset(geometry.x, geometry.y);
+            unsafe {
+                band.placement
+                    .SetMatrixElement2(0, 0, width)
+                    .and_then(|()| band.placement.SetMatrixElement2(1, 1, height))
+                    .and_then(|()| band.placement.SetMatrixElement2(2, 0, x))
+                    .and_then(|()| band.placement.SetMatrixElement2(2, 1, y))
+            }
+            .map_err(|error| {
+                compositor_failure(
+                    "IDCompositionMatrixTransform::SetMatrixElement(skirt)",
+                    &error,
+                )
+            })
         }
 
         /// Take the web preview's visual back out of the tree.
@@ -1932,6 +2510,14 @@ mod windows_impl {
         /// the one call that presents a frame — see `Runtime::present_seats_and_commit`
         /// in `crates/bt-app/src/main.rs`, which is the only caller of
         /// `Renderer::present_seats` in the program.
+        ///
+        /// **The one commit that is not a frame's** is
+        /// [`Compositor::set_window_size`]'s, and it is inside this type rather
+        /// than at a second call site in the app precisely so that the funnel
+        /// above stays the only place a *frame* is published. What that one
+        /// commits is a skirt and nothing else: the swapchain has not moved, so
+        /// what reaches the glass is the same picture with the window's ground
+        /// under the part of it the picture does not reach.
         pub fn commit(&self) -> Result<(), String> {
             unsafe { self.device.Commit() }
                 .map_err(|error| compositor_failure("IDCompositionDevice2::Commit", &error))
