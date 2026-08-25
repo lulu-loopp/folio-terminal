@@ -1593,6 +1593,24 @@ pub enum Text {
     /// other panes, and it is the word this operating system has used for the
     /// window button that undoes a maximize for thirty years.
     PaneMenuRestore,
+
+    // ── the hint a held modifier raises (§7.1.5e′, Claude 定 2026-08-25) ─────
+    //
+    // One contiguous block at the end, per this table's standing rule. Two
+    // entries: a row and its sentence. The card's own body carries no words of
+    // its own at all — every line of it is a verb's name out of the shortcut
+    // table, which is the whole of「不新造文案」.
+    /// **`General ▸ Shortcut hints`** — the row.
+    ///
+    /// It names what appears rather than what raises it. `Hold Ctrl to see
+    /// shortcuts` would be a title that teaches the gesture and then has nothing
+    /// left to say in the line under it, and a title that is an instruction reads
+    /// as a step in a wizard rather than as a thing that is either on or off.
+    RowKeyHints,
+    /// Its sentence — the gesture, because the title deliberately does not carry
+    /// it, and the one fact a reader needs before deciding: **it never takes a
+    /// key**.
+    DescKeyHints,
 }
 
 impl Text {
@@ -2640,6 +2658,20 @@ impl Text {
             Self::PaneMenuZoom => pick(lang, "Zoom pane", "放大窗格"),
             Self::PaneMenuRestore => pick(lang, "Restore pane", "还原窗格"),
 
+            // ── the hint a held modifier raises (§7.1.5e′) ─────────────────
+            //
+            // The copy ruling of 2026-08-17 applies here more than anywhere: the
+            // sentence states two facts and stops. No first person, no advice,
+            // and in particular no「让你不用记」— what a reader does with the
+            // list is not this window's to narrate.
+            Self::RowKeyHints => pick(lang, "Shortcut hints", "快捷键提示"),
+            Self::DescKeyHints => pick(
+                lang,
+                "Holding a modifier for a moment lists the shortcuts it starts. \
+                 The card never takes a key.",
+                "按住修饰键片刻,列出以它开头的快捷键。这张卡片不吃任何按键。",
+            ),
+
             Self::GitDocumentEmpty => pick(lang, "No changes to show", "没有可显示的改动"),
 
             // ── a drag's landing caption ───────────────────────────────────
@@ -2880,7 +2912,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 465] = [
+    pub const ALL: [Self; 467] = [
         Self::Settings,
         Self::ToggleSidebar,
         Self::Minimize,
@@ -3346,6 +3378,8 @@ impl Text {
         Self::ShortcutWindowAddress,
         Self::PaneMenuZoom,
         Self::PaneMenuRestore,
+        Self::RowKeyHints,
+        Self::DescKeyHints,
     ];
 
     /// The entries whose two columns are allowed to be the same string.
@@ -4237,6 +4271,24 @@ fn shortcut_already_used_in(lang: Lang, title: &str) -> String {
     match lang {
         Lang::English => format!("Already used by {title}"),
         Lang::Chinese => format!("已被「{title}」占用"),
+    }
+}
+
+/// **The hint card's last cell, when the window could not hold every line**
+/// (§7.1.5e′).
+///
+/// [`git_more_changed_files`]'s own rule one surface over, and it is the rule
+/// rather than a courtesy: a card that showed fourteen of sixteen without saying
+/// so would be this window teaching a reader that two chords do not exist.
+#[must_use]
+pub fn key_hint_more(count: usize) -> String {
+    key_hint_more_in(current(), count)
+}
+
+fn key_hint_more_in(lang: Lang, count: usize) -> String {
+    match lang {
+        Lang::English => format!("{count} more not shown"),
+        Lang::Chinese => format!("还有 {count} 个没显示"),
     }
 }
 
@@ -5551,6 +5603,7 @@ mod tests {
                     "git_more_changed_files",
                     git_more_changed_files_in(lang, 12),
                 ),
+                ("key_hint_more", key_hint_more_in(lang, 4)),
                 (
                     "git_renamed_from",
                     git_renamed_from_in(lang, "b.rs", "a.rs"),

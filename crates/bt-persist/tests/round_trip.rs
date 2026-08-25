@@ -855,7 +855,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 21,
+        SETTINGS_SCHEMA_VERSION, 22,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -878,8 +878,15 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          and the Terminal page's own Offer PowerShell integration the v17-to-v18, \
          and the Appearance page's own Focus card height the v18-to-v19, and the \
          General page's own Search engine the v19-to-v20, and the Terminal page's \
-         own Line wrapping the v20-to-v21 — one key on one day, eleven times \
-         running"
+         own Line wrapping the v20-to-v21, and the General page's own Shortcut \
+         hints the v21-to-v22 — one key on one day, twelve times running"
+    );
+    assert!(
+        defaults.key_hints,
+        "a hand that has stopped on its modifiers is offered the list; the offer \
+         is a thing a reader ends once and this key remembers, and a default of \
+         `false` would ship the surface switched off for everybody who has ever \
+         opened this product"
     );
     assert!(
         defaults.line_wrapping,

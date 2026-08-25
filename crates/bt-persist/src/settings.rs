@@ -123,7 +123,14 @@ use serde::{Deserialize, Serialize};
 /// and v19 did rather than the way v17–v20 did: this is not a feature arriving with its row, it is
 /// the only thing every terminal ever written here has done, so `true` is a behaviour being
 /// carried forward and not a product default being chosen.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 21;
+/// **v22 carries `key_hints`**, whether holding a modifier still raises the card that lists the
+/// shortcuts it starts (`docs/DESIGN.md` §7.1.5e′). It lands the way v17–v20 did rather than the
+/// way v13–v16, v19 and v21 did, and the distinction is the one those steps are written under:
+/// there is no habit here to carry forward, because no build before this one drew the card at all.
+/// What is being defaulted on is an **offer** — a surface that appears only when a hand has
+/// deliberately stopped, and that goes away the instant it is touched — and the row that ends the
+/// offering is one press away on the General page.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 22;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -251,10 +258,10 @@ pub const DEFAULT_SCROLLBACK_LINES: u32 = 100_000;
 /// not depend on the renderer, and the two are held together by the test that reads them both.
 pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 
-/// `settings.json` v19 — docs/M2-persistence-schema-v1.md §2:
+/// `settings.json` v22 — docs/M2-persistence-schema-v1.md §2:
 /// ```json
 /// {
-///   "schema_version": 20,
+///   "schema_version": 22,
 ///   "theme_mode": "System" | "Light" | "Dark",
 ///   "display_formulas": true | false,
 ///   "inline_formulas": true | false,
@@ -281,7 +288,9 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "minimum_contrast": "Off" | "Ratio2" | "Ratio3" | "Ratio45",
 ///   "terminal_notifications": true | false,
 ///   "powershell_integration_offer": true | false
-///   "focus_card_height": 160 | 240 | 320
+///   "focus_card_height": 160 | 240 | 320,
+///   "line_wrapping": true | false,
+///   "key_hints": true | false
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -690,6 +699,19 @@ pub struct SettingsV1 {
     /// world would be ladder two, which is spiked and not built.
     #[serde(default = "default_line_wrapping")]
     pub line_wrapping: bool,
+    /// **Whether a modifier held on its own raises the card that lists what it starts** — the
+    /// General page's `Shortcut hints` row (`docs/DESIGN.md` §7.1.5e′).
+    ///
+    /// `true`, because the card is an offer rather than a change: it appears only after a hand has
+    /// held modifiers for the better part of a second without pressing anything, it never takes a
+    /// key, and it leaves the instant one is pressed. A reader who does not want it switches it off
+    /// once and this key remembers.
+    ///
+    /// **It says nothing to the shortcut table.** Every chord is bound, in force and dispatched
+    /// exactly as it was with this off; what the key governs is whether the window offers to *say
+    /// so*. That is why it is a settings key and not a member of any layout's identity.
+    #[serde(default = "default_key_hints")]
+    pub key_hints: bool,
 }
 
 /// `serde`'s door for a v14 key that is missing from a file this build is reading.
@@ -732,6 +754,15 @@ fn default_focus_card_height() -> u32 {
 /// file that had lost this key would come back as a pane that stopped wrapping — a document nobody
 /// asked for, on the strength of an absent line.
 fn default_line_wrapping() -> bool {
+    true
+}
+
+/// `serde`'s door for a v22 key missing from a file this build is reading.
+///
+/// [`default_powershell_integration_offer`]'s reason exactly, and it is the same *kind* of key: a
+/// `bool`'s own default is `false`, so a file that had lost this one would come back as a reader
+/// who had switched the offer off — the one answer this product must not put in somebody's mouth.
+fn default_key_hints() -> bool {
     true
 }
 
@@ -779,6 +810,9 @@ impl Default for SettingsV1 {
             // What every terminal this product has ever drawn did with a line too long for its
             // pane.
             line_wrapping: true,
+            // A hand that has stopped on its modifiers is offered the list, once it has really
+            // stopped.
+            key_hints: true,
         }
     }
 }
