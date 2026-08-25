@@ -1539,8 +1539,10 @@ pub enum SettingsCategory {
     /// Mock-up 2555. **Born with the PSReadLine row** (§7.1.6c-3b): the variant
     /// and its heading existed for two slices with nothing to put under them,
     /// and `nav_items` derives the rail from what has content, so the page
-    /// appeared the moment it had one. Line wrapping is still the row the
-    /// mock-up drew here first, and it still has no setting behind it.
+    /// appeared the moment it had one. `Line wrapping` — the row the mock-up
+    /// drew here first and the last of this page's rows to arrive — joined it
+    /// once `bt_persist::SettingsV1` grew a key for it at schema v21, and the
+    /// page now holds the whole set the mock-up drew.
     Terminal,
     RenderedBlocks,
     /// The profile table, one row per profile (§7.1.6c-6).
@@ -2267,6 +2269,29 @@ pub enum SettingsRow {
     /// `Runtime::apply_scrollback_lines` for why the deletion is immediate and
     /// why waiting would not have spared a line.
     Scrollback,
+    /// **How a pane sets a logical line too long to fit across it** — folded onto
+    /// the next row, or left to run off the right-hand edge.
+    ///
+    /// The row the mock-up drew on this page first (6000) and the last of its
+    /// rows to arrive, because until `bt_persist::SettingsV1` grew
+    /// `line_wrapping` at schema v21 there was no preference for it to point at.
+    /// There is one now, `bt_doc::LayoutKey` already carries it, and every leaf
+    /// is already born reading it — what was missing was the door.
+    ///
+    /// **Directly under [`Self::Scrollback`]**, which is the mock-up's own order
+    /// and an argument as well: the two rows are the same question asked of the
+    /// two axes a pane has. One says how far back the pane keeps what it was
+    /// handed, the other says what the pane does when what it was handed is
+    /// wider than the pane. A row about the desktop standing between them would
+    /// break a page that otherwise reads downwards as one pane's story.
+    ///
+    /// **Its sentence changes with its answer**, which only two rows in this
+    /// dialog do — see [`Self::description`]. Turning wrapping off moves text
+    /// off the right-hand edge of the pane, and the `Off` sentence is where the
+    /// two ways of following it are written down; nothing else in the product
+    /// says so, because the horizontal bar only appears once there is already
+    /// something the reader cannot see.
+    LineWrapping,
     /// **Whether a program may put a message on the desktop** — the Terminal
     /// page's third row (§7.6, Windows landing slice 3, 2026-08-20).
     ///
@@ -2391,9 +2416,13 @@ impl SettingsRow {
             // about the machine: what a terminal keeps of what it has already
             // shown is the plainest reading of "how ONE pane behaves once
             // something is running" this dialog has.
+            // And the row that is about the pane's other axis: how a line wider
+            // than the pane is set is the same kind of question as how much of
+            // the past the pane keeps, asked sideways.
             Self::PsReadLine
             | Self::PowerShellOffer
             | Self::Scrollback
+            | Self::LineWrapping
             | Self::Notifications => SettingsCategory::Terminal,
             // The mock-up files what typesetting does to a block under "Rendered
             // blocks" (2570), beside that page's own Maximum height row.
@@ -2458,6 +2487,7 @@ impl SettingsRow {
             Self::Tables => Text::RowTables.text(),
             Self::BlockMaxHeight => Text::RowBlockMaxHeight.text(),
             Self::Scrollback => Text::RowScrollback.text(),
+            Self::LineWrapping => Text::RowLineWrapping.text(),
             Self::Notifications => Text::RowNotifications.text(),
             Self::PowerShellOffer => Text::RowPowerShellOffer.text(),
             Self::GitPanel => Text::RowGitPanel.text(),
@@ -2508,12 +2538,15 @@ impl SettingsRow {
     /// out what the switch they are looking at is currently doing, so the value
     /// has to be in scope here.
     ///
-    /// Neither of those two rows exists yet — there is no line-wrapping and no
-    /// block-height setting behind them (`bt_persist::SettingsV1` holds neither),
-    /// and this build does not invent a row for a preference nothing reads. What
-    /// arrives now is the *shape*: the parameter, so that the slice which adds
-    /// those rows adds two match arms rather than changing every call site of a
-    /// method with nine of them.
+    /// `wrap-desc` is the one of the two that took the mock-up up on it.
+    /// [`SettingsRow::LineWrapping`] arrived once `bt_persist::SettingsV1` grew
+    /// `line_wrapping` at schema v21, and its two sentences are the reason this
+    /// method takes the values at all: the `Off` half names the two ways of
+    /// following a line that has run off the edge, and a row that said so under
+    /// both answers would be advising a reader about a state they are not in.
+    /// `blockmax-desc` declined it — see [`Self::BlockMaxHeight`]'s arm, where
+    /// one sentence covers both ends because `No limit` is a word in the picker
+    /// that already says the rest.
     ///
     /// Still `&'static str`, which is the i18n ruling's own constraint
     /// (2026-08-13): the language table is a `match lang` returning one of two
@@ -2554,6 +2587,20 @@ impl SettingsRow {
             // a `&'static str` that does not read its own value, so it carries
             // what the numerals cannot — that the number is spent once per pane,
             // and that a smaller one is paid for out of the oldest lines.
+            // **The one row on this page whose line is a function of its own
+            // answer**, and the reason the parameter above exists. What a reader
+            // needs to be told is different at the two ends: with wrapping on
+            // there is nothing to say beyond where the fold happens, and with it
+            // off the pane is holding text nobody can see until they know the
+            // gesture. The `Off` sentence names both ways of reaching it and
+            // stops — no advice about which answer to pick.
+            Self::LineWrapping => {
+                if values.line_wrapping {
+                    Text::DescLineWrappingOn.text()
+                } else {
+                    Text::DescLineWrappingOff.text()
+                }
+            }
             Self::Scrollback => Text::DescScrollback.text(),
             Self::Notifications => Text::DescNotifications.text(),
             Self::PowerShellOffer => Text::DescPowerShellOffer.text(),
@@ -2769,6 +2816,7 @@ impl SettingsRow {
             | Self::PsReadLine
             | Self::PowerShellOffer
             | Self::Scrollback
+            | Self::LineWrapping
             | Self::Notifications
             // The everyday half of the editor, in the order somebody decides a
             // profile: what it is called, what it runs, where it starts, what
@@ -2862,7 +2910,8 @@ impl SettingsRow {
             | Self::ContextMenu
             | Self::PsReadLine
             | Self::Notifications
-            | Self::PowerShellOffer => FORMULA_OPTIONS.len(),
+            | Self::PowerShellOffer
+            | Self::LineWrapping => FORMULA_OPTIONS.len(),
             Self::BlockMaxHeight => BLOCK_MAX_HEIGHT_OPTIONS.len(),
             Self::Scrollback => SCROLLBACK_OPTIONS.len(),
             Self::TerminalFont => monospace_families().len(),
@@ -2925,7 +2974,8 @@ impl SettingsRow {
             | Self::ContextMenu
             | Self::PsReadLine
             | Self::Notifications
-            | Self::PowerShellOffer => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
+            | Self::PowerShellOffer
+            | Self::LineWrapping => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
             // The one item that is a word goes through the i18n table and the
             // three that are quantities do not — the table's own header lists
             // quantities among the things that stay put in both languages. The
@@ -3218,6 +3268,12 @@ impl SettingsRow {
             Self::Scrollback => SCROLLBACK_OPTIONS
                 .iter()
                 .position(|it| *it == values.scrollback_lines),
+            // The file's answer and not a window's posture: there is one door to
+            // this row, and every pane in every window is already reading the
+            // same key out of the same store.
+            Self::LineWrapping => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.line_wrapping),
             Self::GitPanel => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.git_panel),
@@ -3441,10 +3497,13 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     rows.push(SettingsRow::PowerShellOffer);
     // **Under the PSReadLine row**, which is the mock-up's own order for this page
     // (4838, then 4862): the row that reports a fact about the machine stands
-    // first and the row that changes what a pane does stands under it. The
-    // mock-up's second row is `Line wrapping` rather than this one, and that row
-    // still has no setting behind it — see §7.1.6g for why it is not this slice.
+    // first and the row that changes what a pane does stands under it.
     rows.push(SettingsRow::Scrollback);
+    // **Directly under it**, which is the mock-up's own order again (6000) and
+    // the pairing the page is built on: the two rows are the pane's two axes.
+    // One says how much of what has gone past the pane still holds, the other
+    // says what the pane does with a line wider than itself.
+    rows.push(SettingsRow::LineWrapping);
     // **Last on its page**, the judgement `Explorer context menu` is filed under
     // in General: the two rows above say what a pane keeps and what one shell is
     // patched with, and this is the only row here whose answer shows up outside
@@ -3697,6 +3756,16 @@ pub struct SettingsValues {
     /// reason: the picker declines to tick a capacity this build does not offer
     /// rather than pretend the file named one that it does.
     pub scrollback_lines: u32,
+    /// Whether a logical line too wide for its pane folds onto the next row —
+    /// `bt_persist`'s own key, read straight through.
+    ///
+    /// The file's answer and not a window's, unlike
+    /// [`SettingsValues::focus_mode`] beside it: there is one door to this row,
+    /// so what the picker ticks is what `settings.json` says, and every pane in
+    /// every window is already keyed on the same bit through
+    /// `bt_doc::LayoutKey`. It is also what the row's *sentence* is chosen by —
+    /// see [`SettingsRow::LineWrapping`].
+    pub line_wrapping: bool,
     /// Whether a program may put a message on the desktop (§7.6).
     pub terminal_notifications: bool,
     /// Whether a PowerShell pane with no integration is offered one — the row
@@ -3848,6 +3917,7 @@ impl SettingsValues {
             tables: true,
             block_max_height: bt_persist::DEFAULT_BLOCK_MAX_HEIGHT,
             scrollback_lines: bt_persist::DEFAULT_SCROLLBACK_LINES,
+            line_wrapping: true,
             terminal_notifications: true,
             powershell_integration_offer: true,
             git_panel: true,
@@ -6385,6 +6455,21 @@ pub fn scrollback_lines_requested(target: SettingsTarget) -> Option<u32> {
     match target {
         SettingsTarget::Choice(SettingsRow::Scrollback, index) => {
             SCROLLBACK_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// The "Line wrapping" row's answer, if this target is one of its two items.
+///
+/// The row above it read as a boolean — [`FORMULA_OPTIONS`] is `[true, false]`,
+/// which is the `On` / `Off` order every two-state picker in this dialog is drawn
+/// in, so item 0 asks for wrapping and item 1 asks for none.
+#[must_use]
+pub fn line_wrapping_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::LineWrapping, index) => {
+            FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
     }
@@ -16148,9 +16233,10 @@ mod tests {
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
                 SettingsRow::Scrollback,
+                SettingsRow::LineWrapping,
                 SettingsRow::Notifications
             ],
-            "the mock-up's order for this page, with the two PowerShell rows \n             together at the top: the row that reports a fact about the machine, \n             the row that offers what this one is missing, then the row that \n             changes what a pane keeps, and last the only row on this page whose \n             answer shows up outside this window"
+            "the mock-up's order for this page, with the two PowerShell rows \n             together at the top: the row that reports a fact about the machine, \n             the row that offers what this one is missing, then the pane's two \n             axes — what it keeps of what has gone past, and what it does with a \n             line wider than itself — and last the only row on this page whose \n             answer shows up outside this window"
         );
     }
 
@@ -16205,6 +16291,127 @@ mod tests {
             SettingsRow::Scrollback.selected_index(&odd),
             None,
             "a capacity this build's list does not offer ticks nothing rather              than the nearest thing to it"
+        );
+    }
+
+    /// PIN — **the Line wrapping row stands on the Terminal page directly under
+    /// `Scrollback`**, which is the mock-up's own order for it (6000).
+    ///
+    /// The page reads downwards as one shell's story: what is wrong with the module
+    /// this shell loads, what this shell is not loading, what the pane keeps of what
+    /// has already gone past, how the pane sets a line too long for it, and last the
+    /// only row here whose answer shows up outside this window. The adjacency to
+    /// `Scrollback` is the load-bearing half: both rows answer what the pane does
+    /// with output it has already been handed, and a row about the desktop standing
+    /// between them would break the reading.
+    ///
+    /// Red gate: drop the row from `visible_rows` and the list assertion goes red;
+    /// move it past `Notifications` and the adjacency assertion goes with it.
+    #[test]
+    fn the_line_wrapping_row_stands_directly_under_scrollback_on_the_terminal_page() {
+        let terminal = visible_rows(TabLayoutMode::Horizontal)
+            .into_iter()
+            .filter(|row| row.category() == SettingsCategory::Terminal)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            terminal,
+            vec![
+                SettingsRow::PsReadLine,
+                SettingsRow::PowerShellOffer,
+                SettingsRow::Scrollback,
+                SettingsRow::LineWrapping,
+                SettingsRow::Notifications
+            ],
+            "the mock-up's order for this page"
+        );
+        let under = terminal
+            .windows(2)
+            .find(|pair| pair[0] == SettingsRow::Scrollback)
+            .map(|pair| pair[1]);
+        assert_eq!(
+            under,
+            Some(SettingsRow::LineWrapping),
+            "the row that says how a line is set stands directly under the row \
+             that says how many lines are kept"
+        );
+        assert_eq!(SettingsRow::LineWrapping.title(), "Line wrapping");
+        assert_eq!(SettingsRow::LineWrapping.option_count(), 2);
+        assert_eq!(SettingsRow::LineWrapping.option_label(0), Some("On"));
+        assert_eq!(SettingsRow::LineWrapping.option_label(1), Some("Off"));
+        assert!(
+            matches!(SettingsRow::LineWrapping.control(), SettingsControl::Combo),
+            "a boolean is a two-item picker in this dialog and never a switch of \
+             its own (DESIGN §7.1.6c)"
+        );
+        assert!(
+            !SettingsRow::LineWrapping.advanced(),
+            "the Terminal page has no Advanced group and this row does not open one"
+        );
+    }
+
+    /// PIN — the Line wrapping row's own items ask for it and nothing else does.
+    ///
+    /// `scrollback_lines_requested`'s shape on the boolean beside it, and the two
+    /// refusals are the load-bearing half: an index this row does not offer and a
+    /// choice naming another row both answer `None`, so the applier is never handed
+    /// a value the picker did not produce.
+    #[test]
+    fn only_the_line_wrapping_rows_items_ask_for_it() {
+        assert_eq!(
+            line_wrapping_requested(SettingsTarget::Choice(SettingsRow::LineWrapping, 0)),
+            Some(true)
+        );
+        assert_eq!(
+            line_wrapping_requested(SettingsTarget::Choice(SettingsRow::LineWrapping, 1)),
+            Some(false)
+        );
+        assert_eq!(
+            line_wrapping_requested(SettingsTarget::Choice(SettingsRow::LineWrapping, 2)),
+            None,
+            "there is no third option to ask for"
+        );
+        for target in [
+            SettingsTarget::Choice(SettingsRow::Scrollback, 0),
+            SettingsTarget::Choice(SettingsRow::Notifications, 1),
+            SettingsTarget::Combo(SettingsRow::LineWrapping),
+            SettingsTarget::Scrim,
+        ] {
+            assert_eq!(line_wrapping_requested(target), None, "{target:?}");
+        }
+    }
+
+    /// PIN — **the row's tick and its sentence both follow the stored answer.**
+    ///
+    /// The sentence is the point. This is one of the two rows in the dialog whose
+    /// description is a function of its value, and the `Off` half is the one line in
+    /// the product that names the sideways gesture — a reader who turns wrapping off
+    /// and is told nothing has a pane whose right-hand text is simply missing.
+    #[test]
+    fn the_line_wrapping_rows_tick_and_sentence_follow_the_stored_answer() {
+        let on = SettingsValues {
+            line_wrapping: true,
+            ..values()
+        };
+        let off = SettingsValues {
+            line_wrapping: false,
+            ..values()
+        };
+        assert_eq!(SettingsRow::LineWrapping.selected_index(&on), Some(0));
+        assert_eq!(SettingsRow::LineWrapping.selected_index(&off), Some(1));
+        assert_eq!(
+            SettingsRow::LineWrapping.description(&on),
+            "Long lines fold at the pane's edge."
+        );
+        assert_eq!(
+            SettingsRow::LineWrapping.description(&off),
+            "Long lines run on and the pane scrolls sideways: Shift+wheel, or the \
+             bar along the pane's foot."
+        );
+        assert_ne!(
+            SettingsRow::LineWrapping.description(&on),
+            SettingsRow::LineWrapping.description(&off),
+            "a description that describes the setting rather than the state is \
+             the one line a reader has to find out what the picker is doing now"
         );
     }
 
@@ -17070,6 +17277,7 @@ mod tests {
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
                 SettingsRow::Scrollback,
+                SettingsRow::LineWrapping,
                 SettingsRow::Notifications
             ]
         );
@@ -17106,13 +17314,15 @@ mod tests {
                 SettingsRow::PsReadLine,
                 SettingsRow::PowerShellOffer,
                 SettingsRow::Scrollback,
+                SettingsRow::LineWrapping,
                 SettingsRow::Notifications
             ],
             "Sidebar stands directly under `Tab layout`; the two font rows stay \
              next to each other because they are one decision in two halves, the \
              three block rows together as the whole of the Rendered blocks page, \
-             and the two Terminal rows last with the PSReadLine one above it, \
-             which is the mock-up's own order for that page.
+             and the Terminal rows last with the PSReadLine one above them and \
+             the pane's two axes adjacent, which is the mock-up's own order for \
+             that page.
 
              **Sidebar touches `Tab layout` again** (user ruling 2026-08-18, \
              reversing §7.1.6c-5's filing of it under `Advanced`): the condition \

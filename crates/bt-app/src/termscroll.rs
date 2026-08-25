@@ -48,11 +48,45 @@
 //! and its offset) are converted once, at this boundary, and converted back by
 //! the same factor when a hand puts them down somewhere else.
 //!
+//! # The bar along the foot, and why it is not the same instrument turned
+//!
+//! P2-9 left no-wrap horizontal scrolling out of slice 1 and said why: the axis
+//! did not exist. It exists now ([`bt_viewport::horizontal`], the horizontal
+//! scroll plan's ladder one), so the foot of a pane gets a bar too — the same
+//! derivation, the same mark, the same clock — with **two rules of its own**,
+//! both of which come from one fact: *the right edge has a reserved lane and the
+//! foot does not*.
+//!
+//! [`TERMINAL_SCROLL_LANE_LOGICAL_PX`] has held eight pixels of every pane's
+//! right edge since before there was anything to put in them. Nothing has ever
+//! held the bottom edge, and nothing is going to: the rows are the PTY's, the
+//! last of them is where the cursor and the prompt live, and the one thing a
+//! terminal must never do is make the line you are typing on harder to click.
+//! So the horizontal bar is a guest on the last row rather than a tenant of a
+//! lane, and it behaves like one:
+//!
+//! 1. **It is never summoned by hovering** ([`column_visibility`]). The vertical
+//!    thumb comes up when the pointer enters its lane, because that lane is
+//!    nobody else's. Doing the same at the foot would put a grabbable thing
+//!    under the pointer of somebody who was reaching for their prompt, and their
+//!    next press would take the bar instead of the text. It comes up when the
+//!    reader is *already* reading sideways, and hovering only lights what is
+//!    there.
+//! 2. **It takes a press on its mark and nowhere else** ([`TerminalColumnBar`]
+//!    has no `lane`, and no `paged_from`). Clicking the vertical track pages the
+//!    view, which the reserved lane pays for. The horizontal track is the
+//!    reader's own last line; a click there is a click on their text.
+//!
+//! What is *not* different: the arithmetic ([`preview::scroll_bar`] with
+//! [`ScrollAxis::Horizontal`], the same function, not a copy), the thickness,
+//! the radius, the grab tolerance, the minimum length, the rest and the fade.
+//! Two bars that are the same bar must not drift apart, which is the rule that
+//! module states about itself and the reason this one is thirty lines rather
+//! than a second geometry.
+//!
 //! # What this slice is not
 //!
-//! P2-9 also owns the capacity expansion, regex search and no-wrap horizontal
-//! scrolling. None of them is here. This is the vertical bar, and the only claim
-//! it makes about the scrollback is how far it goes.
+//! P2-9 also owns the capacity expansion and regex search. Neither is here.
 
 use std::time::{Duration, Instant};
 
@@ -436,6 +470,207 @@ pub fn layer(
     })
 }
 
+/// The bar along a pane's foot: how far the flattened content reaches, and where
+/// the window on it stands.
+///
+/// The mirror of [`TerminalScrollBar`] and deliberately a different type rather
+/// than the same one with an axis in it. Three of that type's members have no
+/// counterpart here — there is no `lane`, because the foot is not one; there is
+/// no `page`, because nothing pages a horizontal track; and the unit is a
+/// terminal **column**, an integer the projection owns, not a subpixel. A shared
+/// struct would have had to carry all three as `Option`s and answer "which axis
+/// am I" at every call, which is how the two would eventually disagree.
+///
+/// **No inversion.** [`bar`] turns its offset round because a terminal is
+/// scrolled up from its bottom while the shared derivation counts down from a
+/// top. Columns are counted from the left by both, so this one is the plain map.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TerminalColumnBar {
+    /// The shared derivation, in pixels along the pane's own width.
+    pub bar: ScrollBar,
+    /// The mark as it is drawn: the stadium lying on the foot.
+    pub thumb: [f32; 4],
+    /// The thumb's target — the thumb's own span (grown by the shared
+    /// tolerance) across, the whole reach up from the foot.
+    pub grab: [f32; 4],
+    /// The thumb's corner radius, in physical pixels.
+    pub radius: f32,
+    /// One past the last column the flattened content presents.
+    extent: u32,
+    /// How many columns the pane shows at once.
+    viewport: u32,
+    /// Physical pixels per column, the one factor the unit change runs on.
+    scale_of_column: f64,
+}
+
+/// The bar for a pane whose `body` shows `viewport` of `extent` columns, its
+/// window currently starting at column `origin` — or `None` when everything the
+/// pane can reach already fits across it, which is every wrapping pane and most
+/// no-wrap ones.
+///
+/// **The track stops where the vertical thumb's reach begins.** Both instruments
+/// end up in the pane's bottom-right corner otherwise, and §7.1.6f's rule for
+/// that corner is the one it was written for: two instruments on one edge get
+/// disjoint bands, not an arbitration. Taking the width off the horizontal bar
+/// rather than off the vertical one is the same choice as taking it off the
+/// scrollbar rather than off the command rail — the newcomer yields.
+#[must_use]
+pub fn column_bar(
+    body: [f32; 4],
+    extent: u32,
+    viewport: u32,
+    origin: u32,
+    scale: f32,
+) -> Option<TerminalColumnBar> {
+    if viewport == 0 {
+        return None;
+    }
+    let reach = THUMB_REACH_LOGICAL_PX * scale;
+    let track = [body[0], body[1], body[2] - reach, body[3]];
+    let width = f64::from(track[2] - track[0]);
+    if width <= 0.0 {
+        return None;
+    }
+    // One paneful of columns is the track's own width, which is what makes this
+    // a change of units and not a second geometry.
+    let scale_of_column = width / f64::from(viewport);
+    let content = f64::from(extent) * scale_of_column;
+    let offset = f64::from(origin.min(extent.saturating_sub(viewport))) * scale_of_column;
+    let inner = preview::scroll_bar(
+        track,
+        ScrollAxis::Horizontal,
+        offset as f32,
+        content as f32,
+        scale,
+    )?;
+    let foot = body[3];
+    let margin = THUMB_LANE_MARGIN_LOGICAL_PX * scale;
+    let thickness = THUMB_WIDTH_LOGICAL_PX * scale;
+    let thumb = [
+        inner.thumb[0],
+        foot - margin - thickness,
+        inner.thumb[2],
+        foot - margin,
+    ];
+    Some(TerminalColumnBar {
+        bar: inner,
+        thumb,
+        // Along: the tolerance the shared bar already put on its own ends,
+        // clamped into the track so a thumb at either end does not claim a strip
+        // of somebody else's edge. Across: the same eleven pixels the vertical
+        // thumb reaches through, because a hand aiming at a four-pixel mark aims
+        // at the band it is in — and eleven and no more, so that a press one row
+        // higher than the bar is unambiguously the reader's own text.
+        grab: [
+            inner.grab[0].max(track[0]),
+            foot - THUMB_REACH_LOGICAL_PX * scale,
+            inner.grab[2].min(track[2]),
+            foot,
+        ],
+        radius: THUMB_RADIUS_LOGICAL_PX * scale,
+        extent,
+        viewport,
+        scale_of_column,
+    })
+}
+
+impl TerminalColumnBar {
+    /// Whether a pointer at `at` is on the mark.
+    ///
+    /// **The only question this instrument asks of a press.** There is no
+    /// `lane_holds` beside it, and the absence is the ruling: everything in the
+    /// bottom row that is not the mark itself stays the terminal's — the caret
+    /// goes where it is clicked, a selection starts where it is dragged, and a
+    /// link under the pointer is still the link.
+    #[must_use]
+    pub fn thumb_holds(&self, at: [f32; 2]) -> bool {
+        within(self.grab, at)
+    }
+
+    /// The furthest left edge the window may take: `max(0, extent - viewport)`,
+    /// the same number [`bt_viewport::horizontal::HorizontalProjection`] clamps
+    /// by, read here so the drag stops where the axis stops.
+    #[must_use]
+    pub fn max_origin(&self) -> u32 {
+        self.extent.saturating_sub(self.viewport)
+    }
+
+    /// Which column the window starts at when the thumb is dragged to `x`, held
+    /// `grab` pixels right of its own left edge.
+    #[must_use]
+    pub fn dragged_to(&self, x: f32, grab: f32) -> u32 {
+        let along =
+            f64::from(preview::scroll_dragged_to(&self.bar, x, grab)) / self.scale_of_column;
+        // `round` and not `trunc`: the thumb is a picture of a column, and a
+        // picture that always rounded down would sit half a column left of the
+        // text it claims to be pointing at.
+        let column = along.round().max(0.0);
+        (column as u32).min(self.max_origin())
+    }
+
+    /// Where a hand that took the mark at `x` is holding it, measured from the
+    /// mark's own left edge, clamped into it.
+    #[must_use]
+    pub fn grip(&self, x: f32) -> f32 {
+        (x - self.thumb[0]).clamp(0.0, self.thumb[2] - self.thumb[0])
+    }
+}
+
+/// **The foot bar's visibility**: [`visibility`]'s rule with one reason removed.
+///
+/// `near` stops being a standing reason and becomes only a light. The vertical
+/// thumb's lane is eight reserved pixels, so a pointer arriving there wanted the
+/// bar and nothing else; the foot's eleven belong to the reader's last line, so
+/// a pointer arriving there most likely wanted their prompt. A bar that appeared
+/// under it would turn the reader's next press into a grab of something they had
+/// not asked for — and it would do it precisely on the row where a mis-aimed
+/// press costs the most.
+///
+/// So the bar comes up for the two reasons that are already the reader's own
+/// doing — a hand on it, and a window that is not at column zero — rests for
+/// [`THUMB_REST`] after the last of them and fades over [`THUMB_FADE`], exactly
+/// as the vertical one does. Hovering an already-drawn mark lights it, because
+/// by then it is there to be lit.
+#[must_use]
+pub fn column_visibility(
+    situation: ThumbSituation,
+    motion: Motion,
+    curve: impl FnOnce(f32) -> f32,
+) -> Thumb {
+    let standing = ThumbSituation {
+        near: false,
+        ..situation
+    };
+    match visibility(standing, motion, curve) {
+        Thumb::Shown { alpha, lit } => Thumb::Shown {
+            alpha,
+            lit: lit || situation.near,
+        },
+        Thumb::Hidden => Thumb::Hidden,
+    }
+}
+
+/// The foot's mark, on the same layer and in the same ink as the right edge's.
+#[must_use]
+pub fn column_layer(
+    bar: &TerminalColumnBar,
+    thumb: Thumb,
+    palette: &ChromePalette,
+) -> Option<OverlayLayer> {
+    let Thumb::Shown { alpha, lit } = thumb else {
+        return None;
+    };
+    let ink = if lit {
+        palette.scroll_thumb_hover
+    } else {
+        palette.scroll_thumb
+    };
+    Some(OverlayLayer {
+        quads: bt_render::rounded_overlay_fill(bar.thumb, bar.radius, ink, alpha),
+        ..OverlayLayer::default()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,6 +1000,205 @@ mod tests {
         assert!(
             bar.lane_holds([BODY[2] - 1.0, BODY[1] + 1.0]),
             "the lane runs the pane's whole height, because the track does"
+        );
+    }
+
+    /// Eighty columns of pane over four hundred columns of flattened line — the
+    /// shape the whole horizontal ladder was built for.
+    const VIEWPORT_COLUMNS: u32 = 80;
+    const CONTENT_COLUMNS: u32 = 400;
+
+    fn foot(origin: u32) -> TerminalColumnBar {
+        column_bar(BODY, CONTENT_COLUMNS, VIEWPORT_COLUMNS, origin, SCALE)
+            .expect("four hundred columns behind an eighty-column pane")
+    }
+
+    /// The corner rule, on the other instrument: the foot's track ends exactly
+    /// where the vertical thumb's reach begins, so no pixel of the pane's
+    /// bottom-right corner is claimed twice and there is nothing to arbitrate.
+    ///
+    /// MUTATION: run the foot's track out to `body[2]` and the two marks overlap
+    /// in the corner — the 2026-07-18 report, on a third pair of instruments.
+    #[test]
+    fn the_foot_bar_stops_where_the_vertical_thumbs_reach_begins() {
+        let reach = THUMB_REACH_LOGICAL_PX * SCALE;
+        let bar = foot(bar_max_origin());
+        assert!(
+            bar.thumb[2] <= BODY[2] - reach,
+            "the mark ends inboard of the vertical lane, got {}",
+            bar.thumb[2]
+        );
+        assert!(
+            !bar.thumb_holds([BODY[2] - 1.0, BODY[3] - 1.0]),
+            "and the very corner is the vertical thumb's, not this one's"
+        );
+    }
+
+    fn bar_max_origin() -> u32 {
+        CONTENT_COLUMNS - VIEWPORT_COLUMNS
+    }
+
+    /// A pane nothing overflows has no foot bar — the same answer, and for the
+    /// same reason, as a pane with no scrollback. A wrapping pane is exactly
+    /// this case by construction: wrapping *is* the choice to fold every line
+    /// into the pane's width, so its content extent is its width.
+    #[test]
+    fn a_pane_whose_widest_line_fits_across_it_has_no_foot_bar() {
+        assert_eq!(column_bar(BODY, 80, 80, 0, SCALE), None);
+        assert_eq!(column_bar(BODY, 12, 80, 0, SCALE), None);
+    }
+
+    /// Where the mark sits along the foot is where the window sits in the line,
+    /// and the two ends are exact rather than nearly.
+    #[test]
+    fn the_marks_place_along_the_foot_is_the_windows_place_in_the_line() {
+        let reach = THUMB_REACH_LOGICAL_PX * SCALE;
+        let home = foot(0);
+        assert!(
+            (home.thumb[0] - BODY[0]).abs() < 0.5,
+            "at column zero the mark is at the head of the track"
+        );
+        let far = foot(bar_max_origin());
+        assert!(
+            (far.thumb[2] - (BODY[2] - reach)).abs() < 0.5,
+            "and at the last legal origin it is at the foot of it"
+        );
+    }
+
+    /// The drag is the geometry read backwards, and unlike the vertical bar
+    /// there is no inversion to get wrong — which is precisely why it is worth
+    /// checking that nobody added one.
+    #[test]
+    fn a_foot_thumb_dragged_where_the_geometry_put_it_lands_on_the_column_it_came_from() {
+        for origin in [0, 1, 40, 160, 319, bar_max_origin()] {
+            let bar = foot(origin);
+            let landed = bar.dragged_to(bar.thumb[0], 0.0);
+            assert!(
+                landed.abs_diff(origin) <= 1,
+                "column {origin} drew a mark that read back as {landed}"
+            );
+        }
+    }
+
+    /// Both ends are reachable and neither overshoots the axis's own clamp.
+    #[test]
+    fn dragging_the_foot_thumb_past_either_end_stops_at_that_end() {
+        let bar = foot(160);
+        assert_eq!(bar.dragged_to(BODY[0] - 400.0, 0.0), 0, "the line's head");
+        assert_eq!(
+            bar.dragged_to(BODY[2] + 400.0, 0.0),
+            bar_max_origin(),
+            "and the furthest the window may go"
+        );
+    }
+
+    /// A hand keeps the point it grabbed.
+    #[test]
+    fn a_grip_taken_in_the_middle_of_the_foot_thumb_is_kept_while_it_travels() {
+        let bar = foot(120);
+        let middle = (bar.thumb[0] + bar.thumb[2]) / 2.0;
+        let grip = bar.grip(middle);
+        assert!(
+            bar.dragged_to(middle, grip).abs_diff(120) <= 1,
+            "a mark held in the middle and not moved must not jump"
+        );
+    }
+
+    /// **The bottom-row ruling, both halves.** Hovering the foot never brings
+    /// the bar out, and hovering one that is already out only lights it.
+    ///
+    /// MUTATION: call [`visibility`] here instead of [`column_visibility`] and
+    /// the first half fails — which is the bug in its executable form: a bar
+    /// appearing under the pointer of somebody reaching for their prompt.
+    #[test]
+    fn hovering_the_foot_never_summons_the_bar_and_only_lights_one_already_there() {
+        let long_gone = Duration::from_secs(60);
+        let mut hovered = resting(long_gone);
+        hovered.near = true;
+        assert_eq!(
+            column_visibility(hovered, Motion::Full, linear),
+            Thumb::Hidden,
+            "a pointer on the last row is reaching for the last row"
+        );
+        let mut reading_sideways = resting(long_gone);
+        reading_sideways.scrolled = true;
+        reading_sideways.near = true;
+        assert_eq!(
+            column_visibility(reading_sideways, Motion::Full, linear),
+            Thumb::Shown {
+                alpha: 1.0,
+                lit: true
+            },
+            "a window away from column zero keeps its picture, and the hand lights it"
+        );
+        let mut held = resting(long_gone);
+        held.held = true;
+        assert_eq!(
+            column_visibility(held, Motion::Full, linear),
+            Thumb::Shown {
+                alpha: 1.0,
+                lit: true
+            },
+            "and a hand that has left the mark still holds what it took"
+        );
+    }
+
+    /// The rest and the fade are the vertical bar's, unchanged — one clock for
+    /// both instruments, so a pane does not have two different ideas of how long
+    /// a mark stays after the gesture that raised it.
+    #[test]
+    fn the_foot_bar_rests_and_fades_on_the_same_clock_as_the_lane_bar() {
+        assert_eq!(
+            column_visibility(resting(Duration::from_millis(100)), Motion::Full, linear),
+            Thumb::Shown {
+                alpha: 1.0,
+                lit: false
+            },
+            "still up while the rest runs, exactly as the lane's mark is"
+        );
+        match column_visibility(resting(THUMB_REST + THUMB_FADE / 2), Motion::Full, linear) {
+            Thumb::Shown { alpha, lit } => {
+                assert!(!lit, "a fading mark is not a lit one");
+                assert!(
+                    (alpha - 0.5).abs() < 0.01,
+                    "halfway through the fade is half the ink, got {alpha}"
+                );
+            }
+            Thumb::Hidden => panic!("the fade had not finished"),
+        }
+        assert_eq!(
+            column_visibility(resting(THUMB_REST + THUMB_FADE), Motion::Full, linear),
+            Thumb::Hidden,
+            "and then the last row is the reader's again"
+        );
+    }
+
+    /// **The other half of the bottom-row ruling**: the bar reaches for exactly
+    /// the eleven pixels the vertical thumb reaches through, and a press one
+    /// pixel above that band is the reader's own text.
+    ///
+    /// MUTATION: grow the band by `preview::BODY_SCROLL_INWARD_HIT_LOGICAL_PX`
+    /// the way the preview's own edge-riding bar does, and the mark starts
+    /// taking presses aimed at the prompt.
+    #[test]
+    fn the_foot_bar_reaches_eleven_pixels_up_and_the_row_above_that_is_the_terminals() {
+        let bar = foot(160);
+        let reach = THUMB_REACH_LOGICAL_PX * SCALE;
+        let middle = (bar.thumb[0] + bar.thumb[2]) / 2.0;
+        for y in [BODY[3] - reach, bar.thumb[1], bar.thumb[3], BODY[3]] {
+            assert!(
+                bar.thumb_holds([middle, y]),
+                "a hand at {y} is on the mark's band and must be able to take it"
+            );
+        }
+        assert!(
+            !bar.thumb_holds([middle, BODY[3] - reach - 1.0]),
+            "and one pixel above the band the press is the terminal's"
+        );
+        assert!(
+            !bar.thumb_holds([BODY[0] + 1.0, BODY[3] - 1.0]),
+            "a press on the same band but beside the mark is the terminal's too — \
+             there is no track to page from down here"
         );
     }
 }
