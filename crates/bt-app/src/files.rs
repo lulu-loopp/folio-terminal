@@ -347,6 +347,26 @@ impl DirCache {
         self.revision = self.revision.wrapping_add(1);
     }
 
+    /// **Put a row's triangle at its new angle without turning it** (user ruling
+    /// 2026-08-25) — what a locate does where a click turns.
+    ///
+    /// The tween is *dropped* rather than retargeted, and that is the whole
+    /// point: [`Self::row_turn`] answers a row with no tween with the row's own
+    /// state, so a triangle that never had one — or has just had one taken away
+    /// — is drawn at exactly the angle its folder is at, on the very first frame
+    /// and with no wake-up asked for.
+    ///
+    /// A turn is a picture of **your hand doing something**, and
+    /// `Runtime::open_files_path_to` is not your hand on these triangles: it is
+    /// several folders being put into a state at once so that a row somewhere
+    /// below them can be shown to you. Easing a run of them would draw a
+    /// cascade nobody performed — and would rest on the loop being woken for
+    /// each of them, which is a promise nothing in this cache can keep on its
+    /// own.
+    pub fn settle_row(&mut self, key: &str) {
+        self.turns.remove(key);
+    }
+
     /// Start a row's triangle turning towards `open`.
     ///
     /// The tween is minted standing at the *other* end rather than at rest,
@@ -1623,6 +1643,47 @@ mod tests {
             "with the preference set it is simply turned, on the first frame"
         );
         assert!(!cache.any_turning(now, crate::Motion::Reduced));
+    }
+
+    /// PIN (user report on a real window, 2026-08-25) — **a triangle a locate
+    /// opened arrives turned, on the first frame, asking for no wake-up.**
+    ///
+    /// `Runtime::open_files_path_to` puts a run of folders into a state so that
+    /// one row below them can be shown; that is not a hand on those triangles,
+    /// and easing them draws a cascade nobody performed. Worse, it *depends* on
+    /// the loop being woken again for each of them — and the report is what that
+    /// dependency looks like when it is not met: `.android` drawn with a shut
+    /// triangle over its own open children, one frame after the locate and every
+    /// frame after that.
+    ///
+    /// RED EVIDENCE (2026-08-25): with `turn_row(key, true, …)` where the locate
+    /// now calls `settle_row`, the first assertion reads `(0.0, true)` — the
+    /// angle the report photographed — and the last one fails, which is the
+    /// wake-up the cache cannot promise.
+    ///
+    /// MUTATIONS: retarget instead of dropping; drop a different key.
+    #[test]
+    fn a_row_a_locate_opened_arrives_turned_rather_than_turning() {
+        let now = Instant::now();
+        let mut cache = DirCache::default();
+        // A triangle that was shut by a click a moment ago, which is the state
+        // the report's tree was in.
+        cache.turn_row("/.android", false, now, crate::Motion::Full);
+        cache.settle_row("/.android");
+        assert_eq!(
+            cache.row_turn("/.android", true, now, crate::Motion::Full),
+            (1.0, false),
+            "the row is drawn at the angle its folder is at, at once"
+        );
+        assert_eq!(
+            cache.row_turn("/.android", false, now, crate::Motion::Full),
+            (0.0, false),
+            "and it follows the folder rather than a remembered angle"
+        );
+        assert!(
+            !cache.any_turning(now, crate::Motion::Full),
+            "a locate asks the loop for no frames it cannot be sure of getting"
+        );
     }
 
     /// PIN — K143's keyboard half. The Menu key and `Shift+F10` are the same

@@ -3272,55 +3272,17 @@ pub fn find_git(environment: &dyn ShellEnvironment) -> Option<PathBuf> {
     })
 }
 
-/// The installs `Code.exe` is looked for in when it is not on `PATH`.
-///
-/// The three defaults Visual Studio Code's own installers write — the per-user
-/// one first, because it is the one a developer machine most often has and the
-/// one that needs no administrator to have happened.
-fn vscode_fallbacks() -> [ProgramCandidate; 3] {
-    [
-        ProgramCandidate::Under {
-            variable: "LocalAppData".to_owned(),
-            tail: r"Programs\Microsoft VS Code\Code.exe".to_owned(),
-        },
-        ProgramCandidate::Under {
-            variable: "ProgramFiles".to_owned(),
-            tail: r"Microsoft VS Code\Code.exe".to_owned(),
-        },
-        ProgramCandidate::Under {
-            variable: "ProgramFiles(x86)".to_owned(),
-            tail: r"Microsoft VS Code\Code.exe".to_owned(),
-        },
-    ]
-}
-
-/// Where Visual Studio Code is on this machine, or `None` when it is nowhere
-/// (user ruling 2026-08-24: 「VS Code(存在才列)」).
-///
-/// [`find_git`]'s shape and its reasons, with one difference the installer
-/// forces. `PATH` does not name `Code.exe`: what a VS Code install puts on the
-/// path is a `bin` directory holding the shim `code.cmd`, and handing a `.cmd`
-/// to a process launcher means handing it to a command interpreter. So the shim
-/// is used as a *pointer* — the real binary is its grandparent's `Code.exe` —
-/// and the three installer defaults catch the machine where the shim was never
-/// added.
-///
-/// `None` is an answer and not a failure, exactly as it is for Git: the menu
-/// simply has one row fewer, and every other part of the product is untouched.
-#[must_use]
-pub fn find_vscode(environment: &dyn ShellEnvironment) -> Option<PathBuf> {
-    let shimmed = search_path(environment, "code.cmd")
-        .and_then(|shim| Some(shim.parent()?.parent()?.join("Code.exe")))
-        .filter(|binary| environment.is_file(binary));
-    shimmed
-        .or_else(|| search_path(environment, "Code.exe"))
-        .or_else(|| {
-            vscode_fallbacks().iter().find_map(|candidate| {
-                ProfilePrograms::candidate_path(candidate, environment)
-                    .filter(|path| environment.is_file(path))
-            })
-        })
-}
+// `vscode_fallbacks` and `find_vscode` are **retired** (user ruling 2026-08-25:
+// 「既然有 default app 了,就把 VS Code 去掉」). They existed for one row of one
+// menu — the editor row the 2026-08-24 ruling put under `Open with default app`
+// — and the row is gone: the door above it already asks this machine what it has
+// registered for the path, which on a developer's machine is very often that
+// same editor. A probe kept alive for a row nobody draws is a `is_file` walk at
+// start-up answering a question the product no longer asks.
+//
+// What went with them: the `editor` parameter that `file_menu`, `file_menu_step`
+// and `file_menu_layout` all carried, and with it the only fact outside the
+// subject that could change the length of one of these lists.
 
 /// Which executable each profile resolves to **on this machine**, probed once.
 ///
@@ -5244,18 +5206,36 @@ pub enum FileMenuSubject {
     /// A folder row, with the fold it was standing in when the menu came up.
     Folder { expanded: bool },
     /// **A path a preview's breadcrumb row names** (user ruling 2026-08-24) —
-    /// the `Open ⌄` pill's document, and the deepest folder behind the `…` a
-    /// folded path is drawn as.
+    /// the `Open ⌄` pill's document.
     ///
     /// The third face, and the one that is not a tree row at all. It is on this
-    /// enum rather than in a menu of its own because 「系统默认程序 / VS Code /
-    /// 在 files 列中定位」are verbs about a *path*, and a window that grew a
-    /// second list for them would be a window where the two could come to
-    /// disagree. What it does not share is the row set: there is no
-    /// `Open preview` on a surface that *is* the preview, no fold on something
-    /// that is not a row, and no `Reveal in files column` on the column itself
-    /// — see [`file_menu`].
+    /// enum rather than in a menu of its own because 「系统默认程序 / 在 files 列
+    /// 中定位」are verbs about a *path*, and a window that grew a second list for
+    /// them would be a window where the two could come to disagree. What it does
+    /// not share is the row set: there is no `Open preview` on a surface that
+    /// *is* the preview, no fold on something that is not a row, and no
+    /// `Reveal in files column` on the column itself — see [`file_menu`].
+    ///
+    /// It used to be the `…` chip's face as well; that is [`Self::FoldedPath`]
+    /// now, and the reason is written there.
     Document,
+    /// **The levels a folded breadcrumb is standing in for** (user ruling
+    /// 2026-08-25) — the `…` chip's own list.
+    ///
+    /// The fourth face, and the only one whose rows are *places* rather than
+    /// verbs. It exists because the chip used to raise [`Self::Document`] on the
+    /// deepest folder the fold was hiding, and that was the wrong sentence twice
+    /// over: it offered `Copy path` and `Insert path` for **one** of the several
+    /// folders behind the chip without saying which, and it answered a control
+    /// that means *there are folders here you cannot see* with a menu that never
+    /// names them. Windows Explorer's own breadcrumb `…` is the reference the
+    /// ruling gave: it lists the hidden levels, and pressing one goes there.
+    ///
+    /// `levels` is how many the fold is hiding, which is all this face needs to
+    /// know to say how many rows it has; **what** they are called is the look's
+    /// [`FileMenuLook::crumbs`], because a name is a string and this enum is
+    /// `Copy`.
+    FoldedPath { levels: usize },
 }
 
 /// One row of the menu a tree row raises under the pointer, or a preview's
@@ -5287,52 +5267,85 @@ pub enum FileMenuRow {
     /// says `Open with default app`; on a breadcrumb it is the *first* and only
     /// door, so it says `Open in default app` — see [`Self::text`].
     OpenWith,
-    /// **Open it in the editor this machine has** (user ruling 2026-08-24).
-    ///
-    /// The one row here that is not offered on every machine, and the reason
-    /// [`file_menu`] takes an `editor` flag: a machine with no editor installed
-    /// must not be shown a row that would open nothing. Which editor it is, and
-    /// whether there is one, is [`find_vscode`]'s answer — asked once, where
-    /// every other availability question in this module is asked.
-    OpenWithEditor,
+    // `OpenWithEditor` is **retired** (user ruling 2026-08-25: 「既然有 default
+    // app 了,就把 VS Code 去掉」). It was the one row here that was not offered on
+    // every machine, and the whole reason this menu's length was a function of
+    // anything but its subject. The door above it — `Open with default app` —
+    // hands the path to whatever this machine has registered for it, which on the
+    // machine that had the editor row is very often that editor; a second row
+    // naming one program by name was this window picking a favourite.
     /// Unfold the folder, or fold it — one row wearing the face of the state it
     /// is standing in.
     Fold,
     /// A tab of the default profile, standing in this folder.
     NewTerminal,
-    /// **Stand the files column in this file's folder** (user ruling
-    /// 2026-08-24).
-    ///
-    /// The `Reveal in files column` half of the breadcrumb row's `Open ⌄`, and
-    /// it is on **that** face alone: a right press on a tree row is a press
-    /// *inside* the files column, and a row offering to show you the column you
-    /// are already looking at is a row that does nothing. The tree's own answer
-    /// to "show me where this lives" is [`Self::Reveal`], which leaves the
-    /// window.
-    ShowInFiles,
+    // `ShowInFiles` is **retired** (user ruling 2026-08-25). It was the
+    // breadcrumb face's answer to "where does this live", and the breadcrumb it
+    // was hung under grew the same answer four times over: every segment of the
+    // path stands the column on that level, softly, without leaving the tree.
+    // A row that repeats the row above it is one surface saying a thing twice.
+    // The verb itself is not lost — `Runtime::locate_folder_in_files_column` is
+    // what the segments press, and it is the one this row used to reach.
     CopyPath,
     InsertPath,
     /// Show the row in Explorer: a file selected inside its folder, a folder
     /// opened as itself.
     Reveal,
+    /// **One level a folded breadcrumb is standing in for** (user ruling
+    /// 2026-08-25) — a row of [`FileMenuSubject::FoldedPath`]'s list.
+    ///
+    /// It carries an index into [`FileMenuLook::crumbs`] and not a depth into
+    /// the path, because the two are not the same order: the ruling asks for
+    /// **deepest first** (「由深到浅排,最近的隐藏级在最上,一路到根方向」),
+    /// which is Explorer's own order and the reverse of the row the chip stands
+    /// in. Numbering the rows by the list they are drawn from is what keeps the
+    /// paint, the hit test and the press from each having their own opinion
+    /// about which way up it is; turning the list round is done once, by
+    /// whoever builds the look.
+    Crumb(usize),
+}
+
+/// **Everything one file menu needs that a [`FileMenuSubject`] cannot carry.**
+///
+/// [`GitMenuLook`]'s shape and its reason: two of these rows say a word that is
+/// a fact about the *machine* or about the *path*, not about the menu, and a
+/// `Copy` enum cannot hold a string. Bundled rather than passed one by one
+/// because the layout, the paint and the walk all need the same set and three
+/// argument lists that can drift apart is exactly the bug this menu already had
+/// once, when the editor row's caption and the flag that offered it were two
+/// parameters.
+#[derive(Clone, Copy, Debug)]
+pub struct FileMenuLook<'a> {
+    pub subject: FileMenuSubject,
+    /// The names of the folded levels, **deepest first** — the rows of
+    /// [`FileMenuSubject::FoldedPath`]. Empty for every other face.
+    pub crumbs: &'a [String],
+    /// The mark `New terminal here` wears: **the default profile's own** (user
+    /// ruling 2026-08-25).
+    ///
+    /// It is passed in rather than read here because "which profile is the
+    /// default" is a setting, and this module's table does not hold the setting —
+    /// `Runtime::default_profile` does, and it is the one reader every other
+    /// caller of that question already goes through.
+    pub terminal: ChromeMark,
 }
 
 impl FileMenuRow {
-    /// What the row says, over this subject, on a machine whose editor is
-    /// `editor` (empty when it has none).
+    /// What the row says, wearing this look.
     ///
-    /// The subject is a parameter rather than the caller's string because a menu
+    /// The look is a parameter rather than the caller's string because a menu
     /// that took its words from the call site is a menu whose wording can
-    /// disagree with what the press does. **Two rows' wording turns on it** —
-    /// the fold, which is a toggle, and the default-app door, which is a second
-    /// door on a tree row and the only one on a breadcrumb.
+    /// disagree with what the press does. **Two rows' wording turns on the
+    /// subject** — the fold, which is a toggle, and the default-app door, which
+    /// is a second door on a tree row and the only one on a breadcrumb — and one
+    /// row's is a name the look is carrying, which is the folded level's own.
     ///
-    /// The editor's name is the caller's, because it is the one word here that
-    /// is a fact about the machine rather than about the menu, and it is passed
-    /// as the same string that decides whether the row is offered at all —
-    /// see [`file_menu`].
+    /// A folded level whose name the look has not got says nothing, and that is
+    /// the honest answer: `file_menu` mints exactly as many `Crumb` rows as the
+    /// subject declares levels, so an empty string here means the two were built
+    /// from different lists.
     #[must_use]
-    pub fn text(self, subject: FileMenuSubject, editor: &str) -> &str {
+    pub fn text<'a>(self, look: &FileMenuLook<'a>) -> &'a str {
         match self {
             Self::Open => crate::i18n::Text::FileMenuOpenPreview.text(),
             // `with` on a tree row, where it stands under `Open preview` and the
@@ -5340,25 +5353,24 @@ impl FileMenuRow {
             // it is the first row of the list an `Open ⌄` pill opened and has
             // nothing above it to contrast with.
             Self::OpenWith => {
-                if matches!(subject, FileMenuSubject::Document) {
+                if matches!(look.subject, FileMenuSubject::Document) {
                     crate::i18n::Text::FileMenuOpenDefaultApp.text()
                 } else {
                     crate::i18n::Text::FileMenuOpenWith.text()
                 }
             }
-            Self::OpenWithEditor => editor,
             Self::Fold => {
-                if matches!(subject, FileMenuSubject::Folder { expanded: true }) {
+                if matches!(look.subject, FileMenuSubject::Folder { expanded: true }) {
                     crate::i18n::Text::FolderMenuCollapse.text()
                 } else {
                     crate::i18n::Text::FolderMenuExpand.text()
                 }
             }
             Self::NewTerminal => crate::i18n::Text::FolderMenuNewTerminal.text(),
-            Self::ShowInFiles => show_in_files_text(),
             Self::CopyPath => copy_path_text(),
             Self::InsertPath => insert_path_text(),
             Self::Reveal => reveal_in_explorer_text(),
+            Self::Crumb(at) => look.crumbs.get(at).map_or("", String::as_str),
         }
     }
 
@@ -5373,49 +5385,66 @@ impl FileMenuRow {
     /// row in the wrong place — which is exactly what happened when the menu
     /// grew from three rows to nine across three faces.
     ///
-    /// **[`Self::ShowInFiles`] is above the rule and [`Self::Reveal`] is below
-    /// it**, and the two are not in the same menu, so no reader ever sees them
-    /// disagree. They are also not the same act: `Reveal` hands the path to
-    /// another program, which is what this predicate names; `Show in files
-    /// column` moves *this window's own* column until the file's row is in front
-    /// of you, which is a way in.
+    /// **[`Self::Reveal`] is below the rule on a tree row and above it on a
+    /// breadcrumb** (user ruling 2026-08-25), which is why this takes the
+    /// subject at all — and it is a difference in what the row *is* on the two
+    /// faces rather than a placement bolted on.
+    ///
+    /// On a tree row the reader is already looking at a list of files with this
+    /// one in it, so "open the folder it lives in" is a third thing to do *with
+    /// the path*, beside copying it and typing it. On a breadcrumb there is no
+    /// such list — the pane is showing the file's contents — so the same verb is
+    /// the face's answer to "where does this live", which is a way in. It
+    /// inherited that place from `Show in files column`, the row it replaced,
+    /// which stood above the rule for exactly this reason.
     #[must_use]
-    pub fn hands_out_the_path(self) -> bool {
-        matches!(self, Self::CopyPath | Self::InsertPath | Self::Reveal)
+    pub fn hands_out_the_path(self, subject: FileMenuSubject) -> bool {
+        match self {
+            Self::CopyPath | Self::InsertPath => true,
+            Self::Reveal => !matches!(subject, FileMenuSubject::Document),
+            _ => false,
+        }
     }
 
-    fn mark(self, subject: FileMenuSubject) -> ChromeMark {
+    fn mark(self, look: &FileMenuLook<'_>) -> ChromeMark {
         match self {
             Self::Open => ChromeMark::File,
             // `#i-external` — the bare arrow that means *this content leaves the
             // window*, which is exactly what the preview head's `↗` already uses
             // it to say about the same act.
             Self::OpenWith => ChromeMark::External,
-            // The same glyph the head's `Edit source` and a page's developer
-            // tools wear, and the same sentence: what is behind this is the
-            // thing itself rather than a rendering of it.
-            Self::OpenWithEditor => ChromeMark::Code,
             // The tree's own triangle at the angle the tree turns it to, so the
             // mark turns with the word. Not a second glyph for a second kind of
             // disclosure: a reader who has opened a folder in this window has
             // already learned what a turned triangle means.
             Self::Fold => crate::marks::tree_disclosure(
-                if matches!(subject, FileMenuSubject::Folder { expanded: true }) {
+                if matches!(look.subject, FileMenuSubject::Folder { expanded: true }) {
                     1.0
                 } else {
                     0.0
                 },
             ),
-            // The pane menu's `New terminal in folder…` wears this one, and the
-            // two rows are the same verb told where to stand.
-            Self::NewTerminal => ChromeMark::Folder,
-            // The mark the foot uses for the very same verb one surface over.
-            Self::ShowInFiles => ChromeMark::FolderOpen,
+            // **The terminal this row makes, and not the folder it is standing
+            // in** (user ruling 2026-08-25). It wore `#i-folder` until then, on
+            // the reasoning that the pane menu's `New terminal in folder…` wears
+            // one too — and that reasoning was about the wrong half of the two
+            // rows. The pane menu's row ends in three dots because it asks
+            // *which folder* before anything happens, so a folder is what it is
+            // about; this row already knows the folder, because you right-clicked
+            // it, and what it makes is a shell. So it wears the mark that shell
+            // wears everywhere else this window draws one — the default profile's
+            // own, the same glyph its tab and its pane head carry.
+            Self::NewTerminal => look.terminal,
             Self::CopyPath => ChromeMark::Copy,
             Self::InsertPath => ChromeMark::Paste,
             // The Git row's `Reveal in Explorer` wears this one, for the reason
             // its string is shared: it is the same verb.
             Self::Reveal => ChromeMark::FolderOpen,
+            // A shut folder, which is what every one of these levels is: a place
+            // in the tree the reader has not got open in front of them. The tree
+            // draws its own shut folders with this glyph, so the chip's list
+            // reads as a run of folders rather than as a run of verbs.
+            Self::Crumb(_) => ChromeMark::Folder,
         }
     }
 }
@@ -5440,56 +5469,76 @@ pub struct FileMenu {
 /// above it is what the three faces disagree about, and each one's list is here
 /// rather than at its call site:
 ///
-/// - **[`FileMenuSubject::File`]** — the tree's file row. Three doors: this
-///   window's preview seat, the machine's default program, and the editor. Then
+/// - **[`FileMenuSubject::File`]** — the tree's file row. Two doors: this
+///   window's preview seat and the machine's default program. Then
 ///   `Copy path / Insert path / Reveal in Explorer`. No `Show in files column`:
 ///   the press that raised it *was* in the files column.
 /// - **[`FileMenuSubject::Folder`]** — the tree's folder row. Two verbs no other
 ///   surface offers at the row — the fold, and a shell standing in it — and then
-///   the same three path questions. A folder has no preview seat and no editor.
+///   the same three path questions. A folder has no preview seat.
 /// - **[`FileMenuSubject::Document`]** — a preview's breadcrumb. No preview door
 ///   (the preview is what asked), so the default program is the first row, then
-///   the editor, then `Show in files column`, which is this face's answer to
-///   "where does this live" because the column is somewhere else from here.
+///   `Show in files column`, which is this face's answer to "where does this
+///   live" because the column is somewhere else from here.
+/// - **[`FileMenuSubject::FoldedPath`]** — the `…` chip. The one face with no
+///   verbs in it at all: as many rows as the fold is hiding levels, deepest
+///   first, and no rule, because there is nothing here to divide *what this is*
+///   from *what its path is* — every row is a place.
 ///
-/// `editor` is whether this machine has one at all — [`find_vscode`]'s answer,
-/// and the only fact outside the subject that changes the length of a list.
+/// **Nothing outside the subject changes the length of a list any more** (user
+/// ruling 2026-08-25). The editor row was the one thing that did, and it is
+/// retired; what is left is the property the original three-row menu had and
+/// briefly lost — every reader of this table gets the same table for the same
+/// subject, so no reader can index it with a number another reader computed.
 #[must_use]
-pub fn file_menu(subject: FileMenuSubject, editor: bool) -> FileMenu {
+pub fn file_menu(subject: FileMenuSubject) -> FileMenu {
     let mut rows = Vec::with_capacity(6);
     match subject {
         FileMenuSubject::File => {
             rows.push(FileMenuRow::Open);
             rows.push(FileMenuRow::OpenWith);
-            if editor {
-                rows.push(FileMenuRow::OpenWithEditor);
-            }
         }
         FileMenuSubject::Folder { .. } => {
             rows.push(FileMenuRow::Fold);
             rows.push(FileMenuRow::NewTerminal);
         }
+        // **`Reveal in Explorer` and not `Show in files column`** (user ruling
+        // 2026-08-25). Two rulings of the same day met on this row. The
+        // breadcrumb the pill stands on is now段段可点 with soft semantics, so
+        // "take me to this level of the files column" is already offered four
+        // times over in the row above the menu, and a list that repeated it
+        // would be one surface saying the same thing twice. And the verb this
+        // face was refused — Explorer — was refused because "the pane's own foot
+        // already carries it one band up"; the page's foot is gone and the
+        // file's foot retired into the breadcrumb, so that reason has expired
+        // and the verb has nowhere else to live.
         FileMenuSubject::Document => {
             rows.push(FileMenuRow::OpenWith);
-            if editor {
-                rows.push(FileMenuRow::OpenWithEditor);
-            }
-            rows.push(FileMenuRow::ShowInFiles);
+            rows.push(FileMenuRow::Reveal);
+        }
+        // The whole list, and then out: a folded level is not a path question
+        // and has no path questions of its own here. Asking `Copy path` about
+        // *one* of several hidden folders is what this face was invented to stop
+        // — see [`FileMenuSubject::FoldedPath`].
+        FileMenuSubject::FoldedPath { levels } => {
+            rows.extend((0..levels).map(FileMenuRow::Crumb));
+            return FileMenu {
+                rows,
+                separator_after: None,
+            };
         }
     }
     rows.push(FileMenuRow::CopyPath);
     rows.push(FileMenuRow::InsertPath);
-    // **Explorer is a tree row's third path question and not a breadcrumb's.**
-    // A preview that has a path already carries this verb in its foot
-    // (`Runtime::reveal_preview_file`), one band above where this menu is hung,
-    // and a row that repeated a button six pixels away would be the surface
-    // offering the same act twice.
+    // Explorer is a tree row's third path question, below the rule with the
+    // other two. On a breadcrumb it is a *way in* and it is already above the
+    // rule — see the `Document` arm and [`FileMenuRow::hands_out_the_path`].
     if !matches!(subject, FileMenuSubject::Document) {
         rows.push(FileMenuRow::Reveal);
     }
     let separator_after = rows
         .iter()
-        .position(|row| row.hands_out_the_path())
+        .position(|row| row.hands_out_the_path(subject))
         .filter(|at| *at > 0 && *at < rows.len())
         .map(|at| at - 1);
     FileMenu {
@@ -5512,27 +5561,31 @@ pub fn file_menu(subject: FileMenuSubject, editor: bool) -> FileMenu {
 /// spoken then, which is the same answer the double click gives.
 ///
 /// **The walk is over the rows this menu is actually showing**, which is what
-/// taking a subject and an `editor` flag rather than the enum's whole vocabulary
-/// buys: a keyboard that stepped over every variant would offer a fold on a file
-/// and an editor to a machine that has none.
+/// taking a subject rather than the enum's whole vocabulary buys: a keyboard
+/// that stepped over every variant would offer a fold on a file and a folded
+/// level on a menu that has no fold behind it.
+///
+/// `None` for a subject with no rows, which is the one thing that can happen
+/// without a bug: `FoldedPath { levels: 0 }`. `Runtime::open_file_menu` refuses
+/// to raise such a menu at all, so nothing this window draws can ask — and
+/// answering it here rather than indexing into an empty list is what keeps that
+/// refusal from being the only thing between this walk and a panic.
 #[must_use]
 pub fn file_menu_step(
     subject: FileMenuSubject,
-    editor: bool,
     current: Option<FileMenuRow>,
     forwards: bool,
-) -> FileMenuRow {
-    let rows = file_menu(subject, editor).rows;
-    let last = rows.len() - 1;
+) -> Option<FileMenuRow> {
+    let rows = file_menu(subject).rows;
+    let last = rows.len().checked_sub(1)?;
     let Some(current) = current else {
-        return if forwards { rows[0] } else { rows[last] };
+        return Some(if forwards { rows[0] } else { rows[last] });
     };
     // **A hover this list does not hold does not wedge the walk.** It can happen
-    // — the editor row disappears with the machine's editor, and every face has
-    // rows the others have not — and the answer is the end the step was
-    // travelling towards, which is *not* what a fresh menu answers: a hand
-    // already moving down is asking for the row after the one it thinks it is
-    // on, and the honest last-resort answer to that is the bottom.
+    // — every face has rows the others have not — and the answer is the end the
+    // step was travelling towards, which is *not* what a fresh menu answers: a
+    // hand already moving down is asking for the row after the one it thinks it
+    // is on, and the honest last-resort answer to that is the bottom.
     let at = rows
         .iter()
         .position(|found| *found == current)
@@ -5542,7 +5595,7 @@ pub fn file_menu_step(
     } else {
         at.saturating_sub(1)
     };
-    rows[next]
+    Some(rows[next])
 }
 
 /// One drawn row of the file menu.
@@ -5581,9 +5634,8 @@ pub fn copy_path_text() -> &'static str {
 pub fn reveal_in_explorer_text() -> &'static str {
     crate::i18n::Text::MenuRevealInExplorer.text()
 }
-pub fn show_in_files_text() -> &'static str {
-    crate::i18n::Text::FileMenuShowInFiles.text()
-}
+// `show_in_files_text` retired with `FileMenuRow::ShowInFiles` (user ruling
+// 2026-08-25), and `i18n::Text::FileMenuShowInFiles` with it.
 
 /// The menu hung under the point a row was right-clicked at.
 ///
@@ -5597,11 +5649,7 @@ pub fn file_menu_layout(
     point: [f32; 2],
     surface: (f32, f32),
     scale: f32,
-    subject: FileMenuSubject,
-    // `editor` is the editor this machine has, or empty when it has none —
-    // which is also how the row is offered or withheld, so a caller cannot pass
-    // a name and a contradicting flag.
-    editor: &str,
+    look: &FileMenuLook<'_>,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> FileMenuLayout {
     let px = |value: f32| value * scale;
@@ -5612,7 +5660,7 @@ pub fn file_menu_layout(
     let separator_margin = px(SEPARATOR_MARGIN_Y_LOGICAL_PX).round();
     let separator_block = 2.0 * separator_margin + separator_thickness;
 
-    let menu = file_menu(subject, !editor.is_empty());
+    let menu = file_menu(look.subject);
     let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
     let row_width = |text: &str, measure: &mut dyn FnMut(&str, f32) -> f32| {
         px(ITEM_ICON_COLUMN_LOGICAL_PX)
@@ -5620,7 +5668,7 @@ pub fn file_menu_layout(
             + measure(text, px(ITEM_FONT_LOGICAL_PX))
     };
     let content = menu.rows.iter().fold(0.0f32, |wide, row| {
-        wide.max(row_width(row.text(subject, editor), measure))
+        wide.max(row_width(row.text(look), measure))
     });
     let width = (chrome + content)
         .max(px(FILE_MENU_MIN_WIDTH_LOGICAL_PX))
@@ -5694,8 +5742,7 @@ pub fn file_menu_hit(layout: &FileMenuLayout, x: f64, y: f64) -> Option<Option<F
 #[must_use]
 pub fn file_menu_build(
     layout: &FileMenuLayout,
-    subject: FileMenuSubject,
-    editor: &str,
+    look: &FileMenuLook<'_>,
     hover: Option<FileMenuRow>,
 ) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
@@ -5725,8 +5772,8 @@ pub fn file_menu_build(
         push_row(
             &Row {
                 rect: item.rect,
-                mark: Some(item.row.mark(subject)),
-                name: item.row.text(subject, editor),
+                mark: Some(item.row.mark(look)),
+                name: item.row.text(look),
                 hint: None,
                 hint_ink: None,
                 hovered: hover == Some(item.row),
@@ -5735,9 +5782,7 @@ pub fn file_menu_build(
                 // kept — the refusals these verbs *can* meet (a program the tree
                 // will not run, a shell that has gone) happen after the press
                 // and are spoken then, which is the same answer the double
-                // click gives. The editor row is not an exception: it is only
-                // *offered* on a machine that has one, which is the layout's
-                // judgement and not a state of the row.
+                // click gives.
                 available: true,
                 pin: None,
             },
@@ -9810,6 +9855,17 @@ mod tests {
         text.chars().count() as f32 * font_px * 0.6
     }
 
+    /// A file menu's look for a face with nothing runtime in it, with a named
+    /// terminal mark so that a test which does not care about the shell still
+    /// says which one it was handed.
+    fn plain_look(subject: FileMenuSubject) -> FileMenuLook<'static> {
+        FileMenuLook {
+            subject,
+            crumbs: &[],
+            terminal: ChromeMark::ProfilePowerShell,
+        }
+    }
+
     // ── P130-P137: the preview's filename switcher ──────────────────────────
 
     fn pool(names: &[(&str, bool, bool)]) -> Vec<PreviewMenuItem> {
@@ -13156,12 +13212,16 @@ mod tests {
     ///
     /// `DESIGN.md` §7.1.3's three are still here in their order. What the two
     /// rulings added, and what this pin holds together, is that the *ways in*
-    /// half grew twice — a second door out of the row (`Open with default app`)
-    /// beside the preview, and the editor on a machine that has one — while the
-    /// path half grew once (`Reveal in Explorer`). The rule still divides *what
-    /// this row is* from *what its path is*, and it moves down as the first half
-    /// grows, because `file_menu` puts it where `hands_out_the_path` starts
-    /// being true rather than at an index.
+    /// half grew — a second door out of the row (`Open with default app`) beside
+    /// the preview — while the path half grew once (`Reveal in Explorer`). The
+    /// rule still divides *what this row is* from *what its path is*, and it
+    /// moves down as the first half grows, because `file_menu` puts it where
+    /// `hands_out_the_path` starts being true rather than at an index.
+    ///
+    /// **The editor row is gone** (user ruling 2026-08-25) and with it the whole
+    /// second half this pin used to have: there is no machine on which this menu
+    /// is a different length from this menu. `a_menus_length_is_a_fact_about_its_
+    /// subject_and_nothing_else` is where that is now nailed.
     ///
     /// **`Show in files column` is not here**, and that is the composition of
     /// the two rulings rather than a row lost in one: the press that raises this
@@ -13176,22 +13236,18 @@ mod tests {
     ///
     /// MUTATIONS:
     /// ① take `OpenWith` or `Reveal` out of [`file_menu`]'s `File` arm;
-    /// ② put the separator back at a fixed index — it lands inside the ways in
-    ///    once the editor row is there, and the rule assertion goes red;
-    /// ③ offer the editor row unconditionally — the first assertion goes red on
-    ///    a machine with no editor, which is the row that would open nothing.
+    /// ② put the separator back at a fixed index.
     #[test]
     fn a_file_rows_menu_draws_its_doors_then_a_rule_then_its_path_verbs() {
-        let subject = FileMenuSubject::File;
+        let look = plain_look(FileMenuSubject::File);
         let layout = file_menu_layout(
             [300.0, 200.0],
             (960.0, 600.0),
             1.0,
-            subject,
-            "",
+            &look,
             &mut fake_measure,
         );
-        let layer = one_layer(file_menu_build(&layout, subject, "", None));
+        let layer = one_layer(file_menu_build(&layout, &look, None));
         let names: Vec<&str> = layer
             .labels
             .iter()
@@ -13206,13 +13262,12 @@ mod tests {
                 insert_path_text(),
                 reveal_in_explorer_text(),
             ],
-            "five rows on a machine with no editor, top to bottom, and no \
-             heading over them"
+            "five rows, top to bottom, and no heading over them"
         );
         let ways_in = layout
             .items
             .iter()
-            .filter(|item| !item.row.hands_out_the_path())
+            .filter(|item| !item.row.hands_out_the_path(look.subject))
             .count();
         let separator = layout.separator.expect("a menu with both kinds of row");
         assert!(
@@ -13236,49 +13291,44 @@ mod tests {
             "each verb wears its own glyph — the copy and the paste are not one \
              mark twice"
         );
-        // ③ And a machine that has an editor is offered one, in the ways-in half.
-        let with_editor = file_menu_layout(
-            [300.0, 200.0],
-            (960.0, 600.0),
-            1.0,
-            subject,
-            "VS Code",
-            &mut fake_measure,
-        );
-        let layer = one_layer(file_menu_build(&with_editor, subject, "VS Code", None));
-        let names: Vec<&str> = layer
-            .labels
-            .iter()
-            .map(|label| label.text.as_str())
-            .collect();
-        assert_eq!(
-            names,
-            vec![
-                crate::i18n::Text::FileMenuOpenPreview.text(),
-                crate::i18n::Text::FileMenuOpenWith.text(),
-                "VS Code",
-                copy_path_text(),
-                insert_path_text(),
-                reveal_in_explorer_text(),
-            ],
-            "the editor stands with the other doors, above the rule"
-        );
-        assert_eq!(
-            with_editor.items.len() - layout.items.len(),
-            1,
-            "one row more, and one row's worth of height with it"
-        );
+    }
+
+    /// PIN (user ruling 2026-08-25) — **a menu's length is a fact about its
+    /// subject and nothing else.**
+    ///
+    /// This is what retiring the editor row bought back, and it is worth a nail
+    /// of its own because it was true, then lost, and is true again. The three
+    /// verb faces each have one length; only the `…` chip's varies, and it
+    /// varies with a number its own subject carries. Nothing here asks the
+    /// machine a question.
+    ///
+    /// RED EVIDENCE (2026-08-25): with the editor row still in
+    /// `file_menu`'s `File` and `Document` arms, this cannot even be written —
+    /// `file_menu` took a second argument, which is the finding.
+    ///
+    /// MUTATIONS: re-introduce any row conditional on anything but the subject.
+    #[test]
+    fn a_menus_length_is_a_fact_about_its_subject_and_nothing_else() {
+        for (subject, rows) in [
+            (FileMenuSubject::File, 5),
+            (FileMenuSubject::Folder { expanded: false }, 5),
+            (FileMenuSubject::Folder { expanded: true }, 5),
+            (FileMenuSubject::Document, 4),
+            (FileMenuSubject::FoldedPath { levels: 3 }, 3),
+        ] {
+            assert_eq!(
+                file_menu(subject).rows.len(),
+                rows,
+                "{subject:?} draws one list, and it is this long"
+            );
+        }
         assert!(
-            with_editor.frame[3] - with_editor.frame[1] > layout.frame[3] - layout.frame[1],
-            "a menu with a row more is a menu taller by one row — never a row \
-             drawn outside its own frame"
-        );
-        // And the rule went down with the half that grew, rather than staying
-        // where an index would have kept it.
-        let with_editor_rule = with_editor.separator.expect("both kinds of row");
-        assert!(
-            with_editor_rule[1] > separator[1],
-            "the rule moved down by the row that joined the half above it"
+            !file_menu(FileMenuSubject::File)
+                .rows
+                .iter()
+                .chain(file_menu(FileMenuSubject::Document).rows.iter())
+                .any(|row| matches!(row, FileMenuRow::Crumb(_))),
+            "a folded level is a row of the chip's list and of nothing else"
         );
     }
 
@@ -13289,28 +13339,42 @@ mod tests {
     /// preview head's second row and the tree row's completed menu had to land
     /// on. What this face does *not* have is as load-bearing as what it does:
     /// no `Open preview`, because the preview is what raised it; no fold,
-    /// because it is not a row of any tree; no `Reveal in Explorer`, because
-    /// the pane's own foot already carries that verb one band up. What only it
-    /// has is `Show in files column`, and the first row says `Open in default
+    /// because it is not a row of any tree. The first row says `Open in default
     /// app` rather than `Open with default app` because on this face there is
     /// nothing above it to be contrasted with.
     ///
+    /// **Four rows since 2026-08-25**, and two of the four changed that day:
+    /// the editor left this list with every other, and `Show in files column`
+    /// gave its place to `Reveal in Explorer`. Both halves of that swap are
+    /// rulings of the same afternoon and each one's reason is the other's — the
+    /// breadcrumb above the pill now stands the column on any level of the path
+    /// without leaving the tree, so a row for it was the surface repeating
+    /// itself; and Explorer, refused here because the pane's foot carried it,
+    /// has nowhere else to live now the feet are gone.
+    ///
+    /// **And it is above the rule**, which is the difference
+    /// [`FileMenuRow::hands_out_the_path`] takes a subject for: on this face
+    /// "open the folder it lives in" is the answer to *where is this*, not a
+    /// third thing to do with the text of a path.
+    ///
     /// MUTATIONS:
-    /// ① give the `Document` arm `Open` or `Reveal` — the label list goes red;
+    /// ① give the `Document` arm `Open` or `Fold` — the label list goes red;
     /// ② let `OpenWith` wear one wording on every face — the first label goes
-    ///    red on this menu or on the file row's, whichever way it is settled.
+    ///    red on this menu or on the file row's, whichever way it is settled;
+    /// ③ make `hands_out_the_path` subject-blind again — the rule lands one row
+    ///    higher and the last assertion goes red.
     #[test]
     fn the_breadcrumbs_menu_is_the_document_faces_own_list() {
         let subject = FileMenuSubject::Document;
+        let look = plain_look(subject);
         let layout = file_menu_layout(
             [300.0, 200.0],
             (960.0, 600.0),
             1.0,
-            subject,
-            "VS Code",
+            &look,
             &mut fake_measure,
         );
-        let layer = one_layer(file_menu_build(&layout, subject, "VS Code", None));
+        let layer = one_layer(file_menu_build(&layout, &look, None));
         assert_eq!(
             layer
                 .labels
@@ -13319,38 +13383,156 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 crate::i18n::Text::FileMenuOpenDefaultApp.text(),
-                "VS Code",
-                show_in_files_text(),
+                reveal_in_explorer_text(),
                 copy_path_text(),
                 insert_path_text(),
             ],
         );
-        let rows = file_menu(subject, true).rows;
+        let rows = file_menu(subject).rows;
         assert!(
-            !rows.contains(&FileMenuRow::Open)
-                && !rows.contains(&FileMenuRow::Fold)
-                && !rows.contains(&FileMenuRow::Reveal),
-            "no preview door, no fold and no Explorer on the face that is the \
-             preview"
+            !rows.contains(&FileMenuRow::Open) && !rows.contains(&FileMenuRow::Fold),
+            "no preview door and no fold on the face that is the preview"
         );
         // And the two verbs about the path are the same two the tree's rows
         // offer, in the same order, so a rename in one menu cannot drift.
         assert_eq!(
             rows[rows.len() - 2..],
-            file_menu(FileMenuSubject::File, true).rows[3..5],
+            file_menu(FileMenuSubject::File).rows[2..4],
         );
-        // `Show in files column` belongs to this face alone: on a tree row it
-        // would offer to show you the column the press came from.
-        for tree in [
-            FileMenuSubject::File,
-            FileMenuSubject::Folder { expanded: true },
-        ] {
-            assert!(
-                !file_menu(tree, true)
-                    .rows
-                    .contains(&FileMenuRow::ShowInFiles)
+        // The rule falls under Explorer here and over it on a tree row: two
+        // rows above the line on this face, one on that one.
+        let rule = layout.separator.expect("a menu with both kinds of row");
+        assert!(
+            rule[1] >= layout.items[1].rect[3] && rule[3] <= layout.items[2].rect[1],
+            "Explorer is a way in on a breadcrumb, so it stands above the rule"
+        );
+        let tree = plain_look(FileMenuSubject::File);
+        let tree_layout = file_menu_layout(
+            [300.0, 200.0],
+            (960.0, 600.0),
+            1.0,
+            &tree,
+            &mut fake_measure,
+        );
+        let tree_rule = tree_layout.separator.expect("both kinds of row");
+        assert!(
+            tree_rule[1] >= tree_layout.items[1].rect[3]
+                && tree_rule[3] <= tree_layout.items[2].rect[1],
+            "and on a tree row it is one of the three path verbs under the rule"
+        );
+        assert_eq!(
+            tree_layout.items.last().map(|item| item.row),
+            Some(FileMenuRow::Reveal),
+            "which is where the tree row's own Explorer is: last, below the line"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-25) — **the `…` chip lists the levels it is
+    /// standing in for, deepest first, and offers no verbs at all.**
+    ///
+    /// The chip used to raise the `Document` face on the *deepest* folder behind
+    /// the fold, which is two wrong sentences at once: it offered `Copy path`
+    /// and `Insert path` about one of several hidden folders without naming
+    /// which, and it answered a control meaning *there are folders here you
+    /// cannot see* with a list that never says what they are. Windows Explorer's
+    /// breadcrumb `…` is the reference the ruling gave — the hidden levels, top
+    /// to bottom, nearest first — and pressing one goes there.
+    ///
+    /// **Deepest first is the assertion, not an accident of the caller**: the
+    /// row the chip stands in reads root-to-leaf, and this list reads the other
+    /// way, so a builder that forgot to turn it round would draw a list that
+    /// looks right in the fixture with two levels and wrong with three.
+    ///
+    /// RED EVIDENCE (2026-08-25): against the chip's old behaviour this test
+    /// cannot be written at all — there was no `FoldedPath` subject and the chip
+    /// raised `Document`. The narrower nail that *is* expressible against the
+    /// old code is `the_chips_menu_offers_no_verbs_about_one_hidden_folder`
+    /// below.
+    ///
+    /// MUTATIONS: hand `crumbs` root-first; give the face a `CopyPath`.
+    #[test]
+    fn the_chips_menu_lists_the_folded_levels_deepest_first() {
+        let crumbs = [
+            "test-assets".to_owned(),
+            "BetterTerminal".to_owned(),
+            "Developer".to_owned(),
+        ];
+        let subject = FileMenuSubject::FoldedPath {
+            levels: crumbs.len(),
+        };
+        let look = FileMenuLook {
+            subject,
+            crumbs: &crumbs,
+            terminal: ChromeMark::ProfilePowerShell,
+        };
+        let layout = file_menu_layout(
+            [300.0, 200.0],
+            (960.0, 600.0),
+            1.0,
+            &look,
+            &mut fake_measure,
+        );
+        let layer = one_layer(file_menu_build(&layout, &look, None));
+        assert_eq!(
+            layer
+                .labels
+                .iter()
+                .map(|label| label.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["test-assets", "BetterTerminal", "Developer"],
+            "the nearest hidden level is the top row and the walk is towards the \
+             root"
+        );
+        assert_eq!(
+            layer
+                .sprites
+                .iter()
+                .map(|sprite| sprite.mark)
+                .collect::<Vec<_>>(),
+            vec![ChromeMark::Folder; 3],
+            "every row is a folder, because every row is a place"
+        );
+        assert!(
+            layout.separator.is_none(),
+            "a list with no verbs in it has nothing to divide"
+        );
+        // And each row answers for its own rectangle, in the same order.
+        for (at, item) in layout.items.iter().enumerate() {
+            assert_eq!(
+                file_menu_hit(
+                    &layout,
+                    f64::from((item.rect[0] + item.rect[2]) / 2.0),
+                    f64::from((item.rect[1] + item.rect[3]) / 2.0),
+                ),
+                Some(Some(FileMenuRow::Crumb(at))),
             );
         }
+    }
+
+    /// PIN (user ruling 2026-08-25) — **no face of this menu offers a path verb
+    /// about a folder it has not named.**
+    ///
+    /// The half of the chip's ruling that is expressible as a property rather
+    /// than as a list: `Copy path` and its two neighbours are only ever offered
+    /// on a menu whose *subject* is one path, and the chip's subject is several.
+    ///
+    /// RED EVIDENCE (2026-08-25): against the old code — the chip raising
+    /// `FileMenuSubject::Document` on the deepest hidden folder — the second
+    /// assertion is the finding, and the first cannot be reached because there
+    /// was no fourth subject to ask about.
+    #[test]
+    fn the_chips_menu_offers_no_verbs_about_one_hidden_folder() {
+        let subject = FileMenuSubject::FoldedPath { levels: 4 };
+        let rows = file_menu(subject).rows;
+        assert!(
+            rows.iter().all(|row| matches!(row, FileMenuRow::Crumb(_))),
+            "the chip's list is places and nothing else"
+        );
+        assert!(
+            !rows.iter().any(|row| row.hands_out_the_path(subject)),
+            "a menu about several folders must not answer `Copy path` about one \
+             of them"
+        );
     }
 
     /// PIN — **a folder row's menu is its own two verbs and then the same three**
@@ -13362,18 +13544,23 @@ mod tests {
     /// offers, which is the whole reason both menus live in one enum.
     ///
     /// RED GATE: give the `Folder` arm of [`file_menu`] the file's rows.
+    ///
+    /// **The shell's mark is the default profile's own** (user ruling
+    /// 2026-08-25) — see `the_new_terminal_row_wears_the_terminal_it_makes`,
+    /// which is where that half is nailed; here it is only asserted that the row
+    /// does not wear a folder, so the two cannot both be forgotten at once.
     #[test]
     fn a_folder_rows_menu_is_the_fold_a_shell_and_the_same_three_path_verbs() {
         let subject = FileMenuSubject::Folder { expanded: false };
+        let look = plain_look(subject);
         let layout = file_menu_layout(
             [300.0, 200.0],
             (960.0, 600.0),
             1.0,
-            subject,
-            "VS Code",
+            &look,
             &mut fake_measure,
         );
-        let layer = one_layer(file_menu_build(&layout, subject, "VS Code", None));
+        let layer = one_layer(file_menu_build(&layout, &look, None));
         assert_eq!(
             layer
                 .labels
@@ -13387,17 +13574,67 @@ mod tests {
                 insert_path_text(),
                 reveal_in_explorer_text(),
             ],
-            "a folder has no preview seat and no editor, so the machine having \
-             one changes nothing here"
+            "a folder has no preview seat, so its ways in are its own two"
         );
         let separator = layout.separator.expect("a menu with both kinds of row");
         assert!(separator[1] >= layout.items[1].rect[3] && separator[3] <= layout.items[2].rect[1]);
         // The path half is one list shared with the file row's menu, so the two
         // cannot drift apart by a rename in one of them.
         assert_eq!(
-            file_menu(subject, true).rows[2..],
-            file_menu(FileMenuSubject::File, true).rows[3..],
+            file_menu(subject).rows[2..],
+            file_menu(FileMenuSubject::File).rows[2..],
         );
+    }
+
+    /// PIN (user ruling 2026-08-25) — **`New terminal here` wears the terminal
+    /// it makes, not the folder it is standing in.**
+    ///
+    /// The report was a screenshot of the folder menu with `#i-folder` beside
+    /// `New terminal here`, one row under `Expand`'s triangle and two above
+    /// `Reveal in Explorer`'s open folder — three rows, two of them folders, and
+    /// the one that makes a shell was one of them. The row already knows its
+    /// folder (you right-clicked it); what it makes is a tab of the default
+    /// profile, so it wears the mark that profile's tab and pane head wear.
+    ///
+    /// **Asked of two different defaults**, because a mark hard-coded to
+    /// whatever the fixture's default happens to be would pass while saying
+    /// nothing.
+    ///
+    /// RED EVIDENCE (2026-08-25): with the arm returning `ChromeMark::Folder`
+    /// this fails on the first assertion — "left: Folder, right:
+    /// ProfilePowerShell".
+    ///
+    /// MUTATIONS: return any fixed mark from the `NewTerminal` arm.
+    #[test]
+    fn the_new_terminal_row_wears_the_terminal_it_makes() {
+        for terminal in [ChromeMark::ProfilePowerShell, ChromeMark::ProfileUbuntu] {
+            let look = FileMenuLook {
+                terminal,
+                ..plain_look(FileMenuSubject::Folder { expanded: false })
+            };
+            let layout = file_menu_layout(
+                [300.0, 200.0],
+                (960.0, 600.0),
+                1.0,
+                &look,
+                &mut fake_measure,
+            );
+            let layer = one_layer(file_menu_build(&layout, &look, None));
+            let at = file_menu(look.subject)
+                .rows
+                .iter()
+                .position(|row| *row == FileMenuRow::NewTerminal)
+                .expect("a folder row offers a shell");
+            assert_eq!(
+                layer.sprites[at].mark, terminal,
+                "the row wears the shell it starts"
+            );
+            assert_ne!(
+                layer.sprites[at].mark,
+                ChromeMark::Folder,
+                "and it is not the folder it is standing in"
+            );
+        }
     }
 
     /// PIN — **the fold row wears the face of the fold it is standing in**
@@ -13413,33 +13650,33 @@ mod tests {
     /// a fixed angle from its `mark`.
     #[test]
     fn the_fold_row_turns_its_word_and_its_triangle_together() {
-        let shut = FileMenuSubject::Folder { expanded: false };
-        let open = FileMenuSubject::Folder { expanded: true };
+        let shut = plain_look(FileMenuSubject::Folder { expanded: false });
+        let open = plain_look(FileMenuSubject::Folder { expanded: true });
         assert_eq!(
-            FileMenuRow::Fold.text(shut, ""),
+            FileMenuRow::Fold.text(&shut),
             crate::i18n::Text::FolderMenuExpand.text()
         );
         assert_eq!(
-            FileMenuRow::Fold.text(open, ""),
+            FileMenuRow::Fold.text(&open),
             crate::i18n::Text::FolderMenuCollapse.text()
         );
         assert_eq!(
-            FileMenuRow::Fold.mark(shut),
+            FileMenuRow::Fold.mark(&shut),
             crate::marks::tree_disclosure(0.0)
         );
         assert_eq!(
-            FileMenuRow::Fold.mark(open),
+            FileMenuRow::Fold.mark(&open),
             crate::marks::tree_disclosure(1.0)
         );
         assert_ne!(
-            FileMenuRow::Fold.mark(shut),
-            FileMenuRow::Fold.mark(open),
+            FileMenuRow::Fold.mark(&shut),
+            FileMenuRow::Fold.mark(&open),
             "the two ends of the turn are two different marks"
         );
         // And the rows either side of it say the same thing whichever fold the
         // menu came up in: only the toggle turns.
         for row in [FileMenuRow::NewTerminal, FileMenuRow::CopyPath] {
-            assert_eq!(row.text(shut, ""), row.text(open, ""));
+            assert_eq!(row.text(&shut), row.text(&open));
         }
     }
 
@@ -13456,23 +13693,25 @@ mod tests {
     /// RED GATE: collapse [`FileMenuRow::text`]'s `OpenWith` arm to one string.
     #[test]
     fn the_default_app_door_is_one_row_wearing_each_faces_preposition() {
+        let file = plain_look(FileMenuSubject::File);
+        let document = plain_look(FileMenuSubject::Document);
         assert_eq!(
-            FileMenuRow::OpenWith.text(FileMenuSubject::File, ""),
+            FileMenuRow::OpenWith.text(&file),
             crate::i18n::Text::FileMenuOpenWith.text()
         );
         assert_eq!(
-            FileMenuRow::OpenWith.text(FileMenuSubject::Document, ""),
+            FileMenuRow::OpenWith.text(&document),
             crate::i18n::Text::FileMenuOpenDefaultApp.text()
         );
         assert_ne!(
-            FileMenuRow::OpenWith.text(FileMenuSubject::File, ""),
-            FileMenuRow::OpenWith.text(FileMenuSubject::Document, ""),
+            FileMenuRow::OpenWith.text(&file),
+            FileMenuRow::OpenWith.text(&document),
         );
         // One glyph, because it is one act: the bare arrow that means *this
         // content leaves the window*.
         assert_eq!(
-            FileMenuRow::OpenWith.mark(FileMenuSubject::File),
-            FileMenuRow::OpenWith.mark(FileMenuSubject::Document),
+            FileMenuRow::OpenWith.mark(&file),
+            FileMenuRow::OpenWith.mark(&document),
         );
     }
 
@@ -14808,16 +15047,16 @@ mod tests {
                 crate::i18n::Text::FileMenuOpenDefaultApp.text(),
             ),
         ] {
+            let look = plain_look(subject);
             let layout = file_menu_layout(
                 [300.0, 200.0],
                 (960.0, 600.0),
                 1.0,
-                subject,
-                "",
+                &look,
                 &mut fake_measure,
             );
-            let layer = one_layer(file_menu_build(&layout, subject, "", None));
-            assert_eq!(file_menu(subject, false).rows[0], first);
+            let layer = one_layer(file_menu_build(&layout, &look, None));
+            assert_eq!(file_menu(subject).rows[0], first);
             assert_eq!(
                 layer.labels.first().map(|label| label.text.as_str()),
                 Some(says)
@@ -14835,18 +15074,10 @@ mod tests {
     #[test]
     fn a_menu_raised_in_the_corner_is_pulled_back_inside_on_both_axes() {
         let surface = (960.0, 600.0);
-        // The tallest face this window has — a file row on a machine with an
-        // editor — because the clamp is only tested by the menu that has the
-        // most to fit.
-        let subject = FileMenuSubject::File;
-        let layout = file_menu_layout(
-            [950.0, 596.0],
-            surface,
-            1.0,
-            subject,
-            "VS Code",
-            &mut fake_measure,
-        );
+        // The tallest face this window has — a tree row's five — because the
+        // clamp is only tested by the menu that has the most to fit.
+        let look = plain_look(FileMenuSubject::File);
+        let layout = file_menu_layout([950.0, 596.0], surface, 1.0, &look, &mut fake_measure);
         assert!(layout.frame[2] <= surface.0 - MENU_EDGE_MARGIN_LOGICAL_PX);
         assert!(layout.frame[3] <= surface.1 - MENU_EDGE_MARGIN_LOGICAL_PX);
         assert!(layout.frame[0] >= MENU_EDGE_MARGIN_LOGICAL_PX);
@@ -14866,137 +15097,152 @@ mod tests {
     /// PIN — rows answer, the body swallows, outside is nobody's; and the rule
     /// is body, so a press on a hairline commits no verb.
     ///
-    /// Asked of **both** subjects, because the hit test walks a list whose
-    /// length now depends on which row raised the menu.
+    /// Asked of **every** subject, because the hit test walks a list whose
+    /// length depends on which row raised the menu.
     #[test]
     fn the_file_menu_answers_a_press_on_each_of_its_rows() {
-        for subject in [
-            FileMenuSubject::File,
-            FileMenuSubject::Folder { expanded: true },
-            FileMenuSubject::Document,
+        let crumbs = ["one".to_owned(), "two".to_owned()];
+        for look in [
+            plain_look(FileMenuSubject::File),
+            plain_look(FileMenuSubject::Folder { expanded: true }),
+            plain_look(FileMenuSubject::Document),
+            FileMenuLook {
+                subject: FileMenuSubject::FoldedPath {
+                    levels: crumbs.len(),
+                },
+                crumbs: &crumbs,
+                terminal: ChromeMark::ProfilePowerShell,
+            },
         ] {
-            for editor in ["", "VS Code"] {
-                let layout = file_menu_layout(
-                    [300.0, 200.0],
-                    (960.0, 600.0),
-                    1.0,
-                    subject,
-                    editor,
-                    &mut fake_measure,
-                );
-                let middle = |rect: [f32; 4]| {
-                    (
-                        f64::from((rect[0] + rect[2]) / 2.0),
-                        f64::from((rect[1] + rect[3]) / 2.0),
-                    )
-                };
-                assert_eq!(
-                    layout.items.len(),
-                    file_menu(subject, !editor.is_empty()).rows.len()
-                );
-                for item in &layout.items {
-                    let (x, y) = middle(item.rect);
-                    assert_eq!(file_menu_hit(&layout, x, y), Some(Some(item.row)));
-                }
-                let (x, y) = middle(layout.separator.expect("both kinds of row"));
-                assert_eq!(file_menu_hit(&layout, x, y), Some(None));
-                assert_eq!(
-                    file_menu_hit(
-                        &layout,
-                        f64::from(layout.frame[0] - 4.0),
-                        f64::from(layout.frame[1] - 4.0)
-                    ),
-                    None
-                );
+            let layout = file_menu_layout(
+                [300.0, 200.0],
+                (960.0, 600.0),
+                1.0,
+                &look,
+                &mut fake_measure,
+            );
+            let middle = |rect: [f32; 4]| {
+                (
+                    f64::from((rect[0] + rect[2]) / 2.0),
+                    f64::from((rect[1] + rect[3]) / 2.0),
+                )
+            };
+            assert_eq!(layout.items.len(), file_menu(look.subject).rows.len());
+            for item in &layout.items {
+                let (x, y) = middle(item.rect);
+                assert_eq!(file_menu_hit(&layout, x, y), Some(Some(item.row)));
             }
+            // The rule is body, so a press on a hairline commits no verb — and
+            // the one face with no verbs in it has no hairline to press.
+            match layout.separator {
+                Some(rule) => {
+                    let (x, y) = middle(rule);
+                    assert_eq!(file_menu_hit(&layout, x, y), Some(None));
+                }
+                None => assert!(matches!(look.subject, FileMenuSubject::FoldedPath { .. })),
+            }
+            assert_eq!(
+                file_menu_hit(
+                    &layout,
+                    f64::from(layout.frame[0] - 4.0),
+                    f64::from(layout.frame[1] - 4.0)
+                ),
+                None
+            );
         }
     }
 
     /// PIN — the keyboard walk stops at both ends instead of wrapping round,
     /// which is the law the tree beside it already keeps (D45).
     ///
-    /// **And it walks the list this menu is actually showing**, which two
-    /// rulings each made true for their own reason: a folder's menu has no
-    /// `Open`, and no machine without an editor has an editor row. A walk that
-    /// stepped through a fixed table would offer a row that is not on the glass
-    /// — VS Code on a machine without it, a fold on a file.
+    /// **And it walks the list this menu is actually showing**: a folder's menu
+    /// has no `Open`, a breadcrumb's has no `Reveal`, and the `…` chip's has
+    /// nothing but places. A walk that stepped through a fixed table would offer
+    /// a row that is not on the glass — a fold on a file, a folded level on a
+    /// path that is not folded.
     ///
-    /// RED GATE: hand [`file_menu_step`] one subject's rows for every subject,
-    /// or the editing machine's rows for both machines.
+    /// RED GATE: hand [`file_menu_step`] one subject's rows for every subject.
     #[test]
     fn the_file_menus_keyboard_walk_clamps_at_both_ends_of_the_list_it_is_on() {
         let file = FileMenuSubject::File;
-        assert_eq!(file_menu_step(file, false, None, true), FileMenuRow::Open);
+        let step = |subject, current, forwards| {
+            file_menu_step(subject, current, forwards).expect("this menu has rows")
+        };
+        assert_eq!(step(file, None, true), FileMenuRow::Open);
+        assert_eq!(step(file, None, false), FileMenuRow::Reveal);
         assert_eq!(
-            file_menu_step(file, false, None, false),
-            FileMenuRow::Reveal
-        );
-        assert_eq!(
-            file_menu_step(file, false, Some(FileMenuRow::Open), false),
+            step(file, Some(FileMenuRow::Open), false),
             FileMenuRow::Open,
             "up from the first row stays on the first row"
         );
         assert_eq!(
-            file_menu_step(file, false, Some(FileMenuRow::Reveal), true),
+            step(file, Some(FileMenuRow::Reveal), true),
             FileMenuRow::Reveal,
             "and down from the last stays on the last"
         );
         assert_eq!(
-            file_menu_step(file, false, Some(FileMenuRow::Open), true),
-            FileMenuRow::OpenWith,
-            "a machine with no editor steps straight past it"
+            step(file, Some(FileMenuRow::Open), true),
+            FileMenuRow::OpenWith
         );
         assert_eq!(
-            file_menu_step(file, false, Some(FileMenuRow::CopyPath), false),
+            step(file, Some(FileMenuRow::CopyPath), false),
             FileMenuRow::OpenWith
         );
 
-        // And a machine that has one walks through it.
-        assert_eq!(
-            file_menu_step(file, true, Some(FileMenuRow::OpenWith), true),
-            FileMenuRow::OpenWithEditor
-        );
-        assert_eq!(
-            file_menu_step(file, true, Some(FileMenuRow::CopyPath), false),
-            FileMenuRow::OpenWithEditor
-        );
-
         let folder = FileMenuSubject::Folder { expanded: false };
-        assert_eq!(file_menu_step(folder, true, None, true), FileMenuRow::Fold);
+        assert_eq!(step(folder, None, true), FileMenuRow::Fold);
+        assert_eq!(step(folder, None, false), FileMenuRow::Reveal);
         assert_eq!(
-            file_menu_step(folder, true, None, false),
-            FileMenuRow::Reveal
-        );
-        assert_eq!(
-            file_menu_step(folder, true, Some(FileMenuRow::Fold), true),
+            step(folder, Some(FileMenuRow::Fold), true),
             FileMenuRow::NewTerminal
         );
         assert_eq!(
-            file_menu_step(folder, true, Some(FileMenuRow::CopyPath), false),
+            step(folder, Some(FileMenuRow::CopyPath), false),
             FileMenuRow::NewTerminal,
             "and it steps over a row this subject does not have"
         );
 
         let document = FileMenuSubject::Document;
         assert_eq!(
-            file_menu_step(document, true, None, false),
+            step(document, None, false),
             FileMenuRow::InsertPath,
             "the face with no Explorer row ends one row earlier"
         );
         assert_eq!(
-            file_menu_step(document, true, Some(FileMenuRow::OpenWithEditor), true),
-            FileMenuRow::ShowInFiles
+            step(document, Some(FileMenuRow::Open), true),
+            FileMenuRow::InsertPath,
+            "a hover this face has not got does not wedge the walk: the step \
+             lands at the end it was travelling towards"
+        );
+        assert_eq!(
+            step(document, Some(FileMenuRow::OpenWith), true),
+            FileMenuRow::Reveal,
+            "and Explorer is this face's second row, not its last"
+        );
+
+        // The chip's list walks like any other, over rows that are places.
+        let folded = FileMenuSubject::FoldedPath { levels: 3 };
+        assert_eq!(step(folded, None, true), FileMenuRow::Crumb(0));
+        assert_eq!(step(folded, None, false), FileMenuRow::Crumb(2));
+        assert_eq!(
+            step(folded, Some(FileMenuRow::Crumb(2)), true),
+            FileMenuRow::Crumb(2)
+        );
+        assert_eq!(
+            file_menu_step(FileMenuSubject::FoldedPath { levels: 0 }, None, true),
+            None,
+            "a menu with no rows has no row to step to — and does not panic"
         );
 
         // A hover left over from a menu that does not share this one's rows does
         // not wedge the walk: the step lands at the end it was travelling
         // towards, rather than at the end a fresh menu would have offered.
         assert_eq!(
-            file_menu_step(file, false, Some(FileMenuRow::OpenWithEditor), true),
+            step(file, Some(FileMenuRow::Crumb(0)), true),
             FileMenuRow::Reveal
         );
         assert_eq!(
-            file_menu_step(file, false, Some(FileMenuRow::Fold), false),
+            step(file, Some(FileMenuRow::Fold), false),
             FileMenuRow::Open
         );
     }

@@ -2369,12 +2369,15 @@ pub fn preview_body_viewport(
         viewport.y = viewport.y.saturating_add(consumed);
         viewport.height = viewport.height.saturating_sub(consumed).max(1);
     }
-    if rail != Some(PreviewRailKind::Crumbs) {
+    // **A seat with a rail has no foot at all** (user rulings 2026-08-24 and
+    // 2026-08-25): the file's path went up into the breadcrumb and the page's
+    // address into the address row, and the page's hover line became a tag that
+    // floats rather than a band that stands. What is left with a foot is a
+    // preview showing something with neither — a diff, a commit, a graph — and
+    // there the foot keeps its whole height while the body gives way, down to a
+    // single row, on the rule a files column already follows.
+    if rail.is_none() {
         let bar = (FILES_FOOT_BAR_LOGICAL_PX * scale).round().max(1.0) as u32;
-        // The foot keeps its whole height and the body is what gives way, down to
-        // a single row — the rule a files column already follows, and for its
-        // reason: a pane squeezed to a sliver is more use with a path in it than
-        // with two lines of a document and no way to reach the file.
         let consumed = bar.min(viewport.height.saturating_sub(1));
         viewport.height = viewport.height.saturating_sub(consumed).max(1);
     }
@@ -7627,13 +7630,14 @@ pub fn build_chrome_for_tabs(
                         },
                         align_right: false,
                         align_center: false,
-                        letter_spacing_em: 0.0,
-                        weight: if focused {
-                            ChromeLabelWeight::Medium
-                        } else {
-                            ChromeLabelWeight::Regular
-                        },
-                        tabular_numerals: false,
+                        // **The face the box was cut from** (user report,
+                        // 2026-08-25). Written out of [`seat_title_face`] rather
+                        // than beside it, so the weight this caption wears and
+                        // the weight the files head's button was sized in cannot
+                        // be changed apart.
+                        letter_spacing_em: seat_title_face(focused).letter_spacing_em,
+                        weight: seat_title_face(focused).weight,
+                        tabular_numerals: seat_title_face(focused).tabular_numerals,
                         clip: None,
                     });
                 }
@@ -7974,6 +7978,10 @@ pub fn build_chrome_for_tabs(
                         // holds none.
                         _ => files_tree.map(|tree| FootStrip {
                             path: tree.foot_path.as_str(),
+                            // A band fills its strip and never hugs its text,
+                            // so the width is the tag's question and not this
+                            // one's.
+                            path_width: 0.0,
                             revealed: tree.foot_revealed,
                             notice: "",
                             notice_width: 0.0,
@@ -7993,6 +8001,52 @@ pub fn build_chrome_for_tabs(
                         &palette,
                         (&mut pane_quads, &mut pane_labels, &mut pane_sprites),
                     );
+                }
+                // **A page's hover line, as the bubble every browser draws**
+                // (user ruling 2026-08-25). The band it used to ride retired
+                // with the address it stopped printing, and what is left of its
+                // job — "the pointer is on a link, and this is where it goes" —
+                // floats in the body's bottom-left corner instead: nothing in
+                // the layout, so the page's own bottom edge no longer moves
+                // every time the pointer crosses a link.
+                //
+                // Drawn only while there is something to say, which is the whole
+                // difference a bubble buys over a band.
+                if placement.kind == SeatKind::Preview
+                    && seats.seat_rail(placement.id) == Some(PreviewRailKind::Address)
+                    && let Some(strip) = preview_foot(placement.id)
+                    && !strip.path.is_empty()
+                    && let Some(geometry) = files_pane
+                    && let Some(tag) = page_hover_tag_box(geometry.body, scale, strip.path_width)
+                {
+                    pane_sprites.push(ChromeSprite::new(
+                        ChromeMark::ControlPill {
+                            radius_px: (PAGE_HOVER_TAG_RADIUS_LOGICAL_PX * scale).round().max(1.0)
+                                as u32,
+                        },
+                        tag,
+                        palette.menu_surface,
+                    ));
+                    let pad = (PAGE_HOVER_TAG_PAD_X_LOGICAL_PX * scale).round();
+                    let text = [
+                        tag[0] + pad,
+                        tag[1],
+                        (tag[2] - pad).max(tag[0] + pad),
+                        tag[3],
+                    ];
+                    pane_labels.push(ChromeLabel {
+                        mono: false,
+                        text: strip.path.to_owned(),
+                        rect: text,
+                        font_size_px: PAGE_HOVER_TAG_FONT_LOGICAL_PX * scale,
+                        color: palette.pane_title,
+                        align_right: false,
+                        align_center: false,
+                        letter_spacing_em: 0.0,
+                        weight: ChromeLabelWeight::Regular,
+                        tabular_numerals: false,
+                        clip: Some(text),
+                    });
                 }
                 // The "no preview" card: 30px file mark at half strength, the
                 // sentence, and the one way out (mock-up 614-623). Drawn instead
@@ -12155,6 +12209,55 @@ pub const FILES_ROOT_CHEVRON_HEIGHT_LOGICAL_PX: f32 = 5.0;
 /// is punctuation on the name rather than a control of its own.
 pub const FILES_ROOT_CHEVRON_OPACITY: f32 = 0.6;
 
+/// **The face a pane head's caption is drawn in — and therefore the face its box
+/// is cut from** (user report, 2026-08-25).
+///
+/// `.pane.focused .panehead { font-weight: 500 }` with the face's own regular
+/// weight everywhere else (mock-up 1644), which is [`PREVIEW_NAME_FACE`]'s
+/// declaration one head over and it is here for that constant's exact reason.
+/// The report was a screenshot of a files column headed `BetterTermina|` with a
+/// third of the head standing empty beside it: nothing clamps that name either —
+/// [`files_root_box`] hugs the width it is handed and the caption's box is cut to
+/// stop before the chevron — so the only thing that can crop it is a width taken
+/// in a face the paint does not wear. It was, and it was the *same* face the
+/// preview head's name had just been fixed for: the caller measured with
+/// `measure_chrome_text`, the face's regular weight by definition, while the head
+/// under the keyboard draws `Medium`.
+///
+/// **A function of the focus and not one constant**, because the caption really
+/// does change face: a button sized for `Medium` on a resting head would hug
+/// nothing, and one sized for `Regular` on the focused head crops the last
+/// letter. The paint and the measurement both read this, which is what stops the
+/// two from being changed apart.
+#[must_use]
+pub const fn seat_title_face(focused: bool) -> MeasureFace {
+    if focused {
+        MeasureFace::weighted(ChromeLabelWeight::Medium)
+    } else {
+        MeasureFace::PLAIN
+    }
+}
+
+/// **How wide a files head's root name is drawn**, in the face it is drawn in.
+///
+/// [`preview_head_measurements`]'s opposite number and its whole reasoning: the
+/// width and the ink are one shaping run asked twice, and the only way to keep
+/// the two runs identical is for the measurer and the painter to read one
+/// declaration — [`seat_title_face`].
+#[must_use]
+pub fn files_root_name_width(
+    name: &str,
+    scale: f32,
+    focused: bool,
+    measure: &mut Measure<'_>,
+) -> f32 {
+    measure(
+        name,
+        SEAT_TITLE_FONT_LOGICAL_PX * scale,
+        seat_title_face(focused),
+    )
+}
+
 // ── `.files-pane .files-foot` (mock-up 527-538) ─────────────────────────────
 //
 // The strip along the bottom of a **docked** column: the full path, and a click
@@ -13117,6 +13220,71 @@ pub fn preview_rail_geometry(
     geometry
 }
 
+/// **Which of one preview rail's controls a tip is for** (user ruling
+/// 2026-08-25 — 「预览头与地址行/面包屑行的新控件全部挂 tooltip」).
+///
+/// The three controls the 2026-08-24 ruling moved down off the head brought
+/// their tips with them (`↗` and the three navigation buttons answer to
+/// [`crate::tooltip::TooltipAnchorId::PreviewBrowser`] and `PreviewWebNav`); the
+/// five this row *grew* had none, and every one of them is exactly the case a
+/// tip exists for. `⧉`, `</>` and `⌄` are marks with no word beside them; a
+/// breadcrumb segment is a word that is only the last piece of what it names;
+/// and `…` is a control whose whole meaning is *there is something here you
+/// cannot see*.
+///
+/// A **depth into the whole path** on the segment, not an index into the drawn
+/// run, for [`PreviewCrumbBox::depth`]'s stated reason: a folded path draws
+/// fewer boxes than it has segments, so a tip numbered by the run would name a
+/// different folder on a narrower pane.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreviewRailTip {
+    /// `</>` — the source flip, whose tip changes with the face it would turn to.
+    Flip,
+    /// `⧉` — copy the path, or copy the address.
+    Copy,
+    /// The `Open ⌄` pill.
+    Open,
+    /// The `…` a folded middle is drawn as.
+    Fold,
+    /// One drawn segment of the path.
+    Crumb(usize),
+}
+
+/// Every tippable box on one preview rail, with what it is for.
+///
+/// A function of the geometry rather than a second walk of it, for
+/// [`hit_preview_rail`]'s standing reason: a tip anchored on a rectangle a
+/// second derivation produced is a tip that stands beside its button rather
+/// than on it. The controls do not nest, so the order is only the order they
+/// are drawn in.
+///
+/// The address field itself is deliberately absent: a box you type into has its
+/// own placeholder to say what it is for, which is the search capsule's own
+/// exemption read one row over.
+#[must_use]
+pub fn preview_rail_tip_boxes(geometry: &PreviewRailGeometry) -> Vec<(PreviewRailTip, [f32; 4])> {
+    let mut boxes = Vec::with_capacity(geometry.crumbs.len() + 4);
+    if let Some(box_) = geometry.flip {
+        boxes.push((PreviewRailTip::Flip, box_));
+    }
+    if let Some(box_) = geometry.copy {
+        boxes.push((PreviewRailTip::Copy, box_));
+    }
+    if let Some(box_) = geometry.open {
+        boxes.push((PreviewRailTip::Open, box_));
+    }
+    if let Some(box_) = geometry.fold {
+        boxes.push((PreviewRailTip::Fold, box_));
+    }
+    boxes.extend(
+        geometry
+            .crumbs
+            .iter()
+            .map(|crumb| (PreviewRailTip::Crumb(crumb.depth), crumb.rect)),
+    );
+    boxes
+}
+
 /// Which of one preview rail's controls the pointer is on.
 ///
 /// [`hit_preview_head`]'s exact sibling, one row down, and its own entry for
@@ -13731,25 +13899,75 @@ pub fn preview_pane_geometry(
     rail: Option<PreviewRailKind>,
 ) -> FilesPaneGeometry {
     let mut geometry = pane_foot_geometry(rect, SeatKind::Preview, scale);
-    let Some(kind) = rail else {
+    if rail.is_none() {
         return geometry;
-    };
+    }
     let band = preview_rail_band(rect, scale);
     geometry.body[1] = geometry.body[1].max(band[3]);
-    if kind == PreviewRailKind::Crumbs {
-        // **The foot is retired and the body takes its pixels back** — the
-        // ruling's own sentence, said in rectangles: 「脚上那行路径退役,面包屑接
-        // 任」. Collapsed to the pane's floor rather than removed from the type,
-        // because every reader of a foot already asks `contains` of it and a
-        // rectangle with no height contains nothing.
-        geometry.foot = [rect[0], rect[3], rect[2], rect[3]];
-        geometry.foot_edge = geometry.foot;
-        geometry.foot_mark = geometry.foot;
-        geometry.foot_path = geometry.foot;
-        geometry.body[3] = rect[3];
-    }
+    // **The foot is retired and the body takes its pixels back** — the 2026-08-24
+    // ruling's own sentence, said in rectangles: 「脚上那行路径退役,面包屑接任」.
+    // Collapsed to the pane's floor rather than removed from the type, because
+    // every reader of a foot already asks `contains` of it and a rectangle with
+    // no height contains nothing.
+    //
+    // **Both rail kinds since 2026-08-25** (user ruling). The address row took
+    // the file pane's foot on 2026-08-24 and left the page's standing, because
+    // the page's band still had the hover line to draw and 「一条随指针出现又消失
+    // 的带子会把页面自己的下沿每次都挪一下」. That reason is spent: the hover
+    // line is a floating tag now ([`page_hover_tag_box`]), which does not stand
+    // in the layout at all, so nothing moves when it comes and goes — and a band
+    // that is empty every moment nobody is on a link is a row of nothing under
+    // a page that has one row of address already.
+    geometry.foot = [rect[0], rect[3], rect[2], rect[3]];
+    geometry.foot_edge = geometry.foot;
+    geometry.foot_mark = geometry.foot;
+    geometry.foot_path = geometry.foot;
+    geometry.body[3] = rect[3];
     geometry.body[3] = geometry.body[3].max(geometry.body[1]);
     geometry
+}
+
+/// `.page-hover-tag { height: 20px }` — the floating status bubble a page raises
+/// under the pointer (user ruling 2026-08-25).
+pub const PAGE_HOVER_TAG_HEIGHT_LOGICAL_PX: f32 = 20.0;
+/// Its inset, each side of the address.
+pub const PAGE_HOVER_TAG_PAD_X_LOGICAL_PX: f32 = 8.0;
+/// Its corner — the rail crumb's, because the two are the same size of chip.
+pub const PAGE_HOVER_TAG_RADIUS_LOGICAL_PX: f32 = PREVIEW_CRUMB_RADIUS_LOGICAL_PX;
+/// How far it floats off the body's bottom-left corner.
+pub const PAGE_HOVER_TAG_MARGIN_LOGICAL_PX: f32 = 6.0;
+/// The face it is written in — the retired band's own, so the same address reads
+/// the same size wherever this window has printed it.
+pub const PAGE_HOVER_TAG_FONT_LOGICAL_PX: f32 = FILES_FOOT_FONT_LOGICAL_PX;
+
+/// **Where a page's hover tag stands** — the bottom-left corner of the pane's
+/// body, floating over the page rather than under it (user ruling 2026-08-25).
+///
+/// Every browser this product's readers already use puts it exactly here, and
+/// the reason is the one that retired the band: a status line that *is* the
+/// layout moves the page's own bottom edge every time the pointer crosses a
+/// link, and a bubble that floats does not.
+///
+/// **Drawn over the page and not beside it**, which this window can do because
+/// the composition tree puts the engine's visual at the bottom
+/// (`bt_platform::VisualLayer::Bottom`): everything this renderer paints is
+/// already above it.
+///
+/// `None` when the body has no room — half a tag is worse than none, which is
+/// the rule every control in a head follows.
+#[must_use]
+pub fn page_hover_tag_box(body: [f32; 4], scale: f32, text_width: f32) -> Option<[f32; 4]> {
+    let margin = (PAGE_HOVER_TAG_MARGIN_LOGICAL_PX * scale).round();
+    let pad = (PAGE_HOVER_TAG_PAD_X_LOGICAL_PX * scale).round();
+    let height = (PAGE_HOVER_TAG_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
+    let room = (body[2] - body[0]) - margin * 2.0;
+    let width = (text_width + pad * 2.0).min(room);
+    if width <= pad * 2.0 || body[3] - body[1] < height + margin * 2.0 {
+        return None;
+    }
+    let left = body[0] + margin;
+    let bottom = body[3] - margin;
+    Some(pixel_snapped([left, bottom - height, left + width, bottom]))
 }
 
 /// The border box of one named files column, or `None` when it is not a full
@@ -15427,6 +15645,10 @@ pub struct FootStrip<'a> {
     /// `direction: rtl` ellipsis that keeps the file name and drops the drive
     /// (P35). Or the word it is flashing instead: "Revealed…", or "Saved".
     pub path: &'a str,
+    /// How wide that string draws — [`FootWords::lead_width`], carried through
+    /// for the one surface that hugs its text rather than filling a strip: a
+    /// page's hover tag.
+    pub path_width: f32,
     /// Whether it is confirming rather than reporting, which takes the mark as
     /// well as the words.
     pub revealed: bool,
@@ -15494,6 +15716,15 @@ pub struct FootWords {
     /// The left-hand sentence, already cut to the room the notice left it.
     pub lead: String,
     pub lead_box: [f32; 4],
+    /// How wide that sentence draws **after** the cut, measured beside the
+    /// renderer.
+    ///
+    /// The band never needed it — a strip is as wide as its pane — and the page's
+    /// hover tag does: a bubble hugs its text (user ruling 2026-08-25), so
+    /// something holding a font has to say how long the text is, which is
+    /// [`files_root_box`]'s standing reason for taking a width rather than
+    /// deriving one.
+    pub lead_width: f32,
     /// The right-hand phrase, **never cut**, and empty whenever the strip is
     /// flashing.
     pub notice: String,
@@ -15561,9 +15792,17 @@ pub fn dress_foot(dress: FootDress<'_>, measure: &mut impl FnMut(&str, f32) -> f
     } else {
         crate::settings::ellipsized(lead, room, font_px, measure)
     };
+    // Measured **after** the cut, because what a bubble has to hug is the text
+    // that is going to be drawn and not the one that was asked for.
+    let lead_width = if lead.is_empty() {
+        0.0
+    } else {
+        measure(&lead, font_px)
+    };
     FootWords {
         lead,
         lead_box,
+        lead_width,
         notice: notice.to_owned(),
         notice_box,
         notice_width,
@@ -18819,6 +19058,7 @@ mod tests {
             &geometry,
             Some(FootStrip {
                 path: r"C:\w\huge.txt",
+                path_width: 0.0,
                 revealed: false,
                 notice,
                 notice_width,
@@ -18926,32 +19166,44 @@ mod tests {
     /// RAIL (user ruling 2026-08-24) — **the row under the head, and what each
     /// of the two costs the document under it.**
     ///
-    /// The ruling is not symmetrical and this is where that asymmetry is
-    /// asserted, because it is the one thing about the row a reader can measure:
+    /// **RE-JUDGED 2026-08-25** — the asymmetry is gone, and so is the reason
+    /// for it.
     ///
-    /// * a **breadcrumb** takes the *foot's* place — the ruling retires the path
-    ///   along the bottom and the row above takes the question over — so a
-    ///   file's pane keeps exactly the body it had;
-    /// * an **address** is added, because a page's foot has a second job the row
-    ///   cannot do for it (§7.7 ③: while the pointer is over a link the band
-    ///   says the resolved target).
+    /// The 2026-08-24 ruling was not symmetrical: a **breadcrumb** took the
+    /// *foot's* place, because the ruling retired the path along the bottom and
+    /// the row above took the question over; an **address** was *added*, because
+    /// a page's foot had a second job the row could not do for it (§7.7 ③: while
+    /// the pointer is over a link the band says the resolved target), and 「一条
+    /// 随指针出现又消失的带子会把页面自己的下沿每次都挪一下」.
     ///
-    /// And the foot really is gone in the first case, not merely undrawn: the
-    /// bottom twenty-eight pixels of such a pane are document, and a hit test
-    /// still answering `PreviewFoot` there is the invisible button this module's
-    /// standing law is about.
+    /// The user's 2026-08-25 ruling settles it the other way, and the argument
+    /// that held the band up is what it removes rather than overrules: the hover
+    /// line is a **floating tag** now ([`page_hover_tag_box`]), which stands in
+    /// no layout at all, so nothing moves when it comes and goes — and a band
+    /// that is empty every moment nobody is on a link was a row of nothing under
+    /// a page that already had a row of address. **So a rail of either kind
+    /// retires the foot, and a pane with a rail keeps exactly the body it had.**
+    ///
+    /// And the foot really is gone, not merely undrawn: the bottom twenty-eight
+    /// pixels of such a pane are document, and a hit test still answering
+    /// `PreviewFoot` there is the invisible button this module's standing law is
+    /// about.
+    ///
+    /// RED EVIDENCE (2026-08-25): with the foot kept for an address row — the
+    /// pre-ruling code, which is what this pin used to assert — the page's arm
+    /// fails with "left: 0, right: 28": the address row cost the page a whole
+    /// band of document that the file pane beside it did not pay.
     ///
     /// MUTATIONS:
-    /// ① subtract the rail without retiring the foot for a breadcrumb — the
-    ///    document loses fifty-six pixels to chrome and the first equality goes
-    ///    red;
-    /// ② retire the foot for an address row too — the page keeps its body and
-    ///    loses its hover line, and the second equality goes red;
+    /// ① subtract the rail without retiring the foot — the document loses
+    ///    fifty-six pixels to chrome and the height equalities go red;
+    /// ② retire the foot for a breadcrumb only — the page's arm goes red again,
+    ///    with the number the report was about;
     /// ③ leave `seats` out of `hit_files_foot` and answer from
     ///    `pane_foot_geometry` — the last assertion goes red, which is a press
     ///    in a document landing on a strip that is not there.
     #[test]
-    fn a_breadcrumb_row_takes_the_foot_s_place_and_an_address_row_stands_above_one() {
+    fn a_rail_of_either_kind_takes_the_foots_place() {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
         seats.add_preview(&metrics).expect("the preview seat lands");
@@ -18959,27 +19211,20 @@ mod tests {
         let seat = seats.preview().expect("the preview seat");
         let footed = preview_body_viewport(&seats, &layout, seat, 1.0).expect("a body");
 
-        seats.set_rails(BTreeMap::from([(seat, PreviewRailKind::Crumbs)]));
-        let crumbed = preview_body_viewport(&seats, &layout, seat, 1.0).expect("a body");
-        assert_eq!(
-            crumbed.height, footed.height,
-            "the breadcrumb takes the foot's twenty-eight and gives none of the \
-             document away"
-        );
-        assert_eq!(
-            crumbed.y,
-            footed.y + PREVIEW_RAIL_BAR_LOGICAL_PX as u32,
-            "and it takes them off the top, where the row is drawn"
-        );
-
-        seats.set_rails(BTreeMap::from([(seat, PreviewRailKind::Address)]));
-        let addressed = preview_body_viewport(&seats, &layout, seat, 1.0).expect("a body");
-        assert_eq!(
-            footed.height - addressed.height,
-            PREVIEW_RAIL_BAR_LOGICAL_PX as u32,
-            "a page keeps its foot — it is a hover line as well as a band — so \
-             the address row is added rather than swapped in"
-        );
+        for kind in [PreviewRailKind::Crumbs, PreviewRailKind::Address] {
+            seats.set_rails(BTreeMap::from([(seat, kind)]));
+            let railed = preview_body_viewport(&seats, &layout, seat, 1.0).expect("a body");
+            assert_eq!(
+                railed.height, footed.height,
+                "{kind:?}: the row takes the foot's twenty-eight and gives none \
+                 of the document away"
+            );
+            assert_eq!(
+                railed.y,
+                footed.y + PREVIEW_RAIL_BAR_LOGICAL_PX as u32,
+                "{kind:?}: and it takes them off the top, where the row is drawn"
+            );
+        }
 
         // ③ The retired foot is retired for the pointer too.
         let rect = full_pane_rect(&layout, seat).expect("a full pane");
@@ -18988,16 +19233,169 @@ mod tests {
             f64::from((foot[0] + foot[2]) / 2.0),
             f64::from((foot[1] + foot[3]) / 2.0),
         );
+        for kind in [PreviewRailKind::Crumbs, PreviewRailKind::Address] {
+            seats.set_rails(BTreeMap::from([(seat, kind)]));
+            assert_eq!(
+                hit_files_foot(&seats, &layout, 1.0, x, y),
+                None,
+                "{kind:?}: a railed pane has no foot there to press"
+            );
+        }
+        // And a preview with neither — a diff, a commit, a graph — keeps both
+        // the strip and the button, which is what makes the claim above about
+        // the *rail* rather than about previews.
+        seats.set_rails(BTreeMap::new());
         assert_eq!(
             hit_files_foot(&seats, &layout, 1.0, x, y),
             Some(ChromeTarget::PreviewFoot(seat)),
-            "a page's foot is still a button"
+            "a document with no address of any kind still has its strip"
         );
-        seats.set_rails(BTreeMap::from([(seat, PreviewRailKind::Crumbs)]));
+    }
+
+    /// PIN (user ruling 2026-08-25) — **every control this row grew answers for
+    /// a tip, on the very rectangle it is drawn in.**
+    ///
+    /// 「预览头与地址行/面包屑行的新控件全部无 tooltip」 was the report, and it
+    /// listed them: `</>`, `↗`, both `⧉`s, `Open ⌄`, each breadcrumb segment,
+    /// and the `…` chip. Three of those already registered — they came down off
+    /// the head with their anchors — so what this pin holds is the five that did
+    /// not, and it holds them the only way that is worth anything: the tip's box
+    /// is the *paint's* box, taken from the same geometry the hit test reads, so
+    /// a tip cannot stand beside its button.
+    ///
+    /// The claim is written as a **correspondence with the hit test** rather
+    /// than as a list of five rectangles, because a list would go stale the day
+    /// the row grows a sixth control and would say nothing about it.
+    ///
+    /// RED EVIDENCE (2026-08-25): `preview_rail_tip_boxes` did not exist and no
+    /// anchor was pushed for any of these, so every one of them was silent.
+    ///
+    /// MUTATIONS: drop any arm of `preview_rail_tip_boxes`; build a box from a
+    /// second derivation instead of from `geometry`.
+    #[test]
+    fn every_control_of_a_breadcrumb_row_answers_for_a_tip_on_its_own_box() {
+        let rect = [0.0, 0.0, 420.0, 600.0];
+        let measure = PreviewRailMeasure {
+            kind: PreviewRailKind::Crumbs,
+            segments: vec![24.0, 90.0, 120.0, 96.0, 72.0],
+            flip: true,
+            open_width: 30.0,
+            ..PreviewRailMeasure::default()
+        };
+        let geometry = preview_rail_geometry(rect, 1.0, &measure);
+        let tips = preview_rail_tip_boxes(&geometry);
+        assert!(
+            geometry.fold.is_some(),
+            "the fixture is narrow enough to fold, which is what puts a chip in \
+             this list at all"
+        );
+        for control in [
+            PreviewRailTip::Flip,
+            PreviewRailTip::Copy,
+            PreviewRailTip::Open,
+            PreviewRailTip::Fold,
+        ] {
+            assert!(
+                tips.iter().any(|(tip, _)| *tip == control),
+                "{control:?} is drawn on this row and registers no tip"
+            );
+        }
         assert_eq!(
-            hit_files_foot(&seats, &layout, 1.0, x, y),
+            tips.iter()
+                .filter(|(tip, _)| matches!(tip, PreviewRailTip::Crumb(_)))
+                .count(),
+            geometry.crumbs.len(),
+            "one tip per drawn segment, and the fold's hidden ones have the chip"
+        );
+        // The box is the button's, which is the whole point: ask the hit test
+        // about the middle of every tip and it answers with that control.
+        for (tip, box_) in &tips {
+            let (x, y) = (
+                f64::from((box_[0] + box_[2]) / 2.0),
+                f64::from((box_[1] + box_[3]) / 2.0),
+            );
+            assert!(
+                contains(geometry.band, x as f32, y as f32),
+                "{tip:?}'s tip hangs off a box outside the row it is drawn in"
+            );
+            let hit = preview_rail_tip_boxes(&geometry)
+                .into_iter()
+                .find(|(_, other)| contains(*other, x as f32, y as f32))
+                .map(|(other, _)| other);
+            assert_eq!(
+                hit,
+                Some(*tip),
+                "{tip:?}'s box overlaps another control's — a tip that names the \
+                 wrong button"
+            );
+        }
+        // And a page's row registers its own copy button, which is the other
+        // `⧉` the report named.
+        let address = preview_rail_geometry(
+            rect,
+            1.0,
+            &PreviewRailMeasure {
+                kind: PreviewRailKind::Address,
+                address_width: 180.0,
+                ..PreviewRailMeasure::default()
+            },
+        );
+        assert!(
+            preview_rail_tip_boxes(&address)
+                .iter()
+                .any(|(tip, _)| *tip == PreviewRailTip::Copy),
+            "the address row's own `⧉` registers too"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-25) — **a page's hover line floats in the body's
+    /// bottom-left corner and hugs its text.**
+    ///
+    /// The half of the foot's retirement that is not a subtraction: the words
+    /// did not go away, they stopped being a band. This is where the shape is
+    /// nailed — the corner it stands in, that it never leaves the body, and that
+    /// it is as wide as what it has to say rather than as wide as the pane.
+    ///
+    /// **The clamp is the load-bearing one.** A resolved target can be any
+    /// length at all, and a bubble sized straight from it would run out of the
+    /// pane and off the window; `dress_preview_foot` cuts the string to this
+    /// same run before it is measured, so the two agree by construction and this
+    /// asserts the floor under both.
+    ///
+    /// MUTATIONS: drop the `min(room)`; measure from the pane rather than from
+    /// the body; give it the whole width like the band it replaced.
+    #[test]
+    fn a_pages_hover_tag_floats_in_the_corner_and_hugs_its_words() {
+        let body = [100.0, 200.0, 500.0, 460.0];
+        let short = page_hover_tag_box(body, 1.0, 60.0).expect("a body this size seats a tag");
+        assert!(
+            short[0] > body[0] && short[3] < body[3],
+            "it floats off the corner rather than being welded into it"
+        );
+        assert_eq!(
+            short[2] - short[0],
+            60.0 + PAGE_HOVER_TAG_PAD_X_LOGICAL_PX * 2.0,
+            "and it is as wide as its words plus their inset"
+        );
+        assert_eq!(
+            short[3] - short[1],
+            PAGE_HOVER_TAG_HEIGHT_LOGICAL_PX,
+            "one line, at the height a chip of this family is"
+        );
+        // A target longer than the pane is cut to the pane rather than drawn
+        // out of it.
+        let long = page_hover_tag_box(body, 1.0, 4_000.0).expect("a tag");
+        assert!(
+            long[0] >= body[0] && long[2] <= body[2],
+            "a very long address never reaches past the body it floats in"
+        );
+        assert_eq!(long[1], short[1], "both sit on the same floor");
+        // And a body with no room for one draws none, on the rule every control
+        // in a head follows.
+        assert_eq!(
+            page_hover_tag_box([100.0, 200.0, 500.0, 210.0], 1.0, 60.0),
             None,
-            "and a breadcrumbed pane has no foot there to press"
+            "half a tag is worse than none"
         );
     }
 
@@ -36206,6 +36604,122 @@ mod tests {",
                 room + 0.5 >= ink,
                 "{what} is drawn in a box {room}px wide and the ink it has to \
                  hold is {ink}px — a box cut in a face the paint does not wear"
+            );
+        }
+    }
+
+    /// PIN (user report, 2026-08-25) — **a files head's root name box is cut
+    /// from the face the name is drawn in**, on the focused head as on the
+    /// resting one.
+    ///
+    /// The report was a screenshot of a column headed `BetterTermina|` with a
+    /// third of the head standing empty to the right of the chevron. It is the
+    /// same fault the preview head's name had the same morning, one head over
+    /// and one weight along: `.pane.focused .panehead { font-weight: 500 }` is
+    /// what the caption is drawn in, and the caller measured every head alike
+    /// with `measure_chrome_text` — the face's regular weight by definition. The
+    /// caption's box stops before the chevron of a button hugging that width, so
+    /// a width taken 2% short takes the last letter with it.
+    ///
+    /// RED EVIDENCE (2026-08-25): with the width measured `MeasureFace::PLAIN`
+    /// for both heads — the old call site, transcribed — the focused arm fails
+    /// with "the focused head's name is drawn in a box 81px wide and the ink it
+    /// has to hold is 82.11px", and the resting arm passes, which is the shape
+    /// of the report: only the column under the keyboard was cropped.
+    ///
+    /// MUTATIONS: measure with `MeasureFace::PLAIN`; give the caption a weight
+    /// that is not `seat_title_face`'s; hand `files_root_box` the resting width
+    /// on a focused head.
+    #[test]
+    fn a_files_heads_root_name_box_is_cut_from_the_face_it_is_drawn_in() {
+        const NAME: &str = "BetterTerminal";
+        for focused in [false, true] {
+            let metrics = seat_metrics(1_000);
+            let mut seats = Seats::lone_terminal();
+            let column = seats
+                .add_files_pane(&metrics, None)
+                .expect("the files column lands");
+            let terminal = seats.terminals()[0];
+            seats.set_focus(if focused { column } else { terminal });
+            assert_eq!(
+                seats.focus() == column,
+                focused,
+                "the fixture puts the keyboard where this arm is about"
+            );
+            let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+            let mut measure =
+                |text: &str, size: f32, face: MeasureFace| fake_face_width(text, size, face);
+            let width = files_root_name_width(NAME, 1.0, focused, &mut measure);
+            let names: BTreeMap<SeatId, String> = [(column, NAME.to_owned())].into_iter().collect();
+            let widths: BTreeMap<SeatId, f32> = [(column, width)].into_iter().collect();
+            let marks = all_powershell(&seats);
+            let tabs = [TabContent::default()];
+            let chrome = build_chrome_for_tabs(
+                &seats,
+                &layout,
+                1.0,
+                ChromePointer::default(),
+                ChromeContent {
+                    tabs: &tabs,
+                    active_tab: 0,
+                    grabbed: None,
+                    strip_preview: None,
+                    float_shown: &[],
+                    tab_scroll: 0.0,
+                    rail: RailState::default(),
+                    rail_scroll: 0.0,
+                    focus_reveal: 1.0,
+                    focus_thumbnails: &[],
+                    preview_titles: &[],
+                    terminal_names: &NO_TERMINAL_NAMES,
+                    leaf_marks: &marks,
+                    files_names: &names,
+                    files_name_widths: &widths,
+                    files_root_open: None,
+                    files_trees: &NO_FILES_TREES,
+                    files_views: &NO_FILES_VIEWS,
+                    git_pages: &NO_GIT_PAGES,
+                    git_graphs: &NO_GIT_GRAPHS,
+                    preview_messages: &[],
+                    preview_feet: &[],
+                    preview_heads: &[],
+                    preview_rails: &[],
+                    preview_cards: &[],
+                    fit_overflow: None,
+                    profile_menu_open: false,
+                    chevron_turn: 0.0,
+                    pane_motion: PaneMotionFrame::default(),
+                    search_seat: None,
+                    pane_menu_seat: None,
+                    resizing_cards: None,
+                },
+            );
+            let label = chrome
+                .seats
+                .labels
+                .iter()
+                .find(|label| label.text == NAME)
+                .expect("the column's root name is drawn");
+            // The ink, asked for in the label's **own** declared face — the one
+            // attribute set this test never takes on trust.
+            let ink = fake_face_width(
+                &label.text,
+                label.font_size_px,
+                MeasureFace {
+                    weight: label.weight,
+                    letter_spacing_em: label.letter_spacing_em,
+                    tabular_numerals: label.tabular_numerals,
+                },
+            );
+            let room = label.rect[2] - label.rect[0];
+            // A 240px column head holding one short name: there is room to
+            // spare, so the only thing that can crop it is a box cut too small.
+            assert!(
+                room + 0.5 >= ink,
+                "the {} head's name is drawn in a box {room}px wide and the ink \
+                 it has to hold is {ink}px — a box cut in a face the paint does \
+                 not wear",
+                if focused { "focused" } else { "resting" },
             );
         }
     }

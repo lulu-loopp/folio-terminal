@@ -440,6 +440,22 @@ pub enum TooltipAnchorId {
     /// has met here meaning something else. The reload's tip changes with the
     /// button, because the button changes into a stop.
     PreviewWebNav(bt_layout::SeatId, WebNavTool),
+    /// **One control of a preview's address or breadcrumb row** (user ruling
+    /// 2026-08-25 — 「预览头与地址行/面包屑行的新控件全部挂 tooltip」).
+    ///
+    /// The five that row grew when the 2026-08-24 ruling built it, and every one
+    /// of them registers for the reason the four above do: `⧉`, `</>` and `⌄`
+    /// are marks with no word beside them, and two of the three are marks this
+    /// window has already taught meaning something else one row up. The other
+    /// two are the row's own inventions — a breadcrumb segment, whose word is
+    /// only the last piece of the place it names, and the `…`, whose entire
+    /// meaning is *there is something here you cannot see*.
+    ///
+    /// It carries [`crate::seats::PreviewRailTip`], whose segment arm is a depth
+    /// into the *whole* path rather than an index into the drawn run — see that
+    /// type — so a tip already up follows its folder through a re-fold instead of
+    /// quietly starting to name a different one.
+    PreviewRail(bt_layout::SeatId, crate::seats::PreviewRailTip),
     /// One tick of a pane's command marks rail — *"hover **glances** the command"*
     /// (mock 4604).
     ///
