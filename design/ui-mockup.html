@@ -1367,6 +1367,19 @@
   /* bigger than the head's 10×6: this one is not in a run, and there is no head
      under it holding air around it */
   .pane-ghost svg { width: 11px; height: 7px; }
+  /* ── the second door: 🗀 to the `⌄`'s left (user proposal, Claude 认可
+     2026-08-25) ──
+     `right: 33px` is 11 + the ghost's own 22, so the folder's right edge IS the
+     chevron's left edge: one run with no gap at the joint, exactly as
+     `.pane-files + .pane-close` has none in the head. The glyph is 11 and not
+     the head run's 13 — `.panehead .pane-chev svg` cut the CHEVRON to the
+     folder's size there for the rule "a run whose glyphs disagree about size
+     reads as a mistake rather than a set", and the rule belongs to the run, so
+     here it binds the folder instead: this run's size is the ghost's 11. It
+     carries `.pane-files` and `data-flyout-leaf` because it is that button —
+     same handler, same pinned window, same tip. */
+  .pane-ghost-files { right: 33px; }
+  .pane-ghost-files svg { width: 11px; height: 11px; }
   .pane:hover .pane-ghost { opacity: .75; }
   /* `--menu` and a shadow, NOT the run's `--hover`: that one is a 5.5% wash of
      ink, which is exactly right on a head (there is opaque panel under it) and
@@ -8763,7 +8776,16 @@
      `.pane-ghost`. */
   const paneChevHtml = (node, cls) =>
     `<span class="pane-chev ${cls}" data-chev-leaf="${node.id}" title="Split and more"><svg><use href="#i-chev"/></svg></span>`;
-  const loneVerbHtml = (node) => paneChevHtml(node, "pane-ghost");
+  /* TWO DOORS IN THAT CORNER (user proposal, Claude 认可 2026-08-25): 🗀 then
+     `⌄`, left to right. The folder is `.pane-files` — the very element a split
+     head hangs off its run — wearing the ghost's dress, so the click handler,
+     the pinned window, the hover peek and the tip are the head's own and not a
+     second implementation. What §7.1.6i put back was one of the three things
+     the head took away; this is the second, and the reason is the ruling's own:
+     a lone pane wanting its files had to leave the pane for the tab strip. */
+  const loneVerbHtml = (node) =>
+    `<span class="pane-files pane-ghost pane-ghost-files" data-flyout-leaf="${node.id}" title="Peek files here">${folderSvg}</span>`
+    + paneChevHtml(node, "pane-ghost");
   /* ── the PowerShell integration notice (user ruling 2026-08-21) ──
      Folio's PowerShell integration is opt-in: there is no argument that would
      hand `pwsh` a second startup file, so the script is dot-sourced from

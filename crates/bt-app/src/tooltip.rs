@@ -389,6 +389,17 @@ pub enum TooltipAnchorId {
     /// is a list here" and never what is on it. It is exactly the case a tip is
     /// for.
     PaneChevron(bt_layout::SeatId),
+    /// The 🗀 beside a **lone** pane's corner ghost (user proposal, Claude 认可
+    /// 2026-08-25) — "Peek files here", [`Self::TabFiles`]'s own words, because
+    /// it is that action again.
+    ///
+    /// **Only the corner's**, and the clause above is why: the head's folder
+    /// still does not register, because it stands in a run inside a head that is
+    /// itself saying what the pane is. This one floats bare over the terminal's
+    /// output with nothing around it — which is the case the chevron beside it
+    /// registers for, and the sentence about idioms taught elsewhere does not
+    /// reach a mark with no surface under it.
+    PaneFiles(bt_layout::SeatId),
     /// A preview head's `↗` — the hand-off arrow a page's seat wears (user
     /// ruling 2026-08-20).
     ///
