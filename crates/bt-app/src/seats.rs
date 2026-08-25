@@ -7623,10 +7623,14 @@ pub fn build_chrome_for_tabs(
                     .flatten();
                 if let Some(content) = preview_rail {
                     push_preview_rail(
-                        head_box,
+                        preview_rail_band(head_box, scale),
                         content,
-                        placement.id,
-                        pointer,
+                        // **The hover, turned into a part** — the window still
+                        // names a seat, and this row's paint no longer knows
+                        // what a seat is (§7.7 ⑩ 欠账): the very same call draws
+                        // this band inside a torn-off window, where there is no
+                        // seat to name.
+                        preview_rail_hover(pointer.hover, placement.id),
                         scale,
                         &palette,
                         (&mut pane_quads, &mut pane_labels, &mut pane_sprites),
@@ -13085,13 +13089,32 @@ pub fn preview_rail_band(rect: [f32; 4], scale: f32) -> [f32; 4] {
 /// A control that will not fit is not drawn, on the head's own rule: half a
 /// button is worse than none.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn preview_rail_geometry(
     rect: [f32; 4],
     scale: f32,
     measure: &PreviewRailMeasure,
 ) -> PreviewRailGeometry {
-    let band = preview_rail_band(rect, scale);
+    preview_rail_geometry_in(preview_rail_band(rect, scale), scale, measure)
+}
+
+/// [`preview_rail_geometry`] **against a band somebody else cut** — the same row,
+/// on a surface that does not derive its own (§7.7 ⑩ 欠账, 2026-08-25).
+///
+/// A docked seat's band is its pane less its head, which is what the function
+/// above says. A **float** has no pane and no `pane_head_geometry`: its head is
+/// the chassis's own thirty-pixel strip and the row under it is
+/// [`crate::float::FloatGeometry::rail`], reserved by the very layout that took
+/// the height off the body. Splitting the band off the contents is therefore the
+/// whole of what "the same furniture on two hosts" costs — one derivation of
+/// where every control stands, handed the one rectangle the two hosts genuinely
+/// disagree about.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn preview_rail_geometry_in(
+    band: [f32; 4],
+    scale: f32,
+    measure: &PreviewRailMeasure,
+) -> PreviewRailGeometry {
     let edge_px = (PREVIEW_RAIL_EDGE_LOGICAL_PX * scale).max(1.0);
     let edge = [band[0], (band[3] - edge_px).max(band[1]), band[2], band[3]];
     // Centred in the row *above its hairline*, which is the flex row's own
@@ -13335,6 +13358,162 @@ pub fn preview_rail_tip_boxes(geometry: &PreviewRailGeometry) -> Vec<(PreviewRai
     boxes
 }
 
+/// **Which control of one preview rail the pointer is on — the answer with no
+/// host in it** (§7.7 ⑩ 欠账, 2026-08-25).
+///
+/// A docked rail's press is a [`ChromeTarget`], which names a seat; a torn-off
+/// one's is a [`crate::float::FloatPart`], which names a window. Neither of
+/// those is the *question*, and until this enum existed the question could only
+/// be asked by the half of the window that had a seat to answer with — which is
+/// exactly why the float went a day and a half without a row it could press.
+///
+/// So the ladder below is spelled once against the geometry, and each host puts
+/// its own name on the answer: [`preview_rail_target`] for the tree,
+/// [`crate::float::FloatPart::Rail`] for a window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreviewRailPart {
+    Back,
+    Forward,
+    Reload,
+    /// `↗` — hand the address to the machine's own browser.
+    Browser,
+    /// `</>` — the source flip.
+    Flip,
+    /// The `Open ⌄` pill.
+    OpenWith,
+    /// `⧉` — copy the address, or copy the path. **Which of the two it is is a
+    /// property of the row's kind and not of the box**, which is why the fork
+    /// lives in [`preview_rail_target`] and not here.
+    Copy,
+    /// The address field.
+    Address,
+    /// The `…` a folded middle is drawn as.
+    Fold,
+    /// One drawn segment, by its **depth into the whole path** — see
+    /// [`PreviewCrumbBox::depth`].
+    Crumb(usize),
+    /// The band itself, everywhere its controls are not.
+    Band,
+}
+
+/// Resolve a pointer against one preview rail's controls, smallest target first.
+///
+/// **The geometry is handed in rather than derived**, which is the one thing
+/// this row cannot be allowed to get wrong: the widths were measured where a
+/// font was, and a hit test that re-derived them from anything else would answer
+/// about a row nobody drew. `None` is "not in this band at all"; a press inside
+/// the band that lands on no control is [`PreviewRailPart::Band`], because the
+/// row stands between a drag handle and a document and a press falling through
+/// it would either drag the pane by something that is not its head or land in a
+/// document twenty-eight pixels below where it was aimed.
+#[must_use]
+pub fn preview_rail_part(
+    geometry: &PreviewRailGeometry,
+    x: f32,
+    y: f32,
+) -> Option<PreviewRailPart> {
+    if !contains(geometry.band, x, y) {
+        return None;
+    }
+    let hit = |box_: Option<[f32; 4]>| box_.is_some_and(|box_| contains(box_, x, y));
+    if hit(geometry.back) {
+        return Some(PreviewRailPart::Back);
+    }
+    if hit(geometry.forward) {
+        return Some(PreviewRailPart::Forward);
+    }
+    if hit(geometry.reload) {
+        return Some(PreviewRailPart::Reload);
+    }
+    if hit(geometry.external) {
+        return Some(PreviewRailPart::Browser);
+    }
+    if hit(geometry.flip) {
+        return Some(PreviewRailPart::Flip);
+    }
+    if hit(geometry.open) {
+        return Some(PreviewRailPart::OpenWith);
+    }
+    if hit(geometry.copy) {
+        return Some(PreviewRailPart::Copy);
+    }
+    if hit(geometry.address) {
+        return Some(PreviewRailPart::Address);
+    }
+    if hit(geometry.fold) {
+        return Some(PreviewRailPart::Fold);
+    }
+    if let Some(crumb) = geometry
+        .crumbs
+        .iter()
+        .find(|crumb| contains(crumb.rect, x, y))
+    {
+        return Some(PreviewRailPart::Crumb(crumb.depth));
+    }
+    Some(PreviewRailPart::Band)
+}
+
+/// What one rail control is called **on a docked seat**.
+///
+/// The one place [`PreviewRailPart`] and [`ChromeTarget`] meet, in both
+/// directions: the hit test reads it forwards and the paint reads it backwards
+/// ([`preview_rail_hover`]), so a button that lights is a button that answers.
+#[must_use]
+pub fn preview_rail_target(
+    part: PreviewRailPart,
+    seat: SeatId,
+    kind: PreviewRailKind,
+) -> ChromeTarget {
+    match part {
+        PreviewRailPart::Back => ChromeTarget::PreviewBack(seat),
+        PreviewRailPart::Forward => ChromeTarget::PreviewForward(seat),
+        PreviewRailPart::Reload => ChromeTarget::PreviewReload(seat),
+        PreviewRailPart::Browser => ChromeTarget::PreviewBrowser(seat),
+        PreviewRailPart::Flip => ChromeTarget::PreviewFlip(seat),
+        PreviewRailPart::OpenWith => ChromeTarget::PreviewOpenWith(seat),
+        // **A verb about the address on one row and about the file on the other**
+        // — one glyph, two sentences, which is the whole reason it carries a tip.
+        PreviewRailPart::Copy => match kind {
+            PreviewRailKind::Address => ChromeTarget::PreviewAddressCopy(seat),
+            PreviewRailKind::Crumbs => ChromeTarget::PreviewPathCopy(seat),
+        },
+        PreviewRailPart::Address => ChromeTarget::PreviewAddress(seat),
+        PreviewRailPart::Fold => ChromeTarget::PreviewCrumbFold(seat),
+        PreviewRailPart::Crumb(depth) => ChromeTarget::PreviewCrumb { seat, depth },
+        PreviewRailPart::Band => ChromeTarget::PreviewRail(seat),
+    }
+}
+
+/// [`preview_rail_target`] read backwards: which of **this** seat's rail
+/// controls the window's hover is naming, if it is naming one at all.
+///
+/// The paint needs it and the float is why it is a function. A docked rail lit
+/// its buttons by comparing the hover against a target it built from its own
+/// seat number; a float has no seat, so the comparison had to become a question
+/// about the *part* — and then both hosts ask it the same way.
+#[must_use]
+pub fn preview_rail_hover(hover: Option<ChromeTarget>, seat: SeatId) -> Option<PreviewRailPart> {
+    let part = match hover? {
+        ChromeTarget::PreviewBack(at) if at == seat => PreviewRailPart::Back,
+        ChromeTarget::PreviewForward(at) if at == seat => PreviewRailPart::Forward,
+        ChromeTarget::PreviewReload(at) if at == seat => PreviewRailPart::Reload,
+        ChromeTarget::PreviewBrowser(at) if at == seat => PreviewRailPart::Browser,
+        ChromeTarget::PreviewFlip(at) if at == seat => PreviewRailPart::Flip,
+        ChromeTarget::PreviewOpenWith(at) if at == seat => PreviewRailPart::OpenWith,
+        ChromeTarget::PreviewAddressCopy(at) | ChromeTarget::PreviewPathCopy(at) if at == seat => {
+            PreviewRailPart::Copy
+        }
+        ChromeTarget::PreviewAddress(at) if at == seat => PreviewRailPart::Address,
+        ChromeTarget::PreviewCrumbFold(at) if at == seat => PreviewRailPart::Fold,
+        ChromeTarget::PreviewCrumb { seat: at, depth } if at == seat => {
+            PreviewRailPart::Crumb(depth)
+        }
+        ChromeTarget::PreviewRail(at) if at == seat => PreviewRailPart::Band,
+        _ => return None,
+    };
+    Some(part)
+}
+
 /// Which of one preview rail's controls the pointer is on.
 ///
 /// [`hit_preview_head`]'s exact sibling, one row down, and its own entry for
@@ -13365,57 +13544,10 @@ pub fn hit_preview_rail(
             continue;
         };
         let geometry = preview_rail_geometry(rect, scale, measure);
-        if !contains(geometry.band, x, y) {
+        let Some(part) = preview_rail_part(&geometry, x, y) else {
             continue;
-        }
-        let hit = |box_: Option<[f32; 4]>| box_.is_some_and(|box_| contains(box_, x, y));
-        let seat = placement.id;
-        if hit(geometry.back) {
-            return Some(ChromeTarget::PreviewBack(seat));
-        }
-        if hit(geometry.forward) {
-            return Some(ChromeTarget::PreviewForward(seat));
-        }
-        if hit(geometry.reload) {
-            return Some(ChromeTarget::PreviewReload(seat));
-        }
-        if hit(geometry.external) {
-            return Some(ChromeTarget::PreviewBrowser(seat));
-        }
-        if hit(geometry.flip) {
-            return Some(ChromeTarget::PreviewFlip(seat));
-        }
-        if hit(geometry.open) {
-            return Some(ChromeTarget::PreviewOpenWith(seat));
-        }
-        if hit(geometry.copy) {
-            return Some(match measure.kind {
-                PreviewRailKind::Address => ChromeTarget::PreviewAddressCopy(seat),
-                PreviewRailKind::Crumbs => ChromeTarget::PreviewPathCopy(seat),
-            });
-        }
-        if hit(geometry.address) {
-            return Some(ChromeTarget::PreviewAddress(seat));
-        }
-        if hit(geometry.fold) {
-            return Some(ChromeTarget::PreviewCrumbFold(seat));
-        }
-        if let Some(crumb) = geometry
-            .crumbs
-            .iter()
-            .find(|crumb| contains(crumb.rect, x, y))
-        {
-            return Some(ChromeTarget::PreviewCrumb {
-                seat,
-                depth: crumb.depth,
-            });
-        }
-        // **The band swallows what its controls left over**, and it has to: the
-        // row stands between the head's drag handle and the document, and a
-        // press falling through it would either drag the pane by a row that is
-        // not its head or land in a document twenty-eight pixels below where it
-        // was aimed.
-        return Some(ChromeTarget::PreviewRail(seat));
+        };
+        return Some(preview_rail_target(part, placement.id, measure.kind));
     }
     None
 }
@@ -15236,11 +15368,10 @@ pub struct PreviewRailContent<'a> {
 /// [`PREVIEW_NAV_REST`] at rest and full under the pointer, which is the ladder
 /// the three navigation buttons already climbed while they were upstairs.
 #[allow(clippy::too_many_lines)]
-fn push_preview_rail(
-    rect: [f32; 4],
+pub(crate) fn push_preview_rail(
+    band: [f32; 4],
     content: PreviewRailContent<'_>,
-    seat: SeatId,
-    pointer: ChromePointer,
+    hovered: Option<PreviewRailPart>,
     scale: f32,
     palette: &bt_render::ChromePalette,
     out: (
@@ -15250,7 +15381,7 @@ fn push_preview_rail(
     ),
 ) {
     let (quads, labels, sprites) = out;
-    let geometry = preview_rail_geometry(rect, scale, content.measure);
+    let geometry = preview_rail_geometry_in(band, scale, content.measure);
     if geometry.band[3] <= geometry.band[1] {
         return;
     }
@@ -15267,11 +15398,11 @@ fn push_preview_rail(
     #[allow(clippy::too_many_arguments)]
     fn button(
         sprites: &mut Vec<ChromeSprite>,
-        pointer: ChromePointer,
+        hovered: Option<PreviewRailPart>,
         scale: f32,
         palette: &bt_render::ChromePalette,
         box_: Option<[f32; 4]>,
-        target: ChromeTarget,
+        part: PreviewRailPart,
         mark: ChromeMark,
         glyph_px: f32,
         live: bool,
@@ -15279,7 +15410,7 @@ fn push_preview_rail(
         let Some(box_) = box_ else {
             return;
         };
-        let lit = live && pointer.hover == Some(target);
+        let lit = live && hovered == Some(part);
         if lit {
             sprites.push(ChromeSprite::new(
                 ChromeMark::ControlPill {
@@ -15317,11 +15448,11 @@ fn push_preview_rail(
         PreviewRailKind::Address => {
             button(
                 sprites,
-                pointer,
+                hovered,
                 scale,
                 palette,
                 geometry.back,
-                ChromeTarget::PreviewBack(seat),
+                PreviewRailPart::Back,
                 // `#i-chev` turned a quarter — this window has one directional
                 // glyph, and the sentence travelled down here with the buttons.
                 ChromeMark::Chevron { turned_degrees: 90 },
@@ -15330,11 +15461,11 @@ fn push_preview_rail(
             );
             button(
                 sprites,
-                pointer,
+                hovered,
                 scale,
                 palette,
                 geometry.forward,
-                ChromeTarget::PreviewForward(seat),
+                PreviewRailPart::Forward,
                 ChromeMark::Chevron {
                     turned_degrees: 270,
                 },
@@ -15343,11 +15474,11 @@ fn push_preview_rail(
             );
             button(
                 sprites,
-                pointer,
+                hovered,
                 scale,
                 palette,
                 geometry.reload,
-                ChromeTarget::PreviewReload(seat),
+                PreviewRailPart::Reload,
                 // One button, two glyphs: while a navigation is in flight the
                 // reload is a stop.
                 if content.web.loading {
@@ -15360,22 +15491,22 @@ fn push_preview_rail(
             );
             button(
                 sprites,
-                pointer,
+                hovered,
                 scale,
                 palette,
                 geometry.copy,
-                ChromeTarget::PreviewAddressCopy(seat),
+                PreviewRailPart::Copy,
                 ChromeMark::Copy,
                 PREVIEW_RAIL_GLYPH_LOGICAL_PX,
                 true,
             );
             button(
                 sprites,
-                pointer,
+                hovered,
                 scale,
                 palette,
                 geometry.external,
-                ChromeTarget::PreviewBrowser(seat),
+                PreviewRailPart::Browser,
                 // `#i-external` — the head's own arrow, moved (user ruling
                 // 2026-08-24, second round): 「在浏览器打开」 is a verb about the
                 // address, so it stands on the address's row.
@@ -15387,7 +15518,7 @@ fn push_preview_rail(
                 return;
             };
             let editing = content.edit.is_some();
-            let lit = pointer.hover == Some(ChromeTarget::PreviewAddress(seat));
+            let lit = hovered == Some(PreviewRailPart::Address);
             if lit && !editing {
                 sprites.push(ChromeSprite::new(
                     ChromeMark::ControlPill {
@@ -15479,7 +15610,7 @@ fn push_preview_rail(
         PreviewRailKind::Crumbs => {
             let font = PREVIEW_RAIL_FONT_LOGICAL_PX * scale;
             if let Some(fold) = geometry.fold {
-                let lit = pointer.hover == Some(ChromeTarget::PreviewCrumbFold(seat));
+                let lit = hovered == Some(PreviewRailPart::Fold);
                 if lit {
                     sprites.push(ChromeSprite::new(
                         ChromeMark::ControlPill {
@@ -15536,11 +15667,7 @@ fn push_preview_rail(
                 // to: the file. A folder in the run has nothing on this row for a
                 // box to change.
                 let editing = crumb.tail && content.edit.is_some();
-                let lit = pointer.hover
-                    == Some(ChromeTarget::PreviewCrumb {
-                        seat,
-                        depth: crumb.depth,
-                    });
+                let lit = hovered == Some(PreviewRailPart::Crumb(crumb.depth));
                 if lit || editing {
                     sprites.push(ChromeSprite::new(
                         ChromeMark::ControlPill {
@@ -15632,11 +15759,11 @@ fn push_preview_rail(
             }
             button(
                 sprites,
-                pointer,
+                hovered,
                 scale,
                 palette,
                 geometry.flip,
-                ChromeTarget::PreviewFlip(seat),
+                PreviewRailPart::Flip,
                 if content.flip_to_source {
                     ChromeMark::Code
                 } else {
@@ -15647,11 +15774,11 @@ fn push_preview_rail(
             );
             button(
                 sprites,
-                pointer,
+                hovered,
                 scale,
                 palette,
                 geometry.copy,
-                ChromeTarget::PreviewPathCopy(seat),
+                PreviewRailPart::Copy,
                 ChromeMark::Copy,
                 PREVIEW_RAIL_GLYPH_LOGICAL_PX,
                 true,
@@ -15659,7 +15786,7 @@ fn push_preview_rail(
             let Some(open) = geometry.open else {
                 return;
             };
-            let lit = pointer.hover == Some(ChromeTarget::PreviewOpenWith(seat));
+            let lit = hovered == Some(PreviewRailPart::OpenWith);
             if lit {
                 sprites.push(ChromeSprite::new(
                     ChromeMark::ControlPill {
@@ -19768,6 +19895,100 @@ mod tests {
     /// ② index the press by the drawn run rather than by the whole path — every
     ///    segment after the `…` points at the wrong folder, which the depth
     ///    assertion catches;
+    /// PIN (§7.7 ⑪ 欠账, 2026-08-25) — **splitting the band off the contents
+    /// changed no pixel of the row a pane wears.**
+    ///
+    /// [`preview_rail_geometry_in`] exists so a torn-off window can hand in the
+    /// band its own chassis reserved; the moment it stopped being the same
+    /// derivation as the pane's, the two hosts would be two rows. So the pane's
+    /// entry is asserted to *be* the general one applied to the pane's own band,
+    /// on both fillings and at a width where the fold has fired.
+    ///
+    /// Mutation: derive the band inside `preview_rail_geometry_in` from anything
+    /// but its argument and this goes red on the first field.
+    #[test]
+    fn a_panes_rail_is_the_general_row_laid_into_the_panes_own_band() {
+        const SCALE: f32 = 1.5;
+        let rect = [0.0, 0.0, 620.0, 480.0];
+        for measure in [
+            PreviewRailMeasure {
+                kind: PreviewRailKind::Address,
+                address_width: 210.0,
+                ..PreviewRailMeasure::default()
+            },
+            PreviewRailMeasure {
+                kind: PreviewRailKind::Crumbs,
+                segments: vec![24.0, 70.0, 64.0, 58.0, 96.0],
+                flip: true,
+                open_width: 34.0,
+                notice_width: 62.0,
+                ..PreviewRailMeasure::default()
+            },
+        ] {
+            let band = preview_rail_band(rect, SCALE);
+            assert_eq!(
+                preview_rail_geometry(rect, SCALE, &measure),
+                preview_rail_geometry_in(band, SCALE, &measure),
+                "one derivation, whichever host cut the band"
+            );
+        }
+    }
+
+    /// PIN — **what the pointer is on, and what each host calls it.**
+    ///
+    /// [`preview_rail_part`] is the ladder both a pane and a window climb, and
+    /// the two name-maps around it are what let a pane go on speaking
+    /// [`ChromeTarget`]: [`preview_rail_target`] going out to the hit test,
+    /// [`preview_rail_hover`] coming back in to the paint. A round trip that
+    /// lost a control is a button that answers a press and never lights under
+    /// the pointer — which is exactly what the paint's own comparison used to
+    /// guarantee by construction and now has to be pinned.
+    ///
+    /// Mutation ①: drop an arm of `preview_rail_hover` and that control stops
+    /// lighting — red here. Mutation ②: answer another seat's target and the
+    /// last block goes red, which is one pane's button lit by a pointer standing
+    /// on another's.
+    #[test]
+    fn every_rail_control_survives_the_trip_out_to_a_seat_and_back() {
+        let seat = SeatId(3);
+        let other = SeatId(4);
+        for kind in [PreviewRailKind::Address, PreviewRailKind::Crumbs] {
+            for part in [
+                PreviewRailPart::Back,
+                PreviewRailPart::Forward,
+                PreviewRailPart::Reload,
+                PreviewRailPart::Browser,
+                PreviewRailPart::Flip,
+                PreviewRailPart::OpenWith,
+                PreviewRailPart::Copy,
+                PreviewRailPart::Address,
+                PreviewRailPart::Fold,
+                PreviewRailPart::Crumb(2),
+                PreviewRailPart::Band,
+            ] {
+                let target = preview_rail_target(part, seat, kind);
+                assert_eq!(
+                    preview_rail_hover(Some(target), seat),
+                    Some(part),
+                    "{part:?} on a {kind:?} row answers the pointer and lights under it"
+                );
+                assert_eq!(
+                    preview_rail_hover(Some(target), other),
+                    None,
+                    "and it is this seat's control and not the pane next door's"
+                );
+            }
+        }
+        // The `⧉` is the one glyph with a sentence for each row, so it is the
+        // one place the trip out is not injective on the part alone — said out
+        // loud, because it is the shape a lazy round trip would get wrong.
+        assert_ne!(
+            preview_rail_target(PreviewRailPart::Copy, seat, PreviewRailKind::Address),
+            preview_rail_target(PreviewRailPart::Copy, seat, PreviewRailKind::Crumbs),
+            "one glyph, two verbs, and the row's kind is what tells them apart"
+        );
+    }
+
     /// ③ let the crumbs run under the verbs — the last assertion goes red, and
     ///    `Open ⌄` is drawn over a folder name.
     #[test]

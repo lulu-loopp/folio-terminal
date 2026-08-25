@@ -2255,7 +2255,7 @@ HKCU\Software\Classes\AppUserModelId\Folio.Terminal
 
 **脚:两条不对称的判决,各自有各自的理由。** 面包屑行**接任**脚上那行路径,所以那条脚整条退役、文件 pane 的正文一像素不少(28 换 28);脚上活着的另一件职责——右手那句常驻事实(`Read-only · 64 KB`、`Not saved · changed on disk`)与「Saved / Revealed…」那一闪——搬到面包屑行的右手,路径让宽,这正是 2026-08-15 `foot_notice_split` 那条裁决原样抬高一行。**地址行不这么办**:页面的脚不只是一条带子,它还是**悬停行**(§7.7 ③:指针在链接上时它说解析后的目标),悬停行在这个 pane 里没有第二个地方可站,所以页面**保留脚**、地址行是加上去的。代价是页面的地址在上下各出现一次——**记为欠账,等用户裁**;可选的了结是把页面的脚改成纯悬停行(静止时空着),但那是砍一条既有裁决,不在本单里做。
 
-**这一行归 docked 席位。** 撕出去的浮窗预览没有跟着长这一行(float 有自己的一套头脚),**记为欠账**。
+**这一行归 docked 席位。** ~~撕出去的浮窗预览没有跟着长这一行(float 有自己的一套头脚),**记为欠账**。~~ **已结清(2026-08-25 晚,见 ⑫)**:浮窗照样长这一行,而且长的是同一行——同一份几何、同一份画、同一条命中梯子、同一台编辑器。
 
 **⑩′ 本地文件一律显示 OS 路径形(用户裁决 2026-08-25;`crates/bt-app/src/{webnav,webhost,main}.rs`)。** 由头是两张截图并排:网页道的脚写 `file:///D:/…` 配地球,旁边普通预览的脚写 `D:\…` 配文件夹——**同一块盘,两种拼法**。裁决把这条分裂一次性抹平:①**走引擎道的本地文件**(`file:` 页,pdf/html)在**地址行**显示 `D:\Developer\…` 反斜杠形;②**真网页**(http/https)照旧显示 URL,一个字符不动;③**脚上的路径同规**——文件预览那条已由面包屑接任,`file:` 页保留的那条(它同时是悬停行)也走 OS 形,连带指向本地文件的**悬停链接**也是。
 
@@ -2281,7 +2281,21 @@ HKCU\Software\Classes\AppUserModelId\Folio.Terminal
 
 **倍率记在座位上,不记在窗上,而且到点了要清空。** 两块 pane 并排就是两台引擎两个倍率,窗上一个槽会让第二块的滚轮把确认闪在第一块的脚上。清空(`advance_page_zoom_said` / `WebSeat::forget_the_zoom_it_said`)是 `advance_foot_reveal` 的孪生,理由也逐字相同:一个留着不清的槽会在此后每一轮都递给 `WaitUntil` 一个**已经过去**的时刻,那正是钉子里写的「永不睡觉的循环」。红测 `a_page_says_the_zoom_it_moved_to_and_then_goes_back_to_being_a_hover_line`(先落一个恒答 `None` 的假实现,看着它红)与源码钉 `a_zoom_notch_reports_the_factor_the_engine_ended_up_at`。
 
-**欠账:撕出去的浮窗预览没有这条带子**(与 ⑩ 那条欠账同因:float 有自己的一套头脚),所以在浮窗里缩放网页仍然无声。
+~~**欠账:撕出去的浮窗预览没有这条带子**(与 ⑩ 那条欠账同因:float 有自己的一套头脚),所以在浮窗里缩放网页仍然无声。~~ **已结清(2026-08-25 晚,见 ⑫)**:带子长出来了;倍率那句确认仍走浮窗自己的脚(浮窗保留脚的理由写在 ⑫ 第四段)。
+**⑫ 那一行跟着 pane 走出去:撕出的浮窗长同一条带子,`Ctrl+L` 在浮窗里进得去(2026-08-25 晚;`crates/bt-app/src/{seats,float,main,tooltip}.rs`)。** ⑩ 与 ⑪ 各自记的那笔欠账是同一笔,理由也是同一句——「float 有自己的一套头脚」——而这句话正是欠账没被还的原因:一套自己的头脚,邀请的是**第三条地址行**站在已有的两条旁边。本片没有造第三条。
+
+**分家的只有一个矩形。** `preview_rail_geometry` 拆成两半:`preview_rail_band(rect)` 说 docked 席位那条带子在哪,`preview_rail_geometry_in(band, …)` 说带子里的每一个控件在哪。浮窗交进来的是 `float::FloatGeometry::rail`——由**布局**预留而不只是被画出来(`FloatHeadTools::rail`),因为让路的是正文:一行画上去而没有从正文里扣掉高度的带子,就是一行踩在文档第一行上的家具。带子高度取 `PREVIEW_RAIL_BAR_LOGICAL_PX` 本身而不是第二个数——这一行和 pane 那一行是同一件家具在回答同一个问题,哪天两者高度分家,一个把窗口 dock 回去的读者会看见地址跳一下。红测 `a_torn_off_preview_reserves_the_rails_band_and_the_body_gives_way`(按 `rail: None` 的空实现写下时当场红)。
+
+**命中与画也各只有一份,办法是把「席位」从答案里拿掉。** `seats::PreviewRailPart` 是这一行的控件枚举,不带任何 host;`preview_rail_part(geometry, x, y)` 是两边都爬的那把梯子。docked 那头继续说 `ChromeTarget`,靠的是两张互逆的名册——出去是 `preview_rail_target`(命中),回来是 `preview_rail_hover`(画,判亮),`every_rail_control_survives_the_trip_out_to_a_seat_and_back` 钉住这趟往返不掉控件、也不认隔壁 pane 的指针。浮窗那头答的是 `float::FloatPart::Rail(part)`,`float_hit` 收下**画它的那一份几何**去分辨(红测 `the_rails_controls_answer_inside_a_torn_off_window`:不给几何时整条带子把自己的按钮全吞了,正是它红的样子)。画只有 `seats::push_preview_rail` 一个,收的是 band 与 `Option<PreviewRailPart>`;浮窗把它吐出的 `ChromeQuad` 按 `ChromeSurface` 逐臂搬到自己那层的两个通道上(`float::lay_rail_on`)。
+
+**按下去之后也只有一条梯子:`Runtime::press_preview_rail(surface, part)`。** 十一个控件的动词写在这里,`chrome_mouse_input` 的席位臂与 `press_float` 的浮窗臂都往这里走。所有以 seat 为参数的相关判断改收 `PreviewSurface`——`preview_rail_kind` / `preview_rail_path` / `preview_rail_measure` / 两台编辑器 / 两张菜单 / `⧉` / 三枚导航钮 / `↗` / `</>`;`preview_rail_measures` 与 `preview_crumb_clicks` 改按 surface 记账,tooltip 的 `TooltipAnchorId::PreviewRail` 也改带 surface——这是 `GitGraphTool` 早就写下的同一条理由:**这条带子属于一份文档,而文档是可以被撕出去的**,一枚 `⧉` 不会因为它待的 pane 变成了窗就不再需要一句话说明它复制的是什么。
+
+**`Ctrl+L`:那台机器一个零件没换,换的是问谁。** `RenameSubject::WebAddress` 从出生起就按 `LeafId` 记账,而浮窗里的页**有** leaf(`FloatPreview::page`)——缺的只是一扇能说出它的门。`open_web_address` 原本问 `focused_web_seat`,那个谓词**按设计**只答 docked(它是用来往 pane 头上挂东西的,而撕出去的页在树里没有头),于是这个和弦在浮窗上一按什么都不发生。改问 `page_with_the_keyboard`——§7.14c 早就让它对两种 host 都答得出——`open_web_address_on` 随之改收 leaf。三扇门(`Ctrl+L`、`Ctrl+Shift+L`、按地址本身)仍然是同一扇,`the_address_editor_moved_to_the_rail_and_kept_its_machine` 照旧钉着这一条,只是多钉了两句:框是量在**band** 上的,门是按 leaf 开的。顺带补一处失血:一张撕出去的页的编辑框**不再在本 tab 的 chrome 里认领任何目标**——它记着的那个 seat 号完全可能还在这张 tab 上坐着一台终端,而按在那台终端头上的一下会被读成「按进了三寸之外那扇窗里的地址框」(红测 `a_floated_pages_address_field_names_no_target_in_this_tabs_chrome`;名字那一格的臂早就这么写着,地址这一格只是从来没被问过——今天以前它在浮窗上根本开不出来)。
+
+**两处刻意与 docked 不同,都是裁决不是漏。** 其一,**浮窗保留自己的脚**。⑩‴(8) 让长了 rail 的**席位**一律没有脚,理由是那条带子在页面底下什么都不剩;浮窗的脚不是那种带子——它是一枚**按钮**(按下去 reveal 这份文件),也是这扇窗唯一的闪字通道(`Saved`、`Revealed…`、⑪ 的倍率)。一个既是按钮又是唯一确认位的条带,和一条空着的带子不是同一件东西。其二,**`</>` 在浮窗上也跟着下沉**:`float_head_tools` 用的就是 `preview_head_tools` 那句原话——有 rail 就不在头上留,没有 rail 才留——否则一扇窗会同时戴两枚翻面钮。
+
+**没有一条新串**:这一行的五句 tip、`Open ⌄` 的行、`…` 的清单,浮窗读的都是 pane 读的那几条,`Text::ALL` 仍是 484 条。
+
 **⑩‴ next6 实测束:一行控件全部开口说话,`…` 改成它自己的清单,「定位」不再重根,网页的脚整条退役(用户裁决 2026-08-25 三批;`crates/bt-app/src/{seats,profiles,main,i18n,tooltip}.rs`)。** 上面 ⑩ / ⑩″ 两段记的是这一行落地当天的样子;用户在真机上把它用了一遍,报回来九件,每一件都在改上面某一句话。逐条:
 
 **(1) 这一行长出来的每一枚控件都挂了 tooltip。** 报告原话是「预览头与地址行/面包屑行的新控件全部无 tooltip」。三枚原本就有(`↗` 与三枚导航钮是从头上连着 anchor 一起搬下来的),新长的五枚一枚都没有:两处 `⧉`、`</>`、`Open ⌄`、面包屑各段、`…`。全部补上,走既有 tooltip 通道(`TooltipAnchorId::PreviewRail(seat, PreviewRailTip)`),盒子取自**画它的那一份几何**(`seats::preview_rail_tip_boxes` 读 `preview_rail_geometry`,与命中测试同一份),因为一枚挂在第二份推导上的 tip 是站在钮**旁边**而不是站在钮**上**。文案两条值得记:**面包屑一段说的是它代表的整条路径**(段里画的只是那条路径的最后一节,和根菜单行的 tip 同一句道理),**`…` 说的是它替掉的那一串层级、按根在前**——它是一段路径被从左往右读,与它背后那张**菜单**的深在前正好相反(菜单是一串去处,不是一段路径;资源管理器自己也是这两种顺序)。`</>` 报的是**去处**而不是状态(钮会变,一个词两用等于在描述一按之前的事),`⧉` 在地址行说 `Copy address`、在面包屑行说 `Copy path`——一个字形两句话,这正是它需要 tip 的全部理由。头上留下的那枚 `</>`(没有面包屑行的 markdown)用同一个函数出同一句话,一个动词不该因为换了行就换了说法。新串四条:`PreviewRailOpenTip` / `PreviewCopyAddress` / `PreviewFlipToSource` / `PreviewFlipToRendered`。

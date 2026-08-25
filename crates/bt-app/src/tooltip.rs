@@ -455,7 +455,13 @@ pub enum TooltipAnchorId {
     /// into the *whole* path rather than an index into the drawn run — see that
     /// type — so a tip already up follows its folder through a re-fold instead of
     /// quietly starting to name a different one.
-    PreviewRail(bt_layout::SeatId, crate::seats::PreviewRailTip),
+    ///
+    /// **Addressed by surface and not by seat** (§7.7 ⑩ 欠账, 2026-08-25), which
+    /// is [`Self::GitGraphTool`]'s own reason arriving one row down: this band
+    /// belongs to a *document*, a document can be torn off into a window, and a
+    /// `⧉` does not stop needing a word for what it copies because the pane it
+    /// was in became a window.
+    PreviewRail(crate::PreviewSurface, crate::seats::PreviewRailTip),
     /// One tick of a pane's command marks rail — *"hover **glances** the command"*
     /// (mock 4604).
     ///
