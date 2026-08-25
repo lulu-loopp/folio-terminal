@@ -3750,6 +3750,52 @@ fn shown_address(url: &str) -> String {
     webnav::local_path_form(url).unwrap_or_else(|| url.to_owned())
 }
 
+/// The left hand of a **page**'s foot: nothing, until the pointer is over a link
+/// (user ruling 2026-08-25).
+///
+/// **The band keeps its job and loses its echo.** §7.7 ③ gave a page's foot two
+/// jobs at once — the landing band that says where this seat's content lives, and
+/// the hover line that says where a link under the pointer would go — and it kept
+/// both because the hover line had nowhere else in the pane to stand. Then the
+/// 2026-08-24 ruling gave the page an address row of its own, and the band's first
+/// job became a second printing of the row two lines above it: one address, said
+/// twice, in one pane. §7.7's own note booked that as a debt and named this exact
+/// settlement as the way out.
+///
+/// So the foot is the hover line and only the hover line. The strip itself does
+/// **not** retire — that is the difference from the file pane, where the
+/// breadcrumb row took the whole question over and `preview_pane_geometry`
+/// collapses the band; here there is still something that has to appear on
+/// hover, and a band that appeared and disappeared under the pointer would move
+/// the page's own bottom edge every time the pointer crossed a link.
+///
+/// A target this window will not follow is written out in full and stamped
+/// `· blocked` (2026-08-20's terminal hover-line ruling, same words from
+/// [`i18n::Text::HyperlinkBlockedSuffix`]). The stamp is on the hovered target
+/// only: the seat's own URL committed, so it is by definition one this window
+/// went to, and there is no longer any rest state in which it could be stamped.
+/// **Both addresses are handed in, and the page's own is deliberately unused.**
+/// What the ruling changed is *which of the two this band prints*, and a
+/// signature that had already dropped the one it stopped printing would leave
+/// the decision nowhere — the caller would look as though it never had a choice.
+/// The underscore is the ruling: this band is given the page's address and does
+/// not print it.
+fn page_foot_lead(_page_url: &str, hover: &str) -> String {
+    if hover.is_empty() {
+        // At rest the address row above says where this is, and this band saying
+        // it again is the duplication the ruling retired.
+        return String::new();
+    }
+    // The *resolved* target, not the `href` as written — `#/download` written out
+    // as `http://127.0.0.1:5173/download` — and a local file spelled as a path,
+    // because a link into a local file is a local file (`shown_address`).
+    let mut lead = shown_address(hover);
+    if !matches!(webnav::address_bar(hover), webnav::Decision::Navigate(_)) {
+        lead.push_str(i18n::Text::HyperlinkBlockedSuffix.text());
+    }
+    lead
+}
+
 fn files_row_activation(root: &str, key: &str) -> RowActivation {
     if !files::root_is_addressable(root) {
         return RowActivation::Nowhere;
@@ -37044,37 +37090,17 @@ impl Runtime<'_> {
         now: Instant,
     ) -> Option<seats::FootWords> {
         let surface = self.preview_here(seat);
-        // **A page's foot is a landing band and a hover line at once** (§7.7 ③,
-        // W2 slice ④). It says where this seat's content lives and hands it to
-        // the system, exactly as a file's does; and while the pointer is over a
-        // link inside the page it says **the resolved target of that link**
-        // instead — `#/download` written out as
-        // `http://127.0.0.1:5173/download`, because the `href` as printed would
-        // be this band reporting the page's source rather than its meaning.
-        //
-        // A target this window will not follow is written out in full and
-        // stamped `· blocked`, and pressing it does nothing at all. That is not
-        // a new ruling: it is the 2026-08-20 one about a terminal's hover line,
-        // landing on the surface that already had a hover line — and it is
-        // stamped with the very same words, from `Text::HyperlinkBlockedSuffix`.
+        // **A page's foot is the hover line, and since 2026-08-25 nothing else**
+        // (§7.7 ③ as amended). It was a landing band as well until the page got
+        // an address row of its own; a band that reprinted that row two lines
+        // below it was one address said twice in one pane, which is the debt
+        // §7.7 booked and this ruling settles. See [`page_foot_lead`] — the
+        // whole of what this band says now lives there, so that "the page's foot
+        // is empty at rest" is a fact a test can hold rather than a shape only a
+        // screenshot could catch.
         let page = self.web_on(seat).map(|web| web.page().clone());
         if let Some(page) = page {
-            let hovering = !page.hover.is_empty();
-            let target = if hovering { &page.hover } else { &page.url };
-            // **A local file is a path on this band too** (user ruling
-            // 2026-08-25). The band and the address row name the same thing, so
-            // they spell it the same way — that is the whole of the ruling, and
-            // the two screenshots behind it were this band and a preview's
-            // disagreeing about one disk. It applies to a hovered link as
-            // readily as to the page's own address: a link into a local file is
-            // a local file.
-            let mut lead = shown_address(target);
-            // The stamp goes on the *hovered* target only. The seat's own URL
-            // committed, so it is by definition one this window went to, and a
-            // band that stamped it would be arguing with the page behind it.
-            if hovering && !matches!(webnav::address_bar(target), webnav::Decision::Navigate(_)) {
-                lead.push_str(i18n::Text::HyperlinkBlockedSuffix.text());
-            }
+            let lead = page_foot_lead(&page.url, &page.hover);
             let revealed = self.foot_reveal_is_fresh(RevealedFoot::Preview(seat), now);
             let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
             let run =
@@ -92636,6 +92662,56 @@ mod tests {
             "two runs, not one: nothing of the path is inside the phrase's box"
         );
         assert!(!words.flashing, "nothing is being confirmed");
+    }
+
+    /// **One address, said once** (user ruling 2026-08-25) — a page's foot is the
+    /// hover line and nothing else.
+    ///
+    /// The band and the address row above it were both printing the page's own
+    /// URL, which §7.7 booked as a debt on the day the row landed. The strip
+    /// stays (it is where the hover line stands, and a band that came and went
+    /// under the pointer would move the page's bottom edge every time the
+    /// pointer crossed a link); what leaves is the echo.
+    ///
+    /// MUTATION: return `shown_address(url)` at rest and the first assertion goes
+    /// red on the very duplication the ruling retired.
+    #[test]
+    fn a_pages_foot_says_nothing_until_the_pointer_is_over_a_link() {
+        assert_eq!(
+            page_foot_lead("https://example.com/manual", ""),
+            "",
+            "at rest the address row above is the one that says where this is"
+        );
+
+        assert_eq!(
+            page_foot_lead("http://127.0.0.1:5173/", "http://127.0.0.1:5173/download"),
+            "http://127.0.0.1:5173/download",
+            "and a hovered link is still written out in full, resolved"
+        );
+
+        // A target this window will not follow is named and stamped — the same
+        // words the terminal's own hover line uses (2026-08-20).
+        let refused = page_foot_lead("https://example.com/", "mailto:someone@example.com");
+        assert!(
+            refused.starts_with("mailto:someone@example.com"),
+            "the refused target is still said in full: {refused}"
+        );
+        assert!(
+            refused.ends_with(i18n::Text::HyperlinkBlockedSuffix.text()),
+            "and stamped: {refused}"
+        );
+
+        // The band spells a local file the way the row does (2026-08-25, the
+        // earlier ruling of the same day). `webnav::address_bar` refuses `file:`
+        // from every door, so this one is named as a path *and* stamped.
+        let local = page_foot_lead(
+            "https://example.com/",
+            "file:///D:/Developer/notes%20and%20more.html",
+        );
+        assert!(
+            local.starts_with(r"D:\Developer\notes and more.html"),
+            "a path, not a URI: {local}"
+        );
     }
 
     /// PIN (user ruling, 2026-08-15) — **when the path and the phrase meet, the
