@@ -1490,6 +1490,16 @@ pub mod hang;
 /// `windows_impl` is Win32 through the `windows` crate, and everything here is
 /// WebView2 through `webview2-com`. They share this crate's exemption from
 /// `unsafe_code = "deny"` and nothing else.
+/// The attention endpoint — a named pipe with a descriptor of our own.
+///
+/// A fourth unsafe boundary, against a fourth thing: `windows_impl` is Win32 for the window's
+/// sake, [`webview`] is WebView2, [`hang`] is Win32 turned on this process, and this is Win32
+/// turned on **a channel other processes are allowed to speak into**. It is the only one of the
+/// four whose inputs come from outside this program, which is why every bound it takes is written
+/// down in its own header rather than assumed from the caller.
+#[cfg(windows)]
+pub mod attention_pipe;
+
 #[cfg(windows)]
 mod webview;
 

@@ -45,8 +45,15 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     # `CreateFileW` and `CreateEventW` both take a `SECURITY_ATTRIBUTES`, which
-    # is what pulls this one in; nothing here ever passes one.
+    # is what pulls this one in. The attention endpoint is the one caller that
+    # actually passes one: `GetTokenInformation` / `TOKEN_GROUPS` (this
+    # namespace) find the logon SID, and `Win32_Security_Authorization` below
+    # turns it into the descriptor. See `src/attention_pipe.rs` for why a
+    # default descriptor is not an option there.
     "Win32_Security",
+    # `ConvertStringSecurityDescriptorToSecurityDescriptorW` and
+    # `ConvertSidToStringSidW`: SDDL in, kernel descriptor out.
+    "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     # `CreateStreamOnHGlobal`: the buffer `ICoreWebView2::CapturePreview` writes
@@ -70,6 +77,10 @@ windows = { version = "0.62.2", features = [
     # caller stops it with (`Win32_System_Threading`). See `DirWatch`.
     "Win32_System_IO",
     "Win32_System_Memory",
+    # `CreateNamedPipeW` / `ConnectNamedPipe` / `DisconnectNamedPipe` /
+    # `WaitNamedPipeW`: the attention endpoint and the `folio attention` verb's
+    # two ends.
+    "Win32_System_Pipes",
     # `EnumProcessModulesEx` / `GetModuleInformation` / `GetModuleBaseNameW`:
     # the module map that turns a raw return address into `folio.exe+0x…`. Built
     # before the suspend, because it takes the loader lock — see `src/hang.rs`.
