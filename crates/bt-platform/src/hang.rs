@@ -60,6 +60,7 @@
 //! be watching at the moment it happens.
 
 use std::fmt;
+use std::time::Duration;
 
 /// How much of the stack is read and scanned for return addresses.
 ///
@@ -140,6 +141,115 @@ pub fn current_thread_id() -> u32 {
 #[must_use]
 pub fn current_thread_id() -> u32 {
     0
+}
+
+/// **What a thread said when it was asked whether it is still there.**
+///
+/// The three answers are three different facts and a watchdog needs all of
+/// them: a thread that replies is alive whatever else it is doing, a thread
+/// that is asked and stays silent is the fault this facility exists for, and a
+/// thread with no window to ask is neither — it is a question that could not be
+/// put, which before the first window and after the last one is the ordinary
+/// state of affairs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Answer {
+    /// It answered inside the timeout. It is servicing messages.
+    Answered,
+    /// It was asked and it did not answer — or Windows already holds the window
+    /// hung and refused to wait at all.
+    Silent,
+    /// There was no window on that thread to put the question to.
+    NoWindow,
+}
+
+impl Answer {
+    /// The sentence a report prints for this answer.
+    #[must_use]
+    pub fn phrase(self) -> &'static str {
+        match self {
+            Self::Answered => "the window answered, so the thread is alive",
+            Self::Silent => "the window was asked and did not answer",
+            Self::NoWindow => "this thread owned no window to ask",
+        }
+    }
+}
+
+/// **Ask the thread whether it is still answering, and wait a bounded time.**
+///
+/// The question this asks is not "is it busy" but "does it still service what
+/// is sent to it", and those are different facts about a Windows UI thread. A
+/// thread inside a USER32 modal loop — the drag that resizes a window, a
+/// tracked menu — is not turning its own event loop at all, and yet it is
+/// perfectly alive: it is pumping, it repaints, it answers. A watchdog that
+/// judged on the loop alone would file a report on every window somebody
+/// dragged for six seconds.
+///
+/// `WM_NULL` because it is the message that means nothing: no window procedure
+/// in this process or any library in it can act on it, so the question cannot
+/// change what it is measuring. `SendMessageTimeout` because the whole value is
+/// in the bound — a plain `SendMessage` to a wedged thread would wedge the
+/// watchdog too, which is the one thing a watchdog may never do.
+/// `SMTO_ABORTIFHUNG` on top of the timeout, so that a window Windows has
+/// *already* decided is hung answers immediately rather than after the full
+/// wait: that is the same fact arriving a second earlier.
+///
+/// The window is found by enumeration rather than being handed over at startup,
+/// because the thread's windows come and go — there is none before the event
+/// loop is built, several while the product is in use, and none again at the
+/// end — and a watchdog holding one `HWND` from birth would be asking about a
+/// window that has been destroyed.
+#[cfg(windows)]
+#[must_use]
+pub fn ask_thread_to_answer(thread_id: u32, timeout: Duration) -> Answer {
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumThreadWindows, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW, WM_NULL,
+    };
+
+    /// Keep the first window and stop. `state` is the `&mut HWND` below, which
+    /// outlives the enumeration because `EnumThreadWindows` is synchronous and
+    /// returns before the borrow ends.
+    unsafe extern "system" fn keep_the_first(window: HWND, state: LPARAM) -> windows::core::BOOL {
+        unsafe { *(state.0 as *mut HWND) = window };
+        // `FALSE` stops the enumeration: any one window of the thread is as good
+        // a question as any other, because they all answer out of the same pump.
+        false.into()
+    }
+
+    let mut window = HWND::default();
+    let state = LPARAM((&raw mut window) as isize);
+    // The answer is "did the callback run to the end", which is `FALSE` on every
+    // thread that has a window — the callback stops at the first one. What
+    // matters is whether `window` was filled in, and that is the test below.
+    let _ = unsafe { EnumThreadWindows(thread_id, Some(keep_the_first), state) };
+    if window.is_invalid() {
+        return Answer::NoWindow;
+    }
+    let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
+    let mut reply = 0_usize;
+    // Non-zero is success; zero is "the timeout elapsed" or "already hung".
+    let answered = unsafe {
+        SendMessageTimeoutW(
+            window,
+            WM_NULL,
+            WPARAM(0),
+            LPARAM(0),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            milliseconds,
+            Some(&raw mut reply),
+        )
+    };
+    if answered.0 == 0 {
+        Answer::Silent
+    } else {
+        Answer::Answered
+    }
+}
+
+#[cfg(not(windows))]
+#[must_use]
+pub fn ask_thread_to_answer(_thread_id: u32, _timeout: Duration) -> Answer {
+    Answer::NoWindow
 }
 
 /// Suspend `thread_id`, read where it is, resume it, and say what was there.
