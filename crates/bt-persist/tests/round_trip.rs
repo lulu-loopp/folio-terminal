@@ -855,7 +855,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 20,
+        SETTINGS_SCHEMA_VERSION, 21,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -877,8 +877,15 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          v15-to-v16, and the Terminal page's own Notifications the v16-to-v17, \
          and the Terminal page's own Offer PowerShell integration the v17-to-v18, \
          and the Appearance page's own Focus card height the v18-to-v19, and the \
-         General page's own Search engine the v19-to-v20 — one key on one day, \
-         ten times running"
+         General page's own Search engine the v19-to-v20, and the Terminal page's \
+         own Line wrapping the v20-to-v21 — one key on one day, eleven times \
+         running"
+    );
+    assert!(
+        defaults.line_wrapping,
+        "a line too long for the pane wraps, which is what every terminal this \
+         product has ever drawn did with one; the flattened reading is a place a \
+         reader goes and never one they are put"
     );
     assert_eq!(
         defaults.search_engine,
@@ -2194,6 +2201,62 @@ fn settings_v19_migrates_to_the_engine_the_feature_ships_with_and_v20_keeps_anot
         on_disk.contains(r#""search_engine": "Google""#),
         "a name and never a URL template, which is what keeps a settings file \
          from being a way to hand a browser engine an arbitrary address: {on_disk}"
+    );
+    let (round_tripped, report) = read_settings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, chosen);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// PIN (`docs/plans/horizontal-scroll/plan.md` §5.7, ladder one level two) — **a v20 settings file
+/// migrates to v21 still wrapping, and a v21 file that says otherwise is heard.**
+///
+/// The eleventh one-key bump in a row, and it lands the way v13–v16 and v19 did rather than the way
+/// v17–v20 did: there is a habit here to carry. Wrapping is what every terminal this product has
+/// ever drawn did with a line too long for its pane, so `true` preserves the document already on
+/// somebody's screen. A migration that wrote `false` would flatten every pane in the world on the
+/// strength of a row nobody has seen, and its owner would meet it as their scrollback silently
+/// losing three quarters of every long line off the right-hand edge.
+///
+/// MUTATION: leave the key out of the migration and every settings file on every machine that has
+/// ever run this product falls back to defaults whole — `missing field line_wrapping`, which is the
+/// same failure the v19→v20 pin above describes one version down.
+#[test]
+fn settings_v20_migrates_still_wrapping_and_v21_keeps_a_flattened_pane() {
+    let (migrated, report) = read_settings(&fixture_path("settings_v20_search_engine.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(migrated.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(
+        migrated.line_wrapping,
+        "the step carries a behaviour forward rather than choosing a side"
+    );
+    assert_eq!(
+        migrated.search_engine,
+        SearchEngineV1::Google,
+        "one key crosses; every sibling crosses untouched"
+    );
+    assert_eq!(migrated.focus_card_height, 320);
+
+    let (chosen, report) = read_settings(&fixture_path("settings_v21_line_wrapping.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(chosen.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert!(
+        !chosen.line_wrapping,
+        "a reader who has turned wrapping off is heard"
+    );
+
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-settings-v21-line-wrapping-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    write_settings_atomic(&path, &chosen).unwrap();
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains(r#""line_wrapping": false"#),
+        "the answer is written as the answer, so a file edited by hand says what \
+         it means: {on_disk}"
     );
     let (round_tripped, report) = read_settings(&path);
     assert_eq!(report, ReadReport::Loaded);

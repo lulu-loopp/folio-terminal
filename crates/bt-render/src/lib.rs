@@ -459,6 +459,13 @@ impl CellMetrics {
 
     /// Hit test against the exact geometry published with a frame. This is the sole row oracle
     /// for selection and protocol forwarding once live rows can have non-uniform pixel heights.
+    ///
+    /// **What comes back is a drawn cell**, never a content coordinate: pixels only ever name the
+    /// column they were painted in, and turning that into a place in a line is the frame's
+    /// horizontal projection's job and nobody else's
+    /// (`docs/plans/horizontal-scroll/plan.md` §5.5). `ViewportFrame::live_point_at` and
+    /// `ViewportFrame::anchor_at` are where that conversion happens; this is the one oracle that
+    /// feeds them.
     pub fn hit_test_frame(&self, frame: &ViewportFrame, x: f64, y: f64) -> Option<GridHit> {
         let x = x as f32 - self.padding_px;
         let y = y as f32 - self.padding_px;
@@ -500,6 +507,12 @@ impl CellMetrics {
     }
 }
 
+/// A cell **as drawn**: a presentation row, and a viewport column inside it.
+///
+/// Neither number is a content coordinate. The row is turned into a grid row or an anchor by the
+/// frame's row map, and the column into a content column by the frame's horizontal projection; a
+/// consumer that reads either as content is reading a place on screen as a place in a document
+/// (`docs/plans/horizontal-scroll/plan.md` §5.5).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GridHit {
     pub row: u32,
@@ -537,6 +550,14 @@ pub struct ComposedFrame {
 ///
 /// The terminal grid remains the sole authority for committed cell width. Preedit is transient UI,
 /// but it consumes the same grapheme width oracle so its caret does not jump when text commits.
+///
+/// # Which columns it advances through
+///
+/// **The grid's**, not the window's (`docs/plans/horizontal-scroll/plan.md` §5.1 clause 4, §5.5).
+/// Preedit is text about to reach the child, so it wraps where the child's grid wraps; where it is
+/// *drawn* is then the window's business, and a cluster that lands outside the window is simply not
+/// drawn. Advancing in viewport columns would put the wrap at a place the grid has no line break
+/// at, and the caret would jump the moment the text committed.
 pub fn compose_preedit(
     frame: &ViewportFrame,
     preedit: Option<&Preedit>,
@@ -555,18 +576,41 @@ pub fn compose_preedit(
         &preedit.text,
         preedit.cursor_byte.unwrap_or(preedit.text.len()),
     );
-    let ime_caret = advance_grid_position(
-        frame.cursor,
+    let advanced = advance_grid_position(
+        grid_cursor_of(frame),
         &preedit.text[..cursor_byte],
         frame.columns.get(),
         frame.grid_rows.get(),
     );
+    let drawn = frame
+        .horizontal
+        .to_viewport(bt_viewport::horizontal::ContentColumn(advanced.column));
+    let ime_caret = bt_viewport::GridCursor {
+        row: advanced.row,
+        column: drawn.map_or(0, |column| column.0),
+        visible: drawn.is_some(),
+    };
     overlay_preedit_cells(&mut composed, preedit);
     composed.cursor = ime_caret;
     Ok(ComposedFrame {
         frame: composed,
         ime_caret,
     })
+}
+
+/// The frame's caret back in the grid's own columns.
+///
+/// `ViewportFrame::cursor` is where the caret is **drawn**; the two things that reason about what
+/// the child will do with the next keystroke — the preedit's wrap and its caret — need where it
+/// *is*. One conversion, through the frame's own projection, and never a second copy of the origin.
+fn grid_cursor_of(frame: &ViewportFrame) -> bt_viewport::GridCursor {
+    bt_viewport::GridCursor {
+        column: frame
+            .horizontal
+            .to_content(bt_viewport::horizontal::ViewportColumn(frame.cursor.column))
+            .0,
+        ..frame.cursor
+    }
 }
 
 fn valid_cursor_byte(text: &str, requested: usize) -> usize {
@@ -612,13 +656,26 @@ fn advance_grid_position(
     }
 }
 
+/// Write the preedit's clusters into the cells the window draws them in.
+///
+/// The walk is over **grid** columns for [`compose_preedit`]'s reason, and each cluster is placed
+/// through `frame.horizontal`; one whose grid column the window does not show is stepped over
+/// rather than drawn, and a combining mark then joins whichever lead cell was drawn last — never a
+/// cell belonging to a cluster nobody put on screen.
 fn overlay_preedit_cells(frame: &mut ViewportFrame, preedit: &Preedit) {
     let columns = frame.columns.get() as usize;
     // IME remains bounded to the PTY grid in phase A. Moving it into a partially visible
     // presentation row belongs to the cursor/IME debt carried into the pixel-offset phase.
     let rows = frame.grid_rows.get() as usize;
+    let axis = frame.horizontal;
+    let drawn_at = |grid_column: usize| {
+        axis.to_viewport(bt_viewport::horizontal::ContentColumn(grid_column as u32))
+            .map(|column| column.0 as usize)
+    };
     let mut row = frame.cursor.row as usize;
-    let mut column = frame.cursor.column as usize;
+    let mut column = axis
+        .to_content(bt_viewport::horizontal::ViewportColumn(frame.cursor.column))
+        .0 as usize;
     let mut previous_lead: Option<usize> = None;
 
     for cluster in graphemes(&preedit.text) {
@@ -637,20 +694,24 @@ fn overlay_preedit_cells(frame: &mut ViewportFrame, preedit: &Preedit) {
             break;
         }
 
-        let index = row * columns + column;
-        let mut cell = CapturedCell::plain(cluster.to_owned());
-        cell.style.flags.insert(CellFlags::UNDERLINE);
-        if width == 2 {
-            cell.style.flags.insert(CellFlags::WIDE_CHAR);
-        }
-        frame.cells[index] = cell;
-        previous_lead = Some(index);
+        if let Some(drawn) = drawn_at(column) {
+            let index = row * columns + drawn;
+            let mut cell = CapturedCell::plain(cluster.to_owned());
+            cell.style.flags.insert(CellFlags::UNDERLINE);
+            if width == 2 {
+                cell.style.flags.insert(CellFlags::WIDE_CHAR);
+            }
+            frame.cells[index] = cell;
+            previous_lead = Some(index);
 
-        if width == 2 && column + 1 < columns {
-            let mut spacer = CapturedCell::plain("");
-            spacer.wide_spacer = true;
-            spacer.style.flags.insert(CellFlags::UNDERLINE);
-            frame.cells[index + 1] = spacer;
+            if width == 2
+                && let Some(spacer_at) = drawn_at(column + 1)
+            {
+                let mut spacer = CapturedCell::plain("");
+                spacer.wide_spacer = true;
+                spacer.style.flags.insert(CellFlags::UNDERLINE);
+                frame.cells[row * columns + spacer_at] = spacer;
+            }
         }
         column += width;
         if column >= columns {
@@ -10157,6 +10218,7 @@ fn indexed_color(index: u8) -> [u8; 3] {
 mod tests {
     use super::*;
     use bt_transcript::CapturedCell;
+    use bt_viewport::horizontal::HorizontalProjection;
 
     /// Every style the sweep below asks `resolve_colors` about: the two defaults, both ends of
     /// the palette, a scheme index that collides with its own ground under Solarized, a direct
@@ -10870,6 +10932,7 @@ mod tests {
                 height_subpixels: 22 * SUBPIXELS_PER_PX,
                 live_grid_row: Some(row),
                 continues: false,
+                source_ends: None,
             })
             .collect()
     }
@@ -10885,6 +10948,7 @@ mod tests {
                 height_subpixels: height,
                 live_grid_row: Some(row),
                 continues: false,
+                source_ends: None,
             })
             .collect()
     }
@@ -11010,6 +11074,7 @@ mod tests {
         let rows = 4_usize;
         let frame = ViewportFrame {
             columns: NonZeroU32::new(columns as u32).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(columns as u32),
             grid_rows: NonZeroU32::new(rows as u32).unwrap(),
             rows: NonZeroU32::new(rows as u32).unwrap(),
             presentation_offset_subpixels: 0,
@@ -11713,6 +11778,7 @@ mod tests {
         }
         let mut frame = ViewportFrame {
             columns: NonZeroU32::new(columns as u32).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(columns as u32),
             grid_rows: NonZeroU32::new(rows as u32).unwrap(),
             rows: NonZeroU32::new(rows as u32).unwrap(),
             presentation_offset_subpixels: 0,
@@ -11844,6 +11910,7 @@ mod tests {
             };
             let frame = ViewportFrame {
                 columns: NonZeroU32::new(4).unwrap(),
+                horizontal: HorizontalProjection::unscrolled(4),
                 grid_rows: NonZeroU32::new(3).unwrap(),
                 rows: NonZeroU32::new(3).unwrap(),
                 presentation_offset_subpixels: 0,
@@ -11887,6 +11954,7 @@ mod tests {
         let unit = SUBPIXELS_PER_PX;
         let frame = ViewportFrame {
             columns: NonZeroU32::new(2).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(2),
             grid_rows: NonZeroU32::new(4).unwrap(),
             rows: NonZeroU32::new(4).unwrap(),
             presentation_offset_subpixels: 0,
@@ -11903,24 +11971,28 @@ mod tests {
                     height_subpixels: 40 * unit,
                     live_grid_row: Some(0),
                     continues: false,
+                    source_ends: None,
                 },
                 bt_viewport::FrameVisualRow {
                     top_subpixels: 18 * unit,
                     height_subpixels: 18 * unit,
                     live_grid_row: Some(1),
                     continues: false,
+                    source_ends: None,
                 },
                 bt_viewport::FrameVisualRow {
                     top_subpixels: 36 * unit,
                     height_subpixels: 18 * unit,
                     live_grid_row: Some(2),
                     continues: false,
+                    source_ends: None,
                 },
                 bt_viewport::FrameVisualRow {
                     top_subpixels: 54 * unit,
                     height_subpixels: 18 * unit,
                     live_grid_row: Some(3),
                     continues: false,
+                    source_ends: None,
                 },
             ],
             selection_spans: vec![bt_viewport::SelectionSpan {
@@ -11989,6 +12061,7 @@ mod tests {
         };
         let frame = ViewportFrame {
             columns: NonZeroU32::new(3).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(3),
             grid_rows: NonZeroU32::new(2).unwrap(),
             rows: NonZeroU32::new(2).unwrap(),
             presentation_offset_subpixels: 0,
@@ -12073,6 +12146,7 @@ mod tests {
         let unit = SUBPIXELS_PER_PX;
         let mut frame = ViewportFrame {
             columns: NonZeroU32::new(2).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(2),
             grid_rows: NonZeroU32::new(2).unwrap(),
             rows: NonZeroU32::new(3).unwrap(),
             presentation_offset_subpixels: 7 * unit,
@@ -12089,18 +12163,21 @@ mod tests {
                     height_subpixels: 18 * unit,
                     live_grid_row: Some(0),
                     continues: false,
+                    source_ends: None,
                 },
                 bt_viewport::FrameVisualRow {
                     top_subpixels: 11 * unit,
                     height_subpixels: 18 * unit,
                     live_grid_row: Some(1),
                     continues: false,
+                    source_ends: None,
                 },
                 bt_viewport::FrameVisualRow {
                     top_subpixels: 29 * unit,
                     height_subpixels: 18 * unit,
                     live_grid_row: None,
                     continues: false,
+                    source_ends: None,
                 },
             ],
             selection_spans: Vec::new(),
@@ -12271,6 +12348,7 @@ mod tests {
     fn latest_frame_slot_overwrites_instead_of_queueing() {
         let frame = ViewportFrame {
             columns: NonZeroU32::new(1).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(1),
             grid_rows: NonZeroU32::new(1).unwrap(),
             rows: NonZeroU32::new(1).unwrap(),
             presentation_offset_subpixels: 0,
@@ -12311,6 +12389,7 @@ mod tests {
     fn frame_content_digest_is_stable_for_known_and_blank_frames() {
         let make_frame = |columns: u32, rows: u32, cells: Vec<CapturedCell>| ViewportFrame {
             columns: NonZeroU32::new(columns).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(columns),
             grid_rows: NonZeroU32::new(rows).unwrap(),
             rows: NonZeroU32::new(rows).unwrap(),
             presentation_offset_subpixels: 0,
@@ -12422,6 +12501,7 @@ mod tests {
         let block_bytes = 6 * 1024 * 1024;
         let frame = ViewportFrame {
             columns: NonZeroU32::new(4).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(4),
             grid_rows: NonZeroU32::new(rows).unwrap(),
             rows: NonZeroU32::new(rows).unwrap(),
             presentation_offset_subpixels: 0,
@@ -12433,6 +12513,7 @@ mod tests {
                     height_subpixels: cell,
                     live_grid_row: Some(row),
                     continues: false,
+                    source_ends: None,
                 })
                 .collect(),
             cursor: bt_viewport::GridCursor {
@@ -12513,6 +12594,7 @@ mod tests {
         let grid_rows = 2_usize;
         let legacy = ViewportFrame {
             columns: NonZeroU32::new(columns as u32).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(columns as u32),
             grid_rows: NonZeroU32::new(grid_rows as u32).unwrap(),
             rows: NonZeroU32::new(grid_rows as u32).unwrap(),
             presentation_offset_subpixels: 0,
@@ -12553,6 +12635,7 @@ mod tests {
             height_subpixels: 22 * SUBPIXELS_PER_PX,
             live_grid_row: None,
             continues: false,
+            source_ends: None,
         });
         overscan.cursor.row = grid_rows as u32;
         overscan.selection_spans.push(SelectionSpan {
@@ -12627,6 +12710,7 @@ mod tests {
     fn publish_composition_and_text_row_boundary_reject_non_rectangular_frames() {
         let mut frame = ViewportFrame {
             columns: NonZeroU32::new(2).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(2),
             grid_rows: NonZeroU32::new(2).unwrap(),
             rows: NonZeroU32::new(2).unwrap(),
             presentation_offset_subpixels: 0,
@@ -12688,6 +12772,7 @@ mod tests {
             theme_rev: 1,
             lang_rev: 0,
             profile_rev: 0,
+            line_wrapping: true,
         }
     }
 
@@ -12969,6 +13054,7 @@ mod tests {
         let mut status_overlay = None;
         let mut frame = ViewportFrame {
             columns: NonZeroU32::new(2).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(2),
             grid_rows: NonZeroU32::new(3).unwrap(),
             rows: NonZeroU32::new(3).unwrap(),
             presentation_offset_subpixels: 0,
@@ -13491,6 +13577,7 @@ mod tests {
         yellow.style.foreground = TerminalColor::Named(3);
         let frame = ViewportFrame {
             columns: NonZeroU32::new(1).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(1),
             grid_rows: NonZeroU32::new(1).unwrap(),
             rows: NonZeroU32::new(1).unwrap(),
             presentation_offset_subpixels: 0,
@@ -13602,6 +13689,7 @@ mod tests {
     fn preedit_is_transient_underlined_grid_content_with_a_collapsed_caret() {
         let frame = ViewportFrame {
             columns: NonZeroU32::new(8).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(8),
             grid_rows: NonZeroU32::new(2).unwrap(),
             rows: NonZeroU32::new(2).unwrap(),
             presentation_offset_subpixels: 0,
@@ -13652,6 +13740,7 @@ mod tests {
     fn preedit_uses_the_same_cluster_oracle_as_committed_cells() {
         let frame = ViewportFrame {
             columns: NonZeroU32::new(8).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(8),
             grid_rows: NonZeroU32::new(2).unwrap(),
             rows: NonZeroU32::new(2).unwrap(),
             presentation_offset_subpixels: 0,
@@ -13794,6 +13883,7 @@ mod tests {
             let metrics = CellMetrics::measure(&mut font_system, scale).unwrap();
             let frame = ViewportFrame {
                 columns: NonZeroU32::new(1).unwrap(),
+                horizontal: HorizontalProjection::unscrolled(1),
                 grid_rows: NonZeroU32::new(1).unwrap(),
                 rows: NonZeroU32::new(1).unwrap(),
                 presentation_offset_subpixels: 0,
@@ -13862,6 +13952,7 @@ mod tests {
         spacer.wide_spacer = true;
         let mut frame = ViewportFrame {
             columns: NonZeroU32::new(3).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(3),
             grid_rows: NonZeroU32::new(1).unwrap(),
             rows: NonZeroU32::new(1).unwrap(),
             presentation_offset_subpixels: 0,
@@ -13918,6 +14009,7 @@ mod tests {
     fn single_cell_cursor_frame(metrics: CellMetrics) -> ViewportFrame {
         ViewportFrame {
             columns: NonZeroU32::new(1).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(1),
             grid_rows: NonZeroU32::new(1).unwrap(),
             rows: NonZeroU32::new(1).unwrap(),
             presentation_offset_subpixels: 0,
@@ -16060,6 +16152,7 @@ mod tests {
             cells[1].style.flags = CellFlags::INVERSE;
             ViewportFrame {
                 columns: NonZeroU32::new(columns as u32).unwrap(),
+                horizontal: HorizontalProjection::unscrolled(columns as u32),
                 grid_rows: NonZeroU32::new(rows as u32).unwrap(),
                 rows: NonZeroU32::new(rows as u32).unwrap(),
                 presentation_offset_subpixels: 0,

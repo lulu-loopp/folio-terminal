@@ -313,6 +313,102 @@ pub fn resume_seek(text: &str, from: ColumnSeek, target: ContentColumn) -> Colum
     }
 }
 
+/// What one column is, for the single purpose of deciding where a word ends.
+///
+/// The terminal selection policy, in the coordinate system a flattened line is read in. It is the
+/// same rule `word_class` applies to a laid-out cell and deliberately not a second one: a double
+/// click must select the same run whether the run is inside the window or crosses its edge, and two
+/// implementations of "is this still the same word" would eventually disagree at exactly the seam
+/// nobody looks at.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WordClass {
+    Space,
+    Delimiter,
+    Word,
+}
+
+/// Stable xterm-style shell delimiters. Configuration belongs to the later settings slice.
+pub(crate) const WORD_DELIMITERS: &str = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
+
+/// The class of the column one cluster **starts** at.
+///
+/// A wide glyph's second column is not this: it is its lead's spacer, and a spacer is
+/// [`WordClass::Word`] wherever it stands, because a cluster can never be split by a word boundary
+/// that falls inside it. [`column_classes`] is where that distinction is applied.
+#[must_use]
+pub fn cluster_word_class(cluster: &str) -> WordClass {
+    if cluster.is_empty() || cluster.chars().all(char::is_whitespace) {
+        return WordClass::Space;
+    }
+    if cluster
+        .chars()
+        .all(|character| WORD_DELIMITERS.contains(character))
+    {
+        WordClass::Delimiter
+    } else {
+        WordClass::Word
+    }
+}
+
+/// Every column of a flattened line paired with its class, in column order.
+///
+/// A wide cluster contributes its own class at its lead column and [`WordClass::Word`] at the
+/// spacer beside it, which is exactly the pair of answers the two cells `layout_frozen_line`
+/// emits give.
+fn column_classes(text: &str) -> impl Iterator<Item = WordClass> + '_ {
+    graphemes(text).flat_map(|cluster| {
+        let width = cluster_width(cluster);
+        let class = cluster_word_class(cluster);
+        (0..width).map(
+            move |offset| {
+                if offset == 0 { class } else { WordClass::Word }
+            },
+        )
+    })
+}
+
+/// One maximal run of same-class columns, half-open like every other column interval here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ColumnRun {
+    pub start: ContentColumn,
+    pub end: ContentColumn,
+}
+
+/// The run containing `target`, by walking from the front of the line.
+///
+/// The reference implementation, and the one [`LineColumnIndex::word_run`] must agree with run for
+/// run. A target at or past the line's last column reports the empty run there: past the end a
+/// flattened row is padding, and padding is nobody's word.
+#[must_use]
+pub fn word_run_from_start(text: &str, target: ContentColumn) -> ColumnRun {
+    let mut start = 0u32;
+    let mut column = 0u32;
+    let mut current: Option<WordClass> = None;
+    for class in column_classes(text) {
+        if current != Some(class) {
+            if column > target.0 {
+                return ColumnRun {
+                    start: ContentColumn(start),
+                    end: ContentColumn(column),
+                };
+            }
+            start = column;
+            current = Some(class);
+        }
+        column += 1;
+    }
+    if target.0 < column {
+        return ColumnRun {
+            start: ContentColumn(start),
+            end: ContentColumn(column),
+        };
+    }
+    ColumnRun {
+        start: target,
+        end: target,
+    }
+}
+
 /// How many columns apart the checkpoints of a fresh index stand.
 ///
 /// **Columns, not bytes, not code units, not glyphs** (plan §5.2 clause 1). A tunable strategy
@@ -328,10 +424,10 @@ pub const CHECKPOINT_STRIDE_COLUMNS: u32 = 64;
 /// index carries a cap of its own, and a line that would exceed it simply goes unindexed.
 ///
 /// **The number is read off the line the plan benchmarks.** §1b's pathological case is a hundred
-/// thousand graphemes; at stride 64 that is about 1,560 checkpoints, and a checkpoint is twelve
-/// bytes — call it 19 KB, against 100 KB of text the line is already costing. Sixty-four
-/// kibibytes therefore indexes that line whole with room for a stride shortened three-fold, and
-/// refuses somewhere past a third of a million columns, where the linear scan is still correct
+/// thousand graphemes; at stride 64 that is about 1,560 checkpoints, and a checkpoint is sixteen
+/// bytes — call it 25 KB, against 100 KB of text the line is already costing. Sixty-four
+/// kibibytes therefore indexes that line whole with room for a stride shortened two-fold, and
+/// refuses somewhere past a quarter of a million columns, where the linear scan is still correct
 /// and the reader has other problems. It was 4 KiB in the first draft, which refused the plan's
 /// own benchmark line — the fallback answered correctly and nothing failed, which is precisely
 /// why the cap has to be measured rather than guessed.
@@ -347,6 +443,15 @@ struct ColumnCheckpoint {
     column: u32,
     byte: u32,
     grapheme: u32,
+    /// The first column of the word-class run this checkpoint stands in.
+    ///
+    /// The fourth word of a checkpoint, and it is what makes "which word is this" answerable in
+    /// `O(log n + stride)` instead of `O(run)`. A run can be the whole line — a hundred thousand
+    /// columns of `abcdefghij` is one word — so walking outward from the window to find a word's
+    /// two ends is exactly the `O(line length)` per frame plan §1b forbids. These numbers ascend
+    /// with the columns they sit in, so a binary search over them finds the run's far end without
+    /// reading the columns in between.
+    run_start: u32,
 }
 
 /// Sparse column checkpoints for one logical line.
@@ -384,20 +489,36 @@ impl LineColumnIndex {
         let mut column = 0u32;
         let mut byte = 0u32;
         let mut next_target = 0u32;
+        let mut run_start = 0u32;
+        let mut run_class: Option<WordClass> = None;
         for (grapheme, cluster) in graphemes(text).enumerate() {
             let width = cluster_width(cluster) as u32;
-            if width > 0 && column >= next_target {
-                if checkpoints.len() == capacity {
-                    return None;
+            if width > 0 {
+                let class = cluster_word_class(cluster);
+                if run_class != Some(class) {
+                    run_start = column;
+                    run_class = Some(class);
                 }
-                checkpoints.push(ColumnCheckpoint {
-                    column,
-                    byte,
-                    grapheme: grapheme as u32,
-                });
-                // The next multiple strictly past the column just anchored, so a line of wide
-                // glyphs cannot anchor twice inside one stride.
-                next_target = (column / stride + 1).saturating_mul(stride);
+                if column >= next_target {
+                    if checkpoints.len() == capacity {
+                        return None;
+                    }
+                    checkpoints.push(ColumnCheckpoint {
+                        column,
+                        byte,
+                        grapheme: grapheme as u32,
+                        run_start,
+                    });
+                    // The next multiple strictly past the column just anchored, so a line of wide
+                    // glyphs cannot anchor twice inside one stride.
+                    next_target = (column / stride + 1).saturating_mul(stride);
+                }
+                // A wide glyph's second column is its spacer, which is `Word` wherever it stands
+                // — see [`column_classes`].
+                if width == 2 && run_class != Some(WordClass::Word) {
+                    run_start = column + 1;
+                    run_class = Some(WordClass::Word);
+                }
             }
             column = column.saturating_add(width);
             byte += cluster.len() as u32;
@@ -456,6 +577,106 @@ impl LineColumnIndex {
     pub fn seek(&self, text: &str, target: ContentColumn) -> ColumnSeek {
         resume_seek(text, self.anchor(target), target)
     }
+
+    /// The word-class run containing `target`, through the index. Identical to
+    /// [`word_run_from_start`] by construction, and — unlike it — bounded.
+    ///
+    /// Two searches and two short scans. The run's **start** is found by resuming from the
+    /// checkpoint at or before the target: if the class has not changed between the two, the run
+    /// began at or before the checkpoint and the checkpoint already recorded where. The run's
+    /// **end** is found by binary-searching the checkpoints for the first one standing in a later
+    /// run — everything before it is inside this one — and scanning the last stride's worth of
+    /// columns for the boundary itself. Neither half reads the run's interior, which is the point:
+    /// a run can be the whole line.
+    #[must_use]
+    pub fn word_run(&self, text: &str, target: ContentColumn) -> ColumnRun {
+        let Some(index) = self
+            .checkpoints
+            .partition_point(|checkpoint| checkpoint.column <= target.0)
+            .checked_sub(1)
+        else {
+            return word_run_from_start(text, target);
+        };
+        let Some((start, class)) = run_at_from(text, self.checkpoints[index], target.0) else {
+            // Past the line's last column there is only padding, and padding is nobody's word.
+            return ColumnRun {
+                start: target,
+                end: target,
+            };
+        };
+        // Run starts ascend with the columns they name, so this is a partition: every checkpoint
+        // before it is at or before this run's last column.
+        let beyond = self
+            .checkpoints
+            .partition_point(|checkpoint| checkpoint.run_start <= start);
+        let from = self.checkpoints[beyond.saturating_sub(1)];
+        ColumnRun {
+            start: ContentColumn(start),
+            end: ContentColumn(run_end_from(text, from, class, start)),
+        }
+    }
+}
+
+/// The run start and class of `target`, resuming from a checkpoint whose own run start is known.
+///
+/// `None` when `target` is past the line's last column.
+fn run_at_from(text: &str, from: ColumnCheckpoint, target: u32) -> Option<(u32, WordClass)> {
+    let mut column = from.column;
+    let mut run_start = from.run_start;
+    let mut run_class: Option<WordClass> = None;
+    for cluster in graphemes(text.get(from.byte as usize..)?) {
+        let width = cluster_width(cluster) as u32;
+        if width == 0 {
+            continue;
+        }
+        let class = cluster_word_class(cluster);
+        if run_class != Some(class) {
+            // The first cluster is the checkpoint's own, and where *its* run began is the one
+            // thing the walk cannot see for itself — it is why the checkpoint carries it.
+            if run_class.is_some() {
+                run_start = column;
+            }
+            run_class = Some(class);
+        }
+        if column == target {
+            return Some((run_start, class));
+        }
+        if width == 2 {
+            if run_class != Some(WordClass::Word) {
+                run_start = column + 1;
+                run_class = Some(WordClass::Word);
+            }
+            if column + 1 == target {
+                return Some((run_start, WordClass::Word));
+            }
+        }
+        column += width;
+    }
+    None
+}
+
+/// One past the last column of the run that began at `start` with class `class`, scanning forward
+/// from a checkpoint known to stand at or before that run's end.
+fn run_end_from(text: &str, from: ColumnCheckpoint, class: WordClass, start: u32) -> u32 {
+    let mut column = from.column;
+    let Some(tail) = text.get(from.byte as usize..) else {
+        return column;
+    };
+    for cluster in graphemes(tail) {
+        let width = cluster_width(cluster) as u32;
+        if width == 0 {
+            continue;
+        }
+        if column >= start && cluster_word_class(cluster) != class {
+            return column;
+        }
+        // The spacer beside a wide glyph is `Word`, so a wide space ends a run one column in.
+        if width == 2 && column + 1 >= start && class != WordClass::Word {
+            return column + 1;
+        }
+        column += width;
+    }
+    column
 }
 
 /// Which logical line an index belongs to, and which version of it.
@@ -536,32 +757,64 @@ impl HorizontalIndexStore {
                 grapheme: 0,
             };
         }
-        if let Some(index) = self.entries.get(&key) {
-            return index.seek(text, target);
+        match self.index_for(key, text) {
+            Some(index) => index.seek(text, target),
+            None => seek_from_start(text, target),
         }
-        if text.len() as u32 <= self.stride {
-            // Bytes bound columns from above, so a line this short cannot be wider than one
-            // stride and the linear scan is already inside the bound.
-            return seek_from_start(text, target);
+    }
+
+    /// The word-class run one column of a logical line stands in, in that line's own columns.
+    ///
+    /// The other question a horizontal window cannot answer out of the cells it kept: a word cut
+    /// by the window's edge goes on past it, and where it goes on to is a fact about the line.
+    /// Unlike [`Self::seek`] this has no free answer at column zero — a run beginning at the left
+    /// edge still has to end somewhere — so it builds the line's index on its own account.
+    pub fn word_run(&mut self, key: LineKey, text: &str, target: ContentColumn) -> ColumnRun {
+        match self.index_for(key, text) {
+            Some(index) => index.word_run(text, target),
+            None => word_run_from_start(text, target),
         }
-        let Some(index) = LineColumnIndex::build(text, self.stride, self.line_budget_bytes) else {
-            self.refusals += 1;
-            return seek_from_start(text, target);
-        };
-        if index.columns <= self.stride {
-            self.refusals += 1;
-            return index.seek(text, target);
+    }
+
+    /// How many columns one logical line presents, out of its index when it has one.
+    ///
+    /// [`presentable_end_column`] walks the line, which is the right answer for a line short
+    /// enough not to be indexed and the wrong one to ask on every frame of a scroll across a
+    /// hundred thousand columns. An index already counted them while it was being built.
+    pub fn columns(&mut self, key: LineKey, text: &str) -> ContentColumn {
+        match self.index_for(key, text) {
+            Some(index) => index.columns(),
+            None => presentable_end_column(text),
         }
-        let cost = index.resident_bytes();
-        if self.resident_bytes + cost > self.store_budget_bytes {
-            self.refusals += 1;
-            return index.seek(text, target);
+    }
+
+    /// This line's index, built and kept if this is the first ask and the budgets allow it.
+    ///
+    /// `None` is never an error and never changes an answer: it means the caller's linear
+    /// reference implementation is the one that runs, either because it is already inside the
+    /// bound an index would buy or because there was no room to buy it (plan §5.2 clause 5).
+    fn index_for(&mut self, key: LineKey, text: &str) -> Option<&LineColumnIndex> {
+        if !self.entries.contains_key(&key) {
+            if text.len() as u32 <= self.stride {
+                // Bytes bound columns from above, so a line this short cannot be wider than one
+                // stride and the linear scan is already inside the bound.
+                return None;
+            }
+            let index = LineColumnIndex::build(text, self.stride, self.line_budget_bytes);
+            let Some(index) = index.filter(|index| index.columns > self.stride) else {
+                self.refusals += 1;
+                return None;
+            };
+            let cost = index.resident_bytes();
+            if self.resident_bytes + cost > self.store_budget_bytes {
+                self.refusals += 1;
+                return None;
+            }
+            self.resident_bytes += cost;
+            self.builds += 1;
+            self.entries.insert(key, index);
         }
-        let seek = index.seek(text, target);
-        self.resident_bytes += cost;
-        self.builds += 1;
-        self.entries.insert(key, index);
-        seek
+        self.entries.get(&key)
     }
 
     /// Release every index for one history line — its eviction, or its tombstone.
@@ -874,6 +1127,74 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Plan §5.5, the word half: **which word a column belongs to is a fact about the line**, so
+    /// the indexed answer and the linear one must name the same two columns everywhere, including
+    /// across the stride boundaries the index is made of.
+    ///
+    /// This is [`an_indexed_seek_and_a_linear_seek_name_the_same_cell`]'s contract for the second
+    /// question a horizontal window cannot answer out of its own cells. It matters more than the
+    /// seek's, not less: a seek that disagreed would draw the wrong cell and be seen, while a run
+    /// that disagreed would quietly select half a path and put it on somebody's clipboard.
+    #[test]
+    fn an_indexed_run_and_a_linear_run_name_the_same_word() {
+        let mut corpus = corpus();
+        corpus.push((
+            "prose",
+            "the quick brown fox, jumps/over the lazy dog. ".repeat(20),
+        ));
+        corpus.push(("one long word", "abcdefghij".repeat(50)));
+        corpus.push(("wide space", "漢字\u{3000}仮名 ".repeat(40)));
+        for (name, text) in corpus {
+            let width = text_width(&text) as u32;
+            for stride in [1u32, 2, 3, 64, 97, width + 5] {
+                let index = LineColumnIndex::build(&text, stride, LINE_INDEX_BUDGET_BYTES)
+                    .expect("the corpus fits the per-line budget");
+                for target in 0..=width + 3 {
+                    assert_eq!(
+                        index.word_run(&text, ContentColumn(target)),
+                        word_run_from_start(&text, ContentColumn(target)),
+                        "{name} at stride {stride}, column {target}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The run machinery's whole reason for existing (plan §1b against §5.5): a hundred thousand
+    /// columns of one uninterrupted word is one run, and both of its ends must be findable without
+    /// reading the columns in between.
+    ///
+    /// Red gate: drop `run_start` from the checkpoint and this still passes — with the far end
+    /// found by walking every one of the hundred thousand columns, once per row, once per frame,
+    /// which is exactly the `O(line length)` §1b forbids. `tests/horizontal_budget.rs` is where
+    /// that shows up as a number; this is where it shows up as an answer.
+    #[test]
+    fn one_word_a_hundred_thousand_columns_wide_still_has_two_ends() {
+        let text = "abcdefghij".repeat(10_000);
+        let width = text_width(&text) as u32;
+        let index =
+            LineColumnIndex::build(&text, CHECKPOINT_STRIDE_COLUMNS, LINE_INDEX_BUDGET_BYTES)
+                .expect("a hundred thousand columns at stride 64 fits the per-line budget");
+        for target in [0u32, 1, 63, 64, 65, 50_000, width - 1] {
+            assert_eq!(
+                index.word_run(&text, ContentColumn(target)),
+                ColumnRun {
+                    start: ContentColumn(0),
+                    end: ContentColumn(width),
+                },
+                "column {target}"
+            );
+        }
+        assert_eq!(
+            index.word_run(&text, ContentColumn(width)),
+            ColumnRun {
+                start: ContentColumn(width),
+                end: ContentColumn(width),
+            },
+            "past the end there is padding, and padding is nobody's word"
+        );
     }
 
     /// Plan §5.2 clause 2: a checkpoint is a position a decoder can be dropped at. Every one of

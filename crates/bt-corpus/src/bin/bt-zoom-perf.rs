@@ -275,6 +275,7 @@ fn run_zoom_sample(
         theme_rev: session.layout_key().theme_rev,
         lang_rev: session.layout_key().lang_rev,
         profile_rev: session.layout_key().profile_rev,
+        line_wrapping: session.layout_key().line_wrapping,
     });
     let layout_key = started.elapsed();
 

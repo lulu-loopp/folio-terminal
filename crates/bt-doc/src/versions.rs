@@ -133,6 +133,26 @@ pub struct LayoutKey {
     /// so a rename, a reorder or a duplicate that did not advance a number here
     /// would be a window drawing yesterday's widths under today's words.
     pub profile_rev: u64,
+    /// Whether a logical line too long for the pane **wraps** onto the next row,
+    /// or is flattened onto one row and read through a horizontal window
+    /// (`docs/plans/horizontal-scroll/plan.md` §5.7, ladder one level two).
+    ///
+    /// A member of the layout key and not a render flag, because it decides **how
+    /// many rows a line takes**: `true` is the wrap this terminal has always done,
+    /// where a four-hundred-column line on an eighty-column pane is five
+    /// presentation rows; `false` is one row, with the other three hundred and
+    /// twenty columns off to the right of the window. Every height, every scroll
+    /// extent and every anchor-to-row answer measured under one of those two
+    /// answers is meaningless under the other, which is the identity this key
+    /// exists to carry.
+    ///
+    /// It reads as "wrapping" rather than "flattening" because that is the
+    /// product's own word — the Terminal page's `Line wrapping` row — and because
+    /// the affirmative spelling is the one whose default is `true`. It is
+    /// unrelated to `MathLayoutOptions::block_line_wrapping`, which was renamed on
+    /// 2026-08-24 precisely so that two different meanings of "line wrapping"
+    /// stop sharing a vocabulary next to this axis (plan §0 fact 2).
+    pub line_wrapping: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -185,6 +205,7 @@ mod tests {
             theme_rev: 1,
             lang_rev: 0,
             profile_rev: 0,
+            line_wrapping: true,
         };
         let switched = LayoutKey {
             lang_rev: 1,
@@ -224,6 +245,7 @@ mod tests {
             theme_rev: 1,
             lang_rev: 0,
             profile_rev: 0,
+            line_wrapping: true,
         };
         let renamed = LayoutKey {
             profile_rev: 1,
@@ -237,5 +259,47 @@ mod tests {
             hasher.finish()
         };
         assert_ne!(hash_of(base), hash_of(renamed));
+    }
+
+    /// PIN (`docs/plans/horizontal-scroll/plan.md` §5.7) — **whether lines wrap is
+    /// part of the key**, by equality and by hash, and it is the member of this
+    /// struct with the largest claim to be here.
+    ///
+    /// `lang_rev` and `profile_rev` above change how wide a *string* measures.
+    /// This one changes how many **rows** a line is: a four-hundred-column line is
+    /// five presentation rows wrapped and one row flattened. A cached
+    /// `MeasuredLayout` handed back across that switch would give a viewport a
+    /// height, a scroll extent and an anchor-to-row mapping belonging to a
+    /// document that is not on screen.
+    ///
+    /// Red gate: drop `line_wrapping` from the struct and a pane told to stop
+    /// wrapping keeps every row count it measured while wrapping, so its scrollbar
+    /// and every click in it address rows that are no longer drawn.
+    #[test]
+    fn a_line_wrapping_change_is_a_different_layout_key() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let base = LayoutKey {
+            width_cells: NonZeroU32::new(80).unwrap(),
+            dpi_milli: NonZeroU32::new(1000).unwrap(),
+            font_rev: 1,
+            theme_rev: 1,
+            lang_rev: 0,
+            profile_rev: 0,
+            line_wrapping: true,
+        };
+        let flattened = LayoutKey {
+            line_wrapping: false,
+            ..base
+        };
+        assert_ne!(base, flattened);
+
+        let hash_of = |key: LayoutKey| {
+            let mut hasher = DefaultHasher::new();
+            key.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_ne!(hash_of(base), hash_of(flattened));
     }
 }

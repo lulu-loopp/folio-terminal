@@ -41,6 +41,14 @@ pub(crate) fn should_copy_selection(
     is_copy_shortcut(key, modifiers) && (modifiers.shift_key() || has_selection)
 }
 
+/// One mouse event in SGR 1006, one-based.
+///
+/// **`row` and `column` are the child's grid coordinates and never this window's**
+/// (`docs/plans/horizontal-scroll/plan.md` §5.5). They arrive from
+/// `ViewportFrame::live_point_at` by way of `live_viewport_mouse_hit`, which is the one place a
+/// drawn cell is turned into a grid cell; a viewport column reaching here would tell a
+/// mouse-tracking program the column the pointer was painted in, and every program that draws by
+/// coordinate would answer somewhere else.
 pub(crate) fn sgr_mouse_bytes(
     button: MouseProtocolButton,
     event: MouseProtocolEvent,
@@ -70,6 +78,8 @@ pub(crate) fn sgr_mouse_bytes(
     format!("\x1b[<{code};{};{}{suffix}", column + 1, row + 1).into_bytes()
 }
 
+/// The same event in whichever encoding the application asked for. `row` and `column` are the
+/// child's grid coordinates — see [`sgr_mouse_bytes`].
 pub(crate) fn mouse_bytes(
     sgr: bool,
     button: MouseProtocolButton,

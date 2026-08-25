@@ -1219,6 +1219,9 @@ impl DualPlaneSession {
                 theme_rev: 1,
                 lang_rev: 0,
                 profile_rev: 0,
+                // What every terminal this product has drawn does with a line too long for its
+                // pane; the window replaces it from `settings.json` before anything is measured.
+                line_wrapping: true,
             },
             view_generation: ViewGeneration(1),
             grid_generation: GridGeneration(1),
@@ -7041,13 +7044,24 @@ impl DualPlaneSession {
     /// first or its fourth. Measuring from the row start instead would have made every frozen band
     /// full-width and silently disagreed with the live plane, where the column is real and the same
     /// reference on the same screen must not change size merely by being frozen.
+    /// The rule this fixes on, one axis over: **the horizontal origin is invisible to a band too**.
+    /// What comes back is a [`bt_viewport::horizontal::ContentColumn`] — a place in the line, not a
+    /// place on screen — and the width budget is measured from it, so a reference keeps the same
+    /// display box however far the reader has scrolled sideways past it. Measuring from where it is
+    /// currently drawn would re-raster every picture on every horizontal notch.
     fn reference_screen_column(&self, anchor: &ContentAnchor) -> u32 {
         let columns = self.layout_key.width_cells.get() as usize;
         match anchor {
             ContentAnchor::Live { point, .. } => point.column,
             ContentAnchor::History { id, offset, .. } => {
                 self.document.entries().get(id).map_or(offset.0, |entry| {
-                    bt_viewport::frozen_line_screen_column(&entry.line, offset.0, columns)
+                    bt_viewport::frozen_line_screen_column(
+                        &entry.line,
+                        offset.0,
+                        columns,
+                        self.layout_key.line_wrapping,
+                    )
+                    .0
                 })
             }
             ContentAnchor::Staging { id, offset, .. } => self
@@ -7055,7 +7069,7 @@ impl DualPlaneSession {
                 .staged_rows()
                 .find(|staged| staged.id == *id)
                 .map_or(offset.0, |staged| {
-                    bt_viewport::staged_row_screen_column(staged, offset.0)
+                    bt_viewport::staged_row_screen_column(staged, offset.0).0
                 }),
         }
     }
@@ -12885,6 +12899,7 @@ mod tests {
             theme_rev: 1,
             lang_rev: 0,
             profile_rev: 0,
+            line_wrapping: true,
         };
         assert_ne!(
             shared_math_artifact_key(
@@ -13335,6 +13350,7 @@ mod tests {
             theme_rev,
             lang_rev,
             profile_rev,
+            line_wrapping: true,
         });
     }
 
@@ -13770,6 +13786,7 @@ mod tests {
             theme_rev: session.layout_key().theme_rev,
             lang_rev: session.layout_key().lang_rev,
             profile_rev: session.layout_key().profile_rev,
+            line_wrapping: true,
         });
         session
             .feed_at(
@@ -13853,6 +13870,7 @@ mod tests {
                 theme_rev: session.layout_key().theme_rev,
                 lang_rev: session.layout_key().lang_rev,
                 profile_rev: session.layout_key().profile_rev,
+                line_wrapping: true,
             });
             session
                 .feed_at(
@@ -13947,6 +13965,7 @@ mod tests {
                 theme_rev: session.layout_key().theme_rev,
                 lang_rev: session.layout_key().lang_rev,
                 profile_rev: session.layout_key().profile_rev,
+                line_wrapping: true,
             });
             let mut lines = Vec::new();
             for i in 0..60 {
