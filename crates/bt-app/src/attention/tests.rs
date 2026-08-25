@@ -499,6 +499,49 @@ fn a_vanished_pane_expires_its_place_and_drops_everything_else() {
     );
 }
 
+/// PIN (`attention` plan §4 B4) — **a tab dragged into another window leaves its place behind and
+/// takes everything else with it.**
+///
+/// The half that is easy to get wrong is not the surrender, it is what survives it: the pane is
+/// still being asked for, so the window it lands in has to admit it again — with a place drawn from
+/// *that* window's serial, because two windows' places are two orderings and a number carried
+/// across would belong to both.
+///
+/// Red gate: clear the credentials along with the place and the pane arrives silent, which is a
+/// standing request the user never sees again; wind the serial back and the two panes' places
+/// become indistinguishable in the one file that is supposed to tell them apart.
+#[test]
+fn a_pane_carried_to_another_window_gives_up_its_place_and_keeps_its_request() {
+    let mut idle = Pane::new();
+    assert!(idle.ledger.surrender_place(site()).lines.is_empty());
+
+    let mut pane = requested();
+    assert!(
+        pane.ledger.surrender_place(site()).lines.is_empty(),
+        "a pane with nothing to give up gives nothing up, and says nothing"
+    );
+    assert_eq!(pane.state(), State::Requested(1));
+
+    let mut pane = queued();
+    assert_eq!(
+        pane.ledger.surrender_place(site()).lines,
+        ["expire tab=1 seat=SeatId(2) ticket=0 episode=1 reason=torn-out"]
+    );
+    assert_eq!(pane.state(), State::Requested(1), "and it is still asking");
+    assert_eq!(
+        pane.next_ticket, 1,
+        "the serial the window issued does not come back"
+    );
+
+    // The window it landed in admits it again, out of its own serial — which starts wherever that
+    // window's own counter stands, and here is simply the next one.
+    assert_eq!(
+        pane.away(),
+        ["admit tab=1 seat=SeatId(2) ticket=1 episode=1 grounds=requested active=0 focused=0"],
+        "the same episode, a new place"
+    );
+}
+
 /// GRID — `MarkSeen`, all four states (`attention` plan §10.9, edge e17).
 ///
 /// Switching to a tab spends every bell and every failing exit code in it, deliberately and for a

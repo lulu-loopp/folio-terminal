@@ -4794,41 +4794,41 @@ struct LeafSession {
     /// held one, so no schema moves.
     spawn_place: Option<PathBuf>,
     session: DualPlaneSession,
-    /// **This pane's place in the attention queue**, or `None` when it is not in
-    /// it (§7.1.5b P1-8, landed with §7.1.6b′ F3).
+    /// **This pane's attention account, and with it the place it holds in this window's queue**
+    /// (`attention` plan §11.1; §7.1.5b P1-8).
     ///
-    /// A **monotonic serial and not a clock**, which is the ruling's own wording
-    /// (时间戳用单调序号, mock 可确定重放): the queue is walked oldest-first, and
-    /// ordering by a counter makes the walk a function of the order things
-    /// happened rather than of what the clock read while they happened. Two
-    /// sessions that ask in the same millisecond still have an order, and a
-    /// replay of the same events gives the same one.
+    /// The ledger is where both producers' credentials land, it is the one thing that can tell a
+    /// restatement from a genuinely new request, and — since A2 — it is the only source the orange
+    /// dot is drawn from. What it hands out is a **monotonic serial and not a clock**, which is the
+    /// ruling's own wording (时间戳用单调序号, mock 可确定重放): the queue is walked oldest-first,
+    /// so ordering by a counter makes the walk a function of the order things happened rather than
+    /// of what the clock read while they happened. Two panes that ask in the same millisecond still
+    /// have an order, and a replay of the same events gives the same one.
     ///
-    /// **On the leaf, so it dies with the leaf.** A queue kept as a table beside
-    /// the tabs would need pruning every time a pane closed or moved, and the way
-    /// to get that wrong is to forget once; here a tear-out carries the place
-    /// with the shell (`profile`'s own argument, two fields up) and a close takes
-    /// it away with no bookkeeping at all.
+    /// **On the leaf, so it dies with the leaf.** A queue kept as a table beside the tabs would
+    /// need pruning every time a pane closed or moved, and the way to get that wrong is to forget
+    /// once; here a tear-out carries the account with the shell (`profile`'s own argument, two
+    /// fields up) and a close takes it away with no bookkeeping at all.
     ///
-    /// **What puts a ticket here, and what takes it away, are different events.**
-    /// [`Runtime::admit_to_attention_queue`] hands one out; only
-    /// [`Runtime::answer_attention`] — an `Enter` typed into this very session —
-    /// takes it back. Looking at the tab does not, which is the point of the
-    /// whole mechanism: 看一眼阻塞的 agent 不解除阻塞.
-    attention_ticket: Option<u64>,
-    /// **A3's ledger, running beside the queue above and owning nothing it owns.**
-    ///
-    /// The double bookkeeping is deliberate and is the plan's ordering, not an accident of it: the
-    /// ledger is what a real producer's signals land in and what `BT_ATTENTION_TRACE` reports, and
-    /// A2 is the slice that takes the field above away and lets this one drive the dot. Until then
-    /// this decides nothing anybody can see — no dot is drawn from it, no toast is raised from it,
-    /// and the place it hands out comes from a serial of its own so that the queue the user
-    /// actually has is untouched.
-    ///
-    /// Landing it now is what makes the wiring provable before it is load-bearing: a real Claude
-    /// Code permission prompt mints an episode and takes a place in the trace on this build, which
-    /// is the evidence A2 needs and cannot produce for itself.
+    /// **What puts a place here and what takes it away are different events**, which is the whole
+    /// of 看一眼阻塞的 agent 不解除阻塞. [`attention::Event::Settle`] hands one out, and only three
+    /// things give it back: a user action **in this very seat**
+    /// ([`Runtime::answer_attention`]), the program withdrawing what it asked, or the pane going
+    /// away. Looking at the tab is not one of them —
+    /// [`attention::Event::MarkSeen`] is the arrival with nothing to say.
     attention: attention::AttentionLedger,
+    /// **Whether the bell this pane currently has latched has already been announced** (`attention`
+    /// plan §11.7's fourth source).
+    ///
+    /// A bare `BEL` is an *event*, and the ledger's turn-end door takes events rather than levels
+    /// — while `bt-term`'s `bell_latched` is a level that stays up until somebody looks. This is
+    /// the edge between the two, and it is a field rather than a comparison against last frame's
+    /// status because the level it mirrors is retired by a different mechanism (a look) than the
+    /// one that raises it.
+    ///
+    /// It goes back down whenever the latch does, so a pane that rings, is read, and rings again
+    /// announces twice. That is the correct number: two turns ended.
+    bell_reported: bool,
     /// When each of this pane's standing credentials runs out.
     attention_clock: attention_wire::WaitClock,
     /// **The name this pane answers to on the process's endpoint** — 128 bits, minted at birth.
@@ -6768,7 +6768,7 @@ struct WindowRuntime {
     /// target with no frames asked for, so the mode arrives in one frame and that
     /// frame is pixel-for-pixel the one F1 shipped.
     focus_reveal: RevealTween,
-    /// **The next place in the attention queue** (§7.1.5b P1-8).
+    /// **The next place in the attention queue** (§7.1.5b P1-8; `attention` plan §11.1.1).
     ///
     /// The window's own counter — and, since F1b took the tab numbering up to
     /// [`TabIds`], the only one left down here. Per window for
@@ -6776,17 +6776,11 @@ struct WindowRuntime {
     /// attention in *this* window, and two windows sharing one counter would make
     /// "who has been waiting longest" a question about a program rather than
     /// about a screen. Never reset, never reused — see
-    /// [`LeafSession::attention_ticket`] for why it is a serial and not a clock.
-    attention_next_ticket: u64,
-    /// **The same serial, for the ledger running beside that queue** (`attention` plan §11.8's A3).
+    /// [`LeafSession::attention`] for why it is a serial and not a clock.
     ///
-    /// A second counter and not a shared one, and only because the two mechanisms are alive at the
-    /// same time: the queue above is what the user's dots are drawn from today, and a ledger
-    /// drawing places out of the same counter would make the numbers in `session.json` and the
-    /// numbers in the trace two interleaved halves of one sequence, each with gaps the other
-    /// explains. A2 is the slice that removes the first of them, and this becomes the only one.
-    ///
-    /// Per window and never reused, for [`Self::attention_next_ticket`]'s reasons exactly.
+    /// **One counter, since A2.** A3 ran a second one beside it while the ledger and the bell-fed
+    /// queue were both alive, precisely so that neither could renumber the other; taking the bell
+    /// out of the door left one queue and therefore one serial.
     attention_next_place: u64,
     /// How far the rail is scrolled, in physical pixels.
     ///
@@ -8796,8 +8790,10 @@ struct {name} {{
                  never read again",
             ),
             (
-                "attention_ticket = None",
-                "a place in one window's queue is not a place in another's",
+                ".surrender_place(",
+                "a place in one window's queue is not a place in another's — and the \
+                 credentials behind it travel, so the pane is admitted again by the \
+                 window it landed in rather than falling silent",
             ),
             (
                 "settle_pin_partition(",
@@ -10327,7 +10323,7 @@ impl LeafSession {
             output_revision: self.output_revision,
             last_seen_revision: self.last_seen_revision,
             tab_is_active,
-            awaiting: self.attention_ticket.is_some(),
+            awaiting: self.attention.ticket().is_some(),
         }
     }
 }
@@ -14652,12 +14648,16 @@ enum StatusClaim {
     /// **This session is in the attention queue and has not been answered**
     /// (§7.1.5b P1-8) — the mock-up's loudest claim (line 262), `.unreaddot.await`.
     ///
-    /// Louder than [`Self::Bell`] even though the two are seeded by the same
-    /// byte in this build, and the difference is the whole of §7.1.5b's ladder:
-    /// a bell is a thing that *rang* and looking at the tab answers it, while a
-    /// place in the queue is a thing that is *still standing there* and only an
-    /// answer typed into that session retires it. The two therefore go out at
-    /// different moments and cannot be one variant.
+    /// Louder than [`Self::Bell`], and the difference is the whole of §7.1.5b's ladder: a bell is a
+    /// thing that *rang*, and looking at the tab answers it; a place in the queue is a thing that is
+    /// *still standing there*, and only an action put into that session — or the program taking
+    /// back what it asked — retires it. The two go out at different moments and cannot be one
+    /// variant.
+    ///
+    /// **Until A2 they were seeded by the same byte**, and that is what made the ladder a lie in
+    /// practice: a `BEL` rings when a *turn ends*, so a badge saying "it is standing there waiting
+    /// for you" was lit by a program that had just stopped talking. The two claims now have two
+    /// producers — a bell for the one above, and a credential a program can withdraw for this one.
     Awaiting,
 }
 
@@ -14706,7 +14706,7 @@ struct SessionFacts {
     /// Whether the tab holding this session is the one on screen.
     tab_is_active: bool,
     /// **Whether this session holds an unanswered place in the attention
-    /// queue** (§7.1.5b P1-8) — `LeafSession::attention_ticket.is_some()`.
+    /// queue** (§7.1.5b P1-8) — `LeafSession::attention`'s own place.
     ///
     /// A fact about the *queue* and not about the shell, which is why it is
     /// carried in beside the status rather than read out of it: the signal that
@@ -14987,55 +14987,20 @@ pub(crate) fn attention_is_consumed(tab_is_active: bool, window_is_focused: bool
     tab_is_active && window_is_focused
 }
 
-/// **Whether a ringing session is asking for a place in the queue** (user ruling
-/// 2026-08-21, same source as §7.1.5b's 看着就算消费).
-///
-/// The door *into* the queue, and it is [`attention_is_consumed`]'s door read
-/// from the other side: a bell that rings in the pane the user is sitting in
-/// front of has already been answered by the sitting, so it asks for nothing. A
-/// place is handed only to a bell that rang **where nobody was looking** — which
-/// is the only situation a badge can tell you something the screen has not.
-///
-/// **The bug this closes, in one sentence.** Before this, admission read the
-/// latch alone, so a bell on the watched tab took a ticket on the same turn the
-/// look retired the latch — the badge outlived the thing it was reporting, and
-/// the only door out was an `Enter` in that exact seat. Claude Code rings on
-/// every turn it ends, so the user's active tab wore a permanent orange ring
-/// (2026-08-21, user's screenshot: a three-seat tab they were working in).
-///
-/// **Both halves of `attention_is_consumed` are inherited**, and the second is
-/// the one that keeps this honest: a background *window* consumes nothing, so a
-/// bell that rings while the user is away in another application still takes its
-/// place even on the tab that happens to be on screen. That is the one moment a
-/// queue is doing its job.
-fn attention_is_asked(bell_latched: bool, tab_is_active: bool, window_is_focused: bool) -> bool {
-    bell_latched && !attention_is_consumed(tab_is_active, window_is_focused)
-}
-
-/// The place a session holds after one look at whether it is asking (§7.1.5b
-/// P1-8).
-///
-/// **Two rules, and the second is the one that is easy to lose.** A session that
-/// is asking and has no place takes the next serial. A session that *already*
-/// has one keeps it — the serial is not re-stamped, whatever the signal is doing
-/// now. Re-stamping would hand a shell that rings twice while unanswered a
-/// younger place than one that rang once and waited, which turns 先到先服务 into
-/// its opposite for exactly the shells that are trying hardest to be noticed.
-///
-/// And a session that is not asking keeps whatever it has, which is nothing at
-/// all if it never asked: **nothing here takes a place away.** The signal that
-/// hands one out is the program's and retires on its own terms
-/// ([`attention_is_consumed`]); the only thing that gives one up is the user
-/// answering ([`Runtime::answer_attention`]), and that is a different event in a
-/// different function.
-fn attention_ticket(held: Option<u64>, asking: bool, next: &mut u64) -> Option<u64> {
-    if held.is_some() || !asking {
-        return held;
-    }
-    let ticket = *next;
-    *next += 1;
-    Some(ticket)
-}
+// **`attention_is_asked` and `attention_ticket` stood here until A2, and what took them away is
+// worth stating rather than deleting in silence.**
+//
+// Both were written around the one signal this build had: `bell_latched`. A bell is an *event* that
+// rings when a turn ends, and projecting it onto a badge that means "it is standing there waiting
+// for you" is the defect `attention` plan §0 spends its four recordings on — the badge lit when it
+// should not, could not be put out, and could not say why. The gate of 2026-08-21 made the first of
+// those bearable by refusing a place to a bell that rang where the user was already looking, but it
+// could not fix the sentence itself.
+//
+// So the door into the queue is now [`attention::Event::Settle`], the credential behind it is one a
+// program can **withdraw**, and the bell keeps exactly the claim it always honestly had:
+// [`StatusClaim::Bell`], a flat dot that a look spends. `attention_is_consumed` stays where it is —
+// the latches it retires are still latches, and red line 4 forbids it a third parameter.
 
 /// **Where `Ctrl+Shift+A` goes next** (§7.1.5b P1-8, landed with §7.1.6b′ F3).
 ///
@@ -15044,7 +15009,7 @@ fn attention_ticket(held: Option<u64>, asking: bool, next: &mut u64) -> Option<u
 /// * **先到先服务** — the queue is ordered by the serial each place was handed
 ///   when it was taken, so the stop is the one that has been waiting longest.
 ///   `min_by_key` over a serial and never over a clock: see
-///   [`LeafSession::attention_ticket`].
+///   [`LeafSession::attention`].
 /// * **已在队列中再按 = 走到下一个** — `standing_on` is the serial of the seat
 ///   the keyboard is already in, if that seat is itself in the queue. When it is,
 ///   the answer is the next one *after* it rather than the oldest, so a second
@@ -15067,134 +15032,6 @@ fn next_attention_stop<T: Copy>(queue: &[(T, u64)], standing_on: Option<u64>) ->
         .map(|(place, _)| *place)
 }
 
-/// **One turn of the attention queue, for every shell in this window** (§7.1.5b
-/// P1-8).
-///
-/// **What "asked" means in this build, said out loud.** The queue's members are
-/// the sessions whose bell is latched, because `BEL` is the only byte a program
-/// can send this terminal that means *I want you* — the taxonomy's own `await`,
-/// "an agent blocked on stdin", is `bt-shellint`'s interactive detection and
-/// there is no such crate here. So this covers the half of the ruling a real
-/// signal can reach and invents nothing for the other: a shell that sits at a
-/// prompt without ringing is not in this queue, and will not be until something
-/// honest tells us it is standing still.
-///
-/// **A place is taken once and only once.** [`attention_ticket`]'s guard is
-/// `is_none()`, not the latch's edge, and the difference matters at the other
-/// end: the bell latch retires when the tab is *looked at*
-/// ([`attention_is_consumed`]), while a place retires only when it is
-/// *answered*. Re-reading the latch would hand the same session a fresh, younger
-/// ticket every time it rang again while still unanswered, and 先到先服务 would
-/// quietly become last-come-first.
-///
-/// Both doors that a *frame* can open, written as one pass over one leaf at a
-/// time, and that shape is the fix of 2026-08-21. They used to be two passes with
-/// a comment between them explaining that their order was the mechanism: admit
-/// first, retire second, so that a bell which rang on the watched tab was seen to
-/// have rung before the look spent it. **That reasoning had it exactly backwards
-/// — a bell nobody needed to be told about was handed a badge and then had its
-/// latch taken away, leaving a place in the queue whose only door out was an
-/// `Enter` in that one seat.** The user's screenshot of 2026-08-21 is that bug:
-/// a three-seat tab they were working in, ringing on every turn Claude Code
-/// ended, wearing an orange ring that no amount of working in it could put out.
-///
-/// So admission now asks the same question the retirement asks
-/// ([`attention_is_asked`], which is [`attention_is_consumed`] read from the
-/// other side) and **the order stops mattering**: each leaf's two decisions are
-/// taken from the same two facts, in one place, and no reader has to reconstruct
-/// which pass ran first. The out door is untouched — a place is still given up
-/// only by an `Enter` typed into that very session
-/// ([`Runtime::answer_attention`]), because 看一眼阻塞的 agent 不解除阻塞.
-///
-/// **No ledger arithmetic here, and its absence is load-bearing.** This runs once
-/// per turn of the loop and *after* the turn's tab switch has already been paid,
-/// so a ledger advanced from `tab_is_active` squares the tab that arrived and
-/// strands the tab that left one revision behind — a permanent dot on a tab whose
-/// shell never spoke. Seeing is painting, and painting is answered where the
-/// painting happens ([`Runtime::redraw`]).
-fn settle_attention(
-    tabs: &mut [TabState],
-    active_tab: usize,
-    window_is_focused: bool,
-    next_ticket: &mut u64,
-    trace: Option<&attention_trace::Trace>,
-) {
-    let traced = trace.is_some();
-    for (index, tab) in tabs.iter_mut().enumerate() {
-        let tab_is_active = index == active_tab;
-        let consumed = attention_is_consumed(tab_is_active, window_is_focused);
-        // Only computed when someone is reading: the claim is a fold over every
-        // shell in the tab, and this pass runs on every turn of the event loop.
-        let was = traced.then(|| tab.fleet_claim_for(tab_is_active));
-        for (seat, leaf) in tab.leaves_mut() {
-            let seat = *seat;
-            let held = leaf.attention_ticket;
-            let bell = leaf.session.status().bell_latched;
-            leaf.attention_ticket = attention_ticket(
-                held,
-                attention_is_asked(bell, tab_is_active, window_is_focused),
-                next_ticket,
-            );
-            // Watching is consuming: a latch that arrives on the tab the user is
-            // already reading has been answered by the reading. Both latches go
-            // together because `bt-term` retires them together, and because "the
-            // user has seen this" is one fact and not two.
-            if consumed {
-                leaf.session.clear_attention();
-            }
-            let ticket = leaf.attention_ticket;
-            // Stations fire on a *change*, which for this mechanism is the same
-            // thing as an event — see `attention_trace`'s own note on why a
-            // station that spoke whenever it saw a latch would write the same
-            // line sixty times a second.
-            if ticket != held {
-                attention_trace::emit(trace, || {
-                    format!(
-                        "admit tab={index} seat={seat:?} ticket={} bell={} active={} focused={}",
-                        ticket.unwrap_or_default(),
-                        u8::from(bell),
-                        u8::from(tab_is_active),
-                        u8::from(window_is_focused),
-                    )
-                });
-            } else if consumed && bell {
-                attention_trace::emit(trace, || match held {
-                    Some(ticket) => {
-                        format!("look tab={index} seat={seat:?} ticket={ticket} kept=1")
-                    }
-                    None => format!(
-                        "refuse tab={index} seat={seat:?} reason=watched active=1 focused=1"
-                    ),
-                });
-            }
-        }
-        if let Some(was) = was {
-            let now = tab.fleet_claim_for(tab_is_active);
-            if now != was {
-                attention_trace::emit(trace, || {
-                    format!("claim tab={index} was={was:?} now={now:?}")
-                });
-            }
-        }
-    }
-}
-
-/// **The one door out of the queue, over the tab that holds it** (§7.1.5b P1-8).
-///
-/// Returns the place that was given up, so the caller can say so; `None` is the
-/// ordinary case, because every `Enter` in every shell comes through here.
-///
-/// **Named for the seat and not for the tab's focus**, which is the half of the
-/// ruling the 2026-08-21 fix deliberately left alone: a place taken by one pane
-/// is answered in *that* pane. Typing into a sibling seat of the same tab does
-/// not retire it, because looking at a blocked agent — and typing at the shell
-/// beside it — does not unblock it.
-fn answer_attention_in(tab: &mut TabState, seat: SeatId) -> Option<u64> {
-    tab.sessions
-        .get_mut(&seat)
-        .and_then(|leaf| leaf.attention_ticket.take())
-}
-
 /// **How far an interruption about this pane could get, from the facts this build has.**
 ///
 /// Two of §10.7's three answers, because the third needs a fact nobody has measured yet: telling
@@ -15203,9 +15040,12 @@ fn answer_attention_in(tab: &mut TabState, seat: SeatId) -> Option<u64> {
 /// *weaker* of the two — a window that is really out of reach is reported as merely unwatched,
 /// which under-states rather than over-states how much of the user's attention is being asked for.
 ///
-/// Nothing acts on it in this slice. The ledger writes it into the one `toast` line it is allowed
-/// per request, and the `Raised` it hands back is dropped: raising the notification is C3's, and a
-/// slice that raised one from a two-thirds answer would be a slice that had to be found and undone.
+/// **What acts on it in this slice is the window, and only the window.** `Reach::Nothing` is
+/// exactly the pane whose request is refused a place at all ([`attention::Event::Settle`]), so the
+/// in-window surface — the dot, its pulse, the card's halo — is this answer's first consumer and
+/// needs no second gate. The `Raised` handed back is still dropped: the taskbar flash is C2's and
+/// the desktop toast is C3's, and a slice that raised one of those from a two-thirds answer would
+/// be a slice that had to be found and undone.
 fn ledger_reach(tab_is_active: bool, window_is_focused: bool) -> attention::Reach {
     if tab_is_active && window_is_focused {
         attention::Reach::Nothing
@@ -15214,17 +15054,59 @@ fn ledger_reach(tab_is_active: bool, window_is_focused: bool) -> attention::Reac
     }
 }
 
-/// One turn of the ledger's own per-frame pass, and the timers that came due with it.
+/// The pane a tab's `Awaiting` is about: **the oldest place it holds.**
 ///
-/// **Beside `settle_attention` rather than inside it**, for the reason the field is beside the
-/// ticket: the two mechanisms are alive at once and the older one draws what the user sees. Folding
-/// them would make this slice a change to the dots, which is A2's to make and is gated on two
-/// rulings this one does not have.
+/// The one the queue would send you to ([`next_attention_stop`]'s 先到先服务), which is what makes
+/// it the honest answer to "which request is this dot reporting" — a tab is a lid over panes, and
+/// the claim it wears is the loudest of theirs.
+fn tab_queue_leader(tab: &TabState) -> Option<SeatId> {
+    tab.sessions
+        .iter()
+        .filter_map(|(seat, leaf)| leaf.attention.ticket().map(|ticket| (ticket, *seat)))
+        .min_by_key(|(ticket, _)| *ticket)
+        .map(|(_, seat)| seat)
+}
+
+/// **One turn of the attention queue, for every shell in this window** (`attention` plan §11.1.4;
+/// §7.1.5b P1-8).
 ///
-/// What it does produce is the trace, and that is the point: on this build a real permission prompt
-/// from a real Claude Code writes `mint` and `admit` into `BT_ATTENTION_TRACE`, which is the
-/// evidence that the producer, the endpoint, the tables and the ledger are one working chain.
-fn settle_attention_ledger(
+/// **What "asking" means, said out loud, and it is not what it was.** The queue's members used to
+/// be the sessions whose bell was latched, because a `BEL` was the only byte a program could send
+/// this terminal that meant *I want you*. Four recordings of a real Claude Code (`attention` plan
+/// §2) established that a bell rings when a **turn ends**, which is an event, and that a badge
+/// meaning "it is standing there waiting for you" is a state — so the badge lit when it should not,
+/// could not be put out, and could not say why. A2 takes the bell out of this door entirely. What
+/// comes in now is a credential the program can **withdraw** ([`attention::AttentionLedger`]), and
+/// the bell keeps the claim it always honestly had: a flat dot a look spends.
+///
+/// **A place is taken once and only once.** The ledger's own guard is that a held place is never
+/// re-stamped, and the difference matters at the other end: the bell latch retires when the tab is
+/// *looked at* ([`attention_is_consumed`]), while a place retires only when it is *answered*.
+/// Re-stamping would hand a shell that asks twice while unanswered a younger place than one that
+/// asked once and waited, and 先到先服务 would quietly become last-come-first.
+///
+/// **Everything a frame can decide, in one pass over one leaf at a time**, which is the shape the
+/// fix of 2026-08-21 left behind and A2 keeps. Four decisions, in the one order that is not
+/// arbitrary:
+///
+/// 1. **the timers that came due** — a credential that ran out this instant is not one to hand a
+///    place to, and the other way round would put an `admit` and a `withdraw` for the same episode
+///    in the file one line apart;
+/// 2. **a bell that has not been announced** — read here because the step below spends the latch it
+///    is read from. It takes no place and mints nothing (red line 14): the end of a turn reaches
+///    the desktop on its own lane and never through the queue;
+/// 3. **the queue's own pass** — which admits a request nobody is looking at and refuses one they
+///    are;
+/// 4. **the look** — watching is consuming, so the bell and failure latches retire on the tab that
+///    is both on screen *and* in a focused window. Both go together because `bt-term` retires them
+///    together, and because "the user has seen this" is one fact and not two.
+///
+/// **No unread ledger arithmetic here, and its absence is load-bearing.** This runs once per turn
+/// of the loop and *after* the turn's tab switch has already been paid, so a ledger advanced from
+/// `tab_is_active` squares the tab that arrived and strands the tab that left one revision behind —
+/// a permanent dot on a tab whose shell never spoke. Seeing is painting, and painting is answered
+/// where the painting happens ([`Runtime::redraw`]).
+fn settle_attention(
     tabs: &mut [TabState],
     active_tab: usize,
     window_is_focused: bool,
@@ -15232,20 +15114,52 @@ fn settle_attention_ledger(
     now: Instant,
     trace: Option<&attention_trace::Trace>,
 ) {
+    let traced = trace.is_some();
     for (index, tab) in tabs.iter_mut().enumerate() {
         let tab_is_active = index == active_tab;
+        let consumed = attention_is_consumed(tab_is_active, window_is_focused);
         let reach = ledger_reach(tab_is_active, window_is_focused);
+        // Only computed when someone is reading: the claim is a fold over every shell in the tab,
+        // and this pass runs on every turn of the event loop. The leader is sampled beside it,
+        // because a dot that goes *out* this turn is reported by the pane that was holding it.
+        let was = traced.then(|| tab.fleet_claim_for(tab_is_active));
+        let leader_before = traced.then(|| tab_queue_leader(tab)).flatten();
         for (seat, leaf) in tab.leaves_mut() {
             let at = attention::Site {
                 tab: index,
                 seat: *seat,
             };
-            // The timers first: a credential that ran out this instant is not one the pass should
-            // hand a place to, and doing it the other way round would put a `admit` and a
-            // `withdraw` for the same episode in the file one line apart.
             for expired in leaf.attention_clock.due(now) {
                 let lines = leaf.attention.apply(at, reach, expired, next_place).lines;
                 emit_attention_lines(trace, lines);
+            }
+            // **The weak tier, which is a level on a status snapshot and has to become an edge.**
+            // `bt-term` mints a generation on the `None → Some` rise of `RequestAttention=yes` and
+            // clears the live value on `=no`; the translation is the ledger's own, next to the
+            // mirror it compares against, so no call site keeps a second copy of what was last
+            // seen. A program restating `yes` every second produces no edge and therefore no line.
+            //
+            // One snapshot for both this and the bell below: `status()` is a coherent reading of
+            // the session, and asking twice would let two decisions in one turn be taken from two
+            // readings of one shell.
+            let reported = leaf.session.status();
+            if let Some(edge) = leaf.attention.weak_edge(reported.attention_request) {
+                let lines = leaf.attention.apply(at, reach, edge, next_place).lines;
+                emit_attention_lines(trace, lines);
+            }
+            if reported.bell_latched && !leaf.bell_reported {
+                leaf.bell_reported = true;
+                // **`enabled` is true because there is no switch yet.** `turn_end_notification` is
+                // C2's setting; until it exists, "off" is not a state this build can be in, and
+                // passing `false` would be inventing a preference nobody expressed.
+                let outcome = leaf.attention.announce_turn_end(
+                    at,
+                    reach,
+                    true,
+                    attention::Transport::Bel,
+                    attention::Via::Bel,
+                );
+                emit_attention_lines(trace, outcome.lines);
             }
             let settle = attention::Event::Settle {
                 active: tab_is_active,
@@ -15253,8 +15167,98 @@ fn settle_attention_ledger(
             };
             let lines = leaf.attention.apply(at, reach, settle, next_place).lines;
             emit_attention_lines(trace, lines);
+            if consumed {
+                leaf.session.clear_attention();
+            }
+            // Whatever spent the latch — this look, or `mark_seen` on the way in — re-arms the
+            // edge, so the next turn that ends is announced instead of being read as this one.
+            leaf.bell_reported = leaf.session.status().bell_latched;
+        }
+        if let Some(was) = was {
+            let now_claim = tab.fleet_claim_for(tab_is_active);
+            if now_claim != was {
+                // §13.2.1: the request this change is about, when it is about one at all. The third
+                // branch is the common one — most claim changes are unread, bell or work in flight,
+                // and none of those belongs to a request.
+                let leader = if now_claim == StatusClaim::Awaiting {
+                    tab_queue_leader(tab)
+                } else {
+                    leader_before
+                };
+                let episode = leader
+                    .and_then(|seat| tab.sessions.get(&seat))
+                    .and_then(|leaf| {
+                        leaf.attention.claim_episode(
+                            was == StatusClaim::Awaiting,
+                            now_claim == StatusClaim::Awaiting,
+                        )
+                    });
+                attention_trace::emit(trace, || {
+                    attention::claim_line(
+                        index,
+                        episode,
+                        &format!("{was:?}"),
+                        &format!("{now_claim:?}"),
+                    )
+                });
+            }
         }
     }
+}
+
+/// **The out door, over the tab that holds the place** (`attention` plan §11.1.4's `Answer` row).
+///
+/// **Named for the seat and not for the tab's focus**, which is the half of the ruling the
+/// 2026-08-21 fix deliberately left alone and 2026-08-25 did not touch either: a place taken by one
+/// pane is answered in *that* pane. Typing into a sibling seat of the same tab does not retire it,
+/// because looking at a blocked agent — and typing at the shell beside it — does not unblock it.
+///
+/// A free function rather than a method, because [`Runtime::answer_attention`] is this call plus
+/// one borrow split, and a fixture holding a bare tab should exercise the window's own rule rather
+/// than a second copy of it.
+fn answer_attention_in(
+    tab: &mut TabState,
+    index: usize,
+    seat: SeatId,
+    by: UserInputKind,
+    reach: attention::Reach,
+    next_place: &mut u64,
+    trace: Option<&attention_trace::Trace>,
+) {
+    let Some(answered) = by.answer_kind() else {
+        return;
+    };
+    let Some(leaf) = tab.sessions.get_mut(&seat) else {
+        return;
+    };
+    let lines = leaf
+        .attention
+        .apply(
+            attention::Site { tab: index, seat },
+            reach,
+            attention::Event::Answer(answered),
+            next_place,
+        )
+        .lines;
+    emit_attention_lines(trace, lines);
+}
+
+/// **A pane is going away, so the place it held goes with it** (`attention` plan §4 B4).
+///
+/// One leaf, because the two doors that reach it name one leaf each: a pane closed on its own, and
+/// every pane of a tab closed together. The window's serial is not wound back — a place that was
+/// handed out was handed out, and the ledger says why in its own words.
+fn expire_leaf_attention(
+    at: attention::Site,
+    reach: attention::Reach,
+    leaf: &mut LeafSession,
+    next_place: &mut u64,
+) {
+    let lines = leaf
+        .attention
+        .apply(at, reach, attention::Event::LeafGone, next_place)
+        .lines;
+    emit_attention_lines(attention_trace::global(), lines);
 }
 
 /// The next instant any pane in this window owes the loop a wake-up on the ledger's account.
@@ -20160,13 +20164,21 @@ impl TabState {
             .find_map(|leaf| leaf.session.status().progress)
     }
 
-    /// Mark this tab as read, and retire the attention it had latched.
+    /// Mark this tab as read, and retire the attention it had **latched**.
     ///
     /// Called when the tab becomes the one on screen. Looking at a tab is the
     /// event that answers every claim it was making: the output is now seen, the
     /// bell has been heard, and the failure has been read about. `bt-term` owns
     /// the two latches and exposes exactly one way to drop them, which is what
     /// keeps "the user looked" a single decision rather than three.
+    ///
+    /// **A standing request is not one of them**, and the word "latched" is doing the work: a bell
+    /// and a failing exit code are one-shot facts that a look spends, while `RequestAttention=yes`
+    /// is a sentence the program is still saying. A terminal that unsaid it because somebody
+    /// glanced at the tab would be answering on the program's behalf — the withdrawal is the
+    /// program's alone, or the user's answer, recorded as a watermark rather than as an erasure
+    /// (`attention` plan §10.9; 看一眼阻塞的 agent 不解除阻塞). The ledger is offered the same look
+    /// by [`Runtime::mark_attention_seen`], one call away from this one, and answers with nothing.
     ///
     /// **Every leaf, not the focused one.** The claim being answered is the
     /// tab's, and a tab's claim is its whole fleet's ([`fleet_claim`]) — so
@@ -20354,7 +20366,7 @@ impl TabState {
     fn fleet_awaiting(&self) -> bool {
         self.sessions
             .values()
-            .any(|leaf| leaf.attention_ticket.is_some())
+            .any(|leaf| leaf.attention.ticket().is_some())
     }
 
     /// Whether anything in this tab's mark slot is moving under its own steam,
@@ -22441,8 +22453,8 @@ fn create_leaf_session(
         spawn_place,
         session,
         // Nobody has asked for anything yet.
-        attention_ticket: None,
         attention: attention::AttentionLedger::default(),
+        bell_reported: false,
         attention_clock: attention_wire::WaitClock::default(),
         attention_capability: capability,
         // Aimed at the tail, which is where a card looks until somebody turns a
@@ -24271,7 +24283,6 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         // Resting where the bit is, and the two are set together below: a window
         // that opens *in* focus mode has not animated into it, it was born there.
         focus_reveal: RevealTween::resting(0.0, RAIL_TRANSITION),
-        attention_next_ticket: 0,
         attention_next_place: 0,
         focus_mini_advance: 0.0,
         focus_mini_face_advance: 0.0,
@@ -25702,6 +25713,12 @@ impl Runtime<'_> {
         // a tab that became active while still counting as unread would flash
         // its own dot on the way in.
         self.window.tabs[index].mark_seen();
+        // **And the same look, put to the ledger, which answers it with nothing** (`attention` plan
+        // §10.9, red line 11). It is written rather than left out because the two mechanisms are
+        // one sentence apart and the difference between them is the whole ruling: a look spends a
+        // *latch*, and a standing request is not a latch — it is a sentence the program is still
+        // saying, and only the program or an answer ends it. 看一眼阻塞的 agent 不解除阻塞.
+        self.mark_attention_seen(index);
         // Ordered after the assignment on purpose: the tab being revealed is the
         // active one, and an active tab is measured with the skirt only an active
         // tab has.
@@ -26199,6 +26216,20 @@ impl Runtime<'_> {
                     self.app.recent.record(seed, pages, SystemTime::now());
                 }
                 let mut removed = self.window.tabs.remove(index);
+                // Every place this tab's panes held, given up before its shells are — the same
+                // door `close_pane` uses, asked of every leaf because a tab closes all of them.
+                let reach = ledger_reach(was_active, self.window.window_focused);
+                for (seat, leaf) in removed.leaves_mut() {
+                    expire_leaf_attention(
+                        attention::Site {
+                            tab: index,
+                            seat: *seat,
+                        },
+                        reach,
+                        leaf,
+                        &mut self.window.attention_next_place,
+                    );
+                }
                 // Every leaf's shell, not the focused one's. Reaching for
                 // `removed.pty` went through the deref and closed exactly one of
                 // them — see [`TabState::shutdown_all_shells`] for the ConPTY a
@@ -37281,6 +37312,17 @@ impl Runtime<'_> {
         if kind == bt_layout::SeatKind::Terminal
             && let Some(mut leaf) = self.sessions.remove(&seat)
         {
+            // And the place it held in this window's queue, which is one of the three doors out
+            // (`attention` plan §4 B4): the program never withdrew and nobody answered, so the
+            // ledger says `expire … reason=leaf-gone` and the serial stands where it is.
+            let index = self.window.active_tab;
+            let reach = ledger_reach(true, self.window.window_focused);
+            expire_leaf_attention(
+                attention::Site { tab: index, seat },
+                reach,
+                &mut leaf,
+                &mut self.window.attention_next_place,
+            );
             if let Some(pty) = leaf.pty.as_mut() {
                 pty.shutdown().context("shut down closed pane's shell")?;
             }
@@ -52754,6 +52796,11 @@ impl Runtime<'_> {
                 "write an inserted files row path to PTY",
             )
         })?;
+        // One user gesture, landing in one named seat — so it answers what that seat was asking
+        // (`attention` plan §10.3.2 row 4). The seat is the shell the path went into, which is the
+        // tab's own focused leaf and the one `shell_mut` just wrote through.
+        let seat = self.window.tabs[active].focused_leaf;
+        self.answer_attention(seat, UserInputKind::FilesRow);
         self.pending_keyboard_at = Some(Instant::now());
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
@@ -56956,21 +57003,10 @@ impl Runtime<'_> {
             return Ok(());
         }
         self.window.strip_animation_ticked_at = Some(now);
-        // Both doors of the attention queue, in one pass over one leaf at a time
+        // Every door of the attention queue, in one pass over one leaf at a time
         // — see `settle_attention` for why they stopped being two passes whose
-        // order was the mechanism.
+        // order was the mechanism, and for the order the four that are left run in.
         settle_attention(
-            &mut self.window.tabs,
-            self.window.active_tab,
-            self.window.window_focused,
-            &mut self.window.attention_next_ticket,
-            attention_trace::global(),
-        );
-        // And the ledger's own turn, beside it. It draws nothing and hands nothing to the queue
-        // above; what it does is take places and let go of them in the trace, which is where the
-        // evidence that a real producer reached a real pane has to be readable before A2 makes it
-        // visible.
-        settle_attention_ledger(
             &mut self.window.tabs,
             self.window.active_tab,
             self.window.window_focused,
@@ -63863,6 +63899,10 @@ impl Runtime<'_> {
                     self.mouse_route_name()
                 )
             });
+            // A press or a release forwarded into a program running there is as much a claim on it
+            // as a keystroke (user ruling 2026-08-25). Read at this door and not inside
+            // `send_user_input`, for that function's own stated reason.
+            self.answer_attention(self.focused_leaf, UserInputKind::MouseButton);
             return self.send_user_input(
                 &bytes,
                 "forward mouse button event to PTY",
@@ -64399,26 +64439,71 @@ impl Runtime<'_> {
         self.set_focus_mode(!self.window.focus_mode)
     }
 
-    /// **回答才消费** — an `Enter` typed into a session gives up its place.
+    /// **回答才消费** — a user action **with a source**, put into this seat's shell, answers what
+    /// it was asking (`attention` plan §10.3.2, §11.3; user ruling 2026-08-25).
     ///
-    /// The one door out of the queue, and it is a *keystroke into that shell*
-    /// rather than a glance at it. §7.1.5b is explicit about why: looking at a
-    /// blocked agent does not unblock it, so a queue that emptied on sight would
-    /// be a queue that forgot exactly the things it exists to remember. Answering
-    /// is the only event that can plausibly have ended the wait.
+    /// The door out of the queue, and it is a *write into that shell* rather than a glance at it.
+    /// §7.1.5b is explicit about why: looking at a blocked agent does not unblock it, so a queue
+    /// that emptied on sight would be a queue that forgot exactly the things it exists to remember.
     ///
-    /// Silent when the seat holds no place, which is the ordinary case: every
-    /// `Enter` in every shell comes through here, and almost none of them is
-    /// answering anything.
-    fn answer_attention(&mut self, seat: SeatId) {
-        let active = self.window.active_tab;
-        // Only the `Enter` that actually retired something writes a line: every
-        // `Enter` in every shell comes through here, and almost none of them is
-        // answering anything.
-        if let Some(ticket) = answer_attention_in(&mut self.window.tabs[active], seat) {
-            attention_trace::line(|| {
-                format!("answer tab={active} seat={seat:?} ticket={ticket} door=enter")
-            });
+    /// **It used to be `Enter` alone, and that was the third of the four defects.** Answering a
+    /// permission prompt in Claude Code is `1`, `y`, `Esc` or `↓`; you replied to the agent and the
+    /// badge stayed lit. The door is now "you put a byte in its mouth on purpose", which is the only
+    /// honest converse of "looking does not count" — a look produces no bytes.
+    ///
+    /// **The kind is the caller's, and it is a kind rather than a byte string.** Six of the seven
+    /// answer; the seventh is a forwarded pointer *sweep*, which is not an answer and cannot be
+    /// spelled as one ([`UserInputKind::answer_kind`]). The terminal's own replies — a
+    /// device-attributes answer, a colour report, the focus reports of A0.5, the PSReadLine repair —
+    /// are not writes of a *kind* at all and never reach this door; they are structurally out of
+    /// reach rather than excluded by a list (red line 10).
+    ///
+    /// Silent when the seat has nothing unanswered, which is the ordinary case: every keystroke in
+    /// every shell comes through here, and almost none of them is answering anything.
+    fn answer_attention(&mut self, seat: SeatId, by: UserInputKind) {
+        let index = self.window.active_tab;
+        let reach = ledger_reach(true, self.window.window_focused);
+        // Split rather than reached through `self`: the place is drawn from the window's own serial
+        // while the account it lands in is a field of one of that window's tabs.
+        let WindowRuntime {
+            tabs,
+            attention_next_place,
+            ..
+        } = &mut self.window;
+        answer_attention_in(
+            &mut tabs[index],
+            index,
+            seat,
+            by,
+            reach,
+            attention_next_place,
+            attention_trace::global(),
+        );
+    }
+
+    /// **A tab was looked at, offered to every account it holds** (`attention` plan §10.9).
+    ///
+    /// The arrival with nothing to say, and saying it is the point: [`TabState::mark_seen`] one
+    /// line up retires this tab's bells and failure codes, and a reader of these two lines has to be
+    /// able to see that the standing requests were *offered the same event and kept*. A rule that
+    /// held only because nobody had written the call is a rule one edit away from not holding.
+    fn mark_attention_seen(&mut self, index: usize) {
+        let reach = ledger_reach(true, self.window.window_focused);
+        let WindowRuntime {
+            tabs,
+            attention_next_place,
+            ..
+        } = &mut self.window;
+        for (seat, leaf) in tabs[index].leaves_mut() {
+            let at = attention::Site {
+                tab: index,
+                seat: *seat,
+            };
+            let lines = leaf
+                .attention
+                .apply(at, reach, attention::Event::MarkSeen, attention_next_place)
+                .lines;
+            emit_attention_lines(attention_trace::global(), lines);
         }
     }
 
@@ -64443,9 +64528,9 @@ impl Runtime<'_> {
     /// tab,由卡片橙框指路.
     ///
     /// **Nothing is consumed here.** Arriving is looking, and looking is not
-    /// answering; the place stands until an `Enter` retires it. That is what
-    /// makes a second press walk on to the next one instead of finding the queue
-    /// one shorter than it was.
+    /// answering; the place stands until [`Runtime::answer_attention`] retires it — or until the
+    /// program takes back what it asked. That is what makes a second press walk on to the next one
+    /// instead of finding the queue one shorter than it was.
     fn jump_to_attention(&mut self) -> Result<()> {
         let queue: Vec<((usize, SeatId), u64)> = self
             .window
@@ -64454,7 +64539,9 @@ impl Runtime<'_> {
             .enumerate()
             .flat_map(|(index, tab)| {
                 tab.sessions.iter().filter_map(move |(seat, leaf)| {
-                    leaf.attention_ticket.map(|ticket| ((index, *seat), ticket))
+                    leaf.attention
+                        .ticket()
+                        .map(|ticket| ((index, *seat), ticket))
                 })
             })
             .collect();
@@ -64462,7 +64549,7 @@ impl Runtime<'_> {
         let standing_on = self.window.tabs[active]
             .sessions
             .get(&self.focused_leaf)
-            .and_then(|leaf| leaf.attention_ticket);
+            .and_then(|leaf| leaf.attention.ticket());
         let waiting = queue.len();
         let Some((tab, seat)) = next_attention_stop(&queue, standing_on) else {
             attention_trace::line(|| format!("jump queue={waiting} from=none to=none"));
@@ -65488,6 +65575,11 @@ impl Runtime<'_> {
                     hit.column,
                     self.window.modifiers,
                 );
+                // On the wire a notch *is* a press (SGR button 64/65, with no release of its own),
+                // so "presses count" already covered it. Spelled at this door rather than in the
+                // helper, because the helper it shares with a pointer sweep carries two semantics
+                // and only one of them is an answer (`attention` plan §11.3).
+                self.answer_attention(target_seat, UserInputKind::MouseWheel);
                 self.send_mouse_input_to(
                     target_seat,
                     &one.repeat(notches.unsigned_abs() as usize),
@@ -65507,6 +65599,7 @@ impl Runtime<'_> {
                     lines,
                     self.leaf_application_cursor_mode(target_seat),
                 );
+                self.answer_attention(target_seat, UserInputKind::MouseWheel);
                 self.send_mouse_input_to(
                     target_seat,
                     &bytes,
@@ -66441,14 +66534,16 @@ impl Runtime<'_> {
         ) else {
             return Ok(());
         };
-        // **回答才消费** (§7.1.5b P1-8). The one event that gives up a place in
-        // the attention queue is an answer typed into the session that took it,
-        // so it is read here — off the key that is about to become bytes, and not
-        // from anything downstream: `send_user_input` is handed a byte string and
-        // cannot tell an answer from a paste that happens to end in a newline.
-        if matches!(event.logical_key, Key::Named(NamedKey::Enter)) {
-            self.answer_attention(self.focused_leaf);
-        }
+        // **回答才消费** (§7.1.5b P1-8, widened by the ruling of 2026-08-25). The event that gives
+        // up a place is a user action put into the session that took it, so it is read here — at
+        // the door that knows what kind of gesture this is, and not from anything downstream:
+        // `send_user_input` is handed a byte string and cannot tell an answer from a paste that
+        // happens to end in a newline.
+        //
+        // **Every key, not `Enter` alone.** Answering a permission prompt in Claude Code is `1`,
+        // `y`, `Esc` or `↓`, and a door that only heard `Enter` left the badge lit for a person who
+        // had already replied.
+        self.answer_attention(self.focused_leaf, UserInputKind::Keyboard);
         self.send_user_input(
             &bytes,
             "write keyboard input to PTY",
@@ -66503,6 +66598,10 @@ impl Runtime<'_> {
         )? {
             return Ok(());
         }
+        // A paste is one gesture landing in one named pane, so it answers whatever that pane was
+        // asking — and it is the pane the clipboard went into, not the one holding the keyboard
+        // (`attention` plan §10.3.2 row 3).
+        self.answer_attention(seat, UserInputKind::Paste);
         // **The keyboard's clock is the keyboard's pane's.** A paste into the
         // focused shell is a keystroke and is measured as one; a paste into the
         // pane a menu was raised over is not, and stamping `pending_keyboard_at`
@@ -66634,6 +66733,10 @@ impl Runtime<'_> {
                 self.window.preedit = None;
                 self.return_to_live_for_input();
                 self.pending_keyboard_at = Some(Instant::now());
+                // A commit is what you typed, so it answers (`attention` plan §10.3.2 row 2). A
+                // *preedit* is not: it puts no byte in the pipe and never reaches this arm at all,
+                // which is what keeps "IME counts" from being read as "mid-composition counts".
+                self.answer_attention(self.focused_leaf, UserInputKind::Ime);
                 // IMM32 also emits this commit when focus/layout changes mid-composition. M0-beta
                 // deliberately accepts it exactly like Windows Terminal: every commit reaches PTY.
                 write_pty_input(
@@ -71917,7 +72020,7 @@ impl FolioApp {
                 target.web_thumbs.put(*leaf, picture);
             }
         }
-        for (_, leaf) in carried.leaves_mut() {
+        for (_seat, leaf) in carried.leaves_mut() {
             // **The wake-up is re-pointed here and nowhere else** — see
             // [`LeafWake`] for what a shell nudging the bit of a window that has
             // closed costs, which is silence rather than a wrong picture.
@@ -71928,10 +72031,18 @@ impl FolioApp {
                     "F1b: a moved shell must nudge the window it is now in"
                 );
             }
-            // A place in a queue this pane has left — see this function's own
-            // doc. The bell is untouched, so a pane still asking is issued a new
-            // one by the window it arrived in.
-            leaf.attention_ticket = None;
+            // A place in a queue this pane has left — see this function's own doc, and
+            // `AttentionLedger::surrender_place` for why the serial cannot travel. The credentials
+            // are untouched, so a pane that is still asking is admitted again, with a place drawn
+            // from the serial of the window it arrived in.
+            let lines = leaf
+                .attention
+                .surrender_place(attention::Site {
+                    tab: index,
+                    seat: *_seat,
+                })
+                .lines;
+            emit_attention_lines(attention_trace::global(), lines);
         }
         target.tabs.push(carried);
         target.active_tab = target.tabs.len() - 1;
@@ -81407,44 +81518,6 @@ mod tests {
         }
     }
 
-    /// PIN (§7.1.5b P1-8) — **a place is taken once and never re-stamped.**
-    ///
-    /// 先到先服务 is a claim about *order*, and the way to lose it is to re-read
-    /// the signal: a shell that rings a second time while still unanswered would
-    /// take a younger serial than one that rang once and waited, which sorts the
-    /// most insistent program last. The guard is "does it already hold one",
-    /// never "did the signal just arrive".
-    ///
-    /// And the counter is never rewound, so two sessions that ask on the same
-    /// turn of the loop still have an order.
-    ///
-    /// Red gate: change the guard to `asking && !held.is_some()` → unchanged;
-    /// change it to re-stamp on every ask and the third assertion goes red.
-    #[test]
-    fn a_place_in_the_queue_is_taken_once_and_never_re_stamped() {
-        let mut next = 0;
-        assert_eq!(attention_ticket(None, false, &mut next), None);
-        assert_eq!(next, 0, "a shell that is not asking spends no serial");
-
-        let first = attention_ticket(None, true, &mut next);
-        let second = attention_ticket(None, true, &mut next);
-        assert_eq!((first, second), (Some(0), Some(1)));
-
-        assert_eq!(
-            attention_ticket(first, true, &mut next),
-            first,
-            "asking again while still in the queue keeps the place it has — \
-             otherwise the loudest program sorts last"
-        );
-        assert_eq!(next, 2, "and spends nothing");
-        assert_eq!(
-            attention_ticket(first, false, &mut next),
-            first,
-            "and the signal going quiet does not empty the queue either: only an \
-             answer does, and that is `answer_attention`'s business"
-        );
-    }
-
     /// PIN (§7.1.5b P1-8) — **`Ctrl+Shift+A` serves the oldest, then walks on,
     /// then wraps.**
     ///
@@ -81495,8 +81568,11 @@ mod tests {
         cross_tab(id, &names)
     }
 
-    /// The `BEL` byte, arriving in one pane's shell — the whole of the signal
-    /// this queue has (`bt-shellint` does not exist in this build).
+    /// The `BEL` byte, arriving in one pane's shell.
+    ///
+    /// It used to be the whole of this queue's signal. Since A2 it is an **announcement** — the end
+    /// of a turn, which is what `attention` plan §2's four recordings established it is — and the
+    /// tests below use it to show that it no longer opens the door it used to.
     fn ring(tab: &mut TabState, seat: SeatId) {
         tab.sessions
             .get_mut(&seat)
@@ -81510,212 +81586,215 @@ mod tests {
         );
     }
 
+    /// `OSC 1337;RequestAttention=<value>` — the weak tier's whole vocabulary, in one pane's shell.
+    ///
+    /// A real sequence through the real parser, because the thing under test is that a *standing*
+    /// request behaves differently from a bell, and a hand-set field would prove only that a field
+    /// can be set.
+    fn request_attention(tab: &mut TabState, seat: SeatId, value: &str) {
+        let bytes = format!("\x1b]1337;RequestAttention={value}\x07");
+        tab.sessions
+            .get_mut(&seat)
+            .expect("the fixture's seat holds a shell")
+            .session
+            .feed(bytes.as_bytes())
+            .expect("the sequence parses");
+    }
+
     fn ticket_at(tab: &TabState, seat: SeatId) -> Option<u64> {
-        tab.sessions[&seat].attention_ticket
+        tab.sessions[&seat].attention.ticket()
     }
 
     /// One turn of the event loop's attention pass over one window's tabs.
     fn one_turn(tabs: &mut [TabState], active: usize, focused: bool, next: &mut u64) {
-        settle_attention(tabs, active, focused, next, None);
+        settle_attention(tabs, active, focused, next, Instant::now(), None);
     }
 
-    /// PIN (user ruling 2026-08-21) — **the door into the queue is the door out
-    /// of the latch, read from the other side.**
+    /// The out door, over a bare tab — **the runtime's own function**, so a fixture cannot drift
+    /// away from what the window does. `Runtime::answer_attention` is this call plus the borrow
+    /// split a window needs and a one-tab fixture does not.
+    fn answer(
+        tabs: &mut [TabState],
+        index: usize,
+        seat: SeatId,
+        by: UserInputKind,
+        next: &mut u64,
+        trace: Option<&attention_trace::Trace>,
+    ) {
+        answer_attention_in(
+            &mut tabs[index],
+            index,
+            seat,
+            by,
+            attention::Reach::Nothing,
+            next,
+            trace,
+        );
+    }
+
+    /// PIN (`attention` plan §4 B2, user ruling 2026-08-25) — **a bell takes no place, anywhere.**
     ///
-    /// The truth table in full, because it is an `and` under a `not` and every
-    /// row of it is load-bearing: only the pane that is *both* on screen *and* in
-    /// a focused window asks for nothing.
+    /// The retirement, as a truth table, because "we removed it" is a claim about four rows and not
+    /// about one. A `BEL` is what a program sends at the *end of a turn*; the badge it used to light
+    /// says "it is standing there waiting for you", and the four recordings of §2 are why those are
+    /// not the same sentence. What the bell keeps is the claim it always honestly had — a flat dot
+    /// that a look spends.
+    ///
+    /// Red gate: put `bell_latched` back into the door and the first assertion goes red on three of
+    /// the four rows at once.
     #[test]
-    fn a_bell_asks_for_a_place_only_where_nobody_was_looking() {
-        for (tab_is_active, window_is_focused, asks) in [
-            (true, true, false),
-            (true, false, true),
-            (false, true, true),
-            (false, false, true),
-        ] {
-            assert_eq!(
-                attention_is_asked(true, tab_is_active, window_is_focused),
-                asks,
-                "a bell on active={tab_is_active} focused={window_is_focused}"
-            );
-            assert!(
-                !attention_is_asked(false, tab_is_active, window_is_focused),
-                "and silence asks for nothing anywhere"
-            );
-        }
-        // The two halves are each other's complement, which is the whole claim:
-        // there is one rule about looking, not two.
+    fn a_bell_takes_no_place_wherever_it_rings() {
         for tab_is_active in [true, false] {
             for window_is_focused in [true, false] {
+                let mut tabs = vec![ringing_tab(1, 1)];
+                let seat = tabs[0].seats.terminals()[0];
+                let mut next = 0;
+                ring(&mut tabs[0], seat);
+                one_turn(
+                    &mut tabs,
+                    usize::from(!tab_is_active),
+                    window_is_focused,
+                    &mut next,
+                );
                 assert_eq!(
-                    attention_is_asked(true, tab_is_active, window_is_focused),
-                    !attention_is_consumed(tab_is_active, window_is_focused)
+                    ticket_at(&tabs[0], seat),
+                    None,
+                    "a bell on active={tab_is_active} focused={window_is_focused} asked for a place"
+                );
+                assert_eq!(next, 0, "and spent no serial");
+                let watched = tab_is_active && window_is_focused;
+                assert_eq!(
+                    tabs[0].sessions[&seat].session.status().bell_latched,
+                    !watched,
+                    "the latch is spent by a look and by nothing else"
+                );
+                assert_eq!(
+                    tabs[0].fleet_claim_for(tab_is_active),
+                    if watched {
+                        StatusClaim::Silent
+                    } else {
+                        StatusClaim::Bell
+                    },
+                    "a bell claims `Bell`, which is the claim it can support"
                 );
             }
         }
     }
 
-    /// PIN (user report + Claude ruling 2026-08-21) — **a bell that rings in the
-    /// pane the user is sitting in front of takes no place in the queue.**
+    /// PIN (`attention` plan §11.1.4's `Settle` rows) — **a standing request behind a closed lid is
+    /// exactly what the queue is for, and one in front of you asks for nothing.**
     ///
-    /// The bug, in one test. Admission used to read the latch alone, so the same
-    /// turn that spent the latch ("watching is consuming", §7.1.5b) handed out a
-    /// ticket — and the only door out of the queue is an `Enter` in that exact
-    /// seat. Claude Code rings on every turn it ends, so the tab the user was
-    /// working in wore an orange ring that working in it could not put out
-    /// (user's screenshot, 2026-08-21).
-    ///
-    /// Red gate: hand `attention_ticket` the raw latch instead of
-    /// [`attention_is_asked`] and every assertion below goes red at once — a
-    /// ticket, an `Awaiting` claim, and a pulsing halo on the card of the tab the
-    /// user is typing into.
+    /// The door into the queue, in full: it is [`attention_is_consumed`] read from the other side,
+    /// and every row of that `and` under a `not` is load-bearing. Only the pane that is *both* on
+    /// screen *and* in a focused window is refused — a background **window** consumes nothing, which
+    /// is the one moment a queue is doing its job.
     #[test]
-    fn a_bell_on_the_tab_the_user_is_reading_takes_no_place() {
-        let mut tabs = vec![ringing_tab(1, 1)];
-        let seat = tabs[0].seats.terminals()[0];
-        let mut next = 0;
-        ring(&mut tabs[0], seat);
+    fn a_standing_request_asks_for_a_place_only_where_nobody_was_looking() {
+        for tab_is_active in [true, false] {
+            for window_is_focused in [true, false] {
+                let mut tabs = vec![ringing_tab(1, 1)];
+                let seat = tabs[0].seats.terminals()[0];
+                let mut next = 0;
+                request_attention(&mut tabs[0], seat, "yes");
+                one_turn(
+                    &mut tabs,
+                    usize::from(!tab_is_active),
+                    window_is_focused,
+                    &mut next,
+                );
 
-        one_turn(&mut tabs, 0, true, &mut next);
-
-        assert_eq!(
-            ticket_at(&tabs[0], seat),
-            None,
-            "你正看着的终端不需要一枚徽章告诉你看它"
-        );
-        assert_eq!(next, 0, "and no serial was spent");
-        assert!(
-            !tabs[0].sessions[&seat].session.status().bell_latched,
-            "the latch is spent by the look, exactly as it always was"
-        );
-        assert!(!tabs[0].fleet_awaiting());
-        assert_eq!(tabs[0].fleet_claim_for(true), StatusClaim::Silent);
-        assert_eq!(
-            tabs[0]
-                .mark_state(
-                    true,
-                    tabs[0].animation_epoch,
-                    Motion::Full,
-                    &bt_render::chrome_palette()
-                )
-                .pulse,
-            None,
-            "and the focus card wears no pulsing ring"
-        );
-
-        // And it stays that way however many turns run afterwards: nothing here
-        // is a race that a later frame could still lose.
-        for _ in 0..4 {
-            one_turn(&mut tabs, 0, true, &mut next);
+                let watched = tab_is_active && window_is_focused;
+                assert_eq!(
+                    ticket_at(&tabs[0], seat).is_some(),
+                    !watched,
+                    "a request on active={tab_is_active} focused={window_is_focused}"
+                );
+                assert_eq!(
+                    tabs[0].fleet_claim_for(tab_is_active),
+                    if watched {
+                        StatusClaim::Silent
+                    } else {
+                        StatusClaim::Awaiting
+                    }
+                );
+                // 你正看着的终端不需要一枚徽章告诉你看它 — and it stays that way however many turns
+                // run afterwards: nothing here is a race a later frame could still lose.
+                for _ in 0..4 {
+                    one_turn(
+                        &mut tabs,
+                        usize::from(!tab_is_active),
+                        window_is_focused,
+                        &mut next,
+                    );
+                }
+                assert_eq!(ticket_at(&tabs[0], seat).is_some(), !watched);
+                assert_eq!(
+                    next,
+                    u64::from(!watched),
+                    "and one serial at most was spent"
+                );
+            }
         }
-        assert_eq!(ticket_at(&tabs[0], seat), None);
     }
 
-    /// PIN (§7.1.5b P1-8) — **a bell behind a closed lid is exactly what the
-    /// queue is for.**
+    /// PIN (§7.1.5b P1-8) — **a place is taken once and never re-stamped.**
     ///
-    /// The dual of the pin above, and the reason the fix is a gate and not a
-    /// deletion: the tab you cannot see is the only place a badge can tell you
-    /// something the screen has not.
+    /// 先到先服务 is a claim about *order*, and the way to lose it is to re-read the signal: a pane
+    /// that asks a second time while still unanswered would take a younger serial than one that
+    /// asked once and waited, which sorts the most insistent program last.
+    ///
+    /// And the counter is never rewound, so two panes that ask on the same turn still have an order.
     #[test]
-    fn a_bell_behind_a_tab_nobody_is_looking_at_takes_its_place() {
-        let mut tabs = vec![ringing_tab(1, 1), ringing_tab(2, 1)];
-        let background = tabs[1].seats.terminals()[0];
-        let mut next = 0;
-        ring(&mut tabs[1], background);
-
-        one_turn(&mut tabs, 0, true, &mut next);
-
-        assert_eq!(ticket_at(&tabs[1], background), Some(0));
-        assert_eq!(next, 1);
-        assert!(
-            tabs[1].sessions[&background].session.status().bell_latched,
-            "and the latch is untouched — nobody looked at that tab"
-        );
-        assert_eq!(tabs[1].fleet_claim_for(false), StatusClaim::Awaiting);
-    }
-
-    /// PIN (user ruling 2026-08-21, second half) — **a bell in a background
-    /// *window* takes its place even on the tab that is on screen.**
-    ///
-    /// `attention_is_consumed`'s second clause, inherited whole: nobody is
-    /// reading a window that is not in front of them, so nothing in it is read.
-    /// This is the row that keeps the fix from swallowing the one moment the
-    /// queue is doing its job — the user is away in another application and an
-    /// agent has stopped to ask them something.
-    #[test]
-    fn a_bell_in_a_background_window_takes_its_place_on_the_active_tab_too() {
-        let mut tabs = vec![ringing_tab(1, 1)];
-        let seat = tabs[0].seats.terminals()[0];
-        let mut next = 0;
-        ring(&mut tabs[0], seat);
-
-        one_turn(&mut tabs, 0, false, &mut next);
-
-        assert_eq!(ticket_at(&tabs[0], seat), Some(0));
-        assert!(
-            tabs[0].sessions[&seat].session.status().bell_latched,
-            "and an unfocused window consumes no latch either"
-        );
-    }
-
-    /// PIN (user report 2026-08-21) — **the three-seat tab from the screenshot.**
-    ///
-    /// A tab with a files column and two Claude Code panes, active, in a focused
-    /// window. `B` rings at the end of a turn while the user is typing in `A`.
-    /// Before the fix `B` took a place that only an `Enter` *in B* could retire,
-    /// and §7.1.5b forbids retiring it from A ("看一眼阻塞的 agent 不解除阻塞") —
-    /// so the ring was permanent by construction. The fix is at the other door:
-    /// a bell that rings on the tab the user is looking at never takes a place
-    /// at all, so there is nothing for A's `Enter` to be asked to do.
-    ///
-    /// Red gate: without [`attention_is_asked`], `B` holds `Some(0)` here and the
-    /// tab claims `Awaiting` forever.
-    #[test]
-    fn a_sibling_pane_ringing_on_the_watched_tab_takes_no_place() {
-        let mut tabs = vec![ringing_tab(1, 3)];
+    fn a_place_in_the_queue_is_taken_once_and_never_re_stamped() {
+        let mut tabs = vec![ringing_tab(1, 2), ringing_tab(2, 1)];
         let seats = tabs[0].seats.terminals();
         let (a, b) = (seats[0], seats[1]);
         let mut next = 0;
-        ring(&mut tabs[0], b);
 
-        one_turn(&mut tabs, 0, true, &mut next);
+        request_attention(&mut tabs[0], a, "yes");
+        request_attention(&mut tabs[0], b, "yes");
+        one_turn(&mut tabs, 1, true, &mut next);
+        assert_eq!(
+            (ticket_at(&tabs[0], a), ticket_at(&tabs[0], b)),
+            (Some(0), Some(1)),
+            "two panes asking on one turn still have an order"
+        );
+        assert_eq!(next, 2);
 
-        assert_eq!(ticket_at(&tabs[0], b), None, "B rang where the user was");
-        assert_eq!(ticket_at(&tabs[0], a), None);
-        assert!(!tabs[0].fleet_awaiting(), "so the card wears no queue ring");
-        // And the out door is untouched: an `Enter` in A never had anything to
-        // do with B's place, before this fix or after it.
-        assert_eq!(answer_attention_in(&mut tabs[0], a), None);
-        assert_eq!(ticket_at(&tabs[0], b), None);
+        // Restating it decides nothing — `bt-term` mints on the rise alone, so there is no edge to
+        // read and no younger serial to hand out.
+        for _ in 0..3 {
+            request_attention(&mut tabs[0], a, "yes");
+            one_turn(&mut tabs, 1, true, &mut next);
+        }
+        assert_eq!(
+            ticket_at(&tabs[0], a),
+            Some(0),
+            "the loudest program must not sort last"
+        );
+        assert_eq!(next, 2, "and spends nothing");
     }
 
-    /// PIN (§7.1.5b P1-8, verbatim) — **a place taken behind a closed lid
-    /// survives the look, survives the sibling's `Enter`, and is retired only by
-    /// an `Enter` in its own seat.**
+    /// PIN (§7.1.5b P1-8, verbatim) — **a place taken behind a closed lid survives the look,
+    /// survives the sibling's keystroke, and is retired only by an action in its own seat.**
     ///
-    /// Every clause of the out door in one walk, and none of them moved on
-    /// 2026-08-21: the fix is at the *in* door, so this is the behaviour it had
-    /// to leave standing.
+    /// Every clause of the out door in one walk. The widening of 2026-08-25 is in the last of them:
+    /// the key that answers is `1`, not `Enter`, because that is what answering a permission prompt
+    /// in Claude Code actually is.
     #[test]
-    fn a_place_taken_behind_a_closed_tab_waits_for_its_own_enter() {
+    fn a_place_taken_behind_a_closed_tab_waits_for_an_action_in_its_own_seat() {
         let mut tabs = vec![ringing_tab(1, 1), ringing_tab(2, 3)];
         let seats = tabs[1].seats.terminals();
         let (a, b) = (seats[0], seats[1]);
         let mut next = 0;
 
-        // It rings while its tab is shut.
-        ring(&mut tabs[1], b);
+        // It asks while its tab is shut.
+        request_attention(&mut tabs[1], b, "yes");
         one_turn(&mut tabs, 0, true, &mut next);
         assert_eq!(ticket_at(&tabs[1], b), Some(0));
 
-        // The user switches to it and only looks. The latch retires; the place
-        // does not.
+        // The user switches to it and only looks.
         one_turn(&mut tabs, 1, true, &mut next);
-        assert!(
-            !tabs[1].sessions[&b].session.status().bell_latched,
-            "看一眼: the bell is heard"
-        );
         assert_eq!(
             ticket_at(&tabs[1], b),
             Some(0),
@@ -81723,64 +81802,64 @@ mod tests {
         );
         assert_eq!(tabs[1].fleet_claim_for(true), StatusClaim::Awaiting);
 
-        // An `Enter` in the sibling seat answers nothing.
-        assert_eq!(answer_attention_in(&mut tabs[1], a), None);
+        // A keystroke in the sibling seat answers nothing: typing at the shell beside a blocked
+        // agent does not unblock it either.
+        answer(&mut tabs, 1, a, UserInputKind::Keyboard, &mut next, None);
         assert_eq!(ticket_at(&tabs[1], b), Some(0));
 
-        // An `Enter` in its own seat is the one thing that does.
-        assert_eq!(answer_attention_in(&mut tabs[1], b), Some(0));
+        // And a pointer sweeping across its own pane is not an answer — the one member of the
+        // vocabulary that cannot be spelled as one (`attention` plan §11.3).
+        answer(&mut tabs, 1, b, UserInputKind::MouseMotion, &mut next, None);
+        assert_eq!(ticket_at(&tabs[1], b), Some(0));
+
+        // A key in its own seat is what does it.
+        answer(&mut tabs, 1, b, UserInputKind::Keyboard, &mut next, None);
         assert_eq!(ticket_at(&tabs[1], b), None);
         assert!(!tabs[1].fleet_awaiting());
 
-        // And a later turn does not hand it back: the latch went with the look,
-        // so there is nothing left to re-admit.
+        // And a later turn does not hand it back: the request is still standing, but it has been
+        // answered, and `Acknowledged` is a fixed point under the pass. **This is the state a bit
+        // could not represent**, and the whole reason the ledger counts generations.
         one_turn(&mut tabs, 1, true, &mut next);
         assert_eq!(ticket_at(&tabs[1], b), None);
+        assert_eq!(next, 1, "no second serial was spent");
     }
 
-    /// PIN (user ruling 2026-08-21, the ordering clause) — **one pass, one set of
-    /// facts, so there is no turn in which a spent latch leaves a place behind.**
+    /// PIN (`attention` plan §11.1.3 rule 4) — **the program that withdraws takes the dot with it.**
     ///
-    /// The old code was two passes with a comment between them arguing that
-    /// admitting *before* retiring was the mechanism. It was the bug. This pins
-    /// the property that replaced the argument: after a single turn over a bell
-    /// that rang where the user was looking, **both** the latch and the place are
-    /// gone, and the tab's claim went nowhere.
-    ///
-    /// Red gate: split the pass in two again, in either order, and one of these
-    /// two assertions fails — admit-then-retire leaves the ticket, and
-    /// retire-then-admit passes here only by an ordering nobody can see from the
-    /// call site.
+    /// The half a bell never had, and the reason `RequestAttention` is the sequence this is built
+    /// on: "it wants you" is a sentence that can be **taken back**. Nothing the user does is
+    /// involved, which is what makes it a second door rather than a second spelling of the first.
     #[test]
-    fn a_watched_bell_leaves_neither_a_latch_nor_a_place() {
-        let mut tabs = vec![ringing_tab(1, 2)];
-        let seats = tabs[0].seats.terminals();
+    fn a_withdrawn_request_gives_up_its_place_without_anybody_answering() {
+        let mut tabs = vec![ringing_tab(1, 1), ringing_tab(2, 1)];
+        let seat = tabs[1].seats.terminals()[0];
         let mut next = 0;
-        for seat in &seats {
-            ring(&mut tabs[0], *seat);
-        }
-        assert_eq!(tabs[0].fleet_claim_for(true), StatusClaim::Bell);
 
+        request_attention(&mut tabs[1], seat, "yes");
         one_turn(&mut tabs, 0, true, &mut next);
+        assert_eq!(ticket_at(&tabs[1], seat), Some(0));
 
-        for seat in &seats {
-            assert!(!tabs[0].sessions[seat].session.status().bell_latched);
-            assert_eq!(ticket_at(&tabs[0], *seat), None);
-        }
-        assert_eq!(next, 0);
-        assert_eq!(tabs[0].fleet_claim_for(true), StatusClaim::Silent);
+        request_attention(&mut tabs[1], seat, "no");
+        one_turn(&mut tabs, 0, true, &mut next);
+        assert_eq!(ticket_at(&tabs[1], seat), None);
+        assert_eq!(tabs[1].fleet_claim_for(false), StatusClaim::Silent);
+
+        // And asking again after a withdrawal is a **new** request, with a new place: the generation
+        // it mints is above every watermark the last one was compared against.
+        request_attention(&mut tabs[1], seat, "yes");
+        one_turn(&mut tabs, 0, true, &mut next);
+        assert_eq!(ticket_at(&tabs[1], seat), Some(1));
     }
 
-    /// PIN — **[`claim_after_a_look`]'s stand-in for the retirement is nailed to
-    /// the real one.**
+    /// PIN — **the look that spends a latch is the runtime's own call.**
     ///
-    /// That fixture reproduces `clear_attention`'s two field writes against a
-    /// bare [`SessionStatus`], because a `SessionStatus` cannot be injected into
-    /// a live session. It is therefore the one place in these tests that could
-    /// drift away from the runtime without anything failing. This is the anchor:
-    /// a real leaf, a real `BEL`, a real failing exit code, and the runtime's own
-    /// pass — and the two fields the fixture clears are exactly the two that end
-    /// up clear.
+    /// [`claim_after_a_look`] reproduces `clear_attention`'s two field writes against a bare
+    /// [`SessionStatus`], because a `SessionStatus` cannot be injected into a live session. It is
+    /// therefore the one place in these tests that could drift away from the runtime without
+    /// anything failing. This is the anchor: a real leaf, a real `BEL`, a real failing exit code,
+    /// and the runtime's own pass — and the two fields the fixture clears are exactly the two that
+    /// end up clear.
     #[test]
     fn the_look_that_spends_a_latch_is_the_runtimes_own_call() {
         let mut tabs = vec![ringing_tab(1, 1)];
@@ -81809,18 +81888,17 @@ mod tests {
         assert_eq!(tabs[0].fleet_claim_for(true), StatusClaim::Silent);
     }
 
-    /// PIN — **`BT_ATTENTION_TRACE` says which of the queue's decisions
-    /// happened, and says each of them once.**
+    /// PIN — **`BT_ATTENTION_TRACE` says which of the queue's decisions happened, and says each of
+    /// them once** (`attention` plan §11.1.5's field contract).
     ///
-    /// The whole reason this trace exists: the orange ring is the only thing the
-    /// queue ever says out loud, and it says the same word for every reason it
-    /// could be lit. A user reporting "it never goes out" was reporting a result;
-    /// these lines are the decisions behind it.
+    /// The whole reason this trace exists: the orange ring is the only thing the queue ever says out
+    /// loud, and it says the same word for every reason it could be lit. A user reporting "it never
+    /// goes out" was reporting a result; these lines are the decisions behind it.
     ///
-    /// Two properties are pinned, and the second is the one a station is likely
-    /// to lose: every decision writes a line, and **nothing that decided nothing
-    /// writes one.** The pass runs on every turn of the event loop, so a station
-    /// that spoke whenever it merely *saw* a latch would drown the file.
+    /// Three properties, and the last two are the ones a station is likely to lose: every decision
+    /// writes a line; **nothing that decided nothing writes one** (the pass runs on every turn of
+    /// the event loop, so a station that spoke whenever it merely *saw* a level would drown the
+    /// file); and **every line names the request it is about**, `episode=-` included.
     #[test]
     fn the_attention_trace_writes_one_line_per_decision_and_none_otherwise() {
         let path = std::env::temp_dir().join(format!(
@@ -81843,67 +81921,114 @@ mod tests {
                 })
                 .collect()
         };
+        let turn = |tabs: &mut [TabState], active: usize, next: &mut u64| {
+            settle_attention(tabs, active, true, next, Instant::now(), Some(&trace));
+        };
 
         let mut tabs = vec![ringing_tab(1, 1), ringing_tab(2, 2)];
         let watched = tabs[0].seats.terminals()[0];
         let background = tabs[1].seats.terminals()[1];
         let mut next = 0;
+        let mut written = 0;
+        let next_lines = |written: &mut usize, expected: &[String]| {
+            let lines = read(*written);
+            assert_eq!(lines, expected, "written from line {written}");
+            *written += lines.len();
+        };
 
         // A quiet turn decides nothing, and says nothing.
-        settle_attention(&mut tabs, 0, true, &mut next, Some(&trace));
-        assert_eq!(read(0), Vec::<String>::new());
+        turn(&mut tabs, 0, &mut next);
+        next_lines(&mut written, &[]);
 
-        // A bell where the user is looking: refused, and the tab's claim never
-        // moved, so there is no `claim` line either.
+        // **A bell where the user is looking.** It is a turn ending, so it is decided about once and
+        // reaches nothing; it takes no place, and the only other line is the dot the look put out.
         ring(&mut tabs[0], watched);
-        settle_attention(&mut tabs, 0, true, &mut next, Some(&trace));
-        let refused = read(0);
-        assert_eq!(refused.len(), 2, "{refused:?}");
-        assert!(
-            refused[0].starts_with("refuse tab=0 ") && refused[0].contains("reason=watched"),
-            "{refused:?}"
-        );
-        assert_eq!(
-            refused[1], "claim tab=0 was=Bell now=Silent",
-            "and the dot the look put out is reported by the same pass"
+        turn(&mut tabs, 0, &mut next);
+        next_lines(
+            &mut written,
+            &[
+                format!(
+                    "toast tab=0 seat={watched:?} why=turn-end episode=- reach=nothing src=bel \
+                     via=bel"
+                ),
+                "claim tab=0 episode=- was=Bell now=Silent".to_owned(),
+            ],
         );
 
-        // A bell behind a closed lid: admitted, and the tab's dot changed.
-        ring(&mut tabs[1], background);
-        settle_attention(&mut tabs, 0, true, &mut next, Some(&trace));
-        let admitted = read(2);
-        assert_eq!(admitted.len(), 2, "{admitted:?}");
-        assert!(
-            admitted[0].starts_with("admit tab=1 ")
-                && admitted[0].contains("ticket=0")
-                && admitted[0].contains("bell=1 active=0 focused=1"),
-            "{admitted:?}"
+        // **A standing request behind a closed lid**: minted, admitted, and the tab's dot changed.
+        // No `toast`, because a program that says it wants you has not said it is blocked on you.
+        request_attention(&mut tabs[1], background, "yes");
+        turn(&mut tabs, 0, &mut next);
+        next_lines(
+            &mut written,
+            &[
+                format!(
+                    "mint tab=1 seat={background:?} episode=1 src=osc gen=1 grounds=requested prev=-"
+                ),
+                format!(
+                    "admit tab=1 seat={background:?} ticket=0 episode=1 grounds=requested \
+                     active=0 focused=1"
+                ),
+                "claim tab=1 episode=1 was=Silent now=Awaiting".to_owned(),
+            ],
         );
-        assert_eq!(admitted[1], "claim tab=1 was=Bell now=Awaiting");
 
-        // Ringing again while it stands in the queue decides nothing — and this
-        // is the line that would repeat sixty times a second if it did.
+        // Restating it while it stands decides nothing — and this is the line that would repeat
+        // sixty times a second if it did.
         for _ in 0..3 {
-            ring(&mut tabs[1], background);
-            settle_attention(&mut tabs, 0, true, &mut next, Some(&trace));
+            request_attention(&mut tabs[1], background, "yes");
+            turn(&mut tabs, 0, &mut next);
         }
-        assert_eq!(read(4), Vec::<String>::new());
+        next_lines(&mut written, &[]);
 
-        // Looking at it retires the latch and keeps the place, exactly once.
-        settle_attention(&mut tabs, 1, true, &mut next, Some(&trace));
-        let looked = read(4);
-        assert_eq!(looked.len(), 1, "{looked:?}");
-        assert!(
-            looked[0].starts_with("look tab=1 ")
-                && looked[0].contains("ticket=0")
-                && looked[0].ends_with("kept=1"),
-            "{looked:?}"
+        // Looking at it keeps the place, and says nothing at all about it: the ledger holds no
+        // latch for a look to spend.
+        turn(&mut tabs, 1, &mut next);
+        next_lines(&mut written, &[]);
+
+        // Answering is the door out, and it names what it answered. **No `claim` line follows**,
+        // and that is the station's own rule rather than an omission: a `claim` reports what the
+        // *pass* did to the dot, and the dot went out at the keystroke — which the `answer` line
+        // above is the record of.
+        answer(
+            &mut tabs,
+            1,
+            background,
+            UserInputKind::Keyboard,
+            &mut next,
+            Some(&trace),
         );
-        settle_attention(&mut tabs, 1, true, &mut next, Some(&trace));
-        assert_eq!(
-            read(5),
-            Vec::<String>::new(),
-            "and not again on the next turn"
+        turn(&mut tabs, 1, &mut next);
+        next_lines(
+            &mut written,
+            &[format!(
+                "answer tab=1 seat={background:?} ticket=0 episode=1 by=keyboard weak=1 strong=0"
+            )],
+        );
+
+        // And the program withdrawing what it asked closes the episode.
+        request_attention(&mut tabs[1], background, "no");
+        turn(&mut tabs, 1, &mut next);
+        next_lines(
+            &mut written,
+            &[
+                format!("clear tab=1 seat={background:?} episode=1 src=osc gen=1 reason=program"),
+                format!("drop tab=1 seat={background:?} episode=1 reason=program"),
+            ],
+        );
+
+        // **Every line names its request**, and the two spellings of "none" are the honest ones.
+        let all = read(0);
+        assert!(!all.is_empty());
+        for line in &all {
+            assert!(
+                line.contains(" episode="),
+                "a line that cannot say which request it is about: {line}"
+            );
+        }
+        assert!(
+            !all.iter().any(|line| line.contains("by=mouse-motion")),
+            "a pointer sweep can never reach the answer door"
         );
 
         let _ = std::fs::remove_file(&path);
@@ -100388,8 +100513,8 @@ mod tests {
             // Nor a place: a fixture was never put down anywhere.
             spawn_place: None,
             session,
-            attention_ticket: None,
             attention: attention::AttentionLedger::default(),
+            bell_reported: false,
             attention_clock: attention_wire::WaitClock::default(),
             // A fixture has no shell, so nothing was ever told a capability — and an empty string
             // is one no arriving message can match, which is the honest shape of that.

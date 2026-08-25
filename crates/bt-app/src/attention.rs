@@ -1,9 +1,10 @@
 //! **The attention ledger: two producers, one episode, one place that decides.**
 //!
 //! `docs/plans/attention/plan.md` is the specification and §11.1 is this file. Everything here is
-//! bookkeeping — no dot is drawn, no ticket is handed to the queue that exists today, no toast is
-//! raised. What it owns is the one question the old machine could not answer: **is this the same
-//! request as the last one, and has the user dealt with it?**
+//! bookkeeping — no dot is drawn here and no toast is raised here — but since A2 it is the
+//! bookkeeping the window's own queue is made of: the place this hands out is the place
+//! `StatusClaim::Awaiting` is drawn from. What it owns is the one question the old machine could not
+//! answer: **is this the same request as the last one, and has the user dealt with it?**
 //!
 //! # The defect this shape exists to remove
 //!
@@ -55,23 +56,9 @@
 //! are handed in. That is what lets the arrival grid of §11.1.4 be tested cell by cell instead of
 //! by driving a terminal.
 
-// **Both producers now reach this ledger, and nothing yet reads what it decides.**
-// A3 gave it the pipe and A1 gave it the OSC lane, so on this build a real request from a real
-// agent writes `mint` and `admit` into the trace — but no dot is drawn from any of it and no toast
-// is raised. The slice that reads it is A2, which cannot land until the two rulings it depends on
-// are in. The ordering is the plan's and the reason is written there: taking the false queue apart
-// before a real producer exists leaves an empty queue and a worse build than the one being fixed.
-//
-// So what the allowance still covers is the vocabulary this file names ahead of its readers — the
-// strong level nothing on the wire may ever be, the `Via` of a sequence whose line C3 will write —
-// and the ledger's own accessors that only a drawn dot will call.
-//
-// The attribute names the slice that will take it away, which is this repository's own rule for
-// one of these: an excuse that outlives its slice has to be visible rather than merely tolerated.
-#![allow(
-    dead_code,
-    reason = "A-core lands the ledger; A2 is the slice that reads it"
-)]
+// **A2 took the blanket `dead_code` excuse away**, which is what it said it would do: this module
+// is the running build's attention queue now, and the two things left unconstructed below carry
+// their own one-line reasons at the point where the gap is rather than over the whole file.
 
 use std::fmt;
 
@@ -119,6 +106,13 @@ pub(crate) enum Reach {
     /// where Windows will honour one.
     Flash,
     /// Out of reach of the window entirely — minimised or cloaked. The desktop is what is left.
+    ///
+    /// **Nothing constructs this yet**, and the gap is named rather than filled: telling
+    /// "minimised or on another virtual desktop" from "on this screen behind something" is
+    /// `IsIconic` and `DWMWA_CLOAKED`, which is slice C1's. Until those exist `ledger_reach`
+    /// answers the weaker of the two, which under-states how much of the user's attention is being
+    /// asked for rather than over-stating it.
+    #[allow(dead_code, reason = "C1 lands the fact that tells this from `Flash`")]
     Toast,
 }
 
@@ -180,6 +174,10 @@ pub(crate) enum Credential {
     /// `OSC 1337;RequestAttention=yes`, taken back by `=no`. A program **wants** you.
     Weak,
     /// `folio attention wait`. A program is **blocked on** you.
+    #[allow(
+        dead_code,
+        reason = "the pipe lane spells this tier as a `WaitKind` row today; the C slices name it"
+    )]
     Strong,
 }
 
@@ -189,6 +187,17 @@ pub(crate) enum Credential {
 /// Not storing them is the point: two producers each keeping their own copy of "are we asking" is
 /// exactly how the two would drift, and a test can build a field combination directly instead of
 /// walking a path of events to reach it.
+///
+/// **The window reads [`AttentionLedger::ticket`] and [`AttentionLedger::grounds`] rather than
+/// this**, and the asymmetry is deliberate: a dot is drawn from what is being asked for, and a
+/// caller handed a four-way state would have to `match` its way back to that. What this is for is
+/// the grid's own cells — a test that asserts the whole state would otherwise have to reconstruct
+/// it out of the two accessors, which is the reconstruction the derivation exists to make
+/// unnecessary.
+#[allow(
+    dead_code,
+    reason = "the derived state is what the grid's cells are spelled against"
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum State {
     /// Neither tier is asserting anything. Every leaf is born here.
@@ -242,10 +251,32 @@ pub(crate) enum Via {
     StopFailure,
     /// A bare bell at the end of a turn.
     Bel,
+    // **The four OSC names have no producer on this lane yet**, and that is a fact about the lane
+    // rather than about the parsers. `attention` plan §11.7 lists exactly four sources for the end
+    // of a turn — the `Stop` pair, a bare bell, codex's `notify` and pi's `agent_settled` — and an
+    // `OSC 9;<text>` is a *message*, not one of them. They are named here because §13.2.2 fixes the
+    // vocabulary in one place, so that a family arriving over one of them later adds a row rather
+    // than a value.
+    #[allow(
+        dead_code,
+        reason = "§11.7 has no turn-end source on this sequence yet"
+    )]
     Osc1337,
+    #[allow(
+        dead_code,
+        reason = "§11.7 has no turn-end source on this sequence yet"
+    )]
     Osc9,
+    #[allow(
+        dead_code,
+        reason = "§11.7 has no turn-end source on this sequence yet"
+    )]
     Osc777,
     /// kitty's `OSC 99`. **No producer yet** — named because the vocabulary is fixed here.
+    #[allow(
+        dead_code,
+        reason = "§11.7 has no turn-end source on this sequence yet"
+    )]
     Osc99,
     /// codex's `notify` program, whose only `type` today is `agent-turn-complete`.
     Notify,
@@ -477,6 +508,14 @@ pub(crate) enum Tier {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum IdSource {
     None,
+    /// **No shipped row is one** (§12.1.6), which is the honest state of the evidence rather than a
+    /// gap: a path may be written only from a verbatim quotation of an upstream payload, and none
+    /// has been taken. The day one is, that is a data change in `attention_map` and nothing else —
+    /// which is what `a_receipt_aims_as_narrowly_as_its_evidence_allows` exercises.
+    #[allow(
+        dead_code,
+        reason = "§12.1.6: no upstream identifier has been quoted yet"
+    )]
     Path(&'static str),
 }
 
@@ -566,6 +605,15 @@ impl MappingRow {
 /// itself (does this version have the event?), never for a version number we guessed at.
 ///
 /// Answers the offending kind rather than a bool, because a table that fails this has to say where.
+///
+/// **Nothing in the running build calls it**, and that is what it is for: the shipped catalogue
+/// deliberately holds both layers of `permission` so that `installed_rows` has something to choose
+/// between, and this is the checker that proves the *installed* set never does. A rule whose only
+/// witness is a test is still a rule; a rule with no witness at all is a comment.
+#[allow(
+    dead_code,
+    reason = "R2's checker; its witness is the catalogue's own red form"
+)]
 pub(crate) fn duplicated_tier(rows: &[MappingRow]) -> Option<(&'static str, WaitKind)> {
     for row in rows.iter().filter(|row| row.is_wait()) {
         let MappedAction::Wait { tier } = row.action else {
@@ -814,6 +862,11 @@ impl AttentionLedger {
         }
     }
 
+    /// [`State`], derived — see that type for why the window does not ask for it.
+    #[allow(
+        dead_code,
+        reason = "the derived state is what the grid's cells are spelled against"
+    )]
     pub(crate) fn state(&self) -> State {
         let Some(episode) = self.episode else {
             return State::Idle;
@@ -1189,6 +1242,28 @@ impl AttentionLedger {
         // The window's serial is not wound back, here or anywhere: a place that is gone was still
         // handed out, and reusing its number would make two different waits indistinguishable in
         // the one file that is supposed to tell them apart.
+    }
+
+    /// **The place this pane held in a window it has just left** (`attention` plan §4 B4).
+    ///
+    /// A tear-out carries the shell, its credentials and its episode into another window and
+    /// leaves the *place* behind — 号不跨窗, and the reason is arithmetic rather than policy:
+    /// places are ordered by a serial each window owns, so a number carried across is a number two
+    /// panes could hold at once and the walk over "who has been waiting longest" would have two
+    /// answers. The pane goes on asking, so the first pass in the window it landed in admits it
+    /// there, with that window's own next serial.
+    ///
+    /// **Nothing is wound back**, for [`Self::leaf_gone`]'s reason exactly, and nothing else is
+    /// touched: the credentials, the episode and its spent interruption all belong to the program
+    /// and the person, neither of whom did anything by dragging a tab.
+    pub(crate) fn surrender_place(&mut self, at: Site) -> Outcome {
+        let mut out = Outcome::default();
+        if let (Some(ticket), Some(episode)) = (self.ticket.take(), self.episode) {
+            out.lines.push(format!(
+                "expire {at} ticket={ticket} episode={episode} reason=torn-out"
+            ));
+        }
+        out
     }
 
     fn mint(&mut self, at: Site, source: Transport, generation: u64, out: &mut Outcome) {
