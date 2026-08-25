@@ -779,7 +779,7 @@ impl MathWorker {
         // Read here rather than handed down: the lane is spawned before there is
         // a `Runtime` to own the flag, and this is the same question
         // [`Runtime::trace_perf`] asks of the same variable.
-        let trace_perf = std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty());
+        let trace_perf = diagnostics::switched_on(std::env::var_os("BT_PERF_TRACE"));
         bt_platform::spawn_at_priority(
             "bt-image-scale-worker",
             bt_platform::ThreadPriority::BelowNormal,
@@ -18044,7 +18044,7 @@ fn files_float_content_height(
 /// swallowed whole: a diagnostic that can take the window down with it is a
 /// second bug wearing the first one's clothes.
 fn dump_chrome_frame(chrome: &seats::ChromeGroup) {
-    let Some(path) = std::env::var_os("BT_CHROME_DUMP") else {
+    let Some(path) = diagnostics::named_file(std::env::var_os("BT_CHROME_DUMP")) else {
         return;
     };
     use std::fmt::Write as _;
@@ -18114,7 +18114,7 @@ fn dump_focus_thumb_frame(
     stats: focus_thumb::ThumbStats,
     pages: web_thumb::WebThumbStats,
 ) {
-    let Some(path) = std::env::var_os("BT_FOCUS_THUMB_DUMP") else {
+    let Some(path) = diagnostics::named_file(std::env::var_os("BT_FOCUS_THUMB_DUMP")) else {
         return;
     };
     // **The page lane on the same line and not on a second switch** (W2 slice
@@ -18159,7 +18159,7 @@ fn dump_focus_thumb_frame(
 /// the second, and reading one file with both in it settles that without a second
 /// run.
 fn dump_overlay_frame(layers: &[marks::OverlayLayer]) {
-    let Some(path) = std::env::var_os("BT_CHROME_DUMP") else {
+    let Some(path) = diagnostics::named_file(std::env::var_os("BT_CHROME_DUMP")) else {
         return;
     };
     use std::fmt::Write as _;
@@ -24512,14 +24512,15 @@ impl Runtime<'_> {
         startup_started: Instant,
         cli: &cli::CliRequest,
     ) -> Result<(App, WindowRuntime)> {
-        let trace_startup = std::env::var_os("BT_STARTUP_TRACE").is_some();
-        let trace_resize = std::env::var_os("BT_RESIZE_TRACE").is_some();
-        let trace_layout_events = std::env::var_os("BT_LAYOUT_EVENTS").is_some();
-        // Set-but-empty is off, not on. `BT_PERF_TRACE=` is how a shell says
-        // "not this run", and taking it as on turned a profiling session into a
-        // measurement of its own `eprintln!`s — the per-frame trace dominated
-        // the profile that was supposed to be reading the frames.
-        let trace_perf = std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty());
+        // Set-but-empty is off, not on ([`diagnostics::switched_on`]).
+        // `BT_PERF_TRACE=` is how a shell says "not this run", and taking it as
+        // on turned a profiling session into a measurement of its own
+        // `eprintln!`s — the per-frame trace dominated the profile that was
+        // supposed to be reading the frames.
+        let trace_startup = diagnostics::switched_on(std::env::var_os("BT_STARTUP_TRACE"));
+        let trace_resize = diagnostics::switched_on(std::env::var_os("BT_RESIZE_TRACE"));
+        let trace_layout_events = diagnostics::switched_on(std::env::var_os("BT_LAYOUT_EVENTS"));
+        let trace_perf = diagnostics::switched_on(std::env::var_os("BT_PERF_TRACE"));
         let phase_started = Instant::now();
         // Read the previous session before the window exists, so its bounds can
         // be the window's opening bounds rather than a correction applied after
@@ -66633,7 +66634,7 @@ impl Runtime<'_> {
         // grepped, and the question "did the IME say that, or did we" has to
         // be answered from what the IME actually said. Written before any
         // routing so a swallowed event is still on the record.
-        if let Some(path) = std::env::var_os("BT_IME_TRACE") {
+        if let Some(path) = diagnostics::named_file(std::env::var_os("BT_IME_TRACE")) {
             use std::io::Write as _;
             if let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
@@ -67021,6 +67022,20 @@ impl Runtime<'_> {
                     .set_cell_width_subpixels(cell_width_subpixels(metrics));
                 leaf.session
                     .set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
+            }
+        }
+        // **And every page this window hosts** (§7.8 ⑨). The same sentence, said
+        // to the one kind of content in this window that computes its own
+        // pixels. A WebView2 controller in composition hosting has no window of
+        // its own to hear a display change through, and its own detection —
+        // switched off in `bt_platform`'s `configure` — noticed late enough to
+        // be photographed: the page arrived on the second display still laid out
+        // at the first one's ratio. This is where the number is known, so this
+        // is where it is said. A refusal is one line and not a window taken
+        // down, exactly as a refused placement is.
+        for web in self.window.web.values_mut() {
+            if let Err(error) = web.set_device_scale(scale_factor) {
+                eprintln!("BT_WEB rasterization scale failed: {error}");
             }
         }
         Ok(())
@@ -67815,6 +67830,12 @@ impl Runtime<'_> {
             hwnd,
             url,
             minted,
+            // **This window's scale factor, at birth** (§7.8 ⑨). Every number a
+            // composition-hosted controller holds about the display it is on is
+            // a number this window gave it, and the first of them has to be
+            // right: a page opened on the second display lays itself out before
+            // anything else happens to it.
+            self.window.renderer.metrics().scale_factor,
             Box::new(move || {
                 let _ = proxy.send_event(AppEvent::WebPageSpoke);
             }),
@@ -76616,10 +76637,23 @@ fn pty_size(grid: GridSize, physical: PhysicalSize<u32>) -> PtySize {
 }
 
 fn load_probe_input() -> Result<Option<Vec<u8>>> {
-    let Some(path) = std::env::var_os("BT_PROBE_INPUT") else {
+    probe_input(std::env::var_os("BT_PROBE_INPUT"))
+}
+
+/// The bytes `BT_PROBE_INPUT` names, or `None` when it names nothing.
+///
+/// **Set-but-empty names nothing** ([`diagnostics::named_file`]). This one read
+/// the value straight into a path, and `BT_PROBE_INPUT=` therefore did not turn
+/// the probe off — it stopped Folio before its window with `read BT_PROBE_INPUT
+/// : The system cannot find the path specified. (os error 3)`.
+///
+/// Takes the value rather than reading the environment, so the rule above is a
+/// decision a test can make: setting a process-wide variable is `unsafe` in this
+/// edition and races every other test in the same binary.
+fn probe_input(value: Option<std::ffi::OsString>) -> Result<Option<Vec<u8>>> {
+    let Some(path) = diagnostics::named_file(value) else {
         return Ok(None);
     };
-    let path = PathBuf::from(path);
     std::fs::read(&path)
         .with_context(|| format!("read BT_PROBE_INPUT {}", path.display()))
         .map(Some)
@@ -76730,7 +76764,7 @@ fn main() -> Result<()> {
     // and never in somebody's shell — which is the report that opened this.
     let storage = persist::storage_dir();
     let channel = diagnostics::enter_resident_run(&storage);
-    if std::env::var_os("BT_STARTUP_TRACE").is_some() {
+    if diagnostics::switched_on(std::env::var_os("BT_STARTUP_TRACE")) {
         eprintln!(
             "BT_STARTUP_TRACE: from here Folio talks to {}",
             channel.label()
@@ -76765,6 +76799,42 @@ mod tests {
 
     /// The tab a test that has only ever had one tab is talking about.
     const TAB_ONE: TabId = TabId(1);
+
+    /// PIN (user report, 2026-08-25) — **`BT_PROBE_INPUT=` opens no probe and
+    /// kills nothing.**
+    ///
+    /// The report was `Folio stopped: read BT_PROBE_INPUT : The system cannot
+    /// find the path specified. (os error 3)` — a window that never appeared
+    /// because a variable had been cleared rather than removed. The ruling is
+    /// this program's own and already written down for `BT_PTY_DUMP`: an emptied
+    /// variable is off.
+    ///
+    /// Red gate: read the value into a `PathBuf` without asking whether it names
+    /// anything, and the empty string becomes a file to open.
+    #[test]
+    fn an_emptied_probe_variable_is_off_and_not_a_nameless_file() {
+        assert!(
+            super::probe_input(None)
+                .expect("an unset variable is not a failure")
+                .is_none()
+        );
+        assert!(
+            super::probe_input(Some(std::ffi::OsString::new()))
+                .expect("an emptied variable is off, not a file this run cannot open")
+                .is_none(),
+        );
+        let named =
+            std::env::temp_dir().join(format!("folio-probe-input-{}.vt", std::process::id()));
+        std::fs::write(&named, b"\x1b[2J").expect("write a fixture into the scratch directory");
+        assert_eq!(
+            super::probe_input(Some(named.clone().into_os_string()))
+                .expect("a variable that names a readable file is read")
+                .as_deref(),
+            Some(b"\x1b[2J".as_slice()),
+            "and a variable that does name a file still feeds it in"
+        );
+        let _ = std::fs::remove_file(&named);
+    }
 
     /// PIN (P2-9 slice 2) — **the capacity a pane is born with and the capacity a
     /// fresh `settings.json` is written with are the same number**, and a file that

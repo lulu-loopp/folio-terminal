@@ -3737,7 +3737,10 @@ impl ViewportProjection {
                 // rather than flashing to source while its fresh relayout is off-thread. Its box
                 // height is already the scaled height, so the visible-text floor stays honest.
                 let accepted = box_height <= per_block_limit;
-                if !accepted && std::env::var_os("BT_PERF_TRACE").is_some() {
+                // Set-but-empty is off, as everywhere else this family is read.
+                if !accepted
+                    && std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty())
+                {
                     eprintln!(
                         "BT_PERF_TRACE live_math_event=source-fallback row={} box_subpixels={} per_block_limit_subpixels={} min_text_rows={} reason=block-exceeds-visible-text-floor",
                         artifact.start.row,

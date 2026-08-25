@@ -1113,8 +1113,16 @@ impl WebHost {
             controller3
                 .SetBoundsMode(COREWEBVIEW2_BOUNDS_MODE_USE_RAW_PIXELS)
                 .map_err(|error| failure("SetBoundsMode", &error))?;
+            // **Off, because this host says the scale itself and one number may
+            // have one author.** A composition-hosted controller has no window
+            // of its own; what it can watch is the parent this host gives it,
+            // and watching it is late — measured before the host took the job,
+            // a window carried onto a 1.5 display still had its page at
+            // `devicePixelRatio` 2 when it arrived and reached 1.5 somewhere
+            // after that, on a later disturbance rather than on the change. See
+            // [`WebHost::set_rasterization_scale`].
             controller3
-                .SetShouldDetectMonitorScaleChanges(true)
+                .SetShouldDetectMonitorScaleChanges(false)
                 .map_err(|error| failure("SetShouldDetectMonitorScaleChanges", &error))?;
         }
         Ok(())
@@ -1582,6 +1590,35 @@ impl WebHost {
         };
         unsafe { controller.SetBounds(bounds_rect(x, y, width, height)) }
             .map_err(|error| failure("ICoreWebView2Controller::SetBounds", &error))
+    }
+
+    /// **How many device pixels one CSS pixel is** — the page's
+    /// `devicePixelRatio`, told to the engine rather than discovered by it.
+    ///
+    /// With [`COREWEBVIEW2_BOUNDS_MODE_USE_RAW_PIXELS`] the bounds this host
+    /// sends are physical, so this number is the whole of what the page knows
+    /// about the display it is on: it divides the rectangle into CSS pixels and
+    /// it is what every raster inside the engine is sized for.
+    ///
+    /// **The host is the authority for it, and `configure` switches the
+    /// engine's own detection off** so that it is the only one. A
+    /// composition-hosted controller has no window to be told about a display
+    /// change through; what it has is the parent window this host lends it, and
+    /// what it does with that is late (see `configure`). The window knows the
+    /// moment the scale factor moves, so it is the window that says so — from
+    /// `bt_app::Runtime::apply_scale_factor`, and from the first placement a
+    /// newly built controller gets.
+    ///
+    /// A no-op before the controller arrives, like every other setter here.
+    pub fn set_rasterization_scale(&self, scale: f64) -> Result<(), String> {
+        let Some(controller) = self.controller.as_ref() else {
+            return Ok(());
+        };
+        let controller3: ICoreWebView2Controller3 = controller
+            .cast()
+            .map_err(|error| failure("ICoreWebView2Controller3", &error))?;
+        unsafe { controller3.SetRasterizationScale(scale) }
+            .map_err(|error| failure("SetRasterizationScale", &error))
     }
 
     /// **The parent window moved on the desktop.**

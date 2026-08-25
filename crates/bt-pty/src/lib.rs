@@ -1767,9 +1767,12 @@ mod tests {
     /// autoload its own `Microsoft.PowerShell.Utility`. See `crates/bt-pty/build.rs`, which now
     /// names the module path it needs instead of inheriting one.
     fn declare_probe_module_path(command: PtyCommand) -> PtyCommand {
+        // Set-but-empty is unset ([`pty_dump_path`]'s rule): declaring
+        // `PSModulePath=` would hand the child a module path that finds nothing,
+        // which is a stronger statement than the one a cleared variable makes.
         match std::env::var("BT_PSREADLINE_MODULE_PATH") {
-            Ok(module_path) => command.env("PSModulePath", module_path),
-            Err(_) => command,
+            Ok(module_path) if !module_path.is_empty() => command.env("PSModulePath", module_path),
+            _ => command,
         }
     }
 
