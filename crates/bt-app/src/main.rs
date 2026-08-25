@@ -6821,6 +6821,22 @@ struct WindowRuntime {
     /// wheel, the hit test and the watcher all read it, exactly as their docked
     /// twins read `git_pages_shown`.
     float_git_pages_shown: BTreeMap<float::FloatId, git_panel::GitPanelContent>,
+    /// **Where each float's own layer stands in the flattened overlay stack**
+    /// (§7.14c), written by [`Runtime::float_layer`] as the stack is built.
+    ///
+    /// A page carried into a float is seen through a hole punched *directly
+    /// above that float* ([`bt_render::WebHole::above`]), and the hole is decided
+    /// once a frame by `sync_web_page` — a whole pass away from the place the
+    /// stack is assembled, and on a different clock: the chrome is rebuilt when
+    /// something moves, the placement is answered every frame. So the index
+    /// crosses between them here, in the record the assembly leaves behind, and
+    /// the per-frame half goes on deciding *whether* there is a hole and *where*
+    /// on the glass — which is the half that must never be a frame late.
+    ///
+    /// Rebuilt from nothing on every pass, exactly as `float_git_pages_shown`
+    /// is: it is a record of what this frame's stack looks like, and a stale
+    /// entry in it is a page's hole punched over somebody else's window.
+    float_hole_level: BTreeMap<float::FloatId, usize>,
     /// The graph each preview **surface** drew this frame —
     /// [`Self::git_pages_shown`]'s twin, kept for the same `&self` hit test.
     ///
@@ -16728,9 +16744,26 @@ struct PreviewPlacement {
 /// A function and not two lines at the call site because it is the whole of the
 /// ruling and it is pure — the part that can be wrong without a window, and
 /// therefore the part a test can hold.
-fn hole_for(presence: webhost::WebPresence, floored: bool) -> Option<[f32; 4]> {
+///
+/// # And where in the stack it is punched (§7.14c, 2026-08-25)
+///
+/// `above` is [`bt_render::WebHole::above`] and it is this window's second
+/// answer, not the renderer's: **a page's pane is not always a seat.** A docked
+/// page passes `None` and is punched under the whole overlay stack, where every
+/// surface over its pane is entitled to cover it. A page carried into a float
+/// passes that float's own layer, because the float is its pane — a hole under
+/// the stack is a hole the float's face paints straight back over, which is the
+/// report this argument exists to answer.
+fn hole_for(
+    presence: webhost::WebPresence,
+    floored: bool,
+    above: Option<usize>,
+) -> Option<bt_render::WebHole> {
     match presence {
-        webhost::WebPresence::Shown(bounds) if floored => Some(bounds.as_rect()),
+        webhost::WebPresence::Shown(bounds) if floored => Some(bt_render::WebHole {
+            rect: bounds.as_rect(),
+            above,
+        }),
         _ => None,
     }
 }
@@ -17096,6 +17129,30 @@ struct OverlayStack {
 
 impl OverlayStack {
     /// The whole overlay, bottom to top — **this list is the z-order**.
+    /// **How many layers stand under the float group** — the offset a hole above
+    /// a float is spelled against (§7.14c).
+    ///
+    /// A page carried into a float is seen through a hole punched directly above
+    /// that float's own layer ([`bt_render::WebHole::above`]), and that index is
+    /// an index into [`Self::flattened`]'s one list. This is where the list's
+    /// order and the index meet, so it is written **beside** that list and in
+    /// its order — a group added to one has to be added to the other, and
+    /// `the_offset_below_the_floats_is_where_the_float_group_starts` is what
+    /// says so out loud rather than leaving it to be discovered by a page
+    /// appearing over somebody else's window.
+    fn below_the_floats(&self) -> usize {
+        self.preview_bars.len()
+            + self.terminal_bars.len()
+            + self.command_rail.len()
+            + self.rail.len()
+            + self.flight.len()
+            + self.ground.len()
+            + self.search.len()
+            + self.pane_notices.len()
+            + self.web_sheet.len()
+            + self.layout_peek.len()
+    }
+
     fn flattened(self) -> Vec<marks::OverlayLayer> {
         let Self {
             preview_bars,
@@ -20330,6 +20387,11 @@ struct WebPlacement {
     leaf: LeafId,
     presence: webhost::WebPresence,
     rect: Option<webhost::WebBounds>,
+    /// Where in the overlay stack this page's hole is punched — see
+    /// [`bt_render::WebHole::above`] and [`hole_for`]. `None` for a page whose
+    /// pane is a seat, which is under the whole stack; the float's own layer for
+    /// a page whose pane is a floating window.
+    above: Option<usize>,
 }
 
 /// **What a preview source can be written down as** — the one door between this
@@ -23660,6 +23722,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         files_name_widths: BTreeMap::new(),
         git_pages_shown: BTreeMap::new(),
         float_git_pages_shown: BTreeMap::new(),
+        float_hole_level: BTreeMap::new(),
         git_graphs_shown: BTreeMap::new(),
         files_view_widths: BTreeMap::new(),
         files_notice: None,
@@ -30198,7 +30261,12 @@ impl Runtime<'_> {
             Vec::new()
         };
         stack.layout_peek = self.layout_peek_layer();
-        stack.float = self.float_layer(now);
+        // **Read after the last group under the floats and before the floats
+        // themselves** (§7.14c): this is the offset every floated page's hole is
+        // spelled against, and the one place the stack's order and that index
+        // are the same statement.
+        let below_floats = stack.below_the_floats();
+        stack.float = self.float_layer(now, below_floats);
         stack.file_menu = self.file_menu_layer();
         stack.pane_menu = self.pane_menu_layer();
         stack.git_menu = self.git_menu_layer();
@@ -39311,14 +39379,41 @@ impl Runtime<'_> {
     /// the pane a press put the keyboard in is `focused_preview_seat`, which is
     /// the same reading `Focus::preview` one line above already takes.
     fn page_holds_the_keyboard(&self) -> bool {
-        let Some(seat) = self.focused_preview_seat() else {
-            return false;
-        };
-        // And not while the quick edit or a float has it: those are answered by
-        // `preview_keyboard_surface` above and are a different surface's
-        // keyboard, whatever seat is focused underneath them.
-        self.preview_keyboard_surface() == Some(self.preview_here(seat))
-            && self.seat_holds_a_page(seat)
+        self.page_with_the_keyboard().is_some()
+    }
+
+    /// **Which page typing goes into right now, docked or floated** (§7.14c,
+    /// closing §7.14b 挂账 ⓑ).
+    ///
+    /// One reading of [`Self::preview_keyboard_surface`] and a fork on what kind
+    /// of surface it named, which is the same shape [`a_page_still_has_a_pane`]
+    /// already takes for the same reason: **the float answers instead of the
+    /// tree, not beside it.** `pop_out_preview` closes the seat by design, so a
+    /// popped-out page has no seat for the layout to focus and never will again
+    /// — and a rule written against the tree alone answered "no page has the
+    /// keyboard" about the one page a reader had just clicked into. Measured on
+    /// the machine before this ticket (`BT_MOUSE_TRACE`): `press_web_page
+    /// focus=SeatId(1) page_leaf=Some(LeafId { tab: TabId(1), seat: SeatId(2) })
+    /// holds=false`, and [`Self::settle_the_web_keyboard`] duly took the keys
+    /// back from the engine on the very next frame.
+    ///
+    /// A **leaf** and not a seat, because that is what the answer is good for:
+    /// the settling loop is keyed by leaf, and a floated page's seat number
+    /// names nothing that has a rectangle. [`Self::focused_web_seat`] stays the
+    /// seat-shaped question and stays docked-only, because what *it* is for is
+    /// hanging chrome off a pane head — see the note there.
+    fn page_with_the_keyboard(&self) -> Option<LeafId> {
+        match self.preview_keyboard_surface()? {
+            PreviewSurface::Float(id) => self.page_carried_by(id),
+            // And not while the quick edit has it: that is answered by
+            // `preview_keyboard_surface` above and is a different surface's
+            // keyboard, whatever seat is focused underneath it.
+            surface => {
+                let seat = self.focused_preview_seat()?;
+                (self.preview_here(seat) == surface && self.seat_holds_a_page(seat))
+                    .then(|| self.leaf_here(seat))
+            }
+        }
     }
 
     /// **Whether a shell is the one holding the keyboard** — `InputOwner ==
@@ -52101,6 +52196,35 @@ impl Runtime<'_> {
             .find_map(|win| (win.preview()?.page == Some(leaf)).then_some(win.epoch))
     }
 
+    /// **Which overlay layer this float's face is** — the index a page it is
+    /// carrying spells its hole against (§7.14c).
+    ///
+    /// Read off [`WindowRuntime::float_hole_level`], which the chrome pass wrote
+    /// when it last assembled the stack. `None` is the honest answer for a float
+    /// this frame's stack has no layer for — a window whose fade has ended
+    /// between the two passes — and a page with no level is a page with no hole,
+    /// which is the window simply being there.
+    fn float_hole_level(&self, id: float::FloatId) -> Option<usize> {
+        self.window.float_hole_level.get(&id).copied()
+    }
+
+    /// **Which page a float is carrying**, if it is carrying one.
+    ///
+    /// [`float::FloatPreview::page`] read through the window's own map, so that
+    /// the answer is a page this window still has rather than a leaf a float
+    /// remembers: the two part company for exactly as long as it takes the
+    /// retirement loop to run, and every reader here wants the live one.
+    fn page_carried_by(&self, id: float::FloatId) -> Option<LeafId> {
+        let leaf = self
+            .window
+            .float
+            .drawn()
+            .find(|win| win.epoch == id)?
+            .preview()?
+            .page?;
+        self.window.web.contains_key(&leaf).then_some(leaf)
+    }
+
     fn float_body_rect(&self, id: float::FloatId, scale: f32) -> Option<[f32; 4]> {
         let win = self.window.float.drawn().find(|win| win.epoch == id)?;
         let fade = self.float_fade_of(win, Instant::now(), scale);
@@ -52144,12 +52268,22 @@ impl Runtime<'_> {
     /// The stack slot was always a `Vec`, so 浮窗多开 needed nothing of it: the
     /// z-order inside the family is [`float::FloatHost::drawn`]'s order, stated
     /// there and merely obeyed here.
-    fn float_layer(&mut self, now: Instant) -> Vec<marks::OverlayLayer> {
+    ///
+    /// `below` is how many layers the stack already holds under this group — see
+    /// [`OverlayStack::below_the_floats`] — and it is handed in rather than
+    /// looked up because it is the *stack's* arithmetic and not a window's: what
+    /// this function knows is which window is where inside its own family, and
+    /// adding the two here is what makes [`WindowRuntime::float_hole_level`] an
+    /// index into the one flattened list.
+    fn float_layer(&mut self, now: Instant, below: usize) -> Vec<marks::OverlayLayer> {
         let ids: Vec<float::FloatId> = self.window.float.drawn().map(|win| win.epoch).collect();
         // Rebuilt from nothing on every pass, exactly as `git_pages_shown` is:
         // it is a record of what this frame drew, and a stale entry in it is a
         // press landing on a row that is not there.
         self.window.float_git_pages_shown.clear();
+        // And the ledger a floated page's hole is spelled against, on the same
+        // terms and for the same reason (§7.14c).
+        self.window.float_hole_level.clear();
         // **The floating graphs, on the same terms** — and only the floating
         // half of that map, because the seats' entries were written by the
         // chrome pass and are not this pass's to throw away.
@@ -52172,6 +52306,13 @@ impl Runtime<'_> {
             // layer is, and a bar that stayed at full strength through an
             // entrance would be a scrollbar arriving before its window.
             let opacity = window.opacity;
+            // **Where this window lands in the one flattened list** — written
+            // before the push, because that is the slot the push is about to
+            // take. A page this float is carrying has its hole punched directly
+            // above this layer and under the bar beside it (§7.14c).
+            self.window
+                .float_hole_level
+                .insert(id, below + layers.len());
             layers.push(window);
             layers.extend(
                 self.preview_float_bar_layers(id)
@@ -64918,6 +65059,7 @@ impl Runtime<'_> {
                     leaf,
                     presence: webhost::WebPresence::Hidden,
                     rect: None,
+                    above: None,
                 });
                 continue;
             };
@@ -64936,6 +65078,7 @@ impl Runtime<'_> {
                     leaf,
                     presence: webhost::WebPresence::Hidden,
                     rect: None,
+                    above: None,
                 });
                 continue;
             }
@@ -64983,12 +65126,23 @@ impl Runtime<'_> {
                 body,
                 a_page_is_off_the_glass(obstructed, floated.is_some(), index == active, carded),
             );
+            // **And where in the stack the hole for it is punched** (§7.14c). A
+            // float is not a surface standing *over* this page — it is the pane
+            // the page is in — so the hole has to be punched above the float's
+            // own face, which is drawn a whole overlay pass after the seats are.
+            // A docked page keeps the older answer, `None`, which is under the
+            // entire stack.
+            let above = floated.and_then(|id| self.float_hole_level(id));
             // **One line per decision, and none while the answer stands still**
             // — `BT_WEB_TRACE`'s fourth station, and the one that separates the
-            // four ways a page comes up empty: it was never given a rectangle,
-            // it was given one and hidden, it was hidden by a card, or it was
-            // placed and the hole was never cut. Change-gated against what the
-            // seat was last asked, so a still page is silent.
+            // ways a page comes up empty: it was never given a rectangle, it was
+            // given one and hidden, it was hidden by a card, it was placed and
+            // the hole was never cut, or — the fifth, and the one the 2026-08-25
+            // report cost a whole ticket to see — the hole was cut in a place
+            // something drew over afterwards. `above=` is that last one: the
+            // level the hole stands on, `-` for the seats' own place under the
+            // whole stack. Change-gated against what the seat was last asked, so
+            // a still page is silent.
             if self
                 .window
                 .web
@@ -64998,11 +65152,12 @@ impl Runtime<'_> {
                 web_trace::line(|| {
                     format!(
                         "place tab={} seat={} floated={} body={} presence={presence:?} \
-                         obstructed={} carded={} front={}",
+                         above={} obstructed={} carded={} front={}",
                         leaf.tab.0,
                         seat.0,
                         floated.map_or_else(|| String::from("-"), |id| id.to_string()),
                         body.map_or_else(|| String::from("none"), |rect| format!("{rect:?}")),
+                        above.map_or_else(|| String::from("-"), |level| level.to_string()),
                         u8::from(obstructed),
                         u8::from(carded),
                         u8::from(index == active),
@@ -65013,6 +65168,7 @@ impl Runtime<'_> {
                 leaf,
                 presence,
                 rect,
+                above,
             });
         }
         // **A page holds the keyboard only while it is what typing goes into**
@@ -65042,7 +65198,7 @@ impl Runtime<'_> {
                 }
                 None => false,
             };
-            holes.extend(hole_for(placement.presence, floored));
+            holes.extend(hole_for(placement.presence, floored, placement.above));
         }
         window.renderer.set_web_holes(holes);
     }
@@ -65068,7 +65224,11 @@ impl Runtime<'_> {
                 .web
                 .get(&leaf)
                 .is_some_and(|web| web.fault().is_none())
-            && self.focused_web_seat().map(|seat| self.leaf_here(seat)) == Some(leaf)
+            // **The leaf and not the seat** (§7.14c). A page carried into a
+            // float has no seat left in the tree, so a comparison that went
+            // through one answered `false` for it every frame — and this is the
+            // predicate the settling loop takes the keyboard back on.
+            && self.page_with_the_keyboard() == Some(leaf)
     }
 
     /// **Take the keyboard back from a page that has stopped being what typing
@@ -65653,10 +65813,18 @@ impl Runtime<'_> {
     /// preview seat and a chord routed through it never fires. One predicate,
     /// asked twice, is how the two came to differ in the first place — so this
     /// is now that predicate.
+    /// **Docked only, and that is the point of it** (§7.14c). Every caller hangs
+    /// something off the pane's own head — a search capsule, an address editor —
+    /// and a page carried into a float has no head in the layout to hang it on:
+    /// its seat was closed by `pop_out_preview` and has no rectangle at all. So
+    /// the page with the keyboard is asked for first, and then whether it still
+    /// has a seat; a floated page answers `None` here and holds the keyboard
+    /// anyway, which are two different facts and now say so.
     fn focused_web_seat(&self) -> Option<SeatId> {
-        self.page_holds_the_keyboard()
-            .then(|| self.focused_preview_seat())
-            .flatten()
+        let leaf = self.page_with_the_keyboard()?;
+        self.float_holding_the_page(leaf)
+            .is_none()
+            .then_some(leaf.seat)
     }
 
     /// **`Ctrl+L`, and the double click on the name cell** — the address
@@ -65876,15 +66044,24 @@ impl Runtime<'_> {
     }
 
     /// `F12`, and the head's `</>` tool.
+    /// **Addressed by leaf and not by seat** (§7.14c). Every other verb in
+    /// [`Scope::WebPage`]'s neighbourhood hangs chrome off a pane head and so
+    /// needs a seat; this one opens a window of the engine's own and needs
+    /// nothing of the layout, so it answers for a page carried into a float
+    /// exactly as it does for a docked one.
     fn open_web_dev_tools(&mut self) -> Result<()> {
-        let Some(seat) = self.focused_web_seat() else {
+        let Some(leaf) = self.page_with_the_keyboard() else {
             return Ok(());
         };
-        self.open_web_dev_tools_on(seat)
+        self.open_web_dev_tools_at(leaf)
     }
 
     fn open_web_dev_tools_on(&mut self, seat: SeatId) -> Result<()> {
-        if let Some(web) = self.web_on(seat)
+        self.open_web_dev_tools_at(self.leaf_here(seat))
+    }
+
+    fn open_web_dev_tools_at(&mut self, leaf: LeafId) -> Result<()> {
+        if let Some(web) = self.window.web.get(&leaf)
             && let Err(error) = web.open_dev_tools()
         {
             eprintln!("BT_WEB {error}");
@@ -66204,6 +66381,25 @@ impl Runtime<'_> {
         self.apply_pointer_cursor();
     }
 
+    /// **Bring the float carrying this page to the front and give it the
+    /// window's preview focus** (§7.14c).
+    ///
+    /// The first two statements of [`Self::press_float`] exactly, and they are
+    /// the same two statements for the same reason: a press inside a floating
+    /// window raises it (user ruling 2026-08-12, rule ⑤) and a raise is a frame
+    /// debt. What this cannot be is a call *to* `press_float` — that function
+    /// then goes on to act on the part that was pressed, and the part pressed
+    /// here is not the window's at all.
+    fn raise_the_float_holding(&mut self, leaf: LeafId) -> Result<()> {
+        let Some(id) = self.float_holding_the_page(leaf) else {
+            return Ok(());
+        };
+        if self.window.float.raise(id) && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
     /// A button, over the page.
     fn press_web_page(
         &mut self,
@@ -66233,9 +66429,25 @@ impl Runtime<'_> {
             return Ok(());
         };
         if down {
-            // The seat takes the layout focus exactly as any pane does when it
-            // is pressed (D40), and then the keyboard goes inside the page.
-            self.focus_pane_at(position)?;
+            // **A press inside a page is a press inside its pane, and the pane
+            // comes forward** — whichever kind of surface that pane is (§7.14c).
+            //
+            // A docked page's pane is a seat, and it takes the layout focus
+            // exactly as any pane does when it is pressed (D40). A page carried
+            // into a float has no seat at all: the float *is* its pane, and
+            // `press_float`'s rule ⑤ — "a press anywhere inside a window brings
+            // it to the front" — never reached it, because a float carrying a
+            // page has no body of its own to press and this branch returns two
+            // rungs above that function. Without the raise no float is ever the
+            // focused preview surface, so `page_with_the_keyboard` has nothing
+            // to answer with and the settling loop takes the keys straight back.
+            // Focusing the pane *under* the window would be worse than nothing:
+            // it is the layout focus moving to a pane nobody pressed.
+            if self.float_holding_the_page(leaf).is_some() {
+                self.raise_the_float_holding(leaf)?;
+            } else {
+                self.focus_pane_at(position)?;
+            }
             // **A station, because this is a `return` nobody can see from
             // outside** (`BT_MOUSE_TRACE`'s own rule). Which seat the press
             // landed the focus on is the whole of whether `Ctrl+L` and `F12`
@@ -72485,7 +72697,26 @@ mod resize_skirt_order_tests {
 /// **A page popped out into a float still has a pane** (§7.14a).
 #[cfg(test)]
 mod floated_page_tests {
-    use super::a_page_still_has_a_pane;
+    use super::{a_page_still_has_a_pane, marks};
+
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The body of a method declared at an `impl`'s own indentation.
+    ///
+    /// **Every caller spells the signature through `concat!`**, and that is not
+    /// decoration: this module is *below* the methods it reads, so a needle
+    /// written as one literal would also be found inside this file's own call to
+    /// `fn_body` — the first match would be the test, the "body" would be the
+    /// assertion standing right after it, and the test would cheerfully assert
+    /// against itself. Split in two, the needle exists only where the method
+    /// does.
+    fn fn_body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        &rest[..rest.find("\n    fn ").unwrap_or(rest.len())]
+    }
 
     /// RED — **the float answers for a page whose seat is gone**, which is the
     /// whole of the defect (user report 2026-08-25: the popped-out web preview
@@ -72546,6 +72777,206 @@ mod floated_page_tests {
         assert!(
             a_page_is_off_the_glass(false, true, true, true),
             "and a failure card replaces the page in a float too"
+        );
+    }
+
+    /// RED — **a page carried into a float is seen through a hole punched above
+    /// that float's own layer** (§7.14c; user report 2026-08-25 on
+    /// `dist\folio-next6.exe`: the popped-out page was *still* a head, a foot and
+    /// a flat panel between them).
+    ///
+    /// §7.14a repaired everything up to the glass and stopped one draw short.
+    /// The trace taken on the machine before this ticket says so in one line —
+    /// `place tab=1 seat=2 floated=1 body=[1019.0, 207.0, 1875.0, 906.0]
+    /// presence=Shown(…) obstructed=0 carded=0 front=1`, with no
+    /// `BT_WEB place failed` beside it — so the float arm ran, the rectangle was
+    /// the float's own body, the engine was given it, the floor stood and the
+    /// hole was cut. What then happened is that the **float's face was drawn over
+    /// the hole**: the seat-level hole is punched before the first overlay layer
+    /// opens, and a float *is* an overlay layer, painting
+    /// `palette.dialog_surface` across its whole frame.
+    ///
+    /// So the hole has to name where it stands. A page whose pane is a seat
+    /// belongs under the whole stack, exactly where it has always been; a page
+    /// whose pane is a **float** belongs directly above that float.
+    ///
+    /// RED GATE: make [`super::hole_for`] drop its `above`, or have
+    /// `sync_web_page` pass `None` for a floated page, and this goes red on the
+    /// second assertion while the docked line beside it stays green — which is
+    /// how the defect survived §7.14a: a docked page's hole was never in the
+    /// wrong place.
+    #[test]
+    fn a_floated_pages_hole_is_punched_above_the_float_that_carries_it() {
+        let bounds = super::webhost::WebBounds {
+            x: 12,
+            y: 34,
+            width: 500,
+            height: 400,
+        };
+        let shown = super::webhost::WebPresence::Shown(bounds);
+
+        assert_eq!(
+            super::hole_for(shown, true, None),
+            Some(bt_render::WebHole {
+                rect: bounds.as_rect(),
+                above: None,
+            }),
+            "a docked page's hole has stopped standing under the whole overlay \
+             stack, where every surface over its pane is entitled to cover it"
+        );
+        assert_eq!(
+            super::hole_for(shown, true, Some(7)),
+            Some(bt_render::WebHole {
+                rect: bounds.as_rect(),
+                above: Some(7),
+            }),
+            "a floated page's hole does not name the layer its own float draws \
+             on, so the float's face is painted straight back over it"
+        );
+        assert_eq!(
+            super::hole_for(shown, false, Some(7)),
+            None,
+            "a floated page whose floor is not down is cut a hole anyway, which \
+             is a rectangle of desktop inside a floating window"
+        );
+        assert_eq!(
+            super::hole_for(super::webhost::WebPresence::Hidden, true, Some(7)),
+            None,
+            "a hidden page in a float is cut a hole anyway"
+        );
+
+        // And the half a value cannot hold: that the per-frame placement
+        // actually asks which float is carrying the page. `hole_for` is honest
+        // about whatever it is handed, so a caller handing it `None` for every
+        // page is exactly the shipped build the user photographed.
+        let sync = fn_body(concat!("    fn ", "sync_web_page("));
+        assert!(
+            sync.contains("floated.and_then(|id| self.float_hole_level(id))"),
+            "the placement does not ask which float is carrying this page, so \
+             every hole is punched under the whole stack again:\n{sync}"
+        );
+    }
+
+    /// RED — **the number a float's hole is spelled against is where the floats
+    /// really begin in the flattened stack** (§7.14c).
+    ///
+    /// [`super::OverlayStack::flattened`] is the z-order and it is one list of
+    /// groups; the index a [`bt_render::WebHole`] carries is an index into that
+    /// list. The two are written in the same file and could drift the day a group
+    /// is added between the panes and the floats — so this holds them together
+    /// rather than describing them: every group is given one recognisable layer,
+    /// and the layer found at the offset must be the float's.
+    ///
+    /// **No `..Default::default()` on purpose.** A group added to
+    /// [`super::OverlayStack`] must fail to compile here, so that whoever adds it
+    /// is asked the one question that matters — is it under the floats or over
+    /// them — instead of silently defaulting to an empty vector this test would
+    /// never notice.
+    ///
+    /// RED GATE: drop any one term from `below_the_floats` and the assertion
+    /// names the group that was forgotten.
+    #[test]
+    fn the_offset_below_the_floats_is_where_the_float_group_starts() {
+        // One layer per group, each wearing an opacity nothing else has: a
+        // marker the flattened list can be read back through.
+        let mark = |opacity: f32| {
+            vec![marks::OverlayLayer {
+                opacity,
+                ..marks::OverlayLayer::default()
+            }]
+        };
+        const FLOAT: f32 = 0.11;
+        let stack = super::OverlayStack {
+            preview_bars: mark(0.01),
+            terminal_bars: mark(0.02),
+            command_rail: mark(0.03),
+            rail: mark(0.04),
+            flight: mark(0.05),
+            ground: mark(0.06),
+            pane_notices: mark(0.07),
+            web_sheet: mark(0.08),
+            search: mark(0.09),
+            layout_peek: mark(0.10),
+            float: mark(FLOAT),
+            modal: mark(0.12),
+            file_menu: mark(0.13),
+            pane_menu: mark(0.14),
+            git_menu: mark(0.15),
+            term_menu: mark(0.16),
+            toast: mark(0.17),
+            key_hint: mark(0.18),
+            tooltip: mark(0.19),
+            file_peek: mark(0.20),
+            drag_ghost: mark(0.21),
+        };
+        let below = stack.below_the_floats();
+        let layers = stack.flattened();
+        assert_eq!(
+            layers.get(below).map(|layer| layer.opacity),
+            Some(FLOAT),
+            "the offset a float's hole is spelled against does not land on the \
+             first float layer, so every floated page's hole is punched over \
+             somebody else's window"
+        );
+    }
+
+    /// RED — **a page in a float can be typed into** (§7.14b 挂账 ⓑ, closed
+    /// here).
+    ///
+    /// Measured on the machine before this ticket, `BT_MOUSE_TRACE` on a click
+    /// inside the popped-out page: `press_web_page focus=SeatId(1)
+    /// page_leaf=Some(LeafId { tab: TabId(1), seat: SeatId(2) }) holds=false`.
+    /// The press found the page and handed the engine the keyboard, and then
+    /// three things undid it: the press focused the *pane underneath the float*
+    /// rather than the float, `page_holds_the_keyboard` asked the layout for a
+    /// seat that had been closed by `pop_out_preview`, and
+    /// `settle_the_web_keyboard` — which runs every frame precisely so a page
+    /// that has stopped being the typing target gives the keys back — read that
+    /// `false` and called `take_keyboard_focus` on the window. The engine held
+    /// the keyboard for less than one frame, every frame.
+    ///
+    /// Read off the file for this module's standing reason: a page holding the
+    /// keyboard is a browser, a compositor and a Win32 focus, and none of those
+    /// stand up in this process. What can be held is which question each rung
+    /// asks.
+    ///
+    /// MUTATIONS:
+    /// ① take the float arm out of `page_with_the_keyboard` — the first goes
+    ///    red, and the answer is the closed seat's again;
+    /// ② have `page_is_the_typing_target` go back to comparing seats — the
+    ///    second goes red, and the settling loop takes the keys back from a page
+    ///    that is very much being typed into;
+    /// ③ drop the raise from the press branch — the third goes red, and no float
+    ///    is ever the focused preview surface, so ① has nothing to answer with.
+    #[test]
+    fn a_page_carried_into_a_float_is_what_typing_goes_into() {
+        let holder = fn_body(concat!("    fn ", "page_with_the_keyboard("));
+        assert!(
+            holder.contains(concat!(
+                "PreviewSurface::Float(id) => ",
+                "self.page_carried_by(id)"
+            )),
+            "the page holding the keyboard is still looked for in the layout \
+             tree alone, where a popped-out page has no seat:\n{holder}"
+        );
+
+        let target = fn_body(concat!("    fn ", "page_is_the_typing_target("));
+        assert!(
+            target.contains(concat!("self.page_with_the_keyboard()", " == Some(leaf)")),
+            "the settling loop judges a floated page by a seat it does not have, \
+             so the keyboard is taken back from it every frame:\n{target}"
+        );
+
+        let press = fn_body(concat!("    fn ", "press_web_page("));
+        let raise = press
+            .find("self.raise_the_float_holding(leaf)?")
+            .unwrap_or(usize::MAX);
+        let takes = press.find("web.focus_page()").unwrap_or(0);
+        assert!(
+            raise < takes,
+            "a press inside a float's page does not bring that float forward \
+             before the engine takes the keyboard, so the window carrying the \
+             page is never the focused preview surface:\n{press}"
         );
     }
 
@@ -101662,19 +102093,19 @@ mod tests {
         let shown = super::webhost::WebPresence::Shown(bounds);
 
         assert_eq!(
-            super::hole_for(shown, false),
+            super::hole_for(shown, false, None),
             None,
             "a page whose floor is not down yet is still given a hole, which is \
              a rectangle of desktop inside this window"
         );
         assert_eq!(
-            super::hole_for(shown, true),
+            super::hole_for(shown, true, None).map(|hole| hole.rect),
             Some(bounds.as_rect()),
             "a page standing on its own floor is given no hole, so the page \
              nobody can see is hosted perfectly"
         );
         assert_eq!(
-            super::hole_for(super::webhost::WebPresence::Hidden, true),
+            super::hole_for(super::webhost::WebPresence::Hidden, true, None),
             None,
             "a hidden page is cut a hole anyway"
         );

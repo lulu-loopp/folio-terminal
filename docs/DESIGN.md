@@ -2608,7 +2608,26 @@ Recent 的 `previews` 是这份文件里唯一一列裸标量,所以它的判别
 - **案④ `↗` 交出去的字符串 —— 清白,并且它就是案①的另一面。** 那扇门**根本不做 URL**:`preview_page_hand_off` 把座位那条自铸的 `file:` URL 解回 `PathBuf`,`bt_platform::open_local_path` 把 `path.as_os_str().encode_wide()` 原样交给 `ShellExecuteW`——空格、中文、`#`/`%` 全程没有被编码过一次,也没有第二次解析的机会(不传参数、不传工作目录)。既有测试 `only_a_page_with_a_file_behind_it_is_handed_over_to_a_browser` 已经盖了空格、中文与 `.pdf`。用户当时在外部 Edge 看到的 `file not found`,按案①的结论就是**同一件事**:Folio 把正确的路径交了出去,Edge 用同一个阅读器打开同一份文件,得到同一句话。
 - **挂账。** ⓐ **落地的座位已经有一张页时,`DOCK` 不搬**(只打 stderr):把带来的那张压上去等于把一台活浏览器**不走那扇「等它的进程退出、把 profile 目录还回去」的门**就丢掉,所以带来的那张留在原地、下一帧按孤儿正常退休——丢一张而不是两张。这一格是 §7.7 「每 tab 单例」与浮窗跨 tab 落地这两条规矩相撞的地方,本单不替它裁。ⓑ **浮窗里的页拿不到键盘**:`page_holds_the_keyboard` 走的是布局焦点,一张不在树里的页答不上来——滚轮与鼠标都通了,打字没通,另开一单。ⓒ 案③的**实机前后照**没拍成:整个时段桌面被另一位 agent 的 folio 窗口恒置顶占着(ui-probe 的像素归属律因此一路拒发),`SendMessage`/`PostMessage` 合成的 `WM_MOUSEMOVE` winit 不认(实测 `pointer=none`、或停在上一次真实指针位置),所以 `↗`(pop-out)那一下按不下去;单元红绿与 `place` 站是本片留下的验收器,复现只需一次真实点击。ⓓ `open_local_path` 对**超过 `MAX_PATH` 的路径**没有任何处理(不加 `\\?\`),本单没碰。ⓔ `BT_WEB_TRACE` 这个开关**还没进 `docs/HANDOFF-2026-08-21.md` 的诊断开关登记处**——本单奉命不动 HANDOFF,补登记是下一位的第一件事。
 
-## 8. 依赖策略
+#### 7.14c 洞要说清自己压在谁头上;浮窗里的页也能打字(缺陷重开单,2026-08-25,已落地;`crates/bt-render/src/lib.rs`、`crates/bt-app/src/main.rs`)
+
+**§7.14b 案③ 把一切都修到了玻璃跟前,差最后一次落笔。** 用户在 `dist\folio-next6.exe` 上实测:浮窗的壳、头、脚都在,`file:///…folio-pdf-test.html` 也写在头上,**体内仍然整片空白**。
+
+- **定罪(debug build + `BT_WEB_TRACE` + 一次真实 pop-out)。** trace 只留下一行,而这一行把三个嫌疑当场判无罪:
+
+  ```
+  202372.327 place tab=1 seat=2 floated=1 body=[1019.0, 207.0, 1875.0, 906.0] presence=Shown(WebBounds { x: 1019, y: 207, width: 856, height: 699 }) obstructed=0 carded=0 front=1
+  ```
+
+  `floated=1` —— **浮窗那条臂走到了**;`body` 正是浮窗自己的体内矩形(与截图逐边对得上:头下沿 207、脚上沿 906);`presence=Shown` —— 引擎收到了这块矩形;整个 stderr 里**一条 `BT_WEB place failed` 都没有**,而 `WebSeat::stand_on_the_floor` 只在 `Shown` 且 `place_web_visual` 没报错时返回 `floored=true`,所以**地板站住了、洞也挖了**。于是只剩最后一种可能,并且它是必然:**洞被浮窗自己的脸盖住了**。
+- **真因:洞只有一个落笔位置,而一张页的 pane 不一定是座位。** `set_web_holes` 挖的洞画在「所有座位画完之后、整个 overlay 栈之前」——对一张 pane 是**座位**的页,这是对的:菜单、遮罩、浮窗都是站在那块 pane **上面**的东西,理应盖住它。可**一张被端进浮窗的页,浮窗就是它的 pane**,而浮窗的脸(`push_float_window` 用 `palette.dialog_surface` 铺满整个 frame)是一层 overlay,画在洞之后。两者隔着一次 draw 站在对立面,页被完美地托管在一块不透明矩形背后。
+- **修法:洞自己说出它压在谁头上。** `bt_render::WebHole { rect, above: Option<usize> }` —— `above` 是这个洞**紧压在哪一层 overlay 之上**,`None` 是座位那条老答案(压在整个栈底下)。渲染侧因此有两处落笔:`None` 的仍在原处(既有 PIN 测试 `the_hole_is_drawn_over_the_seat_and_under_everything_over_the_window` 原样照绿),`Some(n)` 的在 overlay 循环里、**画完第 n 层的地面与填充之后、它的图标与字之前**——所以浮窗的头、脚、`DOCK` 照旧画在页上面,压在它上面的每一层浮窗/菜单/遮罩也照旧盖得住它。红测 `a_layers_own_hole_is_punched_after_the_face_that_layer_draws`(源序,理由与它上面那条同款:一次 render pass 事后问不出它的 draw 顺序)。
+- **那个下标从哪来:一条跨两趟的账,而不是两处各自判断。** 摆放是**每帧**的(`sync_web_page`),overlay 栈是**变了才重建**的(`refresh_overlay`)。让浮窗那一层自己算「我要不要挖洞」会踩到这条时差:`floored` 是摆放那一趟的产物,浮窗那一层拿到的永远可能是上一帧的答案,而一个挖早了的洞就是桌面。所以**判断仍然只有一处**(`hole_for` 照旧,`sync_web_page` 照旧每帧决定 rect 与 floored),跨过去的只是一个**下标**:`float_layer` 在把每扇窗 push 进 `stack.float` 的那一刻记下 `WindowRuntime::float_hole_level[id] = below + layers.len()`,`below` 由 `OverlayStack::below_the_floats()` 给出。这个下标只在栈本身变化时才变,而栈变化就是 `refresh_overlay` 跑过——两者同生同灭。`below_the_floats` 与 `flattened()` 的那张组清单是同一个次序写两遍,所以有一条**防漂移**的纯测试 `the_offset_below_the_floats_is_where_the_float_group_starts`:每一组塞一层带记号的 layer,拍平之后按这个下标取到的必须是浮窗那一层;并且**故意不写 `..Default::default()`**,这样 `OverlayStack` 新加一组时它编译不过,加组的人必须当场回答「在浮窗下面还是上面」。
+- **挂账 ⓑ 一并结清:浮窗里的页拿得到键盘了。** 修前实测(`BT_MOUSE_TRACE`,在浮窗体内点一下):`press_web_page focus=SeatId(1) page_leaf=Some(LeafId { tab: TabId(1), seat: SeatId(2) }) holds=false`。按下确实找到了页、也确实把键盘交给了引擎,随后三件事把它撤销:① 按下走的是 `focus_pane_at`,把布局焦点给了**浮窗底下那块 pane**;② `page_holds_the_keyboard` 从 `focused_preview_seat` 起手,而这张页的座位已经被 `pop_out_preview` 关掉了;③ `settle_the_web_keyboard` 每帧读到 `false`,就对窗口调 `take_keyboard_focus` 把键盘抢回来——引擎每一帧都持有键盘不到一帧。三处照 §7.14b 的同一句话改:**浮窗替代树回答,不是并列**。
+  - `page_with_the_keyboard() -> Option<LeafId>`:读一次 `preview_keyboard_surface`(它本来就已经把 `focused_preview_float` 排在座位前面了),按surface 的**种类**分叉——`Float(id)` 问 `page_carried_by(id)`,座位那支照旧。`page_holds_the_keyboard` 变成它的 `is_some()`,`page_is_the_typing_target` 改成拿它跟叶子比(**叶子而不是座位**:浮窗里的页没有座位可比)。
+  - 按下那一半:一张页在浮窗里时,按下**抬起并聚焦那扇浮窗**(`raise_the_float_holding`,就是 `press_float` 头两句),而不是去聚焦一块没人按的 pane。§7.1.2 的规矩⑤「按窗内任何地方都把它提到前面」本来就该管到体内,只是带页的浮窗没有自己的 body、这条分支在 `press_float` 上面两级就 return 了,所以从没走到。
+  - `focused_web_seat` 明确收成**只答停靠页**:它的每一个调用方都要把东西挂在 pane 头上(搜索胶囊、地址编辑框),而浮窗里的页在布局里没有头可挂。`F12`(devtools)改成按**叶**寻址(`open_web_dev_tools_at`),因为它开的是引擎自己的窗,不用布局里的任何东西——所以浮窗里也管用。
+  - 红测 `a_page_carried_into_a_float_is_what_typing_goes_into`(源读,理由与 `a_refused_address_is_a_field_that_can_still_be_left` 同款:一张页持有键盘是浏览器 + 合成器 + Win32 焦点,本进程立不起来)。**这一片的 `fn_body` 每个 needle 都用 `concat!` 拆成两截**,因为这个测试模块在被读的那些方法**下面**,一整条字面量会先命中测试自己那行调用——测试就会对着自己断言。
+- **挂账。** ⓐ **`Ctrl+L` 在浮窗里的页上被 claim 了却没有门**:地址编辑框画在 pane 头上,浮窗的头目前只是把 URL 印出来、不可编辑,所以 `open_web_address` 对浮窗页返回 `Ok(())`。给浮窗头一条地址编辑路是自己一片,本单不夹带。ⓑ §7.14b 的 ⓐ / ⓓ / ⓔ 原样挂着。
 
 同 v3 表格，关键修订：**alacritty_terminal 稳态配置 scrollback=0**。vendor seam 包含既有上滚事件钩子，以及窄事务操作：打开 primary native history、查询行数、在 coalesced final viewport 上用 vendor row/WRAPLINE/cursor 重新评估高度、一次性 `take_history(oldest→newest)`、清空并恢复 limit=0，以及只针对唯一未闭合 staging candidate 的 `restore_history(oldest→newest)`；没有可独立呈现的 transcript snapshot/backing 镜像，也不复制 reflow 算法。事务期 vendor grid 是 mutable tail 唯一权威；收割后转录层拥有 staging ID/配额/定稿权，vendor 只保留该候选的原生 row escrow 供下一事务无损交还。升级必须 diff `grid/resize.rs`/history 语义，跑 vendor 181 项与完整生命周期矩阵。
 

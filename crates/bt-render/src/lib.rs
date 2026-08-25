@@ -1022,6 +1022,12 @@ struct PreparedOverlayLayer {
     ground_opacity: f32,
     rect_buffer: Option<wgpu::Buffer>,
     rect_count: u32,
+    /// The rectangles where this layer — and everything under it — is **not**:
+    /// the holes that named this layer in [`WebHole::above`], drawn after its
+    /// ground and its fills. A float carrying a page is the one layer that has
+    /// any, and the page is what is seen there.
+    hole_buffer: Option<wgpu::Buffer>,
+    hole_count: u32,
     icon_buffer: Option<wgpu::Buffer>,
     icon_draws: Vec<MathDraw>,
     text_prepared: bool,
@@ -2777,7 +2783,7 @@ pub struct WindowRenderer {
     chrome_labels: Vec<ChromeLabel>,
     chrome_icons: Vec<ChromeIcon>,
     /// Rectangles where this window is **not**. See [`WindowRenderer::set_web_holes`].
-    web_holes: Vec<[f32; 4]>,
+    web_holes: Vec<WebHole>,
     /// The modal overlay's own stack. Kept apart from the chrome's lists rather
     /// than appended to them because the two are drawn in different places in the
     /// frame: seat chrome owns the space between seats, and a modal owns the
@@ -3276,6 +3282,38 @@ pub struct OverlayGround {
     /// `[left, top, right, bottom]`.
     pub rect: [f32; 4],
     pub color: [u8; 3],
+}
+
+/// **One rectangle where this window is not, and where in the frame it stops
+/// being there** (§7.14c).
+///
+/// The rectangle was the whole of a hole until 2026-08-25. See
+/// [`WindowRenderer::set_web_holes`] for what a hole is; what [`Self::above`]
+/// adds is the answer to *when* it is punched, and the reason it has to be asked
+/// at all is that a page's pane is not always a seat.
+///
+/// A page whose pane is a **seat** is drawn over by everything in the overlay
+/// stack, by design: a menu, a scrim, a floating window are all things standing
+/// over that pane. A page carried into a **float** is the other case entirely —
+/// the float *is* its pane, and the float's own opaque face is an overlay layer.
+/// A hole with no answer to "above what" can only be punched in one place, and
+/// whichever place that is, one of the two cases is wrong.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WebHole {
+    /// `[left, top, right, bottom]`, in surface pixels.
+    pub rect: [f32; 4],
+    /// The overlay layer this hole stands **directly above** — punched after
+    /// that layer's own ground and fills and before the next layer opens.
+    ///
+    /// `None` is the seat's answer and the older one: punched after everything
+    /// the seats drew and under the whole overlay stack.
+    ///
+    /// An index into the list [`WindowRenderer::set_modal_overlay`] was last
+    /// given, which is the same list and the same order the caller built. A
+    /// hole naming a layer that is not there is dropped rather than moved: it
+    /// is a hole whose pane has gone, and the honest picture of that is the
+    /// window being there.
+    pub above: Option<usize>,
 }
 
 /// One stacking layer of the modal overlay: its fills, its marks and its text.
@@ -4497,15 +4535,22 @@ impl WindowRenderer {
     ///
     /// # Where in the frame
     ///
-    /// After everything a seat draws — its chrome, its picture, its text body —
-    /// and **before** the peek flyout and the modal overlay. Those two are
+    /// [`WebHole::above`] says, per hole, and there are two answers.
+    ///
+    /// `None` — after everything a seat draws (its chrome, its picture, its text
+    /// body) and **before** the peek flyout and the modal overlay. Those two are
     /// drawn over the whole window on purpose, and a hole punched through a
     /// scrim would be a page read clearly through a dimmed window. The caller
     /// keeps the other half of that bargain by hiding the page outright while a
     /// modal is up (`bt_app::webhost::web_presence`), so the two never disagree
     /// about a rectangle: this one is simply where the page is when there is a
     /// page.
-    pub fn set_web_holes(&mut self, holes: Vec<[f32; 4]>) -> bool {
+    ///
+    /// `Some(n)` — directly above overlay layer `n`, which is where a page whose
+    /// pane is a **floating window** belongs: the float's own face is that layer,
+    /// and a hole punched under the stack is a hole the float paints over. See
+    /// [`WebHole`].
+    pub fn set_web_holes(&mut self, holes: Vec<WebHole>) -> bool {
         let changed = self.web_holes != holes;
         self.web_holes = holes;
         changed
@@ -5478,9 +5523,10 @@ impl WindowRenderer {
         let web_hole_rects: Vec<RectInstance> = self
             .web_holes
             .iter()
-            .map(|rect| {
+            .filter(|hole| hole.above.is_none())
+            .map(|hole| {
                 premultiplied_surface_pixel_rect(
-                    *rect,
+                    hole.rect,
                     [0, 0, 0],
                     0.0,
                     self.config.width,
@@ -5549,6 +5595,25 @@ impl WindowRenderer {
         // three channels before opening the next one's — a popup's face cannot
         // cover a caption it shares a text batch with.
         let overlay_layers = std::mem::take(&mut self.overlay_layers);
+        // **The holes that stand between two layers, sorted into the layer each
+        // one named** (§7.14c). Gathered before the loop rather than filtered
+        // inside it so that a hole naming a layer that is not on this frame's
+        // stack is simply dropped here — that is a page whose float has gone,
+        // and the honest picture of it is the window being there.
+        let mut layer_hole_rects: Vec<Vec<RectInstance>> = vec![Vec::new(); overlay_layers.len()];
+        for hole in &self.web_holes {
+            if let Some(index) = hole.above
+                && let Some(slot) = layer_hole_rects.get_mut(index)
+            {
+                slot.push(premultiplied_surface_pixel_rect(
+                    hole.rect,
+                    [0, 0, 0],
+                    0.0,
+                    self.config.width,
+                    self.config.height,
+                ));
+            }
+        }
         let mut overlay_draws: Vec<PreparedOverlayLayer> = Vec::with_capacity(overlay_layers.len());
         for (index, layer) in overlay_layers.iter().enumerate() {
             // The layer's grounds, on the clear's own arithmetic and in their own
@@ -5606,6 +5671,15 @@ impl WindowRenderer {
                         usage: wgpu::BufferUsages::VERTEX,
                     })
             });
+            let hole_rects = std::mem::take(&mut layer_hole_rects[index]);
+            let hole_buffer = (!hole_rects.is_empty()).then(|| {
+                gpu.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("overlay layer web holes"),
+                        contents: bytemuck::cast_slice(hole_rects.as_slice()),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    })
+            });
             let (icon_draws, icon_vertices) =
                 self.prepare_chrome_icon_draws(gpu, &layer.faded_icons());
             let icon_buffer = (!icon_vertices.is_empty()).then(|| {
@@ -5654,6 +5728,8 @@ impl WindowRenderer {
                 ground_opacity: layer.opacity.clamp(0.0, 1.0),
                 rect_buffer,
                 rect_count: rects.len() as u32,
+                hole_buffer,
+                hole_count: hole_rects.len() as u32,
                 icon_buffer,
                 icon_draws,
                 text_prepared,
@@ -5663,6 +5739,7 @@ impl WindowRenderer {
         let overlay_has_work = overlay_draws.iter().any(|layer| {
             layer.ground_buffer.is_some()
                 || layer.rect_buffer.is_some()
+                || layer.hole_buffer.is_some()
                 || layer.icon_buffer.is_some()
                 || layer.text_prepared
         });
@@ -6032,6 +6109,18 @@ impl WindowRenderer {
                         pass.set_pipeline(&gpu.rect_pipeline);
                         pass.set_vertex_buffer(0, buffer.slice(..));
                         pass.draw(0..6, 0..layer.rect_count);
+                    }
+                    // **And then the part of this layer that is not there**
+                    // (§7.14c): a float carrying a page has just painted its own
+                    // face across the rectangle the page lives in, and the page
+                    // is composed *under* this whole surface. So the hole is
+                    // punched here — over this layer's ground and its fills, and
+                    // under its marks, its captions and every layer above it,
+                    // which are all things that legitimately stand over a page.
+                    if let Some(buffer) = layer.hole_buffer.as_ref() {
+                        pass.set_pipeline(&gpu.ground_rect_pipeline);
+                        pass.set_vertex_buffer(0, buffer.slice(..));
+                        pass.draw(0..6, 0..layer.hole_count);
                     }
                     if let Some(buffer) = layer.icon_buffer.as_ref() {
                         pass.set_pipeline(&gpu.math_pipeline);
@@ -16250,6 +16339,64 @@ mod tests {
             assert!(body < hole, "the hole covers the seat's own body");
             assert!(hole < peek, "a floating window covers the hole");
             assert!(hole < overlay, "a scrim covers the hole");
+        }
+
+        /// PIN — **a hole that names a layer is punched inside the overlay loop,
+        /// after that layer's own face** (§7.14c, user report 2026-08-25: a page
+        /// carried into a float drew a head, a foot and a flat panel between
+        /// them).
+        ///
+        /// The seat-level hole above is drawn before the first overlay layer
+        /// opens, which is right for every page whose pane is a *seat*: the
+        /// overlays are all things standing over that pane. A page carried into
+        /// a float has no seat — **the float is its pane** — and the float's own
+        /// face is an overlay layer, drawn after the seat-level hole and in the
+        /// window's own `dialog_surface`. So the hole and the thing it has to
+        /// erase were on opposite sides of one draw, and the page was hosted
+        /// perfectly behind an opaque rectangle.
+        ///
+        /// [`WebHole::above`] is the repair: a hole names the layer it stands
+        /// directly above, and the pass punches it there. There is no way to ask
+        /// a render pass what order it issued its draws in after the fact, so the
+        /// order is held here, in the source that issues them — exactly as the
+        /// test above holds the seat-level hole's place.
+        ///
+        /// MUTATIONS:
+        /// ① draw the layer holes before the layer's grounds — the first
+        ///    assertion goes red, and the float's face paints straight back over
+        ///    the hole it was given;
+        /// ② draw them before the layer's fills — the second goes red, and
+        ///    `push_float_window`'s own rounded face does the same;
+        /// ③ move the draw out of the overlay loop — the third goes red, and
+        ///    every hole is back to being punched under the whole stack.
+        #[test]
+        fn a_layers_own_hole_is_punched_after_the_face_that_layer_draws() {
+            let source: String = include_str!("lib.rs")
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect();
+            let ground = source
+                .find(concat!("pass.draw(0..6,0..", "layer.ground_count"))
+                .expect("the overlay layer's ground draw");
+            let rects = source
+                .find(concat!("pass.draw(0..6,0..", "layer.rect_count"))
+                .expect("the overlay layer's fill draw");
+            let hole = source
+                .find(concat!("pass.draw(0..6,0..", "layer.hole_count"))
+                .expect("the overlay layer's hole draw");
+            let loop_ = source
+                .find("for(index,layer)inoverlay_draws.iter().enumerate()")
+                .expect("the overlay stack's own loop");
+            assert!(
+                ground < hole,
+                "a layer's ground is painted over its own hole"
+            );
+            assert!(rects < hole, "a layer's face is painted over its own hole");
+            assert!(
+                loop_ < hole,
+                "the layer holes are not punched inside the stack's loop, so \
+                 they cannot stand between two layers at all"
+            );
         }
     }
 

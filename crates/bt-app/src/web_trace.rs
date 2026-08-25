@@ -35,11 +35,20 @@
 //! # The fifth station answers a different empty pane (§7.14b, 2026-08-25)
 //!
 //! * `place tab=<n> seat=<n> floated=<id|-> body=<rect|none> presence=<…>
-//!   obstructed=<0|1> carded=<0|1> front=<0|1>` — the per-frame placement's own
-//!   decision. The four stations above say what the *engine* was asked and
-//!   answered; this one says whether the window ever put the answer on the
-//!   glass, which is the other half of "why is this pane empty" and the half a
-//!   popped-out page came up on the wrong side of.
+//!   above=<n|-> obstructed=<0|1> carded=<0|1> front=<0|1>` — the per-frame
+//!   placement's own decision. The four stations above say what the *engine* was
+//!   asked and answered; this one says whether the window ever put the answer on
+//!   the glass, which is the other half of "why is this pane empty" and the half
+//!   a popped-out page came up on the wrong side of.
+//!
+//!   `above=` is [`bt_render::WebHole::above`] — **which overlay layer the hole
+//!   stands on**, `-` for the seats' own place under the whole stack — and it is
+//!   here because the field's absence cost a second ticket (§7.14c). On the
+//!   report of 2026-08-25 this station printed `floated=1`, a body that matched
+//!   the float to the pixel and `presence=Shown`, and the page was still
+//!   invisible: everything the trace could see was right, and the one thing it
+//!   could not see was that the hole was punched under the very window it
+//!   belonged to.
 //!
 //! **Written on a change and never otherwise**, which is
 //! [`crate::attention_trace`]'s rule for its reason exactly: a page standing
