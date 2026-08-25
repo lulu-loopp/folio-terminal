@@ -26575,6 +26575,36 @@ impl Runtime<'_> {
                     pane_chevron_tip(),
                 );
             }
+            // **The 🗀 beside it, on a lone pane only** (user proposal, Claude
+            // 认可 2026-08-25). The words are the tab's folder's, because it is
+            // the same action — `float_trigger_tip` is the one place they are
+            // written. The head's own folder is deliberately not on this list:
+            // see `tooltip::TooltipAnchorId::PaneFiles`, and the gate below is
+            // the same predicate the paint and the hit test share, so the day
+            // the corner is refused the tip goes with it.
+            let corners: Vec<SeatId> = self
+                .seat_layout
+                .rects
+                .iter()
+                .filter(|placement| {
+                    self.seats.seat_wears_ghost(
+                        placement.kind,
+                        placement.id,
+                        self.window.search.seat(),
+                    )
+                })
+                .map(|placement| placement.id)
+                .collect();
+            for seat in corners {
+                let Some(rect) = self.pane_files_box(seat) else {
+                    continue;
+                };
+                anchors.push(
+                    tooltip::TooltipAnchorId::PaneFiles(seat),
+                    rect,
+                    float_trigger_tip(),
+                );
+            }
             // A page's hand-off arrow, in the same pass and inside the same
             // guard: it is a pane head's control like the chevron above, and a
             // head under a drag is a head nobody is pointing at. Only the seats
@@ -48972,6 +49002,24 @@ impl Runtime<'_> {
         )
     }
 
+    /// The 🗀's box on one pane, or `None` when that pane carries none this
+    /// frame — [`Self::pane_chevron_box`]'s sentence for the other door in the
+    /// same corner (user proposal, Claude 认可 2026-08-25).
+    ///
+    /// The flyout's anchor and the tip's are this one rectangle, in both
+    /// layouts, for the reason stated above it: a peek hung off a second
+    /// derivation is a peek that opens at a head that is not there.
+    fn pane_files_box(&self, seat: SeatId) -> Option<[f32; 4]> {
+        let scale = self.window.renderer.metrics().scale_factor as f32;
+        seats::pane_files_box(
+            &self.seats,
+            &self.seat_layout,
+            seat,
+            scale,
+            self.window.search.seat(),
+        )
+    }
+
     /// The hand-off arrow's box on one preview seat, or `None` when that seat is
     /// not showing a page (or has no room for the control).
     ///
@@ -52839,24 +52887,25 @@ impl Runtime<'_> {
                     }
                 }
             }
+            // **Two rectangles, one question** (user proposal, Claude 认可
+            // 2026-08-25): the folder is in the head on a split pane and beside
+            // the corner ghost on a lone one, and `seats::pane_files_box`
+            // answers which. Asking `pane_head_geometry` here regardless is what
+            // this used to do, and on a headless pane it measured a head that is
+            // not drawn — an anchor in empty air, which is E60's own bug wearing
+            // a different hat.
             float::FloatTrigger::Pane(leaf) => {
                 if self.window.tabs[self.window.active_tab].id != leaf.tab {
                     return None;
                 }
                 let scale = self.window.renderer.metrics().scale_factor as f32;
-                let placement = self
-                    .seat_layout
-                    .rects
-                    .iter()
-                    .find(|placement| placement.id == leaf.seat)?;
-                let device = placement.device_rect?;
-                let rect = [
-                    device.left as f32,
-                    device.top as f32,
-                    device.right as f32,
-                    device.bottom as f32,
-                ];
-                seats::pane_head_geometry(rect, placement.kind, scale).files
+                seats::pane_files_box(
+                    &self.seats,
+                    &self.seat_layout,
+                    leaf.seat,
+                    scale,
+                    self.window.search.seat(),
+                )
             }
         }
     }
@@ -72977,7 +73026,8 @@ fn chrome_tick_reuses_picture(picture: PictureOnGlass) -> bool {
 /// produces `ChromeTarget::TabFiles` — so under an icon rail (the only posture
 /// [`Runtime::drive_rail_zone`] runs in) a `Tab` peek *is* a peek hanging off a
 /// rail row. A [`float::FloatTrigger::Pane`] peek is the folder button on a
-/// terminal pane's own head, out in the panes and nowhere near the rail; it
+/// terminal pane's own head — or, on a lone pane, the one in its top-right
+/// corner (2026-08-25) — out in the panes and nowhere near the rail; it
 /// overhangs nothing of the rail's, so the rail has no business being held open
 /// by it. Asking only "is a peek up" made every pane head a second, invisible
 /// rail trigger: hovering a pane's folder icon opened its flyout *and* rolled

@@ -5168,6 +5168,12 @@ pub fn hit_chrome(
 /// It answers the same [`ChromeTarget::PaneMenu`] the head's chevron answers,
 /// which is the ruling's own sentence: one menu, one target, one place it is
 /// built.
+///
+/// **Two doors since 2026-08-25** (user proposal, Claude 认可): 🗀 stands to the
+/// `⌄`'s left and answers [`ChromeTarget::PaneFiles`] — again the head's own
+/// target, so the press arm, the peek's hold and the flyout's root are the one
+/// implementation the split head already uses. The corner is where they differ
+/// and nothing else is.
 #[must_use]
 pub fn hit_pane_ghost(
     seats: &Seats,
@@ -5191,6 +5197,14 @@ pub fn hit_pane_ghost(
             device.right as f32,
             device.bottom as f32,
         ];
+        // The folder first and the `⌄` second — the order they are drawn, left
+        // to right. It cannot change an answer: the two share one edge and
+        // `contains` is half-open there, so no point is inside both.
+        if let Some(folder) = pane_ghost_folder_geometry(rect, scale)
+            && contains(folder, x, y)
+        {
+            return Some(ChromeTarget::PaneFiles(placement.id));
+        }
         let ghost = pane_ghost_geometry(rect, scale)?;
         contains(ghost, x, y).then_some(ChromeTarget::PaneMenu(placement.id))
     })
@@ -5367,6 +5381,14 @@ pub const PANE_HEAD_TRIGGER_REVEAL: f32 = 0.7;
 // [`ChromeTarget::PaneMenu`] exactly as the head's chevron does, which is what
 // keeps "the same menu" a property of the code rather than of two lists that
 // agree today.
+//
+// **And the second of the three, on 2026-08-25** (user proposal, Claude 认可):
+// the files trigger stands beside it — 🗀 on the left, `⌄` on the right — for
+// the same reason and by the same means. It answers
+// [`ChromeTarget::PaneFiles`], which is the head's own target, so the corner is
+// the only thing that differs between a lone pane's folder and a split one's.
+// (The third, the cwd in a title, has no corner to stand in: it is a *label*,
+// and §7.1.6i's whole argument is about what a hand can reach.)
 
 /// `.pane-ghost { top: 10px }` — how far below the pane's own top edge the ghost
 /// hangs.
@@ -5418,6 +5440,18 @@ pub const PANE_GHOST_REST_INK: f32 = crate::cmdrail::TICK_REST_OPACITY;
 /// `.pane:hover .pane-ghost { opacity: .75 }` — the middle rung: the mark
 /// answers a hover before it is asked to answer a click.
 pub const PANE_GHOST_HOVER_INK: f32 = 0.75;
+/// The folder's glyph in that corner (user proposal, Claude 认可 2026-08-25) —
+/// [`PANE_GHOST_GLYPH_WIDTH_LOGICAL_PX`] **by identity and not by coincidence**.
+///
+/// [`PANE_HEAD_CHEVRON_GLYPH_LOGICAL_PX`] settled this question the other way
+/// round: in the head's run the *chevron* was cut to the folder's 13, "because
+/// the two stand next to each other in the same run and a run of triggers that
+/// do not agree about their glyph size reads as a mistake rather than a set".
+/// The rule belongs to the run and not to either glyph, so in this run it binds
+/// the folder: the size here is the ghost's own 11, the width the mock-up
+/// measured its floating mark at. Written as that constant, so the day the
+/// corner is re-measured both marks move together.
+pub const PANE_GHOST_FOLDER_GLYPH_LOGICAL_PX: f32 = PANE_GHOST_GLYPH_WIDTH_LOGICAL_PX;
 
 /// The corner ghost's box inside one pane rectangle, in physical pixels, or
 /// `None` when the pane is too small to seat it.
@@ -5437,6 +5471,32 @@ pub fn pane_ghost_geometry(rect: [f32; 4], scale: f32) -> Option<[f32; 4]> {
     // head's own run keeps: below this the pane simply has no ghost, and the
     // right-click floor under it (§7.1.6i) is what a hand still has.
     (left > rect[0] && bottom <= rect[3]).then_some([left, top, right, bottom])
+}
+
+/// The **folder** door beside that ghost — 🗀 on the left, `⌄` on the right
+/// (user proposal, Claude 认可 2026-08-25; §7.1.6i), or `None` when the corner
+/// has room for only one of them.
+///
+/// Derived from [`pane_ghost_geometry`] and never from the rectangle a second
+/// time, which is the whole of what makes the two a *run*: the folder is the
+/// chevron's own box stepped one box left, so its right edge **is** the
+/// chevron's left edge at every scale and no rounding can open a seam of
+/// unclaimed pixels between two live buttons. It is the rule the head's own run
+/// keeps at its other joint (`.panehead .pane-files + .pane-close
+/// { margin-left: 0 }`): a gap inside a run that has no gap elsewhere reads as
+/// two runs, and a *fractional* gap reads as a dead pixel in the middle of a
+/// button.
+///
+/// **The chevron is the door that stays.** When only one box fits, this answers
+/// `None` and the corner keeps the `⌄` — the ruling put that one there, and the
+/// menu behind it still carries every verb this pane has, while a folder half
+/// over the pane's left edge is the control the head's run refuses.
+#[must_use]
+pub fn pane_ghost_folder_geometry(rect: [f32; 4], scale: f32) -> Option<[f32; 4]> {
+    let chevron = pane_ghost_geometry(rect, scale)?;
+    let right = chevron[0];
+    let left = right - (chevron[2] - chevron[0]);
+    (left > rect[0]).then_some([left, chevron[1], right, chevron[3]])
 }
 
 /// The zoom state mark's own box, in physical pixels — 13 logical, the size the
@@ -8098,70 +8158,102 @@ pub fn build_chrome_for_tabs(
             {
                 let ghost_box = card_rect_of(placement.id, rect).unwrap_or(rect);
                 if let Some(ghost) = pane_ghost_geometry(ghost_box, scale) {
-                    // Lit by the pointer being on it **or** by its own menu
-                    // standing: the menu is dropped under the button and the
-                    // hand walks onto it, and a chevron that went dark the
-                    // instant its list appeared is E61's stranded mark.
-                    let lit = pointer.hover == Some(ChromeTarget::PaneMenu(placement.id))
-                        || pane_menu_seat == Some(placement.id);
-                    if lit {
-                        // `--menu` and a shadow, **not** the run's `--hover`:
-                        // that one is a 5.5% wash of ink, which is right on a
-                        // head (there is opaque panel under it) and useless
-                        // here, where a line of output may be running under the
-                        // glyph. A button that floats over content has to bring
-                        // its own ground, and the menu's own surface is the
-                        // ground it is about to drop.
-                        pane_sprites.push(ChromeSprite::new(
-                            ChromeMark::ControlPill {
-                                radius_px: (PANE_GHOST_RADIUS_LOGICAL_PX * scale).round().max(1.0)
-                                    as u32,
+                    // **One door, written once, drawn twice** (user proposal,
+                    // Claude 认可 2026-08-25). The corner carries 🗀 and `⌄`
+                    // side by side now, and they climb one ladder — the head's
+                    // own run is written as a loop for this reason, and it is
+                    // the sharper reason here: the ladder said twice is the
+                    // ladder that comes apart at the rung nobody tested, and
+                    // this pair rests *visible*, so a rung that drifted would be
+                    // on screen all day.
+                    let mut door = |box_: [f32; 4],
+                                    glyph_mark: ChromeMark,
+                                    glyph_width_logical_px: f32,
+                                    glyph_height_logical_px: f32,
+                                    lit: bool| {
+                        if lit {
+                            // `--menu` and a shadow, **not** the run's
+                            // `--hover`: that one is a 5.5% wash of ink, which
+                            // is right on a head (there is opaque panel under
+                            // it) and useless here, where a line of output may
+                            // be running under the glyph. A button that floats
+                            // over content has to bring its own ground.
+                            pane_sprites.push(ChromeSprite::new(
+                                ChromeMark::ControlPill {
+                                    radius_px: (PANE_GHOST_RADIUS_LOGICAL_PX * scale)
+                                        .round()
+                                        .max(1.0)
+                                        as u32,
+                                },
+                                box_,
+                                palette.menu_surface,
+                            ));
+                        }
+                        let glyph_width = (glyph_width_logical_px * scale).round().max(1.0);
+                        let glyph_height = (glyph_height_logical_px * scale).round().max(1.0);
+                        let glyph_left = ((box_[0] + box_[2] - glyph_width) / 2.0).round();
+                        let glyph_top = ((box_[1] + box_[3] - glyph_height) / 2.0).round();
+                        let mut mark = ChromeSprite::new(
+                            glyph_mark,
+                            [
+                                glyph_left,
+                                glyph_top,
+                                glyph_left + glyph_width,
+                                glyph_top + glyph_height,
+                            ],
+                            if lit {
+                                palette.accent
+                            } else {
+                                palette.pane_close_glyph
                             },
-                            ghost,
-                            palette.menu_surface,
-                        ));
+                        );
+                        // The ladder, and it is three rungs rather than the head
+                        // run's two: **the ghost is never absent**. The
+                        // furniture in a head can afford to appear only on a
+                        // hover because the head itself is on screen saying the
+                        // pane has controls; there is no head here, so a mark
+                        // that rested at nothing would leave nothing on screen
+                        // to say this pane has a menu — which is verbatim the
+                        // testimony that got the head's own chevron built.
+                        mark.opacity = if lit {
+                            1.0
+                        } else if pointer.pane_hover == Some(placement.id) {
+                            PANE_GHOST_HOVER_INK
+                        } else {
+                            PANE_GHOST_REST_INK
+                        };
+                        pane_sprites.push(mark);
+                    };
+                    // 🗀 first, because the run reads left to right — and it is
+                    // lit by the pointer alone. There is no second face for "the
+                    // files are open": the split head's folder has none, and
+                    // this is that button in the other layout.
+                    if let Some(folder) = pane_ghost_folder_geometry(ghost_box, scale) {
+                        door(
+                            folder,
+                            ChromeMark::Folder,
+                            PANE_GHOST_FOLDER_GLYPH_LOGICAL_PX,
+                            PANE_GHOST_FOLDER_GLYPH_LOGICAL_PX,
+                            pointer.hover == Some(ChromeTarget::PaneFiles(placement.id)),
+                        );
                     }
-                    let glyph_width = (PANE_GHOST_GLYPH_WIDTH_LOGICAL_PX * scale).round().max(1.0);
-                    let glyph_height = (PANE_GHOST_GLYPH_HEIGHT_LOGICAL_PX * scale)
-                        .round()
-                        .max(1.0);
-                    let glyph_left = ((ghost[0] + ghost[2] - glyph_width) / 2.0).round();
-                    let glyph_top = ((ghost[1] + ghost[3] - glyph_height) / 2.0).round();
-                    let mut mark = ChromeSprite::new(
+                    door(
+                        ghost,
                         // At rest and turned nowhere, for §7.1.6e's reason read
                         // honestly rather than copied: this menu is dropped at
                         // the button and can land above, below or beside it, so
                         // an arrow swung to 180° would point away from its own
                         // list as often as at it.
                         ChromeMark::Chevron { turned_degrees: 0 },
-                        [
-                            glyph_left,
-                            glyph_top,
-                            glyph_left + glyph_width,
-                            glyph_top + glyph_height,
-                        ],
-                        if lit {
-                            palette.accent
-                        } else {
-                            palette.pane_close_glyph
-                        },
+                        PANE_GHOST_GLYPH_WIDTH_LOGICAL_PX,
+                        PANE_GHOST_GLYPH_HEIGHT_LOGICAL_PX,
+                        // Lit by the pointer being on it **or** by its own menu
+                        // standing: the menu is dropped under the button and the
+                        // hand walks onto it, and a chevron that went dark the
+                        // instant its list appeared is E61's stranded mark.
+                        pointer.hover == Some(ChromeTarget::PaneMenu(placement.id))
+                            || pane_menu_seat == Some(placement.id),
                     );
-                    // The ladder, and it is three rungs rather than the head
-                    // run's two: **the ghost is never absent**. The furniture in
-                    // a head can afford to appear only on a hover because the
-                    // head itself is on screen saying the pane has controls;
-                    // there is no head here, so a mark that rested at nothing
-                    // would leave nothing on screen to say this pane has a menu
-                    // — which is verbatim the testimony that got the head's own
-                    // chevron built.
-                    mark.opacity = if lit {
-                        1.0
-                    } else if pointer.pane_hover == Some(placement.id) {
-                        PANE_GHOST_HOVER_INK
-                    } else {
-                        PANE_GHOST_REST_INK
-                    };
-                    pane_sprites.push(mark);
                 }
             }
             Presentation::Full => {}
@@ -13753,6 +13845,48 @@ pub fn pane_chevron_box(
     seats
         .seat_wears_ghost(placement.kind, placement.id, capsule)
         .then(|| pane_ghost_geometry(rect, scale))
+        .flatten()
+}
+
+/// One pane's 🗀 box, in physical pixels, or `None` when that seat carries no
+/// folder button this frame.
+///
+/// [`pane_chevron_box`]'s sentence, for the other door in the same corner (user
+/// proposal, Claude 认可 2026-08-25): a pane that wears a head answers with the
+/// folder in that head, and a lone terminal answers with the one beside its
+/// corner ghost. **Two rectangles, one question** — the flyout hangs off it and
+/// the tooltip registers on it, and a window that asked twice is a window whose
+/// files peek opens at a head that is not there.
+///
+/// `None` for a collapsed seat and for one whose corner the search capsule has
+/// taken, which is the same law one surface over: a float anchored to a button
+/// that is not drawn is a float pointing at nothing, and
+/// `Runtime::advance_float` reads exactly that to dismiss a peek whose trigger
+/// has left the window.
+#[must_use]
+pub fn pane_files_box(
+    seats: &Seats,
+    layout: &SeatLayout,
+    seat: SeatId,
+    scale: f32,
+    capsule: Option<SeatId>,
+) -> Option<[f32; 4]> {
+    let placement = layout.rects.iter().find(|placement| {
+        placement.id == seat && matches!(placement.presentation, Presentation::Full)
+    })?;
+    let device = placement.device_rect?;
+    let rect = [
+        device.left as f32,
+        device.top as f32,
+        device.right as f32,
+        device.bottom as f32,
+    ];
+    if seats.seat_wears_head(placement.kind) {
+        return pane_head_geometry(rect, placement.kind, scale).files;
+    }
+    seats
+        .seat_wears_ghost(placement.kind, placement.id, capsule)
+        .then(|| pane_ghost_folder_geometry(rect, scale))
         .flatten()
 }
 
@@ -26422,6 +26556,12 @@ mod tests {",
             ),
             Some(ChromeTarget::PaneMenu(seat)),
         );
+        // **This one pixel changed hands on 2026-08-25** and the assertion is
+        // rewritten rather than deleted: it used to be the terminal's own text,
+        // and it is the folder's door now that the corner carries two. What the
+        // pin was about survives one box to the left, in
+        // `the_corner_folder_answers_the_head_folders_own_target`: the *run* has
+        // an outer edge and the pixel beyond it is content.
         assert_eq!(
             hit_pane_ghost(
                 &lone,
@@ -26431,8 +26571,9 @@ mod tests {",
                 f64::from(ghost[0]) - 1.0,
                 centre.1
             ),
-            None,
-            "one pixel left of the box is the terminal's own text, not a button"
+            Some(ChromeTarget::PaneFiles(seat)),
+            "left of the `⌄` is its neighbour the folder — not a gap, and no \
+             longer text"
         );
         // And the menu hangs off the box it was drawn in — the same question
         // `pane_chevron_box` answers for a head, so the window's toggle and its
@@ -26633,6 +26774,318 @@ mod tests {",
         );
     }
 
+    // ── the folder beside it (user proposal, Claude 认可 2026-08-25, §7.1.6i) ──
+
+    /// **Two doors in one corner: 🗀 on the left, `⌄` on the right.**
+    ///
+    /// The folder is the chevron's own box stepped exactly one box left, and
+    /// that is what makes the pair a *run* rather than two marks that happen to
+    /// be near each other: the folder's right edge **is** the chevron's left
+    /// edge at every scale, so no rounding can open a seam of unclaimed pixels
+    /// between two live buttons. It is the rule the head's own run keeps
+    /// (`.panehead .pane-files + .pane-close { margin-left: 0 }`), and the
+    /// reason it is reached by derivation rather than by a second subtraction
+    /// off the pane rectangle is [`pane_ghost_geometry`]'s own: two copies round
+    /// differently at the one fractional scale nobody tested.
+    ///
+    /// Red gate: give the pair a gap and the shared-edge assertion goes; measure
+    /// the folder off `rect[2]` again and it goes at 1.25x; cut the glyph at the
+    /// head run's 13 and the size assertion goes — this run's glyph size is the
+    /// ghost's own 11, which is [`PANE_HEAD_CHEVRON_GLYPH_LOGICAL_PX`]'s rule
+    /// read in this run rather than copied out of that one.
+    #[test]
+    fn the_lone_panes_corner_carries_the_folder_beside_the_chevron() {
+        assert_eq!(
+            PANE_GHOST_FOLDER_GLYPH_LOGICAL_PX, PANE_GHOST_GLYPH_WIDTH_LOGICAL_PX,
+            "one run, one glyph size — and written as the chevron's constant, so \
+             the day the ghost is re-measured both marks move together"
+        );
+
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let rect = [100.0_f32, 40.0, 700.0, 500.0];
+            let chevron = pane_ghost_geometry(rect, scale).expect("a 600px pane seats the mark");
+            let folder = pane_ghost_folder_geometry(rect, scale).expect("and the door beside it");
+            assert_eq!(
+                folder[2], chevron[0],
+                "one shared edge and no gap at {scale}x"
+            );
+            assert_eq!(
+                folder[2] - folder[0],
+                chevron[2] - chevron[0],
+                "the same box at {scale}x"
+            );
+            assert_eq!(
+                [folder[1], folder[3]],
+                [chevron[1], chevron[3]],
+                "and the same lane at {scale}x"
+            );
+            assert!(
+                folder[0] < chevron[0],
+                "🗀 on the left, `⌄` on the right at {scale}x"
+            );
+        }
+
+        // A corner with room for one door seats one. The chevron is the door
+        // that stays, because it is the one the ruling put there: a folder half
+        // over the pane's left edge is the head run's forbidden control, and the
+        // menu behind the `⌄` still carries every verb this pane has.
+        let narrow = [0.0_f32, 0.0, 40.0, 400.0];
+        assert!(pane_ghost_geometry(narrow, 1.0).is_some());
+        assert_eq!(pane_ghost_folder_geometry(narrow, 1.0), None);
+        assert_eq!(
+            pane_ghost_folder_geometry([0.0, 0.0, 20.0, 400.0], 1.0),
+            None,
+            "and where there is no ghost at all there is nothing to stand beside"
+        );
+    }
+
+    /// **One verb, two doors** — the corner's folder answers the very target the
+    /// split head's folder answers, so the press arm, the peek's hold, the
+    /// flyout's root and its anchor are one implementation and not two lists
+    /// that agree today (§7.1.6e).
+    ///
+    /// [`pane_files_box`] is the other half of that sentence: the window asks
+    /// *one* question — "where is this pane's folder button" — and a pane that
+    /// wears a head answers with the head's, a lone one with the corner's. A
+    /// second branch in the window is exactly how a flyout ends up hanging off a
+    /// head that is not there.
+    ///
+    /// Red gate: return a target of this control's own and the first assertion
+    /// goes; answer `pane_files_box` off `pane_head_geometry` unconditionally
+    /// and the lone pane's flyout hangs off a phantom head.
+    #[test]
+    fn the_corner_folder_answers_the_head_folders_own_target() {
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1200, 800, 1_000);
+
+        let lone = Seats::lone_terminal();
+        let layout = solved(&lone, viewport, &metrics);
+        let seat = layout.rects[0].id;
+        let rect = device_rect_of(&layout, seat);
+        let folder = pane_ghost_folder_geometry(rect, 1.0).expect("a full-window pane seats both");
+        let chevron = pane_ghost_geometry(rect, 1.0).expect("a full-window pane seats the mark");
+        let middle_y = f64::from((folder[1] + folder[3]) / 2.0);
+        let at = |x: f32| hit_pane_ghost(&lone, &layout, 1.0, None, f64::from(x), middle_y);
+
+        assert_eq!(
+            at((folder[0] + folder[2]) / 2.0),
+            Some(ChromeTarget::PaneFiles(seat)),
+            "the same target the split head's folder answers",
+        );
+        // Half-open on its leading edge, like every other target in this window.
+        assert_eq!(at(folder[0]), Some(ChromeTarget::PaneFiles(seat)));
+        assert_eq!(
+            at(folder[0] - 1.0),
+            None,
+            "one pixel left of the run is the terminal's own text, not a button"
+        );
+        assert_eq!(
+            at(chevron[0]),
+            Some(ChromeTarget::PaneMenu(seat)),
+            "the shared edge belongs to the box on its right — no pixel answers both",
+        );
+        assert_eq!(
+            at((chevron[0] + chevron[2]) / 2.0),
+            Some(ChromeTarget::PaneMenu(seat)),
+            "and the `⌄` is exactly where it was before the folder joined it",
+        );
+        assert_eq!(
+            pane_files_box(&lone, &layout, seat, 1.0, None),
+            Some(folder)
+        );
+
+        let split = term_beside_files();
+        let split_layout = solved(&split, viewport, &metrics);
+        let terminal = split_layout.rects[0].id;
+        let head = pane_head_geometry(
+            device_rect_of(&split_layout, terminal),
+            SeatKind::Terminal,
+            1.0,
+        );
+        assert!(head.files.is_some(), "a terminal head carries the folder");
+        assert_eq!(
+            pane_files_box(&split, &split_layout, terminal, 1.0, None),
+            head.files,
+            "the same question, answered out of the layout the pane is actually in",
+        );
+        // And a pane that has its head grows no second folder over its body.
+        let corner = pane_ghost_folder_geometry(device_rect_of(&split_layout, terminal), 1.0)
+            .expect("the geometry is pane-agnostic");
+        assert_eq!(
+            hit_pane_ghost(
+                &split,
+                &split_layout,
+                1.0,
+                None,
+                f64::from((corner[0] + corner[2]) / 2.0),
+                f64::from((corner[1] + corner[3]) / 2.0)
+            ),
+            None,
+            "a pane with a head carries its folder in the head's run",
+        );
+    }
+
+    /// **The folder climbs the ghost's ladder, not the head run's** — three
+    /// rungs and never absent, because it is a mark floating over the terminal's
+    /// own output with no head on screen to say the pane has controls.
+    ///
+    /// The rungs are per control, which is the head run's own rule: the pointer
+    /// on one door lifts that door and leaves its neighbour where it stood. And
+    /// the lit ground is `menu_surface` for the reason the chevron's is — a
+    /// button over live output has to bring its own ground, and the head run's
+    /// `pane_close_pill` is a 5.5% wash with opaque panel assumed under it.
+    ///
+    /// **No fourth face for "the files are open".** The split head's folder has
+    /// two faces and not three — at rest and under the pointer — and this one is
+    /// the same button in the other layout, so it wears the same two. That the
+    /// painter is never told whether a flyout is up is the proof rather than the
+    /// promise.
+    ///
+    /// Red gate: rest it at nothing and the first rung goes; light it off
+    /// `PaneMenu` and the neighbour assertion goes with the folder's own; give
+    /// it `pane_close_pill` and the ground assertion goes.
+    #[test]
+    fn the_corner_folder_climbs_the_ghosts_own_ink_ladder() {
+        let seats = Seats::lone_terminal();
+        let metrics = seat_metrics(1_000);
+        let layout = solved(&seats, viewport_of(1200, 800, 1_000), &metrics);
+        let seat = layout.rects[0].id;
+        let palette = chrome_palette();
+        let rect = device_rect_of(&layout, seat);
+        let folder = pane_ghost_folder_geometry(rect, 1.0).expect("a full-window pane seats both");
+
+        let run = |pointer: ChromePointer| {
+            let (_, _, sprites) = pane_chrome(&seats, &layout, 1.0, pointer, None, (None, None));
+            let pick = |mark: ChromeMark| {
+                sprites
+                    .iter()
+                    .find(|sprite| sprite.mark == mark && in_the_pane_layer(sprite.rect, 1.0))
+                    .map(|sprite| (sprite.rect, sprite.color, sprite.opacity))
+            };
+            let chip = sprites
+                .iter()
+                .find(|sprite| {
+                    matches!(sprite.mark, ChromeMark::ControlPill { .. })
+                        && in_the_pane_layer(sprite.rect, 1.0)
+                })
+                .map(|sprite| (sprite.rect, sprite.color));
+            (
+                pick(ChromeMark::Folder),
+                pick(ChromeMark::Chevron { turned_degrees: 0 }),
+                chip,
+            )
+        };
+
+        // Rung 0 — the pointer is nowhere near, and the door is still there.
+        let (mark, _, chip) = run(ChromePointer::default());
+        let (glyph, color, ink) = mark.expect("the folder rests where the chevron rests");
+        assert_eq!(
+            (color, ink),
+            (palette.pane_close_glyph, PANE_GHOST_REST_INK)
+        );
+        assert_eq!(chip, None, "no ground until the pointer is on the button");
+        // Cut at this run's own size and centred in its box, so the two marks
+        // read as a set rather than as one control and one smudge.
+        assert_eq!(glyph[2] - glyph[0], PANE_GHOST_FOLDER_GLYPH_LOGICAL_PX);
+        assert_eq!(glyph[3] - glyph[1], PANE_GHOST_FOLDER_GLYPH_LOGICAL_PX);
+        // Centred in its box and then put on whole pixels, which is the
+        // arithmetic the `⌄` beside it uses: an odd glyph in an even box lands
+        // half a pixel off centre, and a mark rasterized on a half pixel is a
+        // blurred mark. The two doors are off by the same half in the same
+        // direction, so the run still reads as level.
+        assert_eq!(
+            [glyph[0], glyph[1]],
+            [
+                ((folder[0] + folder[2] - PANE_GHOST_FOLDER_GLYPH_LOGICAL_PX) / 2.0).round(),
+                ((folder[1] + folder[3] - PANE_GHOST_FOLDER_GLYPH_LOGICAL_PX) / 2.0).round(),
+            ],
+        );
+
+        // Rung 1 — inside the pane, on neither door.
+        let (mark, chevron, chip) = run(ChromePointer {
+            pane_hover: Some(seat),
+            ..ChromePointer::default()
+        });
+        assert_eq!(
+            mark.map(|(_, color, ink)| (color, ink)),
+            Some((palette.pane_close_glyph, PANE_GHOST_HOVER_INK))
+        );
+        assert_eq!(
+            chevron.map(|(_, color, ink)| (color, ink)),
+            Some((palette.pane_close_glyph, PANE_GHOST_HOVER_INK)),
+            "the pair reveals together"
+        );
+        assert_eq!(chip, None);
+
+        // Rung 2 — on the folder itself, and its neighbour stays where it was.
+        let (mark, chevron, chip) = run(ChromePointer {
+            pane_hover: Some(seat),
+            hover: Some(ChromeTarget::PaneFiles(seat)),
+            ..ChromePointer::default()
+        });
+        assert_eq!(
+            mark.map(|(_, color, ink)| (color, ink)),
+            Some((palette.accent, 1.0))
+        );
+        assert_eq!(
+            chevron.map(|(_, color, ink)| (color, ink)),
+            Some((palette.pane_close_glyph, PANE_GHOST_HOVER_INK)),
+            "the ladder is per control"
+        );
+        assert_eq!(
+            chip,
+            Some((folder, palette.menu_surface)),
+            "the chip is the button's own box, and it brings its own ground"
+        );
+    }
+
+    /// **The capsule stands both doors down, whole.** It takes the corner, and a
+    /// button that answers a press it is not drawn for is an invisible button —
+    /// so the folder leaves with the chevron, out of the one predicate.
+    ///
+    /// Red gate: hit-test the folder off the rectangle without asking
+    /// [`Seats::seat_wears_ghost`] and all three assertions go.
+    #[test]
+    fn an_open_search_capsule_stands_the_corner_folder_down_too() {
+        let seats = Seats::lone_terminal();
+        let metrics = seat_metrics(1_000);
+        let layout = solved(&seats, viewport_of(1200, 800, 1_000), &metrics);
+        let seat = layout.rects[0].id;
+        let folder = pane_ghost_folder_geometry(device_rect_of(&layout, seat), 1.0)
+            .expect("a full-window pane seats both");
+
+        assert_eq!(
+            hit_pane_ghost(
+                &seats,
+                &layout,
+                1.0,
+                Some(seat),
+                f64::from((folder[0] + folder[2]) / 2.0),
+                f64::from((folder[1] + folder[3]) / 2.0)
+            ),
+            None,
+        );
+        assert_eq!(pane_files_box(&seats, &layout, seat, 1.0, Some(seat)), None);
+        let (_, _, sprites) = pane_chrome(
+            &seats,
+            &layout,
+            1.0,
+            ChromePointer {
+                pane_hover: Some(seat),
+                ..ChromePointer::default()
+            },
+            None,
+            (Some(seat), None),
+        );
+        assert!(
+            !sprites
+                .iter()
+                .any(|sprite| sprite.mark == ChromeMark::Folder
+                    && in_the_pane_layer(sprite.rect, 1.0)),
+            "the capsule owns this corner while it is up",
+        );
+    }
+
     /// H110/B18: the two heads carry **different** verbs in the same slot — a
     /// terminal offers to show you where it stands, a column offers to leave.
     ///
@@ -26772,7 +27225,15 @@ mod tests {",
             let (_, _, sprites) = strip_chrome_of(scale, &tabs, 0, 0.0, hover, false);
             sprites
                 .iter()
-                .find(|sprite| sprite.mark == ChromeMark::Folder)
+                // **The strip's folder, said out loud** (2026-08-25). This build
+                // draws the panes too, and since the corner ghost grew its own
+                // 🗀 there is a second `Folder` in the frame — one that rests at
+                // `.45` and is not what this test is about. The layer is the
+                // difference and it is the honest filter: the strip is the title
+                // bar, the ghost is out over the terminal.
+                .find(|sprite| {
+                    sprite.mark == ChromeMark::Folder && !in_the_pane_layer(sprite.rect, scale)
+                })
                 .map(|sprite| sprite.opacity)
         };
         assert_eq!(
