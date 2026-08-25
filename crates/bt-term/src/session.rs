@@ -726,6 +726,50 @@ pub struct TerminalNotification {
     pub title: Option<String>,
     /// The message. Empty only when a title carried the whole of it.
     pub body: String,
+    /// **Which sequence said it.**
+    ///
+    /// The scanner has always known this and used to throw it away at the seam, because the two
+    /// sequences produce the same message and the message was the whole of what anybody read. It
+    /// is kept now because the thing above this reports *how a fact reached us* separately from
+    /// *what the fact was* (`attention` plan §13.2.2): a turn-end announced over `OSC 777` and one
+    /// announced by a bare `BEL` are different arrivals, they are fixed upstream by different
+    /// requests, and a diagnostic that recorded both as "a bell" could not tell anybody which of
+    /// the two a given machine is actually getting.
+    pub source: NotificationSource,
+}
+
+/// The sequence one [`TerminalNotification`] arrived over.
+///
+/// Three, and the third has no producer in this build: kitty's `OSC 99` is named here because it
+/// is one of the event-level announcements the attention ledger's vocabulary has a value for, and
+/// the parser that reads it belongs with the producer that needs it rather than with the enum that
+/// names it. A variant nobody constructs is the honest shape of "recognised, not yet read".
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NotificationSource {
+    /// iTerm2's free-text arm of `OSC 9`.
+    Osc9,
+    /// urxvt's `OSC 777;notify`.
+    Osc777,
+    /// kitty's `OSC 99`. **Unwired**: nothing in this crate produces one yet.
+    Osc99,
+}
+
+/// One `OSC 1337;RequestAttention=` exactly as it arrived (iTerm2's sequence, its spelling).
+///
+/// **Three values and they are not three of a kind.** `Yes` and `No` are the two ends of a
+/// *state* — a program enters a standing request for attention and later withdraws it, which is
+/// the whole reason this sequence is the one the ledger is built on: the sentence "it wants you"
+/// can be both said and taken back. `Once` is an *event*, and it takes the path the bell already
+/// takes; it never enters the ledger at all (`attention` plan §10.8.4, red line 9).
+///
+/// iTerm2's fourth value, `fireworks`, is an animation this terminal does not have; it never
+/// becomes one of these, and dropping it in silence is what "no such gesture" looks like from the
+/// far end of the pipe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttentionRequest {
+    Yes,
+    No,
+    Once,
 }
 
 /// How many notifications one session holds between two drains.
@@ -769,6 +813,21 @@ pub struct SessionStatus {
     /// makes no policy out of it.
     pub alternate_screen: bool,
     pub published_revision: u64,
+    /// **The weak-tier attention generation this session is currently asserting**, or `None` when
+    /// it is asserting none (`attention` plan §11.1.1).
+    ///
+    /// A generation number rather than a bit, and the difference is the whole of why this field
+    /// exists: a bit cannot distinguish "the user has answered, and the program has not withdrawn"
+    /// from "the program is asking again". A number can — the answer is recorded as a watermark
+    /// one layer up, and a generation above the watermark is an unanswered credential while one at
+    /// or below it is a credential that has been dealt with. `None` is not `0`: `None` says nobody
+    /// is holding the request up, and `0` is not a generation any `=yes` ever mints.
+    ///
+    /// **Minted here and nowhere else, on the `None → Some` edge alone.** A second `=yes` while
+    /// one is already standing is the same request restated, not a new one. Withdrawal (`=no`)
+    /// clears the live value and *does not* wind the counter back, which is what makes the next
+    /// request's number strictly larger than every number the last one was compared against.
+    pub attention_request: Option<u64>,
 }
 
 /// Per-session actor core. It is the serialized owner required by DESIGN.md §1.3 and composes
@@ -832,6 +891,20 @@ pub struct DualPlaneSession {
     /// answers the same, and a notification is an event that happens once. It leaves through
     /// [`Self::take_notifications`], which is the only reader, and it is empty at rest.
     notifications: Vec<TerminalNotification>,
+    /// See [`SessionStatus::attention_request`] — the live value of the weak tier.
+    attention_request: Option<u64>,
+    /// **The weak tier's cursor: the next generation `=yes` will mint, and it never runs
+    /// backwards.**
+    ///
+    /// Held apart from the live value above because the two are asked different questions and a
+    /// single field cannot answer both. The live value is cleared by every `=no`; the cursor is
+    /// cleared by nothing. That is what carries "generations are never reused" across a withdrawal
+    /// — after `yes, no, yes` the second request is generation 2, and a watermark left standing at
+    /// 1 by the answer to the first cannot swallow it (`attention` plan §12.2, invariant I2).
+    ///
+    /// Counts from 1, so that `0` is available one layer up as "not asserting" without ever
+    /// colliding with a real generation.
+    next_attention_generation: u64,
     failure_exit_code: Option<i32>,
     working: bool,
     published_revision: u64,
@@ -1241,6 +1314,8 @@ impl DualPlaneSession {
             progress: None,
             bell_latched: false,
             notifications: Vec::new(),
+            attention_request: None,
+            next_attention_generation: 1,
             failure_exit_code: None,
             working: false,
             published_revision: 0,
@@ -1308,6 +1383,7 @@ impl DualPlaneSession {
             working: self.working,
             alternate_screen: self.terminal.modes().alternate_screen,
             published_revision: self.published_revision,
+            attention_request: self.attention_request,
         }
     }
 
@@ -1334,10 +1410,48 @@ impl DualPlaneSession {
         std::mem::take(&mut self.notifications)
     }
 
-    /// Clear both attention latches without changing progress, execution, or publication state.
+    /// Clear both attention **latches** without changing progress, execution, or publication state.
+    ///
+    /// **Latches, and the word is doing work.** A bell and a failing exit code are one-shot facts
+    /// that a look spends; `attention_request` is not one of those and is deliberately not touched
+    /// here. A standing `RequestAttention=yes` is a sentence the program is still saying, and a
+    /// terminal that unsaid it because somebody glanced at the tab would be answering on the
+    /// program's behalf — the withdrawal is the program's alone (`=no`), or the user's answer,
+    /// recorded a layer up as a watermark rather than as an erasure here (`attention` plan §10.9,
+    /// pin 2).
     pub fn clear_attention(&mut self) {
         self.bell_latched = false;
         self.failure_exit_code = None;
+    }
+
+    /// Apply one `OSC 1337;RequestAttention=` to this session's weak tier.
+    ///
+    /// **The whole of the weak tier is these six lines, and each of the three arms is one ruling:**
+    ///
+    /// * `yes` mints a generation **only on the `None → Some` edge**. A program that restates its
+    ///   request every second is saying one thing repeatedly, and a terminal that minted on every
+    ///   restatement would hand the layer above a new request sixty times a second — the very
+    ///   flood the "one line per decision" rule exists to prevent (`attention` plan §11.1.4, the
+    ///   idempotent-restatement cells).
+    /// * `no` clears the live value **and leaves the cursor alone**. Not winding back is what makes
+    ///   the next generation strictly larger than the last, and therefore larger than any watermark
+    ///   the last one left standing; it is also one fewer cleanup path, which is one fewer place to
+    ///   forget (invariant I2).
+    /// * `once` is not part of this machine at all. It latches the bell — the path a bare `0x07`
+    ///   already takes — because a one-shot request for attention *is* a bell, and giving it a
+    ///   second, parallel implementation would be this terminal saying the same thing twice in two
+    ///   voices (§10.8.4).
+    fn apply_attention_request(&mut self, request: AttentionRequest) {
+        match request {
+            AttentionRequest::Yes => {
+                if self.attention_request.is_none() {
+                    self.attention_request = Some(self.next_attention_generation);
+                    self.next_attention_generation += 1;
+                }
+            }
+            AttentionRequest::No => self.attention_request = None,
+            AttentionRequest::Once => self.bell_latched = true,
+        }
     }
 
     pub fn application_cursor_mode(&self) -> bool {
@@ -8039,6 +8153,9 @@ impl DualPlaneSession {
                     if self.notifications.len() < MAX_PENDING_NOTIFICATIONS {
                         self.notifications.push(notification);
                     }
+                }
+                LifecycleDirective::AttentionRequest(request) => {
+                    self.apply_attention_request(request);
                 }
                 LifecycleDirective::GridWrites { screen, rows } => {
                     let screen = match screen {

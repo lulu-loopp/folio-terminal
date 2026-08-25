@@ -19,6 +19,18 @@ pub(crate) const MAX_INLINE_IMAGE_BASE64_BYTES: usize = MAX_INLINE_IMAGE_BYTES.d
 /// Keep a compressed image from expanding into an unbounded CPU/GPU artifact.
 pub const MAX_INLINE_IMAGE_RGBA_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_OSC_1337_FILE_HEADER_BYTES: usize = 4 * 1024;
+/// How many bytes of an `OSC 1337;<key>` are read before the key is abandoned.
+///
+/// The same bound the file header gets, because it is the same bound: everything before the first
+/// `=` of an `OSC 1337` payload is one key, and a payload that reaches this without producing one
+/// is not a sequence this terminal has a name for.
+const MAX_OSC_1337_KEY_BYTES: usize = MAX_OSC_1337_FILE_HEADER_BYTES;
+/// How many bytes of a `RequestAttention=` value are kept.
+///
+/// The four words iTerm2 defines are nine bytes at their longest, so this is not a truncation
+/// anything real can reach — it is the guarantee that an unterminated sequence cannot grow a
+/// buffer. A value that reaches it cannot equal any of the four and is therefore already unknown.
+const MAX_OSC_1337_ATTENTION_VALUE_BYTES: usize = 64;
 /// Bound on the `file://` URI an OSC 7 report may carry. A Windows extended-length path tops out
 /// at 32767 UTF-16 units, but a working directory that percent-encodes past this is not a
 /// directory this terminal will resolve relative text against; the report is dropped whole rather
@@ -1135,6 +1147,12 @@ pub(crate) enum InlineImageStreamAction {
     Progress(Option<crate::session::ProgressState>),
     /// One desktop notification a program asked for, over `OSC 9` or `OSC 777;notify`.
     Notification(crate::session::TerminalNotification),
+    /// One `OSC 1337;RequestAttention=` a program sent (iTerm2's sequence, its spelling).
+    ///
+    /// A *report of the bytes* and nothing more: whether a `yes` is a new request or a repeat of
+    /// one already standing is a question about the session's own ledger, and it is answered one
+    /// layer up in [`crate::session::DualPlaneSession`]. This scanner only says what arrived.
+    AttentionRequest(crate::session::AttentionRequest),
     /// One OSC 7 report: the `file://` URI bytes the shell named its working directory with. An
     /// empty payload is the report "I no longer have one to give", which is a fact of its own and
     /// therefore still an action.
@@ -1206,7 +1224,7 @@ enum StreamState {
         held: Vec<u8>,
     },
     OscPass,
-    InlineFile(InlineFileCapture),
+    Osc1337(Osc1337Capture),
     AfterInlineEscape,
     Text {
         kind: TextOsc,
@@ -1218,6 +1236,102 @@ enum StreamState {
         payload: Vec<u8>,
         oversized: bool,
     },
+}
+
+/// What `OSC 1337;` turned out to be, decided at its **first `=`** and not before.
+///
+/// `1337` is a number iTerm2 hung several unrelated payloads on, and this terminal now reads two of
+/// them: `File=` (an inline image) and `RequestAttention=` (a program asking to be noticed). They
+/// share a prefix and nothing else — one is megabytes of base64 read against a decoder, the other
+/// is one of four words — so the shared prefix is where the split belongs, and it is a split rather
+/// than a second scanner because the C0 handling, the terminator handling and the
+/// bytes-are-swallowed-whole rule around them are the same machine for both.
+///
+/// **A key this terminal has no name for is swallowed exactly as it was before this variant
+/// existed**: it becomes a [`InlineFileCapture`] whose header cannot begin `File=`, which finishes
+/// as nothing. That is deliberate and not an oversight — `OSC 1337;SetMark` and its dozen siblings
+/// were never printed to the grid, and beginning to print them would be this change's own
+/// regression.
+#[derive(Debug)]
+enum Osc1337Capture {
+    /// Before the first `=`: the key that decides which payload this is.
+    Key(Vec<u8>),
+    File(InlineFileCapture),
+    /// After `RequestAttention=`: the value, read at the terminator.
+    Attention(Vec<u8>),
+}
+
+impl Osc1337Capture {
+    fn push(self, byte: u8, encoded_limit: usize) -> Self {
+        match self {
+            Self::Key(mut key) => {
+                if byte == b'=' {
+                    if key == b"RequestAttention" {
+                        Self::Attention(Vec::new())
+                    } else {
+                        key.push(b'=');
+                        Self::File(InlineFileCapture {
+                            header: key,
+                            ..InlineFileCapture::default()
+                        })
+                    }
+                } else if key.len() < MAX_OSC_1337_KEY_BYTES {
+                    key.push(byte);
+                    Self::Key(key)
+                } else {
+                    // Past the bound the key is abandoned, and abandoning it is spelled as the
+                    // file capture that has already given up on its header: one finish, one
+                    // answer, and the answer is nothing.
+                    Self::File(InlineFileCapture {
+                        header_too_large: true,
+                        ..InlineFileCapture::default()
+                    })
+                }
+            }
+            Self::Attention(mut value) => {
+                if value.len() < MAX_OSC_1337_ATTENTION_VALUE_BYTES {
+                    value.push(byte);
+                }
+                Self::Attention(value)
+            }
+            Self::File(mut capture) => {
+                capture.push(byte, encoded_limit);
+                Self::File(capture)
+            }
+        }
+    }
+
+    fn finish(self) -> Option<InlineImageStreamAction> {
+        match self {
+            // A payload that never reached an `=` names nothing.
+            Self::Key(_) => None,
+            Self::File(capture) => capture.finish(),
+            Self::Attention(value) => {
+                parse_request_attention(&value).map(InlineImageStreamAction::AttentionRequest)
+            }
+        }
+    }
+}
+
+/// Read one `RequestAttention=` value, or refuse to read it.
+///
+/// iTerm2 defines four: `yes` enters a standing request, `no` withdraws it, `once` is a one-shot,
+/// and `fireworks` is an animation this terminal does not have. **Three of the four are facts here
+/// and the fourth is dropped in silence** — dropping is what "this terminal has no such gesture"
+/// looks like from the program's side, and inventing a bell or a state out of it would be this
+/// terminal answering a request it did not implement.
+///
+/// The spelling is matched exactly and no case is folded. iTerm2's own vocabulary is lower case
+/// throughout, an unknown value is dropped whole (there is no half-understood attention request),
+/// and a terminal that accepted `YES` would be teaching programs a dialect no other terminal
+/// speaks.
+fn parse_request_attention(value: &[u8]) -> Option<crate::session::AttentionRequest> {
+    match value {
+        b"yes" => Some(crate::session::AttentionRequest::Yes),
+        b"no" => Some(crate::session::AttentionRequest::No),
+        b"once" => Some(crate::session::AttentionRequest::Once),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1275,7 +1389,8 @@ fn parse_inline_file_header(header: &[u8]) -> Option<bool> {
 
 /// Streaming OSC prefilter at the existing adapter parser seam.
 ///
-/// The OSC sequences Folio gives meaning to — `1337;File=` (inline image), `133;` (shell
+/// The OSC sequences Folio gives meaning to — `1337;File=` (inline image),
+/// `1337;RequestAttention=` (a standing request to be noticed), `133;` (shell
 /// integration), `9;` (ConEmu progress and iTerm2 notifications), `777;` (urxvt notifications)
 /// and `7;` (working directory) — are swallowed by `vte::ansi::Performer` before they
 /// reach `alacritty_terminal::Term`, so they are recognized here instead. This is the whole of the
@@ -1358,7 +1473,7 @@ impl Osc1337Scanner {
                             }
                         } else if body == b"1337;" {
                             flush_bytes(&mut actions, &mut ordinary);
-                            StreamState::InlineFile(InlineFileCapture::default())
+                            StreamState::Osc1337(Osc1337Capture::Key(Vec::new()))
                         } else {
                             StreamState::OscPrefix { held }
                         }
@@ -1387,7 +1502,7 @@ impl Osc1337Scanner {
                         }
                     }
                 }
-                StreamState::InlineFile(mut capture) => match byte {
+                StreamState::Osc1337(capture) => match byte {
                     0x07 => {
                         finish_capture(&mut actions, &mut ordinary, capture);
                         StreamState::Ground
@@ -1401,13 +1516,8 @@ impl Osc1337Scanner {
                         ordinary.push(byte);
                         StreamState::Ground
                     }
-                    0x00..=0x06 | 0x08..=0x17 | 0x19 | 0x1c..=0x1f => {
-                        StreamState::InlineFile(capture)
-                    }
-                    _ => {
-                        capture.push(byte, self.encoded_limit);
-                        StreamState::InlineFile(capture)
-                    }
+                    0x00..=0x06 | 0x08..=0x17 | 0x19 | 0x1c..=0x1f => StreamState::Osc1337(capture),
+                    _ => StreamState::Osc1337(capture.push(byte, self.encoded_limit)),
                 },
                 StreamState::AfterInlineEscape => {
                     if byte == b'\\' {
@@ -1576,7 +1686,12 @@ fn finish_osc_9(actions: &mut Vec<InlineImageStreamAction>, payload: &[u8], over
         }
         return;
     }
-    push_notification(actions, None, payload);
+    push_notification(
+        actions,
+        crate::session::NotificationSource::Osc9,
+        None,
+        payload,
+    );
 }
 
 /// Read one terminated `OSC 777`.
@@ -1600,7 +1715,12 @@ fn finish_osc_777(actions: &mut Vec<InlineImageStreamAction>, payload: &[u8], ov
         return;
     };
     let (title, body) = split_once(rest, b';');
-    push_notification(actions, Some(title), body.unwrap_or_default());
+    push_notification(
+        actions,
+        crate::session::NotificationSource::Osc777,
+        Some(title),
+        body.unwrap_or_default(),
+    );
 }
 
 /// File one notification, if what arrived is one.
@@ -1619,6 +1739,7 @@ fn finish_osc_777(actions: &mut Vec<InlineImageStreamAction>, payload: &[u8], ov
 /// and the title falls back to the pane's own name exactly as `OSC 9`'s absent one does.
 fn push_notification(
     actions: &mut Vec<InlineImageStreamAction>,
+    source: crate::session::NotificationSource,
     title: Option<&[u8]>,
     body: &[u8],
 ) {
@@ -1640,6 +1761,7 @@ fn push_notification(
         crate::session::TerminalNotification {
             title: title.map(str::to_owned),
             body: body.to_owned(),
+            source,
         },
     ));
 }
@@ -1675,7 +1797,7 @@ fn parse_progress_percentage(value: &[u8]) -> Option<u8> {
 fn finish_capture(
     actions: &mut Vec<InlineImageStreamAction>,
     ordinary: &mut Vec<u8>,
-    capture: InlineFileCapture,
+    capture: Osc1337Capture,
 ) {
     flush_bytes(actions, ordinary);
     if let Some(action) = capture.finish() {
@@ -2195,6 +2317,7 @@ mod tests {
                 InlineImageStreamAction::Notification(crate::session::TerminalNotification {
                     title: Some("hi".to_owned()),
                     body: "there".to_owned(),
+                    source: crate::session::NotificationSource::Osc777,
                 }),
                 InlineImageStreamAction::Bytes(b"x".to_vec()),
             ]
@@ -2866,6 +2989,7 @@ mod tests {
                         InlineImageStreamAction::Image(_)
                         | InlineImageStreamAction::Progress(_)
                         | InlineImageStreamAction::Notification(_)
+                        | InlineImageStreamAction::AttentionRequest(_)
                         | InlineImageStreamAction::TooLarge => {
                             panic!("fixture contains no image")
                         }
@@ -2884,6 +3008,145 @@ mod tests {
         }
         let bytewise = stream.iter().map(std::slice::from_ref).collect::<Vec<_>>();
         assert_eq!(normalized(&bytewise), whole);
+    }
+
+    /// PIN — **`1337;` is a shared prefix, and the split is made at the first `=`.**
+    ///
+    /// `File=` and `RequestAttention=` are two unrelated payloads iTerm2 hung on one number, and
+    /// until this they went down one path: everything after `1337;` was read as a file header. So
+    /// the red gate is the second line of this test — before the split, `RequestAttention=yes` was
+    /// a header that never began `File=`, and it finished as silence.
+    ///
+    /// The first line is the other half and it is the regression this change had to not cause: the
+    /// image path is byte-for-byte what it was, including the `name=`/`inline=` arguments that come
+    /// *after* the key.
+    #[test]
+    fn osc_1337_splits_file_from_request_attention_at_the_first_equals() {
+        let mut scanner = Osc1337Scanner::default();
+        assert_eq!(
+            scanner.scan(b"\x1b]1337;File=name=YQ==;inline=1:QUJD\x07"),
+            vec![InlineImageStreamAction::Image(b"QUJD".to_vec())],
+            "the file arm is untouched, arguments after the key included"
+        );
+        assert_eq!(
+            scanner.scan(b"before\x1b]1337;RequestAttention=yes\x07after"),
+            vec![
+                InlineImageStreamAction::Bytes(b"before".to_vec()),
+                InlineImageStreamAction::AttentionRequest(crate::session::AttentionRequest::Yes),
+                InlineImageStreamAction::Bytes(b"after".to_vec()),
+            ],
+            "the request is a fact of its own and takes no surrounding byte with it"
+        );
+    }
+
+    /// PIN — **the three values this terminal implements, and the two it deliberately does not.**
+    ///
+    /// `fireworks` is iTerm2's fourth value and this terminal has no such animation; an unknown
+    /// value is a value from a dialect nobody here speaks. Both are dropped *whole* — no action, no
+    /// bytes on the grid — because the alternative to dropping is inventing: a `fireworks` read as
+    /// "some kind of attention" would enter the ledger as a request the program never made, and an
+    /// unknown value printed to the grid would put `RequestAttention=maybe` in the user's
+    /// scrollback.
+    ///
+    /// Case is not folded: iTerm2's vocabulary is lower case throughout, and a terminal that
+    /// accepted `YES` would be teaching programs a spelling no other terminal reads.
+    #[test]
+    fn request_attention_reads_three_values_and_drops_every_other_whole() {
+        for (payload, expected) in [
+            (
+                &b"\x1b]1337;RequestAttention=yes\x07"[..],
+                Some(crate::session::AttentionRequest::Yes),
+            ),
+            (
+                &b"\x1b]1337;RequestAttention=no\x07"[..],
+                Some(crate::session::AttentionRequest::No),
+            ),
+            (
+                &b"\x1b]1337;RequestAttention=once\x07"[..],
+                Some(crate::session::AttentionRequest::Once),
+            ),
+            (&b"\x1b]1337;RequestAttention=fireworks\x07"[..], None),
+            (&b"\x1b]1337;RequestAttention=maybe\x07"[..], None),
+            (&b"\x1b]1337;RequestAttention=YES\x07"[..], None),
+            (&b"\x1b]1337;RequestAttention=\x07"[..], None),
+        ] {
+            let mut scanner = Osc1337Scanner::default();
+            let expected = expected
+                .map(InlineImageStreamAction::AttentionRequest)
+                .into_iter()
+                .collect::<Vec<_>>();
+            assert_eq!(scanner.scan(payload), expected, "{payload:?}");
+        }
+    }
+
+    /// PIN — **both terminators, and a value too long to be one of the four.**
+    ///
+    /// `ST` and `BEL` end the same sequence, which is the rule every other payload in this scanner
+    /// already follows. The bound is the third case and it is not a truncation: a value that
+    /// reaches it cannot equal any of the four words, so the honest answer is the same one an
+    /// unknown value gets.
+    #[test]
+    fn request_attention_ends_at_either_terminator_and_is_bounded() {
+        let mut scanner = Osc1337Scanner::default();
+        assert_eq!(
+            scanner.scan(b"\x1b]1337;RequestAttention=yes\x1b\\"),
+            vec![InlineImageStreamAction::AttentionRequest(
+                crate::session::AttentionRequest::Yes
+            )],
+            "ST terminates it"
+        );
+        let oversized = format!(
+            "\x1b]1337;RequestAttention={}\x07",
+            "y".repeat(MAX_OSC_1337_ATTENTION_VALUE_BYTES + 8)
+        );
+        let mut scanner = Osc1337Scanner::default();
+        assert!(
+            scanner.scan(oversized.as_bytes()).is_empty(),
+            "a value past the bound is not one of the four"
+        );
+    }
+
+    /// PIN — **one request survives being cut anywhere.**
+    ///
+    /// The same property the file payload and the shell-integration markers are pinned on, applied
+    /// to the new arm: a sequence split across reads is one sequence. The split that matters most
+    /// is the one inside the key, because the key is what the whole dispatch now turns on.
+    #[test]
+    fn request_attention_reassembles_across_every_chunk_boundary() {
+        let stream = b"a\x1b]1337;RequestAttention=yes\x07b";
+        for split in 0..=stream.len() {
+            let mut scanner = Osc1337Scanner::default();
+            let mut actions = scanner.scan(&stream[..split]);
+            actions.extend(scanner.scan(&stream[split..]));
+            let requests = actions
+                .iter()
+                .filter(|action| matches!(action, InlineImageStreamAction::AttentionRequest(_)))
+                .count();
+            let bytes = actions
+                .into_iter()
+                .filter_map(|action| match action {
+                    InlineImageStreamAction::Bytes(part) => Some(part),
+                    _ => None,
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+            assert_eq!(requests, 1, "split at byte {split}");
+            assert_eq!(bytes, b"ab".to_vec(), "split at byte {split}");
+        }
+    }
+
+    /// PIN — **a `1337` key this terminal has no name for is still swallowed whole.**
+    ///
+    /// `SetMark`, `CurrentDir`, `StealFocus` and their siblings have never been printed to the
+    /// grid, and the split at the first `=` must not begin printing them. This is the regression
+    /// the new dispatch could most easily have caused, because "not a file" and "not recognised"
+    /// used to be the same branch and are now two.
+    #[test]
+    fn unknown_osc_1337_keys_stay_swallowed() {
+        let mut scanner = Osc1337Scanner::default();
+        assert!(scanner.scan(b"\x1b]1337;SetMark\x07").is_empty());
+        assert!(scanner.scan(b"\x1b]1337;CurrentDir=/tmp\x07").is_empty());
+        assert!(scanner.scan(b"\x1b]1337;\x07").is_empty());
     }
 
     #[test]
