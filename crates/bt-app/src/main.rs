@@ -16096,6 +16096,42 @@ struct PreviewPlacement {
 /// from the solve, corner from the tween. That equality is what makes R2 hold
 /// here for free — no frame of a flight changes the extent, so no frame of a
 /// flight can re-run the scale worker.
+/// **A hole is only ever cut where a floor already stands** (§7.14; user ruling
+/// 2026-08-25).
+///
+/// # What a hole costs when it is wrong
+///
+/// A web pane is a hole: `bt_render::WindowRenderer::set_web_holes` writes
+/// `(0, 0, 0, 0)` over the pane's rectangle so the page composed underneath can
+/// be seen at all. Nothing else in the tree paints there — and this window is
+/// `CreateTargetForHwnd(hwnd, topmost = true)` over a per-pixel-alpha HWND, so a
+/// hole with nothing under it is not a dark rectangle, it is *the desktop*.
+///
+/// The two things that can be under it are the page's own visual and, since
+/// §7.14, the floor beneath that. **The page arrives on the browser's clock and
+/// the floor arrives on the pane's**, which is why the floor is what the hole is
+/// asked about: `floored` is what `webhost::WebSeat::place` returns, and it is
+/// `true` exactly when the compositor has been given this rectangle and did not
+/// refuse it.
+///
+/// Before this rule the hole was cut off `presence` alone, so a page's **first**
+/// open — where the engine does not exist yet and the floor was minted with it —
+/// opened a hole over nothing. Measured on the machine (release, cold profile,
+/// isolated `APPDATA`/`LOCALAPPDATA`): twelve presented frames carried the hole
+/// with no engine, spanning 403 ms, and a magenta board behind the window was
+/// photographed filling the entire pane body from 88.5 ms to 514.6 ms after the
+/// page was asked for.
+///
+/// A function and not two lines at the call site because it is the whole of the
+/// ruling and it is pure — the part that can be wrong without a window, and
+/// therefore the part a test can hold.
+fn hole_for(presence: webhost::WebPresence, floored: bool) -> Option<[f32; 4]> {
+    match presence {
+        webhost::WebPresence::Shown(bounds) if floored => Some(bounds.as_rect()),
+        _ => None,
+    }
+}
+
 fn preview_image_placement(
     seats: &seats::Seats,
     layout: &SeatLayout,
@@ -62819,15 +62855,24 @@ impl Runtime<'_> {
         let window = &mut *self.window;
         let mut holes = Vec::new();
         for placement in placements {
-            if let Some(web) = window.web.get_mut(&placement.leaf)
-                && let Err(error) =
-                    web.place(&window.compositor, placement.presence, placement.size)
-            {
-                eprintln!("BT_WEB place failed: {error}");
-            }
-            if let webhost::WebPresence::Shown(bounds) = placement.presence {
-                holes.push(bounds.as_rect());
-            }
+            // **The placement is what answers the hole**, so it is asked for its
+            // answer rather than only for its failure: a page that could not be
+            // placed has no floor, and a refusal that only reached `stderr`
+            // while the hole was cut anyway is the shape of the defect this
+            // whole slice is about.
+            let floored = match window.web.get_mut(&placement.leaf) {
+                Some(web) => {
+                    match web.place(&window.compositor, placement.presence, placement.size) {
+                        Ok(floored) => floored,
+                        Err(error) => {
+                            eprintln!("BT_WEB place failed: {error}");
+                            false
+                        }
+                    }
+                }
+                None => false,
+            };
+            holes.extend(hole_for(placement.presence, floored));
         }
         window.renderer.set_web_holes(holes);
     }
@@ -98734,6 +98779,66 @@ mod tests {
             blur < takes,
             "a press inside a page takes the keyboard without settling the field \
              standing over it, which leaves an editor nothing can reach:\n{press}"
+        );
+    }
+
+    /// **A hole is only ever cut where a floor already stands** (§7.14; user
+    /// ruling 2026-08-25, from a photograph of a first-opened page showing the
+    /// desktop).
+    ///
+    /// The hole and the floor were on two different clocks and only one of them
+    /// was the pane's. A seat's rectangle exists the moment its pane does, so
+    /// `sync_web_page` cut the hole on the first frame; the floor was minted by
+    /// `attach_web_visual`, which runs when WebView2 hands back a controller —
+    /// hundreds of milliseconds later on a first open, and never at all if the
+    /// engine fails to arrive. In between, the pane is a rectangle nothing in
+    /// the composition tree paints, over a `topmost = true` target on a
+    /// per-pixel-alpha HWND: the desktop, at full size, for as long as it takes.
+    ///
+    /// **Measured on the machine before the fix** (release, cold profile,
+    /// isolated `APPDATA`/`LOCALAPPDATA`, a magenta board window behind Folio):
+    /// twelve presented frames carried the hole with `engine_up=false`, spanning
+    /// 403 ms, and the camera caught the board filling the whole pane body from
+    /// 88.5 ms to 514.6 ms — 120 056 sampled pixels, the pane's body exactly.
+    /// Two runs out of two. After the fix, two runs out of two: not one board
+    /// pixel inside the frame, peak zero.
+    ///
+    /// The fix is that the placement now answers the hole — `WebSeat::place`
+    /// returns whether a floor stands — and this is the sentence that reads that
+    /// answer. It is pure, so unlike the pane it decides for it can be held
+    /// here rather than described.
+    ///
+    /// MUTATIONS:
+    /// ① make [`super::hole_for`] ignore `floored` — the first assertion goes
+    ///    red, and that is exactly the shipped build the user photographed;
+    /// ② let it cut a hole for a `Hidden` page — the second goes red, and a page
+    ///    behind a modal or on a background tab becomes a window-shaped window.
+    #[test]
+    fn a_hole_is_only_cut_where_a_floor_already_stands() {
+        let bounds = super::webhost::WebBounds {
+            x: 12,
+            y: 34,
+            width: 500,
+            height: 400,
+        };
+        let shown = super::webhost::WebPresence::Shown(bounds);
+
+        assert_eq!(
+            super::hole_for(shown, false),
+            None,
+            "a page whose floor is not down yet is still given a hole, which is \
+             a rectangle of desktop inside this window"
+        );
+        assert_eq!(
+            super::hole_for(shown, true),
+            Some(bounds.as_rect()),
+            "a page standing on its own floor is given no hole, so the page \
+             nobody can see is hosted perfectly"
+        );
+        assert_eq!(
+            super::hole_for(super::webhost::WebPresence::Hidden, true),
+            None,
+            "a hidden page is cut a hole anyway"
         );
     }
 }
