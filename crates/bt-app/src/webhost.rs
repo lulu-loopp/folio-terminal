@@ -1211,6 +1211,22 @@ pub(crate) enum RehostReport {
     Rebuilding(String),
 }
 
+impl RehostReport {
+    /// What went wrong, for a caller that has nothing to undo and only has to
+    /// say so.
+    ///
+    /// [`Self::Rebuilding`] is a failure that the seat is already recovering
+    /// from and [`Self::SourceKept`] is one that left the page where it was;
+    /// both are worth a line on `stderr` and neither is worth a branch at every
+    /// call site. `Moved` and `AddressOnly` are the two ways nothing is owed.
+    pub(crate) fn error(&self) -> Option<&str> {
+        match self {
+            Self::Moved | Self::AddressOnly => None,
+            Self::SourceKept(error) | Self::Rebuilding(error) => Some(error),
+        }
+    }
+}
+
 /// One web seat: the state machine, the engine, and the mint they share.
 pub(crate) struct WebSeat {
     /// Which window and which visual this page belongs to **right now** — the
@@ -1243,12 +1259,19 @@ pub(crate) struct WebSeat {
     /// What the engine has actually been told, so a frame that changed nothing
     /// issues no calls.
     presence: Option<WebPresence>,
-    /// **How big this seat's rectangle is**, whether or not the page is on the
-    /// glass — see [`WebSeat::apply_presence`] for why the two are separate
-    /// questions since W2 slice ③.
-    wanted_size: Option<(u32, u32)>,
+    /// **Where this seat's rectangle is and how big it is**, whether or not the
+    /// page is on the glass — see [`WebSeat::apply_presence`] for why presence
+    /// and rectangle are separate questions since W2 slice ③.
+    ///
+    /// **The origin joined the size on 2026-08-25** (the right-click menu in the
+    /// window's corner). It is not the placement — that is the visual's, through
+    /// [`WebSeat::stand_on_the_floor`] — it is what the engine needs in order to
+    /// put its *own* windows, the context menu first among them, over the pane
+    /// they belong to rather than over the window's top-left corner. See
+    /// [`bt_platform::WebHost::set_bounds`].
+    wanted_bounds: Option<WebBounds>,
     /// And what the engine has actually been told about it.
-    sized: Option<(u32, u32)>,
+    bounded: Option<WebBounds>,
     /// **The rectangle the compositor was last given for this page's pair** —
     /// its floor and, once there is one, its visual.
     ///
@@ -1365,7 +1388,22 @@ impl WebSeat {
         let refusal_sink = Rc::clone(&refusal);
         let host = WebHost::new(
             Box::new(move |candidate| {
-                match navigation_starting(candidate, &gate.borrow()) {
+                let decision = navigation_starting(candidate, &gate.borrow());
+                // **The one place the verdict exists** — the same sentence the
+                // 「导航被拦」card is built from, said out loud for the trace as
+                // well, because `NavigationStarting` reports *that* a navigation
+                // was cancelled and never why, and a viewer's own second request
+                // refused here looks from outside exactly like a file the engine
+                // could not read.
+                crate::web_trace::line(|| {
+                    format!(
+                        "navigation_starting {} uri={candidate} mint={} verdict={}",
+                        crate::web_trace::seat(page),
+                        crate::web_trace::mint(&gate.borrow()),
+                        crate::web_trace::verdict(&decision),
+                    )
+                });
+                match decision {
                     Decision::Navigate(target) if target == candidate => {
                         WebNavigationVerdict::Proceed
                     }
@@ -1399,8 +1437,8 @@ impl WebSeat {
             waiting: None,
             wanted: WebPresence::Hidden,
             presence: None,
-            wanted_size: None,
-            sized: None,
+            wanted_bounds: None,
+            bounded: None,
             placed: None,
             buttons: bt_platform::web_mouse_buttons::NONE,
             last_left_press: None,
@@ -1557,6 +1595,13 @@ impl WebSeat {
                 success,
                 status,
             } => {
+                crate::web_trace::line(|| {
+                    format!(
+                        "navigation_completed {} uri={uri} success={} status={status}",
+                        crate::web_trace::seat(self.address.page),
+                        u8::from(*success),
+                    )
+                });
                 self.page.loading = false;
                 self.page.loading_since = None;
                 if *success {
@@ -1662,6 +1707,12 @@ impl WebSeat {
             // anybody else can make, and those are exactly the ones that door
             // already refuses.
             WebEvent::DownloadStarting { uri, file_name } => {
+                crate::web_trace::line(|| {
+                    format!(
+                        "download_starting {} uri={uri} file={file_name}",
+                        crate::web_trace::seat(self.address.page),
+                    )
+                });
                 match download_answer(uri, file_name) {
                     Ok(target) => outcomes.push(WebOutcome::HandOff(target)),
                     Err(fault) => self.fault = Some(fault),
@@ -1688,7 +1739,7 @@ impl WebSeat {
                     // picture is of — asked here rather than at the far end,
                     // because by the time the bytes are decoded the seat may
                     // have been given another rectangle.
-                    source: self.sized,
+                    source: self.bounded.map(|bounds| (bounds.width, bounds.height)),
                 });
                 WebEffect::Ignore
             }
@@ -1874,6 +1925,13 @@ impl WebSeat {
                         }
                     }
                 }
+                crate::web_trace::line(|| {
+                    format!(
+                        "navigate {} url={url} mint={}",
+                        crate::web_trace::seat(self.address.page),
+                        crate::web_trace::mint(&minted),
+                    )
+                });
                 *self.mint.borrow_mut() = minted;
                 self.host.navigate(url)?;
                 Ok(None)
@@ -1983,16 +2041,16 @@ impl WebSeat {
         &mut self,
         compositor: &bt_platform::Compositor,
         presence: WebPresence,
-        size: Option<(u32, u32)>,
+        bounds: Option<WebBounds>,
     ) -> Result<bool, String> {
         self.wanted = presence;
-        // **The size is not the presence** (W2 slice ③). A seat's rectangle
+        // **The rectangle is not the presence** (W2 slice ③). A seat's rectangle
         // exists whenever its pane does; whether the page is *on the glass* is a
         // second question, answered by a modal and by which tab is in front. They
         // were one answer while a window held one page, because the only page
         // there was was the one you were looking at.
-        if let Some(size) = size {
-            self.wanted_size = Some(size);
+        if let Some(bounds) = bounds {
+            self.wanted_bounds = Some(bounds);
         }
         self.stand_on_the_floor(compositor)
     }
@@ -2040,6 +2098,20 @@ impl WebSeat {
         Ok(floored)
     }
 
+    /// What the window last asked of this page — read by the placement's own
+    /// trace station so that a line is written when the answer *moves* and not
+    /// sixty times a second while it stands still.
+    pub(crate) fn wanted(&self) -> WebPresence {
+        self.wanted
+    }
+
+    /// **The window this page stands in has moved** — see
+    /// [`crate::Runtime::window_moved`], which is the one caller and carries the
+    /// argument for why this is not the same fact as [`Self::place`].
+    pub(crate) fn parent_window_moved(&self) -> Result<(), String> {
+        self.host.notify_parent_window_moved()
+    }
+
     /// Tell the engine how big it is and whether it is on the glass, if there is
     /// an engine and it does not know already.
     ///
@@ -2059,11 +2131,12 @@ impl WebSeat {
         // controller was never sized loads against zero by zero. Measured: such a
         // page never committed at all, so the seat had no identity, no pool row
         // and nothing in `session.json`.
-        if let Some((width, height)) = self.wanted_size
-            && self.sized != self.wanted_size
+        if let Some(bounds) = self.wanted_bounds
+            && self.bounded != self.wanted_bounds
         {
-            self.host.set_size(width, height)?;
-            self.sized = Some((width, height));
+            self.host
+                .set_bounds(bounds.x, bounds.y, bounds.width, bounds.height)?;
+            self.bounded = Some(bounds);
         }
         if self.presence == Some(self.wanted) {
             return Ok(());
@@ -2147,7 +2220,12 @@ impl WebSeat {
             return RehostReport::AddressOnly;
         }
         self.settle_input_for_handoff();
-        let size = self.sized.or(self.wanted_size).unwrap_or((0, 0));
+        let rect = self
+            .bounded
+            .or(self.wanted_bounds)
+            .map_or((0, 0, 0, 0), |bounds| {
+                (bounds.x, bounds.y, bounds.width, bounds.height)
+            });
         let visible = matches!(self.wanted, WebPresence::Shown(_));
         let outcome = self.host.rehost(
             &bt_platform::RehostSide {
@@ -2160,7 +2238,7 @@ impl WebSeat {
                 page: address.page,
                 hwnd: address.hwnd,
             },
-            size,
+            rect,
             visible,
         );
         match outcome {
@@ -2218,7 +2296,7 @@ impl WebSeat {
     fn take_address(&mut self, address: SeatAddress) {
         self.address = address;
         self.presence = None;
-        self.sized = None;
+        self.bounded = None;
         self.placed = None;
     }
 
@@ -2585,7 +2663,7 @@ impl WebSeat {
             // glass but the blank page this host minted for itself.
             committed: self.machine.recoverable_url().is_some() && self.fault.is_none(),
             capturing: self.capturing,
-            size: self.sized,
+            size: self.bounded.map(|bounds| (bounds.width, bounds.height)),
         }
     }
 
@@ -3306,8 +3384,8 @@ mod rehost_address_tests {
             waiting: None,
             wanted: WebPresence::Hidden,
             presence: None,
-            wanted_size: None,
-            sized: None,
+            wanted_bounds: None,
+            bounded: None,
             placed: None,
             buttons: bt_platform::web_mouse_buttons::NONE,
             last_left_press: None,
@@ -3448,28 +3526,32 @@ mod rehost_address_tests {
             page: page(1, 3),
             hwnd: hwnd(0x1111),
         });
-        seat.wanted_size = Some((800, 600));
-        seat.sized = Some((800, 600));
-        seat.presence = Some(WebPresence::Shown(WebBounds {
+        let rectangle = WebBounds {
             x: 10,
             y: 20,
             width: 800,
             height: 600,
-        }));
+        };
+        seat.wanted_bounds = Some(rectangle);
+        seat.bounded = Some(rectangle);
+        seat.presence = Some(WebPresence::Shown(rectangle));
 
         seat.take_address(SeatAddress {
             page: page(4, 9),
             hwnd: hwnd(0x2222),
         });
 
-        assert_eq!(seat.sized, None, "the new engine has been told no size");
+        assert_eq!(
+            seat.bounded, None,
+            "the new engine has been told no rectangle"
+        );
         assert_eq!(
             seat.presence, None,
             "the new engine has been told no presence"
         );
         assert_eq!(
-            seat.wanted_size,
-            Some((800, 600)),
+            seat.wanted_bounds,
+            Some(rectangle),
             "what the window wants is unchanged; only what was said is forgotten"
         );
     }

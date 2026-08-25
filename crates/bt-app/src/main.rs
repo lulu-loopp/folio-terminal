@@ -79,6 +79,7 @@ mod tooltip;
 mod trace;
 mod watch_clock;
 mod web_thumb;
+mod web_trace;
 mod webhost;
 mod webnav;
 mod websheet;
@@ -3887,6 +3888,43 @@ enum PreviewOpenLane {
 /// own, and because the loop that consumes it is walking two maps at once.
 fn a_page_was_replaced(showing_picture: bool, buffer: Option<&preview::PreviewSource>) -> bool {
     showing_picture || buffer.is_some_and(|source| source.web_url().is_none())
+}
+
+/// **Whether this page still has a pane to be drawn on** — the rule
+/// [`Runtime::advance_web_page`] retires a browser by (§7.14a, user report
+/// 2026-08-25).
+///
+/// Three facts and no fourth: whether a float is carrying this page, whether the
+/// seat it was opened on is still a preview seat in its tab's tree, and whether
+/// whatever pane it is drawn on has had [`a_page_was_replaced`] happen to it.
+///
+/// **The float answers *instead of* the tree, not beside it**, and that is the
+/// whole of this ticket's repair. Popping a pane out closes its seat — that is
+/// `pop_out_preview`'s design and not an accident of it — so a rule that only
+/// asked the tree said "this page has no pane" about the one page a reader had
+/// just carried into a window of its own, and the browser was closed inside a
+/// float that went on drawing its head, its foot and an empty middle.
+fn a_page_still_has_a_pane(floated: bool, seat_stands: bool, replaced: bool) -> bool {
+    (floated || seat_stands) && !replaced
+}
+
+/// **Whether this page must come off the glass this frame** — the other half of
+/// [`Runtime::sync_web_page`]'s answer, and the one a float changes (§7.14a).
+///
+/// Three of the four reasons are unchanged: a modal is painted over the whole
+/// window by wgpu and a page is *under* wgpu, so a hole through a scrim would be
+/// a page read clearly through a dimmed window; a failure card replaces the
+/// seat's content and the hole would erase it; and a page on a tab nobody is
+/// looking at costs nothing precisely because it is hidden.
+///
+/// **The fourth is a float's exemption from the third.** A floating window is on
+/// the glass across tab switches — that is §7.1.2's ruling and the whole of what
+/// a float is for — so "which tab is in front" says nothing about a page inside
+/// one. Written as its own clause rather than folded into the caller's `body`,
+/// because a page hidden for the wrong reason and a page with no rectangle look
+/// identical from the outside and are two different defects.
+fn a_page_is_off_the_glass(obstructed: bool, floated: bool, in_front: bool, carded: bool) -> bool {
+    obstructed || (!floated && !in_front) || carded
 }
 
 /// [`PreviewOpenLane`] for one path.
@@ -19931,7 +19969,7 @@ fn persisted_preview_pages(tab: &TabV1) -> Vec<bt_persist::RecentPreviewV1> {
 struct WebPlacement {
     leaf: LeafId,
     presence: webhost::WebPresence,
-    size: Option<(u32, u32)>,
+    rect: Option<webhost::WebBounds>,
 }
 
 /// **What a preview source can be written down as** — the one door between this
@@ -51058,6 +51096,28 @@ impl Runtime<'_> {
     /// of the preview's pointer arithmetic — is answered here rather than by
     /// taking a mutable borrow of the whole window to describe controls it is
     /// never going to look at.
+    /// **Which float, if any, is holding this page** (§7.14a, user report
+    /// 2026-08-25).
+    ///
+    /// The inverse of [`float::FloatPreview::page`] and the only way back: a
+    /// popped-out page's seat is closed out of the tree, so every question the
+    /// per-frame placement asks about a docked page — where is your pane, which
+    /// tab is it on, is it in front — has no answer for this one, and this is
+    /// what supplies a different one.
+    ///
+    /// **Asked of `drawn` and not of `live`**, so that a page keeps its rectangle
+    /// through the float's own closing fade: a window on its way out is still on
+    /// the glass, and a page taken off it a frame early would leave a hole in a
+    /// window still drawing its border. When the fade ends the float leaves this
+    /// list, `sync_web_page` finds no rectangle and `advance_web_page` retires
+    /// the browser — which is the same sentence a closed pane already gets.
+    fn float_holding_the_page(&self, leaf: LeafId) -> Option<float::FloatId> {
+        self.window
+            .float
+            .drawn()
+            .find_map(|win| (win.preview()?.page == Some(leaf)).then_some(win.epoch))
+    }
+
     fn float_body_rect(&self, id: float::FloatId, scale: f32) -> Option<[f32; 4]> {
         let win = self.window.float.drawn().find(|win| win.epoch == id)?;
         let fade = self.float_fade_of(win, Instant::now(), scale);
@@ -52217,6 +52277,14 @@ impl Runtime<'_> {
     /// structural answer is the one that survives that stopping being true.
     fn pop_out_preview(&mut self, seat: SeatId) -> Result<()> {
         let surface = self.preview_here(seat);
+        // **The page travels too, and it is named here** (§7.14a). Read *before*
+        // the seat leaves the tree, because after that there is no leaf to build
+        // the name out of — and a page nobody can name is a browser that is
+        // placed nowhere and then closed for having lost its pane.
+        let carried = {
+            let leaf = self.leaf_here(seat);
+            self.window.web.contains_key(&leaf).then_some(leaf)
+        };
         let scale = self.window.renderer.metrics().scale_factor as f32;
         let viewport = self.float_viewport();
         // The button's own box, read while the head it stands in is still on
@@ -52317,7 +52385,7 @@ impl Runtime<'_> {
         let id = self.window.float.open(
             float::FloatMode::Pinned,
             None,
-            float::FloatTenant::Preview(float::FloatPreview { tab }),
+            float::FloatTenant::Preview(float::FloatPreview { tab, page: carried }),
             frame,
             None,
             Instant::now(),
@@ -52450,6 +52518,17 @@ impl Runtime<'_> {
             debug_assert_eq!(leaf.tab, self.id, "a dock lands in the tab on the glass");
             self.seats.set_focus(leaf.seat);
         }
+        // **And the live page, home with the pane it came out on** (§7.14a).
+        // The buffer travels as a value and the graph's view as a value; a page
+        // is neither — it is a browser addressed by a leaf, and docking is a
+        // change of address. `WebSeat::rehost` is that change: it is the one
+        // door that writes the seat's own cached address in the same call that
+        // moves the visual, so the *next* rebuild — a crash, an Evergreen
+        // update — asks for a controller on the pane the reader can see.
+        //
+        // Nothing happens when the float carried no page, which is every
+        // document: the pop-out only names one when there was one.
+        self.dock_the_page_of(id, landing);
         // Wiped rather than dismissed — a preview float has no exit to play
         // (P49 ③), so an animation frame here would be the one place it did.
         self.window.float.wipe(id);
@@ -52459,6 +52538,84 @@ impl Runtime<'_> {
         self.settle_seat_set_change()?;
         self.refresh_chrome();
         self.present_chrome_change()
+    }
+
+    /// **The page a docking float was carrying, moved onto the pane it landed
+    /// on** (§7.14a) — [`Self::dock_preview_float`]'s one caller.
+    ///
+    /// A separate function because it is a *transaction on the window's page
+    /// map*, and the dock around it is a transaction on the tab's panes: the two
+    /// have different failure modes and the failure of this one must not undo
+    /// that one. A page that could not be moved is reported and left where it
+    /// is; the next frame finds it under a float that is gone, gives it no
+    /// rectangle, and [`Self::advance_web_page`] retires it. A pane with a
+    /// document under it and no browser is a pane; a pane with a browser
+    /// nothing can address is a leak.
+    fn dock_the_page_of(&mut self, id: float::FloatId, landing: PreviewSurface) {
+        let Some(carried) = self
+            .window
+            .float
+            .live(id)
+            .and_then(float::FloatWin::preview)
+            .and_then(|preview| preview.page)
+        else {
+            return;
+        };
+        let PreviewSurface::Seat(landed) = landing else {
+            return;
+        };
+        let address = webhost::SeatAddress {
+            page: bt_platform::PageVisual {
+                tab: landed.tab.0,
+                seat: landed.seat.0,
+            },
+            hwnd: match window_hwnd(&self.window.window) {
+                Ok(hwnd) => hwnd,
+                Err(error) => {
+                    eprintln!("BT_WEB {error}");
+                    return;
+                }
+            },
+        };
+        // **A seat that already holds a page keeps it.** `preview_landing_surface`
+        // picks a preview seat, and a preview seat can itself be a page; moving
+        // this one on top would drop a live browser without going through the
+        // door that waits for its process to exit and gives its profile folder
+        // back. So the carried page stays where it is and the next frame retires
+        // it the ordinary way — it has neither a float nor a seat any more —
+        // which is one page lost and not two.
+        if self.window.web.contains_key(&landed) {
+            eprintln!(
+                "BT_WEB the docked page had nowhere to land: {landed:?} is already showing one"
+            );
+            return;
+        }
+        let mut outcomes = Vec::new();
+        let report = {
+            let window = &mut *self.window;
+            let Some(web) = window.web.remove(&carried) else {
+                return;
+            };
+            // Re-keyed under the leaf it is landing on before anything is asked
+            // of it, so that every later reader — the placement, the retirement,
+            // the keyboard — finds it under one name. `rehost` is given the same
+            // compositor twice on purpose: this is a move inside one window, and
+            // the visual it is being pointed at is the landing pane's.
+            let entry = window.web.entry(landed).or_insert(web);
+            entry.rehost(
+                &window.compositor,
+                &window.compositor,
+                address,
+                true,
+                &mut outcomes,
+            )
+        };
+        if let Some(error) = report.error() {
+            eprintln!("BT_WEB the docked page could not follow its pane: {error}");
+        }
+        if let Err(error) = self.apply_web_outcomes(landed, outcomes) {
+            eprintln!("BT_WEB {error}");
+        }
     }
 
     /// The files column holding the keyboard *right now*, or `None`.
@@ -60112,6 +60269,23 @@ impl Runtime<'_> {
             self.apply_pointer_cursor();
             return Ok(());
         }
+        // **A float carrying a page has no body of its own to press** (§7.14a).
+        // Its head, its grip and its `DOCK` still answer for themselves — those
+        // are the window — but the rectangle between them *is* the page, exactly
+        // as a docked pane's body is, and a chassis that took the press there
+        // would be answering for a document that is not in it.
+        //
+        // Above `press_float` and nowhere else. A **docked** page that a
+        // floating window happens to cover is still covered by it, and the float
+        // rightly wins there; what is claimed here is only the page the float is
+        // itself carrying.
+        if let Some(position) = self.window.pointer_position
+            && let Some(leaf) = self.web_page_at(position)
+            && self.float_holding_the_page(leaf).is_some()
+        {
+            self.press_web_page(state, button, position)?;
+            return Ok(());
+        }
         // The float takes the press where it is drawn, above the layout and below
         // the modals. It is not in the menus' mutually exclusive chain — a menu is
         // dismissed by a press outside it and this deliberately is not (§7.1.2:
@@ -63380,6 +63554,28 @@ impl Runtime<'_> {
     /// Claimed *before* the resize below, and with the size that resize will carry, so the
     /// `Resized` Windows sends alongside every `WM_DPICHANGED` is recognised as this program's own
     /// rather than read as a hand on the frame.
+    /// **The window moved, so every page in it is told where its own menus
+    /// go** (§7.7 ⑩, user report 2026-08-25).
+    ///
+    /// A composition-hosted page renders into a visual and receives no window
+    /// messages, so `ICoreWebView2Controller::NotifyParentWindowPositionChanged`
+    /// is the only notice the engine gets that the screen rectangle it hangs its
+    /// own windows off has moved. `Bounds` says where the seat is *inside* the
+    /// window ([`bt_platform::WebHost::set_bounds`]); this says where the window
+    /// is. Both are needed and neither implies the other.
+    ///
+    /// A refusal is said out loud and dropped: a page whose engine would not
+    /// take the notice is a page whose context menu opens in the wrong place,
+    /// which is not a reason to fail a window move.
+    fn window_moved(&mut self) -> Result<()> {
+        for web in self.window.web.values() {
+            if let Err(error) = web.parent_window_moved() {
+                eprintln!("BT_WEB {error}");
+            }
+        }
+        Ok(())
+    }
+
     fn scale_factor_changed(&mut self) -> Result<()> {
         self.claim_lawful_layout();
         self.defer_preview_resample(Instant::now());
@@ -63679,7 +63875,7 @@ impl Runtime<'_> {
                 placements.push(WebPlacement {
                     leaf,
                     presence: webhost::WebPresence::Hidden,
-                    size: None,
+                    rect: None,
                 });
                 continue;
             };
@@ -63697,22 +63893,32 @@ impl Runtime<'_> {
                 placements.push(WebPlacement {
                     leaf,
                     presence: webhost::WebPresence::Hidden,
-                    size: None,
+                    rect: None,
                 });
                 continue;
             }
+            // **A page that has been popped out is measured against its float**
+            // (§7.14a). Its seat left the tree when the window opened, so the
+            // layout has no rectangle for it and never will again; the float's
+            // body is where it lives now. And a float floats across tab switches
+            // — that is what §7.1.2 made it for — so the page inside one is not
+            // hidden by the tab behind it changing.
+            let floated = self.float_holding_the_page(leaf);
             let tab = &self.window.tabs[index];
-            let body =
-                preview_image_placement(&tab.seats, &tab.seat_layout, seat, scale, transform).map(
-                    |placement| {
-                        [
-                            placement.seat.x as f32,
-                            placement.seat.y as f32,
-                            (placement.seat.x + placement.seat.width) as f32,
-                            (placement.seat.y + placement.seat.height) as f32,
-                        ]
-                    },
-                );
+            let body = match floated {
+                Some(id) => self.float_body_rect(id, scale),
+                None => {
+                    preview_image_placement(&tab.seats, &tab.seat_layout, seat, scale, transform)
+                        .map(|placement| {
+                            [
+                                placement.seat.x as f32,
+                                placement.seat.y as f32,
+                                (placement.seat.x + placement.seat.width) as f32,
+                                (placement.seat.y + placement.seat.height) as f32,
+                            ]
+                        })
+                }
+            };
             // **A seat showing a card has no page to show** (§7.7 ④, W2 slice
             // ④). Four of the five failures replace the seat's content, and the
             // card is drawn as ordinary pane chrome — which the transparency
@@ -63730,14 +63936,41 @@ impl Runtime<'_> {
             // The size comes off the rectangle whatever is standing over it; the
             // presence is the second question, and a page on a tab nobody is
             // looking at answers it the same way a page under a modal does.
-            let size = webhost::web_presence(body, false)
-                .bounds()
-                .map(|bounds| (bounds.width, bounds.height));
-            let presence = webhost::web_presence(body, obstructed || index != active || carded);
+            let rect = webhost::web_presence(body, false).bounds();
+            let presence = webhost::web_presence(
+                body,
+                a_page_is_off_the_glass(obstructed, floated.is_some(), index == active, carded),
+            );
+            // **One line per decision, and none while the answer stands still**
+            // — `BT_WEB_TRACE`'s fourth station, and the one that separates the
+            // four ways a page comes up empty: it was never given a rectangle,
+            // it was given one and hidden, it was hidden by a card, or it was
+            // placed and the hole was never cut. Change-gated against what the
+            // seat was last asked, so a still page is silent.
+            if self
+                .window
+                .web
+                .get(&leaf)
+                .is_some_and(|web| web.wanted() != presence)
+            {
+                web_trace::line(|| {
+                    format!(
+                        "place tab={} seat={} floated={} body={} presence={presence:?} \
+                         obstructed={} carded={} front={}",
+                        leaf.tab.0,
+                        seat.0,
+                        floated.map_or_else(|| String::from("-"), |id| id.to_string()),
+                        body.map_or_else(|| String::from("none"), |rect| format!("{rect:?}")),
+                        u8::from(obstructed),
+                        u8::from(carded),
+                        u8::from(index == active),
+                    )
+                });
+            }
             placements.push(WebPlacement {
                 leaf,
                 presence,
-                size,
+                rect,
             });
         }
         // **A page holds the keyboard only while it is what typing goes into**
@@ -63757,7 +63990,7 @@ impl Runtime<'_> {
             // whole slice is about.
             let floored = match window.web.get_mut(&placement.leaf) {
                 Some(web) => {
-                    match web.place(&window.compositor, placement.presence, placement.size) {
+                    match web.place(&window.compositor, placement.presence, placement.rect) {
                         Ok(floored) => floored,
                         Err(error) => {
                             eprintln!("BT_WEB place failed: {error}");
@@ -64071,17 +64304,29 @@ impl Runtime<'_> {
             .keys()
             .copied()
             .filter(|leaf| {
-                let surface = PreviewSurface::Seat(*leaf);
+                // **A page that has been popped out has not lost its pane; it
+                // has taken it with it** (§7.14a). Its seat is closed out of the
+                // tree by design, so the tree answers "no pane" for the one case
+                // where the browser must *not* be closed — and that answer was
+                // the whole of why a popped-out page came up empty.
+                let floated = self.float_holding_the_page(*leaf);
+                let surface = match floated {
+                    Some(id) => PreviewSurface::Float(id),
+                    None => PreviewSurface::Seat(*leaf),
+                };
                 !self
                     .window
                     .tabs
                     .iter()
                     .filter(|tab| tab.id == leaf.tab)
                     .any(|tab| {
-                        tab.seats.preview_seats().contains(&leaf.seat)
-                            && !tab.preview_panes.get(surface).is_some_and(|pane| {
+                        a_page_still_has_a_pane(
+                            floated.is_some(),
+                            tab.seats.preview_seats().contains(&leaf.seat),
+                            tab.preview_panes.get(surface).is_some_and(|pane| {
                                 a_page_was_replaced(pane.image.is_some(), pane.buffer.as_ref())
-                            })
+                            }),
+                        )
                     })
             })
             .collect();
@@ -69272,6 +69517,16 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             WindowEvent::MouseInput { state, button, .. } => runtime.mouse_input(state, button),
             WindowEvent::MouseWheel { delta, .. } => runtime.queue_wheel(delta),
             WindowEvent::Resized(size) => runtime.resize(size),
+            // **The engine is told the window moved** (§7.7 ⑩, user report
+            // 2026-08-25). The pages are drawn through DirectComposition and
+            // get no window messages of their own, so the only thing that knows
+            // where a page's own menus and dialogs belong on screen is the
+            // parent window's position — and the only way the engine learns it
+            // has changed is this call. Said on the window's own move rather
+            // than on a page's clock: a window can be dragged with nothing on
+            // the glass but a shell, and the engine still has to be right the
+            // next time a page is opened in it.
+            WindowEvent::Moved(_) => runtime.window_moved(),
             WindowEvent::ScaleFactorChanged { .. } => runtime.scale_factor_changed(),
             WindowEvent::ThemeChanged(theme) => runtime.os_theme_changed(theme).map(|_| ()),
             WindowEvent::RedrawRequested => runtime.redraw(),
@@ -71050,6 +71305,89 @@ mod resize_skirt_order_tests {
             funnel.contains("renderer.presented_swapchain_size()"),
             "the number it is told is the size the surface is configured at, \
              not the size something has asked it to become"
+        );
+    }
+}
+
+/// **A page popped out into a float still has a pane** (§7.14a).
+#[cfg(test)]
+mod floated_page_tests {
+    use super::a_page_still_has_a_pane;
+
+    /// RED — **the float answers for a page whose seat is gone**, which is the
+    /// whole of the defect (user report 2026-08-25: the popped-out web preview
+    /// drew its head, its foot and nothing in between).
+    ///
+    /// `pop_out_preview` closes the seat; that is the design and it is why the
+    /// second argument here is `false` in the case that matters. Before this
+    /// ticket the rule was the second argument alone, so the answer was "this
+    /// page has no pane", the browser was closed, and the window it had just
+    /// been carried into had nothing left to draw.
+    ///
+    /// RED GATE: drop the `floated ||` from [`a_page_still_has_a_pane`] and the
+    /// first assertion fails while every other line here still passes — which is
+    /// exactly how the defect survived: a *docked* page's account of itself was
+    /// never wrong.
+    #[test]
+    fn a_page_carried_into_a_float_keeps_its_browser() {
+        assert!(
+            a_page_still_has_a_pane(true, false, false),
+            "a floated page's seat is closed by design, and the float is its pane"
+        );
+        assert!(
+            a_page_still_has_a_pane(false, true, false),
+            "a docked page is answered for by its seat, unchanged"
+        );
+        assert!(
+            !a_page_still_has_a_pane(false, false, false),
+            "a page with neither a float nor a seat has run out of surface"
+        );
+    }
+
+    /// RED — **a float is on the glass whichever tab is in front** (§7.1.2), so
+    /// the page inside one is too.
+    ///
+    /// The other half of the empty float, and the half that would have survived
+    /// the first fix: a page that keeps its browser and its rectangle is still
+    /// invisible if the frame goes on hiding it for a tab it no longer stands in.
+    ///
+    /// RED GATE: drop the `!floated &&` from [`a_page_is_off_the_glass`] and the
+    /// second assertion fails — a floating window would empty itself the moment
+    /// the reader looked at another tab, which is the one gesture a float exists
+    /// to survive.
+    #[test]
+    fn a_page_in_a_float_stays_on_the_glass_across_a_tab_switch() {
+        use super::a_page_is_off_the_glass;
+        assert!(
+            a_page_is_off_the_glass(false, false, false, false),
+            "a docked page on a tab nobody is looking at comes off the glass"
+        );
+        assert!(
+            !a_page_is_off_the_glass(false, true, false, false),
+            "a floated page does not, because its window is still on the glass"
+        );
+        assert!(
+            a_page_is_off_the_glass(true, true, true, false),
+            "a modal covers a float as it covers everything else"
+        );
+        assert!(
+            a_page_is_off_the_glass(false, true, true, true),
+            "and a failure card replaces the page in a float too"
+        );
+    }
+
+    /// **A replacement retires the page wherever it happens**, and the float is
+    /// not an exemption from that: dropping a document onto a floating window
+    /// that is showing a page ends the page, exactly as it does in a pane.
+    #[test]
+    fn something_else_landing_on_it_retires_the_page_in_a_float_too() {
+        assert!(
+            !a_page_still_has_a_pane(true, false, true),
+            "a float whose buffer is a document is not showing a page any more"
+        );
+        assert!(
+            !a_page_still_has_a_pane(false, true, true),
+            "and the same sentence in a docked pane"
         );
     }
 }

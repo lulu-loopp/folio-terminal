@@ -878,7 +878,7 @@ impl WebHost {
         &mut self,
         from: &RehostSide<'_>,
         to: &RehostSide<'_>,
-        size: (u32, u32),
+        rect: (i32, i32, u32, u32),
         visible: bool,
     ) -> RehostOutcome {
         let refuse = |error: String| RehostOutcome::KeptSource {
@@ -919,10 +919,10 @@ impl WebHost {
             visible: read_bool(|out| unsafe { controller.IsVisible(out) }),
         };
         let bounds = RECT {
-            left: 0,
-            top: 0,
-            right: size.0 as i32,
-            bottom: size.1 as i32,
+            left: rect.0,
+            top: rect.1,
+            right: rect.0 + rect.2 as i32,
+            bottom: rect.1 + rect.3 as i32,
         };
         let mut failure_at = None;
         for step in REHOST_SEQUENCE {
@@ -1545,25 +1545,63 @@ impl WebHost {
         Ok(())
     }
 
-    /// The size of the seat, in physical pixels.
+    /// **The seat's rectangle inside the parent window**, in physical pixels —
+    /// origin as well as size.
     ///
-    /// **Size and not rectangle.** The engine believes its own bounds start at
-    /// `(0, 0)` and the *visual* carries the placement — the arrangement every
-    /// visual-hosting sample uses, and the one gate 3 measured coordinates
-    /// through: a client point `(511, 242)` less the seat origin `(224, 48)`,
-    /// divided by the 2.0 device pixel ratio, arrived at the page as `(143, 97)`.
-    pub fn set_size(&self, width: u32, height: u32) -> Result<(), String> {
+    /// # The origin used to be zero, and that was a defect (user report
+    /// 2026-08-25, the right-click menu in the window's corner)
+    ///
+    /// Visual hosting makes the *visual* carry the placement, and this method
+    /// used to take a size alone on that reasoning: the pixels come out of
+    /// [`Self::send_mouse`]'s seat-local space and land where the visual's
+    /// offset puts them, so an origin of `(0, 0)` cost the drawing nothing.
+    /// Gate 3's measurement — a client point `(511, 242)` less the seat origin
+    /// `(224, 48)`, divided by the 2.0 device pixel ratio, arriving at the page
+    /// as `(143, 97)` — is still true and still the contract, because the point
+    /// this host sends is **relative to these bounds** and the caller subtracts
+    /// the same origin it passes here.
+    ///
+    /// What the reasoning missed is everything the engine draws *outside* its
+    /// own visual. A context menu, a `<select>` popup, a print dialog and the
+    /// IME candidate window are windows the engine positions itself, and the
+    /// only thing it can position them against is the parent HWND's screen
+    /// rectangle plus **these bounds**: DirectComposition offsets are invisible
+    /// to it. With the origin pinned at zero every one of those appeared at the
+    /// top-left corner of the whole terminal window, however far from the pane
+    /// the press was — photographed on the machine with `Print / Save / Save as
+    /// / Full screen` hanging over the files column while the click was three
+    /// panes away.
+    ///
+    /// So the origin is sent, and [`WebHost::send_mouse`]'s doc says the other
+    /// half of the same sentence: bounds carry where the seat is, the point
+    /// carries where in the seat the pointer is, and neither is asked to mean
+    /// the other.
+    pub fn set_bounds(&self, x: i32, y: i32, width: u32, height: u32) -> Result<(), String> {
         let Some(controller) = self.controller.as_ref() else {
             return Ok(());
         };
-        let bounds = RECT {
-            left: 0,
-            top: 0,
-            right: width as i32,
-            bottom: height as i32,
-        };
-        unsafe { controller.SetBounds(bounds) }
+        unsafe { controller.SetBounds(bounds_rect(x, y, width, height)) }
             .map_err(|error| failure("ICoreWebView2Controller::SetBounds", &error))
+    }
+
+    /// **The parent window moved on the desktop.**
+    ///
+    /// The engine hangs its own windows — context menu, `<select>` popup, print
+    /// dialog, IME candidates — off the parent HWND's screen rectangle plus its
+    /// [`Self::set_bounds`]. In composition hosting it receives no window
+    /// messages at all, so this call is the only way it learns the first of
+    /// those two moved. `WM_MOVE` on the host window is the whole of when to
+    /// say it.
+    ///
+    /// A no-op before the controller arrives, like every other setter here: the
+    /// first `set_bounds` after it does is what tells a new controller where it
+    /// stands.
+    pub fn notify_parent_window_moved(&self) -> Result<(), String> {
+        let Some(controller) = self.controller.as_ref() else {
+            return Ok(());
+        };
+        unsafe { controller.NotifyParentWindowPositionChanged() }
+            .map_err(|error| failure("NotifyParentWindowPositionChanged", &error))
     }
 
     /// Show or hide the page.
@@ -1810,6 +1848,12 @@ impl WebHost {
     /// Forward one mouse event. `point` is **seat-local** physical pixels — the
     /// caller subtracts the seat's origin, because the caller is the only one
     /// that knows where the seat is this frame.
+    ///
+    /// It is the same origin the caller hands [`Self::set_bounds`], and that is
+    /// the whole of the coordinate contract: the bounds say where the seat is in
+    /// the window, this point says where in the seat the pointer is. The engine
+    /// adds them back together itself when it has to name a screen position —
+    /// which is what a context menu is.
     pub fn send_mouse(
         &self,
         event: WebMouseEvent,
@@ -1998,6 +2042,71 @@ fn modifiers_down() -> (bool, bool, bool) {
         (unsafe { GetKeyState(i32::from(vk.0)) } as u16 & 0x8000) != 0
     };
     (down(VK_CONTROL), down(VK_SHIFT), down(VK_MENU))
+}
+
+/// **One seat's rectangle in the parent window's client space**, as the engine
+/// is given it.
+///
+/// A function of four numbers, held apart from the COM call so that the one
+/// thing this repository got wrong about it can be held by a test: the origin.
+/// See [`WebHost::set_bounds`] for what pinning it at zero cost.
+fn bounds_rect(x: i32, y: i32, width: u32, height: u32) -> RECT {
+    RECT {
+        left: x,
+        top: y,
+        right: x + width as i32,
+        bottom: y + height as i32,
+    }
+}
+
+/// **The rectangle the engine is given carries the seat's origin.**
+#[cfg(test)]
+mod bounds_geometry_tests {
+    use super::*;
+
+    /// RED — **the engine is told where the seat is, not only how big it is**
+    /// (user report 2026-08-25: the page's own right-click menu opened in the
+    /// window's top-left corner, panes away from the press).
+    ///
+    /// This is the whole of the defect, held as arithmetic. The engine positions
+    /// every window it owns — context menu, `<select>` popup, print dialog, IME
+    /// candidates — at the parent HWND's screen origin plus these bounds, and a
+    /// DirectComposition offset is a thing it cannot see. So a rectangle whose
+    /// `left`/`top` are zero says "this seat begins at the window's corner", and
+    /// the menu obeys.
+    ///
+    /// RED GATE: put `left: 0, top: 0` back into [`bounds_rect`] — which is
+    /// exactly what stood here until this ticket — and the first two assertions
+    /// fail while the size ones still pass, which is precisely how the defect
+    /// hid: everything that was *drawn* stayed right.
+    #[test]
+    fn the_bounds_the_engine_is_given_begin_at_the_seat_and_not_at_the_window() {
+        // The measurement gate 3 took, and the seat it took it in: a pane whose
+        // origin inside the window is (224, 48).
+        let rect = bounds_rect(224, 48, 800, 600);
+        assert_eq!(rect.left, 224, "the engine is told where the seat begins");
+        assert_eq!(rect.top, 48, "on both axes");
+        assert_eq!(rect.right, 1024, "and the far edge follows the origin");
+        assert_eq!(rect.bottom, 648);
+        assert_eq!(rect.right - rect.left, 800, "the size is unchanged by it");
+        assert_eq!(rect.bottom - rect.top, 600);
+    }
+
+    /// A seat at the window's own corner is the one case the old spelling got
+    /// right, and it still has to be right — otherwise a fix that only ever
+    /// added an offset would be untestable against the case it came from.
+    #[test]
+    fn a_seat_at_the_corner_is_the_rectangle_it_always_was() {
+        assert_eq!(
+            bounds_rect(0, 0, 1920, 1200),
+            RECT {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1200,
+            }
+        );
+    }
 }
 
 /// **The handoff order and its compensation table, held without a browser.**
