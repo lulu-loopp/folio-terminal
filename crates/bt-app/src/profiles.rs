@@ -7421,6 +7421,17 @@ pub enum PaneMenuRow {
     /// The Snap-Layouts picker — a drawing, not a row of text, and the only
     /// entry here that carries its own four answers.
     Picker,
+    /// **This pane alone on the stage, and back again** (§7.1.6l).
+    ///
+    /// The one row here with two faces: over a tiled pane it offers the zoom,
+    /// over the pane that *is* the stage it offers the way back. See
+    /// [`Self::text_when`] and [`Self::mark_when`], which turn together.
+    ///
+    /// It stands directly under the diagram because those two entries are the
+    /// pair that answers **how much of the stage is this pane's** — the picker
+    /// puts another pane beside it, this row puts every other pane away — and
+    /// the four rows below make, move or end a pane.
+    ZoomPane,
     /// The submenu heading: split against a profile you name.
     SplitWith,
     /// Split, with the new shell rooted in a folder the system chooser names.
@@ -7461,8 +7472,15 @@ impl PaneMenuRow {
     /// command palette will carry it when there is one — which is the
     /// systematic door for a low-frequency verb, rather than a temporary one
     /// hung off whatever surface happened to be near.
-    pub const ALL: [Self; 7] = [
+    /// **Zoom joined it on 2026-08-24** (§7.1.6l), and it passes the rule above
+    /// rather than being an exception to it: "this pane alone on the stage" is a
+    /// verb about *this pane*, which is exactly what focus mode's withdrawn row
+    /// was not. The mode is a posture of the window and rearranges the tab
+    /// strip; a zoom is one pane's own share of one tab's stage, and every other
+    /// line here is about that pane's share of that stage too.
+    pub const ALL: [Self; 8] = [
         Self::Picker,
+        Self::ZoomPane,
         Self::SplitWith,
         Self::NewInFolder,
         Self::Duplicate,
@@ -7471,9 +7489,10 @@ impl PaneMenuRow {
         Self::ClosePane,
     ];
 
-    /// The six that are rows of text with a mark, in order — [`Self::ALL`]
+    /// The seven that are rows of text with a mark, in order — [`Self::ALL`]
     /// without the picker.
-    pub const TEXT_ROWS: [Self; 6] = [
+    pub const TEXT_ROWS: [Self; 7] = [
+        Self::ZoomPane,
         Self::SplitWith,
         Self::NewInFolder,
         Self::Duplicate,
@@ -7487,6 +7506,10 @@ impl PaneMenuRow {
         match self {
             // The picker is the drawing; it has no column and no glyph.
             Self::Picker => None,
+            // The face over a tiled pane. `mark_when` is what turns it, and this
+            // arm is the state a row with nothing to turn it is asked about —
+            // see `text` below, which says the same thing at more length.
+            Self::ZoomPane => Some(ChromeMark::PaneZoom { zoomed: false }),
             // The `⊞` the pane head just gave up, in the one place it still
             // means what it always meant: "another one of these, beside this".
             Self::SplitWith => Some(ChromeMark::Split),
@@ -7508,16 +7531,59 @@ impl PaneMenuRow {
         }
     }
 
-    /// The words on this row.
+    /// The words on this row, in the state a row that has no state is in.
+    ///
+    /// Six of the seven verbs read the same whatever the pane is doing, and this
+    /// is the whole table for them. [`Self::ZoomPane`] is the seventh: its
+    /// canonical name is the action, which is what a row is called when nobody
+    /// has said which face is wanted, and [`Self::text_when`] is the one seam
+    /// that asks. Keeping this function total rather than making every caller
+    /// carry a `bool` is what lets `TermMenuEntry::text` go on being a
+    /// two-line delegation — the lone-pane segment carries no zoom row
+    /// (§7.1.6l), so it has no face to choose between.
     fn text(self) -> &'static str {
         match self {
             Self::Picker => picker_caption_text(),
+            Self::ZoomPane => zoom_pane_text(),
             Self::SplitWith => split_with_text(),
             Self::NewInFolder => new_in_folder_text(),
             Self::Duplicate => duplicate_pane_text(),
             Self::MoveToNewTab => move_to_new_tab_text(),
             Self::MoveToNewWindow => move_to_new_window_text(),
             Self::ClosePane => close_pane_text(),
+        }
+    }
+
+    /// **The words on this row, told what the pane under the menu is doing**
+    /// (§7.1.6l).
+    ///
+    /// One row turns and the other six do not, and both halves of that are
+    /// asserted rather than trusted — see
+    /// `the_zoom_row_changes_its_word_and_its_mark_with_the_state_it_names`.
+    ///
+    /// The state is the menu's, taken when the menu was raised, exactly as
+    /// §7.1.6i takes `lone` and `subject` there: a menu that re-asked every
+    /// frame would change its own first row under a hand that was already
+    /// moving toward it.
+    #[must_use]
+    pub fn text_when(self, zoomed: bool) -> &'static str {
+        match self {
+            Self::ZoomPane if zoomed => restore_pane_text(),
+            other => other.text(),
+        }
+    }
+
+    /// **The mark on this row, told the same thing** — and it turns with the
+    /// word, never on its own.
+    ///
+    /// The `Lock` ruling (§7.1.6c-8) said it once and it holds here: change only
+    /// the word and the drawing goes on lying; change only the drawing and the
+    /// reader has to decide which half to believe.
+    #[must_use]
+    pub fn mark_when(self, zoomed: bool) -> Option<ChromeMark> {
+        match self {
+            Self::ZoomPane => Some(ChromeMark::PaneZoom { zoomed }),
+            other => other.mark(),
         }
     }
 
@@ -7534,6 +7600,16 @@ impl PaneMenuRow {
 #[must_use]
 pub fn split_with_text() -> &'static str {
     crate::i18n::Text::PaneMenuSplitWith.text()
+}
+/// The zoom row's action face — what the press does to a tiled pane.
+#[must_use]
+pub fn zoom_pane_text() -> &'static str {
+    crate::i18n::Text::PaneMenuZoom.text()
+}
+/// The zoom row's state face — the way back off the stage.
+#[must_use]
+pub fn restore_pane_text() -> &'static str {
+    crate::i18n::Text::PaneMenuRestore.text()
 }
 /// The ellipsis is load-bearing: it is this window's promise that a row asks
 /// before it acts, and this row opens a system dialog you can cancel.
@@ -7651,7 +7727,11 @@ impl PaneMenuHover {
                 // clamps, exactly as every other walk in this window clamps at
                 // its ends.
                 match step {
-                    MenuStep::Down => Some(Self::Row(PaneMenuRow::SplitWith)),
+                    // The first text row, asked for by position rather than by
+                    // name: §7.1.6l put a verb directly under the diagram, and a
+                    // walk that named `SplitWith` here would have stepped over
+                    // it.
+                    MenuStep::Down => Some(Self::Row(PaneMenuRow::TEXT_ROWS[0])),
                     _ => None,
                 }
             }
@@ -7664,8 +7744,8 @@ impl PaneMenuHover {
                     MenuStep::Down => Some(Self::Row(
                         PaneMenuRow::TEXT_ROWS[(index + 1).min(PaneMenuRow::TEXT_ROWS.len() - 1)],
                     )),
-                    // The row above `Split with` is the picker, entered at the
-                    // zone nearest the row being left.
+                    // The row above the first text row is the picker, entered at
+                    // the zone nearest the row being left.
                     MenuStep::Up if index == 0 => Some(Self::Zone(SplitZone::Down)),
                     MenuStep::Up => Some(Self::Row(PaneMenuRow::TEXT_ROWS[index - 1])),
                     MenuStep::Left | MenuStep::Right => None,
@@ -7782,6 +7862,11 @@ pub struct PaneMenuLayout {
     /// The menu's only rule again: the second one drew the sentence break under
     /// the focus-mode row, and left with it (user ruling 2026-08-19).
     separator: [f32; 4],
+    /// **Which face the zoom row is wearing** (§7.1.6l) — carried on the layout
+    /// rather than passed to the painter a second time, so the words the frame
+    /// was measured against are the words drawn into it. Two parameters would be
+    /// two opinions, and D4 is the rule that there is one.
+    zoomed: bool,
     /// The submenu's frame and rows, when it is open.
     submenu: Option<PaneSubmenuLayout>,
 }
@@ -7937,11 +8022,17 @@ impl PaneMenuLayout {
 /// flips to the other side when this frame is already near the window's edge —
 /// and a second entry point would be a second opinion about where the parent is.
 #[must_use]
+/// `zoomed` says which face the zoom row is wearing (§7.1.6l), and it is here
+/// rather than only in the painter because the frame is measured against the
+/// words it is about to hold: `Restore pane` and `Zoom pane` are not the same
+/// width, and a menu laid out for one and drawn with the other would clip its
+/// own first row at whichever language made it wider.
 pub fn pane_menu_layout(
     point: [f32; 2],
     surface: (f32, f32),
     scale: f32,
     submenu_open: bool,
+    zoomed: bool,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> PaneMenuLayout {
     let px = |value: f32| value * scale;
@@ -7964,7 +8055,7 @@ pub fn pane_menu_layout(
         .map(|row| {
             px(ITEM_ICON_COLUMN_LOGICAL_PX)
                 + px(ITEM_GAP_LOGICAL_PX)
-                + measure(row.text(), px(ITEM_FONT_LOGICAL_PX))
+                + measure(row.text_when(zoomed), px(ITEM_FONT_LOGICAL_PX))
                 + indicator
         })
         // The diagram is content too, and on a narrow menu it is the widest
@@ -8107,6 +8198,7 @@ pub fn pane_menu_layout(
         zone_hits,
         caption,
         separator,
+        zoomed,
         submenu,
     }
 }
@@ -8339,8 +8431,10 @@ pub fn pane_menu_build(
         push_row(
             &Row {
                 rect: *rect,
-                mark: row.mark(),
-                name: row.text(),
+                // Both from the layout's own snapshot (§7.1.6l), so the word and
+                // the mark cannot come from two different readings of the state.
+                mark: row.mark_when(layout.zoomed),
+                name: row.text_when(layout.zoomed),
                 hint: None,
                 hint_ink: None,
                 hovered: hover == Some(PaneMenuHover::Row(*row)),
@@ -12888,6 +12982,9 @@ mod tests {
             (960.0, 600.0),
             1.0,
             submenu_open,
+            // The ordinary posture: these pins are about the menu's shape, and
+            // the zoom row's second face has a pin of its own.
+            false,
             &mut fake_measure,
         )
     }
@@ -12916,12 +13013,19 @@ mod tests {
     /// whole and by name, so putting it — or anything else about the *window* —
     /// back into a menu whose every line acts on the pane under it turns this
     /// red on the first assertion.
+    ///
+    /// **The seventh verb is §7.1.6l's** (2026-08-24): `Zoom pane`, directly
+    /// under the diagram, because those two entries are the pair that answers
+    /// how much of the stage this pane gets. It is *not* the window verb this
+    /// test's last paragraph turns away — a zoom is one pane's share of one
+    /// tab's stage, which is what every other line here is about too.
     #[test]
-    fn the_pane_menu_is_a_picker_and_six_verbs_with_a_rule_above_the_close() {
+    fn the_pane_menu_is_a_picker_and_seven_verbs_with_a_rule_above_the_close() {
         assert_eq!(
             PaneMenuRow::ALL,
             [
                 PaneMenuRow::Picker,
+                PaneMenuRow::ZoomPane,
                 PaneMenuRow::SplitWith,
                 PaneMenuRow::NewInFolder,
                 PaneMenuRow::Duplicate,
@@ -12947,6 +13051,7 @@ mod tests {
             names,
             vec![
                 picker_caption_text(),
+                zoom_pane_text(),
                 split_with_text(),
                 new_in_folder_text(),
                 duplicate_pane_text(),
@@ -12954,7 +13059,7 @@ mod tests {
                 move_to_new_window_text(),
                 close_pane_text(),
             ],
-            "the caption under the diagram, then six rows, and no heading over them"
+            "the caption under the diagram, then seven rows, and no heading over them"
         );
         assert_ne!(
             move_to_new_tab_text(),
@@ -12969,7 +13074,7 @@ mod tests {
             "the rule lies between the last constructive verb and `Close pane`"
         );
         assert!(
-            layout.item(PaneMenuRow::Picker)[3] <= layout.item(PaneMenuRow::SplitWith)[1],
+            layout.item(PaneMenuRow::Picker)[3] <= layout.item(PaneMenuRow::ZoomPane)[1],
             "and the picker stands above every word about this pane"
         );
         // The picker is the first entry again, which is the whole of what
@@ -12979,6 +13084,95 @@ mod tests {
             layout.item(PaneMenuRow::Picker)[1],
             layout.frame[1] + (FLOAT_WINDOW_BORDER_LOGICAL_PX).max(1.0) + MENU_PADDING_LOGICAL_PX,
             "the diagram sits directly under the menu's own padding"
+        );
+    }
+
+    /// PIN (§7.1.6l) — **the zoom row has two faces, and the word and the mark
+    /// change together.**
+    ///
+    /// A toggle that changed only one of the two would be a drawing saying one
+    /// thing while the words say the other, which is the `Lock` ruling
+    /// (§7.1.6c-8) read here: 「只改词不改图,图还在说谎」.
+    ///
+    /// It stands directly under the picker because those two entries are the
+    /// pair that answers "how much of the stage is this pane's" — the diagram
+    /// puts another pane beside it, the row puts every other pane away — and the
+    /// four rows below make, move or end a pane.
+    ///
+    /// Red gate: return the same word for both states and the first pair of
+    /// assertions goes red; return the same mark and the second does.
+    #[test]
+    fn the_zoom_row_changes_its_word_and_its_mark_with_the_state_it_names() {
+        assert_eq!(
+            PaneMenuRow::TEXT_ROWS[0],
+            PaneMenuRow::ZoomPane,
+            "the row stands directly under the diagram"
+        );
+        assert_ne!(
+            PaneMenuRow::ZoomPane.text_when(false),
+            PaneMenuRow::ZoomPane.text_when(true),
+            "a row that reads the same in both states lies in one of them"
+        );
+        assert_ne!(
+            PaneMenuRow::ZoomPane.mark_when(false),
+            PaneMenuRow::ZoomPane.mark_when(true),
+            "and the mark turns with the word, or the drawing is the liar"
+        );
+        for row in PaneMenuRow::ALL {
+            if row == PaneMenuRow::ZoomPane {
+                continue;
+            }
+            assert_eq!(
+                (row.text_when(false), row.mark_when(false)),
+                (row.text_when(true), row.mark_when(true)),
+                "{row:?} is not about the zoom and must not move with it"
+            );
+        }
+        // Both faces are laid out and drawn: the frame is measured against the
+        // words it is about to hold, so a zoomed pane's menu cannot come up
+        // clipping its own first row.
+        for zoomed in [false, true] {
+            let layout = pane_menu_layout(
+                [300.0, 120.0],
+                (960.0, 600.0),
+                1.0,
+                false,
+                zoomed,
+                &mut fake_measure,
+            );
+            let layer = one_layer(pane_menu_build(
+                &layout,
+                None,
+                None,
+                &equipped(),
+                &mut fake_measure,
+            ));
+            assert_eq!(
+                layer.labels[1].text,
+                PaneMenuRow::ZoomPane.text_when(zoomed),
+                "the row draws the face its layout was measured for"
+            );
+        }
+    }
+
+    /// PIN (§7.1.6l, on §7.1.6i's own argument) — **a lone pane's right-click
+    /// segment carries no zoom row.**
+    ///
+    /// The segment already turns away `Move pane to new tab` because a lone pane
+    /// 「本身就是整个 tab,无物可搬也无处可搬」. A lone pane is already the whole
+    /// stage, so zoom has nothing to put away: the same sentence about a
+    /// different verb.
+    ///
+    /// Red gate: add the row to `TERM_MENU_LONE_PANE_ROWS` and this goes red.
+    #[test]
+    fn a_lone_panes_terminal_menu_offers_no_zoom_because_it_is_already_the_stage() {
+        assert!(
+            !TERM_MENU_LONE_PANE_ROWS.contains(&PaneMenuRow::ZoomPane),
+            "a lone pane has nothing to put away"
+        );
+        assert!(
+            !TERM_MENU_LONE_PANE_ROWS.contains(&PaneMenuRow::MoveToNewTab),
+            "the row this one is reasoned from is still out too"
         );
     }
 
@@ -13132,13 +13326,17 @@ mod tests {
         // Aiming twice in the same direction walks out, and only downward leads
         // anywhere: the picker is the first entry, so `↑` from `Up` is the top of
         // the list and clamps (asserted above).
+        // The first text row, whichever verb that is: §7.1.6l put `Zoom pane`
+        // directly under the diagram, and the walk asks by position for exactly
+        // this reason — a step named after a verb steps over the one inserted
+        // above it.
         assert_eq!(
             H::step(Some(H::Zone(SplitZone::Down)), MenuStep::Down, rows),
-            Some(H::Row(PaneMenuRow::SplitWith))
+            Some(H::Row(PaneMenuRow::TEXT_ROWS[0]))
         );
         // Back in from below, landing on the zone nearest the row it came from.
         assert_eq!(
-            H::step(Some(H::Row(PaneMenuRow::SplitWith)), MenuStep::Up, rows),
+            H::step(Some(H::Row(PaneMenuRow::TEXT_ROWS[0])), MenuStep::Up, rows),
             Some(H::Zone(SplitZone::Down))
         );
         // The flat part of the walk clamps at the bottom.
@@ -13206,7 +13404,14 @@ mod tests {
     #[test]
     fn the_pane_menu_raised_in_the_corner_is_pulled_back_inside_on_both_axes() {
         let surface = (960.0, 600.0);
-        let layout = pane_menu_layout([950.0, 596.0], surface, 1.0, false, &mut fake_measure);
+        let layout = pane_menu_layout(
+            [950.0, 596.0],
+            surface,
+            1.0,
+            false,
+            false,
+            &mut fake_measure,
+        );
         assert!(
             layout.frame[2] <= surface.0 && layout.frame[3] <= surface.1,
             "the whole menu is inside the window: {:?}",
@@ -13370,6 +13575,7 @@ mod tests {
             (1600.0, 900.0),
             1.0,
             true,
+            false,
             &mut fake_measure,
         );
         let parent = roomy.frame;
@@ -13396,6 +13602,7 @@ mod tests {
             (1600.0, 900.0),
             1.0,
             true,
+            false,
             &mut fake_measure,
         );
         let parent = cramped.frame;
@@ -13433,6 +13640,7 @@ mod tests {
                 (1600.0 * scale, 900.0 * scale),
                 scale,
                 true,
+                false,
                 &mut fake_measure,
             );
             let parent = layout.frame;
@@ -13485,6 +13693,7 @@ mod tests {
             (1600.0, 900.0),
             1.0,
             true,
+            false,
             &mut fake_measure,
         );
         let child = layout.submenu_frame().expect("an open submenu has a frame");
@@ -13527,6 +13736,7 @@ mod tests {
             (1600.0, 900.0),
             1.0,
             false,
+            false,
             &mut fake_measure,
         );
         assert!(!alone.on_submenu(child[0] + 4.0, inside_y));
@@ -13553,6 +13763,7 @@ mod tests {
             (1600.0, 900.0),
             1.0,
             true,
+            false,
             &mut fake_measure,
         );
         let parent = layout.frame;

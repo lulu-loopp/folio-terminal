@@ -432,6 +432,25 @@ pub enum ChromeMark {
     /// time, for [`Self::Pin`]'s reason: `mark_key` keys on [`Self::id`], and a
     /// shared id would hand the second lock on screen the first one's pixels.
     Lock { engaged: bool },
+    /// `#i-zoom-in` / `#i-zoom-out` — **single-pane zoom** (§7.1.6l).
+    ///
+    /// Four corner brackets thrown out to the frame, and the same four pulled
+    /// in. It is the pair every media player and every code editor on this
+    /// desktop already teaches, which is the only reason a mark drawn from
+    /// scratch is allowed here at all.
+    ///
+    /// **The difference is a direction, not an angle**, which is
+    /// [`Self::TreeDisclosure`]'s note read the other way: three triangles that
+    /// differ by where a line falls are three marks nobody can tell apart at
+    /// fourteen pixels, and *where the corner points* is the whole of this
+    /// drawing. One arm length and one stroke in both, so the pair reads as one
+    /// instrument in two states.
+    ///
+    /// Two variants and not one flag read at draw time, for [`Self::Lock`]'s
+    /// reason: `mark_key` keys on [`Self::id`], and a shared id would hand the
+    /// second one on screen the first one's pixels — which here would be a head
+    /// saying "zoomed" over a menu row saying "zoom".
+    PaneZoom { zoomed: bool },
     /// `#i-save` — the preview header's explicit save (mock-up 2252, P27).
     ///
     /// The floppy, which is the one idiom in this whole interface that names a
@@ -767,6 +786,8 @@ impl ChromeMark {
             Self::Pin { filled: true } => "i-pinned",
             Self::Lock { engaged: false } => "i-lock",
             Self::Lock { engaged: true } => "i-locked",
+            Self::PaneZoom { zoomed: false } => "i-zoom-in",
+            Self::PaneZoom { zoomed: true } => "i-zoom-out",
             Self::Save => "i-save",
             Self::Eye => "i-eye",
             Self::Code => "i-code",
@@ -1697,6 +1718,8 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::Pin { filled: true } => 11,
         ChromeMark::Lock { engaged: false } => 42,
         ChromeMark::Lock { engaged: true } => 43,
+        ChromeMark::PaneZoom { zoomed: false } => 44,
+        ChromeMark::PaneZoom { zoomed: true } => 45,
         ChromeMark::ProfileUbuntu => 12,
         ChromeMark::ProfileGit => 13,
         ChromeMark::ProfileCmd => 14,
@@ -1777,7 +1800,7 @@ pub fn preview_row_mark(is_page: bool, favicon: Option<crate::favicon::FaviconId
 
 const PROFILE_CHASSIS_VIEW_BOX: &str = "0 0 16 16";
 
-const SYMBOL_VIEW_BOX: [&str; 44] = [
+const SYMBOL_VIEW_BOX: [&str; 46] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -1864,11 +1887,17 @@ const SYMBOL_VIEW_BOX: [&str; 44] = [
     // weight in the same row.
     "0 0 16 16",
     "0 0 16 16",
+    // `#i-zoom-in` and `#i-zoom-out`, the house sixteen: they stand in the pane
+    // menu's icon column beside `#i-split` and `#i-copy`, and in the pane head's
+    // leading run beside the seat's own mark — two runs, both cut in these
+    // units, so the pair cannot sit at a different optical weight in either.
+    "0 0 16 16",
+    "0 0 16 16",
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 44] = [
+const SYMBOL_BODY: [&str; 46] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min
@@ -2152,6 +2181,14 @@ const SYMBOL_BODY: [&str; 44] = [
         r#"<path d="M5.6 7.2V5a2.4 2.4 0 014.8 0v2.2" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>"#,
         r#"<rect x="3.1" y="7.2" width="9.8" height="6.6" rx="1.6" fill="currentColor"/>"#,
     ),
+    // `#i-zoom-in` — four corner brackets thrown OUT to the frame: "fill it".
+    // One subpath per corner, all four in one `d`, because they are one drawing
+    // and a reader who moves one has to move the others.
+    r#"<path d="M2.2 6.6V2.2h4.4M9.4 2.2h4.4v4.4M13.8 9.4v4.4H9.4M6.6 13.8H2.2V9.4" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#,
+    // `#i-zoom-out` — the same four pulled IN: "come back". Same arm length and
+    // same stroke as the one above; what differs is which way each corner
+    // points, which is the whole of the pair.
+    r#"<path d="M6.2 2.6v3.6H2.6M9.8 2.6v3.6h3.6M13.4 9.8H9.8v3.6M2.6 9.8h3.6v3.6" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#,
 ];
 
 /// The active tab's closed outline, in physical pixels, clockwise from the
