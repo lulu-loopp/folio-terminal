@@ -1,5 +1,7 @@
 # 通知与注意力块方案 v1(2026-08-25 起草,送 Codex 评审;不写产品代码)
 
+> **读法**:正文 §0–§9 是 v1;**§10 是 v2**(评审折入);**§11 是 v3 终修**(窄复核 `codex-confirm.md` 的五处 + 用户 2026-08-25 的 A 组八条裁决)。**三者冲突时,序号大的为准。** 被改动的正文处已就地改,并留「v1 原文记作 / v2 原文记作」记号。
+
 **由头**:用户把这一块提为当前最重要的块之一,原话「目前 claude code 的通知提示还是存在问题的」,并给了一张实机截图(竖栏 Icons 态,三枚 tab 图标,**前两枚右上角带橙点,而第一枚正是活动 tab**)。
 
 本方案做四件事:①把「还是存在问题」拆成**可指认、带代码证据**的缺陷清单;②用**真 claude 进程的真字节流**回答「Claude Code 到底发什么」这个到今天为止只有散文没有数据的问题;③给 `awaiting` 一个诚实的信号源;④把 P1-8 注意力队列与 §7.6 桌面通知这两条早就各自有一半的线接起来。
@@ -261,6 +263,7 @@ Claude Code 自己开了 `?1004h`(录音 B 第 62 字节,在 ConPTY 第 7 字节
 ### 5.4 队列喂 toast
 
 **只有真 `awaiting` 信号发的号配 toast。** BEL 不配 —— 它是事件,而事件已经有 `OSC 9` / `OSC 777` 那条正路。toast 文案 = `toast_title` 的三层链(carried → pane 名 → profile 名)+ 一句「正在等你回答」;点击走既有 `NotificationRoute`,**一行不改**。
+**v3 澄清(A7/A8)**:上面这句话管的是**「号」那条道** —— 队列里的一张号配不配 toast,判据是 `grounds == AwaitingInput`(§10.8.2)、门在 §11.2。**事件那条道另有一条腿**:回合结束、`OSC 9`/`777` 的消息按 A8 走同一个 `desktop_reach` 三档(§11.7),**不进队列、不发号**。两条道共用 `Notifier` 与 `NotificationRoute`,都不排队不补发(红线 5),trace 上靠 `why=<awaiting|turn-end>` 分辨。
 **不排队、不补发**(`raise_notifications` 那段注释已经写死了理由,原样成立)。
 
 ### 5.5 「Claude Code bell」设置行:实测改了它的诊断,没改它的存留
@@ -303,10 +306,15 @@ HANDOFF §4 g 写的是写 `~/.claude/settings.json` 的 `preferredNotifChannel=
 6. **号不跨窗、序号不回退、不重发。**
 7. **「装没装 X」问那个程序自己。**(§7.1.6j;`1070414` 的现场教训。)
 8. **呼吸的备用屏豁免不许翻案来填 D4 的洞。** 那条豁免的理由(恒真的指示灯不是指示灯)与 D4 是两件事;D4 的正解是 §3,不是把恒真的灯点回来。
-9. **`RequestAttention` 的 `yes/no` 这一臂是状态、`once` 是事件;`OSC 9`/`777` 是消息,三者不合并**(`bt-term/src/session.rs:712-718` 已立)。
+9. **凭据分三级,三级不许互相冒充**(**v3 就地改,A7,2026-08-25 用户裁**):**事件级 `Announced`**(裸 BEL / `RequestAttention=once` / `OSC 9;<text>` / `OSC 777;notify` / `OSC 99` / 回合结束)、**弱 `Requested`**(`RequestAttention=yes|no`)、**强 `AwaitingInput`**(管道 `wait`/`clear`)。**只有后两级铸 episode、发号**;事件级一条都不发号,也不能升 `grounds`。三级表与三条规矩在 **§11.6**。
+   **v2 原文记作**「`RequestAttention` 的 `yes/no` 这一臂是状态、`once` 是事件;`OSC 9`/`777` 是消息,**三者不合并**(`bt-term/src/session.rs:712-718` 已立)」—— A7 把「不合并」换成「**在同一张凭据表里各占一级**」:它们仍然不许互相冒充(那条纪律一个字不动),但它们现在**都在**体系里,而不是有一条留在体系外没有名分。
    **v1 原文记作**「`RequestAttention` 是状态」—— 那句话把 `once` 也裹了进去,而 `once` 按定义是一次性的,它走既有 `bell_latched` 那条路(评审 Q6,折入 §10.8)。
 10. **焦点上报不是用户输入。** 片 A0.5 写出去的 `\e[I`/`\e[O` 必须走终端自答通道(`take_pty_writes` 那条路,`main.rs:22560`/`22582`),**绝不许经过 `send_user_input` / `send_mouse_input_to`**;否则 A0.5 发的 `CSI O` 会被 A2 的出队门当成「用户回答了」而退号(评审 Q8,折入 §10.10)。
-11. **`attention_ticket` 的「nothing here takes a place away」有且只有两个具名例外**,都在 A2 里长出来:程序自撤(`=no`)与 leaf 消失。**用户回答那扇门仍在函数外**(`answer_attention`)。加第三个例外前必须回来改这条红线(§10.2)。
+11. **`attention_ticket` 的「nothing here takes a place away」有且只有两个具名例外**,都在 A2 里长出来:程序自撤与 leaf 消失。**用户回答那扇门仍在函数外**(`answer_attention`)。加第三个例外前必须回来改这条红线(§10.2)。
+    **v3 就地改**:「程序自撤(`=no`)」泛化为「**最后一个未答凭据被它自己的生产者撤回**」—— 弱层 `=no`、强层 `clear`、wait 的 TTL 到期、`SessionEnd`,四条都走这**同一个**例外,不是四个新例外(§11.1 的不变量 I3:`ticket.is_some() ⇒ asking`)。
+12. **toast 门只有一处**(§11.2 那三行,求值在每次状态转移之后)。**C3 不得再立第二处判断**,C2 也不得在 `desktop_reach` 里替它决定投不投 —— `desktop_reach` 只回答「够到哪一档」,不回答「该不该投」。
+13. **强层的 key 只是关联键,永远不是地址。** 它只能在**本端点内**指认一条自己发出的 wait;不能选 pane、不能跨 pane、不进 UI 文案、不进 trace(§10.6 第 3 条的延长,§11.4)。
+14. **事件级凭据不铸 episode、不发号**(红线 9 的执行面)。回合结束、BEL、`once`、`OSC 9`/`777`/`99` 一条都不许进注意力队列 —— 它们够到桌面的那条路是 A8 的两条臂(§11.7),与队列那条道并排、不交叉。
 
 ---
 
@@ -378,6 +386,8 @@ HANDOFF §4 g 写的是写 `~/.claude/settings.json` 的 `preferredNotifChannel=
 ---
 
 ### 10.2 【必改 M3】请求 episode 状态机 —— 替换 `attention_requested: bool`
+
+> **v3 就地记**:本节的**四个状态**、**「只有上升沿铸号」**、**「`Acknowledged` 对 `Settle` 是不动点」**三条全部成立,一个字不撤。但它是一台**单源**机器,而 §10.8 的弱层与强层是**两个独立生产者** —— 窄复核点名的四个死角(铸号所有权、双源电平、后到的强凭据不 toast、`withdraw`/`expire` 的字段合同)都出在这里。**§11.1 用同一个骨架把它扩成双源**:字段从「一个 `Option` + 一位 ack」变成「两个 generation + 两条 ack 水位」,状态由派生式算出、不另存,十七条边扩成 §11.1.4 的那张网格。**本节与 §11.1 冲突时以 §11.1 为准**;下面的 §10.2.1–§10.2.6 留作对照,读它是为了读懂 §11.1 为什么长成那样。
 
 **病在哪(一句话)**:一位 bool 说不出「用户已经答过了,但程序还没说 `no`」。用户答完、`answer_attention` 把号取走,下一帧 `settle_attention` 再看这一位仍是 `true`,于是**立刻重发一张新号** —— 与 2026-08-21 那次「badge 活得比它报告的东西更久」是同一类错,只是搬到了另一根柱子上。
 
@@ -452,19 +462,19 @@ queued   = leaf.attention_ticket.is_some()
 | e1 | `Idle` | `Yes` | `Requested(e)` | **唯一铸 episode 的边**(`no→yes` 上升沿) |
 | e2 | `Idle` | `No` | `Idle` | 幂等,不写 trace |
 | e3 | `Idle` | `Settle{*}` / `Answer` | `Idle` | 无 episode 可确认 |
-| e4 | `Requested(e)` | `Settle{consumed=false}` | `Queued(e,t)` | `admit … ticket=t episode=e`;**C3 toast 的唯一投递边沿(M8)** |
+| e4 | `Requested(e)` | `Settle{consumed=false}` | `Queued(e,t)` | `admit … ticket=t episode=e`;~~**C3 toast 的唯一投递边沿(M8)**~~ **v3 就地改**:admit 不再是 toast 的**唯一**边沿 —— 一个弱凭据先入队、随后强凭据后到的 episode 会永远收不到 toast(窄复核死角 3)。**唯一的 toast 门改成 §11.2 的那三行**(「持号 + `grounds==AwaitingInput` + 本 episode 未投过」),它在 admit 求值,也在 queued 中首次强升级时求值,**仍然只投一次、仍然不重排 ticket** |
 | e5 | `Requested(e)` | `Settle{consumed=true}` | `Requested(e)` | `refuse … reason=watched` |
 | e6 | `Requested(e)` | `Yes` | `Requested(e)` | **幂等重申**:不铸新号、不重发 toast |
-| e7 | `Requested(e)` | `No` | `Idle` | `withdraw … reason=program` |
+| e7 | `Requested(e)` | `No` | `Idle` | ~~`withdraw … reason=program`~~ **v3 就地改**:`Requested(e)` 没有 ticket,而 `withdraw` 这一行强制带 `ticket=` —— 这一格改写不带 ticket 的 `clear`(§11.1.5)。`withdraw` 只属于 `Queued` |
 | e8 | `Requested(e)` | `Answer` | `Acknowledged(e)` | 你抢在入队前答了 |
 | e9 | `Queued(e,t)` | `Answer` | `Acknowledged(e)` | `answer … ticket=t`;**退号** |
 | e10 | `Queued(e,t)` | `No` | `Idle` | `withdraw … reason=program`;**退号** |
 | e11 | `Queued(e,t)` | `Yes` | `Queued(e,t)` | 幂等;**ticket 不重铸**(先到先服务;`attention_ticket` 的 `is_none()` 守卫原样) |
 | e12 | `Queued(e,t)` | `Settle{*}` | `Queued(e,t)` | 无 |
-| e13 | `Acknowledged(e)` | `Yes` | `Acknowledged(e)` | **本状态机存在的理由**:程序持续 yes 也不能再入队 |
-| e14 | `Acknowledged(e)` | `No` | `Idle` | **「下一次能再入队」的唯一开关** |
+| e13 | `Acknowledged(e)` | `Yes` | `Acknowledged(e)` | **本状态机存在的理由**:程序持续 yes 也不能再入队。**v3 就地收窄**:幂等只对**已被确认的那一个 generation** 成立 —— `=yes` 在已经 `Some` 上重申不铸新号,所以确实幂等;但**另一个源的新 generation 不是重申**,它必须能重新入队(§11.1.3)。窄复核的反例就是这一格被读宽了:「已答 → hook 报来一个真的权限请求 → 被当成同一 episode 的幂等 `Yes` 永不入队」 |
+| e14 | `Acknowledged(e)` | `No` | `Idle` | **「下一次能再入队」的唯一开关**。**v3 就地改**:同 e7,这一格写不带 ticket 的 `clear`;并且它**不再是唯一开关** —— 双源之后,一个**新 generation**(哪怕来自另一个源)本身就能让 `asking` 重新为真、铸下一个 episode,不必等旧凭据被撤(§11.1.3 合成规则③,窄复核反例①的正解) |
 | e15 | `Acknowledged(e)` | `Settle{*}` / `Answer` | `Acknowledged(e)` | 不拿号;幂等 |
-| e16 | 任意 | `LeafGone` | — | `expire … reason=leaf-gone`;号消失,`next_ticket` **不回退** |
+| e16 | 任意 | `LeafGone` | — | `expire … reason=leaf-gone`;号消失,`next_ticket` **不回退**。**v3 就地改**:`expire` 这一行强制带 `ticket=`,而 `Idle` 没 episode、`Requested`/`Acknowledged` 没 ticket —— 按 §11.1.5,**只有 `Queued` 写 `expire`**,无号态写不带 ticket 的 `drop`,`Idle` 一行都不写(窄复核死角 4) |
 | e17 | 任意 | `mark_seen` | **不变** | **Q7 钉**:整片清铃**不碰这台状态机**(§10.9) |
 
 #### 10.2.4 三条不变量
@@ -491,7 +501,7 @@ queued   = leaf.attention_ticket.is_some()
 admit    tab=<i> seat=<s> ticket=<t> episode=<e> grounds=<requested|awaiting> active=<0|1> focused=<0|1>
 refuse   tab=<i> seat=<s> episode=<e> reason=watched active=1 focused=1
 look     tab=<i> seat=<s> ticket=<t> episode=<e> kept=1
-answer   tab=<i> seat=<s> ticket=<t> episode=<e> by=<keyboard|ime|paste|files-row|mouse>
+answer   tab=<i> seat=<s> ticket=<t> episode=<e> by=<keyboard|ime|paste|files-row|mouse>   ← v3 改:`by` 的取值换成 §11.3 的七值(`mouse` 拆成 `mouse-button`/`mouse-wheel`,`mouse-motion` 永不出现在这一行);整张 schema 以 §11.1.5 为准
 withdraw tab=<i> seat=<s> ticket=<t> episode=<e> reason=program
 expire   tab=<i> seat=<s> ticket=<t> episode=<e> reason=leaf-gone
 claim    tab=<i> was=<C> now=<C>
@@ -526,13 +536,22 @@ claim    tab=<i> was=<C> now=<C>
 
 **必须按来源定,不能按字节定。** 仓里 `write_pty_input`(`main.rs:10503`)有**八个**调用点,逐个定性:
 
+> **v3 就地改(闭合③)**:下表的 **#1 与 #5 两行的定性不准**,而不准的地方正好是鼠标。实测复核(2026-08-25,`grep` 全部调用点):
+> - `write_pty_input` 的**八个调用点数量闭合**,这一条成立;但**#1 与 #5 都是 helper 内部那一行**,而两个 helper 各自承载**不止一种**语义。
+> - `send_user_input`(`main.rs:55459`)有**两个**调用点:`63061`(键盘)与 **`60529`(被转发的鼠标按键,`UserInputKind::Mouse`)** —— 所以 #1 写成「只有键盘」不准。
+> - `send_mouse_input_to`(`main.rs:55438`)有**三个**调用点:`62142`(SGR 滚轮)、`62161`(备用屏滚轮转方向键)、**`56298`(SGR mouse motion)** —— **它一个按键都不承载**,所以 #5 写成「点击/滚轮」也不准。
+> - 于是 Q2b 的鼠标子格**拆成三格**,并且施工点**只能在产生语义的事件入口**,不能在这两个 helper 上统一消费(否则程序一开 motion tracking,用户把鼠标从 pane 上扫过就退号)。三格的定性见下表 #5a/#5b/#5c。
+
 | # | 位置 | 是什么 | 算不算 `Answer` |
 |---|---|---|---|
-| 1 | `main.rs:55478` `send_user_input(…, UserInputKind::Keyboard)` | 键盘按键 | **算** |
+| 1 | `main.rs:55478` `write_pty_input`(在 `send_user_input` 里) | 键盘按键(调用点 `63061`)**与被转发的鼠标按键**(调用点 `60529`)。**v1/v2 原文记作**「`send_user_input(…, UserInputKind::Keyboard)` 键盘按键」 | 两者**都算**,但**分成两个 kind**:`Keyboard` 与 `MouseButton`(见 #5a) |
 | 2 | `main.rs:63248` `Ime::Commit` | **IME 提交**(不是 preedit) | **算** —— 提交出来的就是你打的字 |
 | 3 | `main.rs:63111` `paste_from_clipboard_into` | 剪贴板粘贴(`Ctrl+V` / `Shift+Insert` / 终端菜单粘贴) | **算** |
 | 4 | `main.rs:49768` files 行插入路径 | 从文件树把一条路径插进 shell | **算** —— 一次用户手势,且落进的是具名的那一席 |
-| 5 | `main.rs:55456` `send_mouse_input_to` | **被转发的鼠标**(点击/滚轮进了追踪程序) | **Q2b 的一个子格,需用户裁。推荐:算。** 正方:`send_mouse_input_to` 的 doc 自己写着「a wheel forwarded into a program running there is as much a claim on it as a keystroke」;反方:滚轮翻页不是回答 |
+| ~~5~~ | ~~`main.rs:55456` `send_mouse_input_to`~~ | ~~**被转发的鼠标**(点击/滚轮进了追踪程序)~~ | ~~**Q2b 的一个子格,需用户裁。推荐:算。**~~ **v3 拆成 #5a/#5b/#5c**(下三行);**v1/v2 原文记作**上面这一行,它把「点击」写进了一个根本不承载点击的 helper |
+| **5a** | 事件入口 `main.rs:60529` → `send_user_input(…, UserInputKind::Mouse)` | **被转发的鼠标按键**(按下 / 抬起,`MouseProtocolEvent::Press`/`Release`) | **算**(A3 已裁「鼠标算」,2026-08-25)。新 kind `MouseButton`。正方原样:`send_mouse_input_to` 的 doc 自己写着「a wheel forwarded into a program running there is as much a claim on it as a keystroke」 |
+| **5b** | 事件入口 `main.rs:62142`(SGR)/ `62161`(备用屏转方向键)→ `send_mouse_input_to` | **被转发的滚轮** | **算**。新 kind `MouseWheel`。**为什么它没被终修单那句「只有按下/抬起算」排除**:按 SGR 线序,一次滚轮**就是一次 `Press`**(button 64/65,没有独立的抬起,`main.rs:62134` 写着 `MouseProtocolEvent::Press`)—— 「按下/抬起」在**线序上**本来就覆盖它,与 A3「鼠标算」不冲突。**若用户要把滚轮也撤出,只改这一格**:它与 #5c 同一个 helper,撤出后那条 helper 整条不碰 `answer_attention`,施工面反而更小 |
+| **5c** | 事件入口 `main.rs:56298` → `send_mouse_input_to`(`MouseProtocolEvent::Motion`) | **被转发的 mouse motion**(程序开了 `?1002h`/`?1003h` 之后,指针每移动一格就是一串字节) | **不算(v3 终修,闭合③)。** 悬停扫过不是回答:你把鼠标从一个 pane 上划过去、甚至只是让指针停在那儿,**没有回答任何问题**。若把 motion 算进去,一个开了 motion tracking 的程序会让「注意力号」被**指针的路过**退掉,而这个 bug 只在特定程序上出现、只在鼠标经过时出现 —— 是最难被人工门抓到的一类。新 kind `MouseMotion`,它**不调 `answer_attention`** |
 | 6 | `main.rs:22561` `take_pty_writes()`(读到输出之后) | **终端协议自答**(DA / DSR / 颜色查询 / **焦点上报**) | **绝不算** |
 | 7 | `main.rs:22583` `take_pty_writes()`(空转时再排一次) | 同上 | **绝不算** |
 | 8 | `main.rs:54149` PSReadLine resize 锚点修复 | **我们自己发的自愈输入** | **绝不算** —— 是终端为修自己发的,不是你 |
@@ -542,7 +561,14 @@ claim    tab=<i> was=<C> now=<C>
 **施工点在哪(M4 的另一半)**:
 
 - **不许下沉到 `write_pty_input`。** 那个函数只看得见一个字节串和一句 `&'static str`,分不出上面八行 —— 与 Enter 门 doc 里那句现成的理由完全同型:「`send_user_input` is handed a byte string and cannot tell an answer from a paste that happens to end in a newline」(`main.rs:63056`)。
-- **正解**:把既有的 `UserInputKind`(`main.rs:10687`,今天只有 `Keyboard | Mouse`)**扩成来源枚举**,并让四条真用户路都经过它:`Keyboard` / `Ime` / `Paste` / `FilesRow` / `Mouse`。`answer_attention(seat, by: UserInputKind)` 由每条路自己调,`by` 直接进 trace(§10.2.6)。
+- **正解**:把既有的 `UserInputKind`(`main.rs:10687-10696`,今天只有 `Keyboard | Mouse`)**扩成来源枚举**,并让每条真用户路都经过它。
+  **v1/v2 原文记作**「`Keyboard` / `Ime` / `Paste` / `FilesRow` / `Mouse`」—— **v3 就地改**:`Mouse` 一格拆三,枚举是
+  ```rust
+  enum UserInputKind { Keyboard, Ime, Paste, FilesRow, MouseButton, MouseWheel, MouseMotion }
+  ```
+  其中 **`MouseMotion` 是唯一一个不是 `Answer` 的成员**(#5c),而 `returns_view_to_live` 对三个鼠标成员**一律为 false**(既有语义原样:鼠标手势没有回到 live 那一半)。
+  `answer_attention(seat, by: UserInputKind)` **由每条路自己在事件入口调**,`by` 直接进 trace(§11.1.5)。
+- **「算不算」这件事必须写成枚举上的一个方法,不能写成调用点的记忆力**:`UserInputKind::is_answer()`(`MouseMotion` 为 false、其余为 true)。一个将来新增的输入路必须在**枚举上**回答这个问题,而不是在某个 `if` 里被忘掉 —— 与 `returns_view_to_live` 同型、同位置、同理由。
 - **协议自答那三条(#6/#7/#8)根本不经过 `UserInputKind`**,所以它们不是「要记得排除的例外」,而是**结构上够不到那扇门** —— 这正是红线 10 想要的形状,也是片 A0.5 的焦点上报能安全存在的原因。
 - **`answer_attention` 的取号语义不变**:仍是「一次动作确认当前 episode 并取走号」,只是入口从一个变成四(或五)个,且每个入口都带来源。
 
@@ -553,6 +579,8 @@ claim    tab=<i> was=<C> now=<C>
 **证据来源**:`https://code.claude.com/docs/en/hooks.md` 原文,2026-08-25 逐字取回(291 536 字节),**不经转述**。文档里 `## Hook events` 下共 **31** 个事件。下表的每一句「官方原文」都是从那份 markdown 里抄的。
 
 #### 10.4.1 三张名单
+
+> **v3 就地记(闭合④)**:三张名单的**语义与拼写窄复核已过**,一个都不撤。缺的是**配平**:下面第一张表里的每一个 `wait`,必须写明**它由什么 clear**,否则一次权限请求会把强断言永久留在 `Acknowledged` 里、吞掉下一次请求。**逐源的 clear 配对表在 §11.4**,连同两个动词之外那把**有界关联键**的合同。第三张名单的标题也就地收窄:**「绝不映射为 `wait`」不等于「不进本体系」** —— `Stop` / `StopFailure` / `agent_completed` / `quota_auto_resume_fired` / `quota_auto_resume_disabled` / `PostToolUse` 在 v3 里**都是 clear 源**,而它们一条都不会把 pane 送进 `Awaiting`。
 
 **映射为 `wait`(它真的在等你输入) —— 事件级优先,notification 级兜底:**
 
@@ -576,17 +604,20 @@ claim    tab=<i> was=<C> now=<C>
 | `Notification` matcher **`elicitation_response`** | "An MCP elicitation response is sent back to the server" |
 | **`SessionEnd`**(事件) | 会话没了(与 e16 `leaf-gone` 是两回事:会话结束时 pane 可能还在) |
 
-**绝不映射为 `wait`(名单是封闭的:**其余 24 个事件与 5 个 notification type 一律不映射**):**
+**绝不映射为 `wait`(名单是封闭的:**其余事件与 notification type 一律不映射为 `wait`**):**
+
+> **v3 就地改两处**:①「其余 **24** 个事件」是**算错了**。31 个 hook event 里,v2 用掉 6 个唯一 event(含 `Notification`)⇒ 应为 **25**;**v3 又把 `PostToolUse` / `Stop` / `StopFailure` 收进 clear 名单**(§11.4)⇒ 用掉 9 个,**其余 22 个事件**一律不映射。这三个数字都写出来,是为了不再出第三次算术错。②标题从「绝不映射」收窄为「**绝不映射为 `wait`**」:下表里有三个已经是 clear 源了,**不 wait ≠ 不出现**。
 
 | 来源 | 官方原文定义 | 为什么不 |
 |---|---|---|
-| **`Stop`** | "Runs when the main Claude Code agent has finished responding." | **这正是本方案 §2 花四段录音证伪的那件事。** v1 §3.3 路线 A 写的 `Stop → wait` 是把「回合结束」升回 `Awaiting`,与本方案对 BEL 的纠正同型同错。**v1 原文记作**「`Notification` → `wait`、`Stop` → `wait`、`UserPromptSubmit` → `clear`」—— 第二条必删,第一条必须细分到 type |
+| **`Stop`** | "Runs when the main Claude Code agent has finished responding." | **v3 就地补**:它**不映射为 `wait`** 这条不动;但它在 v3 里有两个别的身份 —— **① clear 源**(回合结束 ⇒ 该 pane 没有任何东西在等你输入,`clear all`,§11.4);**② A8 的事件级凭据**(回合结束要够到桌面:无焦闪、最小化 toast,§11.7)。两个身份都**不**把它升成状态。<br>**这正是本方案 §2 花四段录音证伪的那件事。** v1 §3.3 路线 A 写的 `Stop → wait` 是把「回合结束」升回 `Awaiting`,与本方案对 BEL 的纠正同型同错。**v1 原文记作**「`Notification` → `wait`、`Stop` → `wait`、`UserPromptSubmit` → `clear`」—— 第二条必删,第一条必须细分到 type |
 | `StopFailure` | "Runs instead of Stop when the turn ends due to an API error." | 结束不是等待 |
 | `SubagentStop` | 子 agent 结束 | 同上 |
-| `Notification` `idle_prompt` | "Claude finished responding about 60 seconds ago and you haven't typed since" | **另裁,见 §10.13。** 它是上游版的「输出安静 N 秒」启发式 —— 而 v1 §3.4 明确不做这一档 |
+| `Notification` `idle_prompt` | "Claude finished responding about 60 seconds ago and you haven't typed since" | ~~**另裁,见 §10.13。**~~ **v3:已裁(A6,2026-08-25 用户裁)—— 不算 waiting。** 它是上游版的「输出安静 N 秒」启发式,而 v1 §3.4 明确不做这一档。**§10.13 那条「次选:当作弱层 `Requested` 凭据」未被采纳** —— 裁决只说「不算」,而名单是封闭的;要把它加成弱层凭据须另裁 |
 | `Notification` `auth_success` | "Authentication completes" | 不等输入 |
-| `Notification` `agent_completed` | "A background session finishes or fails." | 不等输入 |
-| `Notification` `quota_auto_resume_fired` / `quota_auto_resume_disabled` | 自动继续了 / 结束等待 | 不等输入 |
+| `Notification` `agent_completed` | "A background session finishes or fails." | 不等输入。**v3 补**:它是 `agent_needs_input` 的 **clear 源**(§11.4)—— 不 wait,但必须出现,否则那条 wait 有进无出 |
+| `Notification` `quota_auto_resume_fired` / `quota_auto_resume_disabled` | 自动继续了 / 结束等待 | 不等输入。**v3 补**:两条都是 `quota_auto_resume_stale` 的 **clear 源**(§11.4),理由同上 |
+| `StopFailure` / `PostToolUse` | `StopFailure` 见上;**`PostToolUse` 的官方原文本节没有逐字抄录** | **v3 补**:两条都是 clear 源(§11.4)。`PostToolUse` 是 `PermissionRequest` **被批准并执行完**的回执。**A3 开工前必须按 §10.4 同一条纪律**(`curl` 原文、不经转述)**把 `PostToolUse` 的原文定义与它 payload 里的 tool 标识字段逐字取回**,并把 §11.4 那张表的第一行钉死 —— 它是整张 clear 表里唯一一处还靠推断的地方 |
 
 **评审列的可疑拼写全部核对无误**:`permission_prompt`、`elicitation_dialog`、`idle_prompt`、`auth_success`、`elicitation_complete`、`elicitation_response` 六个都在原文里、无一拼错;原文另有评审没列的 `elicitation_url_dialog`、`agent_needs_input`、`agent_completed`、`quota_auto_resume_fired`、`quota_auto_resume_stale`、`quota_auto_resume_disabled` 六个,共 12 个 type。
 
@@ -602,11 +633,17 @@ claim    tab=<i> was=<C> now=<C>
 
 **三条后果,逐条落到片单上:**
 
-1. **v1 片 A0 的问题①②当场消失。** v1 要量的是「hook 子进程写不写得进 pty」与「`async` hook 的时序抖动多大」;上游已经把这条路做好了,而且**明说是 race-free 的、在 Windows 上工作**。**A0 从三问缩成一问**,只剩改正后的 ③′(§10.5)。v1 路线 B「hook 直写 `CONOUT$`」**作废** —— 它现在是一条自己造的、官方已经提供了替代品的风险路径。它的位置由**路线 B′(`terminalSequence`)** 顶替。
+1. **v1 片 A0 的问题①②撤销。** v1 要量的是「hook 子进程写不写得进 pty」与「`async` hook 的时序抖动多大」;上游已经把这条路做好了,而且**明说是 race-free 的、在 Windows 上工作**。**A0 从三问缩成一问**,只剩改正后的 ③′(§10.5)。v1 路线 B「hook 直写 `CONOUT$`」**作废**,它的位置由**路线 B′(`terminalSequence`)** 顶替。
+   **v3 就地改一句措辞**:①② 撤销的理由是**产品选路** —— 官方给了一条它自己维护的、race-free 的通道,我们**选择不再走直写 tty 这条自己造的路**。**不能写成「官方白名单已经实验性证明 `CONOUT$` 写不进去」** —— 白名单一个字都没说 `CONOUT$`,那件事**至今没被量过,也不必再量**。**v2 原文记作**「它现在是一条自己造的、官方已经提供了替代品的风险路径」—— 这句话本身没错,但它容易被下一个人读成「实验已经证否」,所以补这一句把两件事分开。
 
 2. **但 B′ 发不出 `RequestAttention`。** 官方白名单逐字点名 OSC 1337 是被拒的。于是**在 Claude Code 这个生产者身上,正文 §3.2 挑的那条通道无论 hook 怎么写都走不通**。B′ 能发的与本块有关的只有:`OSC 777;notify`(消息,红线 9 已判它不是状态)、`OSC 99`(kitty 通知,同上)、裸 BEL(事件)、`OSC 9;4`(进度,实测无源)、标题(转轮,§2.3 已证伪)。**一条都不满足判据②③。**
 
-3. **所以路线 A 不再是「推荐」,它是 Claude Code 场景下的唯一可行路。** hook 是普通子进程,能执行任意命令、继承 pane 的环境变量,`folio attention wait` 完全不受 `terminalSequence` 白名单约束。这与评审「A3 必须前置于 A2」的重排指向同一处,并给了它一个更硬的理由:**没有 A3,claude pane 上的 awaiting 永远是零,把 BEL 撤出去就只剩一个空队列。**
+3. **所以路线 A 不再是「推荐」。** hook 是普通子进程,能执行任意命令、继承 pane 的环境变量,`folio attention wait` 完全不受 `terminalSequence` 白名单约束。这与评审「A3 必须前置于 A2」的重排指向同一处,并给了它一个更硬的理由:**没有 A3,claude pane 上的 awaiting 永远是零,把 BEL 撤出去就只剩一个空队列。**
+   **v3 就地改这一条的措辞(闭合⑤)。v2 原文记作**「它是 Claude Code 场景下的**唯一可行路**」—— **说宽了**。准确的一句是:
+   > **对 Claude Code 的强层,pane-local attention pipe 是本方案已定义的唯一生产路线;对通用层,`OSC 1337;RequestAttention` 仍是正门。**
+
+   白名单事实证明的是**一件很窄的事**:`terminalSequence` 这条**代发**通道不许带 OSC 1337 —— **被堵死的是「hook 代发 1337」,不是「1337」**。它**不证明**:① `CONOUT$` 直写失败(见上条);② loopback / broker / 继承 handle 等别的 IPC 不可行;③ **别家 CLI 不能自己发 1337** —— 任何自己持有 tty 的程序照发不误,而**片 A1 服务的正是它们**。
+   **成立范围**:当前上游版本 + 本方案既定的安全边界 + 本方案已选的路线。上游哪天把 1337 加进白名单(路线 C 的诉求),这句话自然失效 —— 而 **A1 的解析器当天就能接住**,一行不用改。这是 A1 与 A3 **并行**、而不是 A1 前置于 A3 的另一个理由(§11.5)。
 
 **片 A1(`OSC 1337;RequestAttention`)照做不误,但要说清它是给谁的**:它的用户**不是 Claude Code**,是**任何自己写 tty 的程序** —— iTerm2 生态的现成脚本、构建工具、用户自己的脚本。它是一条**不需要装 hook 的通用路**,这正是它值得存在的理由,也是它不该被 A3 取代的理由。两条路服务两类生产者。
 
@@ -648,13 +685,13 @@ claim    tab=<i> was=<C> now=<C>
 
 **先把不能说的话删掉。** 「管道名是我们自己发的,所以不会被别的程序冒充」不成立:**管道名是定位信息,不是身份**。Windows 默认命名管道 DACL 甚至给 Everyone/anonymous 读权限,官方明确要求需要隔离时**自行提供安全描述符**,并建议用 **logon SID** 隔离登录会话([Named Pipe Security and Access Rights](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights))。同一用户下的另一个进程至少可以连接与伪造;若它读到了 pane 的环境,随机管道名也不再是秘密。
 
-**没有替代通道可换。** §10.4.2 刚证明 `terminalSequence` 发不出 1337,路线 B 作废;路线 A 是 Claude Code 场景下唯一可行路。所以正确的做法不是换路,是**把合同写清楚并把能力封死**。
+**没有替代通道可换。** §10.4.2 刚证明 `terminalSequence` 发不出 1337,路线 B 作废;**对 Claude Code 的强层,pane-local pipe 是本方案已定义的唯一生产路线**(**v2 原文记作**「路线 A 是 Claude Code 场景下唯一可行路」—— 按 §10.4.2 第 3 条 v3 收窄)。所以正确的做法不是换路,是**把合同写清楚并把能力封死**。
 
 **路线 A 的安全合同(六条,施工时逐条对照):**
 
 1. **`FOLIO_PANE` 只供诊断,绝不作为授权或路由依据。** 服务端在**创建端点时**就把它绑定到一个 `LeafSession`;消息里**不接受** window/tab/seat 字段,也不允许调用者改目标。
 2. **每 pane 一个不可预测的端点名 / 至少 128-bit capability**;`PIPE_REJECT_REMOTE_CLIENTS`、`FILE_FLAG_FIRST_PIPE_INSTANCE`;**显式 DACL 只给当前 logon SID**(及确有需要的 SYSTEM),**不用默认描述符**。
-3. **只准两个幂等动词 `wait` / `clear`**,限制单帧长度、连接数与速率。即使被同用户进程偷到,**最大影响也只是给这一 pane 制造/撤销一条注意力声明** —— 不能打字、不能开 pane、不能读转录、不能寻址别的 pane。(这一条与 §10.2 的幂等边 e6/e11/e13 互相加强:重复的 `wait` 连一行 trace 都写不出来。)
+3. **只准两个幂等动词 `wait` / `clear`**(**v3 就地补**:动词仍是**两个**,但各带一把**有界关联键** `--key=<opaque>` —— 它**不具寻址能力**,只能在**本端点内**指认一条自己发出的 wait,而端点在创建时就绑死了 pane。键的合同、长度上限、outstanding 上限与溢出规则在 **§11.4**;红线 13 盯着它不许长成地址),限制单帧长度、连接数与速率。即使被同用户进程偷到,**最大影响也只是给这一 pane 制造/撤销一条注意力声明** —— 不能打字、不能开 pane、不能读转录、不能寻址别的 pane。(这一条与 §10.2 的幂等边 e6/e11/e13 互相加强:重复的 `wait` 连一行 trace 都写不出来。)
 4. **pane 生命周期拥有端点。** leaf 迁窗/换 seat 时端点随 `LeafSession` 迁移;leaf 消失立即关 server 并让旧 capability **永久失效**(与 e16 同一时刻)。`FOLIO_PANE=<window>.<tab>.<seat>` 在 tear-out、合并或座位重排之后会陈旧,**不能作为稳定地址**;仓内进程内路由已经用 `LeafId { tab, seat }`(`main.rs:491-493`)而不是 window 坐标,但那仍是会随结构动作改铸的内部地址 —— **对外只暴露 opaque capability**。
 5. **Folio 不从 cwd、仓库、`.claude/` 发现或加载 hook**;安装器只写**用户明确批准的用户级配置**。这满足 P3-4 的「永远不能从工作区/仓库读自动化」,并有 §10.4.3 第三条的上游佐证。仓库里的程序仍能像发 BEL/OSC 一样调用它继承到的 pane-local `wait` —— 所以第 3 条那道封印是必须的,不是可选的。
 6. **不能与未来 P3-4 / mailbox 共用同一份授权。** 可以复用管道库、事件循环与生命周期代码,但**强能力必须另发 capability、另开 endpoint**。否则一个只该「按门铃」的项目 hook 会自然升级成「向别的终端打字」,正面撞上 P3-4 / P3-11 的 RCE 裁决。
@@ -695,6 +732,8 @@ else                      { Flash }       // 在这台屏上,但不在你眼前
 
 **第 2 行的诚实说明(必须写进 `desktop_reach` 的 doc,否则会被当成分支写错)**:`FlashWindowEx` 对**前台窗口**在 Win32 上是无操作 —— 第 2 行的可见产物是**窗内徽章与那枚点**,不是任务栏闪。把它写成 `Flash` 而不是 `Nothing`,是因为这一格的答案是「**在这台屏上,但不在你眼前**」,与第 3/4 行是同一句话;若下一秒你切走了,同一条臂立刻变成真的闪,而**谓词一个字都不用改**。写成 `Nothing` 才是撒谎:它会让「有焦窗口的非活动 tab」和「你正盯着的那一格」在函数里长得一模一样。
 
+**v3 补:A8 挂在这张表的哪一格。** 用户 2026-08-25 裁「**回合结束 = 无焦任务栏闪(默认开)+ 最小化 toast(设置行默认开可关)**」。它**不新造判据**,就走上面这张 8 行表:**第 1 行 `Nothing`**(你正看着它,回合结束不打扰)、**第 2/3/4 行 `Flash`**(任务栏闪 —— 其中第 2 行按上面那条诚实说明,在前台窗口上 `FlashWindowEx` 是 no-op,可见产物是窗内那两枚既有记号)、**第 5–8 行 `Toast`**。设置行、去重规则、与队列那条道的分界写在 **§11.7**。**它一张号都不发**(红线 14)。
+
 **`attention_is_consumed` 一个参数都不许加**(红线 4 原样)。`notify.rs:93-101` 那段「读的是同一个谓词的另一面」的论证在两档模型下是对的,**三档之后不再对** —— 第 2 行既不是「看过了」也不是「够得到桌面」,它是第三个答案。**那段注释必须在 C2 里重写,不许留着。**
 
 **Q4 不受影响**(第三档判据是否只认 `IsIconic || CLOAKED`),它仍是一道待裁的题(§10.13)。补格改的是第一/二档之间的边界,Q4 管的是第二/三档之间的边界,两者不重叠。
@@ -720,6 +759,8 @@ else                      { Flash }       // 在这台屏上,但不在你眼前
 grounds: AttentionGrounds { Requested, AwaitingInput }
 ```
 
+> **v3 就地记(闭合①)**:「共用同一台状态机」这句话是对的,但 v2 交给它的**数据模型是单源的** —— 一个 `attention_request: Option<u64>`,而铸号只在 `bt-term` 的解析器里。管道事件不经过 OSC 解析器,**没有合法的铸号入口**,也没有存放强层 live 状态的地方;A3 更不许反向去伪造 `bt-term` 的流事实。**§11.1 把这台机器扩成双源**:两个 generation(弱层住 `bt-term`、强层住 `bt-app` 的 pane 端点)、两条 ack 水位、一个 app 侧的 episode 协调器;`grounds` 由派生式算,不是锁存位。**A7 之后这张表还多一级**(事件级 `Announced`,§11.6),但那一级**不进这台状态机**。
+
 #### 10.8.2 合成规则(强吃弱)
 
 | 弱层在请求 | 强层在请求 | 号的 `grounds` | 文案 | 配 toast? |
@@ -729,7 +770,8 @@ grounds: AttentionGrounds { Requested, AwaitingInput }
 | 否 | **是** | `AwaitingInput` | 「正在等你回答」/ "Waiting for you" | **配** |
 | **是** | **是** | `AwaitingInput` | 「正在等你回答」 | **配** |
 
-- **`grounds` 只升不降,在一个 episode 内**:一个 pane 先发 1337 `yes`(弱)、六秒后 hook 又报了 `permission_prompt`(强),是**同一次请求**被证实了 —— 升级 `grounds`,**不铸新 episode、不重发号、不重新排队**(先到先服务不能因为证据变强而被打乱)。反过来不降:强层撤了但弱层还举着,`=no` 之前它仍是同一次请求,只是**没有第二次 toast**。
+- **`grounds` 在一个 episode 内可升可降,但号与 toast 不跟着抖**:一个 pane 先发 1337 `yes`(弱)、六秒后 hook 又报了 `permission_prompt`(强),是**同一次请求**被证实了 —— 升级 `grounds`,**不铸新 episode、不重发号、不重新排队**(先到先服务不能因为证据变强而被打乱),并且**这一刻要补投那一次 toast**(§11.2)。强层撤了而弱层还举着,**`grounds` 降回 `Requested`、文案退回「需要注意」,号不退、也没有第二次 toast**。
+  **v2 原文记作**「`grounds` **只升不降**……反过来不降:强层撤了但弱层还举着,`=no` 之前它仍是同一次请求」—— **v3 就地改(闭合①)**:窄复核的反例成立 —— 强层是唯一的强凭据,它撤了以后 UI 还在说「正在等你回答」,就是**在用一个已经不存在的凭据说话**。正解是把 `grounds` 写成**当前未答凭据的派生量**(`grounds = if 强层有未答凭据 { AwaitingInput } else { Requested }`,§11.1.2),而不是一个只升不降的锁存位;**「只升不降」这件事真正该锁的是 toast**,它由 episode 上的 `toasted` 一位管(§11.2)。**每个源的 `clear` 只撤自己那一层**,这是双源的第一条纪律。
 - **§5.4「只有真 `awaiting` 信号发的号配 toast」现在有了准确的定义**:`grounds == AwaitingInput`。这一条把 v1 那句凭直觉写的话变成了可施工的判据。
 
 #### 10.8.3 为什么不长第八个视觉断言
@@ -793,6 +835,8 @@ window_focused
 ---
 
 ### 10.11 分片依赖重排
+
+> **v3 就地记(闭合⑤的依赖面)**:本节的两条结构性变更(**A3 前置于 A2**、**D 拆出本方案**)都成立,不撤。但下表把 **A3 的前置写成了 `A1 + §10.6`**,而**新事实推不出「A3 依赖 A1」** —— A1 是通用程序的 OSC 弱源,A3 是 Claude hook 的 pipe 强源,两个源**并行喂同一个双源核心**。**§11.8 是 v3 的片表**:抽出 **A-core**(§11.1 的双源账本,不碰 UI、不接生产者),然后 **A1 与 A3 并行**,A2 依赖 A-core + A3 与两条已裁的门。若排期上仍想把 A1 先做完,那是**打包顺序,不是技术依赖**,要在片单里说出来。
 
 **两条结构性变更:**
 - **A3 移到 A2 之前**(评审必改)。理由在 v1 里只有「不该先拆假队列」,§10.4.2 之后有了更硬的一条:**Claude Code 只能走路线 A,没有 A3 就没有任何 claude pane 会进队列**,BEL 一撤队列就是永久空的。
@@ -874,12 +918,14 @@ B2 ──▶ 独立等命令面板
 
 ### 10.13 留给用户的裁决清单(v2 之后)
 
+> **v3 状态:本节全部已裁(A 组八条,2026-08-25 用户裁,全过)。** 逐条落点表在 **§11.0**。下表留作对照 —— 「推荐」那一列现在都是**裁决**,不是建议。
+
 **必须先裁、否则片不能开工的:**
 
 | 题 | 内容 | 挡住哪片 | 推荐 |
 |---|---|---|---|
 | **Q2a** | **BEL 撤出入队门吗?**(复议 2026-08-21 裁决) | **A2** | **撤** |
-| **Q2b** | **出队门从 Enter 扩到「带来源的用户动作」吗?**(复议 2026-07-18 裁决)含子格:**被转发的鼠标算不算**(§10.3.2 第 5 行) | **A2** | **扩**;鼠标**算**。**若 Q2a 被否,Q2b 必须同否** |
+| **Q2b** | **出队门从 Enter 扩到「带来源的用户动作」吗?**(复议 2026-07-18 裁决)含子格:**被转发的鼠标算不算**(§10.3.2 第 5 行) | **A2** | **扩**;鼠标**算**。**若 Q2a 被否,Q2b 必须同否**。**v3:已裁 A3「扩」**;鼠标子格由 §11.3 拆三 —— **按键算、滚轮算、motion 不算** |
 | **Q4** | 第三档判据只认 `IsIconic \|\| CLOAKED`,把「被别的窗口完全盖住」归第二档 —— 接受吗? | **C2** | 接受(winit 的 `Occluded` 在 Windows 后端不发,自己算 z 序是启发式) |
 | **Stop 语义(新)** | `Notification` 的 **`idle_prompt`**(官方:「Claude 回完话约 60 秒且你没打字」)算不算 waiting? | **A3** 的白名单 | **不算 waiting。** 它是上游版的「输出安静 N 秒」启发式,而 v1 §3.4 明确不做这一档。**次选**:当作 §10.8 的弱层 `Requested` 凭据(它至少是程序自己说的,且它知道自己有没有在跑工具 —— 比我们自己数秒诚实)。**普通 `Stop` 无论如何不映射**,那是 §2 花四段录音证伪的东西 |
 
@@ -898,6 +944,8 @@ B2 ──▶ 独立等命令面板
 
 ### 10.14 v2 之后的验收门增补(接正文 §8)
 
+> **v3 再加八步(⑪–⑱),见 §11.9。**
+
 正文 §8 那八步原样有效,加三步:
 
 - **⑧ 同窗非活动 tab**:窗口保持前台,在 tab 3 的 agent 上触发一次请求 ⇒ **窗内徽章 +1、tab 3 上点亮,不弹 toast**(§10.7 第 2 行)。
@@ -905,3 +953,411 @@ B2 ──▶ 独立等命令面板
 - **⑩ 同窗内换键盘 owner**:窗口焦点不动,点一下文件树 ⇒ `BT_PTY_DUMP` 里该 pane 收到**恰好一次** `\e[O`;点回终端 ⇒ **恰好一次** `\e[I`(§10.10 边沿要求 1)。
 
 **外加**:关掉 Windows 动画(reduced-motion)重跑 ②③,Bell 与 Awaiting 必须仍然分得出(红线 3,原样)。
+
+---
+
+## 11. 2026-08-25 v3 终修(窄复核折入 + A 组裁决)
+
+**这一节是什么**:`codex-confirm.md` 的**总判定**点名了五处「阻塞施工的最小修订集」,本节逐处闭合;同日**用户裁决了 A 组八条**(全过,其中 A7 / A8 是新加的两条),本节把它们正式写进方案。**本节与 §0–§10 冲突时以本节为准。** 被改动的旧文都已就地改并留了「v1 原文记作 / v2 原文记作」。
+
+**闭合对照(总判定那五处):**
+
+| # | 窄复核的话 | 落点 | 一句话 |
+|---|---|---|---|
+| ① | 补**双源 generation / ack 合成**与每条边的 trace | **§11.1** | 两个 generation + 两条 ack 水位;状态是它们的**纯函数**,不另存;`asking` 由假变真是**唯一**铸号边 |
+| ② | 补**强凭据后到的单次 toast 边** | **§11.2** | 唯一 toast 门 =「持号 + `grounds==AwaitingInput` + 本 episode 未投过」,每次转移后求值一次 |
+| ③ | 把**鼠标 motion 从 Answer 拆出** | **§11.3**(+ §10.3.2 就地改) | `UserInputKind` 拆七值,`MouseMotion` 是唯一不是 `Answer` 的那个 |
+| ④ | 为 hook wait 写**可连续工作的 clear/关联规则** | **§11.4** | 逐源 clear 配对表 + 一把**有界关联键**;两个动词不变 |
+| ⑤ | 收窄**「管道唯一路线」**及依赖表述 | **§11.5**(+ §10.4.2 / §10.6 / §10.11 就地改) | 强层对 Claude Code 唯一;**通用层 1337 仍是正门**;A1 ∥ A3 |
+
+**另外两处**(窄复核在「四个死角」里点到、本节一并闭合):**死角 1**(episode 的所有权与铸号入口)在 §11.1.1;**死角 4**(`withdraw`/`expire` 的字段合同不可实现)在 §11.1.5。
+
+---
+
+### 11.0 A 组裁决落点(2026-08-25 用户裁,八条全过)
+
+| 编号 | 裁决 | 对应旧题 | 落点 | 解锁了什么 |
+|---|---|---|---|---|
+| **A1** | **做** | Q1 第八记号 `Attached` | §3.5 原样成立 | `Attached` **不占本块工期**(片 D 已按 M9 拆出本方案):它成为 §7.1.5b 表上一条独立的扩条,本块只登记这条裁决。dead 接线与 `closeOnExit` 仍归 §7.1.5b,不借本块施工 |
+| **A2** | **撤** | Q2a BEL 撤出入队门 | §4 B2 / §10.3.1 原样成立 | **片 A2 的第一道锁开了。** 撤之后队列在 A3 落地前是空的,这是有意的(§4 B2) |
+| **A3** | **扩** | Q2b 出队门扩到「带来源的用户动作」 | §10.3.2 + **§11.3** | **片 A2 的第二道锁开了。** 鼠标子格由 §11.3 拆三格 |
+| **A4** | **接受** | Q4 第三档只认 `IsIconic \|\| CLOAKED` | §5.2 / §10.7 原样成立 | **片 C2 的锁开了** |
+| **A5** | **加** | Q5「Claude Code bell」行留着 + 加一条装 hooks | §5.5 原样成立 | 设置块两行;纪律原样(存原值 / 恢复不删 / 状态从文件读 / **问那个程序自己**) |
+| **A6** | **不算** | `Notification` `idle_prompt` 算不算 waiting | §10.4.1 第三张名单就地改 | **片 A3 的白名单封口。** 「次选:当作弱层凭据」**未被采纳** —— 裁决只说「不算」,而名单是封闭的,要加须另裁 |
+| **A7** | **收 `OSC 9` 与 `OSC 777` 通知序列进凭据体系** | 新 | **§11.6** + 红线 9 就地改写 | 凭据从两级变三级:事件级 `Announced` 有了名分,而它**仍然不发号** |
+| **A8** | **回合结束 = 无焦任务栏闪(默认开)+ 最小化 toast(设置行默认开可关)** | 新 | **§11.7** + §10.7 就地补 | 片 C2 / C3 各长一条臂;**不进队列** |
+
+**还没裁、也不挡工期的**:一条都没有 —— A 组之后,本块**没有留给用户的开放题**。将来若要把 `idle_prompt` 收成弱层凭据、或把滚轮撤出 Answer(§11.3),都要**新起一题**。
+
+---
+
+### 11.1 【闭合①】双源 episode 核心
+
+#### 11.1.1 三个生产层,两个 generation,一个 episode 协调器
+
+窄复核死角 1 说的是:§10.2.1 把铸号写死在 `bt-term` 的 OSC 解析器上,而 §10.8 又要求管道的强源共用同一台机器 —— **管道事件不经过解析器,没有合法的铸号入口**,而 A3 更不许反向去伪造 `bt-term` 的流事实。正解不是让一个源冒充另一个源,是**把铸号抬到能同时看见两个源的那一层**。
+
+| 层 | 住哪 | 字段 | 谁写 | 为什么在这一层 |
+|---|---|---|---|---|
+| **弱层**(流的事实) | `bt-term` | `SessionStatus.attention_request: Option<u64>` | 解析器:`=yes` 在 `None → Some` 的**上升沿**铸一个新**弱 generation**;`=no` 清回 `None` | 它是**字节流的函数**,可离线重放、可在 `bt-term` 单元测试里钉死,**不需要知道「用户」是什么**(§10.2.1 原话,原样成立) |
+| **强层**(管道的事实) | `bt-app`,**挂在 pane 端点上** | `LeafSession.attention_waits: Vec<(WaitKey, u64)>` | 端点:`wait --key=k` 且 `k` 不在表里 ⇒ 铸一个新**强 generation** 并记 `(k → g)`;`clear` 按 §11.4 的选择器删条目 | 它是**管道事件序列的函数**,同样可重放;它**住在 leaf 上**,所以 leaf 一消失它跟着消失(§10.6 第 4 条) |
+| **事件级**(A7) | 两边都有 | 既有 `bell_latched` / `TerminalNotification` | BEL / `once` / `OSC 9` / `OSC 777` / `OSC 99` / 回合结束 | **不铸号、不进本节这台机器**(红线 14);它的去处在 §11.6 / §11.7 |
+| **episode 协调器** | `bt-app`,`LeafSession` | `AttentionLedger`(下) | 只有它铸 episode | 它是**唯一同时看得见两个 generation 的地方**,所以它是唯一能回答「这是不是同一次请求」的地方 |
+
+```rust
+struct AttentionLedger {
+    episode:      Option<u64>,  // per-session 单调递增、永不复用
+    ticket:       Option<u64>,  // 既有 `attention_ticket`,一个字不改
+    acked_weak:   u64,          // ack 水位,0 = 从未
+    acked_strong: u64,          // ack 水位,0 = 从未
+    toasted:      bool,         // 本 episode 是否已投过 toast(§11.2),随 episode 生灭
+}
+```
+
+**三个计数器,三本账,不许合并**(§10.2.1「两个计数器」那条纪律的扩写):`ticket` 决定**队列次序**(per-window)、`episode` 决定**这是不是同一次请求**(per-session)、两个 generation 决定**这是不是同一条凭据**(各自 per-session)。
+
+#### 11.1.2 状态是派生量,不另存
+
+```text
+weak_gen   = status.attention_request.unwrap_or(0)                      // 0 = 弱层没在举
+strong_gen = attention_waits.iter().map(|(_, g)| *g).max().unwrap_or(0) // 0 = 强层没在举
+
+unanswered_weak   = weak_gen   > acked_weak
+unanswered_strong = strong_gen > acked_strong
+
+asking       = unanswered_weak || unanswered_strong        // ← 入队门的第一个参数
+any_asserted = weak_gen != 0 || strong_gen != 0
+grounds      = if unanswered_strong { AwaitingInput } else { Requested }
+queued       = ticket.is_some()
+```
+
+四个状态**照旧是那四个**(§10.2.2 一个字不改),只是判据换成上面这五个派生量:
+
+| 状态 | 判据 | 一句话 |
+|---|---|---|
+| **`Idle`** | `!any_asserted` | 两个源都没在举。**leaf 出生即此** |
+| **`Requested(e)`** | `asking && !queued` | 有未答凭据,还没拿到号 |
+| **`Queued(e,t)`** | `asking && queued` | 有未答凭据,持号 `t` |
+| **`Acknowledged(e)`** | `any_asserted && !asking` | **还有凭据举着,但举着的那些你都已经答过了** |
+
+**「水位」是这一节全部正确性的来源,而它只是 §10.2.1 那条单调性论证的双份**:generation 严格递增、永不复用,所以 `gen > acked` 这个比较**天然地**让「旧 ack 吞不住新 generation」,也天然地让「同一条凭据的重申吞不掉自己」。于是:
+
+- **不需要在 `=no` / `clear` 时回头清 ack**(§10.2.1 原话)—— 少一条清理路径,就少一处能忘;
+- **不需要 ack 记一个集合** —— 两个 `u64` 水位就够,因为「答」这个动作在语义上就是「把此刻桌面上摆着的都答了」;
+- **不需要 `grounds` 锁存位** —— 它是 `unanswered_strong` 的即时函数,强层一撤它自己就降下来(§10.8.2 v3 就地改)。
+
+#### 11.1.3 合成规则(四条,双源全部的语义都在这里)
+
+1. **铸号边只有一条:`asking` 由假变真。** 从 `Idle` 起(两源都空 → 一源举起)、或从 `Acknowledged` 起(已答的凭据之外**出现一个更新的 generation**),都铸一个新 episode,并把 `toasted` 置 false。**这条边同时闭合了死角 1**(协调器在 app 层,两个源都能触发它,谁也不用伪造谁)**和窄复核反例①**(已答之后 hook 报来一个真的权限请求 ⇒ 它是新 generation ⇒ `asking` 重新为真 ⇒ **新 episode,能再入队**)。
+2. **答一次,答的是此刻桌面上的全部**:`Answer` 把两条水位同时追平到当前两个 generation。所以 `Acknowledged` 对 `Settle` 仍是**不动点**(§10.2.4 第 1 条,一个字不改),bool 做不到的那件事仍由它做成。
+3. **每个源的撤回只撤自己那一层**(`=no` 只清弱层,`clear` 只删强层的条目)。**窄复核反例②的正解**:强层撤了而弱层还举着 ⇒ `grounds` 降回 `Requested`、文案退回「需要注意」、**号不退、也没有第二次 toast**。
+4. **`asking` 由真变假时,号必须走**(不变量 I3)。走法有两种,而它们写不同的 trace:因 `Answer` 而走 ⇒ `answer`;因**最后一个未答凭据被它的生产者撤回**而走 ⇒ `withdraw`。这就是红线 11 那个「泛化后的例外一」。
+
+#### 11.1.4 全部边(4 态 × 9 事件的到达网格)
+
+事件九种:`WeakYes`(`=yes` 上升沿)、`WeakNo`(`=no`)、`StrongWait{新 key}`、`StrongWait{旧 key}`、`StrongClear{sel}`(含 TTL / `SessionEnd`,§11.4)、`Settle{consumed}`、`Answer{by}`、`LeafGone`、`mark_seen`。
+
+**转移规则只有一条**:先按事件改 generation / 水位,**再由 §11.1.2 的派生式重算状态**;铸号发生在且仅发生在 `asking` 由假变真的那一刻。下表是这条规则展开后的**到达态与副作用**。
+
+| 事件 \ 从 | `Idle` | `Requested(e)` | `Queued(e,t)` | `Acknowledged(e)` |
+|---|---|---|---|---|
+| **`WeakYes`**(上升沿) | → `Requested(e′)`,**铸号** `mint … src=osc` | 不是上升沿(弱层已 `Some`)⇒ 幂等零 trace | 同左,**ticket 不重铸** | 若弱层此刻是 `None`(先前被 `=no` 清过)⇒ 铸新弱 gen ⇒ `asking` ↑ ⇒ → `Requested(e′)` **铸新 episode**;否则幂等零 trace |
+| **`WeakNo`** | 幂等零 trace | 强层仍有未答 ⇒ 留 `Requested(e)`,`clear src=osc`;强层已答但仍举着 ⇒ → `Acknowledged(e)`,`clear`;两源皆空 ⇒ → `Idle`,`clear` + `drop` | 强层仍有未答 ⇒ 留 `Queued(e,t)`,`clear`(`grounds` 不变,仍 awaiting);否则 `asking` ↓ ⇒ **退号** `withdraw … ticket=t reason=program src=osc`,再按 `any_asserted` 落 `Acknowledged(e)` 或 `Idle` | 仍有凭据 ⇒ 留 `Acknowledged(e)`,`clear`;全空 ⇒ → `Idle`,`clear` + `drop` |
+| **`StrongWait{新 key}`** | → `Requested(e′)`,**铸号** `mint … src=pipe grounds=awaiting` | 留 `Requested(e)`,`grounds` 升,`upgrade`(**不带 ticket**);**不 toast**(没入队) | 留 `Queued(e,t)`,`upgrade … ticket=t`;**toast 门求值 ⇒ 这里就是后到的强凭据补投那一次的地方**(§11.2);**ticket 不重铸、不重排** | → `Requested(e′)`,**铸新 episode**(新 gen > 水位),`grounds=awaiting` |
+| **`StrongWait{旧 key}`** | 不可达(旧 key 意味着强层非空) | 幂等零 trace | 幂等零 trace | 幂等零 trace |
+| **`StrongClear{sel}`** | 幂等零 trace | 与 `WeakNo` 对称(`src=pipe`) | 弱层仍有未答 ⇒ 留 `Queued(e,t)`,`clear src=pipe` + **`downgrade … ticket=t grounds=requested`**,**号不退、`toasted` 不清**;否则退号 `withdraw … src=pipe` | 与 `WeakNo` 对称 |
+| **`Settle{consumed=false}`** | 不动点,零 trace | → `Queued(e,t)`,`admit … ticket=t episode=e grounds=<…>`;**toast 门求值** | 不动点,零 trace | 不动点,**不拿号**,零 trace |
+| **`Settle{consumed=true}`** | 不动点,零 trace | 不动点,`refuse … reason=watched` | 不动点,零 trace(已在队列里,你正看着它不改变它的号) | 不动点,零 trace |
+| **`Answer{by}`** | 无 episode 可确认,零 trace | 两水位追平 ⇒ → `Acknowledged(e)`,`answer …`(**不带 ticket**) | 两水位追平 ⇒ → `Acknowledged(e)`,`answer … ticket=t`,**退号** | 幂等(水位已追平),零 trace |
+| **`LeafGone`** | 零 trace | `drop … episode=e reason=leaf-gone` | `expire … ticket=t episode=e reason=leaf-gone`;号消失,`next_ticket` **不回退** | `drop … reason=leaf-gone` |
+| **`mark_seen`** | 不变 | 不变 | 不变 | 不变 |
+
+**这张网格与 §10.2.3 那十七条边的关系**:e1 → 第 1 行第 1 格;e2/e3 → `Idle` 那一列的幂等格;e4 → `Settle{false}` 那一行(**但 toast 门已按 §11.2 搬走**);e5 → `refuse`;e6/e11/e13 → 三个「幂等零 trace」格(**e13 收窄为「同一 generation 的重申」**);e7/e10/e14 → `WeakNo` 那一行(**按 §11.1.5 分成 `clear` / `withdraw` / `drop` 三种行**);e8/e9 → `Answer` 那一行;e12/e15 → `Settle` 两行的不动点格;e16 → `LeafGone` 那一行;e17 → `mark_seen` 那一行。**新增的是 `StrongWait` / `StrongClear` 两整行** —— 它们正是 v2 没有的那半台机器。
+
+**零 trace 的边是一张封闭名单**(接 §10.2.6 那条钉):两个源的幂等重申、`Settle` 对 `Queued`/`Acknowledged`/`Idle`、`Answer` 对 `Acknowledged`/`Idle`、`mark_seen`、`LeafGone` 对 `Idle`。**一个每秒重申 `yes` 或每秒重发同 key `wait` 的程序,一行 trace 都写不出来** —— 因为它一个决定都没改变。
+
+#### 11.1.5 `BT_ATTENTION_TRACE` 的字段(替换 §10.2.6,闭合死角 4)
+
+死角 4 说的是:`Requested(e)` 与 `Acknowledged(e)` **没有 ticket**,却被 e7/e14 描述成 `withdraw`,而 `withdraw` 行强制 `ticket=<t>`;`Idle` **没有 episode**,却被 e16 要求写 `expire`。**正解是按「有没有号」把动词分开**,产品语义一个字不变:
+
+```text
+mint      tab=<i> seat=<s> episode=<e> src=<osc|pipe> gen=<g> grounds=<requested|awaiting> prev=<e|->
+admit     tab=<i> seat=<s> ticket=<t> episode=<e> grounds=<requested|awaiting> active=<0|1> focused=<0|1>
+refuse    tab=<i> seat=<s> episode=<e> reason=watched active=1 focused=1
+upgrade   tab=<i> seat=<s> [ticket=<t>] episode=<e> grounds=awaiting  src=pipe gen=<g>
+downgrade tab=<i> seat=<s> [ticket=<t>] episode=<e> grounds=requested src=pipe reason=<clear|ttl|session-end|overflow>
+toast     tab=<i> seat=<s> ticket=<t> episode=<e> reach=<nothing|flash|toast> why=<awaiting|turn-end>
+look      tab=<i> seat=<s> ticket=<t> episode=<e> kept=1
+answer    tab=<i> seat=<s> [ticket=<t>] episode=<e> by=<keyboard|ime|paste|files-row|mouse-button|mouse-wheel> weak=<w> strong=<g>
+clear     tab=<i> seat=<s> episode=<e> src=<osc|pipe> gen=<g> reason=<program|hook|ttl|session-end|overflow>
+withdraw  tab=<i> seat=<s> ticket=<t> episode=<e> reason=program src=<osc|pipe>
+expire    tab=<i> seat=<s> ticket=<t> episode=<e> reason=leaf-gone
+drop      tab=<i> seat=<s> episode=<e> reason=<leaf-gone|session-end>
+claim     tab=<i> was=<C> now=<C>
+```
+
+三条字段合同(**它们让上面那张网格与这张 schema 逐格自洽**):
+
+- **`ticket=` 只在真有号的时候出现。** `admit` / `look` / `withdraw` / `expire` / `toast` **必带**;`upgrade` / `downgrade` / `answer` **选带**(在 `Requested` 上发生时不带)。
+- **`withdraw` 与 `expire` 只属于 `Queued`。** 无号态的销毁写 `drop`(带 episode、不带 ticket);单个源被撤但 episode 还活着写 `clear`。`Idle` 上的任何事件**一行都不写**。
+- **`episode=` 在有 episode 的每一行都必须出现** —— 这是「带 episode 之后,每一行都要能回答『这是哪一次请求』」那条要求的执行面(§10.2.6 原话)。`by=` 的取值是 §11.3 的七值**去掉 `mouse-motion`**:那个值**永远不会出现在 `answer` 行上**,因为它结构上到不了这扇门。
+
+#### 11.1.6 不变量与钉
+
+| # | 不变量 | 它挡住什么 |
+|---|---|---|
+| **I1** | **只有「`asking` 由假变真」铸 episode**,`toasted` 随之置 false | 「用户答了但程序没撤」= `Acknowledged`,而 `Acknowledged` 对 `Settle` 是不动点(§10.2.4 第 1 条原样) |
+| **I2** | **两条水位单调不减,两个 generation 单调递增、永不复用** | 旧 ack 吞不住新 generation(**双源各一条钉**);同一条凭据的重申吞不掉自己 |
+| **I3** | **`ticket.is_some() ⇒ asking`** | 号不会活得比「有未答凭据」更久 —— 这正是 2026-08-21 那次「badge 活得比它报告的东西更久」的一般化,写成了一条能被断言的不等式 |
+| **I4** | **状态不另存**:四态是 §11.1.2 五个派生量的纯函数 | 两个源不会各存一份互相打架的电平;单测可以直接构造字段组合去断言状态,不必按边走一遍 |
+| **I5** | **事件级凭据不出现在本节任何一处**(红线 14) | A7 之后仍然没有第八个视觉断言,也没有「一声铃发一张号」的回潮 |
+
+**A-core 的红形(片单里逐条跑)**:①§11.1.4 网格**每一格**一条单测(不可达格写成不可达断言);②窄复核反例①(弱 `yes` → 答 → 强 `wait` ⇒ **第二个 episode、能再入队**);③窄复核反例②(弱 + 强 → 强 `clear` ⇒ **文案降级、号不退、无第二次 toast**);④I3 的属性测试:随机事件序列跑一万步,`ticket.is_some() && !asking` 从不出现。
+
+---
+
+### 11.2 【闭合②】强凭据后到的那一次 toast
+
+**病在哪**:§10.2.3 把 toast 钉在 e4(admit)这一条边上,而 §10.8.2 又要求强凭据后到时「不重发号」。于是**弱凭据先入队(按规则不 toast)⇒ 六秒后 `permission_prompt` 把 `grounds` 升成 `AwaitingInput` ⇒ 这一次真正的 waiting 永远没有 toast**。这是漏,不是重复。
+
+**唯一的 toast 门(替换「e4 是唯一投递边沿」;红线 12 盯着它只有这一处)**:
+
+```text
+// 每次状态转移结束后求值一次 —— 它是一个电平的门,不是某一条边的副作用
+if queued && grounds == AwaitingInput && !toasted {
+    投一次(经 §11.7 的同一个 `desktop_reach` 三档);
+    toasted = true;
+    trace: toast … ticket=t episode=e reach=<…> why=awaiting
+}
+```
+
+**它能且只能在两个地方发生**:
+
+1. **admit 的那一刻**(§11.1.4 `Settle{false}` 行):这个 episode 入队时 `grounds` 已经是 `AwaitingInput` —— 就是 v2 的老路子,行为一个字不变;
+2. **queued 中的首次强升级**(`StrongWait{新 key}` 行):**这就是窄复核要补的那条边**。ticket 不重铸、不重排(先到先服务不因证据变强而被打乱),只补那一次桌面打扰。
+
+**「不重复」的三条来源**:①`toasted` 与 `episode` 同生共死,一个 episode 最多一次;②同一 episode 内 `grounds` 反复升降不清 `toasted`(§11.1.4 `StrongClear` 格已写死);③强层重复 key 是幂等边,连 trace 都不写。
+
+**「不漏」的准确陈述**:**每个 episode 只要曾经同时满足「持号」与「`grounds==AwaitingInput`」,就恰好投一次**;反之,一生只有弱凭据的 episode、以及一生都被 `refuse=watched` 挡在队列外的 episode,**一次也不投** —— 这正是 §10.8.2 那张合成表要的,现在它有了可施工的门。
+
+**两个刻意的「不投」,写出来免得被当成 bug**:
+
+- **被 `refuse=watched` 的 episode 即使升到 awaiting 也不投**:你正在看着它。它入队的那一刻(你切走了)门自然重算,那时才投 —— **一次,不补前面那次**(红线 5「不排队不补发」)。
+- **同一 episode 内第二次强升级不投**:弱层一直举着、两次权限请求之间你一次都没答 ⇒ `asking` 从未落下 ⇒ 仍是同一个 episode ⇒ 只有一次桌面打扰。**你若答了任何一次,`asking` 就落下过**,下一次强凭据会铸新 episode、拿新的 `toasted`,于是照投(§11.4.3 的走查逐步演示了这一点)。
+
+---
+
+### 11.3 【闭合③】鼠标三分:按下/抬起算,滚轮算,motion 不算
+
+**病在哪**:§10.3.2 把「被转发的鼠标」写成一格,并把它挂在 `send_mouse_input_to` 上。实测复核(2026-08-25)证明那一格的**定性与位置都不准**,而不准的代价是一个**只在特定程序上、只在鼠标经过时**发作的退号 bug。
+
+**两个 helper 各自承载什么(逐调用点闭合,行号 2026-08-25 实测)**:
+
+| helper | 调用点 | 承载 | 结论 |
+|---|---|---|---|
+| `send_user_input`(`55459`) | `63061` | 键盘按键 | `Keyboard` —— **算** |
+| 同上 | `60529` | **被转发的鼠标按键**(`UserInputKind::Mouse`) | `MouseButton` —— **算** |
+| `send_mouse_input_to`(`55438`) | `62142` | SGR 滚轮(线序上是 `MouseProtocolEvent::Press`,button 64/65) | `MouseWheel` —— **算** |
+| 同上 | `62161` | 备用屏滚轮转方向键 | `MouseWheel` —— **算** |
+| 同上 | `56298` | **SGR mouse motion**(`MouseProtocolEvent::Motion`) | `MouseMotion` —— **不算** |
+
+**裁决面**:A3(2026-08-25 用户裁)「出队门扩,鼠标**算**」原样成立;**终修单把它收窄到「只有按下/抬起算用户动作,motion 不算」**。滚轮留在「算」这一侧是**线序上的同一件事**:一次滚轮就是一次 `Press`(button 64/65,`main.rs:62134` 写着 `MouseProtocolEvent::Press`),**没有独立的抬起** —— 「按下/抬起」在字节层面本来就覆盖它。**motion 才是被拆出去的那个**:悬停扫过不是回答,一个开了 `?1002h`/`?1003h` 的程序不该因为指针路过就被退号。
+**若用户的本意是连滚轮一起撤出**,改动是**一格**:把上表两行 `MouseWheel` 改成「不算」,`is_answer()` 多一个 false,施工面反而更小(见下)。
+
+**施工点(这一条比定性更重要)**:
+
+- **不许在两个 write helper 上统一消费。** 两个 helper 各自承载不止一种语义(上表),在它们身上做判断,等于把一个语义问题交给一个只看得见字节的函数 —— 与 §10.3.2 引的那句现成理由同型:「`send_user_input` is handed a byte string and cannot tell an answer from a paste that happens to end in a newline」。
+- **施工点在产生语义的五个事件入口**:`63061`(键盘)、`60529`(鼠标按键)、`63248`(IME commit)、`63111`(paste)、`49768`(files 行),各自带着自己的 `UserInputKind` 调 `answer_attention(seat, by)`。
+- **`56298` / `62142` / `62161` 三个入口的落法**:motion 那个入口**永不调** `answer_attention`;滚轮两个入口**在自己的事件入口上显式调**,而不是搭 motion 的便车 —— 因为它们共用同一个 helper,而**共用 helper 不等于共用语义**。这也是「若要把滚轮撤出 Answer 只改一格」的原因:撤出后那条 helper 整条不碰 `answer_attention`。
+- **枚举上必须有 `is_answer()`**(§10.3.2 就地改已写):`MouseMotion` 为 false,其余为 true。将来新增一条输入路,它得在**枚举上**回答这个问题,而不是在某个 `if` 里被忘掉 —— 与 `returns_view_to_live` 同型、同位置、同理由。
+
+**钉**:程序开 `?1003h`(任意 motion 上报),鼠标在该 pane 上**扫过一整行**,`BT_ATTENTION_TRACE` 里**没有 `answer` 行**;随后**点一下**,有 —— 一条真机门,写进片 A2(§11.9 的 ⑮)。
+
+---
+
+### 11.4 【闭合④】hook wait 的 clear 配对:每一条进,都有一条出
+
+**病在哪**:§10.4.1 把 `wait` 的名单写对了,却没写 `clear` 的配平。后果是可指认的:**批准或拒绝一次权限请求并不会触发 `UserPromptSubmit`**,于是那条强断言永久留着;而用户按键只把 Folio 送进 `Acknowledged`,**撤不掉强层**;下一次 `PermissionRequest` 再来,若被当成同一条凭据,就被吞掉。
+
+#### 11.4.1 那把有界关联键(两个动词之外唯一多出来的东西)
+
+```text
+folio attention wait  --key=<opaque>            # key 未见过 ⇒ 铸一个强 generation
+folio attention clear [--key=<opaque> | --kind=<permission|elicitation|agent|quota> | --all]
+```
+
+- **key 从哪来**:hook **自己收到的 payload** 里的标识(权限请求的 tool_use / request 标识、elicitation 的 id、background session 的 id)。取不到就用该 `kind` 的固定兜底键。
+- **key 是什么**:一个**有界的、不具寻址能力的关联键**。它**只能在本端点内**指认一条**自己发出的** wait;端点在创建时就绑死了一个 `LeafSession`(§10.6 第 1/4 条),所以 key **选不了 pane、跨不了 pane**。**红线 13** 盯着这一条。
+- **合同**:≤ 64 字节,`[A-Za-z0-9._:-]`;每 pane 最多 **8** 条 outstanding,超限**丢最旧**并写 `clear … reason=overflow`;**key 不进 UI 文案、不进 trace**(它可能带着工具名或路径),trace 只记 `gen=<g>`。
+- **它没有把动词变成三个**:`wait` / `clear` 仍然是**幂等**的两个 —— 同 key 重发 `wait` 零效果零 trace,`clear` 一条不存在的 key 也零效果零 trace(§10.6 第 3 条原样成立)。
+
+#### 11.4.2 逐源的 clear 配对表(**每一种进 wait 的事件都在这张表里有出口**)
+
+| `wait` 源 | key | 正常出口 | 兜底一 | 兜底二 | 最终兜底 |
+|---|---|---|---|---|---|
+| **`PermissionRequest`**(事件,0s) | payload 的 tool_use / request 标识;取不到 ⇒ `kind=permission` | **`PostToolUse`** 同 key ——「批准了、而且那个工具已经跑完」的回执(**开工前须逐字取回原文**,§10.4.1 就地记) | **`UserPromptSubmit`** ⇒ `--all`(你已经回话了,那就什么都不在等你) | **`Stop` / `StopFailure`** ⇒ `--all`(回合结束 ⇒ 这个 pane 没有任何东西在等你输入) | **TTL 600s**(与官方 `PermissionRequest` 的同步超时同值)⇒ `clear … reason=ttl` |
+| `Notification` **`permission_prompt`**(~6s 兜底) | 同上(同 key ⇒ 对上面那条是**幂等重申**,零 trace) | 同上 | 同上 | 同上 | 同上 |
+| **`Elicitation`**(事件,0s) | payload 的 elicitation id | **`ElicitationResult`** 同 key | `elicitation_complete` / `elicitation_response`(**没有 id 时** ⇒ `--kind=elicitation`) | `UserPromptSubmit` / `Stop` / `StopFailure` ⇒ `--all` | TTL 600s |
+| `Notification` **`elicitation_dialog`** / **`elicitation_url_dialog`**(~6s 兜底) | 同上 | 同上 | 同上 | 同上 | 同上 |
+| `Notification` **`agent_needs_input`** | payload 的 background session id | **`agent_completed`** 同 id | `UserPromptSubmit` ⇒ `--all` | `SessionEnd` ⇒ `--all` | TTL 600s |
+| `Notification` **`quota_auto_resume_stale`** | `kind=quota` | **`quota_auto_resume_fired`**(自动继续了)/ **`quota_auto_resume_disabled`**(结束等待) | `UserPromptSubmit` ⇒ `--all` | `SessionEnd` ⇒ `--all` | TTL 600s |
+
+**普适出口(与 key 无关,三条)**:`SessionEnd` ⇒ `--all` + `drop`;**leaf 消失** ⇒ 端点关闭、旧 capability 永久失效(§10.6 第 4 条,与 §11.1.4 的 `LeafGone` 同一时刻);**TTL** ⇒ 逐条到期。
+
+**一句话把 §10.4.1 第三张名单救回来**:**「绝不映射为 `wait`」不等于「不进本体系」。** `Stop` / `StopFailure` / `PostToolUse` / `agent_completed` / `quota_auto_resume_fired` / `quota_auto_resume_disabled` 现在**都是 clear 源**,而它们**一条都不会**把 pane 送进 `Awaiting` —— 这两件事从来不矛盾,v2 只是没把后半句写出来。
+
+#### 11.4.3 连续两次权限请求的走查(窄复核点名要能连续工作的那件事)
+
+```text
+t0  PermissionRequest(key=A)  wait  → 强 gen 1 > acked_strong 0 ⇒ asking↑
+                                     mint     episode=7 src=pipe gen=1 grounds=awaiting prev=-
+t1  settle{consumed=false}           admit    ticket=12 episode=7 grounds=awaiting active=0 focused=0
+                                     toast 门:queued ∧ awaiting ∧ !toasted ⇒ 投一次
+                                     toast    ticket=12 episode=7 reach=flash why=awaiting
+t2  你按 `2` 拒绝                     两水位追平(weak=0 strong=1)⇒ asking↓ ⇒ 退号
+                                     answer   ticket=12 episode=7 by=keyboard weak=0 strong=1
+                                     → Acknowledged(7);强层的 A 还挂着,但 1 ≤ 1 ⇒ 不再 asking(**正确:你答过了**)
+t3  拒绝没有 PostToolUse               什么都不发生(这正是 v2 卡住的那一格)
+t4  Stop(回合结束)                   clear --all → clear episode=7 src=pipe gen=1 reason=hook
+                                     两源皆空 ⇒ → Idle;drop episode=7 …
+                                     并按 A8 投一次回合结束通知(§11.7,why=turn-end)
+t5  PermissionRequest(key=B)  wait  → 强 gen 2 > acked_strong 1 ⇒ asking↑
+                                     mint     episode=8 src=pipe gen=2 grounds=awaiting prev=7
+t6  settle{consumed=false}           admit    ticket=13 episode=8;toast 再投一次(**新 episode,新 toasted**)
+```
+
+**注意 t5 不依赖 t4。** 就算 `Stop` 没来、A 那条 wait 还挂着,`gen 2 > acked_strong 1` 也让 `asking` 重新为真 —— **水位这一条本身就够了**。clear 表与 TTL 要的是**卫生**(outstanding 不无界增长、UI 不长期显示一条已经不存在的等待),**不是正确性的支柱**。这两件事要分清楚,因为它们的失效模式不同:**水位错了会吞请求,clear 缺了只会留脏账。**
+
+---
+
+### 11.5 【闭合⑤】「管道唯一路线」收窄,与它对依赖表的真实影响
+
+**准确的一句(替换 v2 的「路线 A 是 Claude Code 场景下的唯一可行路」)**:
+
+> **对 Claude Code 的强层,pane-local attention pipe 是本方案已定义的唯一生产路线;对通用层,`OSC 1337;RequestAttention` 仍是正门。**
+
+**官方白名单证明的是一件很窄的事**:`terminalSequence` 这条**代发**通道不许带 OSC 1337 —— **被堵死的是「hook 代发 1337」,不是「1337」**。它**不证明**三件事:
+
+1. **`CONOUT$` 直写失败。** 白名单一个字都没提 `CONOUT$`。片 A0 的①②是**因为产品选路而撤销**(官方给了一条它自己维护的、race-free 的通道,我们不再走自己造的直写 tty),**不是因为实验证否**(§10.4.2 第 1 条已就地改)。
+2. **别的 IPC 不可行。** loopback socket、broker、继承 handle 都没被这条事实排除;本方案选命名管道,是**安全合同**(§10.6)与**生命周期**(端点随 leaf 生灭)两条理由挑的,不是被逼到只剩一条路。
+3. **别家 CLI 不能自己发 1337。** 任何自己持有 tty 的程序照发不误 —— iTerm2 生态的现成脚本、构建工具、用户自己的脚本。**片 A1 服务的正是它们**,这也是 A1 不该被 A3 取代的理由(§10.4.2 末段原样成立)。
+
+**成立范围写进方案**:当前上游版本 + 本方案既定的安全边界 + 本方案已选的路线。上游哪天把 OSC 1337 加进白名单(**路线 C 的诉求,记账不排期**),这句话自然失效 —— 而**A1 的解析器当天就能接住,一行不用改**。
+
+**对依赖的正确影响(三条,与窄复核逐条对齐)**:
+
+- **A3 必须在 A2 之前或与 A2 原子落地** —— **成立,不动**。没有 A3,BEL 撤出后 claude pane 的 awaiting 永远是零,队列是空的。
+- **A3 不依赖 A1** —— **v2 的片表写错了**。A1 是通用程序的 OSC 弱源,A3 是 Claude hook 的 pipe 强源,**两个源并行喂同一个双源核心**。正解是先抽 **A-core**(§11.1),然后 **A1 ∥ A3**,A2 依赖 A-core + A3(两道用户门已裁)。若排期上仍想先把 A1 做完,那是**打包顺序,不是技术依赖**,片单里要这么写。
+- **C3 继续依赖 A2 + A3 + C2** —— **成立,不动**;v3 只把它的 toast 判断下沉到 §11.2 那一处门(红线 12)。
+
+---
+
+### 11.6 【A7】`OSC 9` / `OSC 777` 进凭据体系:三级,不是三堆
+
+**裁决(2026-08-25 用户裁)**:把 `OSC 9` 与 `OSC 777` 的**通知序列**收进凭据体系。**它改的是名分,不是行为的方向** —— 这两条今天已经在跑既有的 toast 通道(`main.rs:52596` 那个唯一投递点),但它们**在方案的语言里没有位置**:红线 9 只说「它们是消息、不合并」,于是每次讨论「什么算凭据」它们都得被单独拎出来说一遍。A7 给它们一级。
+
+**三级凭据表(红线 9 的执行面)**:
+
+| 级 | 名字 | 生产者 | 可撤? | 铸 episode? | 发号? | 够到桌面的路 |
+|---|---|---|---|---|---|---|
+| **事件级** | **`Announced`** | 裸 BEL、`RequestAttention=once`、**`OSC 9;<text>`**、**`OSC 777;notify`**、`OSC 99`(kitty)、**回合结束**(hook `Stop`/`StopFailure`) | **否**(一次性,没有「关」) | **否** | **否** | 既有 toast 通道 + **A8 的两条臂**(§11.7) |
+| **弱** | **`Requested`** | `OSC 1337;RequestAttention=yes`(任何自己写 tty 的程序) | 是(`=no`) | **是** | **是** | **不配 toast**(§10.8.2) |
+| **强** | **`AwaitingInput`** | `folio attention wait`(§10.4.1 白名单里的 hook) | 是(`clear`,§11.4) | **是** | **是** | **配 toast**(§11.2) |
+
+**三条规矩**:
+
+1. **严格弱于**:`Announced` **不能升 `grounds`、不能铸 episode、不能延长任何 episode 的寿命**。一条 `OSC 9` 不会把 pane 送进队列,也不会让点变成 `Awaiting`(红线 14)。它今天做的三件事一件不多一件不少:置 `bell_latched`(`once` 与裸 BEL 那条路)、走既有 toast 通道(它有正文)、按 A8 够到桌面。
+2. **可以借正文,不能借状态**:一条带正文的 `Announced`(`OSC 9;<text>` / `777` / `99`)到达时,若该 leaf **此刻有 live episode 且 toast 门正开着**,那次 toast 的正文**用它的文字** —— **程序自己的话优先于我们编的话**。若那个 episode **已经 toast 过**,它**不新投**(红线 5)。它永远不改 `grounds`、不改号。
+3. **`OSC 9;4` 不在这张表里。** 那是**进度环**通道(`bt-term/src/inline_image.rs:1294-1308` → `parse_progress`),§1.2 已立 —— 同一个 OSC 号下的两件事,别混。
+
+**为什么这不是「把消息升成状态」**(红线 9 的原意仍在):三级表**没有让任何一级变成另一级**。它做的是**把体系的定义域补全** —— 以前的表只有「状态」这一栏,于是事件只能站在表外;现在事件有了自己那一行,而**那一行的「铸 episode」「发号」两格都是「否」**。**一个凭据在表里有名分,和它有权力,是两件事。**
+
+**钉(A1/A3 各带一条)**:①一条 `OSC 777;notify` 进来 ⇒ 既有 toast 照投,而**队列长度不变、`StatusClaim` 不变成 `Awaiting`**;②一条 `OSC 9;<text>` 在一个已有 live episode 且**尚未 toast** 的 pane 上进来 ⇒ 那次 toast 的正文是它的文字,**且只有一次**。
+
+---
+
+### 11.7 【A8】回合结束够到桌面:无焦闪、最小化 toast
+
+**裁决(2026-08-25 用户裁)**:**回合结束 = 无焦任务栏闪(默认开)+ 最小化 toast(设置行默认开可关)。**
+
+**它挂在三档表的哪一格**:**不新造判据**,走 §10.7 那个 8 行真值表的**同一个** `desktop_reach`:
+
+| 真值表行 | 情形 | 回合结束时 |
+|---|---|---|
+| 第 1 行(有焦 + 活动 tab) | 你正看着它 | **`Nothing`** —— 你看得见,不打扰 |
+| 第 2/3/4 行 | 有焦但非活动 tab / 副屏可见但无焦 / 都不是 | **`Flash`** —— 任务栏闪。**第 2 行照 §10.7 那条诚实说明**:前台窗口上 `FlashWindowEx` 是 no-op,可见产物是窗内既有的那两枚记号(`Bell` / `Unread`) |
+| 第 5–8 行(`window_is_hidden`) | 最小化 / cloaked | **`Toast`** |
+
+**它一张号都不发**(红线 14):回合结束是**事件级凭据**(§11.6),`Stop` 在 §10.4.1 里**不映射为 `wait`** 这条一个字不动 —— **把回合结束升成「正在等你回答」正是 §2 花四段录音证伪的那件事**。A8 给它的是**够到桌面的一条腿**,不是队列里的一张号。
+
+**事实源有两条,都归 `Announced`**:
+
+- **装了 hook 的 Claude Code**:强层管道的 `Stop` / `StopFailure`(它同时是 §11.4 的 clear 源 —— 一个事件两个身份,互不干扰);
+- **没装 hook、但开了 `preferredNotifChannel: terminal_bell`**:那一枚**裸 BEL**(§2 已把它钉死在回合末尾,而 A0.5 之后它才真的会在你走开时响)。
+
+**去重(两条证据会同时到,而它们说的是同一件事)**:**同一 leaf 上,两次回合结束通知之间必须隔着一次 `UserPromptSubmit` 或一次用户动作。** 没隔着就不投第二次。
+**为什么不用毫秒窗口**:一个「1.5 秒内算同一次」的常数会在慢机器上漏、在快机器上误合,而**「你有没有开始下一个回合」这件事我们本来就知道** —— 用知道的事实,不用猜的阈值。这与 §3.4 拒绝「输出安静 N 秒」是同一条纪律。
+
+**设置行**:`turn_end_notification`,**默认 On**,位置在设置块通知那一节,与 A5 的「Claude Code bell」那一行并排。
+
+- **On**:上表两条臂都走。
+- **Off**:两条臂都不走(既不闪也不 toast)。**窗内记号不受它影响** —— 那是 `Bell` / `Unread` 两枚点自己的事;这一行管的是**够不够得到桌面**,与红线 4 的分工一致。
+- 裁决原话把两条臂分开写(「闪默认开」「toast 默认开可关」),**本方案用一行同时管两条**:因为「回合结束要不要够到桌面」是一句话,拆成两个开关会让「闪着但不 toast」和「toast 但不闪」这两个没人要的组合合法化。**若用户要两个开关,这一条改起来是加一行、不动判据。**
+- i18n 两条串。
+
+**与队列那条道的分界(写进 C3 的片单)**:两条道**共用** `Notifier` 与 `NotificationRoute`(点击回原 pane,一行不改),**都不排队不补发**(红线 5),trace 上靠 **`why=<awaiting|turn-end>`** 分辨。**队列那条道**由 §11.2 那一处门管(`grounds==AwaitingInput`);**事件那条道**由本节管。**两条道永远不互相触发**:一次回合结束不会让号变多,一张号也不会被算成一次回合结束。
+
+**文案**:标题走既有 `toast_title` 的三层链(carried → pane 名 → profile 名);正文 =「回合结束」/ "Turn finished"。若同一刻有 §11.6 第 2 条那样的带正文 `Announced`,**用程序自己的话**。
+
+---
+
+### 11.8 片单与依赖(v3,替换 §10.11 的表)
+
+**生产片十个**(A0 是 spike,D 已出块;新增 **A-core**):
+
+| 序 | 片 | 前置 | 相对 v2 的变更 | 门 |
+|---|---|---|---|---|
+| 0 | **A0**(spike) | 无 | 不变(三问缩成一问,只剩 ③′);撤销理由改成**产品选路**(§11.5) | §10.5 的正门 + 副门 + 三个补测点 |
+| 1 | **A0.5** | A0 ③′ | 不变 | 真机四格:out / in / 后台出生 / 普通 shell 不出乱码 |
+| 2 | **A-core**(**新**) | 无(**可与 A0/A0.5 并行**) | **v3 新片**:§11.1 的双源账本 —— 两个 generation、两条 ack 水位、派生态、§11.1.5 的 trace schema、§11.2 的 toast 门。**不碰 UI、不改入队门、不接任何生产者** | §11.1.6 的四条红形:网格每格一条单测、两个反例各一条、I3 的属性测试 |
+| 3 | **A1** | A-core(**与 A3 并行**) | 前置从「无」改成 A-core;内容不变(parser + 弱层 generation,不落 UI、不命名 Awaiting;`1337;` 要先在共同前缀后分流) | 红形 + 五个钉(BEL/ST 两种收尾、跨 chunk 重组、超限、未知 value、`fireworks` 原样忽略)+ **A7 的两条钉**(§11.6) |
+| 4 | **A3** | A-core + §10.6 安全合同(**与 A1 并行**,**不依赖 A1**) | **前置去掉 A1**(§11.5);hook 按 §10.4.1 白名单 + `async: true` + **§11.4 的 clear 配对表与关联键**;安装提示照 §7.1.6j;**开工前逐字取回 `PostToolUse` 原文** | 真 claude + 真 Folio 人工门:权限提问出现 ⇒ 队列长一位;**外加 §11.4.3 的连续两次权限请求走查** |
+| 5 | **A2** | **A-core + A3**(A2/A3 两道用户门**已裁**;A1 为打包顺序不是技术依赖) | 一次做完 admit / ack / withdraw / leaf-gone(**按 §11.1.4 的网格,不是 §10.2.3 的十七边**);trace 长 episode / grounds / src(§11.1.5);**`UserInputKind` 拆七值 + `is_answer()`**(§11.3);同时改 `attention_ticket` 与 `mark_seen` 两处注释 | `BT_ATTENTION_TRACE` 端到端;截图那个场景先变红再变绿;**§11.9 的 ⑪⑫⑬⑮⑱** |
+| 6 | **B1** | A2 + A3 | 不变 | 命中表断言,不是矩形断言 |
+| 7 | **C1** | 无(**与 A 线并行**) | 不变 | 事实源的钉 |
+| 8 | **C2** | C1 + §10.7 | 8 行真值表;`FlashWindowEx`;`notify.rs:93-101` 注释重写;`attention_is_consumed` 保持两参;**外加 A8 的两条臂与设置行**(§11.7) | 真值表 8 行 + **A8 的三格**(有焦 / 无焦 / 最小化) |
+| 9 | **C3** | A-core + A2 + A3 + C2 | toast 判断**下沉到 §11.2 那一处门**(红线 12),C3 自己不再判;`why=` 两值 | 「持续 `yes` 不连发 toast」+ **「后到的强凭据补投恰好一次」**(§11.9 ⑬) |
+| 10 | **B2** | 命令面板本体 | 不变(解耦,不阻塞主链) | — |
+| — | ~~D~~ | — | 已拆出本方案;**A1 裁「做」** ⇒ `Attached` 成为 §7.1.5b 上一条独立扩条,不占本块工期 | — |
+
+**关键路径**:
+
+```text
+A0 ──▶ A0.5
+
+A-core ──┬──▶ A1 ──┐
+         │         ├──▶ A2 ──▶ B1
+         └──▶ A3 ──┘
+
+C1 ──▶ C2
+
+A-core + A2 + A3 + C2 ──▶ C3
+B2 ──▶ 独立等命令面板
+```
+
+**这样排掉的三个中间坏版本**:①「假队列已拆、真生产者尚未装」(A2 先于 A3);②「持续 `yes` 每帧 toast」(C3 挂在电平而不是边沿上);③**「两个生产者各写各的电平」**(A1 与 A3 各自长一台半截状态机 —— A-core 先落地就是为了挡这一个)。
+
+**并行性**:**A0/A0.5、A-core、C1 三条线开工时互不依赖**;A-core 落地后 A1 与 A3 再开两条。
+
+---
+
+### 11.9 验收门增补(接 §8 的八步与 §10.14 的 ⑧⑨⑩)
+
+- **⑪ 双源合成**:弱层发 `RequestAttention=yes` ⇒ 徽章 +1(文案「需要注意」);在那个 pane 里按一个键回答 ⇒ 点灭;**随后 hook 报一次真的权限请求** ⇒ **徽章重新 +1、trace 里有第二条 `mint`(`prev=` 指着前一个 episode)**。这一步是 v2 单源模型必挂、v3 必过的那一格(窄复核反例①)。
+- **⑫ 强撤弱留**:同一 pane 先弱 `yes` 再 hook `wait` ⇒ 文案「正在等你回答」、**一次** toast;随后 hook `clear`、弱层**不撤** ⇒ 文案退回「需要注意」、**号不退**、**没有第二次 toast**(窄复核反例②)。
+- **⑬ 后到的强凭据补投一次**:弱 `yes` 先入队(**无 toast**)⇒ 六秒后 `permission_prompt` 到 ⇒ **恰好一次** toast,且 **ticket 号不变**(§11.2)。
+- **⑭ 连续两次权限请求**:批准第一次(`PostToolUse` 到)、拒绝第二次 ⇒ **两个 episode、两张号、两次 toast**;拒绝那次即使没有 `PostToolUse`,`Stop` 或下一次 `wait` 的新 generation 也能让它继续工作(§11.4.3 逐行核对)。
+- **⑮ motion 不退号**:让 pane 里的程序开 `?1003h`,把鼠标在它上面扫过一整行 ⇒ `BT_ATTENTION_TRACE` 里**没有 `answer` 行**;再点一下 ⇒ **有一行 `answer … by=mouse-button`**(§11.3)。
+- **⑯ A8 三格**:回合结束时 —— 窗口有焦 + 活动 tab ⇒ **什么都不加**;窗口在副屏无焦 ⇒ **任务栏闪、不 toast**;窗口最小化 ⇒ **toast**;把 `turn_end_notification` 关掉重跑三格 ⇒ **三格都不够到桌面,窗内记号照旧**(§11.7)。
+- **⑰ A7 不越权**:发一条 `OSC 777;notify` ⇒ 既有 toast 照投,而**队列长度不变、点不变成 `Awaiting`**;在一个已有 live episode 且尚未 toast 的 pane 上发一条 `OSC 9;<text>` ⇒ 那次 toast 用**它的正文**,且**只有一次**(§11.6)。
+- **⑱ trace 字段合同**:跑完整个端到端之后扫一遍 trace —— **`withdraw` / `expire` 行必带 `ticket=`;`drop` / `clear` / `mint` 行必不带**;每一行都有 `episode=`;**没有一行 `by=mouse-motion`**(§11.1.5)。
