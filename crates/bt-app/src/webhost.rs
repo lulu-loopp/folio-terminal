@@ -1001,6 +1001,90 @@ pub(crate) fn search_url(engine: SearchEngineV1, query: &str) -> String {
     url
 }
 
+// ── The address field's one judgement ──────────────────────────────────────
+
+/// **What the address field would do with what is in it** — read once by the
+/// commit and once by the colour (user report 2026-08-25).
+///
+/// The two used to be two spellings of "ask `webnav::address_bar`", which was
+/// fine for as long as everything an address field could hold was an address.
+/// §7.8 ⑩′ then ruled that a local page is shown — and therefore typed — as a
+/// path, and a path is the one thing that door cannot see: `D:\x` splits as the
+/// unknown scheme `d`, and minting it into the `file:` URL it names walks
+/// straight into `Refusal::FileScheme`, which that door gives to every `file:`
+/// string and always will (§7.10 ③). So the field reddened over the very
+/// spelling this window had just seeded it with, and Enter over it did nothing:
+/// one wrong answer, given twice, because there was only ever one rule and it
+/// was the wrong one for this arm.
+///
+/// The fix is the arm and not the door. A typed path takes the lane the files
+/// column takes — `path_names_a_page` says it is a page, and the mint is made
+/// from the **disk** at the moment of the commit — and everything else takes the
+/// address door exactly as before.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum AddressVerdict {
+    /// Nothing has been typed. Not an address, and not an error either — an
+    /// empty box is a draft nobody finished (§7.7 ⑨).
+    Draft,
+    /// A local page, spelled the way this window shows one.
+    ///
+    /// **The disk has not been asked yet**, deliberately: this verdict is
+    /// recomputed on every keystroke to colour the field, and a `canonicalize`
+    /// on that path would put a syscall — on a mapped network drive, a blocking
+    /// one — between a key going down and the frame that shows it. What is
+    /// answered here is the string question, which is the whole of what a red
+    /// line is about; whether the file is *there* is answered by the commit, and
+    /// a path that names nothing presses to nothing, which is the answer §7.10 ③
+    /// already gives for a row naming a file that has moved.
+    LocalPage(PathBuf),
+    /// An address the door takes, or the search a phrase was composed into.
+    Address(String),
+    /// The door said no, and the field says so where the typing is.
+    Refuse,
+}
+
+/// The judgement. [`WebSeat::go_to`] and [`WebSeat::would_go_to`] are its two
+/// readers and it has no third.
+pub(crate) fn judge_address(input: &str, engine: SearchEngineV1) -> AddressVerdict {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return AddressVerdict::Draft;
+    }
+    if let Some(path) = local_page_path(trimmed) {
+        return AddressVerdict::LocalPage(path);
+    }
+    // **A non-address is a search, and the search is an address** (方案 §0). The
+    // composed URL goes back through the same door a typed one does — this
+    // build's own string gets no more trust than a person's, which is 「钉不是
+    // 授权」 said about the one URL this window writes itself.
+    match address_bar(trimmed) {
+        Decision::Navigate(target) => AddressVerdict::Address(target),
+        Decision::Search(query) => match address_bar(&search_url(engine, &query)) {
+            Decision::Navigate(target) => AddressVerdict::Address(target),
+            Decision::Search(_) | Decision::Refuse(_) => AddressVerdict::Refuse,
+        },
+        Decision::Refuse(_) => AddressVerdict::Refuse,
+    }
+}
+
+/// Whether this text is a local page, spelled as a path.
+///
+/// Two questions and both of them are somebody else's: `webnav` owns "is this a
+/// path this window could mint at all" (drive-absolute, no `..`, no network
+/// path), and `preview` owns "is a file with this name a page". Neither is asked
+/// again here, because a second copy of either is a build in which a name is a
+/// page in one function and a document in another.
+///
+/// **`file:` URLs are deliberately not this.** A typed `file:` string is not a
+/// spelling this window ever shows, and it is the string that may have been
+/// edited into something else; it stays refused, which is what
+/// `the_field_reddens_for_a_refusal_and_not_for_a_word` has always pinned.
+fn local_page_path(trimmed: &str) -> Option<PathBuf> {
+    crate::webnav::file_url_of_local_path(trimmed)?;
+    let path = PathBuf::from(trimmed);
+    crate::preview::path_names_a_page(&path).then_some(path)
+}
+
 // ── Zoom ───────────────────────────────────────────────────────────────────
 
 /// The zoom ladder, as a browser has them: the rungs `Ctrl`+wheel steps
@@ -1428,12 +1512,14 @@ pub(crate) struct WebSeat {
     /// icon, so any number of changes during one flight collapse into one more
     /// ask when it lands.
     favicon_changed_again: bool,
-    /// The page's zoom as this window last set it.
+    /// The magnification this seat last **moved** to, and when.
     ///
-    /// Kept here as well as in the controller because `Ctrl`+wheel steps from
-    /// the rung it is on, and a rung read back through COM on every notch would
-    /// be a syscall inside a wheel gesture.
-    zoom: f64,
+    /// A page's foot flashes it and then goes back to being the hover line
+    /// ([`crate::page_foot_flash`]). It lives on the seat rather than on the
+    /// window because a zoom is a fact about one page: two panes side by side
+    /// hold two engines at two magnifications, and one slot on the window would
+    /// have the second one's notch confirming itself on the first one's foot.
+    zoom_said: Option<(f64, Instant)>,
 }
 
 impl WebSeat {
@@ -1517,7 +1603,7 @@ impl WebSeat {
             capturing: false,
             fetching_favicon: None,
             favicon_changed_again: false,
-            zoom: 1.0,
+            zoom_said: None,
         };
         let effect = web.machine.request(url);
         debug_assert_eq!(effect, WebEffect::Ignore, "an engine that is not up yet");
@@ -2605,12 +2691,11 @@ impl WebSeat {
 
     /// Go somewhere, because a person typed it or pressed a row that named it.
     ///
-    /// **The address door and no other.** The string is judged by
-    /// `webnav::address_bar` — the same function a pin, a restored session and
-    /// the command palette are judged by — and a refusal is silent here on
-    /// purpose: the field says it, in the field, by turning `--err` (§7.7 ④'s
-    /// 「说在打字的地方」). A card would be telling a reader what they are
-    /// already looking at.
+    /// **One judgement, and the colour reads the same one** ([`judge_address`]).
+    /// A refusal is silent here on purpose: the field says it, in the field, by
+    /// turning `--err` (§7.7 ④'s 「说在打字的地方」). A card would be telling a
+    /// reader what they are already looking at.
+    ///
     /// The bool is whether the address was taken; the outcomes are whatever the
     /// state machine had to say about starting it.
     pub(crate) fn go_to(
@@ -2619,51 +2704,51 @@ impl WebSeat {
         engine: SearchEngineV1,
         compositor: &bt_platform::Compositor,
     ) -> (bool, Vec<WebOutcome>) {
-        // **A non-address is a search, and the search is an address** (方案 §0).
-        // The composed URL goes back through the same door a typed one does —
-        // this build's own string gets no more trust than a person's, which is
-        // 「钉不是授权」 said about the one URL this window writes itself.
-        // **A local path is minted before the door is asked** (user ruling
-        // 2026-08-25). The field shows a local file the way this machine spells
-        // one — `D:\Developer\notes.html` — and `address_bar` does not take a
-        // bare path: `D:` splits as an unknown scheme. So the one conversion
-        // happens here, at the door, and a path typed by a person becomes the
-        // same `file:` URL the files column would have minted for it.
-        let minted = crate::webnav::file_url_of_local_path(input_ref);
-        let input = minted.as_deref().unwrap_or(input_ref);
-        let target = match address_bar(input) {
-            Decision::Navigate(target) => target,
-            Decision::Search(query) => match address_bar(&search_url(engine, &query)) {
-                Decision::Navigate(target) => target,
-                Decision::Search(_) | Decision::Refuse(_) => return (false, Vec::new()),
-            },
-            Decision::Refuse(_) => return (false, Vec::new()),
-        };
-        // Through the machine and not straight at the engine: §4's `desired_url`
-        // is what a seat that is still coming up remembers, and a navigation
-        // issued around it would be one the recovery model never heard of.
-        let effect = self.machine.request(&target);
-        let mut outcomes = Vec::new();
-        self.apply(effect, compositor, &mut outcomes);
-        (true, outcomes)
+        match judge_address(input_ref, engine) {
+            AddressVerdict::Draft | AddressVerdict::Refuse => (false, Vec::new()),
+            // **The three steps every stored spelling of a local page takes**
+            // (§7.10 ③): back to the disk, canonicalise, and mint from *that*.
+            // The typed string contributed a name and no permission, exactly as
+            // a switcher row does — and it goes out under a mint, because the
+            // engine's own gate refuses `file:` to everything else.
+            //
+            // A file that is not there is a target this window cannot mint, and
+            // nothing happens: the same answer §7.10 ③ already gives for a row
+            // naming a file that has been moved away.
+            AddressVerdict::LocalPage(path) => {
+                let Ok(canonical) = std::fs::canonicalize(&path) else {
+                    return (false, Vec::new());
+                };
+                let Ok(mint) = Mint::file(&canonical) else {
+                    return (false, Vec::new());
+                };
+                let Some(url) = mint.target().map(ToOwned::to_owned) else {
+                    return (false, Vec::new());
+                };
+                (true, self.go(&url, mint, compositor))
+            }
+            // Through the machine and not straight at the engine: §4's
+            // `desired_url` is what a seat that is still coming up remembers, and
+            // a navigation issued around it would be one the recovery model never
+            // heard of.
+            AddressVerdict::Address(target) => {
+                let effect = self.machine.request(&target);
+                let mut outcomes = Vec::new();
+                self.apply(effect, compositor, &mut outcomes);
+                (true, outcomes)
+            }
+        }
     }
 
     /// Whether this text would be navigated to, for the field that has to say so
     /// while it is still being typed.
     ///
-    /// The same door, asked without knocking. An empty field is not wrong — it
-    /// is unfinished — so it does not light up red.
-    pub(crate) fn would_go_to(input: &str) -> bool {
-        // The same normalisation `go_to` makes, for the same reason it has to be
-        // made in both: a field that lit up red over the very path it was seeded
-        // with would be this window calling its own spelling wrong.
-        let minted = crate::webnav::file_url_of_local_path(input);
-        let input = minted.as_deref().unwrap_or(input);
-        input.trim().is_empty()
-            || matches!(
-                address_bar(input),
-                Decision::Navigate(_) | Decision::Search(_)
-            )
+    /// **The same door, asked without knocking** — literally the same function,
+    /// since the day the two drifted apart cost a reader a red line over this
+    /// window's own answer. An empty field is not wrong — it is unfinished — so
+    /// it does not light up red.
+    pub(crate) fn would_go_to(input: &str, engine: SearchEngineV1) -> bool {
+        !matches!(judge_address(input, engine), AddressVerdict::Refuse)
     }
 
     /// One notch of `Ctrl`+wheel.
@@ -2671,13 +2756,52 @@ impl WebSeat {
     /// **`Ctrl`+wheel is empty everywhere else in this window** — there is no
     /// type-size zoom in this product and a picture zooms on the bare wheel — so
     /// nothing is being taken from anything by claiming it over a page.
-    pub(crate) fn zoom_by(&mut self, up: bool) -> Result<(), String> {
-        let next = zoom_step(self.zoom, up);
-        if (next - self.zoom).abs() < f64::EPSILON {
-            return Ok(());
+    ///
+    /// **The engine is the authority on where the page is, in both directions**
+    /// (user ruling 2026-08-25). The ladder is walked from `ZoomFactor` rather
+    /// than from this seat's memory of what it last asked for, because the two
+    /// come apart in three ordinary ways: the controller clamps, the page's own
+    /// `Ctrl`+`=` moves it without this window hearing a thing, and a seat whose
+    /// controller is not up yet takes `SetZoomFactor` and does nothing at all.
+    /// What comes back is what the engine settled on, read again afterwards —
+    /// and `None` means the page did not move, which is the honest answer at
+    /// both ends of the ladder and for a seat with no engine behind it.
+    /// **And this seat no longer keeps a `zoom` of its own.** It kept one so
+    /// that a notch would not cost a COM read; now that the read is the answer,
+    /// a second copy would be a number nothing reads and everything has to
+    /// remember to update — the "只写字段 = 死规格" of `CONVENTIONS.md` §3, one
+    /// field wide.
+    pub(crate) fn zoom_by(&mut self, up: bool) -> Result<Option<f64>, String> {
+        let current = self.host.zoom();
+        let next = zoom_step(current, up);
+        if (next - current).abs() < f64::EPSILON {
+            return Ok(None);
         }
-        self.zoom = next;
-        self.host.set_zoom(next)
+        self.host.set_zoom(next)?;
+        let settled = self.host.zoom();
+        if (settled - current).abs() < f64::EPSILON {
+            return Ok(None);
+        }
+        self.zoom_said = Some((settled, Instant::now()));
+        Ok(Some(settled))
+    }
+
+    /// The magnification this seat last moved to, and when it said so.
+    ///
+    /// Read by the page's foot, which flashes it for [`crate::FOOT_REVEAL_FEEDBACK`]
+    /// and then goes back to being the hover line.
+    pub(crate) fn zoom_said(&self) -> Option<(f64, Instant)> {
+        self.zoom_said
+    }
+
+    /// The flash has stood its duration: the foot goes back to being the hover
+    /// line, and the slot is emptied rather than left for the reader to ignore.
+    ///
+    /// See `Runtime::advance_page_zoom_said` for why emptying it is the point: a
+    /// slot that stayed full would hand the event loop a wake-up already in the
+    /// past, on every turn, forever.
+    pub(crate) fn forget_the_zoom_it_said(&mut self) {
+        self.zoom_said = None;
     }
 
     /// Search this page for `term`. The counts come back as
@@ -3522,7 +3646,7 @@ mod rehost_address_tests {
             capturing: false,
             fetching_favicon: None,
             favicon_changed_again: false,
-            zoom: 1.0,
+            zoom_said: None,
         }
     }
 
@@ -4098,6 +4222,53 @@ mod fault_tests {
         assert!((factor - 1.0).abs() < 1e-9);
     }
 
+    /// PIN (user ruling 2026-08-25) — **the factor a notch reports is the
+    /// engine's, read back after the step and not the number this window asked
+    /// for.**
+    ///
+    /// A `ZoomFactor` is the controller's property and `SetZoomFactor` is a
+    /// request: the engine clamps it, a page's own `Ctrl`+`=` moves it without
+    /// this window hearing, and a seat whose controller is not up yet takes the
+    /// call and does nothing at all. A percentage composed from what was *asked*
+    /// would be a number this window made up about somebody else's page — and it
+    /// would be wrong in exactly the three cases a reader would notice.
+    ///
+    /// A source pin, and for [`the_host_asks_its_own_gate_before_it_issues_its_own_navigation`]'s
+    /// reason: reaching `ZoomFactor` needs a live controller, and what a machine
+    /// can hold is the shape of the four lines — ask the engine first, step from
+    /// *that*, and store what the engine says afterwards.
+    ///
+    /// RED GATE: it was red the day it was written. `zoom_by` stepped from a
+    /// `self.zoom` field and assigned the asked-for rung to it, so that field was
+    /// this window's memory of its own request and the engine was never asked at
+    /// all. The field is gone with this change — a second copy of a number the
+    /// engine now answers is `CONVENTIONS.md` §3's write-only field.
+    #[test]
+    fn a_zoom_notch_reports_the_factor_the_engine_ended_up_at() {
+        let source: String = include_str!("webhost.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        let step = concat!(
+            "letcurrent=self.host.z",
+            "oom();letnext=zoom_step(current,up);"
+        );
+        assert_eq!(
+            source.matches(step).count(),
+            1,
+            "the ladder is walked from the engine's own factor"
+        );
+        let after = &source[source.find(step).expect("the step just counted")..];
+        assert!(
+            after.contains(concat!("self.host.set_z", "oom(next)?;")),
+            "the step is requested"
+        );
+        assert!(
+            after.contains(concat!("letsettled=self.host.z", "oom();")),
+            "and what the engine settled on is read back rather than assumed"
+        );
+    }
+
     /// PIN — **every refusal the door can give has a card that can say it.**
     ///
     /// `webnav::Refusal` is ten variants and the blocked card is what a reader
@@ -4222,16 +4393,91 @@ mod search_tests {
     /// searched. An empty field is unfinished rather than wrong.
     #[test]
     fn the_field_reddens_for_a_refusal_and_not_for_a_word() {
-        assert!(WebSeat::would_go_to(""));
-        assert!(WebSeat::would_go_to("   "));
-        assert!(WebSeat::would_go_to("localhost:5173/app"));
+        let red = |input: &str| !WebSeat::would_go_to(input, SearchEngineV1::DuckDuckGo);
+        assert!(!red(""));
+        assert!(!red("   "));
+        assert!(!red("localhost:5173/app"));
         assert!(
-            WebSeat::would_go_to("how do i pin a pane"),
+            !red("how do i pin a pane"),
             "a word is a search, not a refusal"
         );
-        assert!(!WebSeat::would_go_to("javascript:alert(1)"));
-        assert!(!WebSeat::would_go_to("file:///C:/Windows/win.ini"));
-        assert!(!WebSeat::would_go_to("mailto:a@b.c"));
+        assert!(red("javascript:alert(1)"));
+        assert!(red("file:///C:/Windows/win.ini"));
+        assert!(red("mailto:a@b.c"));
+    }
+
+    /// RED GATE (user report 2026-08-25) — **the spelling this window seeds the
+    /// field with is not a spelling it refuses.**
+    ///
+    /// Open the address editor on a local page and the draft is `D:\…\x.pdf`,
+    /// which is §7.8 ⑩′'s ruling and is deliberate. The whole line came up in
+    /// `--err`: this window telling its reader that its own answer is wrong.
+    ///
+    /// It was red the day it was written, on the first line, and the reason is
+    /// the reason the fix is a new arm rather than a new caller: both halves
+    /// were minting the path into the `file:` URL it names and handing *that* to
+    /// a door that refuses `file:` from everywhere and always will.
+    #[test]
+    fn the_path_this_window_seeds_is_not_red_while_it_is_being_typed() {
+        let engine = SearchEngineV1::DuckDuckGo;
+        assert!(WebSeat::would_go_to(
+            r"D:\Developer\folio-pdf-test.pdf",
+            engine
+        ));
+        assert!(WebSeat::would_go_to(r"C:\Users\me\report.html", engine));
+        assert!(WebSeat::would_go_to(r"D:\a folder\notes#1.html", engine));
+        // And nothing was loosened: rubbish is still rubbish, and a `file:`
+        // *string* is still somebody else's string.
+        assert!(!WebSeat::would_go_to("javascript:alert(1)", engine));
+        assert!(!WebSeat::would_go_to("file:///C:/Windows/win.ini", engine));
+        assert!(WebSeat::would_go_to("https://example.com/", engine));
+    }
+
+    /// PIN (user report 2026-08-25) — **the colour and the commit are one
+    /// judgement, and it is the arm that differs, not the answer.**
+    ///
+    /// [`judge_address`] is what both halves read, so the thing worth pinning is
+    /// which arm each kind of input lands in: a page spelled as a path is a
+    /// `LocalPage` and reaches the disk, everything else is the address door's
+    /// business, and a name this window does not open as a page is not made into
+    /// one by being typed into a page's address field.
+    ///
+    /// MUTATION: drop `path_names_a_page` from `local_page_path` and the
+    /// `notes.md` line goes red — a document would be handed to the engine
+    /// because it was typed at a seat that happened to hold a page.
+    #[test]
+    fn the_field_and_the_commit_read_one_judgement() {
+        let engine = SearchEngineV1::DuckDuckGo;
+        let judged = |input: &str| judge_address(input, engine);
+
+        assert_eq!(judged("  "), AddressVerdict::Draft);
+        assert_eq!(
+            judged(r"D:\Developer\report.html"),
+            AddressVerdict::LocalPage(PathBuf::from(r"D:\Developer\report.html"))
+        );
+        assert_eq!(
+            judged("https://example.com/x?y=1"),
+            AddressVerdict::Address("https://example.com/x?y=1".to_owned())
+        );
+        assert_eq!(
+            judged("how do i pin a pane"),
+            AddressVerdict::Address("https://duckduckgo.com/?q=how+do+i+pin+a+pane".to_owned()),
+            "a phrase is composed into an address, and that address went through the door"
+        );
+        // A document is not made into a page by the field it was typed into: the
+        // engine lane is `path_names_a_page`'s answer everywhere else in this
+        // window, and a second answer here would be a `.md` that opens as a page
+        // from the address row and as text from every other door.
+        assert_eq!(judged(r"D:\Developer\notes.md"), AddressVerdict::Refuse);
+        // A network path never becomes a local page: it is refused at the mint,
+        // which is where this product has always refused one.
+        assert!(
+            !matches!(
+                judged(r"\\server\share\report.html"),
+                AddressVerdict::LocalPage(_)
+            ),
+            "a network path is refused at the mint"
+        );
     }
 }
 

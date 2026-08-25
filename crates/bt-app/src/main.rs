@@ -3832,6 +3832,44 @@ fn page_foot_lead(_page_url: &str, hover: &str) -> String {
     lead
 }
 
+/// The word a **page**'s foot is flashing instead of its hover line, if any
+/// (user ruling 2026-08-25).
+///
+/// **A zoom says its own number, on the band's one flash clock.** `Ctrl`+wheel
+/// moved the engine's `ZoomFactor` and said nothing at all, which made it the
+/// only gesture in this window that changes what a reader is looking at without
+/// telling them what it changed it to. The picture beside it has said its
+/// percentage since the day it could be zoomed, so the words are the picture's
+/// exactly — [`i18n::zoom_percent`], one spelling for both — and the *place* is
+/// the one band this pane owns. A page has no meta line to hang it under: its
+/// body is the engine's glass and this window draws nothing on it.
+///
+/// **The same clock, not a second one** ([`FOOT_REVEAL_FEEDBACK`]): this band
+/// already flashes "Opened" for a duration and then goes back to being the hover
+/// line, and a percentage that faded on its own schedule would be a second
+/// rhythm on one strip. `100%` is said like every other rung — the way back to
+/// unzoomed is a detent (`webhost::zoom_step`), and a detent nobody confirms is
+/// the one rung a reader cannot tell they have reached.
+///
+/// **The later gesture owns the strip**, because both of these are answers to
+/// something that was just done and the older one is answering a question the
+/// hand has already moved on from.
+fn page_foot_flash(
+    zoomed: Option<(f64, Instant)>,
+    opened: Option<Instant>,
+    now: Instant,
+) -> Option<String> {
+    let fresh = |at: Instant| now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK;
+    let zoomed = zoomed.filter(|(_, said)| fresh(*said));
+    let opened = opened.filter(|at| fresh(*at));
+    match (zoomed, opened) {
+        (Some((_, said)), Some(at)) if said < at => Some(preview_opened_label().to_owned()),
+        (Some((factor, _)), _) => Some(i18n::zoom_percent(factor)),
+        (None, Some(_)) => Some(preview_opened_label().to_owned()),
+        (None, None) => None,
+    }
+}
+
 fn files_row_activation(root: &str, key: &str) -> RowActivation {
     if !files::root_is_addressable(root) {
         return RowActivation::Nowhere;
@@ -13595,8 +13633,11 @@ fn image_zoom_caption(body: [f32; 4], image_px: [u32; 2], zoom: ImageZoom) -> St
     if zoom.is_fit() {
         return "Fit".to_owned();
     }
-    let percent = (image_zoom_scale(body, image_px, zoom) * 100.0).round();
-    format!("{percent}%")
+    // **One spelling of a magnification for the whole window** (user ruling
+    // 2026-08-25): a page's foot says its zoom in these words too, and a percent
+    // written out at both ends is a build in which one of them grows a decimal
+    // place and the other does not.
+    i18n::zoom_percent(f64::from(image_zoom_scale(body, image_px, zoom)))
 }
 
 /// How much of the shared GPU texture budget one preview picture may hold.
@@ -31090,6 +31131,33 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// **The hand answered, so the question is spent** (§7.1.5e′, user ruling
+    /// 2026-08-25).
+    ///
+    /// One function and three doors — a key that is not a modifier, a notch of
+    /// the wheel, a button going down — because "what spends a hold" is one
+    /// sentence and three copies of it are three chances for the next gesture to
+    /// be added to two of them. The card was born knowing only about the
+    /// keyboard, and the report that ended that is `Ctrl`+wheel zooming a page:
+    /// a hold being answered over and over while the card hangs there insisting
+    /// the hand has forgotten something.
+    ///
+    /// **The bare-modifier exemption is not here**, and that is deliberate: it
+    /// belongs to the keyboard, which is the only door at which a modifier can
+    /// *be* the gesture. A wheel notch and a mouse button are never one, so a
+    /// guard repeated at those two doors would be a guard that can never fire
+    /// and a reader would have to work out why.
+    ///
+    /// It answers nothing and consumes nothing — there is no path from here that
+    /// can stop an event — which is how "the hint never takes a gesture" stays
+    /// structural rather than remembered.
+    fn spend_key_hint(&mut self) -> Result<()> {
+        if self.window.key_hint.spend(self.window.modifiers) && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
     /// Take the card down without closing the offer — the window losing focus, a
     /// menu opening. See [`keyhint::KeyHintHost::hide`].
     fn hide_key_hint(&mut self) -> Result<()> {
@@ -37548,6 +37616,12 @@ impl Runtime<'_> {
         frame.edit = edit;
         // The same door the commit goes through, asked without knocking — an
         // empty field is unfinished rather than wrong, so it does not light up.
+        // **The engine the search would be composed for is handed over** so that
+        // this is not merely the same rule as the commit but the same call: a
+        // predicate that judged a phrase against a different engine's template
+        // than the one Enter would use is a second door wearing the first one's
+        // name.
+        let engine = self.app.settings_store.loaded().search_engine;
         frame.refused = matches!(
             self.window.rename.as_ref().map(|editor| &editor.subject),
             Some(RenameSubject::WebAddress { .. })
@@ -37555,7 +37629,7 @@ impl Runtime<'_> {
             .window
             .rename
             .as_ref()
-            .is_some_and(|editor| webhost::WebSeat::would_go_to(&editor.text));
+            .is_some_and(|editor| webhost::WebSeat::would_go_to(&editor.text, engine));
         let here = self.leaf_here(seat);
         self.window
             .preview_rail_measures
@@ -37659,7 +37733,17 @@ impl Runtime<'_> {
         let page = self.web_on(seat).map(|web| web.page().clone());
         if let Some(page) = page {
             let lead = page_foot_lead(&page.url, &page.hover);
-            let revealed = self.foot_reveal_is_fresh(RevealedFoot::Preview(seat), now);
+            // **And the magnification, when the wheel has just moved it** (user
+            // ruling 2026-08-25). The same word the picture beside it says, on
+            // this band's own one flash clock — see [`page_foot_flash`], which
+            // owns which of the two confirmations this strip is carrying.
+            let opened = self
+                .window
+                .revealed_foot
+                .filter(|(shown, _)| *shown == RevealedFoot::Preview(seat))
+                .map(|(_, at)| at);
+            let zoomed = self.web_on(seat).and_then(webhost::WebSeat::zoom_said);
+            let flash = page_foot_flash(zoomed, opened, now);
             let rect = seats::full_pane_rect(&self.seat_layout, seat)?;
             let run =
                 seats::pane_foot_geometry(rect, bt_layout::SeatKind::Preview, scale).foot_path;
@@ -37670,10 +37754,10 @@ impl Runtime<'_> {
                 seats::FootDress {
                     run,
                     lead: &lead,
-                    // The same word the `Open in default app` card flashes,
-                    // because it is the same sentence: this window handed the
-                    // thing to the machine and the machine has it now.
-                    flash: revealed.then(preview_opened_label),
+                    // "Opened" is the same word the `Open in default app` card
+                    // flashes, because it is the same sentence: this window
+                    // handed the thing to the machine and the machine has it now.
+                    flash: flash.as_deref(),
                     // A page has no standing fact to hang on the right: the two
                     // this strip carries — a truncated read and a refused save —
                     // are both about a *buffer*, and a page holds none.
@@ -51073,6 +51157,42 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// A page's magnification has been said long enough: the foot goes back to
+    /// being the hover line (user ruling 2026-08-25).
+    ///
+    /// [`Self::advance_foot_reveal`]'s twin, and it is a twin rather than a line
+    /// inside it for the same reason that one is not a line inside
+    /// `advance_float`: **the slot is cleared here and not merely ignored by the
+    /// reader**, because a slot that stayed full would hand
+    /// [`Self::next_deadline`] a wake-up that is already in the past on every
+    /// turn for the rest of the session — the `WaitUntil` pin's own definition
+    /// of a loop that never sleeps.
+    fn advance_page_zoom_said(&mut self, now: Instant) -> Result<()> {
+        let expired: Vec<LeafId> = self
+            .window
+            .web
+            .iter()
+            .filter(|(_, web)| {
+                web.zoom_said().is_some_and(|(_, at)| {
+                    now.saturating_duration_since(at) >= FOOT_REVEAL_FEEDBACK
+                })
+            })
+            .map(|(leaf, _)| *leaf)
+            .collect();
+        if expired.is_empty() {
+            return Ok(());
+        }
+        for leaf in expired {
+            if let Some(web) = self.window.web.get_mut(&leaf) {
+                web.forget_the_zoom_it_said();
+            }
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
     /// Advance both of the float's clocks and its animation.
     fn advance_float(&mut self, now: Instant) -> Result<()> {
         let scale = self.window.renderer.metrics().scale_factor as f32;
@@ -61053,6 +61173,13 @@ impl Runtime<'_> {
         // you saying you already know. The mock-up's listener is the document's
         // for the same reason.
         if state == ElementState::Pressed {
+            // **And a press spends a raised hint card** (§7.1.5e′, user ruling
+            // 2026-08-25) — the same sentence one line further out: the card
+            // asks whether the hand has forgotten something, and a hand that is
+            // pressing a button has answered. The press only: a button coming
+            // back up is the end of an answer already given, and the modifiers
+            // are very often still down under it.
+            self.spend_key_hint()?;
             self.hide_tooltip()?;
             // L135 sends the peek the same way and for the same reason: it is a
             // glance, and pressing is you saying you are done glancing.
@@ -63138,6 +63265,18 @@ impl Runtime<'_> {
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
+        // **A notch spends a raised hint card** (§7.1.5e′, user ruling
+        // 2026-08-25), and at the very top for `keyboard_input`'s reason: every
+        // branch below this line is a surface taking the gesture home, and a
+        // card left standing over the thing a notch just did is the failure this
+        // surface exists to avoid. The report that settled it is `Ctrl`+wheel
+        // zooming a page — a hold that is answered over and over while the card
+        // hangs there insisting the hand has forgotten something.
+        //
+        // It answers nothing and consumes nothing: there is no path from `spend`
+        // that can stop a notch, so "the hint never takes a gesture" is
+        // structural here exactly as it is on the keyboard.
+        self.spend_key_hint()?;
         // **A notch over the card is the card's** (user ruling, 2026-08-14), and
         // it is asked before the dismissal below for the obvious reason: the card
         // is the topmost thing on the glass, and a scroller under the pointer
@@ -63664,17 +63803,14 @@ impl Runtime<'_> {
         // (§7.1.5e′), and this is the top of the function for the one reason
         // that matters: every branch below it can return, and a card left
         // standing over the thing a chord just did is the failure this surface
-        // exists to avoid. It answers nothing and consumes nothing — there is no
-        // path from `spend` that can stop an event, which is how "the hint never
-        // eats a key" is kept structurally rather than remembered.
+        // exists to avoid. See [`Self::spend_key_hint`], which the wheel and the
+        // mouse button read too; the exemption is here because this is the one
+        // door at which a modifier can be the gesture.
         //
         // Repeats included: a held `j` in `vim` is a hand that is very much not
         // waiting to be told anything.
-        if !shortcuts::is_a_bare_modifier(&event.logical_key)
-            && self.window.key_hint.spend(self.window.modifiers)
-            && self.refresh_overlay()
-        {
-            self.present_chrome_change()?;
+        if !shortcuts::is_a_bare_modifier(&event.logical_key) {
+            self.spend_key_hint()?;
         }
         if self.reset_cursor_blink(now) {
             self.publish_frame(FrameTrigger {
@@ -66500,9 +66636,25 @@ impl Runtime<'_> {
             // at — the same question every other wheel event on this path asks.
             if let Some(leaf) = self.web_page_at(position)
                 && let Some(web) = self.window.web.get_mut(&leaf)
-                && let Err(error) = web.zoom_by(y > 0.0)
             {
-                eprintln!("BT_WEB {error}");
+                match web.zoom_by(y > 0.0) {
+                    // **The page moved, so the foot says where to** (user ruling
+                    // 2026-08-25): the seat recorded the factor the engine
+                    // settled on, and this is the frame that has to show it.
+                    // `Ok(None)` is a notch at the end of the ladder — nothing
+                    // moved, so there is nothing to confirm, which is also what
+                    // keeps a wall of `300%` off the glass under a held wheel.
+                    Ok(Some(_)) => {
+                        if self.refresh_chrome() {
+                            // The wheel is not on a `?` path, and a failure to
+                            // present a confirmation is not worth taking the
+                            // gesture down over.
+                            let _ = self.present_chrome_change();
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => eprintln!("BT_WEB {error}"),
+                }
             }
             return;
         }
@@ -67147,6 +67299,9 @@ impl Runtime<'_> {
         // because the two feet are drawn into two different surfaces — see
         // `advance_foot_reveal`.
         self.advance_foot_reveal(now)?;
+        // And a page's magnification, on the same clock and for the same reason
+        // it is its own step: what has to be rebuilt is the pane the page is in.
+        self.advance_page_zoom_said(now)?;
         // And the preview's own acknowledgement, on the same 1300ms clock.
         self.advance_preview_notice(now)?;
         // Service the PTY gate after every other due task that can mutate session state, then carry
@@ -67275,6 +67430,14 @@ impl Runtime<'_> {
             self.window
                 .revealed_foot
                 .map(|(_, at)| at + FOOT_REVEAL_FEEDBACK),
+            // And a page's magnification, on that same clock. One entry for
+            // however many pages are on screen — the earliest is the only one
+            // that needs a wake-up, and the pass it wakes finds the rest.
+            self.window
+                .web
+                .values()
+                .filter_map(|web| web.zoom_said().map(|(_, at)| at + FOOT_REVEAL_FEEDBACK))
+                .min(),
             // The preview's "Saved", on the same clock and owing the same single
             // wake-up: the instant it is due to go away.
             self.preview_notice_deadline(),
@@ -67688,6 +67851,59 @@ impl<K: Copy + Eq + std::hash::Hash, W> Windows<K, W> {
     fn clear(&mut self) {
         self.open.clear();
         self.order.clear();
+    }
+}
+
+/// **Every answer the hand gives spends a raised hint card** (§7.1.5e′, user
+/// ruling 2026-08-25).
+///
+/// The card asks one question — "your hand has stopped on these modifiers; did
+/// you forget something?" — and *any* answer spends it. A key that is not a
+/// modifier said so from the day the card was born; a notch of the wheel and a
+/// button going down did not, and the report that settled it is `Ctrl`+wheel
+/// zooming a page with the card hanging over the glass through every notch.
+///
+/// A source pin, and for [`mouse_trace_station_tests`]' reason: both doors take
+/// the whole window and answer by presenting a frame, so what a machine can hold
+/// is that the call is *there* and that it stands in front of the first `return`
+/// — every one of which is a surface that took the gesture and went home.
+///
+/// RED GATE: it was red the day it was written. Neither door mentioned
+/// `key_hint` at all.
+#[cfg(test)]
+mod key_hint_spend_tests {
+    /// This file, read as text.
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// The text of one method, from its signature to the next method's.
+    fn body(signature: &str) -> &'static str {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    #[test]
+    fn the_wheel_and_the_button_spend_a_raised_hold_the_way_a_key_does() {
+        for signature in [
+            "fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {",
+            "fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {",
+        ] {
+            let text = body(signature);
+            let spend = text
+                .find("self.spend_key_hint()?;")
+                .unwrap_or_else(|| panic!("{signature} spends the hold"));
+            // Every `return` in these two functions is a surface saying "this
+            // gesture was mine"; a spend behind one of them is a card that
+            // survives whichever surface answered first.
+            let first_return = text.find("return ").unwrap_or(text.len());
+            assert!(
+                spend < first_return,
+                "{signature} spends the hold before the first surface can take the gesture home"
+            );
+        }
     }
 }
 
@@ -94479,6 +94695,54 @@ mod tests {
             local.starts_with(r"D:\Developer\notes and more.html"),
             "a path, not a URI: {local}"
         );
+    }
+
+    /// RED GATE (user report 2026-08-25) — **a page that just changed size says
+    /// what size it changed to, in the picture's own words and on the band's own
+    /// clock.**
+    ///
+    /// `Ctrl`+wheel moved the engine's `ZoomFactor` and reported nothing, which
+    /// made it the one gesture in this window that changes what a reader is
+    /// looking at without saying what it changed it to.
+    ///
+    /// It was red the day it was written against a
+    /// [`page_foot_flash`] that answered `None` to everything.
+    #[test]
+    fn a_page_says_the_zoom_it_moved_to_and_then_goes_back_to_being_a_hover_line() {
+        let now = Instant::now();
+        let just_now = now - Duration::from_millis(40);
+        let stale = now - FOOT_REVEAL_FEEDBACK - Duration::from_millis(1);
+
+        assert_eq!(
+            page_foot_flash(Some((1.2, just_now)), None, now).as_deref(),
+            Some("120%"),
+            "the picture's own words, from the picture's own function"
+        );
+        // The way back to unzoomed is a rung like any other, and a rung nobody
+        // confirms is the one a reader cannot tell they have reached.
+        assert_eq!(
+            page_foot_flash(Some((1.0, just_now)), None, now).as_deref(),
+            Some("100%")
+        );
+        // Whole percents: `0.67` is a rung of the ladder, not a number to read.
+        assert_eq!(
+            page_foot_flash(Some((0.67, just_now)), None, now).as_deref(),
+            Some("67%")
+        );
+        // One clock, and it is the band's own. After it, the hover line again.
+        assert_eq!(page_foot_flash(Some((1.2, stale)), None, now), None);
+
+        // The later gesture owns the strip — both of these answer something that
+        // was just done, and the older one answers a question the hand has left.
+        assert_eq!(
+            page_foot_flash(Some((1.2, just_now)), Some(stale), now).as_deref(),
+            Some("120%")
+        );
+        assert_eq!(
+            page_foot_flash(Some((1.2, stale)), Some(just_now), now).as_deref(),
+            Some(preview_opened_label()),
+        );
+        assert_eq!(page_foot_flash(None, None, now), None);
     }
 
     /// PIN (user ruling, 2026-08-15) — **when the path and the phrase meet, the
