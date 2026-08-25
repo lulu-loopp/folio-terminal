@@ -17,6 +17,7 @@ fn key(width_cells: u32) -> LayoutKey {
         theme_rev: 1,
         lang_rev: 0,
         profile_rev: 0,
+        line_wrapping: true,
     }
 }
 

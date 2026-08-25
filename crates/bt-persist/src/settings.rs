@@ -116,7 +116,14 @@ use serde::{Deserialize, Serialize};
 /// (`docs/HANDOFF-2026-08-21.md` §2) settles it the way it was written for: whichever
 /// merges second yields, and yielding is renaming the step rather than renumbering a file
 /// anybody already has.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 20;
+///
+/// **v21 carries `line_wrapping`**, whether a logical line too long for the pane wraps onto the
+/// next row or is flattened onto one row and read through a horizontal window
+/// (`docs/plans/horizontal-scroll/plan.md` §5.7, ladder one level two). It lands the way v13–v16
+/// and v19 did rather than the way v17–v20 did: this is not a feature arriving with its row, it is
+/// the only thing every terminal ever written here has done, so `true` is a behaviour being
+/// carried forward and not a product default being chosen.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 21;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -668,6 +675,21 @@ pub struct SettingsV1 {
     /// — see `settings::SettingsRow::selected_index`.
     #[serde(default = "default_focus_card_height")]
     pub focus_card_height: u32,
+    /// **Whether a line too long for the pane wraps onto the next row** — the Terminal page's
+    /// `Line wrapping` row (`docs/plans/horizontal-scroll/plan.md`, ladder one).
+    ///
+    /// `true` is the wrap every terminal in this product's history has done, and it is the
+    /// default for exactly that reason. `false` flattens each logical line onto one presentation
+    /// row and reads it through a horizontal window, which is a different document on screen —
+    /// different row counts, a different scroll extent, a different answer to "which row is this
+    /// anchor on" — and therefore a member of `bt_doc::LayoutKey` as well as a key here.
+    ///
+    /// **It says nothing to the program.** The grid stays exactly as wide as it was, `DECAWM` is
+    /// untouched, and a child that asks its size gets the same answer either way; what moves is
+    /// only how this window presents what it already stored. A setting that changed the child's
+    /// world would be ladder two, which is spiked and not built.
+    #[serde(default = "default_line_wrapping")]
+    pub line_wrapping: bool,
 }
 
 /// `serde`'s door for a v14 key that is missing from a file this build is reading.
@@ -702,6 +724,15 @@ fn default_powershell_integration_offer() -> bool {
 /// no body at all is not a height anybody chose — it is the field having been dropped.
 fn default_focus_card_height() -> u32 {
     DEFAULT_FOCUS_CARD_HEIGHT
+}
+
+/// `serde`'s door for a v21 key missing from a file this build is reading.
+///
+/// [`default_terminal_notifications`]'s reason exactly: a `bool`'s own default is `false`, and a
+/// file that had lost this key would come back as a pane that stopped wrapping — a document nobody
+/// asked for, on the strength of an absent line.
+fn default_line_wrapping() -> bool {
+    true
 }
 
 impl Default for SettingsV1 {
@@ -745,6 +776,9 @@ impl Default for SettingsV1 {
             // The body every card has stood on since F2 — see
             // `DEFAULT_FOCUS_CARD_HEIGHT`.
             focus_card_height: DEFAULT_FOCUS_CARD_HEIGHT,
+            // What every terminal this product has ever drawn did with a line too long for its
+            // pane.
+            line_wrapping: true,
         }
     }
 }

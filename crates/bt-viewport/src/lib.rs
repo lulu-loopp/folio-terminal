@@ -23,8 +23,14 @@ use bt_transcript::{
 };
 use bt_unicode::{cluster_width, graphemes};
 
+use crate::horizontal::{
+    ColumnSeek, ContentColumn, HorizontalIndexStore, HorizontalProjection, LineKey, ViewportColumn,
+    WordClass, presentable_end_column,
+};
+
 pub use bt_doc::{InlineRunPlacement, SUBPIXELS_PER_PX};
 pub use height_tree::HeightTree;
+pub use horizontal::FlattenedExtent;
 
 /// Live display math is never given a lifecycle-specific presentation scale. Projection preserves
 /// at least this many ordinary text rows and gives the remaining vertical attention budget to the
@@ -250,6 +256,54 @@ pub struct FrameVisualRow {
     /// between being blank) is a guess that reads a list of identical links as
     /// one link. This is the answer the terminal already had.
     pub continues: bool,
+    /// What this row's source says outside the columns its window kept — `None` when the window
+    /// kept all of them, which is every row of a wrapping pane.
+    ///
+    /// See [`RowSourceEnds`]. Carried rather than derived for exactly [`Self::continues`]'s reason:
+    /// a selection has only the frame, and the fact it needs lives in a logical line the frame does
+    /// not hold.
+    pub source_ends: Option<RowSourceEnds>,
+}
+
+/// The two ends of what a presentation row is a window **into**, when the window is not the whole
+/// of it (`docs/plans/horizontal-scroll/plan.md` §5.5).
+///
+/// A flattened logical line is one presentation row and may be far wider than the pane, so the cells
+/// the frame holds are a slice of it. Two questions cannot be answered out of a slice:
+///
+/// - `line_selection` must select the **logical line** and not the columns on screen;
+/// - `word_selection` must select the **word** and not the half of it the window kept — the rule
+///   plan §5.5 states as "词的归属按内容坐标,不得按可见范围".
+///
+/// Both are decided during layout, where the line is, and travel here as grapheme offsets into the
+/// line they name. Offsets and not columns, because what they point at is content the frame does
+/// not draw.
+///
+/// **Only a frozen logical line can be windowed**, so this names one (plan §5.1 case A: staging and
+/// the live grid keep their physical rows, and a physical row is never wider than the grid it came
+/// off). A row whose source the window holds whole carries none of this and its own cells are its
+/// two ends — which is what makes a wrapping pane's every answer the answer it gave before this
+/// type existed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RowSourceEnds {
+    pub id: TranscriptId,
+    pub generation: SourceGeneration,
+    /// The logical line's own first and last grapheme.
+    pub line: (GraphemeOffset, GraphemeOffset),
+    /// The first grapheme of the word-class run the window's left edge stands in, and the last
+    /// grapheme of the run its right edge stands in. One run when a single word fills the window.
+    pub word: (GraphemeOffset, GraphemeOffset),
+}
+
+impl RowSourceEnds {
+    fn anchor(&self, offset: GraphemeOffset, bias: Bias) -> ContentAnchor {
+        ContentAnchor::History {
+            id: self.id,
+            offset,
+            bias,
+            generation: self.generation,
+        }
+    }
 }
 
 /// Byte budget of the GPU texture cache every projected artifact competes in.
@@ -472,6 +526,18 @@ pub enum FrameViewportOrigin {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ViewportFrame {
     pub columns: NonZeroU32,
+    /// The horizontal half of this frame's geometry: how wide the addressable content is, how wide
+    /// the window is, and where the window sits along it
+    /// (`docs/plans/horizontal-scroll/plan.md` §1a).
+    ///
+    /// `columns` says how many cells a row holds; this says **which** columns they are. The two
+    /// were the same statement for as long as every pane showed every line from its first column,
+    /// and `validate_shape` keeps them bound: a frame whose window is not `columns` wide is a frame
+    /// whose cells and whose coordinates disagree.
+    ///
+    /// Every conversion between a drawn column and a content column goes through this and through
+    /// nothing else, which is the whole of plan §1a's "转换集中一处".
+    pub horizontal: HorizontalProjection,
     pub grid_rows: NonZeroU32,
     /// Number of rectangular presentation rows, including bottom overscan.
     pub rows: NonZeroU32,
@@ -479,6 +545,14 @@ pub struct ViewportFrame {
     /// value exposes the bottom overscan suffix while preserving one rectangular row payload.
     pub presentation_offset_subpixels: i64,
     pub cells: Vec<CapturedCell>,
+    /// The caret **as this frame draws it**: a presentation row and a viewport column.
+    ///
+    /// Neither number is the grid's. The row has been through the row map since presentation rows
+    /// existed, and the column now goes through [`Self::horizontal`] for the same reason — the
+    /// frame's own cells are indexed by what is drawn, so a caret column that meant a grid column
+    /// would index somebody else's cell the moment a window moved. A caret whose grid column the
+    /// window does not show is not `visible`, exactly as a caret on a row the frame does not draw
+    /// is not (plan §5.5).
     pub cursor: GridCursor,
     pub cell_anchors: Vec<CellAnchor>,
     pub row_map: Vec<FrameVisualRow>,
@@ -532,6 +606,12 @@ impl ViewportFrame {
             return Err(FrameShapeError::LayoutWidth {
                 frame: self.columns.get(),
                 layout: self.layout_key.width_cells.get(),
+            });
+        }
+        if self.horizontal.viewport_columns() != self.columns.get() {
+            return Err(FrameShapeError::HorizontalWidth {
+                frame: self.columns.get(),
+                window: self.horizontal.viewport_columns(),
             });
         }
         if self.rows < self.grid_rows {
@@ -706,11 +786,26 @@ impl ViewportFrame {
         Some(last)
     }
 
+    /// The grid cell a drawn cell stands on, for the protocol to report to the child.
+    ///
+    /// One conversion on each axis and they are separate conversions (plan §5.5, case A): the row
+    /// goes through the row map, which is the vertical projection, and the column goes through
+    /// [`Self::horizontal`], which is the horizontal one. `column` is a **viewport** column — where
+    /// the pointer is on screen — and what comes back is a grid column, which is a content column
+    /// of the live plane.
+    ///
+    /// **The live plane owns `[0, grid_columns)` and nothing else** (plan §5.1 clause 4). A window
+    /// scrolled past the grid's last column is over no live cell at all, and the clamp says so by
+    /// naming the last one — the same clamp this has always applied at the right-hand edge. What it
+    /// must never do is pin the live plane at origin zero on its own: one pointer position would
+    /// then mean two different columns depending on which plane it landed on, and copy, selection
+    /// and hit-testing would each have to pick one.
     pub fn live_point_at(&self, row: u32, column: u32) -> Option<GridPoint> {
         let live_row = self.row_map.get(row as usize)?.live_grid_row?;
+        let content = self.horizontal.to_content(ViewportColumn(column));
         Some(GridPoint {
             row: live_row,
-            column: column.min(self.columns.get().saturating_sub(1)),
+            column: content.0.min(self.columns.get().saturating_sub(1)),
         })
     }
 
@@ -1062,6 +1157,12 @@ impl ViewportFrame {
     /// Expand a cell hit to a word using the terminal selection delimiter policy. Whitespace and
     /// shell punctuation delimit words; every other grapheme (including emoji clusters) stays in
     /// the same run. Wide spacers share their lead cell's anchors and can never split a cluster.
+    ///
+    /// **A word is a word in the content, not in the window** (plan §5.5). The run is found among
+    /// the cells the frame holds, and when it reaches an edge of a windowed row it goes on past it:
+    /// the row's [`RowSourceEnds`] carry where the run really begins and really ends, decided
+    /// during layout with the whole logical line in hand. A row whose source the window holds whole
+    /// has no such ends and its own cells are the answer, which is every row of a wrapping pane.
     pub fn word_selection(
         &self,
         row: u32,
@@ -1087,20 +1188,50 @@ impl ViewportFrame {
         while last < columns && word_class(&cells[last]) == class {
             last += 1;
         }
-        let Some(start) = self.anchor_at(row as u32, first as u32, Bias::Before)? else {
-            return Ok(None);
+        let ends = self.row_map[row].source_ends;
+        let start = match ends.filter(|_| first == 0) {
+            Some(ends) => ends.anchor(ends.word.0, Bias::Before),
+            None => {
+                let Some(anchor) = self.anchor_at(row as u32, first as u32, Bias::Before)? else {
+                    return Ok(None);
+                };
+                anchor
+            }
         };
-        let Some(end) = self.anchor_at(row as u32, (last - 1) as u32, Bias::After)? else {
-            return Ok(None);
+        let end = match ends.filter(|_| last == columns) {
+            Some(ends) => ends.anchor(ends.word.1, Bias::After),
+            None => {
+                let Some(anchor) = self.anchor_at(row as u32, (last - 1) as u32, Bias::After)?
+                else {
+                    return Ok(None);
+                };
+                anchor
+            }
         };
         Ok(Some(ViewSelection { start, end }))
     }
 
+    /// Select one presentation row's **source**: the logical line a flattened row is a window into,
+    /// and the physical row itself everywhere else (plan §5.5).
+    ///
+    /// The distinction only exists once a row can be narrower than what it shows. A wrapping pane's
+    /// row is its whole source, so its first and last cells are its two ends and this is the
+    /// selection it has always made.
     pub fn line_selection(&self, row: u32) -> Result<Option<ViewSelection>, FrameShapeError> {
         self.validate_shape()?;
         let Some(last) = self.columns.get().checked_sub(1) else {
             return Ok(None);
         };
+        if let Some(ends) = self
+            .row_map
+            .get(row as usize)
+            .and_then(|row| row.source_ends)
+        {
+            return Ok(Some(ViewSelection {
+                start: ends.anchor(ends.line.0, Bias::Before),
+                end: ends.anchor(ends.line.1, Bias::After),
+            }));
+        }
         let Some(start) = self.anchor_at(row, 0, Bias::Before)? else {
             return Ok(None);
         };
@@ -1116,6 +1247,11 @@ pub enum FrameShapeError {
     LayoutWidth {
         frame: u32,
         layout: u32,
+    },
+    /// The frame's cells and its coordinates disagree about how wide a row is.
+    HorizontalWidth {
+        frame: u32,
+        window: u32,
     },
     GridRowsBeyondPresentation {
         grid_rows: u32,
@@ -1168,6 +1304,10 @@ impl fmt::Display for FrameShapeError {
                     "frame width is {frame} cells, layout width is {layout}"
                 )
             }
+            Self::HorizontalWidth { frame, window } => write!(
+                formatter,
+                "frame width is {frame} cells, its horizontal window is {window} columns wide"
+            ),
             Self::GridRowsBeyondPresentation {
                 grid_rows,
                 presentation_rows,
@@ -1227,6 +1367,8 @@ struct VisualRow {
     anchors: Vec<CellAnchor>,
     /// Whether this row soft-wraps into the next. See [`FrameVisualRow::continues`].
     continues: bool,
+    /// What this row's source says outside the window. See [`RowSourceEnds`].
+    source_ends: Option<RowSourceEnds>,
 }
 
 /// The single projection-time source of truth for one rectangular presentation row. Flattened
@@ -1274,6 +1416,7 @@ fn flatten_presented_rows(
             height_subpixels: row.height_subpixels,
             live_grid_row: row.live_grid_row,
             continues: row.visual.continues,
+            source_ends: row.visual.source_ends,
         });
         next_top = next_top.saturating_add(row.height_subpixels);
         cells.extend(row.visual.cells);
@@ -1472,7 +1615,55 @@ pub struct ViewportProjection {
     /// The paths this pane drew and could not answer for, gathered so that whoever owns a worker
     /// can go and look. Bounded, because a full-screen program can print new names forever.
     printed_path_probes: BTreeSet<PathBuf>,
+    /// Where this pane's horizontal window sits along its content, as a **request**.
+    ///
+    /// A request and not the axis, because an origin only becomes legal in the company of an extent
+    /// and a width, and both of those move without anybody asking: history is evicted, a pane is
+    /// dragged wider. So this is what the reader last asked for and [`Self::horizontal`] is what
+    /// they get, clamped in the same step that learns the other two numbers (plan §5.3 clause 5).
+    /// Keeping the request rather than the clamped answer is what lets a window that came home
+    /// because history shrank go back out again when the wide line returns.
+    requested_x_origin: ContentColumn,
+    /// The presentable width of every addressable logical line this pane can reach, as a multiset
+    /// so that the widest of them can be **withdrawn** (plan §5.3).
+    ///
+    /// Maintained in `project`, in lock-step with `ordered_ids` and `visual_rows` and by the same
+    /// two roads they take: a line appended is a width admitted, and a rebuild is a rebuild. That
+    /// is the pairing plan §5.3 clause 3 asks for, and it is structural rather than remembered —
+    /// there is no road that adds a line here without adding its width, because it is the same
+    /// `push`.
+    ///
+    /// **Staging and the live grid are deliberately absent**, and it costs nothing that they are:
+    /// both are physical rows of exactly `layout_key.width_cells` cells, so neither can be wider
+    /// than the window, and `HorizontalProjection::new` already floors the extent at the window's
+    /// own width. They are in the domain; they are never its maximum.
+    extent: FlattenedExtent,
+    /// The per-line column indexes this pane is holding (plan §5.2). Derived, budgeted, and
+    /// released when a line leaves or its generation moves.
+    horizontal_index: HorizontalIndexStore,
+    /// Every frozen logical line's inference this pane is holding (plan §5.6 clause 1).
+    ///
+    /// **The clause has two halves and this is the second.** Inference reads the whole logical
+    /// line — always, because reading a window resolves `…> https://support.cla` to a host
+    /// somebody else owns — so it is O(line length), and a continuous horizontal scroll must not
+    /// pay that on every frame. Both of its inputs have events: a line's content is sealed and
+    /// leaves with its id, and the printed-path ledger clears the lot when a worker answers.
+    ///
+    /// `Arc` because a frame hands the same list to the materializer without copying the strings
+    /// in it, and because the entry has to survive the borrow the materializer takes.
+    inference: HashMap<LineKey, Arc<Vec<InferredLink>>>,
 }
+
+/// How many logical lines' inference one pane will remember.
+///
+/// A ceiling and not a target: what a pane actually needs is one entry per row it draws, and this
+/// is three orders of magnitude above that, so it is reached only by a reader who has scrolled
+/// through thousands of lines without the ledger once moving. It is spent whole when it is reached,
+/// because there is nothing here worth the bookkeeping of a recency order: every entry is
+/// reconstructible from the line it names, and the only cost of losing one is the line's own length,
+/// once. `HorizontalIndexStore`'s budget is the same shape and the same promise — never a wrong
+/// answer, only a slower one.
+const MAX_INFERRED_LINES: usize = 4096;
 
 /// How many unanswered printed paths one projection will remember between drains.
 ///
@@ -1577,7 +1768,62 @@ impl ViewportProjection {
             projection_dirty: true,
             printed_path_links: PrintedPathLinks::default(),
             printed_path_probes: BTreeSet::new(),
+            requested_x_origin: ContentColumn(0),
+            extent: FlattenedExtent::new(),
+            horizontal_index: HorizontalIndexStore::default(),
+            inference: HashMap::new(),
         }
+    }
+
+    /// The horizontal axis this pane publishes: the retained extent, this pane's width, and the
+    /// reader's origin clamped into the two.
+    ///
+    /// Built here on every ask rather than stored, which is plan §5.3 clause 5 made structural: an
+    /// origin cannot survive a change to either of the numbers that bound it, because it is never
+    /// separated from them for long enough to.
+    /// **A wrapping pane has nothing outside its window**, and that is not a shortcut — wrapping is
+    /// precisely the choice to fold every line into the pane's width, so the retained extent of a
+    /// wrapping pane *is* its width and zero is its only legal origin. The axis is still built and
+    /// still published, because one pane's coordinates must not be a different kind of thing from
+    /// another's.
+    #[must_use]
+    pub fn horizontal(&self) -> HorizontalProjection {
+        let widest = if self.layout_key.line_wrapping {
+            ContentColumn(0)
+        } else {
+            self.extent.widest()
+        };
+        HorizontalProjection::new(
+            widest,
+            self.layout_key.width_cells.get(),
+            self.requested_x_origin,
+        )
+    }
+
+    /// Ask for a horizontal origin. What is granted is [`Self::horizontal`]'s clamp of it.
+    ///
+    /// There is no gesture behind this yet — the active gestures, the bar and the switch that shows
+    /// them are plan §1c and belong to the level after this one. It is here because the axis has to
+    /// be reachable to be tested and measured, in the same way `scroll_by_rows` existed before
+    /// anything dragged a scrollbar.
+    pub fn set_horizontal_origin(&mut self, origin: ContentColumn) {
+        self.requested_x_origin = origin;
+    }
+
+    /// What the widest addressable logical line in this pane presents.
+    #[must_use]
+    pub fn flattened_extent(&self) -> &FlattenedExtent {
+        &self.extent
+    }
+
+    /// How many line indexes this pane holds, what they cost, and how many were declined.
+    #[must_use]
+    pub fn horizontal_index_stats(&self) -> (usize, usize, (u64, u64)) {
+        (
+            self.horizontal_index.len(),
+            self.horizontal_index.resident_bytes(),
+            self.horizontal_index.build_counts(),
+        )
     }
 
     /// Tell this pane where relative text is measured from and which printed paths are real
@@ -1587,6 +1833,11 @@ impl ViewportProjection {
         if &self.printed_path_links != links {
             self.printed_path_links = links.clone();
             self.projection_dirty = true;
+            // The ledger is half of what inference is a function of, so a verdict landing retires
+            // every cached answer (plan §5.6 clause 3: the probe's own effect follows "once per
+            // line", and a path that has just become real has to light on the next frame rather
+            // than after another round trip).
+            self.inference.clear();
         }
     }
 
@@ -1844,6 +2095,7 @@ impl ViewportProjection {
                 overscan_rows: FRAME_OVERSCAN_ROWS,
             })?;
         let presentation_rows = presentation_row_count.get() as usize;
+        let axis = self.horizontal();
         let mut presented = Vec::with_capacity(presentation_rows);
         let implicit = implicit_hyperlinks(
             &rows.iter().collect::<Vec<_>>(),
@@ -1864,6 +2116,7 @@ impl ViewportProjection {
                 row,
                 expected_columns,
                 &implicit[row_index],
+                &axis,
                 |column, bias| ContentAnchor::Live {
                     screen: ScreenId::Primary,
                     point: GridPoint {
@@ -1882,14 +2135,16 @@ impl ViewportProjection {
         }
         let last_grid_row = self.live_rows.get().saturating_sub(1);
         presented.push(PresentedRow {
-            visual: blank_visual_row(expected_columns, |column, bias| ContentAnchor::Live {
-                screen: ScreenId::Primary,
-                point: GridPoint {
-                    row: last_grid_row,
-                    column: column as u32,
-                },
-                bias,
-                generation: self.grid_generation,
+            visual: blank_visual_row(expected_columns, &axis, |column, bias| {
+                ContentAnchor::Live {
+                    screen: ScreenId::Primary,
+                    point: GridPoint {
+                        row: last_grid_row,
+                        column: column as u32,
+                    },
+                    bias,
+                    generation: self.grid_generation,
+                }
             }),
             height_subpixels: self.cell_height_subpixels.get(),
             live_grid_row: None,
@@ -1899,13 +2154,20 @@ impl ViewportProjection {
             cell_anchors,
             row_map,
         } = flatten_presented_rows(presented, expected_columns, 0)?;
+        let drawn_cursor_column = axis.to_viewport(ContentColumn(cursor.column));
         let frame = ViewportFrame {
             columns,
+            horizontal: axis,
             grid_rows: self.live_rows,
             rows: presentation_row_count,
             presentation_offset_subpixels: 0,
             cells,
-            cursor,
+            // The caret in the coordinates this frame draws in — see `ViewportFrame::cursor`.
+            cursor: GridCursor {
+                column: drawn_cursor_column.map_or(0, |column| column.0),
+                visible: cursor.visible && drawn_cursor_column.is_some(),
+                ..cursor
+            },
             cell_anchors,
             row_map,
             selection_spans: Vec::new(),
@@ -1977,6 +2239,9 @@ impl ViewportProjection {
             }
         }
 
+        // One axis for the whole frame, read once and handed to every plane, so that no plane can
+        // quietly answer at a different origin from its neighbour (plan §5.1 clause 4).
+        let axis = self.horizontal();
         let primary = screen == ScreenId::Primary;
         // Bare-URL recognition reads whole logical lines (see [`implicit_hyperlinks`]), and one
         // logical line can begin in staging and finish on the live grid, so the two planes are
@@ -2387,7 +2652,7 @@ impl ViewportProjection {
                         (
                             (0..line_rows)
                                 .map(|_| {
-                                    blank_visual_row(column_count, |_, bias| {
+                                    blank_visual_row(column_count, &axis, |_, bias| {
                                         ContentAnchor::History {
                                             id: *id,
                                             offset: if bias == Bias::Before {
@@ -2404,14 +2669,54 @@ impl ViewportProjection {
                             row_heights,
                         )
                     } else {
-                        let mut rows = layout_frozen_line(
-                            &entry.line,
-                            column_count,
-                            Some(&mut PrintedPathPass {
-                                links: &self.printed_path_links,
-                                probes: &mut frozen_path_probes,
-                            }),
-                        );
+                        let window = (!self.layout_key.line_wrapping).then(|| FrozenWindow {
+                            axis,
+                            // The one place the per-line index earns its keep: the window's first
+                            // cell is found without walking the columns before it (plan §5.2).
+                            from: self.horizontal_index.seek(
+                                LineKey::History(*id, entry.line.source_generation),
+                                &entry.line.text,
+                                axis.x_origin(),
+                            ),
+                        });
+                        // Once per line and not once per frame (plan §5.6 clause 1). The miss is
+                        // where the whole logical line is read and where its unanswered paths are
+                        // reported, so both of those happen exactly as often as the clause says.
+                        let inference_key = LineKey::History(*id, entry.line.source_generation);
+                        let implicit_links = match self.inference.get(&inference_key) {
+                            Some(cached) => Arc::clone(cached),
+                            None => {
+                                let inferred = Arc::new(infer_links_for(
+                                    &entry.line,
+                                    Some(&mut PrintedPathPass {
+                                        links: &self.printed_path_links,
+                                        probes: &mut frozen_path_probes,
+                                    }),
+                                ));
+                                // A line read while the question budget was full may have had a
+                                // name of its own dropped, and the frame it is owed
+                                // (`printed_path_probes_filled_budget`) has to find it unanswered
+                                // rather than remembered. Every other line is kept.
+                                if frozen_path_probes.len() < MAX_PRINTED_PATH_PROBES {
+                                    if self.inference.len() >= MAX_INFERRED_LINES {
+                                        self.inference.clear();
+                                    }
+                                    self.inference.insert(inference_key, Arc::clone(&inferred));
+                                }
+                                inferred
+                            }
+                        };
+                        let mut rows =
+                            layout_frozen_line(&entry.line, column_count, &implicit_links, window);
+                        if window.is_some()
+                            && let Some(row) = rows.first_mut()
+                        {
+                            row.source_ends = frozen_row_source_ends(
+                                &mut self.horizontal_index,
+                                &entry.line,
+                                &axis,
+                            );
+                        }
                         let source_rows = rows.len();
                         let mut heights = vec![self.cell_height_subpixels.get(); source_rows];
                         let path_artifacts = self
@@ -2431,11 +2736,13 @@ impl ViewportProjection {
                             let max_offset =
                                 entry.line.grapheme_boundaries.len().saturating_sub(1) as u32;
                             rows.extend((0..artifact_rows).map(|_| {
-                                blank_visual_row(column_count, |_, bias| ContentAnchor::History {
-                                    id: *id,
-                                    offset: GraphemeOffset(max_offset),
-                                    bias,
-                                    generation: entry.line.source_generation,
+                                blank_visual_row(column_count, &axis, |_, bias| {
+                                    ContentAnchor::History {
+                                        id: *id,
+                                        offset: GraphemeOffset(max_offset),
+                                        bias,
+                                        generation: entry.line.source_generation,
+                                    }
                                 })
                             }));
                             heights.extend(distributed_row_heights(
@@ -2526,6 +2833,7 @@ impl ViewportProjection {
                     column_count,
                     &implicit[first + offset],
                     self.source_generation,
+                    &axis,
                 );
                 validate_visual_row(&row, column_count, "staging", first + offset)?;
                 presented.push(PresentedRow {
@@ -2553,6 +2861,7 @@ impl ViewportProjection {
                                 row,
                                 column_count,
                                 &implicit[implicit_live_base + live_row],
+                                &axis,
                                 |column, bias| ContentAnchor::Live {
                                     screen,
                                     point: GridPoint {
@@ -2772,7 +3081,7 @@ impl ViewportProjection {
         let last_grid_row = self.live_rows.get().saturating_sub(1);
         while presented.len() < presentation_rows {
             presented.push(PresentedRow {
-                visual: blank_visual_row(column_count, |column, bias| ContentAnchor::Live {
+                visual: blank_visual_row(column_count, &axis, |column, bias| ContentAnchor::Live {
                     screen,
                     point: GridPoint {
                         row: last_grid_row,
@@ -2893,6 +3202,10 @@ impl ViewportProjection {
                     && cursor.row <= end.row
             )
         });
+        // The caret's own column, put through the window it is drawn in. A caret standing on a grid
+        // column the window does not show is exactly as undrawable as one standing on a row the
+        // frame does not carry, and says so the same way (plan §5.5).
+        let projected_cursor_column = axis.to_viewport(ContentColumn(cursor.column));
         debug_assert_eq!(
             cells.len(),
             cell_anchors.len(),
@@ -2900,14 +3213,21 @@ impl ViewportProjection {
         );
         let frame = ViewportFrame {
             columns,
+            horizontal: axis,
             grid_rows: self.live_rows,
             rows: presentation_row_count,
             presentation_offset_subpixels,
             cells,
             cursor: GridCursor {
                 row: projected_cursor_row.unwrap_or(cursor.row),
-                visible: cursor.visible && projected_cursor_row.is_some() && !cursor_hidden_by_math,
-                ..cursor
+                // Zero and not the grid column it could not be converted from: an invisible caret
+                // still has to name a cell inside the rectangle, and a content column in a viewport
+                // field is the confusion this whole axis exists to end.
+                column: projected_cursor_column.map_or(0, |column| column.0),
+                visible: cursor.visible
+                    && projected_cursor_row.is_some()
+                    && projected_cursor_column.is_some()
+                    && !cursor_hidden_by_math,
             },
             cell_anchors,
             row_map,
@@ -2968,6 +3288,30 @@ impl ViewportProjection {
         }
     }
 
+    /// How this pane reads one line for a **vertical** question: how many rows it takes, and which
+    /// line a row belongs to.
+    ///
+    /// Whether lines wrap decides that — it is the whole of the row count. Where the horizontal
+    /// window sits does not: a flattened line is one row at every origin, and that row's first
+    /// grapheme is the line's first grapheme wherever the reader has scrolled sideways to. So the
+    /// vertical questions are asked at the line's left edge.
+    ///
+    /// **Not a plane pinned at zero** (plan §5.1 clause 4 is about what is drawn, and nothing here
+    /// is drawn): it is a scroll anchor and a row count, and making either of them move with the
+    /// horizontal origin would be the bug, not the fix. It is also what keeps a vertical answer
+    /// from costing the origin's worth of clusters on every frame — a resume from the line's start
+    /// to column zero is free, and a resume to column fifty thousand is not (plan §1b).
+    fn vertical_reading(&self) -> Option<FrozenWindow> {
+        (!self.layout_key.line_wrapping).then(|| FrozenWindow {
+            axis: HorizontalProjection::unscrolled(self.layout_key.width_cells.get()),
+            from: ColumnSeek {
+                column: ContentColumn(0),
+                byte: 0,
+                grapheme: 0,
+            },
+        })
+    }
+
     fn history_row_heights(&self, document: &HistoryDocument, index: usize) -> Option<Vec<i64>> {
         let id = *self.ordered_ids.get(index)?;
         if let Some(artifact) = self.math_artifacts.get(&id) {
@@ -2977,10 +3321,14 @@ impl ViewportProjection {
             ));
         }
         let entry = document.entries().get(&id)?;
+        // No links: this caller wants a row count, and an inferred link never changes one. Asking
+        // the ledger here would run the path lexer once per line of a hundred-thousand-line
+        // transcript to produce an answer nobody reads.
         let source_rows = layout_frozen_line(
             &entry.line,
             self.layout_key.width_cells.get() as usize,
-            None,
+            &[],
+            self.vertical_reading(),
         )
         .len();
         let mut heights = vec![self.cell_height_subpixels.get(); source_rows];
@@ -3153,10 +3501,13 @@ impl ViewportProjection {
                     local_offset: absolute_y.saturating_sub(line_top),
                 });
             }
+            // No links, for [`Self::history_row_heights`]'s reason: what is wanted here is which
+            // row an offset lands on, and a link never moves one.
             let source_rows = layout_frozen_line(
                 &entry.line,
                 self.layout_key.width_cells.get() as usize,
-                None,
+                &[],
+                self.vertical_reading(),
             );
             let local_row =
                 absolute_row.saturating_sub(self.visual_row_heights.prefix_sum(index) as usize);
@@ -3516,6 +3867,13 @@ impl ViewportProjection {
             self.live_overflow_offset_subpixels = 0;
             self.last_live_overflow_subpixels = 0;
         }
+        if self.source_generation != source_generation {
+            // The generation event plan §5.2's lifetime rule turns on: staging was invalidated, so
+            // every index built against what a staged row used to say is an answer about a line
+            // that no longer exists. Releasing them costs a walk of a small map and can only make
+            // a later seek slower, never wrong.
+            self.horizontal_index.retain_generation(source_generation);
+        }
         self.live_rows = live_rows;
         self.source_generation = source_generation;
         self.grid_generation = grid_generation;
@@ -3546,14 +3904,38 @@ impl ViewportProjection {
             0
         };
         if !append_only {
+            // Plan §5.2's lifetime rule, and the reason it is a diff rather than a `clear`: a
+            // rebuild is not always a deletion — a settings change or a formula swallowing its
+            // source rows takes this road too — and an index about a line still on screen is worth
+            // more than the microsecond it costs to keep. Both lists are in ascending id order, so
+            // one merge finds everything that left.
+            let mut surviving = next_ids.iter().copied().peekable();
+            for id in &self.ordered_ids {
+                while surviving.peek().is_some_and(|next| next < id) {
+                    surviving.next();
+                }
+                if surviving.peek() == Some(id) {
+                    surviving.next();
+                } else {
+                    self.horizontal_index.release_history(*id);
+                    self.inference
+                        .retain(|key, _| !matches!(key, LineKey::History(line, _) if line == id));
+                }
+            }
+            // The extent is cleared with the row counts it stands beside and refilled by the same
+            // loop below, so admitting a width and withdrawing one are the one `push` rather than
+            // two rules that have to be kept in step (plan §5.3 clause 3). A line evicted or
+            // tombstoned is a line missing from `next_ids`, which is a rebuild — this road.
             self.ordered_ids.clear();
             self.visual_rows.clear();
             self.visual_row_heights.rebuild([]);
             self.heights.rebuild([]);
+            self.extent.clear();
         }
         for id in next_ids.iter().skip(start) {
             let entry = &document.entries()[id];
             self.ordered_ids.push(*id);
+            self.extent.insert(presentable_end_column(&entry.line.text));
             let cache_key = LayoutCacheKey {
                 span: TranscriptSpan {
                     start: *id,
@@ -3584,6 +3966,7 @@ impl ViewportProjection {
                         let source_visual_lines = frozen_visual_line_count(
                             &entry.line.text,
                             self.layout_key.width_cells.get() as usize,
+                            self.layout_key.line_wrapping,
                         ) as u32;
                         let (image_visual_lines, image_height) = self
                             .inline_path_artifacts
@@ -3758,17 +4141,67 @@ fn endpoint(anchor: &ContentAnchor, bias: Bias) -> ContentAnchor {
     anchor
 }
 
-fn blank_visual_row(columns: usize, anchor: impl Fn(usize, Bias) -> ContentAnchor) -> VisualRow {
+/// A row of nothing, `columns` of the source's own columns wide, read through the window.
+///
+/// The anchor closure is handed **content** columns, because that is what the callers' closures
+/// mean by one: a live overscan row names grid columns and a picture's placeholder rows name one
+/// logical line's two ends. The window is applied afterwards, exactly as it is for a row with ink
+/// in it.
+fn blank_visual_row(
+    columns: usize,
+    axis: &HorizontalProjection,
+    anchor: impl Fn(usize, Bias) -> ContentAnchor,
+) -> VisualRow {
+    let mut cells = vec![CapturedCell::default(); columns];
+    let mut anchors = (0..columns)
+        .map(|column| CellAnchor {
+            start: anchor(column, Bias::Before),
+            end: anchor(column, Bias::After),
+        })
+        .collect();
+    window_physical_row(&mut cells, &mut anchors, axis);
     VisualRow {
         // Padding below the last real row, which continues into nothing.
         continues: false,
-        cells: vec![CapturedCell::default(); columns],
-        anchors: (0..columns)
-            .map(|column| CellAnchor {
-                start: anchor(column, Bias::Before),
-                end: anchor(column, Bias::After),
-            })
-            .collect(),
+        // A blank row is as wide as its source, so the window holds all of it.
+        source_ends: None,
+        cells,
+        anchors,
+    }
+}
+
+/// Cut one **physical** row down to the columns the horizontal window holds.
+///
+/// A captured row — live or staged — is exactly as wide as the grid it came off, and the window is
+/// exactly as wide as the pane, so at the origin every pane has today this moves nothing, drops
+/// nothing and allocates nothing: the row is already its own window.
+///
+/// Past the grid's last column there is no live plane at all, and blank is what "no cell here" has
+/// always looked like. It carries the row's last anchor, the same closure `pad_frozen_row` gives a
+/// short frozen row.
+///
+/// **What this must never do is leave the physical planes at origin zero while the frozen plane
+/// moves** (plan §5.1 clause 4). One pointer position would then name two different columns
+/// depending on which plane it landed in, and copy, selection and hit-testing would each have to
+/// choose one of the two.
+fn window_physical_row(
+    cells: &mut Vec<CapturedCell>,
+    anchors: &mut Vec<CellAnchor>,
+    axis: &HorizontalProjection,
+) {
+    let Some(tail) = anchors.last().cloned() else {
+        // A row with no columns has no window to be cut to.
+        return;
+    };
+    let width = axis.viewport_columns() as usize;
+    let origin = (axis.x_origin().0 as usize).min(cells.len().min(anchors.len()));
+    cells.drain(..origin);
+    anchors.drain(..origin);
+    cells.truncate(width);
+    anchors.truncate(width);
+    while cells.len() < width {
+        cells.push(CapturedCell::default());
+        anchors.push(tail.clone());
     }
 }
 
@@ -3788,10 +4221,17 @@ fn captured_row_is_blank(row: &CapturedRow) -> bool {
         .all(|cell| cell.text.chars().all(char::is_whitespace))
 }
 
+/// One live grid row, marked up and then read through the pane's horizontal window.
+///
+/// Everything above the window is done in the row's **own** columns — the anchors, the OSC 8 dots,
+/// the inferred links, all of which are indexed by grid column — and the window is applied last.
+/// Doing it the other way round would index a link ledger built for the grid with a column number
+/// that means something else.
 fn captured_visual_row(
     row: CapturedRow,
     columns: usize,
     implicit: &[ImplicitCellLink],
+    axis: &HorizontalProjection,
     anchor: impl Fn(usize, Bias) -> ContentAnchor,
 ) -> VisualRow {
     let continues = row.continues;
@@ -3809,10 +4249,14 @@ fn captured_visual_row(
     }
     mark_osc_8_dotted(&mut cells);
     apply_implicit_hyperlinks(&mut cells, implicit);
+    window_physical_row(&mut cells, &mut anchors, axis);
     VisualRow {
         cells,
         anchors,
         continues,
+        // A live grid row is a physical row and is never wider than the grid it is on, so nothing
+        // of it stands outside the window that a window could be missing (plan §5.1 case A).
+        source_ends: None,
     }
 }
 
@@ -3821,6 +4265,7 @@ fn captured_staged_visual_row(
     columns: usize,
     implicit: &[ImplicitCellLink],
     generation: SourceGeneration,
+    axis: &HorizontalProjection,
 ) -> VisualRow {
     let mut anchors = Vec::with_capacity(columns);
     let mut grapheme_offset = 0u32;
@@ -3844,10 +4289,14 @@ fn captured_staged_visual_row(
     let mut cells = staged.row.cells.clone();
     mark_osc_8_dotted(&mut cells);
     apply_implicit_hyperlinks(&mut cells, implicit);
+    window_physical_row(&mut cells, &mut anchors, axis);
     VisualRow {
         cells,
         anchors,
         continues: staged.row.continues,
+        // A staged row is a captured physical row, so it is exactly as wide as the grid it came
+        // off — it is in the flattened domain (plan §5.1) and can never be its widest member.
+        source_ends: None,
     }
 }
 
@@ -3884,6 +4333,7 @@ struct ImplicitCellLink {
 /// same string: the reader sees `D:\src\a.md` and the link points at `file:///D:/src/a.md`. That is
 /// exactly the relationship an OSC 8 `file:` link has between its label and its target, which is why
 /// [`ViewportFrame::rejoined_across_break`] can already read it.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InferredLink {
     pub range: HyperlinkRange,
     pub uri: String,
@@ -4213,28 +4663,43 @@ fn percent_decoded(component: &str) -> Option<String> {
 ///
 /// An offset at or past the end of the line reports the column just past the last cell, which is
 /// exactly where `pad_frozen_row` closes the final row.
-pub fn frozen_line_screen_column(line: &FrozenLine, offset: u32, columns: usize) -> u32 {
+///
+/// # When lines are flattened there is no wrap to replay
+///
+/// The answer is then the offset's column along the whole logical line and nothing is folded back
+/// to zero, which is why what comes back is a [`ContentColumn`]: it is a place in the line, and only
+/// the pane's [`HorizontalProjection`] can turn it into a place on screen (plan §5.5).
+pub fn frozen_line_screen_column(
+    line: &FrozenLine,
+    offset: u32,
+    columns: usize,
+    line_wrapping: bool,
+) -> ContentColumn {
     let mut used = 0usize;
     let mut last_cell_column = 0usize;
     for (index, cluster) in graphemes(&line.text).enumerate() {
         let at_offset = index as u32 == offset;
-        let width = cluster_width(cluster).min(columns);
+        let width = if line_wrapping {
+            cluster_width(cluster).min(columns)
+        } else {
+            cluster_width(cluster)
+        };
         if width == 0 {
             if at_offset {
-                return last_cell_column as u32;
+                return ContentColumn(last_cell_column as u32);
             }
             continue;
         }
-        if used != 0 && used + width > columns {
+        if line_wrapping && used != 0 && used + width > columns {
             used = 0;
         }
         if at_offset {
-            return used as u32;
+            return ContentColumn(used as u32);
         }
         last_cell_column = used;
         used += width;
     }
-    used as u32
+    ContentColumn(used as u32)
 }
 
 /// The screen column at which the grapheme `offset` of one staged physical row sits.
@@ -4242,21 +4707,34 @@ pub fn frozen_line_screen_column(line: &FrozenLine, offset: u32, columns: usize)
 /// A `Staging` anchor's offset counts the row's inked cells, so wide-character spacers make it
 /// differ from the column even though a staged row never wraps. This walks the row's cells exactly
 /// as `captured_staged_visual_row` assigns their anchors, so the two always agree.
-pub fn staged_row_screen_column(staged: &StagedRow, offset: u32) -> u32 {
+///
+/// A [`ContentColumn`] like [`frozen_line_screen_column`]'s, and for the same reason: a staged row
+/// is a captured grid row, so its columns are the grid's own and a window along them still has to
+/// be applied before this is a place on screen.
+pub fn staged_row_screen_column(staged: &StagedRow, offset: u32) -> ContentColumn {
     let mut grapheme_offset = 0u32;
     for (column, cell) in staged.row.cells.iter().enumerate() {
         if cell.wide_spacer {
             continue;
         }
         if grapheme_offset == offset {
-            return column as u32;
+            return ContentColumn(column as u32);
         }
         grapheme_offset += u32::from(!cell.text.is_empty());
     }
-    staged.row.cells.len() as u32
+    ContentColumn(staged.row.cells.len() as u32)
 }
 
-fn frozen_visual_line_count(text: &str, columns: usize) -> usize {
+/// How many presentation rows one frozen logical line takes.
+///
+/// **One, when lines are flattened** — that is what flattening is, and it is why plan §5.6 clause 4
+/// calls this function's whole reason for existing a casualty of the level rather than an obstacle
+/// to it. The wrap arithmetic below is the same greedy walk `layout_frozen_line` performs and has
+/// to keep agreeing with it cluster for cluster.
+fn frozen_visual_line_count(text: &str, columns: usize, line_wrapping: bool) -> usize {
+    if !line_wrapping {
+        return 1;
+    }
     let mut rows = 1usize;
     let mut used = 0usize;
     for cluster in graphemes(text) {
@@ -4273,31 +4751,19 @@ fn frozen_visual_line_count(text: &str, columns: usize) -> usize {
     rows
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum WordClass {
-    Space,
-    Delimiter,
-    Word,
-}
-
+/// One laid-out cell's word class.
+///
+/// A wide glyph's spacer is [`WordClass::Word`] wherever it stands: a word boundary can never fall
+/// inside a cluster, so the column that belongs to the glyph belongs to whatever the glyph belongs
+/// to. Everything else is [`horizontal::cluster_word_class`] applied to the cell's own text, which
+/// is the same rule the flattened axis reads a line's columns by — one rule, spoken in the two
+/// coordinate systems, so a double click selects the same run whether it is inside the window or
+/// crosses its edge.
 fn word_class(cell: &CapturedCell) -> WordClass {
     if cell.wide_spacer {
         return WordClass::Word;
     }
-    if cell.text.is_empty() || cell.text.chars().all(char::is_whitespace) {
-        return WordClass::Space;
-    }
-    // Stable xterm-style shell delimiters. Configuration belongs to the later settings slice.
-    const DELIMITERS: &str = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
-    if cell
-        .text
-        .chars()
-        .all(|character| DELIMITERS.contains(character))
-    {
-        WordClass::Delimiter
-    } else {
-        WordClass::Word
-    }
+    horizontal::cluster_word_class(cell.text.as_str())
 }
 
 /// The last visual cell of a frozen line's **final** fragment, when that fragment exactly fills
@@ -4358,15 +4824,44 @@ fn frozen_line_end_cell(line: &FrozenLine) -> Option<LineEndCell> {
         .flatten()
 }
 
-fn layout_frozen_line(
+/// How a flattened frozen line is being read this frame: the axis it is windowed through, and a
+/// resume point at or before the window's first column.
+///
+/// The resume point is the caller's because locating it is what the per-line column index is for,
+/// and the index belongs to the projection (plan §5.2). A caller with no index in hand passes the
+/// line's own start, which costs the origin's worth of clusters and cannot change the answer —
+/// every checkpoint is a legal resume point and so is the origin.
+#[derive(Clone, Copy, Debug)]
+struct FrozenWindow {
+    axis: HorizontalProjection,
+    from: ColumnSeek,
+}
+
+/// Lay one frozen logical line out as the presentation rows it takes.
+///
+/// `window` is the choice plan §5.7 puts behind `LayoutKey::line_wrapping`: `None` wraps the line
+/// at the pane's width into as many rows as it needs, and `Some` flattens it onto **one** row and
+/// materializes the columns that row's window holds — and only those, which is §1b's budget.
+///
+/// # The red line runs through here (plan §5.6)
+///
+/// Link and path inference read the **whole** logical line either way, before a single cell exists.
+/// A window that inferred from the cells it kept would read `…> https://support.cla` as a real host
+/// somebody else owns and send a click there; that was the live plane's bug until 2026-08-20 and a
+/// horizontal window is the identical cut.
+/// One frozen logical line's inferred references — bare URLs and printed paths — over the **whole**
+/// line, minus everything an explicit OSC 8 span already owns.
+///
+/// **Always the whole line, and never once per frame** (plan §5.6 clause 1). Reading a window would
+/// resolve `…> https://support.cla` to a real host somebody else owns; reading the line again on
+/// every frame of a horizontal scroll would make a hundred-thousand-column line cost its own length
+/// sixty times a second. Those are the two halves of the same clause, and `ViewportProjection`'s
+/// inference cache is the second half — this function is where the first half is paid.
+fn infer_links_for(
     line: &FrozenLine,
-    columns: usize,
     paths: Option<&mut PrintedPathPass<'_>>,
-) -> Vec<VisualRow> {
-    // `None` is a caller that only wants to know how many rows this line takes, and an inferred
-    // link never changes that. Asking the ledger there would run the path lexer once per line of a
-    // hundred-thousand-line transcript to produce an answer nobody reads.
-    let implicit_links = inferred_links_in(&line.text, frozen_line_end_cell(line), paths)
+) -> Vec<InferredLink> {
+    inferred_links_in(&line.text, frozen_line_end_cell(line), paths)
         .into_iter()
         .filter(|inferred| {
             !line.styles.iter().any(|span| {
@@ -4375,7 +4870,28 @@ fn layout_frozen_line(
                     && inferred.range.byte_start < span.byte_end as usize
             })
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn layout_frozen_line(
+    line: &FrozenLine,
+    columns: usize,
+    implicit_links: &[InferredLink],
+    window: Option<FrozenWindow>,
+) -> Vec<VisualRow> {
+    if let Some(window) = window {
+        let materialized =
+            horizontal::window_flattened_line(line, implicit_links, &window.axis, window.from);
+        return vec![VisualRow {
+            cells: materialized.cells,
+            anchors: materialized.anchors,
+            // A flattened logical line is one row, so it wraps into nothing: whatever is drawn
+            // under it is the next logical line. Every rule that reads `continues` — a link
+            // rejoined across a soft wrap above all — is therefore told the truth by construction.
+            continues: false,
+            source_ends: None,
+        }];
+    }
     // Every row this produces but the last is a soft wrap **by construction**:
     // one frozen logical line is being cut into as many rows as it takes, and the
     // cut is the wrap. The last is fixed up once the count is known.
@@ -4383,6 +4899,7 @@ fn layout_frozen_line(
         cells: Vec::with_capacity(columns),
         anchors: Vec::with_capacity(columns),
         continues: true,
+        source_ends: None,
     }];
     // Byte queries arrive in ascending order, one per cluster, so the span list is walked once
     // per line instead of once per cell of it.
@@ -4404,6 +4921,7 @@ fn layout_frozen_line(
                 cells: Vec::with_capacity(columns),
                 anchors: Vec::with_capacity(columns),
                 continues: true,
+                source_ends: None,
             });
         }
         let byte_start = line.grapheme_boundaries[grapheme_index];
@@ -4417,7 +4935,7 @@ fn layout_frozen_line(
             }
         }
         if cell.hyperlink.is_none()
-            && let Some(inferred) = implicit_link_at(&implicit_links, byte_start as usize)
+            && let Some(inferred) = implicit_link_at(implicit_links, byte_start as usize)
         {
             cell.hyperlink = Some(CellHyperlink::implicit(inferred.uri.clone()));
             if inferred.resting_dotted && !cell.style.flags.contains(CellFlags::UNDERLINE) {
@@ -4466,6 +4984,58 @@ fn layout_frozen_line(
     // under it is the next logical line.
     last.continues = false;
     rows
+}
+
+/// What one flattened logical line says outside the columns this frame's window kept
+/// (plan §5.5).
+///
+/// `None` when the window holds the whole line — origin at its first column and the pane at least
+/// as wide as it is — because then the row's own cells are its two ends and every selection is the
+/// one a wrapping pane makes. That is the definition of "nothing is cut", not a shortcut past it.
+///
+/// The two run lookups go through the line's column index, so each costs a binary search and a
+/// stride's worth of columns rather than the length of the run (plan §1b). Past the line's last
+/// column there is padding, and padding's anchor is the line's end — the same closure
+/// `pad_frozen_row` stamps on a short row's blanks.
+fn frozen_row_source_ends(
+    index: &mut HorizontalIndexStore,
+    line: &FrozenLine,
+    axis: &HorizontalProjection,
+) -> Option<RowSourceEnds> {
+    let end_offset = GraphemeOffset(line.grapheme_boundaries.len().saturating_sub(1) as u32);
+    let key = LineKey::History(line.id, line.source_generation);
+    // Bytes bound columns from above, so a line this short cannot reach the window's right-hand
+    // edge and there is nothing to ask an index about — which is most lines in most panes, and
+    // the reason an ordinary pane builds no index at all.
+    if axis.x_origin().0 == 0 && line.text.len() as u32 <= axis.viewport_columns() {
+        return None;
+    }
+    if axis.x_origin().0 == 0 && index.columns(key, &line.text).0 <= axis.viewport_columns() {
+        return None;
+    }
+    let last_drawn = ContentColumn(axis.window_end().0.saturating_sub(1));
+    let left = index.word_run(key, &line.text, axis.x_origin());
+    let right = index.word_run(key, &line.text, last_drawn);
+    let cluster_at = |index: &mut HorizontalIndexStore, column: ContentColumn| {
+        GraphemeOffset(index.seek(key, &line.text, column).grapheme)
+    };
+    Some(RowSourceEnds {
+        id: line.id,
+        generation: line.source_generation,
+        line: (GraphemeOffset(0), end_offset),
+        word: (
+            if left.end.0 > left.start.0 {
+                cluster_at(index, left.start)
+            } else {
+                end_offset
+            },
+            if right.end.0 > right.start.0 {
+                cluster_at(index, ContentColumn(right.end.0 - 1))
+            } else {
+                end_offset
+            },
+        ),
+    })
 }
 
 fn implicit_link_at(links: &[InferredLink], byte: usize) -> Option<&InferredLink> {
@@ -4663,6 +5233,15 @@ mod tests {
             theme_rev: 1,
             lang_rev: 0,
             profile_rev: 0,
+            line_wrapping: true,
+        }
+    }
+
+    /// The same key with lines flattened onto one row apiece instead of wrapped.
+    fn flattened_key(width_cells: u32) -> LayoutKey {
+        LayoutKey {
+            line_wrapping: false,
+            ..key(width_cells)
         }
     }
 
@@ -4684,13 +5263,26 @@ mod tests {
 
         // One logical line of 17 graphemes laid out ten columns wide: offsets 0..=9 sit on the
         // first row at their own index, and offsets 10.. restart at column zero on the second.
-        assert_eq!(frozen_line_screen_column(&line, 3, 10), 3);
-        assert_eq!(frozen_line_screen_column(&line, 10, 10), 0);
-        assert_eq!(frozen_line_screen_column(&line, 13, 10), 3);
+        let column = |offset, columns| frozen_line_screen_column(&line, offset, columns, true).0;
+        assert_eq!(column(3, 10), 3);
+        assert_eq!(column(10, 10), 0);
+        assert_eq!(column(13, 10), 3);
         // Past the end is the column just after the last cell, where the row's padding begins.
-        assert_eq!(frozen_line_screen_column(&line, 17, 10), 7);
+        assert_eq!(column(17, 10), 7);
         // Laid out wide enough not to wrap, the same offsets are their own columns again.
-        assert_eq!(frozen_line_screen_column(&line, 13, 40), 13);
+        assert_eq!(column(13, 40), 13);
+
+        // And flattened there is no wrap to replay at any width: the offset's column runs along
+        // the whole logical line, which is what makes it a `ContentColumn` and not a place on
+        // screen (plan §5.5).
+        assert_eq!(
+            frozen_line_screen_column(&line, 13, 10, false),
+            horizontal::ContentColumn(13)
+        );
+        assert_eq!(
+            frozen_line_screen_column(&line, 17, 10, false),
+            horizontal::ContentColumn(17)
+        );
 
         let mut store = TranscriptStore::new(NonZeroUsize::new(8).unwrap());
         let wide = store
@@ -4700,7 +5292,7 @@ mod tests {
             .unwrap()
             .line;
         // Two wide characters occupy four cells, so the fourth grapheme stands at column five.
-        assert_eq!(frozen_line_screen_column(&wide, 3, 40), 5);
+        assert_eq!(frozen_line_screen_column(&wide, 3, 40, true).0, 5);
     }
 
     /// PIN (wrapped-reference geometry, 2026-08-04): a staged row's grapheme offset resolves
@@ -4726,9 +5318,9 @@ mod tests {
                 shell_mark: None,
             },
         };
-        assert_eq!(staged_row_screen_column(&staged, 0), 0);
-        assert_eq!(staged_row_screen_column(&staged, 1), 2);
-        assert_eq!(staged_row_screen_column(&staged, 3), 5);
+        assert_eq!(staged_row_screen_column(&staged, 0).0, 0);
+        assert_eq!(staged_row_screen_column(&staged, 1).0, 2);
+        assert_eq!(staged_row_screen_column(&staged, 3).0, 5);
     }
 
     #[test]
@@ -5133,7 +5725,7 @@ mod tests {
             shell_marks: Vec::new(),
             wrap_split: false,
         };
-        let rows = layout_frozen_line(&line, 8, None);
+        let rows = layout_frozen_line(&line, 8, &infer_links_for(&line, None), None);
         let linked_text = rows
             .iter()
             .flat_map(|row| row.cells.iter())
@@ -5168,7 +5760,7 @@ mod tests {
             wrap_split: false,
         };
 
-        let cells = layout_frozen_line(&line, 80, None)
+        let cells = layout_frozen_line(&line, 80, &infer_links_for(&line, None), None)
             .into_iter()
             .flat_map(|row| row.cells)
             .collect::<Vec<_>>();
@@ -5653,14 +6245,14 @@ mod tests {
         links: &PrintedPathLinks,
     ) -> Vec<String> {
         let mut probes = BTreeSet::new();
-        let rows = layout_frozen_line(
+        let inferred = infer_links_for(
             line,
-            columns,
             Some(&mut PrintedPathPass {
                 links,
                 probes: &mut probes,
             }),
         );
+        let rows = layout_frozen_line(line, columns, &inferred, None);
         let mut targets: Vec<String> = Vec::new();
         for cell in rows.iter().flat_map(|row| row.cells.iter()) {
             if let Some(link) = &cell.hyperlink
@@ -8400,6 +8992,10 @@ mod tests {
                 profile_rev: 0,
                 ..key(8)
             },
+            // The member with the largest claim of the six: it decides how many rows a line is,
+            // so a cached `MeasuredLayout` crossing it would give a viewport a height belonging to
+            // a document that is not on screen (plan §5.7).
+            flattened_key(8),
         ] {
             projection.relayout(base, &document);
             let misses = projection.cache_misses();
@@ -9849,8 +10445,10 @@ mod tests {
 
     #[test]
     fn frozen_wrap_count_respects_cluster_boundaries_instead_of_dividing_total_width() {
-        assert_eq!(frozen_visual_line_count("中中中", 3), 3);
-        assert_eq!(frozen_visual_line_count("a中", 3), 1);
+        assert_eq!(frozen_visual_line_count("中中中", 3, true), 3);
+        assert_eq!(frozen_visual_line_count("a中", 3, true), 1);
+        // And flattened, the same line is one row at any width — plan §5.6 clause 4.
+        assert_eq!(frozen_visual_line_count("中中中", 3, false), 1);
     }
     #[test]
     fn frozen_wide_glyph_spacer_keeps_the_glyph_background() {
@@ -9872,7 +10470,7 @@ mod tests {
             captured_columns: 2,
         });
         let frozen = &result.finalized[0].line;
-        let rows = layout_frozen_line(frozen, 4, None);
+        let rows = layout_frozen_line(frozen, 4, &[], None);
         let spacer = &rows[0].cells[1];
         assert!(spacer.wide_spacer);
         assert_eq!(
@@ -9881,5 +10479,471 @@ mod tests {
             "the spacer column must keep its glyph's background"
         );
         assert!(!spacer.style.flags.contains(CellFlags::WIDE_CHAR));
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Ladder one, level two: the horizontal axis reaches the frame.
+    // `docs/plans/horizontal-scroll/plan.md` §5.5, §5.7.
+    // ------------------------------------------------------------------------------------------
+
+    /// A pane `rows` tall, laid out by `layout`, with `lines` already frozen behind it.
+    fn axis_pane(
+        layout: LayoutKey,
+        rows: u32,
+        lines: &[&str],
+    ) -> (ViewportProjection, HistoryDocument) {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(64).unwrap());
+        let mut document = HistoryDocument::default();
+        for text in lines {
+            for finalized in store.capture(CapturedRow::plain(text, false)).finalized {
+                document.finalize_transaction(finalized);
+            }
+        }
+        let mut projection = ViewportProjection::new(
+            layout,
+            DetectionRevision(1),
+            nz32(rows),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        projection.project(&document);
+        (projection, document)
+    }
+
+    /// One live grid row of `columns` cells, `text` written into its first ones.
+    fn grid_row(text: &str, columns: usize) -> CapturedRow {
+        let mut cells: Vec<CapturedCell> = text.chars().map(CapturedCell::plain).collect();
+        cells.resize(columns, CapturedCell::default());
+        CapturedRow {
+            captured_columns: columns as u32,
+            cells,
+            continues: false,
+            shell_mark: None,
+        }
+    }
+
+    fn axis_frame(
+        projection: &mut ViewportProjection,
+        document: &HistoryDocument,
+        staged: &[StagedRow],
+        live: Vec<CapturedRow>,
+        cursor: GridCursor,
+    ) -> ViewportFrame {
+        projection
+            .continuous_frame(document, staged, live, cursor, ScreenId::Primary)
+            .expect("a rectangular frame")
+    }
+
+    fn cursor_at(column: u32) -> GridCursor {
+        GridCursor {
+            row: 0,
+            column,
+            visible: true,
+        }
+    }
+
+    /// A frame with the frozen plane at the top of the pane.
+    ///
+    /// `wrapped_projection`'s own order and for its reason: at rest a pane sits at the live bottom
+    /// and history is exactly the part above it, so a warm-up frame measures the content, the
+    /// review scroll goes to the top, and the frame under test is the one with history in it.
+    fn axis_frame_from_top(
+        projection: &mut ViewportProjection,
+        document: &HistoryDocument,
+        staged: &[StagedRow],
+        live: Vec<CapturedRow>,
+        cursor: GridCursor,
+    ) -> ViewportFrame {
+        let _ = axis_frame(projection, document, staged, live.clone(), cursor);
+        projection.scroll_to_top();
+        axis_frame(projection, document, staged, live, cursor)
+    }
+
+    /// **The red line of this level, stated as an equality that can actually be checked**
+    /// (plan §5.7): where the two readings must agree, they agree cell for cell.
+    ///
+    /// A logical line no wider than the pane wraps into exactly one row, and flattens into exactly
+    /// one row, and the two rows are the same row — same cells, same anchors, same geometry, same
+    /// caret. So a document made only of such lines is one document under both readings, and this
+    /// asserts the whole rectangle rather than a sample of it.
+    ///
+    /// That is what makes it a red line and not a smoke test: the flattened materializer is a
+    /// second implementation of "lay a frozen line out", written in a different coordinate system,
+    /// and this is the one place the two can be held against each other with nothing left over.
+    ///
+    /// MUTATION: give the flattened path any of the small liberties it is tempted by — pad to the
+    /// window instead of to the line, stamp the row's anchors from the window's first column,
+    /// mark the single row `continues` — and one of these vectors stops matching.
+    #[test]
+    fn a_line_that_fits_is_drawn_identically_whether_it_wraps_or_is_flattened() {
+        const COLUMNS: u32 = 24;
+        let lines = [
+            "cargo build --release",
+            "",
+            "see https://ex.test/a",
+            "漢字 mixed e\u{301}text",
+            "   trailing spaces   ",
+        ];
+        let live = || vec![grid_row("PS D:\\> ", COLUMNS as usize); 3];
+
+        let (mut wrapping, document) = axis_pane(key(COLUMNS), 3, &lines);
+        let wrapped = axis_frame_from_top(&mut wrapping, &document, &[], live(), cursor_at(8));
+
+        let (mut flattening, document) = axis_pane(flattened_key(COLUMNS), 3, &lines);
+        let flattened = axis_frame_from_top(&mut flattening, &document, &[], live(), cursor_at(8));
+
+        assert!(
+            wrapped
+                .cell_anchors
+                .iter()
+                .any(|anchor| matches!(anchor.start, ContentAnchor::History { .. })),
+            "the frame under test has the frozen plane in it, or it compares nothing"
+        );
+
+        assert_eq!(wrapped.rows, flattened.rows);
+        assert_eq!(
+            wrapped.presentation_offset_subpixels,
+            flattened.presentation_offset_subpixels
+        );
+        assert_eq!(wrapped.cells, flattened.cells, "same ink");
+        assert_eq!(
+            wrapped.cell_anchors, flattened.cell_anchors,
+            "same identity"
+        );
+        assert_eq!(wrapped.row_map, flattened.row_map, "same geometry");
+        assert_eq!(wrapped.cursor, flattened.cursor, "same caret");
+        assert_eq!(wrapped.selection_spans, flattened.selection_spans);
+        assert_eq!(
+            wrapped.horizontal, flattened.horizontal,
+            "and the same axis: nothing here is wider than the pane, so the extent is the pane"
+        );
+        assert!(
+            wrapped.row_map.iter().all(|row| row.source_ends.is_none()),
+            "nothing is cut, so no row has ends the window is missing"
+        );
+    }
+
+    /// The other half of the red line: **a wrapping pane has one legal origin and it is zero**
+    /// (`ViewportProjection::horizontal`).
+    ///
+    /// Wrapping is the choice to fold every line into the pane's width, so there is no content
+    /// outside the window to scroll to, and an origin asked for is an origin clamped away. The
+    /// frame a wrapping pane publishes is therefore the frame it published before this axis
+    /// existed, whatever anybody asks of it.
+    ///
+    /// MUTATION: feed `HorizontalProjection::new` the retained extent while wrapping, and a pane
+    /// holding one long line lets its origin move — every physical row then slides sideways while
+    /// the wrapped frozen rows stay put, which is two planes in two coordinate systems.
+    #[test]
+    fn an_origin_a_wrapping_pane_cannot_use_changes_nothing_about_its_frame() {
+        const COLUMNS: u32 = 12;
+        let lines = ["a line far longer than twelve columns", "short"];
+        let live = || vec![grid_row("live text here", COLUMNS as usize); 2];
+
+        let (mut resting, document) = axis_pane(key(COLUMNS), 2, &lines);
+        let before = axis_frame(&mut resting, &document, &[], live(), cursor_at(3));
+
+        let (mut asked, document) = axis_pane(key(COLUMNS), 2, &lines);
+        asked.set_horizontal_origin(ContentColumn(9_999));
+        let after = axis_frame(&mut asked, &document, &[], live(), cursor_at(3));
+
+        assert_eq!(after.horizontal.x_origin(), ContentColumn(0));
+        assert_eq!(
+            after.horizontal.content_extent(),
+            ContentColumn(COLUMNS),
+            "a wrapping pane's content is exactly as wide as the pane"
+        );
+        assert_eq!(before.cells, after.cells);
+        assert_eq!(before.cell_anchors, after.cell_anchors);
+        assert_eq!(before.row_map, after.row_map);
+        assert_eq!(before.cursor, after.cursor);
+    }
+
+    /// Plan §5.1 clause 4 — **no plane is quietly pinned at zero**.
+    ///
+    /// One pointer position has to mean one column. If the frozen plane moved with the origin and
+    /// the physical planes did not, the same x would name two different columns depending on which
+    /// band it landed in, and copy, selection and hit-testing would each have to pick one. So the
+    /// live grid and the staging rows go through the same window as the flattened history; past
+    /// their own last column there is nothing, and nothing is drawn blank.
+    ///
+    /// MUTATION: skip `window_physical_row` for live and staged rows. This test then sees `live`
+    /// where it expects `e text` and the frame is two coordinate systems wide.
+    #[test]
+    fn every_plane_moves_with_the_origin_and_none_is_pinned_at_zero() {
+        const COLUMNS: u32 = 8;
+        let (mut projection, document) =
+            axis_pane(flattened_key(COLUMNS), 2, &["0123456789abcdefghij"]);
+        let mut store = TranscriptStore::new(NonZeroUsize::new(8).unwrap());
+        let staged_id = store
+            .capture(CapturedRow::plain("STAGEDRW", false))
+            .staging_id;
+        let staged = [StagedRow {
+            id: staged_id,
+            row: grid_row("STAGEDRW", COLUMNS as usize),
+        }];
+
+        projection.set_horizontal_origin(ContentColumn(4));
+        let frame = axis_frame_from_top(
+            &mut projection,
+            &document,
+            &staged,
+            vec![grid_row("LIVEROW1", COLUMNS as usize); 2],
+            cursor_at(6),
+        );
+        assert_eq!(frame.horizontal.x_origin(), ContentColumn(4));
+
+        let row_text = |row: usize| {
+            frame.cells[row * COLUMNS as usize..(row + 1) * COLUMNS as usize]
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<String>()
+        };
+        assert_eq!(row_text(0), "456789ab", "the flattened history moved");
+        assert_eq!(row_text(1), "EDRW", "and so did the staged physical row");
+        assert_eq!(row_text(2), "ROW1", "and so did the live grid");
+
+        // The grid owns `[0, 8)`, so the four columns the window shows past it are blank — and a
+        // pointer on them still names a grid cell, clamped to the grid's own last column.
+        assert_eq!(
+            frame.live_point_at(2, 0),
+            Some(GridPoint { row: 0, column: 4 }),
+            "a drawn column is the origin plus itself, on the live plane like every other"
+        );
+        assert_eq!(
+            frame.live_point_at(2, 7),
+            Some(GridPoint { row: 0, column: 7 }),
+            "and past the grid's last column it clamps to the grid, never to zero"
+        );
+    }
+
+    /// The caret is drawn where the window puts it, and a caret the window left behind is not
+    /// drawn at all — which is how a caret on a row the frame does not carry already behaves
+    /// (plan §5.5).
+    ///
+    /// MUTATION: leave `frame.cursor.column` as the grid column. At an origin of four the caret is
+    /// then painted four cells right of the cell it is in, over whatever text is there.
+    #[test]
+    fn the_caret_moves_with_the_window_and_leaves_with_it() {
+        const COLUMNS: u32 = 8;
+        let live = || vec![grid_row("LIVEROW1", COLUMNS as usize); 2];
+
+        let (mut projection, document) =
+            axis_pane(flattened_key(COLUMNS), 2, &["0123456789abcdefghij"]);
+        projection.set_horizontal_origin(ContentColumn(4));
+        let frame = axis_frame(&mut projection, &document, &[], live(), cursor_at(6));
+        assert_eq!(frame.horizontal.x_origin(), ContentColumn(4));
+        assert_eq!(
+            frame.cursor.column, 2,
+            "grid column six is drawn two columns into a window that starts at four"
+        );
+        assert!(frame.cursor.visible);
+
+        projection.set_horizontal_origin(ContentColumn(9));
+        let frame = axis_frame(&mut projection, &document, &[], live(), cursor_at(3));
+        assert_eq!(frame.horizontal.x_origin(), ContentColumn(9));
+        assert!(
+            !frame.cursor.visible,
+            "grid column three is nine columns left of the window"
+        );
+    }
+
+    /// Plan §5.5 — **a word is a word in the content, not in the window**, and a line selection
+    /// names the logical line.
+    ///
+    /// The reader double-clicks a path whose second half is off the right-hand edge. What they get
+    /// is the path, because the run's ends were decided where the line is. Half a path put on a
+    /// clipboard is the §7.1.5h failure one axis over: it looks like an answer and is not one.
+    ///
+    /// MUTATION: drop `RowSourceEnds` and read the run out of the frame's cells alone — the
+    /// selection then ends at column 15, which is the middle of `directory`.
+    #[test]
+    fn a_word_the_window_cuts_is_still_selected_whole() {
+        // `verylongdirectory` is one delimiter-free run over columns 6..23, and a sixteen-column
+        // window can hold neither end of it and one end of it at a time.
+        const COLUMNS: u32 = 16;
+        let text = "cd /a/verylongdirectory/name";
+        let (mut projection, document) = axis_pane(flattened_key(COLUMNS), 2, &[text]);
+        let id = *document.entries().keys().next().expect("one frozen line");
+        let generation = document.entries()[&id].line.source_generation;
+        let history = |offset: u32, bias| ContentAnchor::History {
+            id,
+            offset: GraphemeOffset(offset),
+            bias,
+            generation,
+        };
+        let frame_at = |projection: &mut ViewportProjection, origin: u32| {
+            projection.set_horizontal_origin(ContentColumn(origin));
+            axis_frame_from_top(
+                projection,
+                &document,
+                &[],
+                vec![grid_row("", COLUMNS as usize); 2],
+                cursor_at(0),
+            )
+        };
+
+        // The right-hand edge cuts the run: the window ends at column 15 and the run does not.
+        let frame = frame_at(&mut projection, 0);
+        assert!(frame.row_map[0].source_ends.is_some());
+        let word = frame
+            .word_selection(0, 10)
+            .expect("a rectangular frame")
+            .expect("a word under the pointer");
+        assert_eq!(word.start, history(6, Bias::Before));
+        assert_eq!(
+            word.end,
+            history(22, Bias::After),
+            "the run's own last grapheme, seven columns past what the window drew"
+        );
+
+        // And a triple click takes the logical line, not the sixteen columns of it on screen.
+        let line = frame
+            .line_selection(0)
+            .expect("a rectangular frame")
+            .expect("a line under the pointer");
+        assert_eq!(line.start, history(0, Bias::Before));
+        assert_eq!(
+            line.end,
+            history(text.chars().count() as u32, Bias::After),
+            "the logical line's end, which is where `pad_frozen_row` closes a short row too"
+        );
+
+        // Now the left-hand edge cuts it: the window opens at column 8, inside the same run.
+        let frame = frame_at(&mut projection, 8);
+        let word = frame
+            .word_selection(0, 0)
+            .expect("a rectangular frame")
+            .expect("a word under the pointer");
+        assert_eq!(
+            word.start,
+            history(6, Bias::Before),
+            "the run's own first grapheme, two columns left of the window"
+        );
+        assert_eq!(word.end, history(22, Bias::After));
+    }
+
+    /// Plan §5.6, through a real frame this time: **a window may decide which cells exist and may
+    /// never decide what a link is.**
+    ///
+    /// The address is the one that shipped broken until 2026-08-20. Read out of a cut it resolves
+    /// to `support.cla`, a host somebody else may own. Inference runs once over the whole logical
+    /// line before a single cell is materialized, so every window into it carries the complete
+    /// target — and the single flattened row never claims to continue, so nothing tries to rejoin
+    /// it with the line below.
+    #[test]
+    fn a_windowed_link_carries_the_whole_address_and_the_row_never_continues() {
+        const URI: &str = "https://support.claude.com/en/articles/15363606";
+        const COLUMNS: u32 = 20;
+        let text = format!("see {URI} for more");
+        let width = text.chars().count() as u32;
+        let (mut projection, document) = axis_pane(flattened_key(COLUMNS), 2, &[&text]);
+
+        for origin in 0..width {
+            projection.set_horizontal_origin(ContentColumn(origin));
+            let frame = axis_frame_from_top(
+                &mut projection,
+                &document,
+                &[],
+                vec![grid_row("", COLUMNS as usize); 2],
+                cursor_at(0),
+            );
+            assert!(
+                !frame.row_map[0].continues,
+                "a flattened logical line wraps into nothing"
+            );
+            for (column, cell) in frame.cells[..COLUMNS as usize].iter().enumerate() {
+                let Some(link) = &cell.hyperlink else {
+                    continue;
+                };
+                assert_eq!(
+                    link.uri, URI,
+                    "origin {origin}, column {column}: a window read its own address"
+                );
+            }
+        }
+    }
+
+    /// Plan §5.3 clauses 2 and 5 — **the extent follows what is retained, and the window comes home
+    /// in the same step that learns it.**
+    ///
+    /// The widest line in history is evicted. If the extent were a high-water mark the reader would
+    /// keep a stretch of travel reaching nothing at all; if the origin were clamped a frame later
+    /// there would be one published frame addressing columns no line has.
+    ///
+    /// MUTATION: make `FlattenedExtent` a plain maximum. The eviction below then leaves the extent
+    /// at 400 and the origin at 300, and every row of the frame is blank.
+    #[test]
+    fn the_extent_follows_the_retained_lines_and_brings_the_window_home() {
+        const COLUMNS: u32 = 20;
+        let mut store = TranscriptStore::with_quotas(
+            NonZeroUsize::new(8).unwrap(),
+            NonZeroUsize::new(2).unwrap(),
+        );
+        let mut document = HistoryDocument::default();
+        let mut projection = ViewportProjection::new(
+            flattened_key(COLUMNS),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let admit = |store: &mut TranscriptStore, document: &mut HistoryDocument, text: &str| {
+            for finalized in store.capture(CapturedRow::plain(text, false)).finalized {
+                document.finalize_transaction(finalized);
+            }
+            let evicted = store.take_evictions();
+            document.delete_transaction(&evicted, false, GridGeneration(1));
+        };
+
+        admit(&mut store, &mut document, &"w".repeat(400));
+        admit(&mut store, &mut document, "short");
+        projection.project(&document);
+        projection.set_horizontal_origin(ContentColumn(300));
+        assert_eq!(
+            projection.horizontal().x_origin(),
+            ContentColumn(300),
+            "four hundred columns of `w` are four hundred columns to travel"
+        );
+        assert_eq!(projection.flattened_extent().lines(), 2);
+
+        admit(&mut store, &mut document, "also short");
+        projection.project(&document);
+        assert_eq!(projection.flattened_extent().lines(), 2);
+        assert_eq!(
+            projection.horizontal().content_extent(),
+            ContentColumn(COLUMNS),
+            "the widest retained line is now ten columns, so the pane is the extent"
+        );
+        assert_eq!(
+            projection.horizontal().x_origin(),
+            ContentColumn(0),
+            "and the origin came home in the step that learned it"
+        );
+    }
+
+    /// The frame's cells and its coordinates are one statement, and `validate_shape` is where that
+    /// is enforced — the same door `layout_key.width_cells` goes through.
+    #[test]
+    fn a_frame_whose_window_is_not_its_width_is_refused() {
+        let (mut projection, document) = axis_pane(key(8), 2, &["abcdefgh"]);
+        let mut frame = axis_frame(
+            &mut projection,
+            &document,
+            &[],
+            vec![grid_row("live", 8); 2],
+            cursor_at(0),
+        );
+        assert_eq!(frame.validate_shape(), Ok(()));
+        frame.horizontal = HorizontalProjection::unscrolled(9);
+        assert_eq!(
+            frame.validate_shape(),
+            Err(FrameShapeError::HorizontalWidth {
+                frame: 8,
+                window: 9
+            })
+        );
     }
 }

@@ -264,6 +264,7 @@ mod tests {
     use bt_doc::{GridGeneration, GridPoint, LayoutKey, MathMode, ScreenId, ViewGeneration};
     use bt_transcript::CapturedCell;
     use bt_transcript::TranscriptId;
+    use bt_viewport::horizontal::HorizontalProjection;
     use bt_viewport::{
         BlockOverflowOwner, FrameViewportOrigin, GridCursor, LiveMathOccurrenceId, MathBlockAnchor,
         MathBlockDisplay, MathBlockPlacement, ProjectedMathArtifact, ViewportFrame,
@@ -282,6 +283,7 @@ mod tests {
         cells.resize(columns.get() as usize, CapturedCell::default());
         ViewportFrame {
             columns,
+            horizontal: HorizontalProjection::unscrolled(columns.get()),
             grid_rows: rows,
             rows,
             presentation_offset_subpixels: 0,
@@ -308,6 +310,7 @@ mod tests {
                 theme_rev: 1,
                 lang_rev: 0,
                 profile_rev: 0,
+                line_wrapping: true,
             },
             view_generation: ViewGeneration(0),
         }

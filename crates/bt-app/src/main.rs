@@ -10412,14 +10412,30 @@ impl UserInputKind {
     }
 }
 
+/// The **grid** cell a drawn cell stands on, for the protocol to report to the child.
+///
+/// Both numbers come out of `ViewportFrame::live_point_at`, which is the one place the two axes are
+/// converted and the only place that knows where this pane's horizontal window sits
+/// (`docs/plans/horizontal-scroll/plan.md` §5.5). Reporting `hit.column` unchanged — which is what
+/// this did until the axis existed — would tell a mouse-tracking program the column the pointer was
+/// *painted* in, and every program that draws by coordinate would answer somewhere else.
 fn live_viewport_mouse_hit(frame: &ViewportFrame, hit: bt_render::GridHit) -> bt_render::GridHit {
+    // The mapping belongs to the actual presented frame. Frozen/staging pixels above the
+    // mutable viewport retain Windows Terminal's clamp-to-live-row-zero behaviour, and a pointer
+    // past the grid's last column clamps to it exactly as one past the right-hand edge always has.
+    let point = frame.live_point_at(hit.row, hit.column);
     bt_render::GridHit {
-        // The mapping belongs to the actual presented frame. Frozen/staging pixels above the
-        // mutable viewport retain Windows Terminal's clamp-to-live-row-zero behaviour.
-        row: frame
-            .live_point_at(hit.row, hit.column)
-            .map_or(0, |point| point.row),
-        column: hit.column,
+        row: point.map_or(0, |point| point.row),
+        column: point.map_or_else(
+            || {
+                frame
+                    .horizontal
+                    .to_content(bt_viewport::horizontal::ViewportColumn(hit.column))
+                    .0
+                    .min(frame.columns.get().saturating_sub(1))
+            },
+            |point| point.column,
+        ),
     }
 }
 
@@ -20628,6 +20644,10 @@ fn create_leaf_session(
     // born obeying the same switches, and a birth that read the settings for
     // itself would be a second place for the answer to live.
     scrollback: NonZeroUsize,
+    // **Whether a line too long for this pane wraps.** Beside `scrollback` and for its reason: it
+    // is a `settings.json` answer a new pane must be born obeying, and a pane split off a
+    // neighbour that read the file for itself would be a second place for the answer to live.
+    line_wrapping: bool,
 ) -> Result<LeafSession> {
     let grid = renderer.metrics().grid_for_pixels(body.width, body.height);
     let chosen_id = profiles::id(seed.profile);
@@ -20780,6 +20800,7 @@ fn create_leaf_session(
         columns,
         renderer.metrics().dpi_milli(),
         1,
+        line_wrapping,
     ));
     // **The other way into the same degradation**, and the half that used to be
     // silent. A saved leaf naming a profile this build does not have resolves to
@@ -20900,6 +20921,9 @@ fn create_tab_state(
     // Every terminal seat of the new tab is born holding the same capacity, for
     // the reason each is born obeying the same block switches.
     scrollback: NonZeroUsize,
+    // And every one of them is born reading its lines the same way — see
+    // [`create_leaf_session`]'s parameter of this name.
+    line_wrapping: bool,
 ) -> Result<(TabState, String)> {
     // The new tab's seats are solved into the *current* window, so they answer
     // to whoever owns it. A tab opened while the user is working in a window
@@ -20946,6 +20970,7 @@ fn create_tab_state(
             programs,
             formulas,
             scrollback,
+            line_wrapping,
         )?;
         sessions.insert(seat, leaf);
     }
@@ -23221,6 +23246,7 @@ impl Runtime<'_> {
                 },
                 FormulaSwitches::from_settings(settings_store.loaded()),
                 scrollback_quota(settings_store.loaded().scrollback_lines),
+                settings_store.loaded().line_wrapping,
             )?;
             tabs.push(tab);
             conpty_sources.push(conpty_source);
@@ -23675,6 +23701,7 @@ impl Runtime<'_> {
                 opening_rail,
                 FormulaSwitches::from_settings(app.settings_store.loaded()),
                 scrollback_quota(app.settings_store.loaded().scrollback_lines),
+                app.settings_store.loaded().line_wrapping,
             )?;
             tabs.push(tab);
         }
@@ -23929,6 +23956,7 @@ impl Runtime<'_> {
             self.rail_posture(),
             FormulaSwitches::from_settings(self.app.settings_store.loaded()),
             scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
+            self.app.settings_store.loaded().line_wrapping,
         )?;
         self.window.tabs.push(tab);
         self.apply_window_min_inner_size()?;
@@ -24222,6 +24250,7 @@ impl Runtime<'_> {
             self.rail_posture(),
             FormulaSwitches::from_settings(self.app.settings_store.loaded()),
             scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
+            self.app.settings_store.loaded().line_wrapping,
         )?;
         // Appended, which keeps the pinned run intact without a re-sort: a new
         // unpinned tab belongs at the end by construction.
@@ -24362,6 +24391,7 @@ impl Runtime<'_> {
                 self.rail_posture(),
                 FormulaSwitches::from_settings(self.app.settings_store.loaded()),
                 scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
+                self.app.settings_store.loaded().line_wrapping,
             )?;
             self.window.tabs.push(revived);
             self.request_revived_previews(self.window.tabs.len() - 1);
@@ -34748,6 +34778,7 @@ impl Runtime<'_> {
             &self.app.profile_programs,
             formulas,
             scrollback,
+            self.app.settings_store.loaded().line_wrapping,
         )?;
         self.sessions.insert(arriving, leaf);
         debug_assert!(
@@ -46742,6 +46773,7 @@ impl Runtime<'_> {
             &self.app.profile_programs,
             formulas,
             scrollback,
+            self.app.settings_store.loaded().line_wrapping,
         );
         self.window.restarting = None;
         // The old leaf is dropped **here**, by the insert: `PtySession::drop`
@@ -51033,6 +51065,7 @@ impl Runtime<'_> {
                 &self.app.profile_programs,
                 formulas,
                 scrollback,
+                self.app.settings_store.loaded().line_wrapping,
             )?;
             let Some(arrived) = self.seats.stand_in_terminal(&metrics, seat) else {
                 *self.preview_panes.entry(surface) = pane;
@@ -61992,10 +62025,12 @@ impl Runtime<'_> {
         // cell — correct glyphs at the wrong size, from a cache whose key did not
         // include the thing that moved.
         let font_rev = self.window.renderer.font_revision();
+        let line_wrapping = self.app.settings_store.loaded().line_wrapping;
         self.shell_mut().session.set_layout_key(window_layout_key(
             width_cells,
             dpi_milli,
             font_rev,
+            line_wrapping,
         ));
     }
 
@@ -68720,7 +68755,19 @@ fn unknown_profile_banner(unknown: &str) -> String {
 ///
 /// **Five fields, not four**, and the sentence above is deliberately left saying
 /// four in the places it counts callers rather than fields.
-fn window_layout_key(width_cells: NonZeroU32, dpi_milli: NonZeroU32, font_rev: u64) -> LayoutKey {
+///
+/// `line_wrapping` is the caller's, beside the pane's width and the window's DPI,
+/// and deliberately not a sixth process-wide revision: it is a `settings.json`
+/// answer with no revision counter behind it, and the two callers both have the
+/// settings store in hand. See `bt_doc::LayoutKey::line_wrapping` for why it
+/// belongs in a layout's identity at all — it decides how many rows a line is,
+/// which is a stronger claim on this key than anything else in it.
+fn window_layout_key(
+    width_cells: NonZeroU32,
+    dpi_milli: NonZeroU32,
+    font_rev: u64,
+    line_wrapping: bool,
+) -> LayoutKey {
     LayoutKey {
         width_cells,
         dpi_milli,
@@ -68728,6 +68775,7 @@ fn window_layout_key(width_cells: NonZeroU32, dpi_milli: NonZeroU32, font_rev: u
         theme_rev: theme_revision(),
         lang_rev: i18n::lang_revision(),
         profile_rev: profiles::profile_revision(),
+        line_wrapping,
     }
 }
 
@@ -70316,6 +70364,7 @@ mod tests {
             NonZeroU32::new(80).unwrap(),
             NonZeroU32::new(1000).unwrap(),
             7,
+            true,
         );
         assert_eq!(key.width_cells.get(), 80);
         assert_eq!(key.dpi_milli.get(), 1000);
@@ -78570,6 +78619,7 @@ mod tests {
             theme_rev: harness.session.layout_key().theme_rev,
             lang_rev: harness.session.layout_key().lang_rev,
             profile_rev: harness.session.layout_key().profile_rev,
+            line_wrapping: true,
         });
         let delayed_relayout = harness.session.take_live_worker_task().unwrap();
         assert!(harness.publish_pty_frame());

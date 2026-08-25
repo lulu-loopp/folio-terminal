@@ -22,14 +22,18 @@
 //! Every number is printed under `BT_HSCROLL_BENCH` whether or not the assertions pass, so a run
 //! that only widens the margin still leaves the measurement behind.
 
+use std::num::{NonZeroI64, NonZeroU32, NonZeroUsize};
 use std::time::{Duration, Instant};
 
+use bt_doc::{
+    DetectionRevision, GridGeneration, HistoryDocument, LayoutKey, SUBPIXELS_PER_PX, ScreenId,
+};
 use bt_transcript::{
-    CellFlags, CellHyperlink, CellStyle, FrozenLine, HyperlinkRange, PhysicalFragment,
-    SourceGeneration, StyleSpan, TerminalColor, TranscriptId,
+    CapturedCell, CapturedRow, CellFlags, CellHyperlink, CellStyle, FrozenLine, HyperlinkRange,
+    PhysicalFragment, SourceGeneration, StyleSpan, TerminalColor, TranscriptId, TranscriptStore,
 };
 use bt_viewport::{
-    InferredLink,
+    GridCursor, InferredLink, ViewportProjection,
     horizontal::{
         CHECKPOINT_STRIDE_COLUMNS, ContentColumn, HorizontalIndexStore, HorizontalProjection,
         INDEX_STORE_BUDGET_BYTES, LINE_INDEX_BUDGET_BYTES, LineColumnIndex, LineKey,
@@ -363,4 +367,174 @@ fn an_indexed_seek_is_never_dearer_than_the_scan_it_replaces() {
         indexed_p50 <= linear_p50.max(1_000),
         "an indexed seek costs {indexed_p50} ns against the scan's {linear_p50} ns"
     );
+}
+
+// ----------------------------------------------------------------------------------------------
+// Level two: the same gate, re-measured on the real frame path now that the consumers are
+// switched over (plan §5.7, "二级接线后须在真实帧路径上复量").
+// ----------------------------------------------------------------------------------------------
+
+/// The pane the frame benchmark scrolls, in columns and rows.
+const PANE_COLUMNS: u32 = 120;
+const PANE_ROWS: u32 = 24;
+
+/// How many of the pathological line stand in the pane's history.
+const HISTORY_LINES: usize = 8;
+
+fn flattened_key(width_cells: u32) -> LayoutKey {
+    LayoutKey {
+        width_cells: NonZeroU32::new(width_cells).unwrap(),
+        dpi_milli: NonZeroU32::new(1000).unwrap(),
+        font_rev: 1,
+        theme_rev: 1,
+        lang_rev: 0,
+        profile_rev: 0,
+        line_wrapping: false,
+    }
+}
+
+fn blank_grid_row(columns: usize) -> CapturedRow {
+    CapturedRow {
+        cells: vec![CapturedCell::default(); columns],
+        continues: false,
+        shell_mark: None,
+        captured_columns: columns as u32,
+    }
+}
+
+/// One pane, its history made of `HISTORY_LINES` copies of `text`, scrolled sideways across it.
+///
+/// The frame is published through `continuous_frame` — the same call the window makes — and the
+/// review scroll puts the frozen plane on screen, because at rest a pane sits at the live bottom
+/// and history is exactly the part above it.
+fn published_frame_scroll(text: &str) -> Measured {
+    let mut store = TranscriptStore::new(NonZeroUsize::new(64).unwrap());
+    let mut document = HistoryDocument::default();
+    for _ in 0..HISTORY_LINES {
+        for finalized in store.capture(CapturedRow::plain(text, false)).finalized {
+            document.finalize_transaction(finalized);
+        }
+    }
+    let mut projection = ViewportProjection::new(
+        flattened_key(PANE_COLUMNS),
+        DetectionRevision(1),
+        NonZeroU32::new(PANE_ROWS).unwrap(),
+        NonZeroI64::new(18 * SUBPIXELS_PER_PX).unwrap(),
+        SourceGeneration(1),
+        GridGeneration(1),
+    );
+    projection.project(&document);
+    let live = || vec![blank_grid_row(PANE_COLUMNS as usize); PANE_ROWS as usize];
+    let cursor = GridCursor {
+        row: 0,
+        column: 0,
+        visible: true,
+    };
+    let publish = |projection: &mut ViewportProjection| {
+        projection
+            .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+            .expect("a rectangular frame")
+    };
+    // Warm-up: measure the content, then take the review to the top so the flattened frozen rows
+    // are the ones being materialized.
+    let _ = publish(&mut projection);
+    projection.scroll_to_top();
+    let columns = projection.flattened_extent().widest().0.max(1);
+    // And one more, so the first measured frame is not the one that builds every line's index.
+    projection.set_horizontal_origin(ContentColumn(1));
+    let _ = publish(&mut projection);
+
+    let step = (columns / SCROLL_FRAMES as u32).max(1);
+    let mut measured = Measured {
+        frame_nanos: Vec::with_capacity(SCROLL_FRAMES),
+        heap_bytes: 0,
+        heap_allocations: 0,
+        index_build_nanos: 0,
+        checkpoints: projection.horizontal_index_stats().0,
+        columns,
+    };
+    for frame in 0..SCROLL_FRAMES {
+        projection.set_horizontal_origin(ContentColumn(step.saturating_mul(frame as u32)));
+        let bytes_before = SCROLL_HEAP_BYTES.with(std::cell::Cell::get);
+        let allocations_before = SCROLL_HEAP_ALLOCATIONS.with(std::cell::Cell::get);
+        let started = Instant::now();
+        let published = publish(&mut projection);
+        std::hint::black_box(published.cells.len());
+        let elapsed = started.elapsed();
+        measured.heap_bytes += SCROLL_HEAP_BYTES.with(std::cell::Cell::get) - bytes_before;
+        measured.heap_allocations +=
+            SCROLL_HEAP_ALLOCATIONS.with(std::cell::Cell::get) - allocations_before;
+        measured.frame_nanos.push(elapsed.as_nanos() as u64);
+    }
+    measured
+}
+
+/// §1b's硬门, on the path the window actually publishes through (plan §5.7).
+///
+/// The level-one benchmark above measures the seek and the materializer in isolation, which is all
+/// there was to measure while no consumer was switched over. This measures `continuous_frame`, and
+/// the claim is the one that matters: **a published frame over a hundred-thousand-column line must
+/// cost what a published frame over an eighty-column one costs.** A frame of a wrapping pane lays
+/// every intersecting logical line out in full and then slices the window out of it, which is the
+/// reason this axis exists; if any of that survived the wiring it would show up here as heap in
+/// the ratio of the two line lengths, on any machine, in any build.
+///
+/// **The wall clock is asserted as a ratio here as well as against the ceiling**, which the
+/// level-one benchmark does not do — and it earns that by having caught something. The frame path
+/// has two O(line length) traps that no heap counter can see, because neither of them allocates:
+/// inference re-read on every frame (plan §5.6 clause 1) and a vertical answer re-seeking to the
+/// origin on every frame. With both present the eighty-column line drew the same 1,014,496 bytes as
+/// the hundred-thousand-column one while taking 22 ms against its 0.17 ms. The corpus therefore
+/// carries a ten-thousand-column line as well: a scroll across it and a scroll across the
+/// hundred-thousand-column one must cost the same, and if either trap returns, they will not.
+#[test]
+fn a_published_frame_costs_the_window_and_not_the_line() {
+    let cases = [
+        ("frame/eighty-columns", "x".repeat(80)),
+        ("frame/ascii-10k", "abcdefghij".repeat(1_000)),
+        ("frame/ascii-100k", "abcdefghij".repeat(10_000)),
+        ("frame/cjk-99k", "漢字仮名の混じった文章".repeat(9_000)),
+        (
+            "frame/combining-99k",
+            "e\u{301}o\u{308}u\u{30a}".repeat(33_000),
+        ),
+    ];
+    let mut measurements = Vec::new();
+    for (name, text) in &cases {
+        let measured = published_frame_scroll(text);
+        measured.report(name);
+        measurements.push((name, measured));
+    }
+
+    let reference = |wanted: &str| {
+        measurements
+            .iter()
+            .find(|(name, _)| **name == wanted)
+            .map(|(_, measured)| measured)
+            .unwrap_or_else(|| panic!("{wanted} is in the corpus"))
+    };
+    let short = reference("frame/eighty-columns").heap_bytes / SCROLL_FRAMES as u64;
+    // The clock's control is a line long enough to be scrolled, so that what is being compared is
+    // two lengths of the same code path rather than two different paths.
+    let scrolled = reference("frame/ascii-10k").median_frame_nanos();
+
+    for (name, measured) in &measurements {
+        let per_frame = measured.heap_bytes / SCROLL_FRAMES as u64;
+        assert!(
+            per_frame <= short.max(1) * 4,
+            "{name}: a published frame draws {per_frame} bytes against the eighty-column line's \
+             {short} — a scroll frame must depend on the window, not on the line"
+        );
+        let median = Duration::from_nanos(measured.median_frame_nanos());
+        assert!(
+            median <= FRAME_CEILING,
+            "{name}: the median published frame is {median:?}, ceiling {FRAME_CEILING:?}"
+        );
+        assert!(
+            measured.median_frame_nanos() <= scrolled.saturating_mul(4).max(1),
+            "{name}: the median published frame is {} ns against the ten-thousand-column line's \
+             {scrolled} — a scroll frame must depend on the window, not on the line",
+            measured.median_frame_nanos()
+        );
+    }
 }

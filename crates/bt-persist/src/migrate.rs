@@ -55,6 +55,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (17, migrate_settings_v17_to_v18),
     (18, migrate_settings_v18_to_v19),
     (19, migrate_settings_v19_to_v20),
+    (20, migrate_settings_v20_to_v21),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -428,6 +429,27 @@ fn migrate_settings_v19_to_v20(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(20));
         object.insert("search_engine".to_owned(), Value::from("DuckDuckGo"));
+    }
+    value
+}
+
+/// v20 -> v21: whether a line too long for the pane wraps, defaulted to **the thing it has always
+/// done** (`docs/plans/horizontal-scroll/plan.md` §5.7, ladder one level two).
+///
+/// One key an eleventh time, and it lands the way v13–v16 and v19 did rather than the way v17–v20
+/// did. The distinction those steps are written under is whether there is a habit to carry or only
+/// a default to choose, and here there is nothing but habit: every terminal this product has ever
+/// drawn wrapped, so `true` preserves the document on somebody's screen rather than choosing a
+/// side. Writing `false` here would flatten every pane in the world on the strength of a row its
+/// owner has never seen — `migrate_settings_v15_to_v16`'s sentence, applied to a line instead of a
+/// colour.
+///
+/// See `SettingsV1::line_wrapping`, and `bt_doc::LayoutKey::line_wrapping` for why this answer is
+/// part of a layout's identity and not a render flag.
+fn migrate_settings_v20_to_v21(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(21));
+        object.insert("line_wrapping".to_owned(), Value::from(true));
     }
     value
 }
@@ -1292,6 +1314,45 @@ mod tests {
         assert_eq!(migrated["psreadline_invite"], json!("Installed"));
         assert_eq!(migrated["light_scheme"], json!("Solarized Light"));
         assert_eq!(migrated["dark_scheme"], json!("Nord"));
+    }
+
+    /// PIN — v20 -> v21 writes down the thing every build before it did, and leaves every one of
+    /// its siblings exactly as it found them (rule 3, "迁移函数只做结构升级").
+    ///
+    /// `true` is asserted as a literal and not against a constant, for
+    /// `real_settings_v9_to_v10_…`'s reason: a constant compared with itself proves nothing, while
+    /// the word written out here is a second, independent statement that "no visible change for a
+    /// reader who never opens the page" means *wrapping*. A step that wrote `false` would take
+    /// three quarters of every long line in every scrollback on every machine off the right-hand
+    /// edge, and this is the line that says so.
+    #[test]
+    fn real_settings_v20_to_v21_migration_keeps_every_pane_wrapping() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 20,
+                "theme_mode": "Light",
+                "display_formulas": false,
+                "scrollback_lines": 25000,
+                "focus_card_height": 320,
+                "search_engine": "Google"
+            }),
+            20,
+            21,
+            SETTINGS_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(21));
+        assert_eq!(migrated["line_wrapping"], json!(true));
+        assert_eq!(migrated["theme_mode"], json!("Light"));
+        assert_eq!(migrated["display_formulas"], json!(false));
+        assert_eq!(migrated["scrollback_lines"], json!(25000));
+        assert_eq!(migrated["focus_card_height"], json!(320));
+        assert_eq!(
+            migrated["search_engine"],
+            json!("Google"),
+            "the sibling added one version ago is the one a copy-paste of the \
+             step above would most plausibly reset"
+        );
     }
 
     #[test]

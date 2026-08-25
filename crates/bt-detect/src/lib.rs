@@ -2890,6 +2890,7 @@ mod tests {
                 theme_rev: 1,
                 lang_rev: 0,
                 profile_rev: 0,
+                line_wrapping: true,
             },
             view: ViewGeneration(1),
         }
