@@ -57,11 +57,23 @@ windows = { version = "0.62.2", features = [
     # console of its own can answer `--help` on the console that started it.
     "Win32_System_Console",
     "Win32_System_DataExchange",
+    # `GetThreadContext` and `ReadProcessMemory`: the two kernel calls the hang
+    # reporter makes while the window thread is suspended (`src/hang.rs`). The
+    # namespace is called `Diagnostics::Debug` because a debugger is the other
+    # thing that makes them; nothing here attaches to anything.
+    "Win32_System_Diagnostics_Debug",
+    # `GetThreadContext` alone, which the `windows` crate files under `Kernel`
+    # even though it sits beside `ReadProcessMemory` in `Diagnostics::Debug`.
+    "Win32_System_Kernel",
     # `ReadDirectoryChangesW`'s three companions: the overlapped completion
     # (`Win32_System_IO`), and the events the watcher thread waits on and the
     # caller stops it with (`Win32_System_Threading`). See `DirWatch`.
     "Win32_System_IO",
     "Win32_System_Memory",
+    # `EnumProcessModulesEx` / `GetModuleInformation` / `GetModuleBaseNameW`:
+    # the module map that turns a raw return address into `folio.exe+0x…`. Built
+    # before the suspend, because it takes the loader lock — see `src/hang.rs`.
+    "Win32_System_ProcessStatus",
     # The Explorer verb: `RegCreateKeyExW`, `RegSetValueExW`, `RegQueryValueExW`
     # and `RegDeleteTreeW`, all against `HKEY_CURRENT_USER`. `RegCreateKeyExW`
     # also needs `Win32_Security` above, for the `SECURITY_ATTRIBUTES` it takes

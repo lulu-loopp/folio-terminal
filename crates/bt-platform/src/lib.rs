@@ -1386,6 +1386,16 @@ pub fn order_monospace_families(mut families: Vec<MonospaceFamily>) -> Vec<Monos
     families
 }
 
+/// Sampling this process's own window thread while it is not answering.
+///
+/// A file of its own for the reason [`webview`] is one — a distinct unsafe
+/// boundary with a distinct hazard. `windows_impl` calls Win32 on behalf of a
+/// window that is running; this calls it on a thread that has been **suspended**
+/// by the caller, and the whole of the module comment there is about the two
+/// user-mode locks that makes it illegal to touch. It is the only part of this
+/// crate that can deadlock the process if its statements are reordered.
+pub mod hang;
+
 /// WebView2 in composition hosting — the web preview block's engine (slice ①).
 ///
 /// A file of its own rather than another region of [`windows_impl`], because it

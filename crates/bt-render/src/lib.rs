@@ -13,6 +13,7 @@ use std::{
     mem::size_of,
     num::{NonZeroI64, NonZeroU16, NonZeroU32},
     sync::Arc,
+    sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
     time::{Duration, Instant},
 };
 
@@ -2379,6 +2380,82 @@ fn surface_failure_policy(failure: SurfaceFailure) -> SurfaceFailurePolicy {
         SurfaceFailure::Outdated | SurfaceFailure::Lost => SurfaceFailurePolicy::Reconfigure,
         SurfaceFailure::Validation => SurfaceFailurePolicy::FatalValidation,
     }
+}
+
+/// **How many times each way of failing to get a back buffer has happened in
+/// this process, and nothing else.**
+///
+/// [`RenderTarget::handle_surface_failure`] is entirely silent: three of the
+/// four failures are absorbed (skip the frame, reconfigure the swapchain) and
+/// leave no trace at all, so a run in which DXGI handed back `Outdated` on
+/// every frame for ten seconds looks, from the outside, exactly like a run in
+/// which nothing happened. That silence is correct *per frame* — a terminal
+/// that printed a line every time a swapchain went stale during a resize would
+/// be unusable — and wrong *per run*, which is what a counter fixes without
+/// putting a single word on anyone's console.
+///
+/// Read by the hang reporter's run-counter footer: "the pump stopped and, by
+/// the way, this process has eaten 40 000 `Outdated` acquires" is a different
+/// investigation from "the pump stopped and the swapchain has been fine all
+/// day". Relaxed on both sides — these are tallies, not a protocol, and no
+/// reader is deciding anything from the order two of them were written in.
+static SURFACE_FAILURES: [AtomicU64; 4] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+/// One resident count per way a surface acquire can fail.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SurfaceFailureTally {
+    /// No back buffer available this instant; the frame is skipped.
+    pub unavailable: u64,
+    /// The swapchain no longer matches the window; it is reconfigured.
+    pub outdated: u64,
+    /// The device dropped the surface; it is reconfigured.
+    pub lost: u64,
+    /// A surface the API itself calls invalid — the one that is fatal.
+    pub validation: u64,
+}
+
+impl SurfaceFailureTally {
+    /// Whether anything has failed at all, which is what lets a report say
+    /// "clean" in one word instead of printing four zeroes.
+    #[must_use]
+    pub fn is_clean(self) -> bool {
+        self == Self::default()
+    }
+
+    /// Every acquire failure this process has absorbed.
+    #[must_use]
+    pub fn total(self) -> u64 {
+        self.unavailable
+            .saturating_add(self.outdated)
+            .saturating_add(self.lost)
+            .saturating_add(self.validation)
+    }
+}
+
+/// What this process has counted so far. Safe to call from any thread.
+#[must_use]
+pub fn surface_failure_tally() -> SurfaceFailureTally {
+    SurfaceFailureTally {
+        unavailable: SURFACE_FAILURES[0].load(AtomicOrdering::Relaxed),
+        outdated: SURFACE_FAILURES[1].load(AtomicOrdering::Relaxed),
+        lost: SURFACE_FAILURES[2].load(AtomicOrdering::Relaxed),
+        validation: SURFACE_FAILURES[3].load(AtomicOrdering::Relaxed),
+    }
+}
+
+fn count_surface_failure(failure: SurfaceFailure) {
+    let slot = match failure {
+        SurfaceFailure::Unavailable => 0,
+        SurfaceFailure::Outdated => 1,
+        SurfaceFailure::Lost => 2,
+        SurfaceFailure::Validation => 3,
+    };
+    SURFACE_FAILURES[slot].fetch_add(1, AtomicOrdering::Relaxed);
 }
 
 /// The glyphon state one Terminal seat needs to put text on the glass.
@@ -6698,6 +6775,11 @@ impl WindowRenderer {
         gpu: &GpuContext,
         failure: SurfaceFailure,
     ) -> Result<PresentOutcome, RenderError> {
+        // **First, and unconditionally** — including on the fatal path, because
+        // the run that ends in `SurfaceValidation` is exactly the run whose
+        // footer should say so. See [`SURFACE_FAILURES`] for why a silent
+        // absorption still owes a number.
+        count_surface_failure(failure);
         match surface_failure_policy(failure) {
             SurfaceFailurePolicy::Skip => Ok(PresentOutcome::Skipped),
             SurfaceFailurePolicy::Reconfigure => {
@@ -15725,6 +15807,46 @@ mod tests {
             surface_failure_policy(SurfaceFailure::Validation),
             SurfaceFailurePolicy::FatalValidation
         );
+    }
+
+    /// PIN (hang reporter, 2026-08-25) — **every way of failing to get a back
+    /// buffer leaves a number behind, including the three that are absorbed in
+    /// silence.**
+    ///
+    /// The tally is process-global and this test runs beside others, so it is
+    /// written in deltas: an absolute assertion would be a test that passes
+    /// alone and fails under `--test-threads`.
+    #[test]
+    fn each_kind_of_surface_failure_leaves_a_number_behind() {
+        let before = super::surface_failure_tally();
+        for failure in [
+            SurfaceFailure::Unavailable,
+            SurfaceFailure::Outdated,
+            SurfaceFailure::Outdated,
+            SurfaceFailure::Lost,
+            SurfaceFailure::Validation,
+        ] {
+            super::count_surface_failure(failure);
+        }
+        let after = super::surface_failure_tally();
+        assert_eq!(after.unavailable - before.unavailable, 1);
+        assert_eq!(
+            after.outdated - before.outdated,
+            2,
+            "the two absorbed reconfigures are two events, not one kind"
+        );
+        assert_eq!(after.lost - before.lost, 1);
+        assert_eq!(
+            after.validation - before.validation,
+            1,
+            "the fatal one is counted before the policy decides it is fatal"
+        );
+        assert_eq!(after.total() - before.total(), 5);
+        assert!(
+            !after.is_clean(),
+            "a run that has absorbed anything is not a clean run"
+        );
+        assert!(super::SurfaceFailureTally::default().is_clean());
     }
 
     fn fade_metrics() -> CellMetrics {

@@ -119,6 +119,54 @@
 
 **诚实的留白**：冷启动 `cargo build` 不是平稳负载（早期几十个小 crate、后期几个大 crate），所以载荷下的 p95/p99 在**同一个二进制的两次运行之间**的差别，比两个二进制之间的差别还大——载荷下真正稳的结论是三个：白做的排版从 ~60% 掉到 ~0%、同一次手势上屏的帧数多六成、以及**「排好的一帧几秒钟上不了屏」这个病消失了**。24 个 PowerShell 空转进程复现不出用户报告的严重程度（前台线程有系统自带的 boost，且空转不抢内存带宽），必须用真实的 `cargo` 才复现得出来。
 
+### 1.5 挂死自己留证据：常驻心跳 + 看门狗（挂死常驻自报器，2026-08-25，已落地；`crates/bt-platform/src/hang.rs`(新)、`crates/bt-app/src/hang_watch.rs`(新)、`crates/bt-app/src/{main,persist}.rs`、`crates/bt-render/src/lib.rs`）
+
+§1.3 里那两条窗口线程挂死（`drain_leaf_pty` 的循环唯一出口是「环此刻是空的」、写侧无界）都是**有人正好在机器前、手里握着 `hangprobe.ps1`** 才抓到的。修完之后用户在 `dist\folio-next5.exe`（`fa547ec`）上**仍然偶发** Not Responding 白框——间歇、难复现。结论只能是：剩下那个故障还没有名字，而它出现的时刻**没有人在看**。所以让程序自己看着自己。**不是调试开关**：一个必须先打开才生效的开关，在 bug 每一次发生时都是关着的。
+
+**机制三句话。** 窗口线程在 `about_to_wait` 每轮打一次心跳（时间戳 + **轮次计数**），并在它会做的每一段长调用门口留一个**站点标签**（一个字节、一次 relaxed store）。看门狗线程每 2s 醒一次，只问两件事：轮次动了没有；没动的话停了多久。越过阈值时它把窗口线程 suspend **恰好两次内核调用**的时间，抄走寄存器与裸栈（`bt_platform::hang`），resume，然后把**站点、静默时长、栈、本次运行的计数器**写进 `%APPDATA%\Folio\hang-reports\<UTC 时间戳>.txt`。
+
+**只报案，不干预。** 不杀、不重启、不解锁、不弹窗。一个会动手的看门狗一定会在某天对一个只是慢了的进程动手，而代价是别人的 scrollback。寄存器抄完立刻 resume；如果泵后来活了，**同一个文件**尾部补一行 `healed: the pump came back after Ns`。**一份没有 healed 行的报告就是一次再没醒过来的挂死**——那个缺席本身就是结论。
+
+**活性是轮次，不是时钟。** 停住的线程时间戳是个完全稳定的值，而自旋的循环照样在读时钟；只有「泵真的转过来了」这件事才让计数器 +1。心跳三个字用 Release/Acquire 配对写读（时间戳、站点先 relaxed 写，轮次最后 Release 写；读先 Acquire 读轮次）——否则看门狗可能看见新轮次配旧时间戳，在 2s 轮询对 5s 阈值的尺度上，那就是「安静」与「一份报告」的差别。
+
+**站点是证据的地板。** 九个站点：`about_to_wait` / `window_event` / `drain_pty` / `flush_pending_pty_resize` / `publish_frame_inner` / `flush_wheel` / `advance_web_page` / session `flush_if_due` / `BT_HANG_SELFTEST`。插桩只在函数入口一行。语义**精确地是「最后进入过的站点」而不是「此刻正在的站点」**——进了 `Drain`、返回了、然后在两个站点之间某段没打标的代码里卡住，报告仍然说 `drain_pty`。这是诚实的（那是已知的最后一件事），也正是为什么还要抓栈。项目至今真实发生过的三次挂死，**光凭这个标签就能点名**。
+
+**为什么是扫栈不是走栈**（`bt-platform/src/hang.rs`）。`RtlCaptureStackBackTrace` 只能采**调用者自己**这条线程，指不到别人身上；`StackWalk64` 能，但它在 `dbghelp.dll` 里、契约上单线程、要这份构建不发布的符号，而且是那种**最不该在本进程另一条线程被挂起时去调**的机器。剩下的就是调试器在没有 unwind 信息时干的事：取 `rip`，然后**读裸栈、留下每一个落在已加载模块里的 qword**。它会多报（已经返回的返回地址在被覆盖前一直躺在栈上），而且**故意不过滤**——聪明到能滤掉陈旧项的过滤器，也聪明到能滤掉那个唯一有用的。读者拿到精确的 `rip` 加一串按深度排序的候选，而光是模块名就回答了这件事的核心问题：*终端自己的代码、ConPTY、WebView2，还是内核？*
+
+**操作顺序就是全部设计。** 在同一个进程里采一条被自己挂起的线程，是一句写歪就死锁的事——被挂起的那条线程正握着采样方马上要用的锁。有两把要命：**① loader 锁**，`EnumProcessModulesEx` 走模块表；窗口线程完全可能正挂在 `LoadLibrary` 里（WebView2 调用就会），那样枚举会在看门狗线程上永远阻塞，而 UI 线程还是挂起状态——**一份制造永久挂死的挂死报告**。**② 堆锁**，任何一次分配都可能撞上被挂起线程持有的 CRT 堆。所以模块表和 128 KiB 栈缓冲**都在 suspend 之前**准备好；suspend 与 resume 之间只有 `GetThreadContext` 与 `ReadProcessMemory` 两次内核调用，**零分配、零格式化、零用户态锁**。符号化和排版全在 resume 之后。另：读栈用 `ReadProcessMemory`（对自己进程）而不是裸解引用——线程栈尽头是 guard page，一次走进去的解引用就是**诊断工具自己产生的 AV**；它整段失败而不是部分成功，所以长度从 128 KiB 折半重试。
+
+**空转的账。** 每个站点 = 一次 relaxed `u8` store（x86-64 上一条 `mov`，无栅栏、无分支、无时钟、无分配）；每轮循环 = 一次 `Instant::now()`（`about_to_wait` 本来就要读）加三次 store；**每 2 秒 = 一次时钟读 + 三次原子读 + 一次比较，零分配**——不碰堆、不开文件、**连 `hang-reports` 目录都不建**，一次不挂的运行在磁盘上什么都不留。只有真出报告时才有模块枚举、128 KiB 读和一次写盘，全在看门狗线程上，**窗口线程永远不写盘**。看门狗和所有 worker 一样在 `BelowNormal` 档（§1.4）：这里的挂死是一条**被阻塞**的线程，不是一台没核可用的机器，而一个优先级高过帧的诊断，是在拿它要保护的东西给自己付账。报告数封顶 16 份，写新的之前按文件名（UTC 时间戳，字典序即时序）淘汰最老的，**只删自己的 `hang-*.txt`**。
+
+**启动有它自己的宽限（实机第一次跑就撞上）。** 第一版对启动也用 5s，结果第一次真机运行就给一次**正常**的冷启动开了罚单：debug 构建花了 8 秒才第一次跑到 `about_to_wait`（建事件循环、建 GPU device、起第一个 shell），报告站点 `starting`。**一个泵从来没转过，就不能说它「停了」**——那是另一种故障、另一个时间尺度。所以：见过一次轮次之前用 30s，见过之后永远用 5s。**不是装瞎**：一个永远走不完的启动正是「我双击了它什么也没发生」的形状，照样出报告，只是要走到那条更长的线；报告里写的阈值是**实际越过的那一条**，不是常数 5s。
+
+**`handle_surface_failure` 从此有数**（`bt-render`）。四种 acquire 失败里三种是被吞掉的（跳过这一帧、重配 swapchain），完全无痕——一次「DXGI 连续十秒每帧都 `Outdated`」的运行，从外面看和什么都没发生一模一样。**每帧沉默是对的**（resize 时每次都打印一行的终端没法用），**整轮运行沉默是错的**。四个 relaxed 计数器，进报告尾部的运行计数区：「泵停了，顺带一提这个进程已经吞了四万次 `Outdated`」和「泵停了，swapchain 一整天都好好的」是两场不同的调查。致命的 `Validation` 也在判决之前先计数。
+
+**`BT_HANG_SELFTEST`——只在 debug 构建生效，release 根本不读这个变量。** 一个能被环境变量卡死十秒的 `folio.exe` 是一份带说明书的拒绝服务。它在运行开始 3 秒后的第一轮**只触发一次**，把窗口线程按住 N 秒。实机验证原文（debug、隔离 `APPDATA`、`BT_PTY_DUMP=<文件>`）：
+
+```
+written        : 2026-08-25T04:52:24.778Z (UTC)
+process        : pid 90176, ui thread 11644
+uptime         : 10.002s
+pump silent for: 5.835s (threshold 5.000s)
+last station   : BT_HANG_SELFTEST (the last one entered, not necessarily the one it is in)
+loop turns     : 1
+
+ui thread stack
+  rip    : ntdll.dll+0x160404 (0x00007ff97f140404)
+  rsp    : 0x000000fda4cfc3b8
+  read   : 8192 bytes of stack, 83 modules mapped
+  [+0x00000] KERNELBASE.dll+0x1c11f  …  [+0x00020] folio.exe+0x7d0b410  …（91 条）
+
+run counters
+  surface acquires: clean — nothing has failed in this run
+
+healed         : the pump came back after 11.679s at BT_HANG_SELFTEST
+```
+
+`ntdll+0x160404` 就是 `NtDelayExecution`——那次 sleep 本身，站点直指那一行。**对照组**：同一个 debug 二进制、不设 `BT_HANG_SELFTEST`、活 30 秒——`no hang-reports directory: clean`，30 秒 CPU 2.27s（全是 debug 构建的窗口/GPU 初始化，看门狗在其中量不出来）。
+
+**明账**：`folio.exe+0x…` 是偏移不是函数名，要读得对着同一次构建的 PDB 反查；报告不打包符号，因为模块名这一级已经回答了「是谁」。栈扫描一次只取 rsp 往上能读到的那一段（实测 8 KiB，再往上是未提交页），足以穿过消息泵。
+
 ## 2. 渲染管线
 
 同 v3（cell 宽度权威在 bt-term；延迟指标事件→present 提交，60/120/144Hz 分测，洪水注入法；M-1 做一次光子侧基线校准）。
