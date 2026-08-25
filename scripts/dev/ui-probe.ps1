@@ -153,6 +153,18 @@ param(
   # invocation cannot be used to start an animation, because the burst's own
   # PowerShell start-up would land after the transition had finished.
   [switch]$ClickFirst,
+  # burst: grow the window to -ToW x -ToH and start the run immediately, framing
+  # the GROWN rectangle. The band a resize opens is closed again by the app's
+  # very next presented frame, so it exists only between `SetWindowPos`
+  # returning and that frame reaching the glass — a separate `resize`
+  # invocation is over long before a `burst` process could start, and the band
+  # can only ever be photographed from inside a loop that is already running.
+  # `SWP_NOZORDER | SWP_NOACTIVATE`: the window under test keeps its place in
+  # the z-order and its activation, so what the camera sees is the resize and
+  # nothing else.
+  [switch]$ResizeFirst,
+  [int]$ToW = 0,
+  [int]$ToH = 0,
   [switch]$TraceDpi
 )
 
@@ -749,6 +761,13 @@ switch ($Cmd) {
     # being read on the same line.
     $capW = if ($W -gt 0) { [int]$W } else { [int]($r.R - $r.L) }
     $capH = if ($H -gt 0) { [int]$H } else { [int]($r.B - $r.T) }
+    if ($ResizeFirst) {
+      if ($ToW -le 0 -or $ToH -le 0) { throw "burst -ResizeFirst needs -ToW and -ToH" }
+      # The frame is the GROWN window, whatever crop was asked for: the whole
+      # point of this run is the strip that only exists outside the old rect.
+      $capW = [int]$ToW
+      $capH = [int]$ToH
+    }
     $stem = [System.IO.Path]::Combine(
       [System.IO.Path]::GetDirectoryName($Out),
       [System.IO.Path]::GetFileNameWithoutExtension($Out))
@@ -765,6 +784,25 @@ switch ($Cmd) {
       $wg.CopyFromScreen($r.L, $r.T, 0, 0, $warm.Size)
       $wg.Dispose(); $warm.Dispose()
       [Probe]::ClickNoSettle($px, $py)
+    }
+    if ($ResizeFirst) {
+      # The pixel-ownership law, exactly as `capture` states it: the camera
+      # frames a rectangle of SCREEN, so what has to be true is that the window
+      # under test is the thing standing in it. Foreground is *asked for* and not
+      # required — a desktop can refuse a background process the foreground
+      # while the window is perfectly visible, and no keys are being sent here.
+      [Probe]::BringToFront($hwnd) | Out-Null
+      $cx = [int](($r.L + $r.R) / 2); $cy = [int](($r.T + $r.B) / 2)
+      if (-not [Probe]::PointBelongsTo($cx, $cy, $ProcId)) { throw "REFUSED: the pixel at ($cx,$cy) is not owned by pid=$ProcId" }
+      # Same GDI warm-up debt the click path pays, and for the same reason: the
+      # first CopyFromScreen of a process costs tens of milliseconds, which is
+      # most of the window being photographed.
+      $warm = New-Object -TypeName System.Drawing.Bitmap -ArgumentList @(8, 8)
+      $wg = [System.Drawing.Graphics]::FromImage($warm)
+      $wg.CopyFromScreen($r.L, $r.T, 0, 0, $warm.Size)
+      $wg.Dispose(); $warm.Dispose()
+      # 0x0004 SWP_NOZORDER | 0x0010 SWP_NOACTIVATE.
+      [Probe]::SetWindowPos($hwnd, [IntPtr]::Zero, $r.L, $r.T, $capW, $capH, 0x0014) | Out-Null
     }
     $clock = [System.Diagnostics.Stopwatch]::StartNew()
     $shots = @()

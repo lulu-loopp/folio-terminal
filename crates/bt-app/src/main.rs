@@ -61811,6 +61811,21 @@ impl Runtime<'_> {
         if physical.width == 0 || physical.height == 0 {
             return Ok(());
         }
+        // **First statement in the handler, and that is the whole of it**
+        // (§7.1.6c-4b, re-judged 2026-08-24). Everything below this line —
+        // the solve, every pane's ConPTY, the frame — happens between the
+        // window becoming bigger and the swapchain becoming bigger, and for
+        // the whole of that gap the strip the window grew by is a region
+        // nothing in the composition tree paints, which on a window DWM
+        // honours the alpha of is the desktop. The compositor's own commit
+        // owes nothing to a frame, so the window's ground is on the glass in
+        // the same composition pass that made the window bigger. Costs one
+        // comparison when a `WM_SIZE` settles back onto the same numbers.
+        self.window
+            .compositor
+            .set_window_size(physical.width, physical.height)
+            .map_err(|error| anyhow!(error))
+            .context("put the window's own ground under the strip a resize opens")?;
         // Before anything solves: a rectangle this process did not ask for is the user's, and
         // from here on their minima are advice (user ruling 2026-08-08).
         self.defer_preview_resample(Instant::now());
@@ -63438,6 +63453,7 @@ impl Runtime<'_> {
         gpu: &mut GpuContext,
         renderer: &mut WindowRenderer,
         compositor: &bt_platform::Compositor,
+        window: &Window,
         echo: &mut preview_trace::FrameEcho,
         seat_frames: &[bt_render::SeatFrame<'_>],
         trigger: FrameTrigger,
@@ -63455,10 +63471,34 @@ impl Runtime<'_> {
             outcome,
             PresentOutcome::Presented(_) | PresentOutcome::PresentedWithoutText(_)
         ) {
+            // **The skirt shrinks in the same commit the picture grows in.**
+            // The swapchain has just been reconfigured and presented, so this
+            // is the first instant its new rectangle is true; publishing the
+            // two apart would either leave the strip transparent for one more
+            // frame or lay the window's ground under a clear that already
+            // carries it, and a 60% window would read at 84% along the strip
+            // (§7.1.6c-4b). The present funnel is the only place both facts
+            // are in hand at once, which is why it is here and not beside the
+            // resize handler.
+            let (covered_width, covered_height) = renderer.presented_swapchain_size();
+            compositor
+                .set_covered_size(covered_width, covered_height)
+                .map_err(|error| anyhow!(error))
+                .context("tell the window's ground how much of it the swapchain covers")?;
             compositor
                 .commit()
                 .map_err(|error| anyhow!(error))
                 .context("publish the presented frame to the window's composition tree")?;
+            // **The frame that withdraws the skirt has to be asked for.** The
+            // ground under the strip is sized against the picture of the
+            // *previous* present, because a present queues an image rather than
+            // showing one, so it can only ever be withdrawn by a later frame —
+            // and a window that fell idle the instant a resize ended would have
+            // no later frame. Self-terminating: the frame this asks for is the
+            // one that makes the answer `false`.
+            if compositor.skirt_covers_anything() {
+                window.request_redraw();
+            }
         }
         Ok(outcome)
     }
@@ -63567,6 +63607,7 @@ impl Runtime<'_> {
             &mut self.app.gpu,
             &mut self.window.renderer,
             &self.window.compositor,
+            &self.window.window,
             &mut self.window.preview_trace_echo,
             &seat_frames,
             trigger,
@@ -63716,6 +63757,7 @@ impl Runtime<'_> {
             &mut self.app.gpu,
             &mut self.window.renderer,
             &self.window.compositor,
+            &self.window.window,
             &mut self.window.preview_trace_echo,
             &seat_frames,
             trigger,
@@ -69214,6 +69256,112 @@ fn opening_window_attributes(title: &'static str, size: LogicalSize<f64>) -> Win
         // `a = 1.0` and `install_window_class_background` keeps its opaque
         // brush, so there is no alpha anywhere for DWM to honour.
         .with_transparent(true)
+}
+
+/// **The window's ground is told the new size before anything else is**
+/// (§7.1.6c-4b re-judged; user ruling 2026-08-24).
+///
+/// A source pin, because the claim is about *order in time* and the thing it
+/// orders against is a whole frame of work — a solve, every pane's ConPTY, a
+/// present. There is no fixture that can hold "this happened 40 ms before that
+/// one" on a real compositor; what a machine can hold is that the statement
+/// stands first in the handler, which is the whole of why the strip a resize
+/// opens is covered before the swapchain reaches it.
+///
+/// The second half is the other end of the same rope: the funnel that publishes
+/// a frame tells the compositor how much the swapchain now covers *before* it
+/// commits, so the strip closing and the picture growing are one commit and the
+/// window's ground is never laid under a clear that already carries it.
+#[cfg(test)]
+mod resize_skirt_order_tests {
+    const SOURCE: &str = include_str!("main.rs");
+
+    /// One method's text, from its signature to the next method's.
+    ///
+    /// Comments go, and then whitespace goes. Both for the same reason: the
+    /// claims below are about which *statement* stands first, and a paragraph
+    /// explaining why it does is not a statement. Leaving comments in would
+    /// also make the pins fail the moment somebody rewords one.
+    fn body(signature: &str) -> String {
+        let start = SOURCE
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is declared in this file"));
+        let rest = &SOURCE[start + signature.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        rest[..end]
+            .lines()
+            .map(|line| match line.find("//") {
+                Some(at) => &line[..at],
+                None => line,
+            })
+            .collect::<String>()
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect()
+    }
+
+    /// Red gate: move the `set_window_size` call below the `renderer.resize`
+    /// that follows it — or anywhere else in the handler — and this goes red.
+    /// That is the shipped build of 2026-08-24, where the strip outside the old
+    /// rectangle photographed as `#1B4651`: the window standing behind Folio,
+    /// through Folio's own frame.
+    #[test]
+    fn the_resize_handler_covers_the_new_strip_before_it_does_anything_else() {
+        let handler = body("fn resize(&mut self, physical: PhysicalSize<u32>) -> Result<()> {");
+        // Plain needles: `body` hands back one method's text, so this test's own
+        // source is not among the things being searched.
+        let told = handler
+            .find(".set_window_size(physical.width,physical.height)")
+            .expect("the resize handler tells the compositor the window's new size");
+        let solved = handler
+            .find(".resize(&self.app.gpu,physical.width,physical.height)")
+            .expect("and it also synchronizes the renderer's swapchain");
+        assert!(
+            told < solved,
+            "the window's ground has to be under the new strip before a frame's \
+             worth of work stands between the window growing and the swapchain \
+             growing"
+        );
+        // Nothing may stand in front of it either: the guard above it is the
+        // zero-size early return, and that is all.
+        assert!(
+            told < 150,
+            "the call is the first statement of the handler, not merely an early \
+             one — it stands {told} characters in, and the only thing allowed in \
+             front of it is the zero-size early return"
+        );
+    }
+
+    /// Red gate: put the `set_covered_size` call after the `commit()` and this
+    /// goes red; drop the `request_redraw` and the second assertion does — and
+    /// that one is not cosmetic. The skirt is sized against the picture of the
+    /// *previous* present (a present queues an image, it does not show one), so
+    /// nothing but a later frame can withdraw it, and a window that fell idle
+    /// the instant a drag ended would keep a band of ground standing over a
+    /// swapchain that had caught up.
+    #[test]
+    fn the_present_funnel_shrinks_the_skirt_and_asks_for_the_frame_that_does_it() {
+        let funnel = body("fn present_seats_and_commit(");
+        let shrunk = funnel
+            .find(".set_covered_size(covered_width,covered_height)")
+            .expect("the funnel tells the compositor what the swapchain now covers");
+        let published = funnel
+            .find(".commit()")
+            .expect("and the funnel is what publishes the frame");
+        assert!(
+            shrunk < published,
+            "both halves have to reach the glass in one commit"
+        );
+        assert!(
+            funnel.contains("ifcompositor.skirt_covers_anything(){window.request_redraw();}"),
+            "and the frame that withdraws the skirt has to be asked for: {funnel}"
+        );
+        assert!(
+            funnel.contains("renderer.presented_swapchain_size()"),
+            "the number it is told is the size the surface is configured at, \
+             not the size something has asked it to become"
+        );
+    }
 }
 
 #[cfg(test)]

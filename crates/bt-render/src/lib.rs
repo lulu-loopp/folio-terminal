@@ -4202,6 +4202,23 @@ impl WindowRenderer {
         }
     }
 
+    /// **How much of the window the swapchain is covering right now.**
+    ///
+    /// The *configured* size, which is not the same fact as
+    /// [`WindowRenderer::presentation_geometry`]'s: `resize` records a size the
+    /// surface has been asked to become and the surface only becomes it at the
+    /// next present, when `configure_surface` calls `ResizeBuffers`. Between
+    /// those two moments a window is larger than its own picture, and the
+    /// difference is the strip that would otherwise show the desktop —
+    /// `bt_platform::Compositor::set_covered_size` is the one caller, and it is
+    /// this number and not the requested one that it has to be told, or the
+    /// window's ground would be withdrawn from the strip a frame before the
+    /// swapchain arrives in it.
+    #[must_use]
+    pub fn presented_swapchain_size(&self) -> (u32, u32) {
+        self.configured_size
+    }
+
     /// Startup phase timings, reassembled from the two layers.
     ///
     /// `adapter`, `device`, `font_system` and `render_resources` are charged
