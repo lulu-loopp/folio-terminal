@@ -34,7 +34,7 @@ use bt_transcript::{
     TranscriptId, TranscriptStore,
 };
 use bt_viewport::{
-    FrameProjectionError, FrameViewportOrigin, GridCursor, HorizontalOverflowOwner,
+    BlockOverflowOwner, FrameProjectionError, FrameViewportOrigin, GridCursor,
     LiveMathOccurrenceId, MathBlockAnchor, MathBlockDisplay, MathBlockPlacement,
     MathFailurePlacement, ProjectedLiveMathArtifact, ProjectedMathArtifact, ViewSelection,
     ViewportFrame, ViewportProjection,
@@ -105,7 +105,13 @@ pub const LIVE_MIN_VISIBLE_TEXT_ROWS: u32 = bt_viewport::LIVE_MIN_VISIBLE_TEXT_R
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MathLayoutOptions {
-    pub line_wrapping: bool,
+    /// Whether a **math block** wider than the pane wraps inside its own frame or scrolls.
+    ///
+    /// Nothing to do with the terminal's own lines, which this build wraps unconditionally and
+    /// has no setting for. It was called `line_wrapping`, and the two readings under one name are
+    /// exactly the confusion `docs/plans/horizontal-scroll/plan.md` §0 fact 2 asks to be spelled
+    /// away before a horizontal axis is built next to it.
+    pub block_line_wrapping: bool,
     pub block_max_height_px: Option<NonZeroU32>,
     /// Symmetric display-math padding per side, in thousandths of the measured cell height.
     /// Zero is valid and intentionally exposes the alpha-tight raster without breathing room.
@@ -123,7 +129,7 @@ pub struct MathLayoutOptions {
 impl Default for MathLayoutOptions {
     fn default() -> Self {
         Self {
-            line_wrapping: true,
+            block_line_wrapping: true,
             block_max_height_px: None,
             vertical_padding_cell_milli: DEFAULT_MATH_VERTICAL_PADDING_CELL_MILLI,
             restore_stripped_environment_newlines: true,
@@ -7170,10 +7176,10 @@ impl DualPlaneSession {
     }
 
     fn decorate_math_frame(&self, frame: &mut ViewportFrame) {
-        let overflow = if self.math_layout_options.line_wrapping {
-            HorizontalOverflowOwner::Block
+        let overflow = if self.math_layout_options.block_line_wrapping {
+            BlockOverflowOwner::Block
         } else {
-            HorizontalOverflowOwner::Pane
+            BlockOverflowOwner::Pane
         };
         let block_max = self.math_layout_options.block_max_height_px.map(|height| {
             i64::from(height.get())
@@ -7216,7 +7222,7 @@ impl DualPlaneSession {
                 placement.left_subpixels =
                     i64::from(column).saturating_mul(self.cell_width_subpixels.get());
                 placement.toolbar_visible = false;
-                placement.horizontal_overflow = HorizontalOverflowOwner::Block;
+                placement.horizontal_overflow = BlockOverflowOwner::Block;
                 placement.horizontal_scroll_px = 0;
                 placement.vertical_scroll_px = 0;
                 placement.clip_height_subpixels = placement.artifact.height_subpixels;
@@ -7235,7 +7241,8 @@ impl DualPlaneSession {
                     };
                     placement.toolbar_visible = record.hovered;
                     placement.horizontal_overflow = overflow;
-                    placement.horizontal_scroll_px = if self.math_layout_options.line_wrapping {
+                    placement.horizontal_scroll_px = if self.math_layout_options.block_line_wrapping
+                    {
                         record.horizontal_scroll_px
                     } else {
                         0
@@ -7267,7 +7274,8 @@ impl DualPlaneSession {
                     };
                     placement.toolbar_visible = record.hovered;
                     placement.horizontal_overflow = overflow;
-                    placement.horizontal_scroll_px = if self.math_layout_options.line_wrapping {
+                    placement.horizontal_scroll_px = if self.math_layout_options.block_line_wrapping
+                    {
                         record.horizontal_scroll_px
                     } else {
                         0
@@ -7391,7 +7399,7 @@ impl DualPlaneSession {
                 clip_height_subpixels: band_height,
                 display: MathBlockDisplay::Source,
                 horizontal_overflow: overflow,
-                horizontal_scroll_px: if self.math_layout_options.line_wrapping {
+                horizontal_scroll_px: if self.math_layout_options.block_line_wrapping {
                     record.horizontal_scroll_px
                 } else {
                     0
@@ -7464,7 +7472,7 @@ impl DualPlaneSession {
                 content_offset_subpixels: 0,
                 clip_height_subpixels: row_height_subpixels,
                 display: MathBlockDisplay::Rendered,
-                horizontal_overflow: HorizontalOverflowOwner::Pane,
+                horizontal_overflow: BlockOverflowOwner::Pane,
                 horizontal_scroll_px: 0,
                 vertical_scroll_px: 0,
                 toolbar_visible: false,
@@ -7539,7 +7547,7 @@ impl DualPlaneSession {
                 content_offset_subpixels: 0,
                 clip_height_subpixels: row_height_subpixels,
                 display: MathBlockDisplay::Rendered,
-                horizontal_overflow: HorizontalOverflowOwner::Pane,
+                horizontal_overflow: BlockOverflowOwner::Pane,
                 horizontal_scroll_px: 0,
                 vertical_scroll_px: 0,
                 toolbar_visible: false,
@@ -11968,7 +11976,7 @@ fn scroll_offsets(
         .map(|max| scaled_height.saturating_sub(max.get()))
         .unwrap_or(0);
     let mut changed = false;
-    if options.line_wrapping && horizontal_max != 0 && horizontal_delta_px != 0 {
+    if options.block_line_wrapping && horizontal_max != 0 && horizontal_delta_px != 0 {
         let next = horizontal_scroll_px
             .saturating_add_signed(horizontal_delta_px)
             .min(horizontal_max);
@@ -13225,7 +13233,7 @@ mod tests {
         assert!(!session.scroll_math_block(&anchor, 0, 20));
 
         session.set_math_layout_options(MathLayoutOptions {
-            line_wrapping: true,
+            block_line_wrapping: true,
             block_max_height_px: Some(nz(40)),
             ..MathLayoutOptions::default()
         });
@@ -16794,14 +16802,14 @@ mod tests {
         assert_eq!(scrolled.math_blocks[0].horizontal_scroll_px, 40);
 
         session.set_math_layout_options(MathLayoutOptions {
-            line_wrapping: false,
+            block_line_wrapping: false,
             block_max_height_px: None,
             ..MathLayoutOptions::default()
         });
         assert!(!session.scroll_math_block(&anchor, 40, 0));
         assert_eq!(
             session.viewport_frame(&mut projection).unwrap().math_blocks[0].horizontal_overflow,
-            HorizontalOverflowOwner::Pane
+            BlockOverflowOwner::Pane
         );
     }
 
@@ -25942,7 +25950,7 @@ tail four
         );
 
         session.set_math_layout_options(MathLayoutOptions {
-            line_wrapping: true,
+            block_line_wrapping: true,
             block_max_height_px: Some(nz(60)),
             ..MathLayoutOptions::default()
         });
